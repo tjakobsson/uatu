@@ -24,6 +24,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          track_progress: true
           prompt: |
             Review this pull request for correctness, clarity, and potential bugs.
             Focus on the diff — do not re-review unchanged code.
@@ -32,3 +33,5 @@ jobs:
             either "LGTM" (plus a one-line reason) or a concise list of concerns.
             Use inline review comments only for specific, actionable findings on
             particular lines. Do not invent nits to fill space.
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
