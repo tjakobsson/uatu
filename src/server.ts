@@ -228,7 +228,15 @@ export async function openBrowser(url: string): Promise<boolean> {
   });
 }
 
-export function createWatchSession(rootPaths: string[], initialFollow: boolean) {
+export type WatchSessionOptions = {
+  usePolling?: boolean;
+};
+
+export function createWatchSession(
+  rootPaths: string[],
+  initialFollow: boolean,
+  options: WatchSessionOptions = {},
+) {
   let roots: RootGroup[] = [];
   let stateFingerprint = "";
   let reconcileTimer: ReturnType<typeof setInterval> | null = null;
@@ -238,10 +246,17 @@ export function createWatchSession(rootPaths: string[], initialFollow: boolean) 
 
   const watcher = chokidar.watch(rootPaths, {
     ignoreInitial: true,
+    usePolling: options.usePolling ?? false,
+    interval: 100,
     awaitWriteFinish: {
       stabilityThreshold: 100,
       pollInterval: 25,
     },
+  });
+  const watcherReady = new Promise<void>(resolve => {
+    watcher.once("ready", () => {
+      resolve();
+    });
   });
 
   const refresh = async (changedId: string | null) => {
@@ -284,6 +299,7 @@ export function createWatchSession(rootPaths: string[], initialFollow: boolean) 
 
   return {
     async start() {
+      await watcherReady;
       roots = await scanRoots(rootPaths);
       stateFingerprint = fingerprintRoots(roots);
       reconcileTimer = setInterval(() => {
