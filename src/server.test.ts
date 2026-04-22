@@ -9,7 +9,7 @@ import {
   getAssetRoots,
   parseCommand,
   printStartupBanner,
-  resolveWatchedFile,
+  resolveWatchedFileCandidates,
   resolveWatchRoots,
   scanRoots,
   STARTUP_BANNER,
@@ -163,24 +163,30 @@ describe("asset root helpers", () => {
     expect(roots).toEqual(["/repo/docs", "/repo"]);
   });
 
-  test("resolveWatchedFile maps a URL path to a file inside the root", () => {
-    expect(resolveWatchedFile("/hero.svg", ["/repo"])).toBe("/repo/hero.svg");
-    expect(resolveWatchedFile("/docs/intro.md", ["/repo"])).toBe("/repo/docs/intro.md");
+  test("resolveWatchedFileCandidates maps a URL path to a file inside the root", () => {
+    expect(resolveWatchedFileCandidates("/hero.svg", ["/repo"])).toEqual(["/repo/hero.svg"]);
+    expect(resolveWatchedFileCandidates("/docs/intro.md", ["/repo"])).toEqual([
+      "/repo/docs/intro.md",
+    ]);
   });
 
-  test("resolveWatchedFile rejects empty or root-only paths", () => {
-    expect(resolveWatchedFile("", ["/repo"])).toBeNull();
-    expect(resolveWatchedFile("/", ["/repo"])).toBeNull();
+  test("resolveWatchedFileCandidates rejects empty or root-only paths", () => {
+    expect(resolveWatchedFileCandidates("", ["/repo"])).toEqual([]);
+    expect(resolveWatchedFileCandidates("/", ["/repo"])).toEqual([]);
   });
 
-  test("resolveWatchedFile rejects paths that escape the root", () => {
-    expect(resolveWatchedFile("/../etc/passwd", ["/repo"])).toBeNull();
-    expect(resolveWatchedFile("/docs/../../etc/passwd", ["/repo"])).toBeNull();
+  test("resolveWatchedFileCandidates rejects paths that escape the root", () => {
+    expect(resolveWatchedFileCandidates("/../etc/passwd", ["/repo"])).toEqual([]);
+    expect(resolveWatchedFileCandidates("/docs/../../etc/passwd", ["/repo"])).toEqual([]);
   });
 
-  test("resolveWatchedFile resolves against the first root that contains the path", () => {
-    // First-match wins: /a.svg under /repo/docs is /repo/docs/a.svg.
-    expect(resolveWatchedFile("/a.svg", ["/repo/docs", "/repo/notes"])).toBe("/repo/docs/a.svg");
+  test("resolveWatchedFileCandidates returns all in-bounds candidates in root order", () => {
+    // The caller stats each candidate and serves the first that exists, so a
+    // miss under the first root must fall through to the next instead of 404ing.
+    expect(resolveWatchedFileCandidates("/a.svg", ["/repo/docs", "/repo/notes"])).toEqual([
+      "/repo/docs/a.svg",
+      "/repo/notes/a.svg",
+    ]);
   });
 });
 

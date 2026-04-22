@@ -12,7 +12,7 @@ import {
   createWatchSession,
   getAssetRoots,
   openBrowser,
-  resolveWatchedFile,
+  resolveWatchedFileCandidates,
   SERVE_IDLE_TIMEOUT_SECONDS,
   usageText,
   versionText,
@@ -117,10 +117,8 @@ async function main() {
     fetch: async request => {
       const requestUrl = new URL(request.url);
       const pathname = decodeURIComponent(requestUrl.pathname);
-      const resolved = resolveWatchedFile(pathname, assetRoots);
-
-      if (resolved) {
-        const file = Bun.file(resolved);
+      for (const candidate of resolveWatchedFileCandidates(pathname, assetRoots)) {
+        const file = Bun.file(candidate);
         if (await file.exists()) {
           return new Response(file, { headers: { "cache-control": "no-cache" } });
         }

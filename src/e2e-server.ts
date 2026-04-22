@@ -9,7 +9,7 @@ import {
   createWatchSession,
   getAssetRoots,
   renderDocument,
-  resolveWatchedFile,
+  resolveWatchedFileCandidates,
   resolveWatchRoots,
   SERVE_IDLE_TIMEOUT_SECONDS,
   type WatchEntry,
@@ -109,10 +109,8 @@ const server = Bun.serve({
   fetch: async request => {
     const requestUrl = new URL(request.url);
     const pathname = decodeURIComponent(requestUrl.pathname);
-    const resolved = resolveWatchedFile(pathname, getAssetRoots(activeEntries));
-
-    if (resolved) {
-      const file = Bun.file(resolved);
+    for (const candidate of resolveWatchedFileCandidates(pathname, getAssetRoots(activeEntries))) {
+      const file = Bun.file(candidate);
       if (await file.exists()) {
         return new Response(file, { headers: { "cache-control": "no-cache" } });
       }
