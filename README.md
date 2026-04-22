@@ -114,4 +114,6 @@ GitHub Actions runs the core repository checks:
 - `bun run build`
 - `bun run test:e2e`
 
-Dependabot is configured to keep npm packages and GitHub Actions versions current so repository tooling does not drift behind current releases.
+Renovate keeps npm packages and GitHub Actions versions current so repository tooling does not drift behind current releases. The Dependency Dashboard issue tracks every pending update.
+
+Claude Code reviews every non-draft pull request on open and on push, and also responds to `@claude` mentions in issues, pull requests, and review comments.
