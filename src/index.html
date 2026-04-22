@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>uatu</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="sidebar-header">
+          <div>
+            <p class="eyebrow">uatu</p>
+            <h1>Document Watch</h1>
+          </div>
+          <button id="follow-toggle" class="toggle" type="button" aria-pressed="true">Follow on</button>
+        </div>
+
+        <div class="sidebar-meta">
+          <span id="document-count">0 docs</span>
+          <span id="connection-state">Connecting</span>
+        </div>
+
+        <div id="tree" class="tree"></div>
+      </aside>
+
+      <main class="preview-shell">
+        <header class="preview-header">
+          <div>
+            <p class="eyebrow">Preview</p>
+            <h2 id="preview-title">No document selected</h2>
+          </div>
+          <code id="preview-path">Waiting for supported documents</code>
+        </header>
+
+        <article id="preview" class="preview markdown-body empty">
+          <p>Add a directory with supported documents or save a file to get started.</p>
+        </article>
+      </main>
+    </div>
+
+    <script type="module" src="./app.ts"></script>
+  </body>
+</html>

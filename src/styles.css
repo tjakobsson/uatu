@@ -1,0 +1,192 @@
+@import "github-markdown-css/github-markdown-light.css";
+
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #ffffff;
+  color: #24292f;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: #f6f8fa;
+}
+
+.app-shell {
+  display: grid;
+  min-height: 100vh;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+}
+
+.sidebar {
+  padding: 1.5rem;
+  border-right: 1px solid #d0d7de;
+  background: #ffffff;
+}
+
+.sidebar-header,
+.preview-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.sidebar-meta {
+  display: flex;
+  justify-content: space-between;
+  margin: 1rem 0 1.25rem;
+  color: #57606a;
+  font-size: 0.875rem;
+}
+
+.eyebrow {
+  margin: 0 0 0.35rem;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: #57606a;
+  font-size: 0.72rem;
+}
+
+h1,
+h2 {
+  margin: 0;
+  font-size: 1.2rem;
+}
+
+.toggle {
+  border: 1px solid #1f6feb;
+  background: #1f6feb;
+  color: #ffffff;
+  border-radius: 999px;
+  padding: 0.6rem 0.95rem;
+  cursor: pointer;
+}
+
+.toggle[aria-pressed="false"] {
+  background: #ffffff;
+  color: #24292f;
+  border-color: #d0d7de;
+}
+
+.tree {
+  overflow: auto;
+  max-height: calc(100vh - 11rem);
+  padding-right: 0.3rem;
+}
+
+.root-group + .root-group {
+  margin-top: 1.2rem;
+}
+
+.root-title {
+  display: grid;
+  gap: 0.2rem;
+  margin-bottom: 0.65rem;
+}
+
+.root-title span,
+#preview-path {
+  color: #57606a;
+  font-size: 0.82rem;
+  word-break: break-all;
+}
+
+ul {
+  list-style: none;
+  margin: 0;
+  padding-left: 1rem;
+}
+
+.tree-node + .tree-node {
+  margin-top: 0.15rem;
+}
+
+details > summary {
+  cursor: pointer;
+  color: #24292f;
+  padding: 0.3rem 0;
+}
+
+.tree-doc-button {
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: #24292f;
+  padding: 0.45rem 0.65rem;
+  border-radius: 0.7rem;
+  cursor: pointer;
+}
+
+.tree-doc-button:hover,
+.tree-doc-button.is-selected {
+  background: #ddf4ff;
+  color: #0969da;
+}
+
+.tree-empty {
+  color: #57606a;
+  padding: 0.75rem 0;
+}
+
+.preview-shell {
+  padding: 1.5rem 1.75rem;
+}
+
+.preview {
+  margin-top: 1.4rem;
+  padding: 45px;
+  border-radius: 1.2rem;
+  background: #ffffff;
+  border: 1px solid #d0d7de;
+  min-height: calc(100vh - 8rem);
+  overflow: auto;
+  max-width: none;
+}
+
+.preview.empty {
+  display: grid;
+  place-items: center;
+  color: #57606a;
+}
+
+.preview pre {
+  overflow: auto;
+}
+
+.preview img {
+  max-width: 100%;
+}
+
+.preview .mermaid {
+  display: grid;
+  justify-content: center;
+  overflow-x: auto;
+  padding: 1rem 0;
+}
+
+@media (max-width: 900px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid #d0d7de;
+  }
+
+  .tree {
+    max-height: none;
+  }
+
+  .preview {
+    min-height: 50vh;
+    padding: 15px;
+  }
+}
