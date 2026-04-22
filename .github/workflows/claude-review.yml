@@ -26,6 +26,9 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
             Review this pull request for correctness, clarity, and potential bugs.
-            Focus on the diff — do not re-review unchanged code. Post concrete,
-            actionable findings as inline review comments on the affected lines.
-            If the PR looks good, say so briefly rather than inventing nits.
+            Focus on the diff — do not re-review unchanged code.
+
+            Always leave one top-level review comment with your overall verdict:
+            either "LGTM" (plus a one-line reason) or a concise list of concerns.
+            Use inline review comments only for specific, actionable findings on
+            particular lines. Do not invent nits to fill space.
