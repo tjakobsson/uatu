@@ -1,9 +1,19 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { DEFAULT_PORT, parseCommand, resolveWatchRoots, scanRoots } from "./server";
+import {
+  createWatchSession,
+  DEFAULT_PORT,
+  getAssetRoots,
+  parseCommand,
+  printStartupBanner,
+  resolveWatchedFileCandidates,
+  resolveWatchRoots,
+  scanRoots,
+  STARTUP_BANNER,
+} from "./server";
 
 const tempDirectories: string[] = [];
 
@@ -42,31 +52,225 @@ describe("parseCommand", () => {
 });
 
 describe("resolveWatchRoots", () => {
-  test("rejects non-directories", async () => {
+  test("accepts a markdown file as a single-file entry", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-root-"));
     tempDirectories.push(tempDirectory);
     const tempFile = path.join(tempDirectory, "README.md");
     await writeFile(tempFile, "# Hello\n");
 
-    await expect(resolveWatchRoots([tempFile], tempDirectory)).rejects.toThrow("watch root is not a directory");
+    const entries = await resolveWatchRoots([tempFile], tempDirectory);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toEqual({
+      kind: "file",
+      absolutePath: tempFile,
+      parentDir: tempDirectory,
+    });
+  });
+
+  test("accepts a mix of directory and markdown file inputs", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-root-"));
+    tempDirectories.push(tempDirectory);
+    const tempFile = path.join(tempDirectory, "README.md");
+    await writeFile(tempFile, "# Hello\n");
+
+    const entries = await resolveWatchRoots([tempDirectory, tempFile], tempDirectory);
+    expect(entries.map(entry => entry.kind).sort()).toEqual(["dir", "file"]);
+  });
+
+  test("rejects non-markdown files", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-root-"));
+    tempDirectories.push(tempDirectory);
+    const tempFile = path.join(tempDirectory, "image.png");
+    await writeFile(tempFile, "not really an image");
+
+    await expect(resolveWatchRoots([tempFile], tempDirectory)).rejects.toThrow(
+      "watch path must be a directory or a Markdown file",
+    );
+  });
+});
+
+describe("printStartupBanner", () => {
+  test("prints the ASCII banner with a leading newline when stdout is a TTY", () => {
+    const chunks: string[] = [];
+    printStartupBanner({ isTTY: true, write: chunk => chunks.push(chunk) });
+    const output = chunks.join("");
+    expect(output.startsWith("\n")).toBe(true);
+    expect(output).toContain(STARTUP_BANNER);
+    expect(output).toContain("I observe. I follow. I render.");
+  });
+
+  test("writes nothing when stdout is not a TTY", () => {
+    const chunks: string[] = [];
+    printStartupBanner({ isTTY: false, write: chunk => chunks.push(chunk) });
+    expect(chunks).toHaveLength(0);
   });
 });
 
 describe("scanRoots", () => {
-  test("discovers markdown recursively and ignores hidden or non-markdown files", async () => {
+  test("discovers markdown recursively and ignores known-junk directories and non-markdown files", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-scan-"));
     tempDirectories.push(tempDirectory);
 
     await mkdir(path.join(tempDirectory, "guides", "drafts"), { recursive: true });
-    await mkdir(path.join(tempDirectory, ".hidden"), { recursive: true });
+    await mkdir(path.join(tempDirectory, ".git"), { recursive: true });
+    await mkdir(path.join(tempDirectory, ".github"), { recursive: true });
+    await mkdir(path.join(tempDirectory, "node_modules", "pkg"), { recursive: true });
     await writeFile(path.join(tempDirectory, "README.md"), "# Readme\n");
     await writeFile(path.join(tempDirectory, "guides", "setup.markdown"), "# Setup\n");
     await writeFile(path.join(tempDirectory, "guides", "drafts", "note.txt"), "ignored\n");
-    await writeFile(path.join(tempDirectory, ".hidden", "secret.md"), "# Hidden\n");
+    // .git contents must stay hidden.
+    await writeFile(path.join(tempDirectory, ".git", "config.md"), "# Should not appear\n");
+    // node_modules contents must stay hidden.
+    await writeFile(path.join(tempDirectory, "node_modules", "pkg", "README.md"), "# Should not appear\n");
+    // Other dotdirs (not on the denylist) SHOULD be surfaced — they often hold
+    // real markdown (e.g., .github/CONTRIBUTING.md, .claude/*.md).
+    await writeFile(path.join(tempDirectory, ".github", "CONTRIBUTING.md"), "# Contributing\n");
 
-    const roots = await scanRoots([tempDirectory]);
+    const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
 
     expect(roots).toHaveLength(1);
-    expect(roots[0]?.docs.map(doc => doc.relativePath)).toEqual(["guides/setup.markdown", "README.md"]);
+    expect(roots[0]?.docs.map(doc => doc.relativePath)).toEqual([
+      ".github/CONTRIBUTING.md",
+      "guides/setup.markdown",
+      "README.md",
+    ]);
+  });
+
+  test("returns a single-document root for a file entry", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-scan-file-"));
+    tempDirectories.push(tempDirectory);
+    const filePath = path.join(tempDirectory, "README.md");
+    await writeFile(filePath, "# Readme\n");
+
+    const roots = await scanRoots([
+      { kind: "file", absolutePath: filePath, parentDir: tempDirectory },
+    ]);
+
+    expect(roots).toHaveLength(1);
+    expect(roots[0]?.docs).toHaveLength(1);
+    expect(roots[0]?.docs[0]?.id).toBe(filePath);
+    expect(roots[0]?.path).toBe(tempDirectory);
+    expect(roots[0]?.label).toBe("README.md");
+  });
+});
+
+describe("asset root helpers", () => {
+  test("getAssetRoots returns dir paths for dirs and parent dirs for files", () => {
+    const roots = getAssetRoots([
+      { kind: "dir", absolutePath: "/repo/docs" },
+      { kind: "file", absolutePath: "/repo/README.md", parentDir: "/repo" },
+    ]);
+    expect(roots).toEqual(["/repo/docs", "/repo"]);
+  });
+
+  test("resolveWatchedFileCandidates maps a URL path to a file inside the root", () => {
+    expect(resolveWatchedFileCandidates("/hero.svg", ["/repo"])).toEqual(["/repo/hero.svg"]);
+    expect(resolveWatchedFileCandidates("/docs/intro.md", ["/repo"])).toEqual([
+      "/repo/docs/intro.md",
+    ]);
+  });
+
+  test("resolveWatchedFileCandidates rejects empty or root-only paths", () => {
+    expect(resolveWatchedFileCandidates("", ["/repo"])).toEqual([]);
+    expect(resolveWatchedFileCandidates("/", ["/repo"])).toEqual([]);
+  });
+
+  test("resolveWatchedFileCandidates rejects paths that escape the root", () => {
+    expect(resolveWatchedFileCandidates("/../etc/passwd", ["/repo"])).toEqual([]);
+    expect(resolveWatchedFileCandidates("/docs/../../etc/passwd", ["/repo"])).toEqual([]);
+  });
+
+  test("resolveWatchedFileCandidates returns all in-bounds candidates in root order", () => {
+    // The caller stats each candidate and serves the first that exists, so a
+    // miss under the first root must fall through to the next instead of 404ing.
+    expect(resolveWatchedFileCandidates("/a.svg", ["/repo/docs", "/repo/notes"])).toEqual([
+      "/repo/docs/a.svg",
+      "/repo/notes/a.svg",
+    ]);
+  });
+});
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (predicate()) {
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+
+  if (!predicate()) {
+    throw new Error("condition not met within timeout");
+  }
+}
+
+describe("watchSession scope", () => {
+  test("pinning narrows visible roots to the selected file and unpin restores folder scope", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-pin-"));
+    tempDirectories.push(tempDirectory);
+    const readme = path.join(tempDirectory, "README.md");
+    const guide = path.join(tempDirectory, "guide.md");
+    await writeFile(readme, "# Readme\n");
+    await writeFile(guide, "# Guide\n");
+
+    const session = createWatchSession(
+      [{ kind: "dir", absolutePath: tempDirectory }],
+      true,
+      { usePolling: true },
+    );
+
+    try {
+      await session.start();
+      await waitUntil(() => session.getRoots().some(root => root.docs.length >= 2));
+
+      session.setScope({ kind: "file", documentId: readme });
+      await waitUntil(() => {
+        const docs = session.getRoots().flatMap(root => root.docs);
+        return docs.length === 1 && docs[0]?.id === readme;
+      });
+      expect(session.getScope()).toEqual({ kind: "file", documentId: readme });
+
+      session.setScope({ kind: "folder" });
+      await waitUntil(() => session.getRoots().flatMap(root => root.docs).length >= 2);
+      expect(session.getScope()).toEqual({ kind: "folder" });
+    } finally {
+      await session.stop();
+    }
+  });
+
+  test("unlinking the pinned file reverts scope to folder automatically", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-pin-unlink-"));
+    tempDirectories.push(tempDirectory);
+    const readme = path.join(tempDirectory, "README.md");
+    const guide = path.join(tempDirectory, "guide.md");
+    await writeFile(readme, "# Readme\n");
+    await writeFile(guide, "# Guide\n");
+
+    const session = createWatchSession(
+      [{ kind: "dir", absolutePath: tempDirectory }],
+      true,
+      { usePolling: true },
+    );
+
+    try {
+      await session.start();
+      await waitUntil(() => session.getRoots().some(root => root.docs.length >= 2));
+
+      session.setScope({ kind: "file", documentId: readme });
+      await waitUntil(() => {
+        const docs = session.getRoots().flatMap(root => root.docs);
+        return docs.length === 1 && docs[0]?.id === readme;
+      });
+
+      await unlink(readme);
+      await waitUntil(
+        () =>
+          session.getScope().kind === "folder" &&
+          session.getRoots().flatMap(root => root.docs).some(doc => doc.id === guide),
+      );
+      expect(session.getScope()).toEqual({ kind: "folder" });
+    } finally {
+      await session.stop();
+    }
   });
 });

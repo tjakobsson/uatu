@@ -9,6 +9,14 @@ export async function resetE2EWorkspace(): Promise<void> {
   await fs.mkdir(E2E_WORKSPACE_ROOT, { recursive: true });
   await emptyDirectory(E2E_WORKSPACE_ROOT);
   await copyDirectoryContents(E2E_FIXTURE_ROOT, E2E_WORKSPACE_ROOT);
+  // Ensure the root README has the latest mtime so it becomes the default
+  // selection. Otherwise the directory-copy iteration order can put a nested
+  // file's mtime later, which would (correctly) trigger reveal-on-load and
+  // open that directory — not what most tests assume as a starting state.
+  // Use a timestamp 10s in the future so that even after second-precision
+  // truncation at the fs layer, it's strictly newer than every copied file.
+  const future = new Date(Date.now() + 10_000);
+  await fs.utimes(path.join(E2E_WORKSPACE_ROOT, "README.md"), future, future);
 }
 
 export function workspacePath(...parts: string[]): string {

@@ -8,13 +8,70 @@ import { renderMarkdownToHtml } from "./markdown";
 import {
   defaultDocumentId,
   hasDocument,
+  type BuildSummary,
   type RootGroup,
+  type Scope,
   type StatePayload,
 } from "./shared";
+import { BUILD, formatBuildIdentifier, type BuildInfo } from "./version";
+
+export const BUILD_SUMMARY: BuildSummary = {
+  version: BUILD.version,
+  branch: BUILD.branch,
+  commitSha: BUILD.commitSha,
+  commitShort: BUILD.commitShort,
+  release: BUILD.release,
+  identifier: formatBuildIdentifier(BUILD),
+};
 
 const encoder = new TextEncoder();
 
-const ignoredNames = new Set(["node_modules", "dist", "build"]);
+// Directories and files to skip during the markdown scan. Unlike a blanket
+// "ignore anything starting with a dot" rule, this is an explicit denylist: we
+// DO want to surface markdown inside things like `.github/`, `.claude/`,
+// `.openspec/`, etc., and we only want to hide the well-known junk.
+const ignoredNames = new Set([
+  // Node / JS output
+  "node_modules",
+  "dist",
+  "build",
+  "coverage",
+  // Version control
+  ".git",
+  ".svn",
+  ".hg",
+  // OS metadata
+  ".DS_Store",
+  "Thumbs.db",
+  // Build / framework caches
+  ".cache",
+  ".parcel-cache",
+  ".turbo",
+  ".next",
+  ".nuxt",
+  ".vercel",
+  ".output",
+  ".nitro",
+  ".svelte-kit",
+  ".astro",
+  // Python
+  ".venv",
+  ".tox",
+  ".mypy_cache",
+  ".pytest_cache",
+  ".ruff_cache",
+  "__pycache__",
+  // JVM
+  ".gradle",
+  ".m2",
+  // Package managers
+  ".npm",
+  ".yarn",
+  ".pnpm-store",
+  // Infra
+  ".terraform",
+  ".serverless",
+]);
 const hiddenFileSuffixes = [".swp", ".tmp", ".temp", "~"];
 
 export const DEFAULT_PORT = 4312;
@@ -41,8 +98,8 @@ export type RenderedDocument = {
 
 type EventController = ReadableStreamDefaultController<Uint8Array>;
 
-export function usageText(version: string): string {
-  return `uatu ${version}
+export function usageText(build: BuildInfo = BUILD): string {
+  return `uatu ${formatBuildIdentifier(build)}
 
 Usage:
   uatu watch [PATH...] [--no-open] [--no-follow] [--port <PORT>]
@@ -56,6 +113,30 @@ Options:
   -h, --help      Show help
   -V, --version   Show version
 `;
+}
+
+export function versionText(build: BuildInfo = BUILD): string {
+  return formatBuildIdentifier(build);
+}
+
+export const STARTUP_BANNER = `\
+██╗   ██╗ █████╗ ████████╗██╗   ██╗
+██║   ██║██╔══██╗╚══██╔══╝██║   ██║
+██║   ██║███████║   ██║   ██║   ██║
+██║   ██║██╔══██║   ██║   ██║   ██║
+╚██████╔╝██║  ██║   ██║   ╚██████╔╝
+ ╚═════╝ ╚═╝  ╚═╝   ╚═╝    ╚═════╝
+
+I observe. I follow. I render.`;
+
+export function printStartupBanner(
+  stream: { isTTY?: boolean; write(chunk: string): unknown } = process.stdout,
+): void {
+  if (!stream.isTTY) {
+    return;
+  }
+
+  stream.write(`\n${STARTUP_BANNER}\n\n`);
 }
 
 export function parseCommand(argv: string[]): ParsedCommand {
@@ -131,8 +212,12 @@ export function parseCommand(argv: string[]): ParsedCommand {
   };
 }
 
-export async function resolveWatchRoots(inputPaths: string[], cwd: string): Promise<string[]> {
-  const resolved = new Set<string>();
+export type WatchEntry =
+  | { kind: "dir"; absolutePath: string }
+  | { kind: "file"; absolutePath: string; parentDir: string };
+
+export async function resolveWatchRoots(inputPaths: string[], cwd: string): Promise<WatchEntry[]> {
+  const resolved = new Map<string, WatchEntry>();
 
   for (const inputPath of inputPaths) {
     const absolutePath = path.resolve(cwd, inputPath);
@@ -144,26 +229,68 @@ export async function resolveWatchRoots(inputPaths: string[], cwd: string): Prom
       throw new Error(`watch root does not exist: ${inputPath}`);
     }
 
-    if (!stat.isDirectory()) {
-      throw new Error(`watch root is not a directory: ${inputPath}`);
+    if (stat.isDirectory()) {
+      resolved.set(absolutePath, { kind: "dir", absolutePath });
+      continue;
     }
 
-    resolved.add(absolutePath);
+    if (stat.isFile() && isMarkdownPath(absolutePath)) {
+      resolved.set(absolutePath, {
+        kind: "file",
+        absolutePath,
+        parentDir: path.dirname(absolutePath),
+      });
+      continue;
+    }
+
+    throw new Error(`watch path must be a directory or a Markdown file: ${inputPath}`);
   }
 
-  return Array.from(resolved).sort((left, right) => left.localeCompare(right));
+  return Array.from(resolved.values()).sort((left, right) =>
+    left.absolutePath.localeCompare(right.absolutePath),
+  );
 }
 
-export async function scanRoots(rootPaths: string[]): Promise<RootGroup[]> {
+export async function scanRoots(entries: WatchEntry[]): Promise<RootGroup[]> {
   const roots: RootGroup[] = [];
 
-  for (const rootPath of rootPaths) {
-    const docs = await walkMarkdownFiles(rootPath, rootPath);
+  for (const entry of entries) {
+    if (entry.kind === "dir") {
+      const docs = await walkMarkdownFiles(entry.absolutePath, entry.absolutePath);
+      roots.push({
+        id: entry.absolutePath,
+        label: path.basename(entry.absolutePath) || entry.absolutePath,
+        path: entry.absolutePath,
+        docs: docs.sort((left, right) => left.relativePath.localeCompare(right.relativePath)),
+      });
+      continue;
+    }
+
+    const stat = await fs.stat(entry.absolutePath).catch(() => null);
+    if (!stat) {
+      roots.push({
+        id: entry.absolutePath,
+        label: path.basename(entry.absolutePath),
+        path: entry.parentDir,
+        docs: [],
+      });
+      continue;
+    }
+
+    const relativePath = path.basename(entry.absolutePath);
     roots.push({
-      id: rootPath,
-      label: path.basename(rootPath) || rootPath,
-      path: rootPath,
-      docs: docs.sort((left, right) => left.relativePath.localeCompare(right.relativePath)),
+      id: entry.absolutePath,
+      label: relativePath,
+      path: entry.parentDir,
+      docs: [
+        {
+          id: entry.absolutePath,
+          name: relativePath,
+          relativePath,
+          mtimeMs: stat.mtimeMs,
+          rootId: entry.absolutePath,
+        },
+      ],
     });
   }
 
@@ -186,10 +313,48 @@ export async function renderDocument(roots: RootGroup[], documentId: string): Pr
   };
 }
 
+export function getAssetRoots(entries: WatchEntry[]): string[] {
+  return entries.map(entry => (entry.kind === "dir" ? entry.absolutePath : entry.parentDir));
+}
+
+/**
+ * Translate a URL pathname (e.g. `/docs/hero.svg`) into the set of absolute
+ * filesystem paths it could map to across the asset roots, in root order.
+ * Used by the server's static file fallback so documents can reference
+ * adjacent files with normal relative URLs: the caller stats each candidate
+ * and serves the first one that exists, falling through to 404 only when no
+ * root contains the file. Paths that escape every root via `..` yield `[]`.
+ */
+export function resolveWatchedFileCandidates(pathname: string, assetRoots: string[]): string[] {
+  if (!pathname) {
+    return [];
+  }
+
+  const relative = pathname.replace(/^\/+/, "");
+  if (relative === "") {
+    return [];
+  }
+
+  const candidates: string[] = [];
+  for (const root of assetRoots) {
+    const candidate = path.resolve(root, relative);
+    const relativeToRoot = path.relative(root, candidate);
+    if (
+      relativeToRoot === "" ||
+      (!relativeToRoot.startsWith("..") && !path.isAbsolute(relativeToRoot))
+    ) {
+      candidates.push(candidate);
+    }
+  }
+
+  return candidates;
+}
+
 export function createStatePayload(
   roots: RootGroup[],
   initialFollow: boolean,
   changedId: string | null = null,
+  scope: Scope = { kind: "folder" },
 ): StatePayload {
   return {
     roots,
@@ -197,6 +362,8 @@ export function createStatePayload(
     defaultDocumentId: defaultDocumentId(roots),
     changedId: changedId && hasDocument(roots, changedId) ? changedId : null,
     generatedAt: Date.now(),
+    build: BUILD_SUMMARY,
+    scope,
   };
 }
 
@@ -233,18 +400,20 @@ export type WatchSessionOptions = {
 };
 
 export function createWatchSession(
-  rootPaths: string[],
+  entries: WatchEntry[],
   initialFollow: boolean,
   options: WatchSessionOptions = {},
 ) {
   let roots: RootGroup[] = [];
   let stateFingerprint = "";
+  let scope: Scope = { kind: "folder" };
   let reconcileTimer: ReturnType<typeof setInterval> | null = null;
   let refreshTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingChangedId: string | null = null;
   const subscribers = new Set<EventController>();
 
-  const watcher = chokidar.watch(rootPaths, {
+  const watchPaths = entries.map(entry => entry.absolutePath);
+  const watcher = chokidar.watch(watchPaths, {
     ignoreInitial: true,
     usePolling: options.usePolling ?? false,
     interval: 100,
@@ -259,17 +428,46 @@ export function createWatchSession(
     });
   });
 
+  const applyScope = (source: RootGroup[]): RootGroup[] => {
+    if (scope.kind === "folder") {
+      return source;
+    }
+
+    const pinnedId = scope.documentId;
+    const pinnedRoots: RootGroup[] = [];
+
+    for (const root of source) {
+      const doc = root.docs.find(candidate => candidate.id === pinnedId);
+      if (!doc) {
+        continue;
+      }
+
+      pinnedRoots.push({
+        ...root,
+        docs: [doc],
+      });
+    }
+
+    return pinnedRoots;
+  };
+
   const refresh = async (changedId: string | null) => {
-    const nextRoots = await scanRoots(rootPaths);
-    const nextFingerprint = fingerprintRoots(nextRoots);
-    const changedDocumentId = changedId && hasDocument(nextRoots, changedId) ? changedId : null;
+    const nextRoots = await scanRoots(entries);
+
+    if (scope.kind === "file" && !hasDocument(nextRoots, scope.documentId)) {
+      scope = { kind: "folder" };
+    }
+
+    const visibleRoots = applyScope(nextRoots);
+    const nextFingerprint = fingerprintRoots(visibleRoots);
+    const changedDocumentId = changedId && hasDocument(visibleRoots, changedId) ? changedId : null;
     const shouldBroadcast = nextFingerprint !== stateFingerprint || changedDocumentId !== null;
 
-    roots = nextRoots;
+    roots = visibleRoots;
     stateFingerprint = nextFingerprint;
 
     if (shouldBroadcast) {
-      broadcast(createStatePayload(roots, initialFollow, changedDocumentId));
+      broadcast(createStatePayload(roots, initialFollow, changedDocumentId, scope));
     }
   };
 
@@ -293,14 +491,43 @@ export function createWatchSession(
 
   watcher.on("all", (eventName, filePath) => {
     const absolutePath = path.resolve(filePath);
+
+    if (scope.kind === "file" && eventName === "unlink" && absolutePath === scope.documentId) {
+      scope = { kind: "folder" };
+      scheduleRefresh(null);
+      return;
+    }
+
+    if (scope.kind === "file" && absolutePath !== scope.documentId) {
+      return;
+    }
+
     const changedId = isMarkdownPath(absolutePath) && eventName !== "unlink" ? absolutePath : null;
     scheduleRefresh(changedId);
   });
 
+  const setScope = (next: Scope): Scope => {
+    if (next.kind === "file") {
+      if (scope.kind === "file" && scope.documentId === next.documentId) {
+        return scope;
+      }
+      scope = { kind: "file", documentId: next.documentId };
+    } else {
+      if (scope.kind === "folder") {
+        return scope;
+      }
+      scope = { kind: "folder" };
+    }
+
+    scheduleRefresh(null);
+    return scope;
+  };
+
   return {
     async start() {
       await watcherReady;
-      roots = await scanRoots(rootPaths);
+      const scanned = await scanRoots(entries);
+      roots = applyScope(scanned);
       stateFingerprint = fingerprintRoots(roots);
       reconcileTimer = setInterval(() => {
         void refresh(null).catch(error => {
@@ -331,8 +558,12 @@ export function createWatchSession(
     getRoots() {
       return roots;
     },
+    getScope() {
+      return scope;
+    },
+    setScope,
     getStatePayload(changedId: string | null = null) {
-      return createStatePayload(roots, initialFollow, changedId);
+      return createStatePayload(roots, initialFollow, changedId, scope);
     },
     eventsResponse() {
       let currentSubscriber: EventController | null = null;
@@ -341,7 +572,7 @@ export function createWatchSession(
         start(controller) {
           currentSubscriber = controller;
           subscribers.add(controller);
-          controller.enqueue(encoder.encode(`event: state\ndata: ${JSON.stringify(createStatePayload(roots, initialFollow))}\n\n`));
+          controller.enqueue(encoder.encode(`event: state\ndata: ${JSON.stringify(createStatePayload(roots, initialFollow, null, scope))}\n\n`));
         },
         cancel() {
           if (currentSubscriber) {
@@ -413,10 +644,6 @@ async function walkMarkdownFiles(rootPath: string, currentPath: string) {
 
 function shouldIgnoreEntry(name: string): boolean {
   if (ignoredNames.has(name)) {
-    return true;
-  }
-
-  if (name.startsWith(".")) {
     return true;
   }
 

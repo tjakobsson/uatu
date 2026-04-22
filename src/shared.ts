@@ -13,12 +13,25 @@ export type RootGroup = {
   docs: DocumentMeta[];
 };
 
+export type BuildSummary = {
+  version: string;
+  branch: string;
+  commitSha: string;
+  commitShort: string;
+  release: boolean;
+  identifier: string;
+};
+
+export type Scope = { kind: "folder" } | { kind: "file"; documentId: string };
+
 export type StatePayload = {
   roots: RootGroup[];
   initialFollow: boolean;
   defaultDocumentId: string | null;
   changedId: string | null;
   generatedAt: number;
+  build: BuildSummary;
+  scope: Scope;
 };
 
 export type TreeNode = {

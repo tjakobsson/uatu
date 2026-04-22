@@ -4,34 +4,112 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>uatu</title>
+    <base id="preview-base" href="/" />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <div class="app-shell">
       <aside class="sidebar">
         <div class="sidebar-header">
-          <div>
-            <p class="eyebrow">uatu</p>
-            <h1>Document Watch</h1>
+          <div class="brand">
+            <img class="brand-logo" alt="" width="28" height="28" aria-hidden="true" data-src="/assets/uatu-logo.svg" />
+            <div class="brand-text">
+              <p class="eyebrow">uatu</p>
+              <h1>Codebase Watcher</h1>
+            </div>
           </div>
-          <button id="follow-toggle" class="toggle" type="button" aria-pressed="true">Follow on</button>
+          <button
+            id="sidebar-collapse"
+            class="icon-button"
+            type="button"
+            aria-label="Collapse sidebar"
+            title="Collapse sidebar"
+          >
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+              <path
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.6"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M10 3 5 8l5 5"
+              />
+            </svg>
+          </button>
         </div>
 
         <div class="sidebar-meta">
           <span id="document-count">0 docs</span>
-          <span id="connection-state">Connecting</span>
+          <span id="connection-state" class="connection-state">
+            <span class="indicator-dot" aria-hidden="true"></span>
+            <span class="connection-label">Connecting</span>
+          </span>
         </div>
 
-        <div id="tree" class="tree"></div>
+        <div class="sidebar-body">
+          <div id="tree" class="tree"></div>
+        </div>
+
+        <footer class="sidebar-footer">
+          <span id="build-badge" class="build-badge" title="Build identifier"></span>
+        </footer>
       </aside>
+
+      <button
+        id="sidebar-expand"
+        class="sidebar-rail"
+        type="button"
+        aria-label="Expand sidebar"
+        title="Expand sidebar"
+      >
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <path
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            d="M6 3l5 5-5 5"
+          />
+        </svg>
+      </button>
 
       <main class="preview-shell">
         <header class="preview-header">
-          <div>
+          <div class="preview-heading">
             <p class="eyebrow">Preview</p>
             <h2 id="preview-title">No document selected</h2>
+            <code id="preview-path">Waiting for supported documents</code>
           </div>
-          <code id="preview-path">Waiting for supported documents</code>
+          <div class="preview-toolbar" role="group" aria-label="Preview controls">
+            <button
+              id="follow-toggle"
+              class="chip-button"
+              type="button"
+              aria-pressed="true"
+              title="Follow the latest changed document"
+            >
+              <span class="chip-dot" aria-hidden="true"></span>
+              <span class="chip-label">Follow</span>
+            </button>
+            <button
+              id="pin-toggle"
+              class="chip-button"
+              type="button"
+              aria-pressed="false"
+              aria-label="Pin preview to this file"
+              title="Pin preview to this file"
+              hidden
+            >
+              <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" class="chip-icon">
+                <path
+                  fill="currentColor"
+                  d="M10.1 1.3a.5.5 0 0 1 .8 0l3.8 3.8a.5.5 0 0 1 0 .8l-1 1a.5.5 0 0 1-.5.1L11 6.6l-2.4 2.4.5 2.5a.5.5 0 0 1-.2.5l-1 .8a.5.5 0 0 1-.7-.1L4 8.9l-3 3a.6.6 0 0 1-.9-.8l3-3L0 4.7a.5.5 0 0 1-.1-.7l.8-1a.5.5 0 0 1 .5-.2l2.5.5L6.1 1a.5.5 0 0 1 .5-.1l2.2.5 1.3-.1z"
+                />
+              </svg>
+              <span class="chip-label">Pin</span>
+            </button>
+          </div>
         </header>
 
         <article id="preview" class="preview markdown-body empty">
