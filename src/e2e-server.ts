@@ -67,7 +67,7 @@ process.on("SIGTERM", () => {
 
 async function createSession() {
   await resetE2EWorkspace();
-  const session = createWatchSession([E2E_WORKSPACE_ROOT], true);
+  const session = createWatchSession([E2E_WORKSPACE_ROOT], true, { usePolling: true });
   await session.start();
   return session;
 }
