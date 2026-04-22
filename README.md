@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./uato-logo.svg" alt="uatu" width="156" height="160" />
+  <img src="./uatu-logo.svg" alt="uatu" width="156" height="160" />
 </p>
 
 <h1 align="center">uatu</h1>

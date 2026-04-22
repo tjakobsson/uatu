@@ -45,11 +45,11 @@ Visit https://example.com and ~~remove~~ text.`);
 
   test("passes through GitHub-style inline HTML blocks (e.g. centered README hero)", () => {
     const html = renderMarkdownToHtml(
-      `<p align="center">\n  <img src="./uato-logo.svg" alt="uatu logo" width="128" />\n</p>\n\n# uatu\n`,
+      `<p align="center">\n  <img src="./uatu-logo.svg" alt="uatu logo" width="128" />\n</p>\n\n# uatu\n`,
     );
 
     expect(html).toContain('<p align="center">');
-    expect(html).toContain('<img src="./uato-logo.svg"');
+    expect(html).toContain('<img src="./uatu-logo.svg"');
     expect(html).not.toContain("&lt;p align");
   });
 
@@ -103,11 +103,11 @@ Visit https://example.com and ~~remove~~ text.`);
 
   test("sanitizer keeps the centered-hero README idiom intact", () => {
     const html = renderMarkdownToHtml(
-      `<p align="center">\n  <img src="./uato-logo.svg" alt="uatu logo" width="128" height="130" />\n</p>\n\n# uatu\n`,
+      `<p align="center">\n  <img src="./uatu-logo.svg" alt="uatu logo" width="128" height="130" />\n</p>\n\n# uatu\n`,
     );
 
     expect(html).toContain('align="center"');
-    expect(html).toContain('src="./uato-logo.svg"');
+    expect(html).toContain('src="./uatu-logo.svg"');
     expect(html).toMatch(/width="128"/);
     expect(html).toMatch(/height="130"/);
     expect(html).toContain('alt="uatu logo"');
