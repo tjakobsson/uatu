@@ -243,6 +243,11 @@ export function createWatchSession(rootPaths: string[], initialFollow: boolean) 
       pollInterval: 25,
     },
   });
+  const watcherReady = new Promise<void>(resolve => {
+    watcher.once("ready", () => {
+      resolve();
+    });
+  });
 
   const refresh = async (changedId: string | null) => {
     const nextRoots = await scanRoots(rootPaths);
@@ -284,6 +289,7 @@ export function createWatchSession(rootPaths: string[], initialFollow: boolean) 
 
   return {
     async start() {
+      await watcherReady;
       roots = await scanRoots(rootPaths);
       stateFingerprint = fingerprintRoots(roots);
       reconcileTimer = setInterval(() => {
