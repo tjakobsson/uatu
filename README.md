@@ -116,4 +116,4 @@ GitHub Actions runs the core repository checks:
 
 Renovate keeps npm packages and GitHub Actions versions current so repository tooling does not drift behind current releases. The Dependency Dashboard issue tracks every pending update.
 
-Mentioning `@claude` in an issue, pull request, or review comment triggers the Claude Code GitHub Action to respond inline.
+Claude Code reviews every non-draft pull request on open and on push, and also responds to `@claude` mentions in issues, pull requests, and review comments.
