@@ -61,12 +61,12 @@ test("manual selection disables follow mode and keeps the current preview pinned
 
 test("follow mode switches to the latest changed markdown file", async ({ page }) => {
   const marker = `Changed by Playwright ${Date.now()}`;
-  const relativePath = `guides/follow-${Date.now()}.md`;
+  const relativePath = "guides/setup.md";
 
   await page.getByRole("button", { name: "Follow off" }).click();
   await expect(page.locator("#follow-toggle")).toHaveText("Follow on");
 
-  await fs.writeFile(workspacePath(relativePath), `# Follow Target\n\n${marker}\n`, "utf8");
+  await fs.writeFile(workspacePath(relativePath), `# Setup\n\n${marker}\n`, "utf8");
 
   await expect(page.locator("#preview-path")).toHaveText(relativePath);
   await expect(page.locator("#preview")).toContainText(marker);
