@@ -16,7 +16,7 @@
     "build": "mkdir -p dist && bun build --compile src/cli.ts --outfile dist/uatu"
   },
   "dependencies": {
-    "chokidar": "^4.0.3",
+    "chokidar": "^5.0.0",
     "github-markdown-css": "^5.9.0",
     "mermaid": "^11.14.0",
     "micromark": "^4.0.2",
