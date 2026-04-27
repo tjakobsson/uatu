@@ -1,5 +1,8 @@
 #!/usr/bin/env bun
 
+import { promises as fs } from "node:fs";
+import path from "node:path";
+
 import mermaidAsset from "mermaid/dist/mermaid.min.js" with { type: "file" };
 import logoAsset from "./assets/uatu-logo.svg" with { type: "file" };
 
@@ -16,8 +19,9 @@ import {
 } from "./server";
 
 let activeFilePath: string | null = null;
+let activeRespectGitignore = true;
 let activeEntries: WatchEntry[] = [];
-let watchSession = await createSession();
+let watchSession = await createSession({ resetWorkspace: true });
 
 const server = Bun.serve({
   hostname: "127.0.0.1",
@@ -49,7 +53,11 @@ const server = Bun.serve({
         try {
           const document = await renderDocument(watchSession.getRoots(), documentId);
           return Response.json(document);
-        } catch {
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "";
+          if (message === "document is binary") {
+            return Response.json({ error: "document is not viewable" }, { status: 415 });
+          }
           return Response.json({ error: "document not found" }, { status: 404 });
         }
       },
@@ -89,11 +97,15 @@ const server = Bun.serve({
     },
     "/__e2e/reset": {
       POST: async request => {
-        let body: { file?: string } = {};
+        let body: {
+          file?: string;
+          extras?: Record<string, string>;
+          respectGitignore?: boolean;
+        } = {};
         try {
           const text = await request.text();
           if (text.length > 0) {
-            body = JSON.parse(text) as { file?: string };
+            body = JSON.parse(text) as typeof body;
           }
         } catch {
           body = {};
@@ -101,7 +113,19 @@ const server = Bun.serve({
 
         await watchSession.stop();
         activeFilePath = typeof body.file === "string" ? body.file : null;
-        watchSession = await createSession();
+        activeRespectGitignore =
+          typeof body.respectGitignore === "boolean" ? body.respectGitignore : true;
+
+        await resetE2EWorkspace();
+        if (body.extras) {
+          for (const [relativePath, contents] of Object.entries(body.extras)) {
+            const target = path.join(E2E_WORKSPACE_ROOT, relativePath);
+            await fs.mkdir(path.dirname(target), { recursive: true });
+            await fs.writeFile(target, contents, "utf8");
+          }
+        }
+
+        watchSession = await createSession({ resetWorkspace: false });
         return Response.json(watchSession.getStatePayload());
       },
     },
@@ -135,14 +159,19 @@ process.on("SIGTERM", () => {
   void shutdown();
 });
 
-async function createSession() {
-  await resetE2EWorkspace();
+async function createSession(options: { resetWorkspace: boolean }) {
+  if (options.resetWorkspace) {
+    await resetE2EWorkspace();
+  }
   const entryPaths = activeFilePath
     ? [`${E2E_WORKSPACE_ROOT}/${activeFilePath}`]
     : [E2E_WORKSPACE_ROOT];
   const entries = await resolveWatchRoots(entryPaths, process.cwd());
   activeEntries = entries;
-  const session = createWatchSession(entries, true, { usePolling: true });
+  const session = createWatchSession(entries, true, {
+    usePolling: true,
+    respectGitignore: activeRespectGitignore,
+  });
   await session.start();
   return session;
 }

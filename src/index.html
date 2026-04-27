@@ -39,11 +39,7 @@
         </div>
 
         <div class="sidebar-meta">
-          <span id="document-count">0 docs</span>
-          <span id="connection-state" class="connection-state">
-            <span class="indicator-dot" aria-hidden="true"></span>
-            <span class="connection-label">Connecting</span>
-          </span>
+          <span id="document-count">0 files</span>
         </div>
 
         <div class="sidebar-body">
@@ -79,9 +75,16 @@
           <div class="preview-heading">
             <p class="eyebrow">Preview</p>
             <h2 id="preview-title">No document selected</h2>
-            <code id="preview-path">Waiting for supported documents</code>
+            <div class="preview-meta">
+              <code id="preview-path">Waiting for viewable files</code>
+              <span id="preview-type" class="preview-type" hidden></span>
+            </div>
           </div>
           <div class="preview-toolbar" role="group" aria-label="Preview controls">
+            <span id="connection-state" class="connection-state" title="Live update channel">
+              <span class="indicator-dot" aria-hidden="true"></span>
+              <span class="connection-label">Connecting</span>
+            </span>
             <button
               id="follow-toggle"
               class="chip-button"

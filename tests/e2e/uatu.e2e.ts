@@ -8,7 +8,7 @@ test.beforeEach(async ({ page, request }) => {
   await page.goto("/");
   await expect(page.getByRole("button", { name: "README.md" })).toBeVisible();
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Online");
-  await expect(page.locator("#document-count")).toHaveText("3 docs");
+  await expect(page.locator("#document-count")).toHaveText("3 files");
   await waitForPreviewToSettle(page);
   await page.getByRole("button", { name: "README.md" }).click();
   await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
@@ -77,6 +77,32 @@ test("tree rows show a file-type icon next to each document", async ({ page }) =
   await expect(readmeButton.locator(".tree-icon svg")).toBeVisible();
 });
 
+test("tree rows show a relative-time label on both file leaves and directories", async ({ page }) => {
+  const readmeButton = page.getByRole("button", { name: "README.md" });
+  await expect(readmeButton.locator(".tree-mtime")).toHaveCount(1);
+  await expect(readmeButton.locator(".tree-mtime")).toHaveText(/^(now|\d+(s|m|h|d|w|mo))$/);
+
+  // Directories also carry a tree-mtime in their <summary> — reflecting the newest
+  // descendant file's modified time so users can spot active subtrees at a glance.
+  const guidesSummary = page.locator('#tree details summary:has-text("guides")');
+  await expect(guidesSummary).toBeVisible();
+  await expect(guidesSummary.locator(".tree-mtime")).toHaveCount(1);
+  await expect(guidesSummary.locator(".tree-mtime")).toHaveText(/^(now|\d+(s|m|h|d|w|mo))$/);
+});
+
+test("relative-time labels tick live without requiring a server event", async ({ page }) => {
+  const readmeMtime = page.locator('button[data-document-id$="README.md"] .tree-mtime');
+  const before = (await readmeMtime.textContent())?.trim() ?? "";
+  // Wait long enough that a "Ns" label should bump to a larger N.
+  await page.waitForTimeout(3500);
+  const after = (await readmeMtime.textContent())?.trim() ?? "";
+  expect(after).not.toBe("");
+  // If the label is in the seconds bucket, it must have advanced.
+  if (/^\d+s$/.test(before) && /^\d+s$/.test(after)) {
+    expect(Number.parseInt(after, 10)).toBeGreaterThan(Number.parseInt(before, 10));
+  }
+});
+
 test("follow mode reveals the path to a newly changed nested file without closing anything", async ({ page }) => {
   const guidesDetails = page
     .locator("#tree details")
@@ -129,10 +155,10 @@ test("sidebar collapse preference persists across reloads", async ({ page }) => 
 });
 
 test("pin toggle narrows the sidebar to the current document and ignores changes elsewhere", async ({ page }) => {
-  await expect(page.locator("#document-count")).toHaveText("3 docs");
+  await expect(page.locator("#document-count")).toHaveText("3 files");
   await page.locator("#pin-toggle").click();
   await expect(page.locator("#pin-toggle")).toHaveAttribute("aria-pressed", "true");
-  await expect(page.locator("#document-count")).toHaveText("1 doc");
+  await expect(page.locator("#document-count")).toHaveText("1 file");
   await expect(page.locator("#follow-toggle")).toBeDisabled();
   await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
 
@@ -141,11 +167,11 @@ test("pin toggle narrows the sidebar to the current document and ignores changes
 
   await page.waitForTimeout(500);
   await expect(page.locator("#preview-path")).toHaveText("README.md");
-  await expect(page.locator("#document-count")).toHaveText("1 doc");
+  await expect(page.locator("#document-count")).toHaveText("1 file");
 
   await page.locator("#pin-toggle").click();
   await expect(page.locator("#pin-toggle")).toHaveAttribute("aria-pressed", "false");
-  await expect(page.locator("#document-count")).toHaveText("3 docs");
+  await expect(page.locator("#document-count")).toHaveText("3 files");
   await expect(page.locator("#follow-toggle")).toBeEnabled();
 });
 
@@ -162,7 +188,7 @@ test("connection indicator exposes live and reconnecting classes", async ({ page
 test("single-file mode shows only the pinned markdown file in the sidebar", async ({ page, request }) => {
   await request.post("/__e2e/reset", { data: { file: "README.md" } });
   await page.goto("/");
-  await expect(page.locator("#document-count")).toHaveText("1 doc");
+  await expect(page.locator("#document-count")).toHaveText("1 file");
   await expect(page.getByRole("button", { name: "README.md" })).toBeVisible();
   await expect(page.getByRole("button", { name: "setup.md" })).toHaveCount(0);
 });
@@ -198,6 +224,237 @@ test("relative image references in a README are served natively from the watched
 test("server falls back with 404 for paths outside every watched root", async ({ request }) => {
   const response = await request.get("/does-not-exist.bin");
   expect(response.status()).toBe(404);
+});
+
+test("a non-Markdown text file appears in the tree and renders as syntax-highlighted code", async ({ page, request }) => {
+  await request.post("/__e2e/reset", {
+    data: { extras: { "config.yaml": "key: value\nport: 4321\n" } },
+  });
+  await page.goto("/");
+  await expect(page.locator("#document-count")).toHaveText("4 files");
+
+  const yamlButton = page.getByRole("button", { name: "config.yaml" });
+  await expect(yamlButton).toBeVisible();
+  await yamlButton.click();
+
+  await expect(page.locator("#preview-path")).toHaveText("config.yaml");
+  await expect(page.locator('#preview pre code.hljs.language-yaml')).toBeVisible();
+});
+
+test("a binary file appears in the tree as a non-clickable entry", async ({ page, request }) => {
+  // 1x1 transparent PNG.
+  const pngBase64 =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+  const pngBytes = Buffer.from(pngBase64, "base64").toString("latin1");
+  await request.post("/__e2e/reset", {
+    data: { extras: { "logo.png": pngBytes } },
+  });
+  await page.goto("/");
+
+  const logoEntry = page.locator(".tree-doc-disabled", { hasText: "logo.png" });
+  await expect(logoEntry).toBeVisible();
+  // No button for the binary entry.
+  await expect(page.getByRole("button", { name: "logo.png" })).toHaveCount(0);
+});
+
+test(".uatuignore patterns hide files from the tree", async ({ page, request }) => {
+  await request.post("/__e2e/reset", {
+    data: {
+      extras: {
+        ".uatuignore": "*.lock\n",
+        "bun.lock": "lockfile contents\n",
+        "notes.txt": "visible text\n",
+      },
+    },
+  });
+  await page.goto("/");
+
+  await expect(page.getByRole("button", { name: "notes.txt" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "bun.lock" })).toHaveCount(0);
+  await expect(page.locator(".tree-doc-disabled", { hasText: "bun.lock" })).toHaveCount(0);
+});
+
+test("--no-gitignore exposes a file that .gitignore would have excluded", async ({ page, request }) => {
+  // First confirm the gitignored file is hidden by default.
+  await request.post("/__e2e/reset", {
+    data: {
+      extras: {
+        ".gitignore": "secret.txt\n",
+        "secret.txt": "hidden\n",
+      },
+    },
+  });
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "secret.txt" })).toHaveCount(0);
+
+  // Now reset with respectGitignore disabled.
+  await request.post("/__e2e/reset", {
+    data: {
+      respectGitignore: false,
+      extras: {
+        ".gitignore": "secret.txt\n",
+        "secret.txt": "hidden\n",
+      },
+    },
+  });
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "secret.txt" })).toBeVisible();
+});
+
+test("follow mode switches the preview when a non-Markdown text file changes", async ({ page, request }) => {
+  await request.post("/__e2e/reset", {
+    data: { extras: { "config.yaml": "key: original\n" } },
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "README.md" }).click();
+  await expect(page.locator("#preview-path")).toHaveText("README.md");
+
+  await page.locator("#follow-toggle").click();
+  await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "true");
+
+  await fs.writeFile(workspacePath("config.yaml"), "key: changed\nport: 9999\n", "utf8");
+
+  await expect(page.locator("#preview-path")).toHaveText("config.yaml");
+  await expect(page.locator('#preview pre code.hljs.language-yaml')).toBeVisible();
+});
+
+test("enabling follow jumps to the most recently modified file", async ({ page }) => {
+  // beforeEach lands on README.md (its mtime is bumped 10s into the future by
+  // resetE2EWorkspace, so it's the current default selection).
+  await expect(page.locator("#preview-path")).toHaveText("README.md");
+
+  // Make setup.md genuinely newer than README. resetE2EWorkspace pushed
+  // README's mtime to now+10s, so a plain writeFile (which lands at "now") is
+  // still older than README. utimes setup.md 30s into the future so it wins.
+  await fs.writeFile(workspacePath("guides", "setup.md"), "# Setup\n\nFreshly touched.\n", "utf8");
+  const fresher = new Date(Date.now() + 30_000);
+  await fs.utimes(workspacePath("guides", "setup.md"), fresher, fresher);
+
+  // Don't click Follow until the client's appState reflects the new mtime
+  // ordering — otherwise the catch-up reads stale state and picks README.
+  // The tree-mtime spans carry data-mtime attributes synced from server state,
+  // so this is the precise readiness signal.
+  await page.waitForFunction(
+    () => {
+      const setupEl = document.querySelector(
+        'button[data-document-id$="guides/setup.md"] .tree-mtime',
+      ) as HTMLElement | null;
+      const readmeEl = document.querySelector(
+        'button[data-document-id$="README.md"] .tree-mtime',
+      ) as HTMLElement | null;
+      if (!setupEl || !readmeEl) return false;
+      const setupMtime = Number(setupEl.dataset.mtime);
+      const readmeMtime = Number(readmeEl.dataset.mtime);
+      return Number.isFinite(setupMtime) && Number.isFinite(readmeMtime) && setupMtime > readmeMtime;
+    },
+    undefined,
+    { timeout: 5_000 },
+  );
+
+  // Manually re-select README to ensure follow is OFF and selection is README.
+  await page.getByRole("button", { name: "README.md" }).click();
+  await expect(page.locator("#preview-path")).toHaveText("README.md");
+  await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
+
+  // Enable follow — preview must immediately jump to setup.md.
+  await page.locator("#follow-toggle").click();
+  await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#preview-path")).toHaveText("guides/setup.md");
+});
+
+test("sidebar counter shows the binary subcount when binary files are present", async ({ page, request }) => {
+  const pngBase64 =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+  const pngBytes = Buffer.from(pngBase64, "base64").toString("latin1");
+  await request.post("/__e2e/reset", {
+    data: { extras: { "logo.png": pngBytes } },
+  });
+  await page.goto("/");
+  await expect(page.locator("#document-count")).toHaveText("4 files · 1 binary");
+});
+
+test("sidebar counter shows the hidden subcount for .uatuignore-filtered files", async ({ page, request }) => {
+  await request.post("/__e2e/reset", {
+    data: {
+      extras: {
+        ".uatuignore": "*.lock\n",
+        "bun.lock": "lockfile\n",
+        "yarn.lock": "lockfile\n",
+      },
+    },
+  });
+  await page.goto("/");
+  // Visible: 3 testdata files (README.md, diagram.md, guides/setup.md) plus the
+  // `.uatuignore` file itself (it's not matched by its own `*.lock` pattern).
+  // Hidden: bun.lock, yarn.lock.
+  await expect(page.locator("#document-count")).toHaveText("4 files · 2 hidden");
+});
+
+test("connection indicator is rendered in the preview header so it stays visible when the sidebar is collapsed", async ({ page }) => {
+  await expect(page.locator(".preview-toolbar #connection-state")).toBeVisible();
+  await expect(page.locator(".sidebar-meta #connection-state")).toHaveCount(0);
+
+  await page.locator("#sidebar-collapse").click();
+  await expect(page.locator(".app-shell")).toHaveClass(/is-sidebar-collapsed/);
+  await expect(page.locator("#connection-state")).toBeVisible();
+});
+
+test("preview header shows a file-type chip for the selected document", async ({ page, request }) => {
+  await request.post("/__e2e/reset", {
+    data: { extras: { "config.yaml": "key: value\n" } },
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "README.md" }).click();
+  await expect(page.locator("#preview-type")).toHaveText("markdown");
+
+  await page.getByRole("button", { name: "config.yaml" }).click();
+  await expect(page.locator("#preview-type")).toHaveText("yaml");
+});
+
+test("code blocks expose a copy-to-clipboard control", async ({ page, context, request }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await request.post("/__e2e/reset", {
+    data: { extras: { "config.yaml": "key: value\nport: 4321\n" } },
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "config.yaml" }).click();
+
+  const copyButton = page.locator("#preview pre .code-copy");
+  await expect(copyButton).toHaveCount(1);
+
+  await copyButton.click();
+  await expect(copyButton).toHaveText("Copied!");
+
+  const clipboard = await page.evaluate(() => navigator.clipboard.readText());
+  expect(clipboard).toContain("key: value");
+  expect(clipboard).toContain("port: 4321");
+  // Critical: clipboard must NOT contain the line-number gutter contents.
+  expect(clipboard).not.toMatch(/^\s*1\b/);
+});
+
+test("non-Markdown code views show line numbers; Markdown fenced blocks do not", async ({ page, request }) => {
+  await request.post("/__e2e/reset", {
+    data: {
+      extras: {
+        "config.yaml": "alpha: 1\nbeta: 2\ngamma: 3\n",
+        "with-code.md":
+          "# Sample\n\nText before.\n\n```js\nconst answer = 42;\n```\n\nText after.\n",
+      },
+    },
+  });
+  await page.goto("/");
+
+  // Code view: line numbers visible
+  await page.getByRole("button", { name: "config.yaml" }).click();
+  const codeViewGutter = page.locator("#preview pre.has-line-numbers .line-numbers");
+  await expect(codeViewGutter).toHaveCount(1);
+  await expect(codeViewGutter).toHaveText("1\n2\n3");
+
+  // Markdown view: fenced block has NO line numbers
+  await page.getByRole("button", { name: "with-code.md" }).click();
+  await expect(page.locator("#preview pre")).toHaveCount(1);
+  await expect(page.locator("#preview pre .line-numbers")).toHaveCount(0);
+  await expect(page.locator("#preview pre.has-line-numbers")).toHaveCount(0);
 });
 
 test("preview header stays visible while scrolling and the sidebar scroll is independent", async ({ page }) => {

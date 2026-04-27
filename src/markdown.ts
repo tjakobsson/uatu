@@ -7,6 +7,8 @@ import { gfm, gfmHtml } from "micromark-extension-gfm";
 
 const CODE_BLOCK_PATTERN = /<pre><code(?:\s+class="language-([^"]+)")?>([\s\S]*?)<\/code><\/pre>/g;
 
+export const SYNTAX_HIGHLIGHT_BYTES_LIMIT = 1_048_576;
+
 // Start from hast-util-sanitize's default schema (modeled on GitHub's allowlist)
 // and extend it with the README idioms GitHub also permits but which aren't in
 // the base default: `align` on block elements, and `alt`/`title`/`width`/`height`
@@ -66,9 +68,9 @@ export function highlightCodeBlocks(html: string): string {
   });
 }
 
-type HighlightResult = { value: string; language: string | undefined };
+export type HighlightResult = { value: string; language: string | undefined };
 
-function highlightSource(source: string, language: string | undefined): HighlightResult {
+export function highlightSource(source: string, language: string | undefined): HighlightResult {
   if (language && hljs.getLanguage(language)) {
     try {
       const result = hljs.highlight(source, { language, ignoreIllegals: true });
@@ -79,6 +81,18 @@ function highlightSource(source: string, language: string | undefined): Highligh
   }
 
   return { value: escapeHtml(source), language };
+}
+
+export function renderCodeAsHtml(source: string, language: string | undefined): string {
+  if (source.length >= SYNTAX_HIGHLIGHT_BYTES_LIMIT) {
+    return `<pre><code class="hljs">${escapeHtml(source)}</code></pre>`;
+  }
+
+  const highlighted = highlightSource(source, language);
+  const classAttribute = highlighted.language
+    ? ` class="hljs language-${escapeAttribute(highlighted.language)}"`
+    : ' class="hljs"';
+  return `<pre><code${classAttribute}>${highlighted.value}</code></pre>`;
 }
 
 function decodeHtmlEntities(value: string): string {

@@ -9,6 +9,7 @@ import {
   getAssetRoots,
   parseCommand,
   printStartupBanner,
+  renderDocument,
   resolveWatchedFileCandidates,
   resolveWatchRoots,
   scanRoots,
@@ -49,6 +50,16 @@ describe("parseCommand", () => {
     expect(parsed.options.follow).toBe(false);
     expect(parsed.options.port).toBe(5000);
   });
+
+  test("respectGitignore defaults to true and is disabled by --no-gitignore", () => {
+    const defaulted = parseCommand(["watch"]);
+    if (defaulted.kind !== "watch") throw new Error("expected watch");
+    expect(defaulted.options.respectGitignore).toBe(true);
+
+    const opted = parseCommand(["watch", "--no-gitignore"]);
+    if (opted.kind !== "watch") throw new Error("expected watch");
+    expect(opted.options.respectGitignore).toBe(false);
+  });
 });
 
 describe("resolveWatchRoots", () => {
@@ -77,15 +88,26 @@ describe("resolveWatchRoots", () => {
     expect(entries.map(entry => entry.kind).sort()).toEqual(["dir", "file"]);
   });
 
-  test("rejects non-markdown files", async () => {
+  test("rejects binary files", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-root-"));
     tempDirectories.push(tempDirectory);
     const tempFile = path.join(tempDirectory, "image.png");
     await writeFile(tempFile, "not really an image");
 
     await expect(resolveWatchRoots([tempFile], tempDirectory)).rejects.toThrow(
-      "watch path must be a directory or a Markdown file",
+      "watch path is a binary file",
     );
+  });
+
+  test("accepts non-markdown text files", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-root-"));
+    tempDirectories.push(tempDirectory);
+    const tempFile = path.join(tempDirectory, "script.py");
+    await writeFile(tempFile, "print('hello')\n");
+
+    const entries = await resolveWatchRoots([tempFile], tempDirectory);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.kind).toBe("file");
   });
 });
 
@@ -107,7 +129,7 @@ describe("printStartupBanner", () => {
 });
 
 describe("scanRoots", () => {
-  test("discovers markdown recursively and ignores known-junk directories and non-markdown files", async () => {
+  test("discovers all non-binary files recursively, tags binary files as binary, and honors the hardcoded directory denylist", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-scan-"));
     tempDirectories.push(tempDirectory);
 
@@ -117,7 +139,9 @@ describe("scanRoots", () => {
     await mkdir(path.join(tempDirectory, "node_modules", "pkg"), { recursive: true });
     await writeFile(path.join(tempDirectory, "README.md"), "# Readme\n");
     await writeFile(path.join(tempDirectory, "guides", "setup.markdown"), "# Setup\n");
-    await writeFile(path.join(tempDirectory, "guides", "drafts", "note.txt"), "ignored\n");
+    await writeFile(path.join(tempDirectory, "guides", "drafts", "note.txt"), "plain text\n");
+    await writeFile(path.join(tempDirectory, "config.yaml"), "key: value\n");
+    await writeFile(path.join(tempDirectory, "logo.png"), "not really png");
     // .git contents must stay hidden.
     await writeFile(path.join(tempDirectory, ".git", "config.md"), "# Should not appear\n");
     // node_modules contents must stay hidden.
@@ -131,12 +155,53 @@ describe("scanRoots", () => {
     expect(roots).toHaveLength(1);
     expect(roots[0]?.docs.map(doc => doc.relativePath)).toEqual([
       ".github/CONTRIBUTING.md",
+      "config.yaml",
+      "guides/drafts/note.txt",
       "guides/setup.markdown",
+      "logo.png",
       "README.md",
     ]);
+
+    const byPath = new Map(roots[0]!.docs.map(doc => [doc.relativePath, doc.kind]));
+    expect(byPath.get("README.md")).toBe("markdown");
+    expect(byPath.get("config.yaml")).toBe("text");
+    expect(byPath.get("guides/drafts/note.txt")).toBe("text");
+    expect(byPath.get("logo.png")).toBe("binary");
   });
 
-  test("returns a single-document root for a file entry", async () => {
+  test("respects .uatuignore patterns at the watch root", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-scan-uatuignore-"));
+    tempDirectories.push(tempDirectory);
+    await writeFile(path.join(tempDirectory, ".uatuignore"), "*.lock\n");
+    await writeFile(path.join(tempDirectory, "README.md"), "# Readme\n");
+    await writeFile(path.join(tempDirectory, "bun.lock"), "lockfile contents\n");
+
+    const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
+    const paths = roots[0]?.docs.map(doc => doc.relativePath) ?? [];
+    expect(paths).toContain("README.md");
+    expect(paths).not.toContain("bun.lock");
+    // Files filtered by `.uatuignore` are counted as hidden so the sidebar can
+    // surface that to the user.
+    expect(roots[0]?.hiddenCount).toBe(1);
+  });
+
+  test("respects .gitignore by default and skips it when respectGitignore is false", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-scan-gitignore-"));
+    tempDirectories.push(tempDirectory);
+    await writeFile(path.join(tempDirectory, ".gitignore"), "*.log\n");
+    await writeFile(path.join(tempDirectory, "README.md"), "# Readme\n");
+    await writeFile(path.join(tempDirectory, "debug.log"), "log line\n");
+
+    const respected = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
+    expect(respected[0]?.docs.map(doc => doc.relativePath)).not.toContain("debug.log");
+
+    const ignored = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }], {
+      respectGitignore: false,
+    });
+    expect(ignored[0]?.docs.map(doc => doc.relativePath)).toContain("debug.log");
+  });
+
+  test("returns a single-document root for a file entry tagged with its kind", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-scan-file-"));
     tempDirectories.push(tempDirectory);
     const filePath = path.join(tempDirectory, "README.md");
@@ -149,8 +214,105 @@ describe("scanRoots", () => {
     expect(roots).toHaveLength(1);
     expect(roots[0]?.docs).toHaveLength(1);
     expect(roots[0]?.docs[0]?.id).toBe(filePath);
+    expect(roots[0]?.docs[0]?.kind).toBe("markdown");
     expect(roots[0]?.path).toBe(tempDirectory);
     expect(roots[0]?.label).toBe("README.md");
+  });
+});
+
+describe("renderDocument", () => {
+  test("renders a markdown document through the markdown pipeline", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-render-md-"));
+    tempDirectories.push(tempDirectory);
+    const filePath = path.join(tempDirectory, "README.md");
+    await writeFile(filePath, "# Hello\n\nworld\n");
+
+    const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
+    const rendered = await renderDocument(roots, filePath);
+    expect(rendered.title).toBe("Hello");
+    expect(rendered.html).toContain("<p>world</p>");
+  });
+
+  test("renders a non-markdown text document as syntax-highlighted code", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-render-code-"));
+    tempDirectories.push(tempDirectory);
+    const filePath = path.join(tempDirectory, "config.yaml");
+    await writeFile(filePath, "key: value\n");
+
+    const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
+    const rendered = await renderDocument(roots, filePath);
+    expect(rendered.title).toBe("config.yaml");
+    expect(rendered.html).toContain('<pre><code class="hljs language-yaml">');
+    expect(rendered.kind).toBe("text");
+    expect(rendered.language).toBe("yaml");
+  });
+
+  test("emits markdown kind and null language for a Markdown document", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-render-md-kind-"));
+    tempDirectories.push(tempDirectory);
+    const filePath = path.join(tempDirectory, "README.md");
+    await writeFile(filePath, "# Hello\n");
+
+    const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
+    const rendered = await renderDocument(roots, filePath);
+    expect(rendered.kind).toBe("markdown");
+    expect(rendered.language).toBeNull();
+  });
+
+  test("title extraction ignores `#` lines inside fenced code blocks", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-title-fence-"));
+    tempDirectories.push(tempDirectory);
+    const filePath = path.join(tempDirectory, "README.md");
+    // No real heading — the only `#` lines live inside a fenced code block.
+    // The title should fall back to the filename, NOT pick up "Lockfiles".
+    await writeFile(
+      filePath,
+      "Some intro text.\n\n```gitignore\n# Lockfiles\n*.lock\n```\n",
+    );
+
+    const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
+    const rendered = await renderDocument(roots, filePath);
+    expect(rendered.title).toBe("README");
+  });
+
+  test("title extraction picks up an HTML <h1> heading", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-title-html-"));
+    tempDirectories.push(tempDirectory);
+    const filePath = path.join(tempDirectory, "README.md");
+    await writeFile(
+      filePath,
+      `<h1 align="center">uatu</h1>\n\nSome content.\n\n\`\`\`gitignore\n# Lockfiles\n*.lock\n\`\`\`\n`,
+    );
+
+    const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
+    const rendered = await renderDocument(roots, filePath);
+    expect(rendered.title).toBe("uatu");
+  });
+
+  test("title extraction prefers a Markdown `# Heading` over later content", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-title-md-"));
+    tempDirectories.push(tempDirectory);
+    const filePath = path.join(tempDirectory, "doc.md");
+    await writeFile(filePath, "# Real Title\n\nBody.\n\n```bash\n# comment in code\n```\n");
+
+    const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
+    const rendered = await renderDocument(roots, filePath);
+    expect(rendered.title).toBe("Real Title");
+  });
+
+  test("rejects a binary document with an error", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-render-binary-"));
+    tempDirectories.push(tempDirectory);
+    const filePath = path.join(tempDirectory, "logo.png");
+    await writeFile(filePath, "not really png");
+
+    const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
+    expect(roots[0]?.docs.find(doc => doc.id === filePath)?.kind).toBe("binary");
+    await expect(renderDocument(roots, filePath)).rejects.toThrow("document is binary");
+  });
+
+  test("rejects an unknown id with not-found", async () => {
+    await expect(renderDocument([], "/nope")).rejects.toThrow("document not found");
   });
 });
 
