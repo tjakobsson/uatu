@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
-import { renderMarkdownToHtml } from "./markdown";
+import {
+  renderCodeAsHtml,
+  renderMarkdownToHtml,
+  SYNTAX_HIGHLIGHT_BYTES_LIMIT,
+} from "./markdown";
 
 describe("renderMarkdownToHtml", () => {
   test("renders common GFM features", () => {
@@ -111,5 +115,33 @@ Visit https://example.com and ~~remove~~ text.`);
     expect(html).toMatch(/width="128"/);
     expect(html).toMatch(/height="130"/);
     expect(html).toContain('alt="uatu logo"');
+  });
+});
+
+describe("renderCodeAsHtml", () => {
+  test("emits language-X class for known languages", () => {
+    const html = renderCodeAsHtml("const answer = 42;\n", "javascript");
+    expect(html).toContain('<pre><code class="hljs language-javascript">');
+    expect(html).toContain("hljs-keyword");
+  });
+
+  test("omits language- class when language is undefined", () => {
+    const html = renderCodeAsHtml("plain text\n", undefined);
+    expect(html).toContain('<pre><code class="hljs">');
+    expect(html).not.toContain("language-");
+  });
+
+  test("escapes raw HTML in the source so it never executes", () => {
+    const html = renderCodeAsHtml("<script>alert(1)</script>\n", "javascript");
+    expect(html).not.toMatch(/<script\b/i);
+    expect(html).toMatch(/&(lt;|#x3[Cc];)/);
+  });
+
+  test("bypasses syntax highlighting above the size threshold", () => {
+    const big = "a".repeat(SYNTAX_HIGHLIGHT_BYTES_LIMIT + 1);
+    const html = renderCodeAsHtml(big, "javascript");
+    expect(html).toContain('<pre><code class="hljs">');
+    expect(html).not.toContain("hljs-");
+    expect(html).not.toContain("language-javascript");
   });
 });

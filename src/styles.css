@@ -16,6 +16,7 @@
   --accent-soft: #ddf4ff;
   --navy: #0a1c38;
   --teal: #1ca8a7;
+  --surface-muted: #f3f5f7;
 }
 
 * {
@@ -139,6 +140,17 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
+}
+
+.preview-toolbar .connection-state {
+  padding: 0.35rem 0.7rem 0.35rem 0.55rem;
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--text-subtle);
+}
+
+.preview-toolbar .connection-state.is-live {
+  color: var(--text-strong);
 }
 
 .indicator-dot {
@@ -277,13 +289,35 @@ h2 {
   padding: 0;
 }
 
+.preview-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.preview-type {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.7rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--text-subtle);
+  background: var(--surface-muted);
+  border: 1px solid var(--border-soft);
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  text-transform: lowercase;
+  flex-shrink: 0;
+}
+
 .preview-toolbar {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
   padding: 0.25rem;
   border-radius: 999px;
-  background: #f3f5f7;
+  background: var(--surface-muted);
   border: 1px solid var(--border-soft);
   flex-shrink: 0;
 }
@@ -359,7 +393,7 @@ h2 {
 }
 
 .icon-button:hover {
-  background: #f3f5f7;
+  background: var(--surface-muted);
   color: var(--text-strong);
 }
 
@@ -512,9 +546,33 @@ h2 {
 
 .tree-label {
   min-width: 0;
+  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.tree-dir-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-mtime {
+  flex-shrink: 0;
+  color: var(--text-subtle);
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
+  margin-left: 0.5rem;
+}
+
+.tree-doc-button:hover .tree-mtime,
+.tree-doc-button.is-selected .tree-mtime,
+.tree-dir > details > summary:hover .tree-mtime {
+  opacity: 1;
 }
 
 .tree-doc-button::before {
@@ -542,6 +600,35 @@ h2 {
 
 .tree-doc-button.is-selected::before {
   background: var(--accent);
+}
+
+.tree-doc-disabled {
+  width: 100%;
+  text-align: left;
+  padding: 0.3rem 0.5rem 0.3rem 0.85rem;
+  border-radius: 0.35rem;
+  font-size: 0.82rem;
+  font-weight: 400;
+  line-height: 1.35;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--text-subtle);
+  cursor: default;
+  user-select: none;
+}
+
+.tree-doc-disabled .tree-icon {
+  color: var(--text-subtle);
+  opacity: 0.7;
+}
+
+.tree-doc-disabled .tree-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.85;
 }
 
 .tree-empty {
@@ -572,6 +659,82 @@ h2 {
 
 .preview pre {
   overflow: auto;
+  position: relative;
+}
+
+.preview pre.has-line-numbers {
+  display: flex;
+  align-items: stretch;
+  padding: 0;
+}
+
+.preview pre.has-line-numbers > .line-numbers {
+  flex-shrink: 0;
+  user-select: none;
+  text-align: right;
+  padding: 1rem 0.7rem 1rem 1rem;
+  margin: 0;
+  border-right: 1px solid var(--border-soft);
+  color: var(--text-subtle);
+  background: rgba(208, 215, 222, 0.18);
+  white-space: pre;
+  font-variant-numeric: tabular-nums;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.preview pre.has-line-numbers > code {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 1rem;
+  display: block;
+  overflow: visible;
+}
+
+.code-copy {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  padding: 0.25rem 0.55rem;
+  font-size: 0.7rem;
+  font-weight: 500;
+  font-family: inherit;
+  background: #ffffff;
+  border: 1px solid var(--border-soft);
+  border-radius: 0.3rem;
+  color: var(--text-subtle);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.preview pre:hover .code-copy,
+.preview pre:focus-within .code-copy,
+.code-copy:focus,
+.code-copy.is-copied,
+.code-copy.is-failed {
+  opacity: 1;
+}
+
+.code-copy:hover {
+  color: var(--text-strong);
+  background: #f6f8fa;
+}
+
+.code-copy.is-copied {
+  color: #2da44e;
+  border-color: #2da44e;
+}
+
+.code-copy.is-failed {
+  color: #cf222e;
+  border-color: #cf222e;
+}
+
+@media (hover: none) {
+  .code-copy {
+    opacity: 1;
+  }
 }
 
 .preview img {

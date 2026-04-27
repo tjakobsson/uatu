@@ -4,11 +4,16 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { ReadableStreamDefaultController } from "node:stream/web";
 
-import { renderMarkdownToHtml } from "./markdown";
+import { classifyFile } from "./file-classify";
+import { languageForName } from "./file-languages";
+import { loadIgnoreMatcher, type IgnoreMatcher } from "./ignore-engine";
+import { decodeHtmlEntities, renderCodeAsHtml, renderMarkdownToHtml } from "./markdown";
 import {
   defaultDocumentId,
+  findDocument,
   hasDocument,
   type BuildSummary,
+  type DocumentMeta,
   type RootGroup,
   type Scope,
   type StatePayload,
@@ -76,12 +81,14 @@ const hiddenFileSuffixes = [".swp", ".tmp", ".temp", "~"];
 
 export const DEFAULT_PORT = 4312;
 export const SERVE_IDLE_TIMEOUT_SECONDS = 0;
+export const DEFAULT_RESPECT_GITIGNORE = true;
 
 export type WatchOptions = {
   rootPaths: string[];
   openBrowser: boolean;
   follow: boolean;
   port: number;
+  respectGitignore: boolean;
 };
 
 export type ParsedCommand =
@@ -94,6 +101,8 @@ export type RenderedDocument = {
   title: string;
   path: string;
   html: string;
+  kind: "markdown" | "text";
+  language: string | null;
 };
 
 type EventController = ReadableStreamDefaultController<Uint8Array>;
@@ -102,16 +111,17 @@ export function usageText(build: BuildInfo = BUILD): string {
   return `uatu ${formatBuildIdentifier(build)}
 
 Usage:
-  uatu watch [PATH...] [--no-open] [--no-follow] [--port <PORT>]
+  uatu watch [PATH...] [--no-open] [--no-follow] [--no-gitignore] [--port <PORT>]
   uatu --help
   uatu --version
 
 Options:
-  --no-open       Do not open a browser automatically
-  --no-follow     Start with follow mode disabled
-  -p, --port      Bind the local server to a specific port
-  -h, --help      Show help
-  -V, --version   Show version
+  --no-open        Do not open a browser automatically
+  --no-follow      Start with follow mode disabled
+  --no-gitignore   Do not honor .gitignore patterns when indexing files
+  -p, --port       Bind the local server to a specific port
+  -h, --help       Show help
+  -V, --version    Show version
 `;
 }
 
@@ -155,6 +165,7 @@ export function parseCommand(argv: string[]): ParsedCommand {
   let openBrowser = true;
   let follow = true;
   let port = DEFAULT_PORT;
+  let respectGitignore = DEFAULT_RESPECT_GITIGNORE;
   const rootPaths: string[] = [];
 
   for (let index = 1; index < argv.length; index += 1) {
@@ -167,6 +178,11 @@ export function parseCommand(argv: string[]): ParsedCommand {
 
     if (arg === "--no-follow") {
       follow = false;
+      continue;
+    }
+
+    if (arg === "--no-gitignore") {
+      respectGitignore = false;
       continue;
     }
 
@@ -208,6 +224,7 @@ export function parseCommand(argv: string[]): ParsedCommand {
       openBrowser,
       follow,
       port,
+      respectGitignore,
     },
   };
 }
@@ -234,7 +251,11 @@ export async function resolveWatchRoots(inputPaths: string[], cwd: string): Prom
       continue;
     }
 
-    if (stat.isFile() && isMarkdownPath(absolutePath)) {
+    if (stat.isFile()) {
+      const kind = await classifyFile(absolutePath, path.basename(absolutePath));
+      if (kind === "binary") {
+        throw new Error(`watch path is a binary file: ${inputPath}`);
+      }
       resolved.set(absolutePath, {
         kind: "file",
         absolutePath,
@@ -243,7 +264,7 @@ export async function resolveWatchRoots(inputPaths: string[], cwd: string): Prom
       continue;
     }
 
-    throw new Error(`watch path must be a directory or a Markdown file: ${inputPath}`);
+    throw new Error(`watch path must be a directory or a non-binary file: ${inputPath}`);
   }
 
   return Array.from(resolved.values()).sort((left, right) =>
@@ -251,17 +272,38 @@ export async function resolveWatchRoots(inputPaths: string[], cwd: string): Prom
   );
 }
 
-export async function scanRoots(entries: WatchEntry[]): Promise<RootGroup[]> {
+export type ScanOptions = {
+  respectGitignore?: boolean;
+  matcherCache?: Map<string, IgnoreMatcher>;
+};
+
+export async function scanRoots(
+  entries: WatchEntry[],
+  options: ScanOptions = {},
+): Promise<RootGroup[]> {
+  const { respectGitignore = DEFAULT_RESPECT_GITIGNORE, matcherCache } = options;
   const roots: RootGroup[] = [];
 
   for (const entry of entries) {
     if (entry.kind === "dir") {
-      const docs = await walkMarkdownFiles(entry.absolutePath, entry.absolutePath);
+      let matcher = matcherCache?.get(entry.absolutePath);
+      if (!matcher) {
+        matcher = await loadIgnoreMatcher({
+          rootPath: entry.absolutePath,
+          respectGitignore,
+        });
+        matcherCache?.set(entry.absolutePath, matcher);
+      }
+
+      const walked = await walkAllFiles(entry.absolutePath, entry.absolutePath, matcher);
       roots.push({
         id: entry.absolutePath,
         label: path.basename(entry.absolutePath) || entry.absolutePath,
         path: entry.absolutePath,
-        docs: docs.sort((left, right) => left.relativePath.localeCompare(right.relativePath)),
+        docs: walked.docs.sort((left, right) =>
+          left.relativePath.localeCompare(right.relativePath),
+        ),
+        hiddenCount: walked.hiddenCount,
       });
       continue;
     }
@@ -273,11 +315,13 @@ export async function scanRoots(entries: WatchEntry[]): Promise<RootGroup[]> {
         label: path.basename(entry.absolutePath),
         path: entry.parentDir,
         docs: [],
+        hiddenCount: 0,
       });
       continue;
     }
 
     const relativePath = path.basename(entry.absolutePath);
+    const kind = await classifyFile(entry.absolutePath, relativePath);
     roots.push({
       id: entry.absolutePath,
       label: relativePath,
@@ -289,8 +333,10 @@ export async function scanRoots(entries: WatchEntry[]): Promise<RootGroup[]> {
           relativePath,
           mtimeMs: stat.mtimeMs,
           rootId: entry.absolutePath,
+          kind,
         },
       ],
+      hiddenCount: 0,
     });
   }
 
@@ -298,18 +344,32 @@ export async function scanRoots(entries: WatchEntry[]): Promise<RootGroup[]> {
 }
 
 export async function renderDocument(roots: RootGroup[], documentId: string): Promise<RenderedDocument> {
-  const document = roots.flatMap(root => root.docs).find(doc => doc.id === documentId);
+  const document = findDocument(roots, documentId);
   if (!document) {
     throw new Error("document not found");
   }
 
+  if (document.kind === "binary") {
+    throw new Error("document is binary");
+  }
+
   const source = await fs.readFile(document.id, "utf8");
+  const language = document.kind === "markdown" ? null : languageForName(document.name) ?? null;
+  const html =
+    document.kind === "markdown"
+      ? renderMarkdownToHtml(source)
+      : renderCodeAsHtml(source, language ?? undefined);
 
   return {
     id: document.id,
     path: document.relativePath,
-    title: extractTitle(source, document.name),
-    html: renderMarkdownToHtml(source),
+    title:
+      document.kind === "markdown"
+        ? extractTitle(html, document.name)
+        : document.name,
+    html,
+    kind: document.kind,
+    language,
   };
 }
 
@@ -397,6 +457,7 @@ export async function openBrowser(url: string): Promise<boolean> {
 
 export type WatchSessionOptions = {
   usePolling?: boolean;
+  respectGitignore?: boolean;
 };
 
 export function createWatchSession(
@@ -404,6 +465,7 @@ export function createWatchSession(
   initialFollow: boolean,
   options: WatchSessionOptions = {},
 ) {
+  const respectGitignore = options.respectGitignore ?? DEFAULT_RESPECT_GITIGNORE;
   let roots: RootGroup[] = [];
   let stateFingerprint = "";
   let scope: Scope = { kind: "folder" };
@@ -411,22 +473,27 @@ export function createWatchSession(
   let refreshTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingChangedId: string | null = null;
   const subscribers = new Set<EventController>();
+  const matcherCache = new Map<string, IgnoreMatcher>();
 
   const watchPaths = entries.map(entry => entry.absolutePath);
-  const watcher = chokidar.watch(watchPaths, {
-    ignoreInitial: true,
-    usePolling: options.usePolling ?? false,
-    interval: 100,
-    awaitWriteFinish: {
-      stabilityThreshold: 100,
-      pollInterval: 25,
-    },
-  });
-  const watcherReady = new Promise<void>(resolve => {
-    watcher.once("ready", () => {
-      resolve();
-    });
-  });
+  const dirRoots = entries.filter(entry => entry.kind === "dir").map(entry => entry.absolutePath);
+
+  const isPathIgnored = (testPath: string): boolean => {
+    for (const rootPath of dirRoots) {
+      const matcher = matcherCache.get(rootPath);
+      if (!matcher) {
+        continue;
+      }
+      const rel = path.relative(rootPath, testPath);
+      if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) {
+        continue;
+      }
+      return matcher.toChokidarIgnored()(testPath);
+    }
+    return false;
+  };
+
+  let watcher: ReturnType<typeof chokidar.watch> | null = null;
 
   const applyScope = (source: RootGroup[]): RootGroup[] => {
     if (scope.kind === "folder") {
@@ -452,7 +519,7 @@ export function createWatchSession(
   };
 
   const refresh = async (changedId: string | null) => {
-    const nextRoots = await scanRoots(entries);
+    const nextRoots = await scanRoots(entries, { respectGitignore, matcherCache });
 
     if (scope.kind === "file" && !hasDocument(nextRoots, scope.documentId)) {
       scope = { kind: "folder" };
@@ -460,7 +527,9 @@ export function createWatchSession(
 
     const visibleRoots = applyScope(nextRoots);
     const nextFingerprint = fingerprintRoots(visibleRoots);
-    const changedDocumentId = changedId && hasDocument(visibleRoots, changedId) ? changedId : null;
+    const changedDoc = changedId ? findDocument(visibleRoots, changedId) : undefined;
+    const changedDocumentId =
+      changedDoc && changedDoc.kind !== "binary" ? changedId : null;
     const shouldBroadcast = nextFingerprint !== stateFingerprint || changedDocumentId !== null;
 
     roots = visibleRoots;
@@ -489,8 +558,18 @@ export function createWatchSession(
     }, 150);
   };
 
-  watcher.on("all", (eventName, filePath) => {
+  const handleWatcherEvent = (eventName: string, filePath: string) => {
     const absolutePath = path.resolve(filePath);
+
+    // A root's `.uatuignore`/`.gitignore` itself just changed — drop the cached
+    // matcher so the upcoming scanRoots call rebuilds it from the new rules.
+    const baseName = path.basename(absolutePath);
+    if (baseName === ".uatuignore" || baseName === ".gitignore") {
+      const parentDir = path.dirname(absolutePath);
+      if (dirRoots.includes(parentDir)) {
+        matcherCache.delete(parentDir);
+      }
+    }
 
     if (scope.kind === "file" && eventName === "unlink" && absolutePath === scope.documentId) {
       scope = { kind: "folder" };
@@ -502,9 +581,11 @@ export function createWatchSession(
       return;
     }
 
-    const changedId = isMarkdownPath(absolutePath) && eventName !== "unlink" ? absolutePath : null;
+    // Eligibility for follow is decided after the upcoming refresh — by then
+    // the rescanned roots tell us whether the path is text or binary.
+    const changedId = eventName !== "unlink" ? absolutePath : null;
     scheduleRefresh(changedId);
-  });
+  };
 
   const setScope = (next: Scope): Scope => {
     if (next.kind === "file") {
@@ -525,8 +606,36 @@ export function createWatchSession(
 
   return {
     async start() {
+      // Pre-load matchers so the chokidar `ignored` predicate has something to
+      // consult during the watcher's very first stat sweep. The cache is also
+      // threaded into every subsequent scanRoots call so we don't re-read
+      // `.uatuignore` / `.gitignore` on every refresh.
+      for (const rootPath of dirRoots) {
+        const matcher = await loadIgnoreMatcher({ rootPath, respectGitignore });
+        matcherCache.set(rootPath, matcher);
+      }
+
+      watcher = chokidar.watch(watchPaths, {
+        ignoreInitial: true,
+        usePolling: options.usePolling ?? false,
+        interval: 100,
+        awaitWriteFinish: {
+          stabilityThreshold: 100,
+          pollInterval: 25,
+        },
+        ignored: isPathIgnored,
+      });
+
+      const watcherReady = new Promise<void>(resolve => {
+        watcher!.once("ready", () => {
+          resolve();
+        });
+      });
+
+      watcher.on("all", handleWatcherEvent);
+
       await watcherReady;
-      const scanned = await scanRoots(entries);
+      const scanned = await scanRoots(entries, { respectGitignore, matcherCache });
       roots = applyScope(scanned);
       stateFingerprint = fingerprintRoots(roots);
       reconcileTimer = setInterval(() => {
@@ -553,7 +662,7 @@ export function createWatchSession(
       }
 
       subscribers.clear();
-      return watcher.close();
+      return watcher ? watcher.close() : Promise.resolve();
     },
     getRoots() {
       return roots;
@@ -605,11 +714,18 @@ export function createWatchSession(
   }
 }
 
-async function walkMarkdownFiles(rootPath: string, currentPath: string) {
-  const entries = await fs.readdir(currentPath, { withFileTypes: true });
-  const docs = [] as RootGroup[number]["docs"];
+type WalkResult = { docs: DocumentMeta[]; hiddenCount: number };
 
-  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+async function walkAllFiles(
+  rootPath: string,
+  currentPath: string,
+  matcher: IgnoreMatcher,
+): Promise<WalkResult> {
+  const dirEntries = await fs.readdir(currentPath, { withFileTypes: true });
+  const docs: DocumentMeta[] = [];
+  let hiddenCount = 0;
+
+  for (const entry of dirEntries.sort((left, right) => left.name.localeCompare(right.name))) {
     if (shouldIgnoreEntry(entry.name)) {
       continue;
     }
@@ -620,26 +736,43 @@ async function walkMarkdownFiles(rootPath: string, currentPath: string) {
       continue;
     }
 
-    if (entry.isDirectory()) {
-      docs.push(...(await walkMarkdownFiles(rootPath, absolutePath)));
+    const relativeFromRoot = path
+      .relative(rootPath, absolutePath)
+      .split(path.sep)
+      .join("/");
+
+    if (matcher.shouldIgnore(relativeFromRoot)) {
+      // Count files we filter out via the user-controlled matcher. Directories
+      // count as one (we don't recurse to count their contents — that would
+      // defeat the point of the matcher's perf benefit).
+      hiddenCount += 1;
       continue;
     }
 
-    if (!entry.isFile() || !isMarkdownPath(entry.name)) {
+    if (entry.isDirectory()) {
+      const sub = await walkAllFiles(rootPath, absolutePath, matcher);
+      docs.push(...sub.docs);
+      hiddenCount += sub.hiddenCount;
+      continue;
+    }
+
+    if (!entry.isFile()) {
       continue;
     }
 
     const stat = await fs.stat(absolutePath);
+    const kind = await classifyFile(absolutePath, entry.name);
     docs.push({
       id: absolutePath,
       name: entry.name,
-      relativePath: path.relative(rootPath, absolutePath).split(path.sep).join("/"),
+      relativePath: relativeFromRoot,
       mtimeMs: stat.mtimeMs,
       rootId: rootPath,
+      kind,
     });
   }
 
-  return docs;
+  return { docs, hiddenCount };
 }
 
 function shouldIgnoreEntry(name: string): boolean {
@@ -650,15 +783,22 @@ function shouldIgnoreEntry(name: string): boolean {
   return hiddenFileSuffixes.some(suffix => name.endsWith(suffix));
 }
 
-function isMarkdownPath(filePath: string): boolean {
-  const lower = filePath.toLowerCase();
-  return lower.endsWith(".md") || lower.endsWith(".markdown");
-}
-
-function extractTitle(source: string, fallbackName: string): string {
-  const match = source.match(/^#\s+(.+)$/m);
+// Pull the title from the FIRST `<h1>` in the rendered HTML rather than from
+// the raw Markdown source. Two reasons:
+//   1) The previous source-side regex was unaware of fenced code blocks, so a
+//      `# Lockfiles` comment inside a fenced ` ```gitignore ` block would win
+//      over the actual document heading.
+//   2) Working off rendered HTML lets us pick up GitHub-style centered hero
+//      headings (`<h1 align="center">…</h1>`), which Markdown source regex
+//      can't see.
+// The HTML is already sanitized — `<h1>` survives, `<script>`/etc. don't.
+function extractTitle(html: string, fallbackName: string): string {
+  const match = html.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i);
   if (match?.[1]) {
-    return match[1].trim();
+    const text = decodeHtmlEntities(match[1].replace(/<[^>]+>/g, "")).trim();
+    if (text) {
+      return text;
+    }
   }
 
   return fallbackName.replace(/\.(md|markdown)$/i, "");
@@ -672,6 +812,7 @@ function fingerprintRoots(roots: RootGroup[]): string {
         id: doc.id,
         relativePath: doc.relativePath,
         mtimeMs: doc.mtimeMs,
+        kind: doc.kind,
       })),
     })),
   );

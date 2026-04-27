@@ -26,14 +26,16 @@ whatever changes on disk.
 
 - **GitHub Flavored Markdown** rendering with the light GitHub theme
 - **Mermaid diagrams** from fenced ` ```mermaid ` blocks
-- **Syntax-highlighted code** (highlight.js, GitHub theme)
+- **Syntax-highlighted code** (highlight.js, GitHub theme) for Markdown fenced blocks AND for plain-text source files (YAML, TypeScript, Python, Dockerfiles, etc.)
+- **Whole-repo browsing** — every non-binary file under the watched roots appears in the sidebar; binary files are listed but disabled
+- **Filtering** — `.uatuignore` (gitignore syntax, `!` negation supported) and `.gitignore` (respected by default; `--no-gitignore` opts out)
 - **Safe HTML passthrough** — inline HTML renders like on GitHub; `<script>`, event handlers, and `javascript:` URLs are stripped
 - **Static asset serving** — images and other files next to your Markdown just work via their relative paths
 - **Live reload** over Server-Sent Events, with a pulsing connection indicator
-- **Follow mode** that jumps to the latest changed document
+- **Follow mode** that jumps to the latest changed file (Markdown or text)
 - **Pin mode** that narrows the session to a single file
 - **Collapsible sidebar**, sticky preview header, and a build badge in the footer
-- **Single-file mode** from the CLI (`uatu watch README.md`)
+- **Single-file mode** from the CLI (`uatu watch README.md` or `uatu watch script.py`)
 
 ## Quick Start
 
@@ -62,21 +64,57 @@ Useful options:
 ./dist/uatu watch .
 ./dist/uatu watch docs notes --no-open
 ./dist/uatu watch testdata/watch-docs --no-follow --port 4321
+./dist/uatu watch . --no-gitignore
 ```
 
 ### Watching a single file
 
-`uatu watch` also accepts a Markdown file path. The session starts scoped to that
-one file and the sidebar only shows it:
+`uatu watch` also accepts any non-binary file path. The session starts scoped to
+that one file and the sidebar only shows it:
 
 ```bash
 ./dist/uatu watch README.md
+./dist/uatu watch src/app.ts
 ```
+
+Binary file paths (e.g. `logo.png`) are rejected with a clear error.
 
 Mid-session, you can narrow an already-running folder watch to the currently
 previewed document with the **Pin** button in the preview header. Clicking it
 again restores the full sidebar. Deleting the pinned file on disk automatically
 unpins the session.
+
+### What gets indexed
+
+uatu indexes every file under each watched root, with these exclusions:
+
+1. **Hardcoded directory denylist** — `node_modules/`, `.git/`, `dist/`, `build/`,
+   `.next/`, `.venv/`, etc. Always applied.
+2. **`.uatuignore` at the watch root** — gitignore syntax, with `!` negation.
+   Single file at the root only; nested `.uatuignore` files are ignored.
+3. **`.gitignore` at the watch root** — respected by default. Disable with
+   `--no-gitignore`.
+4. **Binary detection** — files identified as binary (by extension or 8 KB
+   content sniff) appear in the sidebar but as non-clickable entries.
+
+A typical `.uatuignore` for a noisy repo:
+
+```gitignore
+# Lockfiles
+*.lock
+package-lock.json
+bun.lock
+
+# Minified output
+*.min.js
+*.min.css
+
+# Re-include something .gitignore excluded
+!CHANGELOG.generated.md
+```
+
+Files at or above 1 MB are rendered without syntax highlighting (still readable
+as plain text) so the browser stays responsive on large logs or JSON dumps.
 
 ## Validation Commands
 

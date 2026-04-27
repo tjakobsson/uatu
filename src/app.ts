@@ -2,6 +2,8 @@ import { fileIconForName } from "./file-icons";
 import { renderMermaidDiagrams, replaceMermaidCodeBlocks } from "./preview";
 import {
   buildTreeNodes,
+  defaultDocumentId,
+  formatRelativeTime,
   hasDocument,
   nextSelectedDocumentId,
   shouldRefreshPreview,
@@ -17,6 +19,8 @@ type RenderedDocument = {
   title: string;
   path: string;
   html: string;
+  kind: "markdown" | "text";
+  language: string | null;
 };
 
 const SIDEBAR_COLLAPSED_KEY = "uatu:sidebar-collapsed";
@@ -27,6 +31,7 @@ const treeElement = document.querySelector<HTMLDivElement>("#tree");
 const previewElement = document.querySelector<HTMLElement>("#preview");
 const previewTitleElement = document.querySelector<HTMLElement>("#preview-title");
 const previewPathElement = document.querySelector<HTMLElement>("#preview-path");
+const previewTypeElement = document.querySelector<HTMLElement>("#preview-type");
 const followToggleElement = document.querySelector<HTMLButtonElement>("#follow-toggle");
 const documentCountElement = document.querySelector<HTMLElement>("#document-count");
 const connectionStateElement = document.querySelector<HTMLElement>("#connection-state");
@@ -43,6 +48,7 @@ if (
   !previewElement ||
   !previewTitleElement ||
   !previewPathElement ||
+  !previewTypeElement ||
   !followToggleElement ||
   !documentCountElement ||
   !connectionStateElement ||
@@ -80,8 +86,22 @@ followToggleElement.addEventListener("click", () => {
   if (appState.scope.kind === "file") {
     return;
   }
-  appState.followEnabled = !appState.followEnabled;
+  const wasEnabled = appState.followEnabled;
+  appState.followEnabled = !wasEnabled;
   syncFollowToggle();
+
+  // Enabling follow should "catch up" to the latest changed file rather than
+  // wait for the next change event — otherwise the user clicks Follow and
+  // nothing visible happens until a file is touched.
+  if (!wasEnabled && appState.followEnabled) {
+    const latestId = defaultDocumentId(appState.roots);
+    if (latestId && latestId !== appState.selectedId) {
+      appState.selectedId = latestId;
+      revealSelectedFile();
+      renderSidebar();
+      void loadDocument(latestId);
+    }
+  }
 });
 
 sidebarCollapseElement.addEventListener("click", () => setSidebarCollapsed(true));
@@ -223,7 +243,7 @@ function connectEvents() {
     }
 
     if (!hasDocument(payload.roots, appState.selectedId)) {
-      renderEmptyPreview("No document selected", "Waiting for supported documents");
+      renderEmptyPreview("No document selected", "Waiting for viewable files");
     }
   });
 }
@@ -239,11 +259,101 @@ async function loadDocument(documentId: string) {
   const payload = (await response.json()) as RenderedDocument;
   previewTitleElement.textContent = payload.title;
   previewPathElement.textContent = payload.path;
+  setPreviewType(payload);
   previewElement.classList.remove("empty");
   setPreviewBase(payload.path);
   previewElement.innerHTML = replaceMermaidCodeBlocks(payload.html);
   await renderMermaidDiagrams(previewElement);
+  if (payload.kind === "text") {
+    attachLineNumbers(previewElement);
+  }
+  attachCopyButtons(previewElement);
   syncPinToggle();
+}
+
+// Attach a line-number gutter to each <pre><code> in the container. The gutter
+// is a sibling <span> of <code>, NOT a child — copy-to-clipboard reads
+// `code.textContent` so line numbers are excluded automatically. `user-select:
+// none` on the gutter also keeps mouse-selection of the code clean.
+function attachLineNumbers(container: HTMLElement) {
+  const blocks = container.querySelectorAll<HTMLPreElement>("pre");
+  blocks.forEach(pre => {
+    const code = pre.querySelector<HTMLElement>("code");
+    if (!code) {
+      return;
+    }
+    if (pre.querySelector(".line-numbers")) {
+      return;
+    }
+
+    const text = code.textContent ?? "";
+    const lineCount = Math.max(1, text.replace(/\n$/, "").split("\n").length);
+    const numbers = Array.from({ length: lineCount }, (_, index) => String(index + 1)).join("\n");
+
+    const gutter = document.createElement("span");
+    gutter.className = "line-numbers";
+    gutter.setAttribute("aria-hidden", "true");
+    gutter.textContent = numbers;
+
+    pre.classList.add("has-line-numbers");
+    pre.insertBefore(gutter, code);
+  });
+}
+
+function attachCopyButtons(container: HTMLElement) {
+  const blocks = container.querySelectorAll<HTMLPreElement>("pre");
+  blocks.forEach(pre => {
+    const code = pre.querySelector<HTMLElement>("code");
+    if (!code) {
+      return;
+    }
+    if (pre.querySelector(".code-copy")) {
+      return;
+    }
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "code-copy";
+    button.setAttribute("aria-label", "Copy code to clipboard");
+    button.title = "Copy to clipboard";
+    button.textContent = "Copy";
+
+    button.addEventListener("click", async event => {
+      event.preventDefault();
+      const text = code.textContent ?? "";
+      try {
+        await navigator.clipboard.writeText(text);
+        flashCopyButton(button, "Copied!", "is-copied");
+      } catch {
+        flashCopyButton(button, "Failed", "is-failed");
+      }
+    });
+
+    pre.appendChild(button);
+  });
+}
+
+function flashCopyButton(button: HTMLButtonElement, label: string, modifier: string) {
+  button.textContent = label;
+  button.classList.add(modifier);
+  window.setTimeout(() => {
+    button.textContent = "Copy";
+    button.classList.remove(modifier);
+  }, 1500);
+}
+
+function setPreviewType(payload: RenderedDocument) {
+  const label =
+    payload.kind === "markdown"
+      ? "markdown"
+      : payload.language ?? "text";
+  previewTypeElement.textContent = label;
+  previewTypeElement.hidden = false;
+}
+
+function clearPreviewType() {
+  previewTypeElement.textContent = "";
+  previewTypeElement.hidden = true;
 }
 
 function setPreviewBase(relativePath: string) {
@@ -276,11 +386,24 @@ async function postScope(scope: Scope) {
 }
 
 function renderSidebar() {
-  const documentCount = appState.roots.reduce((sum, root) => sum + root.docs.length, 0);
-  documentCountElement.textContent = `${documentCount} doc${documentCount === 1 ? "" : "s"}`;
+  const totalCount = appState.roots.reduce((sum, root) => sum + root.docs.length, 0);
+  const binaryCount = appState.roots.reduce(
+    (sum, root) => sum + root.docs.filter(doc => doc.kind === "binary").length,
+    0,
+  );
+  const hiddenCount = appState.roots.reduce((sum, root) => sum + root.hiddenCount, 0);
 
-  if (documentCount === 0) {
-    treeElement.innerHTML = `<div class="tree-empty">No supported documents found in the watched roots.</div>`;
+  const segments = [`${totalCount} file${totalCount === 1 ? "" : "s"}`];
+  if (binaryCount > 0) {
+    segments.push(`${binaryCount} binary`);
+  }
+  if (hiddenCount > 0) {
+    segments.push(`${hiddenCount} hidden`);
+  }
+  documentCountElement.textContent = segments.join(" · ");
+
+  if (totalCount === 0) {
+    treeElement.innerHTML = `<div class="tree-empty">No files found in the watched roots.</div>`;
     return;
   }
 
@@ -333,19 +456,34 @@ function revealSelectedFile() {
 
 function renderNodes(nodes: TreeNode[]): string {
   if (nodes.length === 0) {
-    return `<div class="tree-empty">No supported documents in this root.</div>`;
+    return `<div class="tree-empty">No files in this root.</div>`;
   }
 
   return `<ul>${nodes
     .map(node => {
       if (node.kind === "dir") {
         const openAttribute = shouldDirRenderOpen(node.path) ? " open" : "";
+        const dirMtime = renderTreeMtime(node.mtimeMs);
         return `
           <li class="tree-node tree-dir">
             <details data-dir-path="${escapeHtmlAttribute(node.path)}"${openAttribute}>
-              <summary>${escapeHtml(node.name)}</summary>
+              <summary><span class="tree-dir-name">${escapeHtml(node.name)}</span>${dirMtime}</summary>
               ${renderNodes(node.children ?? [])}
             </details>
+          </li>
+        `;
+      }
+
+      const mtimeMarkup = renderTreeMtime(node.mtimeMs);
+
+      if (node.documentKind === "binary") {
+        return `
+          <li class="tree-node tree-doc">
+            <span class="tree-doc-disabled" title="Binary file — not viewable">
+              <span class="tree-icon">${fileIconForName(node.name)}</span>
+              <span class="tree-label">${escapeHtml(node.name)}</span>
+              ${mtimeMarkup}
+            </span>
           </li>
         `;
       }
@@ -356,6 +494,7 @@ function renderNodes(nodes: TreeNode[]): string {
           <button type="button" class="tree-doc-button${isSelected ? " is-selected" : ""}" data-document-id="${escapeHtmlAttribute(node.id ?? "")}">
             <span class="tree-icon">${fileIconForName(node.name)}</span>
             <span class="tree-label">${escapeHtml(node.name)}</span>
+            ${mtimeMarkup}
           </button>
         </li>
       `;
@@ -363,9 +502,40 @@ function renderNodes(nodes: TreeNode[]): string {
     .join("")}</ul>`;
 }
 
+function renderTreeMtime(mtimeMs: number | undefined): string {
+  if (mtimeMs === undefined) {
+    return "";
+  }
+  const label = formatRelativeTime(mtimeMs, Date.now());
+  return `<span class="tree-mtime" data-mtime="${mtimeMs}">${escapeHtml(label)}</span>`;
+}
+
+// Refresh tree-mtime labels every second so they tick visibly. Each pass is a
+// DOM walk over ~one span per leaf + per directory; we skip the textContent
+// write when the formatted label hasn't changed (most ticks past the first
+// minute) so this stays cheap regardless of repo size. The server only
+// broadcasts state when fingerprints change, so we can't rely on SSE alone
+// to keep these labels fresh.
+window.setInterval(() => {
+  const now = Date.now();
+  document
+    .querySelectorAll<HTMLElement>(".tree-mtime[data-mtime]")
+    .forEach(element => {
+      const mtime = Number(element.dataset.mtime);
+      if (!Number.isFinite(mtime)) {
+        return;
+      }
+      const next = formatRelativeTime(mtime, now);
+      if (element.textContent !== next) {
+        element.textContent = next;
+      }
+    });
+}, 1000);
+
 function renderEmptyPreview(title: string, body: string) {
   previewTitleElement.textContent = title;
   previewPathElement.textContent = body;
+  clearPreviewType();
   previewElement.classList.add("empty");
   previewElement.innerHTML = `<p>${escapeHtml(body)}</p>`;
 }

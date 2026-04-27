@@ -75,7 +75,11 @@ async function main() {
           try {
             const document = await renderDocument(watchSession.getRoots(), documentId);
             return Response.json(document);
-          } catch {
+          } catch (error) {
+            const message = error instanceof Error ? error.message : "";
+            if (message === "document is binary") {
+              return Response.json({ error: "document is not viewable" }, { status: 415 });
+            }
             return Response.json({ error: "document not found" }, { status: 404 });
           }
         },
