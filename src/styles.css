@@ -16,6 +16,7 @@
   --accent-soft: #ddf4ff;
   --navy: #0a1c38;
   --teal: #1ca8a7;
+  --surface-muted: #f3f5f7;
 }
 
 * {
@@ -302,7 +303,7 @@ h2 {
   font-weight: 500;
   letter-spacing: 0.04em;
   color: var(--text-subtle);
-  background: #f3f5f7;
+  background: var(--surface-muted);
   border: 1px solid var(--border-soft);
   padding: 0.1rem 0.5rem;
   border-radius: 999px;
@@ -316,7 +317,7 @@ h2 {
   gap: 0.35rem;
   padding: 0.25rem;
   border-radius: 999px;
-  background: #f3f5f7;
+  background: var(--surface-muted);
   border: 1px solid var(--border-soft);
   flex-shrink: 0;
 }
@@ -392,7 +393,7 @@ h2 {
 }
 
 .icon-button:hover {
-  background: #f3f5f7;
+  background: var(--surface-muted);
   color: var(--text-strong);
 }
 

@@ -435,4 +435,42 @@ describe("watchSession scope", () => {
       await session.stop();
     }
   });
+
+  test("editing .uatuignore at runtime reapplies the new patterns", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-ignore-live-"));
+    tempDirectories.push(tempDirectory);
+    const readme = path.join(tempDirectory, "README.md");
+    const lockfile = path.join(tempDirectory, "package-lock.json");
+    const ignoreFile = path.join(tempDirectory, ".uatuignore");
+    await writeFile(readme, "# Readme\n");
+    await writeFile(lockfile, "{}\n");
+    await writeFile(ignoreFile, "");
+
+    const session = createWatchSession(
+      [{ kind: "dir", absolutePath: tempDirectory }],
+      true,
+      { usePolling: true },
+    );
+
+    try {
+      await session.start();
+      await waitUntil(() =>
+        session.getRoots().flatMap(root => root.docs).some(doc => doc.id === lockfile),
+      );
+
+      await writeFile(ignoreFile, "package-lock.json\n");
+      await waitUntil(
+        () => session.getRoots().flatMap(root => root.docs).every(doc => doc.id !== lockfile),
+        4000,
+      );
+
+      await writeFile(ignoreFile, "");
+      await waitUntil(
+        () => session.getRoots().flatMap(root => root.docs).some(doc => doc.id === lockfile),
+        4000,
+      );
+    } finally {
+      await session.stop();
+    }
+  });
 });

@@ -95,7 +95,7 @@ export function renderCodeAsHtml(source: string, language: string | undefined): 
   return `<pre><code${classAttribute}>${highlighted.value}</code></pre>`;
 }
 
-function decodeHtmlEntities(value: string): string {
+export function decodeHtmlEntities(value: string): string {
   return value
     .replace(/&#x([0-9a-fA-F]+);/g, (_match, hex) => String.fromCodePoint(Number.parseInt(hex, 16)))
     .replace(/&#([0-9]+);/g, (_match, dec) => String.fromCodePoint(Number.parseInt(dec, 10)))

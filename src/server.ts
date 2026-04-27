@@ -7,7 +7,7 @@ import type { ReadableStreamDefaultController } from "node:stream/web";
 import { classifyFile } from "./file-classify";
 import { languageForName } from "./file-languages";
 import { loadIgnoreMatcher, type IgnoreMatcher } from "./ignore-engine";
-import { renderCodeAsHtml, renderMarkdownToHtml } from "./markdown";
+import { decodeHtmlEntities, renderCodeAsHtml, renderMarkdownToHtml } from "./markdown";
 import {
   defaultDocumentId,
   findDocument,
@@ -561,6 +561,16 @@ export function createWatchSession(
   const handleWatcherEvent = (eventName: string, filePath: string) => {
     const absolutePath = path.resolve(filePath);
 
+    // A root's `.uatuignore`/`.gitignore` itself just changed — drop the cached
+    // matcher so the upcoming scanRoots call rebuilds it from the new rules.
+    const baseName = path.basename(absolutePath);
+    if (baseName === ".uatuignore" || baseName === ".gitignore") {
+      const parentDir = path.dirname(absolutePath);
+      if (dirRoots.includes(parentDir)) {
+        matcherCache.delete(parentDir);
+      }
+    }
+
     if (scope.kind === "file" && eventName === "unlink" && absolutePath === scope.documentId) {
       scope = { kind: "folder" };
       scheduleRefresh(null);
@@ -785,23 +795,13 @@ function shouldIgnoreEntry(name: string): boolean {
 function extractTitle(html: string, fallbackName: string): string {
   const match = html.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i);
   if (match?.[1]) {
-    const text = decodeEntities(match[1].replace(/<[^>]+>/g, "")).trim();
+    const text = decodeHtmlEntities(match[1].replace(/<[^>]+>/g, "")).trim();
     if (text) {
       return text;
     }
   }
 
   return fallbackName.replace(/\.(md|markdown)$/i, "");
-}
-
-function decodeEntities(value: string): string {
-  return value
-    .replace(/&#x([0-9a-fA-F]+);/g, (_match, hex) => String.fromCodePoint(Number.parseInt(hex, 16)))
-    .replace(/&#([0-9]+);/g, (_match, dec) => String.fromCodePoint(Number.parseInt(dec, 10)))
-    .replaceAll("&lt;", "<")
-    .replaceAll("&gt;", ">")
-    .replaceAll("&quot;", '"')
-    .replaceAll("&amp;", "&");
 }
 
 function fingerprintRoots(roots: RootGroup[]): string {
