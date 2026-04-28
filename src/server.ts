@@ -350,7 +350,7 @@ export async function scanRoots(
         label: relativePath,
         path: entry.parentDir,
         docs: [],
-        hiddenCount: 0,
+        hiddenCount: 1,
       });
       continue;
     }
@@ -496,20 +496,18 @@ export async function resolveStaticFileRequest(
       continue;
     }
 
-    if (entry.kind === "dir") {
-      let matcher = matcherCache.get(entry.absolutePath);
-      if (!matcher) {
-        matcher = await loadIgnoreMatcher({ rootPath: entry.absolutePath, respectGitignore });
-        matcherCache.set(entry.absolutePath, matcher);
-      }
+    let matcher = matcherCache.get(rootPath);
+    if (!matcher) {
+      matcher = await loadIgnoreMatcher({ rootPath, respectGitignore });
+      matcherCache.set(rootPath, matcher);
+    }
 
-      if (matcher.shouldIgnore(relativeUnix)) {
-        continue;
-      }
+    if (matcher.shouldIgnore(relativeUnix)) {
+      continue;
     }
 
     const stat = await fs.lstat(candidate).catch(() => null);
-    if (!stat || !stat.isFile() || stat.isSymbolicLink()) {
+    if (!stat || !stat.isFile()) {
       continue;
     }
 

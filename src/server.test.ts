@@ -415,6 +415,23 @@ describe("asset root helpers", () => {
     expect(resolved).toEqual({ status: "not-found" });
   });
 
+  test("resolveStaticFileRequest applies ignore rules to single-file watch assets", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-static-file-ignore-"));
+    tempDirectories.push(tempDirectory);
+    const readmePath = path.join(tempDirectory, "README.md");
+    await writeFile(readmePath, "# Readme\n");
+    await writeFile(path.join(tempDirectory, ".gitignore"), "secret.txt\n");
+    await writeFile(path.join(tempDirectory, "secret.txt"), "hidden\n");
+
+    const resolved = await resolveStaticFileRequest(
+      "/secret.txt",
+      [{ kind: "file", absolutePath: readmePath, parentDir: tempDirectory }],
+      { respectGitignore: true },
+    );
+
+    expect(resolved).toEqual({ status: "not-found" });
+  });
+
   test("resolveStaticFileRequest respects --no-gitignore", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-static-no-gitignore-"));
     tempDirectories.push(tempDirectory);
