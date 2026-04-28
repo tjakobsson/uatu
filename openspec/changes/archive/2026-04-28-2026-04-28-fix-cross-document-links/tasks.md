@@ -42,5 +42,5 @@
 
 - [x] `bun test` — 117 pass.
 - [x] `bun run test:e2e` — 35 pass.
-- [ ] `bun run check:licenses` — verify no new license rejections.
-- [ ] `bun run build` — verify the standalone binary still builds.
+- [x] `bun run check:licenses` — verify no new license rejections.
+- [x] `bun run build` — verify the standalone binary still builds.
