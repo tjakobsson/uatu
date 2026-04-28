@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "license": "MIT",
+  "bin": {
+    "uatu": "./src/cli.ts"
+  },
   "scripts": {
     "dev": "bun run src/cli.ts watch",
     "test": "bun test",

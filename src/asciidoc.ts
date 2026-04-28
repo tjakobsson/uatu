@@ -151,10 +151,18 @@ export function renderAsciidocToHtml(source: string): string {
   // author-controlled `source-highlighter`/`docinfo`/`backend` attributes —
   // the same posture GitHub uses. `showtitle` makes the level-0 doctitle
   // render as <h1> in embedded output, matching GitHub's rendering.
+  //
+  // `relfilesuffix=.adoc` overrides Asciidoctor's default of rewriting
+  // `xref:other.adoc[]` (and the `<<other.adoc#sec,…>>` shorthand) to
+  // `href="other.html"`. The preview spec requires preserving the author's
+  // `href` verbatim — the in-app static-file fallback resolves URLs against
+  // the watched roots, where the actual file is `.adoc`, so a `.html` URL
+  // would 404. The `link:` macro already passes its target through unchanged,
+  // so this attribute only affects the xref shapes.
   const rawHtml = asciidoctor.convert(source, {
     safe: "secure",
     standalone: false,
-    attributes: { showtitle: true },
+    attributes: { showtitle: true, relfilesuffix: ".adoc" },
   });
 
   const html = typeof rawHtml === "string" ? rawHtml : "";

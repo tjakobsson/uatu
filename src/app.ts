@@ -8,6 +8,7 @@ import {
   nextSelectedDocumentId,
   shouldRefreshPreview,
   type BuildSummary,
+  type DocumentMeta,
   type RootGroup,
   type Scope,
   type StatePayload,
@@ -74,6 +75,7 @@ const appState = {
 initSidebarCollapse();
 initBrandLogo();
 initInPageAnchorHandler();
+initCrossDocAnchorHandler();
 
 function initBrandLogo() {
   const logo = document.querySelector<HTMLImageElement>(".brand-logo");
@@ -132,6 +134,130 @@ function cssEscape(value: string): string {
   // Conservative escape for use inside [id="..."] attribute selectors. Only
   // backslashes and double quotes need escaping for that context.
   return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+}
+
+// Intercept clicks on cross-document anchors (`<a href="other.adoc">`,
+// `<a href="guides/setup.md">`, etc.) and switch the preview to the linked
+// document via the existing in-app load path. Without this, the browser
+// performs a full navigation to that URL — the static-file fallback then
+// serves the raw `.adoc`/`.md` text (or triggers a download), bypassing the
+// renderer entirely. We only intercept when the resolved URL maps to a
+// non-binary document we know about; everything else (binary files,
+// off-root paths, external URLs, modifier-clicks, target="_blank") falls
+// through to the browser's default behavior.
+function initCrossDocAnchorHandler() {
+  previewElement.addEventListener("click", event => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    const anchor = target.closest("a");
+    if (!anchor) {
+      return;
+    }
+
+    // Modifier-clicks → respect the user's intent (open in new tab, etc.).
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+      return;
+    }
+
+    // target="_blank" / "_parent" / etc. → don't override.
+    const explicitTarget = anchor.getAttribute("target");
+    if (explicitTarget && explicitTarget !== "_self") {
+      return;
+    }
+
+    const rawHref = anchor.getAttribute("href");
+    if (!rawHref) {
+      return;
+    }
+
+    // Fragment-only links are handled by initInPageAnchorHandler.
+    if (rawHref.startsWith("#")) {
+      return;
+    }
+
+    // anchor.href is the DOM-resolved absolute URL (it already accounts for
+    // the per-document `<base href>`), which is what we need to map back to a
+    // document path.
+    let resolved: URL;
+    try {
+      resolved = new URL(anchor.href);
+    } catch {
+      return;
+    }
+
+    if (resolved.origin !== window.location.origin) {
+      return;
+    }
+    if (resolved.protocol !== "http:" && resolved.protocol !== "https:") {
+      return;
+    }
+
+    let pathname: string;
+    try {
+      pathname = decodeURIComponent(resolved.pathname);
+    } catch {
+      return;
+    }
+    const relativePath = pathname.replace(/^\/+/, "");
+    if (!relativePath) {
+      return;
+    }
+
+    const doc = findDocumentByRelativePath(relativePath);
+    if (!doc) {
+      return;
+    }
+
+    // Binary docs are non-clickable in the sidebar but a hand-authored link
+    // to one (e.g. a PDF) should still let the browser fetch it.
+    if (doc.kind === "binary") {
+      return;
+    }
+
+    event.preventDefault();
+    appState.followEnabled = false;
+    appState.selectedId = doc.id;
+    revealSelectedFile();
+    syncFollowToggle();
+    renderSidebar();
+    void loadDocument(doc.id).then(() => {
+      if (resolved.hash) {
+        scrollToFragment(resolved.hash.slice(1));
+      }
+    });
+  });
+}
+
+function findDocumentByRelativePath(relativePath: string): DocumentMeta | null {
+  for (const root of appState.roots) {
+    const doc = root.docs.find(candidate => candidate.relativePath === relativePath);
+    if (doc) {
+      return doc;
+    }
+  }
+  return null;
+}
+
+function scrollToFragment(rawId: string) {
+  let id: string;
+  try {
+    id = decodeURIComponent(rawId);
+  } catch {
+    return;
+  }
+  // Headings emerge from sanitize with `user-content-` prefixed onto every
+  // id; mirror the same prefix on incoming fragments so a `#section` link
+  // lands on the prefixed heading id without authors having to know.
+  const candidates = id.startsWith("user-content-") ? [id] : [`user-content-${id}`, id];
+  for (const candidate of candidates) {
+    const element = previewElement.querySelector(`[id="${cssEscape(candidate)}"]`);
+    if (element instanceof HTMLElement) {
+      element.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+  }
 }
 
 followToggleElement.addEventListener("click", () => {

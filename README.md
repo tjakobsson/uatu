@@ -24,137 +24,100 @@ whatever changes on disk.
 
 ## Features
 
-- **GitHub Flavored Markdown** rendering with the light GitHub theme
-- **AsciiDoc** rendering for `.adoc` and `.asciidoc` files: doctitle as `<h1>`, admonitions (NOTE/TIP/IMPORTANT/CAUTION/WARNING), tables, footnotes, callouts, and `[source,LANG]` listings — feature surface tracks GitHub's AsciiDoc preview. AsciiDoc is parsed under Asciidoctor's SECURE safe mode, so `include::` directives, filesystem reads, URI reads, and author-controlled `source-highlighter`/`docinfo`/`backend` attributes are disabled (matching GitHub).
-- **Mermaid diagrams** from fenced ` ```mermaid ` Markdown blocks AND AsciiDoc `[source,mermaid]` listings (the bare `[mermaid]` AsciiDoc block stays a literal — same restriction GitHub applies)
-- **Syntax-highlighted code** (highlight.js, GitHub theme) for Markdown fenced blocks, AsciiDoc `[source,LANG]` listings, AND plain-text source files (YAML, TypeScript, Python, Dockerfiles, etc.)
-- **Whole-repo browsing** — every non-binary file under the watched roots appears in the sidebar; binary files are listed but disabled
-- **Filtering** — `.uatuignore` (gitignore syntax, `!` negation supported) and `.gitignore` (respected by default; `--no-gitignore` opts out)
-- **Safe HTML passthrough** — inline HTML renders like on GitHub; `<script>`, event handlers, and `javascript:` URLs are stripped
-- **Static asset serving** — images and other files next to your Markdown just work via their relative paths
-- **Live reload** over Server-Sent Events, with a pulsing connection indicator
-- **Follow mode** that jumps to the latest changed file (Markdown or text)
-- **Pin mode** that narrows the session to a single file
-- **Collapsible sidebar**, sticky preview header, and a build badge in the footer
-- **Single-file mode** from the CLI (`uatu watch README.md` or `uatu watch script.py`)
+- **Markdown** (GFM) and **AsciiDoc** rendering, GitHub-styled
+- **Mermaid** diagrams in fenced blocks and `[source,mermaid]` listings
+- **Syntax highlighting** for source files (highlight.js, GitHub theme)
+- **Cross-document navigation** — clicking a link to another `.md`/`.adoc` swaps the preview in place
+- **Live reload** over Server-Sent Events
+- **Follow** mode jumps to the latest changed file; **Pin** mode locks the session to one file
+- **Whole-repo browsing** with `.uatuignore` and `.gitignore` filtering
+- **Single-file** or multi-root scope from the CLI
 
-## Quick Start
-
-Install dependencies:
+## Install
 
 ```bash
 bun install
 ```
 
-Run against the bundled example docs:
+Run from the source tree:
 
 ```bash
 bun run src/cli.ts watch testdata/watch-docs
 ```
 
-Or build the standalone executable:
+Build a standalone binary:
 
 ```bash
 bun run build
-./dist/uatu watch testdata/watch-docs
-```
-
-Useful options:
-
-```bash
 ./dist/uatu watch .
-./dist/uatu watch docs notes --no-open
-./dist/uatu watch testdata/watch-docs --no-follow --port 4321
-./dist/uatu watch . --no-gitignore
 ```
 
-### Watching a single file
+### Install globally with `bun link`
 
-`uatu watch` also accepts any non-binary file path. The session starts scoped to
-that one file and the sidebar only shows it:
+Expose `uatu` on your `PATH` from any directory:
 
 ```bash
-./dist/uatu watch README.md
-./dist/uatu watch GUIDE.adoc
-./dist/uatu watch src/app.ts
+bun install
+bun link
 ```
 
-Binary file paths (e.g. `logo.png`) are rejected with a clear error.
+`bun link` registers this package's `bin` (`./src/cli.ts`) as a global symlink
+in `~/.bun/install/global/bin`. As long as that directory is on your `$PATH`
+(Bun's installer sets this up by default), `uatu` works from anywhere:
 
-Mid-session, you can narrow an already-running folder watch to the currently
-previewed document with the **Pin** button in the preview header. Clicking it
-again restores the full sidebar. Deleting the pinned file on disk automatically
-unpins the session.
+```bash
+uatu watch .
+uatu watch README.md
+uatu watch docs notes --no-open
+```
+
+To unlink later: `bun unlink` from the repo root.
+
+## Usage
+
+```bash
+uatu watch [PATH...] [--no-open] [--no-follow] [--no-gitignore] [--port <PORT>]
+```
+
+`PATH` may be a directory, multiple directories, or a single non-binary file.
+
+```bash
+uatu watch .
+uatu watch docs notes --no-open
+uatu watch testdata/watch-docs --no-follow --port 4321
+uatu watch . --no-gitignore
+uatu watch README.md
+uatu watch GUIDE.adoc
+```
+
+Mid-session, click **Pin** in the preview header to narrow an already-running
+folder watch to the currently previewed document. Click again to restore the
+full sidebar.
 
 ### What gets indexed
 
-uatu indexes every file under each watched root, with these exclusions:
+Every file under each watched root, with these exclusions:
 
-1. **Hardcoded directory denylist** — `node_modules/`, `.git/`, `dist/`, `build/`,
-   `.next/`, `.venv/`, etc. Always applied.
-2. **`.uatuignore` at the watch root** — gitignore syntax, with `!` negation.
-   Single file at the root only; nested `.uatuignore` files are ignored.
-3. **`.gitignore` at the watch root** — respected by default. Disable with
-   `--no-gitignore`.
-4. **Binary detection** — files identified as binary (by extension or 8 KB
-   content sniff) appear in the sidebar but as non-clickable entries.
+1. Hardcoded directory denylist (`node_modules/`, `.git/`, `dist/`, etc.).
+2. `.uatuignore` at the watch root (gitignore syntax, `!` negation).
+3. `.gitignore` at the watch root (default; opt out with `--no-gitignore`).
+4. Binary files appear in the sidebar but are non-clickable.
 
-A typical `.uatuignore` for a noisy repo:
+Files at or above 1 MB render without syntax highlighting so the browser stays
+responsive.
 
-```gitignore
-# Lockfiles
-*.lock
-package-lock.json
-bun.lock
-
-# Minified output
-*.min.js
-*.min.css
-
-# Re-include something .gitignore excluded
-!CHANGELOG.generated.md
-```
-
-Files at or above 1 MB are rendered without syntax highlighting (still readable
-as plain text) so the browser stays responsive on large logs or JSON dumps.
-
-## Validation Commands
-
-Unit and integration tests:
+## Validation
 
 ```bash
-bun test
+bun test                # unit + integration
+bun run check:licenses  # license audit
+bun run build           # standalone build
+bun run test:e2e        # Playwright E2E
+bun run e2e:install     # install the Playwright browser runtime once
 ```
 
-License audit:
-
-```bash
-bun run check:licenses
-```
-
-Standalone build:
-
-```bash
-bun run build
-```
-
-Install the Playwright browser runtime for local E2E work:
-
-```bash
-bun run e2e:install
-```
-
-Run Playwright E2E tests:
-
-```bash
-bun run test:e2e
-bun run test:e2e:headed
-bun run test:e2e:ui
-bun run test:e2e:debug
-```
-
-If you already have an interactive Playwright session running and need another
-local E2E run, override the port:
+If you have an interactive Playwright session running, override the port for
+another local run:
 
 ```bash
 UATU_E2E_PORT=4174 bun run test:e2e
@@ -162,37 +125,19 @@ UATU_E2E_PORT=4174 bun run test:e2e
 
 ## Repository Workflow
 
-This repository uses OpenSpec for change-driven work.
+This repository uses [OpenSpec](./openspec) for change-driven work:
 
-Typical flow:
+1. Branch.
+2. Create a change under `openspec/changes/<name>/` (proposal, design, spec, tasks).
+3. Implement.
+4. Merge.
+5. Archive the change under `openspec/changes/archive/`.
 
-1. Create a branch for the work.
-2. Create an OpenSpec change under `openspec/changes/<name>/`.
-3. Write proposal, design, spec, and tasks artifacts.
-4. Implement the change.
-5. Merge the work.
-6. Archive the completed change.
-
-The current product behavior is defined in:
-
-- `openspec/specs/document-watch-browser/spec.md`
-
-Archived work lives under:
-
-- `openspec/changes/archive/`
+Current product behavior lives in `openspec/specs/document-watch-browser/spec.md`.
 
 ## GitHub Automation
 
-GitHub Actions runs the core repository checks:
-
-- `bun test`
-- `bun run check:licenses`
-- `bun run build`
-- `bun run test:e2e`
-
-Renovate keeps npm packages and GitHub Actions versions current so repository
-tooling does not drift behind current releases. The Dependency Dashboard issue
-tracks every pending update.
-
-Claude Code reviews every non-draft pull request on open and on push, and also
-responds to `@claude` mentions in issues, pull requests, and review comments.
+GitHub Actions runs `bun test`, `bun run check:licenses`, `bun run build`, and
+`bun run test:e2e` on every PR. Renovate keeps npm packages and GitHub Actions
+versions current. Claude Code reviews every non-draft pull request and responds
+to `@claude` mentions.

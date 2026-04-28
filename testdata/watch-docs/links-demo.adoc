@@ -1,0 +1,24 @@
+= AsciiDoc Cross-Document Links
+
+This fixture exercises the cross-document link path for AsciiDoc — the
+rendered `<a href>` MUST keep the original `.adoc` extension so the in-app
+static-file fallback can resolve the link against the watched root.
+
+By default Asciidoctor rewrites `xref:other.adoc[]` to `href="other.html"`;
+uatu sets `relfilesuffix=.adoc` to suppress that rewrite.
+
+== Sibling document
+
+The xref macro: xref:asciidoc-cheatsheet.adoc[the cheat sheet].
+
+The shorthand: see <<asciidoc-cheatsheet.adoc#,the cheat sheet (shorthand)>>.
+
+The plain link macro: link:asciidoc-cheatsheet.adoc[the cheat sheet (link)].
+
+== Nested document
+
+A subdirectory target via xref: xref:guides/notes.adoc[guides/notes].
+
+== External
+
+External links are unaffected: link:https://example.com[example.com].
