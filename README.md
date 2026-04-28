@@ -25,8 +25,9 @@ whatever changes on disk.
 ## Features
 
 - **GitHub Flavored Markdown** rendering with the light GitHub theme
-- **Mermaid diagrams** from fenced ` ```mermaid ` blocks
-- **Syntax-highlighted code** (highlight.js, GitHub theme) for Markdown fenced blocks AND for plain-text source files (YAML, TypeScript, Python, Dockerfiles, etc.)
+- **AsciiDoc** rendering for `.adoc` and `.asciidoc` files: doctitle as `<h1>`, admonitions (NOTE/TIP/IMPORTANT/CAUTION/WARNING), tables, footnotes, callouts, and `[source,LANG]` listings — feature surface tracks GitHub's AsciiDoc preview. AsciiDoc is parsed under Asciidoctor's SECURE safe mode, so `include::` directives, filesystem reads, URI reads, and author-controlled `source-highlighter`/`docinfo`/`backend` attributes are disabled (matching GitHub).
+- **Mermaid diagrams** from fenced ` ```mermaid ` Markdown blocks AND AsciiDoc `[source,mermaid]` listings (the bare `[mermaid]` AsciiDoc block stays a literal — same restriction GitHub applies)
+- **Syntax-highlighted code** (highlight.js, GitHub theme) for Markdown fenced blocks, AsciiDoc `[source,LANG]` listings, AND plain-text source files (YAML, TypeScript, Python, Dockerfiles, etc.)
 - **Whole-repo browsing** — every non-binary file under the watched roots appears in the sidebar; binary files are listed but disabled
 - **Filtering** — `.uatuignore` (gitignore syntax, `!` negation supported) and `.gitignore` (respected by default; `--no-gitignore` opts out)
 - **Safe HTML passthrough** — inline HTML renders like on GitHub; `<script>`, event handlers, and `javascript:` URLs are stripped
@@ -74,6 +75,7 @@ that one file and the sidebar only shows it:
 
 ```bash
 ./dist/uatu watch README.md
+./dist/uatu watch GUIDE.adoc
 ./dist/uatu watch src/app.ts
 ```
 

@@ -4,6 +4,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { ReadableStreamDefaultController } from "node:stream/web";
 
+import { renderAsciidocToHtml } from "./asciidoc";
 import { classifyFile } from "./file-classify";
 import { languageForName } from "./file-languages";
 import { loadIgnoreMatcher, type IgnoreMatcher } from "./ignore-engine";
@@ -101,7 +102,7 @@ export type RenderedDocument = {
   title: string;
   path: string;
   html: string;
-  kind: "markdown" | "text";
+  kind: "markdown" | "asciidoc" | "text";
   language: string | null;
 };
 
@@ -354,17 +355,22 @@ export async function renderDocument(roots: RootGroup[], documentId: string): Pr
   }
 
   const source = await fs.readFile(document.id, "utf8");
-  const language = document.kind === "markdown" ? null : languageForName(document.name) ?? null;
+  const language =
+    document.kind === "markdown" || document.kind === "asciidoc"
+      ? null
+      : languageForName(document.name) ?? null;
   const html =
     document.kind === "markdown"
       ? renderMarkdownToHtml(source)
-      : renderCodeAsHtml(source, language ?? undefined);
+      : document.kind === "asciidoc"
+        ? renderAsciidocToHtml(source)
+        : renderCodeAsHtml(source, language ?? undefined);
 
   return {
     id: document.id,
     path: document.relativePath,
     title:
-      document.kind === "markdown"
+      document.kind === "markdown" || document.kind === "asciidoc"
         ? extractTitle(html, document.name)
         : document.name,
     html,
@@ -801,7 +807,7 @@ function extractTitle(html: string, fallbackName: string): string {
     }
   }
 
-  return fallbackName.replace(/\.(md|markdown)$/i, "");
+  return fallbackName.replace(/\.(md|markdown|adoc|asciidoc)$/i, "");
 }
 
 function fingerprintRoots(roots: RootGroup[]): string {

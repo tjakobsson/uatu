@@ -19,7 +19,7 @@ type RenderedDocument = {
   title: string;
   path: string;
   html: string;
-  kind: "markdown" | "text";
+  kind: "markdown" | "asciidoc" | "text";
   language: string | null;
 };
 
@@ -73,6 +73,7 @@ const appState = {
 
 initSidebarCollapse();
 initBrandLogo();
+initInPageAnchorHandler();
 
 function initBrandLogo() {
   const logo = document.querySelector<HTMLImageElement>(".brand-logo");
@@ -80,6 +81,49 @@ function initBrandLogo() {
   if (logo && src) {
     logo.src = src;
   }
+}
+
+// Intercept clicks on in-page anchor links (`<a href="#x">`) in the preview and
+// scroll the matching element into view directly. Letting the browser handle
+// these natively would resolve them against `<base href>` (set per-document to
+// the doc's directory so relative image URLs work), which means a TOC link
+// inside e.g. `guides/setup.adoc` resolves to `/guides/#x` and triggers a full
+// navigation to the server's static fallback — returning 404. Intercepting
+// gives us same-document scroll regardless of the base href.
+function initInPageAnchorHandler() {
+  previewElement.addEventListener("click", event => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    const anchor = target.closest("a");
+    if (!anchor) {
+      return;
+    }
+    const href = anchor.getAttribute("href");
+    if (!href || !href.startsWith("#") || href === "#") {
+      return;
+    }
+    // Don't override modifier-clicks the user explicitly intended (open in new
+    // tab, etc.) — the browser will do something reasonable with the resolved
+    // URL even if it's not a same-doc fragment.
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+      return;
+    }
+    const id = decodeURIComponent(href.slice(1));
+    const element = previewElement.querySelector(`[id="${cssEscape(id)}"]`);
+    if (!(element instanceof HTMLElement)) {
+      return;
+    }
+    event.preventDefault();
+    element.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+}
+
+function cssEscape(value: string): string {
+  // Conservative escape for use inside [id="..."] attribute selectors. Only
+  // backslashes and double quotes need escaping for that context.
+  return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
 }
 
 followToggleElement.addEventListener("click", () => {
@@ -346,7 +390,9 @@ function setPreviewType(payload: RenderedDocument) {
   const label =
     payload.kind === "markdown"
       ? "markdown"
-      : payload.language ?? "text";
+      : payload.kind === "asciidoc"
+        ? "asciidoc"
+        : payload.language ?? "text";
   previewTypeElement.textContent = label;
   previewTypeElement.hidden = false;
 }

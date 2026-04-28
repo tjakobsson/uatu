@@ -109,6 +109,21 @@ describe("resolveWatchRoots", () => {
     expect(entries).toHaveLength(1);
     expect(entries[0]?.kind).toBe("file");
   });
+
+  test("accepts an asciidoc file as a single-file entry", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-root-"));
+    tempDirectories.push(tempDirectory);
+    const tempFile = path.join(tempDirectory, "README.adoc");
+    await writeFile(tempFile, "= Hello\n");
+
+    const entries = await resolveWatchRoots([tempFile], tempDirectory);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toEqual({
+      kind: "file",
+      absolutePath: tempFile,
+      parentDir: tempDirectory,
+    });
+  });
 });
 
 describe("printStartupBanner", () => {
@@ -245,6 +260,21 @@ describe("renderDocument", () => {
     expect(rendered.html).toContain('<pre><code class="hljs language-yaml">');
     expect(rendered.kind).toBe("text");
     expect(rendered.language).toBe("yaml");
+  });
+
+  test("renders an asciidoc document through the asciidoc pipeline", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-render-adoc-"));
+    tempDirectories.push(tempDirectory);
+    const filePath = path.join(tempDirectory, "README.adoc");
+    await writeFile(filePath, "= Hello\n\nworld\n\nNOTE: heads up\n");
+
+    const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
+    const rendered = await renderDocument(roots, filePath);
+    expect(rendered.kind).toBe("asciidoc");
+    expect(rendered.language).toBeNull();
+    expect(rendered.title).toBe("Hello");
+    expect(rendered.html).toContain("admonitionblock");
+    expect(rendered.html).toContain("<p>world</p>");
   });
 
   test("emits markdown kind and null language for a Markdown document", async () => {

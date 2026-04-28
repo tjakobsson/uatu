@@ -5,6 +5,9 @@
 
 const MARKDOWN_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.5" y="3.5" width="13" height="9" rx="1.6" /><path d="M3.5 10.5V6L5.5 8L7.5 6V10.5" /><path d="M11 6V10M11 10l1.5-1.5M11 10l-1.5-1.5" /></svg>`;
 
+// "A" glyph for AsciiDoc — distinct from the Markdown "M" glyph.
+const ASCIIDOC_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.5" y="3.5" width="13" height="9" rx="1.6" /><path d="M4.5 10.5L6.5 6L8.5 10.5" /><path d="M5 9.2H8" /><path d="M10.5 6V10.5M10.5 6h2M10.5 8.2h1.5" /></svg>`;
+
 const CODE_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.5" y="3.5" width="13" height="9" rx="1.6" /><path d="M5.5 7L3.5 8.5L5.5 10" /><path d="M10.5 7L12.5 8.5L10.5 10" /><path d="M9 6.5L7 11" /></svg>`;
 
 const CONFIG_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.5" y="3.5" width="13" height="9" rx="1.6" /><circle cx="8" cy="8" r="1.5" /><path d="M8 5.5V4M8 12V10.5M5.5 8H4M12 8H10.5M6.2 6.2L5.2 5.2M10.8 10.8L9.8 9.8M6.2 9.8L5.2 10.8M10.8 5.2L9.8 6.2" /></svg>`;
@@ -18,6 +21,8 @@ const GENERIC_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" fill="none
 const ICONS_BY_EXTENSION: Record<string, string> = {
   ".md": MARKDOWN_ICON,
   ".markdown": MARKDOWN_ICON,
+  ".adoc": ASCIIDOC_ICON,
+  ".asciidoc": ASCIIDOC_ICON,
   ".ts": CODE_ICON,
   ".tsx": CODE_ICON,
   ".js": CODE_ICON,

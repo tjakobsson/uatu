@@ -8,7 +8,7 @@ test.beforeEach(async ({ page, request }) => {
   await page.goto("/");
   await expect(page.getByRole("button", { name: "README.md" })).toBeVisible();
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Online");
-  await expect(page.locator("#document-count")).toHaveText("3 files");
+  await expect(page.locator("#document-count")).toHaveText("4 files");
   await waitForPreviewToSettle(page);
   await page.getByRole("button", { name: "README.md" }).click();
   await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
@@ -155,7 +155,7 @@ test("sidebar collapse preference persists across reloads", async ({ page }) => 
 });
 
 test("pin toggle narrows the sidebar to the current document and ignores changes elsewhere", async ({ page }) => {
-  await expect(page.locator("#document-count")).toHaveText("3 files");
+  await expect(page.locator("#document-count")).toHaveText("4 files");
   await page.locator("#pin-toggle").click();
   await expect(page.locator("#pin-toggle")).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator("#document-count")).toHaveText("1 file");
@@ -171,7 +171,7 @@ test("pin toggle narrows the sidebar to the current document and ignores changes
 
   await page.locator("#pin-toggle").click();
   await expect(page.locator("#pin-toggle")).toHaveAttribute("aria-pressed", "false");
-  await expect(page.locator("#document-count")).toHaveText("3 files");
+  await expect(page.locator("#document-count")).toHaveText("4 files");
   await expect(page.locator("#follow-toggle")).toBeEnabled();
 });
 
@@ -231,7 +231,7 @@ test("a non-Markdown text file appears in the tree and renders as syntax-highlig
     data: { extras: { "config.yaml": "key: value\nport: 4321\n" } },
   });
   await page.goto("/");
-  await expect(page.locator("#document-count")).toHaveText("4 files");
+  await expect(page.locator("#document-count")).toHaveText("5 files");
 
   const yamlButton = page.getByRole("button", { name: "config.yaml" });
   await expect(yamlButton).toBeVisible();
@@ -370,7 +370,7 @@ test("sidebar counter shows the binary subcount when binary files are present", 
     data: { extras: { "logo.png": pngBytes } },
   });
   await page.goto("/");
-  await expect(page.locator("#document-count")).toHaveText("4 files · 1 binary");
+  await expect(page.locator("#document-count")).toHaveText("5 files · 1 binary");
 });
 
 test("sidebar counter shows the hidden subcount for .uatuignore-filtered files", async ({ page, request }) => {
@@ -384,10 +384,10 @@ test("sidebar counter shows the hidden subcount for .uatuignore-filtered files",
     },
   });
   await page.goto("/");
-  // Visible: 3 testdata files (README.md, diagram.md, guides/setup.md) plus the
-  // `.uatuignore` file itself (it's not matched by its own `*.lock` pattern).
-  // Hidden: bun.lock, yarn.lock.
-  await expect(page.locator("#document-count")).toHaveText("4 files · 2 hidden");
+  // Visible: 4 testdata files (README.md, diagram.md, asciidoc-tour.adoc,
+  // guides/setup.md) plus the `.uatuignore` file itself (it's not matched by
+  // its own `*.lock` pattern). Hidden: bun.lock, yarn.lock.
+  await expect(page.locator("#document-count")).toHaveText("5 files · 2 hidden");
 });
 
 test("connection indicator is rendered in the preview header so it stays visible when the sidebar is collapsed", async ({ page }) => {
@@ -409,6 +409,129 @@ test("preview header shows a file-type chip for the selected document", async ({
 
   await page.getByRole("button", { name: "config.yaml" }).click();
   await expect(page.locator("#preview-type")).toHaveText("yaml");
+});
+
+test("renders the AsciiDoc cheat sheet with full heading depth, TOC, admonitions, syntax highlighting, and Mermaid", async ({ page }) => {
+  // Uses the permanent testdata/watch-docs/asciidoc-cheatsheet.adoc fixture,
+  // which doubles as a visual reference for the AsciiDoc render path AND the
+  // fixture under test for it.
+  const adocButton = page.getByRole("button", { name: "asciidoc-cheatsheet.adoc" });
+  await expect(adocButton).toBeVisible();
+  await adocButton.click();
+
+  await expect(page.locator("#preview-type")).toHaveText("asciidoc");
+  await expect(page.locator("#preview-title")).toHaveText("AsciiDoc Cheat Sheet");
+
+  // Heading depth: doctitle → <h1>, then ==/===/====/=====/====== → h2-h6.
+  await expect(page.locator("#preview h1")).toHaveCount(1);
+  await expect(page.locator("#preview h2")).not.toHaveCount(0);
+  await expect(page.locator("#preview h3")).not.toHaveCount(0);
+  await expect(page.locator("#preview h4")).not.toHaveCount(0);
+  await expect(page.locator("#preview h5")).not.toHaveCount(0);
+  await expect(page.locator("#preview h6")).not.toHaveCount(0);
+
+  // TOC renders as a list of links to section anchors. Hrefs are prefixed
+  // with `user-content-` to match the (also-prefixed) heading ids — this is
+  // what makes in-page jumps actually navigate.
+  await expect(page.locator("#preview a[href='#user-content-_headings']")).toBeVisible();
+  await expect(page.locator("#preview a[href='#user-content-_admonitions']")).toBeVisible();
+
+  // Two admonition kinds for spread.
+  await expect(page.locator("#preview .admonitionblock.note")).toBeVisible();
+  await expect(page.locator("#preview .admonitionblock.warning")).toBeVisible();
+
+  // Highlighted code (the cheat sheet has multiple [source,javascript] blocks).
+  await expect(page.locator("#preview pre code.hljs.language-javascript").first()).toBeVisible();
+
+  // Mermaid diagram is hydrated client-side.
+  await expect(page.locator("#preview .mermaid svg")).toBeVisible();
+
+  // Block quote and sidebar.
+  await expect(page.locator("#preview .quoteblock")).toBeVisible();
+  await expect(page.locator("#preview .sidebarblock")).toBeVisible();
+});
+
+test("clicking a Table of Contents link in the AsciiDoc cheat sheet navigates to that section", async ({ page }) => {
+  // Full round-trip: TOC entries are rendered with `href="#user-content-..."`
+  // (sanitize prefixes heading ids; rewriteInPageAnchors mirrors that on the
+  // hrefs), and an in-page anchor click handler in app.ts intercepts the click
+  // and scrolls the matching heading into view directly.
+  await page.getByRole("button", { name: "asciidoc-cheatsheet.adoc" }).click();
+  await expect(page.locator("#preview-title")).toHaveText("AsciiDoc Cheat Sheet");
+
+  // Pick a section near the bottom of the document so the click triggers
+  // visible scrolling (not a no-op).
+  const targetId = "user-content-_admonitions";
+  const targetHeading = page.locator(`#${targetId}`);
+  const tocLink = page.locator(`#preview a[href="#${targetId}"]`);
+
+  await expect(tocLink).toBeVisible();
+  await expect(targetHeading).toHaveCount(1);
+
+  // Before the click, the target heading is below the fold.
+  await expect(targetHeading).not.toBeInViewport();
+
+  await tocLink.click();
+
+  // After the click, the browser has scrolled the heading into view.
+  await expect(targetHeading).toBeInViewport();
+});
+
+test("TOC link click in a nested-directory AsciiDoc doc does NOT navigate to a 404", async ({ page, request }) => {
+  // Regression: when an .adoc file lives in a subdirectory, the per-document
+  // <base href> is set to that directory (so relative image paths resolve).
+  // A naive `<a href="#x">` in the TOC would resolve against the base to
+  // `/<dir>/#x`, triggering a full navigation that hits the static-fallback
+  // 404. The in-page anchor click handler must intercept the click and
+  // scrollIntoView directly so this stays same-document.
+  const longParas = Array.from({ length: 80 }, (_, i) => `Paragraph ${i + 1} of section content with words.`).join("\n\n");
+  await request.post("/__e2e/reset", {
+    data: {
+      extras: {
+        "guides/nested.adoc": `= Nested Doc
+:toc:
+
+== Alpha
+
+${longParas}
+
+== Bravo
+
+content bravo
+`,
+      },
+    },
+  });
+  await page.goto("/");
+
+  // Expand the guides directory so the nested.adoc button is visible/clickable.
+  const guidesDetails = page
+    .locator("#tree details")
+    .filter({ has: page.locator('summary:has-text("guides")') });
+  if (!(await guidesDetails.evaluate((el: HTMLDetailsElement) => el.open))) {
+    await guidesDetails.locator("summary").click();
+  }
+  await page.locator('button[data-document-id$="guides/nested.adoc"]').click();
+  await expect(page.locator("#preview .toc")).toBeVisible();
+
+  // Confirm the base href was set to the subdirectory (the precondition
+  // that makes naive fragment navigation 404).
+  const baseHref = await page.locator("#preview-base").getAttribute("href");
+  expect(baseHref).toMatch(/\/guides\/$/);
+
+  const bravo = page.locator("#preview h2[id$='_bravo']");
+  await expect(bravo).not.toBeInViewport();
+
+  const urlBefore = page.url();
+  await page.locator("#preview .toc a[href*='_bravo']").click();
+
+  // Browser must NOT have navigated away — page URL pathname unchanged, and
+  // the uatu app shell is still rendered (the brand text is in the sidebar).
+  expect(new URL(page.url()).pathname).toBe(new URL(urlBefore).pathname);
+  await expect(page.locator(".brand")).toBeVisible();
+
+  // And the target heading must now be in view.
+  await expect(bravo).toBeInViewport();
 });
 
 test("code blocks expose a copy-to-clipboard control", async ({ page, context, request }) => {

@@ -1,4 +1,4 @@
-export type DocumentKind = "markdown" | "text" | "binary";
+export type DocumentKind = "markdown" | "asciidoc" | "text" | "binary";
 
 export type DocumentMeta = {
   id: string;

@@ -113,6 +113,15 @@ export function isMarkdownPath(filePath: string): boolean {
   return lower.endsWith(".md") || lower.endsWith(".markdown");
 }
 
+// Note: GitHub also registers `.asc` for AsciiDoc, but `.asc` is overwhelmingly
+// used for PGP ASCII-armored content (release signatures, public keys), and the
+// AsciiDoc community itself recommends against `.asc` for AsciiDoc files. uatu
+// deliberately excludes it.
+export function isAsciidocPath(filePath: string): boolean {
+  const lower = filePath.toLowerCase();
+  return lower.endsWith(".adoc") || lower.endsWith(".asciidoc");
+}
+
 function extensionOf(name: string): string {
   const lower = name.toLowerCase();
   const dotIndex = lower.lastIndexOf(".");
@@ -147,6 +156,10 @@ export async function classifyFile(absolutePath: string, name?: string): Promise
 
   if (isMarkdownPath(fileName)) {
     return "markdown";
+  }
+
+  if (isAsciidocPath(fileName)) {
+    return "asciidoc";
   }
 
   if (isKnownText(fileName)) {
