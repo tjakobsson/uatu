@@ -1,0 +1,8 @@
+= Notes
+
+A small AsciiDoc target file used by `links-demo.adoc` to exercise the
+nested-directory cross-document link case.
+
+== Section A
+
+Some notes go here.

@@ -187,6 +187,64 @@ not a real language
   });
 });
 
+describe("renderAsciidocToHtml cross-document links", () => {
+  // Asciidoctor's default `xref:other.adoc[]` rewrites the extension to the
+  // configured output suffix (`.html`). The preview spec requires preserving
+  // the author's `href` verbatim — the in-app static-file fallback resolves
+  // those URLs against the watched roots, where the actual file is `.adoc`.
+  // Set `relfilesuffix=.adoc` so cross-doc xrefs keep their extension.
+
+  test("xref to a sibling .adoc file preserves the .adoc extension", () => {
+    const html = renderAsciidocToHtml(`= Index\n\nxref:other.adoc[Other doc]\n`);
+    expect(html).toContain('<a href="other.adoc">Other doc</a>');
+    expect(html).not.toContain("other.html");
+  });
+
+  test("xref into a subdirectory preserves the relative path", () => {
+    const html = renderAsciidocToHtml(`= Index\n\nxref:guides/setup.adoc[Setup]\n`);
+    expect(html).toContain('<a href="guides/setup.adoc">Setup</a>');
+    expect(html).not.toContain("guides/setup.html");
+  });
+
+  test("xref with a fragment preserves the .adoc extension and the fragment", () => {
+    const html = renderAsciidocToHtml(`= Index\n\nxref:other.adoc#section[Other]\n`);
+    expect(html).toContain('<a href="other.adoc#section">Other</a>');
+    expect(html).not.toContain("other.html");
+  });
+
+  test("<<other.adoc#sec,Title>> shorthand preserves the .adoc extension", () => {
+    const html = renderAsciidocToHtml(`= Index\n\n<<other.adoc#section,Other>>\n`);
+    expect(html).toContain('<a href="other.adoc#section">Other</a>');
+    expect(html).not.toContain("other.html");
+  });
+
+  test("link: macro to a sibling .adoc file preserves the extension", () => {
+    const html = renderAsciidocToHtml(`= Index\n\nlink:other.adoc[Other]\n`);
+    expect(html).toContain('<a href="other.adoc">Other</a>');
+    expect(html).not.toContain("other.html");
+  });
+
+  test("xref to a sibling .asciidoc file preserves the .asciidoc extension", () => {
+    const html = renderAsciidocToHtml(`= Index\n\nxref:other.asciidoc[Other]\n`);
+    expect(html).toContain('<a href="other.asciidoc">Other</a>');
+    expect(html).not.toContain("other.html");
+  });
+
+  test("bare xref:id[] still resolves as an in-page anchor (no extension to preserve)", () => {
+    // With no extension hint Asciidoctor treats the target as an in-document
+    // anchor reference; rewriteInPageAnchors then prefixes it with
+    // `user-content-` to mirror sanitize's id namespacing.
+    const html = renderAsciidocToHtml(`= Doc\n\nxref:target[Jump]\n\n[[target]]\n== Target\n`);
+    expect(html).toContain('href="#user-content-target"');
+    expect(html).not.toContain("target.html");
+  });
+
+  test("external link is not affected by the .adoc preservation rule", () => {
+    const html = renderAsciidocToHtml(`= T\n\nlink:https://example.com[Example]\n`);
+    expect(html).toContain('<a href="https://example.com">Example</a>');
+  });
+});
+
 describe("normalizeAsciidoctorListings", () => {
   test("rewrites Asciidoctor's listing wrapper into the Markdown-shaped pre/code", () => {
     const input =

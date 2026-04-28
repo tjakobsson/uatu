@@ -105,6 +105,19 @@ Visit https://example.com and ~~remove~~ text.`);
     expect(html).toContain('href="#top"');
   });
 
+  test("preserves cross-document Markdown links verbatim (no .md → .html rewrite)", () => {
+    // Mirror the AsciiDoc cross-doc link regression: links to other Markdown
+    // files MUST keep their `.md` extension so the in-app static fallback can
+    // resolve them against the watched roots.
+    const html = renderMarkdownToHtml(
+      `# Index\n\nSee [Other](other.md) and [Setup](guides/setup.md).\n`,
+    );
+    expect(html).toContain('<a href="other.md">Other</a>');
+    expect(html).toContain('<a href="guides/setup.md">Setup</a>');
+    expect(html).not.toContain("other.html");
+    expect(html).not.toContain("guides/setup.html");
+  });
+
   test("sanitizer keeps the centered-hero README idiom intact", () => {
     const html = renderMarkdownToHtml(
       `<p align="center">\n  <img src="./uatu-logo.svg" alt="uatu logo" width="128" height="130" />\n</p>\n\n# uatu\n`,

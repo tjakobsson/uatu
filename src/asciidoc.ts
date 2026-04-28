@@ -147,14 +147,15 @@ export function renderAsciidocToHtml(source: string): string {
     return `<pre><code class="hljs">${escapeHtml(source)}</code></pre>`;
   }
 
-  // SECURE safe mode disables `include::`, filesystem reads, URI reads, and
-  // author-controlled `source-highlighter`/`docinfo`/`backend` attributes —
-  // the same posture GitHub uses. `showtitle` makes the level-0 doctitle
-  // render as <h1> in embedded output, matching GitHub's rendering.
+  // SECURE matches GitHub's posture (no `include::`, no filesystem/URI reads,
+  // no author-controlled `source-highlighter`/`docinfo`/`backend`). `showtitle`
+  // emits the level-0 doctitle as <h1>. `relfilesuffix=.adoc` keeps the
+  // author's extension on cross-document `xref:` and `<<>>` shorthand instead
+  // of Asciidoctor's default `.html` rewrite.
   const rawHtml = asciidoctor.convert(source, {
     safe: "secure",
     standalone: false,
-    attributes: { showtitle: true },
+    attributes: { showtitle: true, relfilesuffix: ".adoc" },
   });
 
   const html = typeof rawHtml === "string" ? rawHtml : "";

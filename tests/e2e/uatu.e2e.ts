@@ -8,7 +8,7 @@ test.beforeEach(async ({ page, request }) => {
   await page.goto("/");
   await expect(page.getByRole("button", { name: "README.md" })).toBeVisible();
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Online");
-  await expect(page.locator("#document-count")).toHaveText("4 files");
+  await expect(page.locator("#document-count")).toHaveText("7 files");
   await waitForPreviewToSettle(page);
   await page.getByRole("button", { name: "README.md" }).click();
   await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
@@ -155,7 +155,7 @@ test("sidebar collapse preference persists across reloads", async ({ page }) => 
 });
 
 test("pin toggle narrows the sidebar to the current document and ignores changes elsewhere", async ({ page }) => {
-  await expect(page.locator("#document-count")).toHaveText("4 files");
+  await expect(page.locator("#document-count")).toHaveText("7 files");
   await page.locator("#pin-toggle").click();
   await expect(page.locator("#pin-toggle")).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator("#document-count")).toHaveText("1 file");
@@ -171,7 +171,7 @@ test("pin toggle narrows the sidebar to the current document and ignores changes
 
   await page.locator("#pin-toggle").click();
   await expect(page.locator("#pin-toggle")).toHaveAttribute("aria-pressed", "false");
-  await expect(page.locator("#document-count")).toHaveText("4 files");
+  await expect(page.locator("#document-count")).toHaveText("7 files");
   await expect(page.locator("#follow-toggle")).toBeEnabled();
 });
 
@@ -231,7 +231,7 @@ test("a non-Markdown text file appears in the tree and renders as syntax-highlig
     data: { extras: { "config.yaml": "key: value\nport: 4321\n" } },
   });
   await page.goto("/");
-  await expect(page.locator("#document-count")).toHaveText("5 files");
+  await expect(page.locator("#document-count")).toHaveText("8 files");
 
   const yamlButton = page.getByRole("button", { name: "config.yaml" });
   await expect(yamlButton).toBeVisible();
@@ -370,7 +370,7 @@ test("sidebar counter shows the binary subcount when binary files are present", 
     data: { extras: { "logo.png": pngBytes } },
   });
   await page.goto("/");
-  await expect(page.locator("#document-count")).toHaveText("5 files · 1 binary");
+  await expect(page.locator("#document-count")).toHaveText("8 files · 1 binary");
 });
 
 test("sidebar counter shows the hidden subcount for .uatuignore-filtered files", async ({ page, request }) => {
@@ -384,10 +384,11 @@ test("sidebar counter shows the hidden subcount for .uatuignore-filtered files",
     },
   });
   await page.goto("/");
-  // Visible: 4 testdata files (README.md, diagram.md, asciidoc-tour.adoc,
-  // guides/setup.md) plus the `.uatuignore` file itself (it's not matched by
-  // its own `*.lock` pattern). Hidden: bun.lock, yarn.lock.
-  await expect(page.locator("#document-count")).toHaveText("5 files · 2 hidden");
+  // Visible: 7 testdata files (README.md, diagram.md, asciidoc-cheatsheet.adoc,
+  // guides/setup.md, guides/notes.adoc, links-demo.md, links-demo.adoc) plus
+  // the `.uatuignore` file itself (it's not matched by its own `*.lock`
+  // pattern). Hidden: bun.lock, yarn.lock.
+  await expect(page.locator("#document-count")).toHaveText("8 files · 2 hidden");
 });
 
 test("connection indicator is rendered in the preview header so it stays visible when the sidebar is collapsed", async ({ page }) => {
@@ -578,6 +579,90 @@ test("non-Markdown code views show line numbers; Markdown fenced blocks do not",
   await expect(page.locator("#preview pre")).toHaveCount(1);
   await expect(page.locator("#preview pre .line-numbers")).toHaveCount(0);
   await expect(page.locator("#preview pre.has-line-numbers")).toHaveCount(0);
+});
+
+test("AsciiDoc cross-document links render with the original .adoc extension (not .html)", async ({ page }) => {
+  // Regression: Asciidoctor's default rewrites `xref:other.adoc[]` to
+  // `href="other.html"`. The preview spec requires preserving the author's
+  // `href` verbatim so the in-app click handler can resolve it to a known
+  // document. Drives the permanent `testdata/watch-docs/links-demo.adoc`
+  // fixture.
+  await page.locator('button[data-document-id$="links-demo.adoc"]').click();
+  await expect(page.locator("#preview-title")).toHaveText("AsciiDoc Cross-Document Links");
+
+  // xref:, <<>>, and link: macros all targeting the existing cheat sheet —
+  // each MUST resolve to the literal `.adoc` URL.
+  await expect(
+    page.locator('#preview a[href="asciidoc-cheatsheet.adoc"]').first(),
+  ).toBeVisible();
+  await expect(page.locator('#preview a[href="guides/notes.adoc"]')).toBeVisible();
+
+  // No link in the preview should reference a `.html` file (the bug shape).
+  await expect(page.locator('#preview a[href$=".html"]')).toHaveCount(0);
+});
+
+test("clicking an AsciiDoc cross-document link switches the preview in-app (no download, no full nav)", async ({ page }) => {
+  // The renderer keeps the .adoc href, but a default click would navigate
+  // the browser to /other.adoc, hitting the static-file fallback that serves
+  // raw bytes (download or plain-text view). The in-app click handler must
+  // intercept the click and switch the preview through the same code path
+  // the sidebar uses.
+  await page.locator('button[data-document-id$="links-demo.adoc"]').click();
+  await expect(page.locator("#preview-title")).toHaveText("AsciiDoc Cross-Document Links");
+
+  const urlBefore = page.url();
+  await page.locator('#preview a[href="asciidoc-cheatsheet.adoc"]').first().click();
+
+  // The URL pathname must not have changed — the SPA shell stays in place,
+  // and the preview swaps to the linked document.
+  expect(new URL(page.url()).pathname).toBe(new URL(urlBefore).pathname);
+  await expect(page.locator("#preview-title")).toHaveText("AsciiDoc Cheat Sheet");
+  await expect(page.locator("#preview-path")).toHaveText("asciidoc-cheatsheet.adoc");
+
+  // Sidebar selection follows the navigation.
+  await expect(
+    page.locator('button[data-document-id$="asciidoc-cheatsheet.adoc"]'),
+  ).toHaveClass(/is-selected/);
+});
+
+test("clicking an AsciiDoc cross-document link into a subdirectory switches the preview", async ({ page }) => {
+  // Same handler, exercised through `xref:guides/notes.adoc[…]` so the
+  // resolved URL has a directory segment in it.
+  await page.locator('button[data-document-id$="links-demo.adoc"]').click();
+  await expect(page.locator("#preview-title")).toHaveText("AsciiDoc Cross-Document Links");
+
+  await page.locator('#preview a[href="guides/notes.adoc"]').click();
+
+  await expect(page.locator("#preview-title")).toHaveText("Notes");
+  await expect(page.locator("#preview-path")).toHaveText("guides/notes.adoc");
+});
+
+test("Markdown cross-document links render with the original .md extension", async ({ page }) => {
+  // Companion regression for the AsciiDoc test above. micromark already
+  // preserves the author's URL verbatim — this test locks that behavior in
+  // so a future renderer swap can't silently regress it. Drives the
+  // permanent `testdata/watch-docs/links-demo.md` fixture.
+  await page.locator('button[data-document-id$="links-demo.md"]').click();
+  await expect(page.locator("#preview-title")).toHaveText("Markdown Cross-Document Links");
+
+  await expect(page.locator('#preview a[href="README.md"]')).toBeVisible();
+  await expect(page.locator('#preview a[href="guides/setup.md"]')).toBeVisible();
+  await expect(page.locator('#preview a[href$=".html"]')).toHaveCount(0);
+});
+
+test("clicking a Markdown cross-document link switches the preview in-app", async ({ page }) => {
+  await page.locator('button[data-document-id$="links-demo.md"]').click();
+  await expect(page.locator("#preview-title")).toHaveText("Markdown Cross-Document Links");
+
+  const urlBefore = page.url();
+  await page.locator('#preview a[href="guides/setup.md"]').click();
+
+  expect(new URL(page.url()).pathname).toBe(new URL(urlBefore).pathname);
+  await expect(page.locator("#preview-title")).toHaveText("Setup");
+  await expect(page.locator("#preview-path")).toHaveText("guides/setup.md");
+  await expect(
+    page.locator('button[data-document-id$="guides/setup.md"]'),
+  ).toHaveClass(/is-selected/);
 });
 
 test("preview header stays visible while scrolling and the sidebar scroll is independent", async ({ page }) => {
