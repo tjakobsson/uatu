@@ -110,7 +110,15 @@ function initInPageAnchorHandler() {
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
       return;
     }
-    const id = decodeURIComponent(href.slice(1));
+    // decodeURIComponent throws URIError on malformed percent-sequences
+    // (e.g. `#bad%GGid`). Treat that as "let the browser handle it" rather
+    // than swallowing the click silently with an uncaught error.
+    let id: string;
+    try {
+      id = decodeURIComponent(href.slice(1));
+    } catch {
+      return;
+    }
     const element = previewElement.querySelector(`[id="${cssEscape(id)}"]`);
     if (!(element instanceof HTMLElement)) {
       return;
