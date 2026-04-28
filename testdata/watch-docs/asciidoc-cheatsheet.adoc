@@ -1,0 +1,164 @@
+= AsciiDoc Cheat Sheet
+:toc:
+:showtitle:
+
+A reference fixture exercising every AsciiDoc feature uatu's renderer supports.
+Open this file in `bun run dev testdata/watch-docs` to see how each construct
+looks; the same file is asserted against in unit and E2E tests.
+
+== Headings
+
+Six levels of nesting, mapping to `<h1>`–`<h6>`. The doctitle above is `<h1>`;
+each `==` adds one heading level.
+
+=== Level 3 heading
+
+==== Level 4 heading
+
+===== Level 5 heading
+
+====== Level 6 heading (deepest)
+
+== Inline Formatting
+
+*bold*, _italic_, `monospace`, ~subscript~, ^superscript^, and a hard line +
+break (note the trailing `+`).
+
+A paragraph with regular flow, https://example.com[an external link], and an
+inline cross-reference to <<source-listings>>.
+
+== Lists
+
+=== Unordered
+
+* one
+* two
+** nested two-A
+** nested two-B
+*** deeper still
+* three
+
+=== Ordered
+
+. first
+. second
+.. nested second-A
+.. nested second-B
+. third
+
+=== Description
+
+Term::
+  Definition body.
+Another term::
+  Another definition. Description lists handle longer prose well too.
+
+=== Checklist
+
+* [x] completed task
+* [ ] pending task
+
+== Tables
+
+|===
+| Feature | Status | Notes
+
+| GFM-equivalent body
+| done
+| Section, lists, tables, formatting
+
+| `[source,LANG]` highlight
+| done
+| highlight.js token coloring
+
+| `[source,mermaid]`
+| done
+| Hydrated client-side
+
+| `include::` directive
+| disabled
+| SECURE safe mode (matches GitHub)
+|===
+
+[#source-listings]
+== Source Listings
+
+Highlighted JavaScript with two callouts:
+
+[source,javascript]
+----
+function answer(input) {
+  const value = input * 2; // <1>
+  return value + 1;        // <2>
+}
+----
+<1> Multiply input by two.
+<2> Adjust by one before returning.
+
+A listing whose language uatu's highlight registry doesn't know — it still
+renders readably as plain code:
+
+[source,fictional-lang]
+----
+when [thing] occurs, do other-thing.
+----
+
+== Mermaid Diagrams
+
+`[source,mermaid]` listings hydrate into a real diagram (matches GitHub):
+
+[source,mermaid]
+----
+graph TD
+  Watch --> Render
+  Render --> Sanitize
+  Sanitize --> Browser
+----
+
+The bare `[mermaid]` block, by contrast, stays a literal block — also matching
+GitHub, which only recognizes the `[source,mermaid]` form:
+
+[mermaid]
+....
+this would NOT render as a diagram
+....
+
+== Admonitions
+
+NOTE: Take note of this fact.
+
+TIP: Try this trick to save time.
+
+IMPORTANT: This setting affects every user.
+
+CAUTION: Make sure to back up first.
+
+WARNING: This action is irreversible.
+
+== Quote and Sidebar Blocks
+
+[quote, Albert Einstein, On Knowledge]
+____
+The only source of knowledge is experience.
+____
+
+[sidebar]
+.A sidebar title
+****
+Sidebars are useful for tangential content that supports the main flow without
+interrupting it. Asciidoctor wraps them in `<div class="sidebarblock">`.
+****
+
+== Footnotes
+
+A claim that needs backing upfootnote:[Footnotes collect at the bottom of the
+document automatically.] and another onefootnote:[Multiple footnotes accumulate
+in order.] for good measure.
+
+== Includes Are Disabled
+
+Per Asciidoctor's SECURE safe mode (the same GitHub uses), `include::`
+directives are not resolved. The line below renders as a clickable link to the
+unresolved target rather than embedding any external content:
+
+include::not-a-real-file.adoc[]

@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { classifyFile, isMarkdownPath } from "./file-classify";
+import { classifyFile, isAsciidocPath, isMarkdownPath } from "./file-classify";
 
 const tempDirectories: string[] = [];
 
@@ -30,10 +30,42 @@ describe("isMarkdownPath", () => {
   });
 });
 
+describe("isAsciidocPath", () => {
+  test("matches .adoc and .asciidoc extensions case-insensitively", () => {
+    expect(isAsciidocPath("README.adoc")).toBe(true);
+    expect(isAsciidocPath("guide.ASCIIDOC")).toBe(true);
+    expect(isAsciidocPath("script.py")).toBe(false);
+    expect(isAsciidocPath("README.md")).toBe(false);
+  });
+
+  // Deliberate divergence from GitHub: `.asc` is dominantly PGP
+  // ASCII-armored content (signatures, keys), and rendering a release
+  // signature as AsciiDoc would produce garbled output.
+  test("does NOT match .asc (PGP collision)", () => {
+    expect(isAsciidocPath("release-1.0.tar.gz.asc")).toBe(false);
+    expect(isAsciidocPath("public-key.asc")).toBe(false);
+  });
+});
+
 describe("classifyFile", () => {
   test("classifies known-markdown extensions as markdown", async () => {
     const filePath = await makeTempFile("README.md", "# Hello\n");
     expect(await classifyFile(filePath)).toBe("markdown");
+  });
+
+  test("classifies known-asciidoc extensions as asciidoc", async () => {
+    const adocPath = await makeTempFile("README.adoc", "= Hello\n");
+    expect(await classifyFile(adocPath)).toBe("asciidoc");
+    const longPath = await makeTempFile("guide.asciidoc", "= Guide\n");
+    expect(await classifyFile(longPath)).toBe("asciidoc");
+  });
+
+  test("does NOT classify .asc as asciidoc — PGP ASCII-armored takes precedence", async () => {
+    const filePath = await makeTempFile(
+      "signature.asc",
+      "-----BEGIN PGP SIGNATURE-----\nVersion: GnuPG v1\n\nabc\n-----END PGP SIGNATURE-----\n",
+    );
+    expect(await classifyFile(filePath)).not.toBe("asciidoc");
   });
 
   test("classifies known-text extensions as text", async () => {

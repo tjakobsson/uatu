@@ -105,7 +105,7 @@ export function decodeHtmlEntities(value: string): string {
     .replaceAll("&amp;", "&");
 }
 
-function escapeHtml(value: string): string {
+export function escapeHtml(value: string): string {
   return value
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")

@@ -16,6 +16,7 @@
     "build": "bun run scripts/build.ts"
   },
   "dependencies": {
+    "@asciidoctor/core": "^3.0.4",
     "chokidar": "^5.0.0",
     "github-markdown-css": "^5.9.0",
     "hast-util-from-html": "^2.0.3",
