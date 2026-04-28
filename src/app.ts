@@ -187,10 +187,10 @@ function initCrossDocAnchorHandler() {
       return;
     }
 
+    // `URL.origin` is `"null"` for `mailto:`/`javascript:`/`blob:`/etc., and
+    // `window.location.origin` is always an `http(s)://host` triple, so this
+    // single check eliminates both off-origin URLs and non-http(s) protocols.
     if (resolved.origin !== window.location.origin) {
-      return;
-    }
-    if (resolved.protocol !== "http:" && resolved.protocol !== "https:") {
       return;
     }
 
