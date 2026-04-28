@@ -1,16 +1,17 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 import {
   createWatchSession,
+  canSetFileScope,
   DEFAULT_PORT,
   getAssetRoots,
   parseCommand,
   printStartupBanner,
   renderDocument,
-  resolveWatchedFileCandidates,
+  resolveStaticFileRequest,
   resolveWatchRoots,
   scanRoots,
   STARTUP_BANNER,
@@ -216,6 +217,23 @@ describe("scanRoots", () => {
     expect(ignored[0]?.docs.map(doc => doc.relativePath)).toContain("debug.log");
   });
 
+  test("excludes secret-like files from directory roots", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-scan-secrets-"));
+    tempDirectories.push(tempDirectory);
+    await writeFile(path.join(tempDirectory, "README.md"), "# Readme\n");
+    await writeFile(path.join(tempDirectory, ".env"), "TOKEN=secret\n");
+    await writeFile(path.join(tempDirectory, ".npmrc"), "//registry.npmjs.org/:_authToken=secret\n");
+    await writeFile(path.join(tempDirectory, "credentials.json"), "{}\n");
+    await writeFile(path.join(tempDirectory, "id_ed25519"), "private key\n");
+
+    const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }], {
+      respectGitignore: false,
+    });
+    const paths = roots[0]?.docs.map(doc => doc.relativePath) ?? [];
+
+    expect(paths).toEqual(["README.md"]);
+  });
+
   test("returns a single-document root for a file entry tagged with its kind", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-scan-file-"));
     tempDirectories.push(tempDirectory);
@@ -355,30 +373,117 @@ describe("asset root helpers", () => {
     expect(roots).toEqual(["/repo/docs", "/repo"]);
   });
 
-  test("resolveWatchedFileCandidates maps a URL path to a file inside the root", () => {
-    expect(resolveWatchedFileCandidates("/hero.svg", ["/repo"])).toEqual(["/repo/hero.svg"]);
-    expect(resolveWatchedFileCandidates("/docs/intro.md", ["/repo"])).toEqual([
-      "/repo/docs/intro.md",
-    ]);
+  test("resolveStaticFileRequest rejects path traversal via double-dot", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-static-traversal-"));
+    tempDirectories.push(tempDirectory);
+
+    const resolved = await resolveStaticFileRequest(
+      "/../etc/passwd",
+      [{ kind: "dir", absolutePath: tempDirectory }],
+    );
+
+    expect(resolved).toEqual({ status: "not-found" });
   });
 
-  test("resolveWatchedFileCandidates rejects empty or root-only paths", () => {
-    expect(resolveWatchedFileCandidates("", ["/repo"])).toEqual([]);
-    expect(resolveWatchedFileCandidates("/", ["/repo"])).toEqual([]);
+  test("resolveStaticFileRequest rejects path traversal via percent-encoded dots", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-static-encoded-traversal-"));
+    tempDirectories.push(tempDirectory);
+
+    const resolved = await resolveStaticFileRequest(
+      "/%2e%2e/secret.txt",
+      [{ kind: "dir", absolutePath: tempDirectory }],
+    );
+
+    expect(resolved).toEqual({ status: "not-found" });
   });
 
-  test("resolveWatchedFileCandidates rejects paths that escape the root", () => {
-    expect(resolveWatchedFileCandidates("/../etc/passwd", ["/repo"])).toEqual([]);
-    expect(resolveWatchedFileCandidates("/docs/../../etc/passwd", ["/repo"])).toEqual([]);
+  test("resolveStaticFileRequest rejects files hidden by ignore rules", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-static-ignore-"));
+    tempDirectories.push(tempDirectory);
+    await writeFile(path.join(tempDirectory, ".gitignore"), "secret.txt\n");
+    await writeFile(path.join(tempDirectory, "secret.txt"), "hidden\n");
+
+    const resolved = await resolveStaticFileRequest(
+      "/secret.txt",
+      [{ kind: "dir", absolutePath: tempDirectory }],
+      { respectGitignore: true },
+    );
+
+    expect(resolved).toEqual({ status: "not-found" });
   });
 
-  test("resolveWatchedFileCandidates returns all in-bounds candidates in root order", () => {
-    // The caller stats each candidate and serves the first that exists, so a
-    // miss under the first root must fall through to the next instead of 404ing.
-    expect(resolveWatchedFileCandidates("/a.svg", ["/repo/docs", "/repo/notes"])).toEqual([
-      "/repo/docs/a.svg",
-      "/repo/notes/a.svg",
-    ]);
+  test("resolveStaticFileRequest applies ignore rules to single-file watch assets", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-static-file-ignore-"));
+    tempDirectories.push(tempDirectory);
+    const readmePath = path.join(tempDirectory, "README.md");
+    await writeFile(readmePath, "# Readme\n");
+    await writeFile(path.join(tempDirectory, ".gitignore"), "secret.txt\n");
+    await writeFile(path.join(tempDirectory, "secret.txt"), "hidden\n");
+
+    const resolved = await resolveStaticFileRequest(
+      "/secret.txt",
+      [{ kind: "file", absolutePath: readmePath, parentDir: tempDirectory }],
+      { respectGitignore: true },
+    );
+
+    expect(resolved).toEqual({ status: "not-found" });
+  });
+
+  test("resolveStaticFileRequest respects --no-gitignore", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-static-no-gitignore-"));
+    tempDirectories.push(tempDirectory);
+    const secretPath = path.join(tempDirectory, "hidden.txt");
+    await writeFile(path.join(tempDirectory, ".gitignore"), "hidden.txt\n");
+    await writeFile(secretPath, "visible when gitignore disabled\n");
+
+    const resolved = await resolveStaticFileRequest(
+      "/hidden.txt",
+      [{ kind: "dir", absolutePath: tempDirectory }],
+      { respectGitignore: false },
+    );
+
+    expect(resolved).toEqual({ status: "found", filePath: await realpath(secretPath) });
+  });
+
+  test("resolveStaticFileRequest rejects symlink escapes", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-static-symlink-"));
+    const outsideDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-static-outside-"));
+    tempDirectories.push(tempDirectory, outsideDirectory);
+    const outsideFile = path.join(outsideDirectory, "outside.txt");
+    await writeFile(outsideFile, "outside\n");
+    await symlink(outsideFile, path.join(tempDirectory, "linked.txt"));
+
+    const resolved = await resolveStaticFileRequest(
+      "/linked.txt",
+      [{ kind: "dir", absolutePath: tempDirectory }],
+    );
+
+    expect(resolved).toEqual({ status: "not-found" });
+  });
+
+  test("resolveStaticFileRequest rejects malformed URL encoding", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-static-bad-url-"));
+    tempDirectories.push(tempDirectory);
+
+    const resolved = await resolveStaticFileRequest(
+      "/%GG",
+      [{ kind: "dir", absolutePath: tempDirectory }],
+    );
+
+    expect(resolved).toEqual({ status: "not-found" });
+  });
+
+  test("resolveStaticFileRequest rejects secret-like files", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-static-secret-"));
+    tempDirectories.push(tempDirectory);
+    await writeFile(path.join(tempDirectory, ".env.local"), "TOKEN=secret\n");
+
+    const resolved = await resolveStaticFileRequest(
+      "/.env.local",
+      [{ kind: "dir", absolutePath: tempDirectory }],
+    );
+
+    expect(resolved).toEqual({ status: "not-found" });
   });
 });
 
@@ -428,6 +533,28 @@ describe("watchSession scope", () => {
     } finally {
       await session.stop();
     }
+  });
+
+  test("canSetFileScope rejects unknown, ignored, secret-like, and binary document ids", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-pin-invalid-"));
+    tempDirectories.push(tempDirectory);
+    const readme = path.join(tempDirectory, "README.md");
+    const ignored = path.join(tempDirectory, "ignored.txt");
+    const secret = path.join(tempDirectory, ".env.local");
+    const binary = path.join(tempDirectory, "logo.png");
+    await writeFile(path.join(tempDirectory, ".uatuignore"), "ignored.txt\n");
+    await writeFile(readme, "# Readme\n");
+    await writeFile(ignored, "ignored\n");
+    await writeFile(secret, "TOKEN=secret\n");
+    await writeFile(binary, "not really png");
+
+    const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
+
+    expect(canSetFileScope(roots, readme)).toBe(true);
+    expect(canSetFileScope(roots, path.join(tempDirectory, "missing.md"))).toBe(false);
+    expect(canSetFileScope(roots, ignored)).toBe(false);
+    expect(canSetFileScope(roots, secret)).toBe(false);
+    expect(canSetFileScope(roots, binary)).toBe(false);
   });
 
   test("unlinking the pinned file reverts scope to folder automatically", async () => {
