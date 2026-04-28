@@ -66,13 +66,18 @@ The system SHALL attempt to open the browser automatically and SHALL start with 
 - **AND** the local browser URL is printed
 
 ### Requirement: Browse supported documents from watched roots
-The browser UI SHALL display a sidebar tree grouped by watched root. The tree SHALL list every file accepted by the ignore filter under each root, recursively. Files classified as Markdown, AsciiDoc, or as viewable text SHALL render as clickable entries that can become the active preview. Files classified as binary SHALL render as non-clickable entries that show a file-type icon but cannot change the active preview. The preview pane SHALL render the currently selected non-binary file: Markdown files through the Markdown pipeline, AsciiDoc files through the AsciiDoc pipeline, other text files through the syntax-highlighted code render path.
+The browser UI SHALL display a sidebar tree grouped by watched root. The tree SHALL list every file accepted by the ignore and exposure filters under each root, recursively. Files classified as Markdown, AsciiDoc, or as viewable text SHALL render as clickable entries that can become the active preview. Files classified as binary SHALL render as non-clickable entries that show a file-type icon but cannot change the active preview. Files matching default-denied secret patterns, hardcoded ignored names, `.uatuignore`, or active `.gitignore` rules MUST NOT appear in the sidebar. The preview pane SHALL render the currently selected non-binary file: Markdown files through the Markdown pipeline, AsciiDoc files through the AsciiDoc pipeline, other text files through the syntax-highlighted code render path.
 
 #### Scenario: Sidebar lists every non-ignored file under each watched root
 - **WHEN** watched roots contain a mix of Markdown, AsciiDoc, source code, configuration, and binary files
 - **THEN** the sidebar displays all of those files within the hierarchy of their corresponding watched root
 - **AND** Markdown, AsciiDoc, and other text files appear as clickable entries
 - **AND** binary files appear as non-clickable entries
+
+#### Scenario: Secret-like files are excluded by default
+- **WHEN** a watched root contains common secret-bearing files such as `.env`, `.env.local`, `.npmrc`, credential JSON, or private-key files
+- **THEN** those files do not appear as clickable or non-clickable sidebar entries
+- **AND** they cannot become the active preview document by direct document ID request
 
 #### Scenario: Selecting a Markdown file renders its preview
 - **WHEN** a user selects a Markdown file from the sidebar
@@ -193,10 +198,10 @@ When follow mode is enabled, the system SHALL switch the active preview to the l
 - **THEN** the active preview switches to that most recently modified file
 
 ### Requirement: Serve adjacent files from watched roots as static content
-For any request path that does not match a known API or built-in asset route, the server SHALL attempt to resolve the path against the union of watched roots and, if the path maps to an existing file inside a watched root, serve that file statically. The rendered preview HTML MUST preserve the author's original `src` and `href` URLs verbatim (no URL rewriting); the browser SHALL resolve those references using a per-document base so that relative references such as `<img src="./hero.svg">` in a README just work. Any requested path that resolves outside every watched root (via `..` segments or otherwise) MUST receive a 404.
+For any request path that does not match a known API or built-in asset route, the server SHALL attempt to resolve the path against the union of watched roots and, if the path maps to an existing allowed file inside a watched root, serve that file statically. Static fallback serving MUST apply the same hardcoded ignore, default secret-file denylist, `.uatuignore`, and active `.gitignore` exposure rules as the browser tree. Static fallback serving MUST verify containment after resolving real filesystem paths and MUST NOT serve files reached through symlink escapes outside the watched root. The rendered preview HTML MUST preserve the author's original `src` and `href` URLs verbatim (no URL rewriting); the browser SHALL resolve those references using a per-document base so that relative references such as `<img src="./hero.svg">` in a README just work. Any requested path that resolves outside every watched root, is ignored, is secret-like, is malformed, or cannot be safely resolved MUST receive a non-success response and MUST NOT read or stream the file.
 
 #### Scenario: A README's centered hero image loads via the static file fallback
-- **WHEN** a previewed Markdown file contains `<img src="./hero.svg">` whose target exists next to the document
+- **WHEN** a previewed Markdown file contains `<img src="./hero.svg">` whose target exists next to the document and is not ignored or secret-like
 - **THEN** the rendered image's `src` attribute is preserved as `./hero.svg`
 - **AND** the browser resolves it through the per-document base and receives the image from the static file fallback
 
@@ -207,6 +212,25 @@ For any request path that does not match a known API or built-in asset route, th
 #### Scenario: Traversal attempts are rejected
 - **WHEN** a request path resolves (via `..`) outside every watched root
 - **THEN** the server responds with 404 and does not read the file
+
+#### Scenario: Ignored files are not served directly
+- **WHEN** a watched root contains a file hidden by `.uatuignore` or an active `.gitignore` rule
+- **THEN** a direct static fallback request for that file receives a non-success response
+- **AND** the server does not stream the ignored file contents
+
+#### Scenario: Symlink escapes are rejected
+- **WHEN** a request path maps through a symlink inside the watched root to a file outside the watched root
+- **THEN** the server responds with 404 and does not stream the outside file contents
+
+#### Scenario: Secret-like files are not served directly
+- **WHEN** a watched root contains a default-denied secret-like file
+- **THEN** a direct static fallback request for that file receives a non-success response
+- **AND** the server does not stream the secret-like file contents
+
+#### Scenario: Malformed URL encoding fails safely
+- **WHEN** the server receives a fallback request path with malformed percent-encoding
+- **THEN** the server responds with a non-success response
+- **AND** request handling continues without an uncaught exception
 
 ### Requirement: Display build identifier in the browser UI
 The browser UI SHALL display a build identifier in its header derived from build-time metadata. For compiled release binaries the identifier MUST include the embedded semantic version and short git commit sha. For local development runs (for example under `bun run dev`) the identifier MUST include the current git branch name and short commit sha. When git metadata is unavailable in a development run, the identifier MUST still display the branch placeholder `main` paired with `unknown` rather than hiding the field.
@@ -302,7 +326,7 @@ While the browser UI is connected to the live update channel, the connection ind
 - **THEN** the connection indicator remains visible elsewhere in the UI
 
 ### Requirement: Pin the session to a single non-binary file
-The browser UI SHALL provide a pin control on the active document that narrows the running session to that file without restarting the process. Pin SHALL be available for any non-binary file (Markdown or text). While pinned, the sidebar MUST show only the pinned file and changes to other files MUST NOT alter the active preview. While pinned, follow mode MUST NOT be enabled: the follow control MUST be disabled and its pressed state MUST be false, and pinning while follow was on MUST turn follow off. An unpin control MUST restore the previous folder-scoped view and re-enable the follow control. If the pinned file is deleted on disk, the session MUST automatically revert to folder scope and notify the UI. Pin state is per-session and MAY reset on page reload.
+The browser UI SHALL provide a pin control on the active document that narrows the running session to that file without restarting the process. Pin SHALL be available for any visible non-binary file (Markdown or text). The server MUST reject file-scope mutations for unknown, ignored, secret-like, or binary document IDs and MUST leave the current scope unchanged when rejecting them. While pinned, the sidebar MUST show only the pinned file and changes to other files MUST NOT alter the active preview. While pinned, follow mode MUST NOT be enabled: the follow control MUST be disabled and its pressed state MUST be false, and pinning while follow was on MUST turn follow off. An unpin control MUST restore the previous folder-scoped view and re-enable the follow control. If the pinned file is deleted on disk, the session MUST automatically revert to folder scope and notify the UI. Pin state is per-session and MAY reset on page reload.
 
 #### Scenario: Pinning narrows the session to one Markdown file
 - **WHEN** a user clicks the pin control on the currently previewed Markdown file
@@ -331,6 +355,11 @@ The browser UI SHALL provide a pin control on the active document that narrows t
 #### Scenario: Unpinning re-enables follow
 - **WHEN** a user unpins the active file
 - **THEN** the follow control is re-enabled (though follow itself remains off until the user activates it)
+
+#### Scenario: Invalid file-scope mutation is rejected
+- **WHEN** a client posts a file scope for a document ID that is unknown, ignored, secret-like, or binary
+- **THEN** the server responds with a non-success response
+- **AND** the current scope remains unchanged
 
 ### Requirement: Scroll the sidebar independently of the preview
 The sidebar SHALL scroll within its own container and MUST NOT scroll together with the preview pane. The sidebar header (title, controls, and meta row) MUST remain visible while the sidebar's document list scrolls, and the sidebar MUST remain in place while the preview scrolls.
@@ -629,3 +658,7 @@ When a user clicks an anchor inside the rendered preview whose resolved URL maps
 - **WHEN** a user clicks an anchor whose `href` begins with `#`
 - **THEN** the cross-document handler does NOT intercept and the existing in-page anchor handler scrolls the matching id into view inside the current document
 
+#### Scenario: An oversized AsciiDoc file falls back to plain text
+- **WHEN** a user selects an `.adoc` file at or above 1 MB
+- **THEN** the preview renders the contents inside `<pre><code class="hljs">` as plain escaped text
+- **AND** Asciidoctor is not invoked on the contents

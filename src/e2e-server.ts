@@ -10,11 +10,11 @@ import index from "./index.html";
 import { E2E_PORT, E2E_WORKSPACE_ROOT, resetE2EWorkspace } from "./e2e";
 import {
   createWatchSession,
-  getAssetRoots,
+  canSetFileScope,
   renderDocument,
-  resolveWatchedFileCandidates,
   resolveWatchRoots,
   SERVE_IDLE_TIMEOUT_SECONDS,
+  staticFileResponse,
   type WatchEntry,
 } from "./server";
 
@@ -89,6 +89,9 @@ const server = Bun.serve({
           if (typeof documentId !== "string" || documentId.length === 0) {
             return Response.json({ error: "missing documentId" }, { status: 400 });
           }
+          if (!canSetFileScope(watchSession.getRoots(), documentId)) {
+            return Response.json({ error: "document not found" }, { status: 404 });
+          }
           return Response.json({ scope: watchSession.setScope({ kind: "file", documentId }) });
         }
 
@@ -132,12 +135,11 @@ const server = Bun.serve({
   },
   fetch: async request => {
     const requestUrl = new URL(request.url);
-    const pathname = decodeURIComponent(requestUrl.pathname);
-    for (const candidate of resolveWatchedFileCandidates(pathname, getAssetRoots(activeEntries))) {
-      const file = Bun.file(candidate);
-      if (await file.exists()) {
-        return new Response(file, { headers: { "cache-control": "no-cache" } });
-      }
+    const response = await staticFileResponse(requestUrl.pathname, activeEntries, {
+      respectGitignore: activeRespectGitignore,
+    });
+    if (response) {
+      return response;
     }
 
     return new Response("Not Found", { status: 404 });

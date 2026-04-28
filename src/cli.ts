@@ -10,10 +10,10 @@ import {
   renderDocument,
   resolveWatchRoots,
   createWatchSession,
-  getAssetRoots,
   openBrowser,
-  resolveWatchedFileCandidates,
+  canSetFileScope,
   SERVE_IDLE_TIMEOUT_SECONDS,
+  staticFileResponse,
   usageText,
   versionText,
   printStartupBanner,
@@ -41,8 +41,9 @@ async function main() {
   }
 
   const rootEntries = await resolveWatchRoots(parsed.options.rootPaths, process.cwd());
-  const assetRoots = getAssetRoots(rootEntries);
-  const watchSession = createWatchSession(rootEntries, parsed.options.follow);
+  const watchSession = createWatchSession(rootEntries, parsed.options.follow, {
+    respectGitignore: parsed.options.respectGitignore,
+  });
   await watchSession.start();
 
   const server = Bun.serve({
@@ -111,6 +112,9 @@ async function main() {
             if (typeof documentId !== "string" || documentId.length === 0) {
               return Response.json({ error: "missing documentId" }, { status: 400 });
             }
+            if (!canSetFileScope(watchSession.getRoots(), documentId)) {
+              return Response.json({ error: "document not found" }, { status: 404 });
+            }
             return Response.json({ scope: watchSession.setScope({ kind: "file", documentId }) });
           }
 
@@ -120,12 +124,11 @@ async function main() {
     },
     fetch: async request => {
       const requestUrl = new URL(request.url);
-      const pathname = decodeURIComponent(requestUrl.pathname);
-      for (const candidate of resolveWatchedFileCandidates(pathname, assetRoots)) {
-        const file = Bun.file(candidate);
-        if (await file.exists()) {
-          return new Response(file, { headers: { "cache-control": "no-cache" } });
-        }
+      const response = await staticFileResponse(requestUrl.pathname, rootEntries, {
+        respectGitignore: parsed.options.respectGitignore,
+      });
+      if (response) {
+        return response;
       }
 
       return new Response("Not Found", { status: 404 });

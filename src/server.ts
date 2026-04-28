@@ -79,6 +79,22 @@ const ignoredNames = new Set([
   ".serverless",
 ]);
 const hiddenFileSuffixes = [".swp", ".tmp", ".temp", "~"];
+const secretFileNames = new Set([
+  ".env",
+  ".npmrc",
+  ".pypirc",
+  ".netrc",
+  ".ssh",
+  "credentials.json",
+  "credential.json",
+  "service-account.json",
+  "service_account.json",
+  "id_rsa",
+  "id_dsa",
+  "id_ecdsa",
+  "id_ed25519",
+]);
+const secretFileSuffixes = [".pem", ".key", ".p12", ".pfx"];
 
 export const DEFAULT_PORT = 4312;
 export const SERVE_IDLE_TIMEOUT_SECONDS = 0;
@@ -105,6 +121,8 @@ export type RenderedDocument = {
   kind: "markdown" | "asciidoc" | "text";
   language: string | null;
 };
+
+export type StaticFileResolution = { status: "found"; filePath: string } | { status: "not-found" };
 
 type EventController = ReadableStreamDefaultController<Uint8Array>;
 
@@ -253,6 +271,10 @@ export async function resolveWatchRoots(inputPaths: string[], cwd: string): Prom
     }
 
     if (stat.isFile()) {
+      if (shouldDenyPath(path.basename(absolutePath))) {
+        throw new Error(`watch path is not viewable: ${inputPath}`);
+      }
+
       const kind = await classifyFile(absolutePath, path.basename(absolutePath));
       if (kind === "binary") {
         throw new Error(`watch path is a binary file: ${inputPath}`);
@@ -322,6 +344,17 @@ export async function scanRoots(
     }
 
     const relativePath = path.basename(entry.absolutePath);
+    if (shouldDenyPath(relativePath)) {
+      roots.push({
+        id: entry.absolutePath,
+        label: relativePath,
+        path: entry.parentDir,
+        docs: [],
+        hiddenCount: 0,
+      });
+      continue;
+    }
+
     const kind = await classifyFile(entry.absolutePath, relativePath);
     roots.push({
       id: entry.absolutePath,
@@ -379,6 +412,11 @@ export async function renderDocument(roots: RootGroup[], documentId: string): Pr
   };
 }
 
+export function canSetFileScope(roots: RootGroup[], documentId: string): boolean {
+  const document = findDocument(roots, documentId);
+  return Boolean(document && document.kind !== "binary");
+}
+
 export function getAssetRoots(entries: WatchEntry[]): string[] {
   return entries.map(entry => (entry.kind === "dir" ? entry.absolutePath : entry.parentDir));
 }
@@ -414,6 +452,90 @@ export function resolveWatchedFileCandidates(pathname: string, assetRoots: strin
   }
 
   return candidates;
+}
+
+export async function resolveStaticFileRequest(
+  pathname: string,
+  entries: WatchEntry[],
+  options: { respectGitignore?: boolean } = {},
+): Promise<StaticFileResolution> {
+  let decodedPathname: string;
+  try {
+    decodedPathname = decodeURIComponent(pathname);
+  } catch {
+    return { status: "not-found" };
+  }
+
+  if (decodedPathname.includes("\0")) {
+    return { status: "not-found" };
+  }
+
+  const relativeUrlPath = decodedPathname.replace(/^\/+/, "");
+  if (!relativeUrlPath) {
+    return { status: "not-found" };
+  }
+
+  const respectGitignore = options.respectGitignore ?? DEFAULT_RESPECT_GITIGNORE;
+  const matcherCache = new Map<string, IgnoreMatcher>();
+
+  for (const entry of entries) {
+    const rootPath = entry.kind === "dir" ? entry.absolutePath : entry.parentDir;
+    const candidate = path.resolve(rootPath, relativeUrlPath);
+    const relativeToRoot = path.relative(rootPath, candidate);
+
+    if (
+      relativeToRoot === "" ||
+      relativeToRoot.startsWith("..") ||
+      path.isAbsolute(relativeToRoot)
+    ) {
+      continue;
+    }
+
+    const relativeUnix = relativeToRoot.split(path.sep).join("/");
+    if (shouldDenyPath(relativeUnix)) {
+      continue;
+    }
+
+    if (entry.kind === "dir") {
+      let matcher = matcherCache.get(entry.absolutePath);
+      if (!matcher) {
+        matcher = await loadIgnoreMatcher({ rootPath: entry.absolutePath, respectGitignore });
+        matcherCache.set(entry.absolutePath, matcher);
+      }
+
+      if (matcher.shouldIgnore(relativeUnix)) {
+        continue;
+      }
+    }
+
+    const stat = await fs.lstat(candidate).catch(() => null);
+    if (!stat || !stat.isFile() || stat.isSymbolicLink()) {
+      continue;
+    }
+
+    const rootRealPath = await fs.realpath(rootPath).catch(() => null);
+    const candidateRealPath = await fs.realpath(candidate).catch(() => null);
+    if (!rootRealPath || !candidateRealPath || !isPathInsideRoot(candidateRealPath, rootRealPath)) {
+      continue;
+    }
+
+    return { status: "found", filePath: candidateRealPath };
+  }
+
+  return { status: "not-found" };
+}
+
+export async function staticFileResponse(
+  pathname: string,
+  entries: WatchEntry[],
+  options: { respectGitignore?: boolean } = {},
+): Promise<Response | null> {
+  const resolved = await resolveStaticFileRequest(pathname, entries, options);
+  if (resolved.status !== "found") {
+    return null;
+  }
+
+  return new Response(Bun.file(resolved.filePath), { headers: { "cache-control": "no-cache" } });
 }
 
 export function createStatePayload(
@@ -786,7 +908,29 @@ function shouldIgnoreEntry(name: string): boolean {
     return true;
   }
 
-  return hiddenFileSuffixes.some(suffix => name.endsWith(suffix));
+  return hiddenFileSuffixes.some(suffix => name.endsWith(suffix)) || isSecretName(name);
+}
+
+function shouldDenyPath(relativePath: string): boolean {
+  return relativePath.split("/").some(part => shouldIgnoreEntry(part));
+}
+
+function isSecretName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return (
+    secretFileNames.has(lower) ||
+    lower.startsWith(".env.") ||
+    lower.endsWith("-credentials.json") ||
+    lower.endsWith("_credentials.json") ||
+    lower.includes("private-key") ||
+    lower.includes("private_key") ||
+    secretFileSuffixes.some(suffix => lower.endsWith(suffix))
+  );
+}
+
+function isPathInsideRoot(candidate: string, root: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
 // Pull the title from the FIRST `<h1>` in the rendered HTML rather than from
