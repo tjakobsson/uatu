@@ -421,39 +421,6 @@ export function getAssetRoots(entries: WatchEntry[]): string[] {
   return entries.map(entry => (entry.kind === "dir" ? entry.absolutePath : entry.parentDir));
 }
 
-/**
- * Translate a URL pathname (e.g. `/docs/hero.svg`) into the set of absolute
- * filesystem paths it could map to across the asset roots, in root order.
- * Used by the server's static file fallback so documents can reference
- * adjacent files with normal relative URLs: the caller stats each candidate
- * and serves the first one that exists, falling through to 404 only when no
- * root contains the file. Paths that escape every root via `..` yield `[]`.
- */
-export function resolveWatchedFileCandidates(pathname: string, assetRoots: string[]): string[] {
-  if (!pathname) {
-    return [];
-  }
-
-  const relative = pathname.replace(/^\/+/, "");
-  if (relative === "") {
-    return [];
-  }
-
-  const candidates: string[] = [];
-  for (const root of assetRoots) {
-    const candidate = path.resolve(root, relative);
-    const relativeToRoot = path.relative(root, candidate);
-    if (
-      relativeToRoot === "" ||
-      (!relativeToRoot.startsWith("..") && !path.isAbsolute(relativeToRoot))
-    ) {
-      candidates.push(candidate);
-    }
-  }
-
-  return candidates;
-}
-
 export async function resolveStaticFileRequest(
   pathname: string,
   entries: WatchEntry[],

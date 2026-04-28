@@ -11,7 +11,6 @@ import {
   parseCommand,
   printStartupBanner,
   renderDocument,
-  resolveWatchedFileCandidates,
   resolveStaticFileRequest,
   resolveWatchRoots,
   scanRoots,
@@ -374,30 +373,28 @@ describe("asset root helpers", () => {
     expect(roots).toEqual(["/repo/docs", "/repo"]);
   });
 
-  test("resolveWatchedFileCandidates maps a URL path to a file inside the root", () => {
-    expect(resolveWatchedFileCandidates("/hero.svg", ["/repo"])).toEqual(["/repo/hero.svg"]);
-    expect(resolveWatchedFileCandidates("/docs/intro.md", ["/repo"])).toEqual([
-      "/repo/docs/intro.md",
-    ]);
+  test("resolveStaticFileRequest rejects path traversal via double-dot", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-static-traversal-"));
+    tempDirectories.push(tempDirectory);
+
+    const resolved = await resolveStaticFileRequest(
+      "/../etc/passwd",
+      [{ kind: "dir", absolutePath: tempDirectory }],
+    );
+
+    expect(resolved).toEqual({ status: "not-found" });
   });
 
-  test("resolveWatchedFileCandidates rejects empty or root-only paths", () => {
-    expect(resolveWatchedFileCandidates("", ["/repo"])).toEqual([]);
-    expect(resolveWatchedFileCandidates("/", ["/repo"])).toEqual([]);
-  });
+  test("resolveStaticFileRequest rejects path traversal via percent-encoded dots", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-static-encoded-traversal-"));
+    tempDirectories.push(tempDirectory);
 
-  test("resolveWatchedFileCandidates rejects paths that escape the root", () => {
-    expect(resolveWatchedFileCandidates("/../etc/passwd", ["/repo"])).toEqual([]);
-    expect(resolveWatchedFileCandidates("/docs/../../etc/passwd", ["/repo"])).toEqual([]);
-  });
+    const resolved = await resolveStaticFileRequest(
+      "/%2e%2e/secret.txt",
+      [{ kind: "dir", absolutePath: tempDirectory }],
+    );
 
-  test("resolveWatchedFileCandidates returns all in-bounds candidates in root order", () => {
-    // The caller stats each candidate and serves the first that exists, so a
-    // miss under the first root must fall through to the next instead of 404ing.
-    expect(resolveWatchedFileCandidates("/a.svg", ["/repo/docs", "/repo/notes"])).toEqual([
-      "/repo/docs/a.svg",
-      "/repo/notes/a.svg",
-    ]);
+    expect(resolved).toEqual({ status: "not-found" });
   });
 
   test("resolveStaticFileRequest rejects files hidden by ignore rules", async () => {
