@@ -9,11 +9,15 @@ import {
   DEFAULT_PORT,
   getAssetRoots,
   parseCommand,
+  prefersHtmlNavigation,
   printStartupBanner,
   renderDocument,
   resolveStaticFileRequest,
+  resolveViewableDocument,
   resolveWatchRoots,
   scanRoots,
+  spaShellResponse,
+  staticFileResponse,
   STARTUP_BANNER,
 } from "./server";
 
@@ -629,5 +633,222 @@ describe("watchSession scope", () => {
     } finally {
       await session.stop();
     }
+  });
+});
+
+describe("prefersHtmlNavigation", () => {
+  test("returns true for a typical browser top-level navigation Accept header", () => {
+    const request = new Request("http://localhost/doc.md", {
+      headers: {
+        accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+      },
+    });
+    expect(prefersHtmlNavigation(request)).toBe(true);
+  });
+
+  test("returns false when Accept is */* only (curl default)", () => {
+    const request = new Request("http://localhost/doc.md", {
+      headers: { accept: "*/*" },
+    });
+    expect(prefersHtmlNavigation(request)).toBe(false);
+  });
+
+  test("returns false when Accept is missing", () => {
+    const request = new Request("http://localhost/doc.md");
+    expect(prefersHtmlNavigation(request)).toBe(false);
+  });
+
+  test("returns false for an <img> sub-resource Accept header", () => {
+    const request = new Request("http://localhost/hero.svg", {
+      headers: { accept: "image/avif,image/webp,*/*;q=0.8" },
+    });
+    expect(prefersHtmlNavigation(request)).toBe(false);
+  });
+
+  test("returns true when Accept lists text/html with q above other types", () => {
+    const request = new Request("http://localhost/doc.md", {
+      headers: { accept: "text/html;q=1.0,application/xml;q=0.5" },
+    });
+    expect(prefersHtmlNavigation(request)).toBe(true);
+  });
+});
+
+describe("resolveViewableDocument", () => {
+  test("returns the matching non-binary document for a known path", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-resolve-doc-"));
+    tempDirectories.push(tempDirectory);
+    await writeFile(path.join(tempDirectory, "README.md"), "# Hello\n");
+
+    const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
+    const doc = resolveViewableDocument("/README.md", roots);
+    expect(doc?.relativePath).toBe("README.md");
+    expect(doc?.kind).toBe("markdown");
+  });
+
+  test("returns null for a binary file even if it exists in the index", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-resolve-binary-"));
+    tempDirectories.push(tempDirectory);
+    await writeFile(path.join(tempDirectory, "logo.png"), "not really png");
+
+    const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
+    expect(resolveViewableDocument("/logo.png", roots)).toBeNull();
+  });
+
+  test("returns null for an unknown path", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-resolve-unknown-"));
+    tempDirectories.push(tempDirectory);
+    await writeFile(path.join(tempDirectory, "README.md"), "# Hello\n");
+
+    const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
+    expect(resolveViewableDocument("/missing.md", roots)).toBeNull();
+  });
+
+  test("returns null for malformed percent-encoding", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-resolve-malformed-"));
+    tempDirectories.push(tempDirectory);
+    await writeFile(path.join(tempDirectory, "README.md"), "# Hello\n");
+
+    const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
+    expect(resolveViewableDocument("/%GG", roots)).toBeNull();
+  });
+
+  test("decodes percent-encoded path segments before lookup", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-resolve-encoded-"));
+    tempDirectories.push(tempDirectory);
+    await writeFile(path.join(tempDirectory, "hello world.md"), "# Hi\n");
+
+    const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
+    const doc = resolveViewableDocument("/hello%20world.md", roots);
+    expect(doc?.relativePath).toBe("hello world.md");
+  });
+});
+
+describe("Accept-based navigation dispatch", () => {
+  const SHELL_MARKER = "<!-- spa-shell-test-marker -->";
+
+  async function withDispatchServer<T>(
+    rootDirectory: string,
+    block: (origin: string) => Promise<T>,
+  ): Promise<T> {
+    const session = createWatchSession(
+      [{ kind: "dir", absolutePath: rootDirectory }],
+      true,
+      { usePolling: true },
+    );
+    await session.start();
+    await waitUntil(() => session.getRoots().some(root => root.docs.length >= 1));
+
+    let server: ReturnType<typeof Bun.serve> | null = null;
+    try {
+      server = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        idleTimeout: 0,
+        routes: {
+          "/": () =>
+            new Response(`<!doctype html><html><body>${SHELL_MARKER}</body></html>`, {
+              headers: { "content-type": "text/html; charset=utf-8" },
+            }),
+        },
+        fetch: async request => {
+          const requestUrl = new URL(request.url);
+          if (prefersHtmlNavigation(request)) {
+            const doc = resolveViewableDocument(
+              requestUrl.pathname,
+              session.getUnscopedRoots(),
+            );
+            if (doc) {
+              return await spaShellResponse(server!);
+            }
+          }
+          const response = await staticFileResponse(requestUrl.pathname, [
+            { kind: "dir", absolutePath: rootDirectory },
+          ]);
+          if (response) {
+            return response;
+          }
+          return new Response("Not Found", { status: 404 });
+        },
+      });
+
+      const origin = `http://${server.hostname}:${server.port}`;
+      return await block(origin);
+    } finally {
+      server?.stop(true);
+      await session.stop();
+    }
+  }
+
+  test("HTML-preferring navigation to a known doc returns the SPA shell, not raw markdown", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-dispatch-shell-"));
+    tempDirectories.push(tempDirectory);
+    await writeFile(path.join(tempDirectory, "README.md"), "# Hello\n");
+
+    await withDispatchServer(tempDirectory, async origin => {
+      const response = await fetch(`${origin}/README.md`, {
+        headers: {
+          accept:
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        },
+      });
+      const body = await response.text();
+      expect(response.status).toBe(200);
+      expect(body).toContain(SHELL_MARKER);
+      expect(body).not.toContain("# Hello");
+    });
+  });
+
+  test("Accept: */* request to the same path returns raw bytes via the static fallback", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-dispatch-raw-"));
+    tempDirectories.push(tempDirectory);
+    await writeFile(path.join(tempDirectory, "README.md"), "# Hello\n");
+
+    await withDispatchServer(tempDirectory, async origin => {
+      const response = await fetch(`${origin}/README.md`, {
+        headers: { accept: "*/*" },
+      });
+      const body = await response.text();
+      expect(response.status).toBe(200);
+      expect(body).toBe("# Hello\n");
+      expect(body).not.toContain(SHELL_MARKER);
+    });
+  });
+
+  test("HTML-preferring navigation to a binary file falls through to the static fallback", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-dispatch-binary-"));
+    tempDirectories.push(tempDirectory);
+    await writeFile(path.join(tempDirectory, "logo.png"), "not really png");
+
+    await withDispatchServer(tempDirectory, async origin => {
+      const response = await fetch(`${origin}/logo.png`, {
+        headers: {
+          accept:
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        },
+      });
+      const body = await response.text();
+      expect(response.status).toBe(200);
+      expect(body).toBe("not really png");
+      expect(body).not.toContain(SHELL_MARKER);
+    });
+  });
+
+  test("HTML-preferring navigation to an unknown path returns the static fallback's 404", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-dispatch-unknown-"));
+    tempDirectories.push(tempDirectory);
+    await writeFile(path.join(tempDirectory, "README.md"), "# Hello\n");
+
+    await withDispatchServer(tempDirectory, async origin => {
+      const response = await fetch(`${origin}/typo-not-a-real-doc`, {
+        headers: {
+          accept:
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        },
+      });
+      const body = await response.text();
+      expect(response.status).toBe(404);
+      expect(body).not.toContain(SHELL_MARKER);
+    });
   });
 });

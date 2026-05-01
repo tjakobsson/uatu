@@ -9,12 +9,12 @@ import logoAsset from "./assets/uatu-logo.svg" with { type: "file" };
 import index from "./index.html";
 import { E2E_PORT, E2E_WORKSPACE_ROOT, resetE2EWorkspace } from "./e2e";
 import {
+  createNavigationFetchHandler,
   createWatchSession,
   canSetFileScope,
   renderDocument,
   resolveWatchRoots,
   SERVE_IDLE_TIMEOUT_SECONDS,
-  staticFileResponse,
   type WatchEntry,
 } from "./server";
 
@@ -23,7 +23,8 @@ let activeRespectGitignore = true;
 let activeEntries: WatchEntry[] = [];
 let watchSession = await createSession({ resetWorkspace: true });
 
-const server = Bun.serve({
+let server: ReturnType<typeof Bun.serve>;
+server = Bun.serve({
   hostname: "127.0.0.1",
   port: E2E_PORT,
   idleTimeout: SERVE_IDLE_TIMEOUT_SECONDS,
@@ -133,17 +134,12 @@ const server = Bun.serve({
       },
     },
   },
-  fetch: async request => {
-    const requestUrl = new URL(request.url);
-    const response = await staticFileResponse(requestUrl.pathname, activeEntries, {
-      respectGitignore: activeRespectGitignore,
-    });
-    if (response) {
-      return response;
-    }
-
-    return new Response("Not Found", { status: 404 });
-  },
+  fetch: createNavigationFetchHandler({
+    getUnscopedRoots: () => watchSession.getUnscopedRoots(),
+    getEntries: () => activeEntries,
+    getRespectGitignore: () => activeRespectGitignore,
+    getServer: () => server,
+  }),
 });
 
 console.log(`http://127.0.0.1:${server.port}`);

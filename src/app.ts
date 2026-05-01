@@ -219,6 +219,7 @@ function initCrossDocAnchorHandler() {
     event.preventDefault();
     appState.followEnabled = false;
     appState.selectedId = doc.id;
+    pushSelection(doc.id, doc.relativePath);
     revealSelectedFile();
     syncFollowToggle();
     renderSidebar();
@@ -238,6 +239,46 @@ function findDocumentByRelativePath(relativePath: string): DocumentMeta | null {
     }
   }
   return null;
+}
+
+function findDocumentById(documentId: string): DocumentMeta | null {
+  for (const root of appState.roots) {
+    const doc = root.docs.find(candidate => candidate.id === documentId);
+    if (doc) {
+      return doc;
+    }
+  }
+  return null;
+}
+
+// Build a same-origin URL for a document. Per-segment percent-encoding mirrors
+// the cross-doc handler's decode: each path segment is encoded individually so
+// `/` separators stay as path separators and other special characters
+// (spaces, unicode, `#`, `?`) are escaped.
+function buildDocumentPath(relativePath: string): string {
+  return "/" + relativePath.split("/").map(encodeURIComponent).join("/");
+}
+
+// Push a new history entry for a user-initiated selection change. No-op when
+// the URL already matches the target — clicking the currently active doc
+// must not grow the back stack.
+function pushSelection(documentId: string, relativePath: string) {
+  const url = buildDocumentPath(relativePath);
+  if (window.location.pathname === url) {
+    return;
+  }
+  window.history.pushState({ documentId }, "", url);
+}
+
+// Replace the current history entry with a new selection. Used for follow-mode
+// auto-switches (so the URL stays accurate without polluting the back stack)
+// and on initial boot (so `history.state` carries the document id for
+// subsequent popstate resolution — the initial entry has `state === null`
+// until we set it). The hash is preserved on the boot path so a deep link
+// like `/guides/setup.md#installation` still scrolls to the named heading.
+function replaceSelection(documentId: string, relativePath: string) {
+  const url = buildDocumentPath(relativePath) + window.location.hash;
+  window.history.replaceState({ documentId }, "", url);
 }
 
 function scrollToFragment(rawId: string) {
@@ -275,6 +316,10 @@ followToggleElement.addEventListener("click", () => {
     const latestId = defaultDocumentId(appState.roots);
     if (latestId && latestId !== appState.selectedId) {
       appState.selectedId = latestId;
+      const latestDoc = findDocumentById(latestId);
+      if (latestDoc) {
+        pushSelection(latestId, latestDoc.relativePath);
+      }
       revealSelectedFile();
       renderSidebar();
       void loadDocument(latestId);
@@ -349,32 +394,171 @@ treeElement.addEventListener("click", event => {
 
   appState.followEnabled = false;
   appState.selectedId = documentId;
+  const doc = findDocumentById(documentId);
+  if (doc) {
+    pushSelection(documentId, doc.relativePath);
+  }
   revealSelectedFile();
   syncFollowToggle();
   renderSidebar();
   void loadDocument(documentId);
 });
 
+// Handle browser back/forward navigation. The browser has already moved the
+// URL by the time this fires, so we re-resolve the new pathname against the
+// current root index and load that document — without ourselves pushing or
+// replacing history. Follow mode is disabled here for the same reason a
+// sidebar click disables it: a back press is an explicit navigation intent
+// that would otherwise be immediately undone by the next file-change-driven
+// auto-switch.
+window.addEventListener("popstate", () => {
+  if (appState.followEnabled) {
+    appState.followEnabled = false;
+    syncFollowToggle();
+  }
+
+  let urlRelativePath = "";
+  try {
+    urlRelativePath = decodeURIComponent(window.location.pathname).replace(/^\/+/, "");
+  } catch {
+    urlRelativePath = "";
+  }
+
+  if (!urlRelativePath) {
+    const fallbackId = defaultDocumentId(appState.roots);
+    if (fallbackId) {
+      appState.selectedId = fallbackId;
+      revealSelectedFile();
+      renderSidebar();
+      void loadDocument(fallbackId);
+    } else {
+      appState.selectedId = null;
+      renderSidebar();
+      renderEmptyPreview("No document selected", "Waiting for viewable files");
+    }
+    return;
+  }
+
+  const requestedDoc = findDocumentByRelativePath(urlRelativePath);
+  if (requestedDoc && requestedDoc.kind !== "binary") {
+    appState.selectedId = requestedDoc.id;
+    revealSelectedFile();
+    renderSidebar();
+    void loadDocument(requestedDoc.id).then(() => {
+      if (window.location.hash) {
+        scrollToFragment(window.location.hash.slice(1));
+      }
+    });
+    return;
+  }
+
+  if (appState.scope.kind === "file") {
+    const pinnedDoc = appState.selectedId ? findDocumentById(appState.selectedId) : null;
+    renderSidebar();
+    renderEmptyPreview(
+      "Session pinned",
+      pinnedDoc
+        ? `Session pinned to ${pinnedDoc.relativePath}. Unpin to view other documents.`
+        : "Session pinned to another file. Unpin to view other documents.",
+    );
+    return;
+  }
+
+  appState.selectedId = null;
+  renderSidebar();
+  renderEmptyPreview("Document not found", `Document not found at ${urlRelativePath}.`);
+});
+
 void loadInitialState();
 
 async function loadInitialState() {
+  // Decode the requested URL path BEFORE fetching state so we can decide
+  // whether to honor the server's defaultDocumentId or override with a
+  // URL-derived doc selection (direct-link arrival, per design D3).
+  let urlRelativePath = "";
+  try {
+    urlRelativePath = decodeURIComponent(window.location.pathname).replace(/^\/+/, "");
+  } catch {
+    urlRelativePath = "";
+  }
+  // Capture the hash before our own `replaceSelection` (below) overwrites
+  // the URL with a hashless version — otherwise the post-load fragment
+  // scroll has nothing to scroll to.
+  const initialHash = window.location.hash;
+
   const response = await fetch("/api/state");
   const payload = (await response.json()) as StatePayload;
 
   appState.roots = payload.roots;
-  appState.followEnabled = payload.initialFollow;
-  appState.selectedId = payload.defaultDocumentId;
   appState.scope = payload.scope;
-  revealSelectedFile();
   syncStateGeneration(payload.generatedAt);
   renderBuildBadge(payload.build);
 
+  let directLinkMessage: { title: string; body: string } | null = null;
+
+  if (!urlRelativePath) {
+    // Default boot at `/` — today's behavior.
+    appState.followEnabled = payload.initialFollow;
+    appState.selectedId = payload.defaultDocumentId;
+  } else {
+    const requestedDoc = findDocumentByRelativePath(urlRelativePath);
+    if (requestedDoc && requestedDoc.kind !== "binary") {
+      // Direct link to a known non-binary doc — force follow off (D3) and
+      // override the server-provided default selection.
+      appState.followEnabled = false;
+      appState.selectedId = requestedDoc.id;
+    } else if (payload.scope.kind === "file") {
+      // Direct link to a doc outside the pinned scope. Keep the pinned doc
+      // as the selection so the sidebar reflects it, but render a "session
+      // pinned" message in place of the preview (per design D4).
+      appState.followEnabled = false;
+      appState.selectedId = payload.defaultDocumentId;
+      const pinnedDoc = appState.selectedId
+        ? findDocumentById(appState.selectedId)
+        : null;
+      directLinkMessage = {
+        title: "Session pinned",
+        body: pinnedDoc
+          ? `Session pinned to ${pinnedDoc.relativePath}. Unpin to view other documents.`
+          : "Session pinned to another file. Unpin to view other documents.",
+      };
+    } else {
+      // Direct link that doesn't resolve to any known doc in the index.
+      appState.followEnabled = false;
+      appState.selectedId = null;
+      directLinkMessage = {
+        title: "Document not found",
+        body: `Document not found at ${urlRelativePath}.`,
+      };
+    }
+  }
+
+  revealSelectedFile();
   syncFollowToggle();
   syncPinToggle();
   renderSidebar();
 
+  // Populate history.state with the document id so subsequent popstate
+  // events have an unambiguous target without re-resolving the path each
+  // time. The initial entry has `state === null` until we set it.
   if (appState.selectedId) {
+    const selected = findDocumentById(appState.selectedId);
+    if (selected) {
+      replaceSelection(appState.selectedId, selected.relativePath);
+    }
+  }
+
+  if (directLinkMessage) {
+    renderEmptyPreview(directLinkMessage.title, directLinkMessage.body);
+  } else if (appState.selectedId) {
     await loadDocument(appState.selectedId);
+    if (initialHash) {
+      // The browser hasn't laid out the freshly-rendered preview yet — defer
+      // the scroll to the next frame so `scrollIntoView` has positions to
+      // work with. Mirrors the TOC click path's timing (which only fires
+      // after the preview is fully painted).
+      requestAnimationFrame(() => scrollToFragment(initialHash.slice(1)));
+    }
   }
 
   connectEvents();
@@ -410,6 +594,15 @@ function connectEvents() {
     // so a user-closed ancestor isn't re-opened by unrelated state updates.
     if (appState.selectedId && appState.selectedId !== previousSelectedId) {
       revealSelectedFile();
+      // Server-driven selection change (follow auto-switch, or current doc
+      // was deleted and we fell back to the default). The URL must follow
+      // what's on screen, but we use replaceState — pushing here would
+      // pollute the back stack with file-change-driven entries the user
+      // never asked for.
+      const switched = findDocumentById(appState.selectedId);
+      if (switched) {
+        replaceSelection(appState.selectedId, switched.relativePath);
+      }
     }
 
     syncPinToggle();
