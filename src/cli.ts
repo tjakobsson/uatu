@@ -6,6 +6,7 @@ import mermaidAsset from "mermaid/dist/mermaid.min.js" with { type: "file" };
 import logoAsset from "./assets/uatu-logo.svg" with { type: "file" };
 import index from "./index.html";
 import {
+  createNavigationFetchHandler,
   parseCommand,
   renderDocument,
   resolveWatchRoots,
@@ -13,7 +14,6 @@ import {
   openBrowser,
   canSetFileScope,
   SERVE_IDLE_TIMEOUT_SECONDS,
-  staticFileResponse,
   usageText,
   versionText,
   printStartupBanner,
@@ -46,7 +46,8 @@ async function main() {
   });
   await watchSession.start();
 
-  const server = Bun.serve({
+  let server: ReturnType<typeof Bun.serve>;
+  server = Bun.serve({
     hostname: "127.0.0.1",
     port: parsed.options.port,
     idleTimeout: SERVE_IDLE_TIMEOUT_SECONDS,
@@ -122,17 +123,12 @@ async function main() {
         },
       },
     },
-    fetch: async request => {
-      const requestUrl = new URL(request.url);
-      const response = await staticFileResponse(requestUrl.pathname, rootEntries, {
-        respectGitignore: parsed.options.respectGitignore,
-      });
-      if (response) {
-        return response;
-      }
-
-      return new Response("Not Found", { status: 404 });
-    },
+    fetch: createNavigationFetchHandler({
+      getUnscopedRoots: () => watchSession.getUnscopedRoots(),
+      getEntries: () => rootEntries,
+      getRespectGitignore: () => parsed.options.respectGitignore,
+      getServer: () => server,
+    }),
   });
 
   const url = `http://127.0.0.1:${server.port}`;
