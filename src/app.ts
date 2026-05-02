@@ -41,8 +41,17 @@ type PaneState = Record<PaneId, { visible: boolean; collapsed: boolean; height: 
 type PreviewMode =
   | { kind: "document" }
   | { kind: "review-score"; repositoryId: string }
-  | { kind: "commit" }
+  | { kind: "commit"; repositoryId: string; sha: string }
   | { kind: "empty" };
+type CommitPreviewParams = { repositoryId: string; sha: string };
+type CommitPreviewResolution =
+  | {
+      kind: "found";
+      repository: RepositoryReviewSnapshot;
+      commit: RepositoryReviewSnapshot["commitLog"][number];
+    }
+  | { kind: "missing-repository"; repositoryId: string; sha: string }
+  | { kind: "missing-commit"; repository: RepositoryReviewSnapshot; sha: string };
 
 const appShellElement = document.querySelector<HTMLDivElement>(".app-shell");
 const previewBaseElement = document.querySelector<HTMLBaseElement>("#preview-base");
@@ -318,6 +327,22 @@ function pushReviewScore(repositoryId: string) {
   window.history.pushState({ reviewScoreRepositoryId: repositoryId }, "", nextPath);
 }
 
+function buildCommitPreviewPath(repositoryId: string, sha: string): string {
+  const url = new URL("/", window.location.origin);
+  url.searchParams.set("repository", repositoryId);
+  url.searchParams.set("commit", sha);
+  return `${url.pathname}${url.search}`;
+}
+
+function pushCommitPreview(repositoryId: string, sha: string) {
+  const nextPath = buildCommitPreviewPath(repositoryId, sha);
+  const currentPath = `${window.location.pathname}${window.location.search}`;
+  if (currentPath === nextPath) {
+    return;
+  }
+  window.history.pushState({ commitRepositoryId: repositoryId, commitSha: sha }, "", nextPath);
+}
+
 // Replace the current history entry with a new selection. Used for follow-mode
 // auto-switches (so the URL stays accurate without polluting the back stack)
 // and on initial boot (so `history.state` carries the document id for
@@ -460,24 +485,46 @@ gitLogElement.addEventListener("click", event => {
     return;
   }
 
-  const button = target.closest<HTMLButtonElement>("button[data-repository-id][data-commit-sha]");
-  if (!button) {
+  const anchor = target.closest<HTMLAnchorElement>("a[data-repository-id][data-commit-sha]");
+  if (!anchor) {
     return;
   }
 
-  const repository = appState.repositories.find(candidate => candidate.id === button.dataset.repositoryId);
-  const commit = repository?.commitLog.find(candidate => candidate.sha === button.dataset.commitSha);
-  if (!repository || !commit) {
+  if (
+    event.defaultPrevented ||
+    event.button !== 0 ||
+    event.metaKey ||
+    event.ctrlKey ||
+    event.shiftKey ||
+    event.altKey ||
+    anchor.hasAttribute("download")
+  ) {
     return;
   }
 
-  appState.followEnabled = false;
-  appState.selectedId = null;
-  appState.previewMode = { kind: "commit" };
-  syncFollowToggle();
-  syncPinToggle();
-  renderSidebar();
-  renderCommitMessage(repository, commit);
+  const explicitTarget = anchor.getAttribute("target");
+  if (explicitTarget && explicitTarget !== "_self") {
+    return;
+  }
+
+  let resolved: URL;
+  try {
+    resolved = new URL(anchor.href);
+  } catch {
+    return;
+  }
+  if (resolved.origin !== window.location.origin) {
+    return;
+  }
+
+  const repositoryId = anchor.dataset.repositoryId;
+  const sha = anchor.dataset.commitSha;
+  if (!repositoryId || !sha) {
+    return;
+  }
+
+  event.preventDefault();
+  activateCommitPreview({ repositoryId, sha }, { pushHistory: true });
 });
 
 changeOverviewElement.addEventListener("click", event => {
@@ -543,6 +590,12 @@ window.addEventListener("popstate", () => {
     return;
   }
 
+  const commitPreview = commitPreviewParamsFromUrl();
+  if (commitPreview) {
+    activateCommitPreview(commitPreview, { pushHistory: false });
+    return;
+  }
+
   let urlRelativePath = "";
   try {
     urlRelativePath = decodeURIComponent(window.location.pathname).replace(/^\/+/, "");
@@ -604,6 +657,73 @@ function reviewScoreRepositoryIdFromUrl(): string | null {
   return value && value.trim() ? value : null;
 }
 
+function commitPreviewParamsFromUrl(): CommitPreviewParams | null {
+  const url = new URL(window.location.href);
+  if (url.pathname !== "/") {
+    return null;
+  }
+
+  const repositoryId = url.searchParams.get("repository");
+  const sha = url.searchParams.get("commit");
+  if (!repositoryId || !repositoryId.trim() || !sha || !sha.trim()) {
+    return null;
+  }
+
+  return { repositoryId, sha };
+}
+
+function resolveCommitPreview(params: CommitPreviewParams): CommitPreviewResolution {
+  const repository = appState.repositories.find(candidate => candidate.id === params.repositoryId);
+  if (!repository) {
+    return { repositoryId: params.repositoryId, sha: params.sha, kind: "missing-repository" };
+  }
+
+  const commit = repository.commitLog.find(candidate => candidate.sha === params.sha);
+  if (!commit) {
+    return { kind: "missing-commit", repository, sha: params.sha };
+  }
+
+  return { kind: "found", repository, commit };
+}
+
+function activateCommitPreview(params: CommitPreviewParams, options: { pushHistory: boolean }) {
+  appState.followEnabled = false;
+  appState.selectedId = null;
+  appState.previewMode = { kind: "commit", ...params };
+  syncFollowToggle();
+  syncPinToggle();
+  if (options.pushHistory) {
+    pushCommitPreview(params.repositoryId, params.sha);
+  }
+  renderSidebar();
+  renderCommitPreview(params);
+}
+
+function renderCommitPreview(params: CommitPreviewParams) {
+  const resolved = resolveCommitPreview(params);
+  if (resolved.kind === "found") {
+    renderCommitMessage(resolved.repository, resolved.commit);
+    return;
+  }
+
+  renderCommitPreviewUnavailable(resolved);
+}
+
+function renderCommitPreviewUnavailable(resolved: Exclude<CommitPreviewResolution, { kind: "found" }>) {
+  if (resolved.kind === "missing-repository") {
+    renderEmptyPreview(
+      "Commit preview unavailable",
+      `Repository data is not available for commit ${resolved.sha}.`,
+    );
+    return;
+  }
+
+  renderEmptyPreview(
+    "Commit preview unavailable",
+    `Commit ${resolved.sha} is not available in the current Git Log data for ${resolved.repository.label}.`,
+  );
+}
+
 void loadInitialState();
 
 async function loadInitialState() {
@@ -632,11 +752,16 @@ async function loadInitialState() {
 
   let directLinkMessage: { title: string; body: string } | null = null;
   const initialReviewScoreRepositoryId = reviewScoreRepositoryIdFromUrl();
+  const initialCommitPreview = commitPreviewParamsFromUrl();
 
   if (initialReviewScoreRepositoryId) {
     appState.followEnabled = false;
     appState.selectedId = null;
     appState.previewMode = { kind: "review-score", repositoryId: initialReviewScoreRepositoryId };
+  } else if (initialCommitPreview) {
+    appState.followEnabled = false;
+    appState.selectedId = null;
+    appState.previewMode = { kind: "commit", ...initialCommitPreview };
   } else if (!urlRelativePath) {
     // Default boot at `/` — today's behavior.
     appState.followEnabled = payload.initialFollow;
@@ -700,6 +825,8 @@ async function loadInitialState() {
     } else {
       renderEmptyPreview("Review score unavailable", "Repository data is not available for this score view.");
     }
+  } else if (appState.previewMode.kind === "commit") {
+    renderCommitPreview(appState.previewMode);
   } else if (directLinkMessage) {
     renderEmptyPreview(directLinkMessage.title, directLinkMessage.body);
   } else if (appState.selectedId) {
@@ -752,6 +879,7 @@ function connectEvents() {
     if (appState.previewMode.kind === "commit") {
       syncPinToggle();
       renderSidebar();
+      renderCommitPreview(appState.previewMode);
       return;
     }
 
@@ -1547,8 +1675,8 @@ function renderGitLog() {
         <ol class="commit-log">
           ${commits.map(commit => `
             <li>
-              <button
-                type="button"
+              <a
+                href="${escapeHtmlAttribute(buildCommitPreviewPath(repository.id, commit.sha))}"
                 data-repository-id="${escapeHtmlAttribute(repository.id)}"
                 data-commit-sha="${escapeHtmlAttribute(commit.sha)}"
                 title="Show full commit message"
@@ -1556,7 +1684,7 @@ function renderGitLog() {
                 <code>${escapeHtml(commit.sha)}</code>
                 <span>${escapeHtml(commit.subject)}</span>
                 <small>${escapeHtml([commit.author, commit.relativeTime].filter(Boolean).join(" · "))}</small>
-              </button>
+              </a>
             </li>
           `).join("")}
         </ol>
