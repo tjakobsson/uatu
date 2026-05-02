@@ -1041,7 +1041,7 @@ h2 {
   margin: 0;
 }
 
-.commit-log button {
+.commit-log a {
   width: 100%;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -1056,10 +1056,11 @@ h2 {
   line-height: 1.3;
   padding: 0.25rem 0.2rem;
   text-align: left;
+  text-decoration: none;
 }
 
-.commit-log button:hover,
-.commit-log button:focus-visible {
+.commit-log a:hover,
+.commit-log a:focus-visible {
   background: #f6f8fa;
   outline: 1px solid var(--border-soft);
 }

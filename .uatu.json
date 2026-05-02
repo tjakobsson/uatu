@@ -10,7 +10,8 @@
     ],
     "ignoreAreas": [
       { "label": "Generated", "paths": ["dist/**", "**/*.generated.ts"] },
-      { "label": "Agent configurations", "paths": [".claude/**", ".opencode/**", ".agents/**"] }
+      { "label": "Agent configurations", "paths": [".claude/**", ".opencode/**", ".agents/**"] },
+      { "label": "OpenSpec Tasks and Specs", "paths": ["openspec/**/tasks.md","openspec/**/spec.md"] }
     ]
   }
 }
