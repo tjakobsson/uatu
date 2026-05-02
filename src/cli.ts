@@ -10,6 +10,7 @@ import {
   parseCommand,
   renderDocument,
   resolveWatchRoots,
+  findNonGitWatchEntries,
   createWatchSession,
   openBrowser,
   canSetFileScope,
@@ -17,6 +18,9 @@ import {
   usageText,
   versionText,
   printStartupBanner,
+  printIndexingStatus,
+  type WatchEntry,
+  type WatchOptions,
 } from "./server";
 
 async function main() {
@@ -40,102 +44,145 @@ async function main() {
     return;
   }
 
-  const rootEntries = await resolveWatchRoots(parsed.options.rootPaths, process.cwd());
-  const watchSession = createWatchSession(rootEntries, parsed.options.follow, {
-    respectGitignore: parsed.options.respectGitignore,
-  });
-  await watchSession.start();
+  try {
+    await runWatch(parsed.options);
+  } catch (error) {
+    console.error(`uatu: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
+}
 
-  let server: ReturnType<typeof Bun.serve>;
-  server = Bun.serve({
-    hostname: "127.0.0.1",
-    port: parsed.options.port,
-    idleTimeout: SERVE_IDLE_TIMEOUT_SECONDS,
-    routes: {
-      "/": index,
-      "/assets/mermaid.min.js": new Response(Bun.file(mermaidAsset), {
-        headers: {
-          "content-type": "application/javascript; charset=utf-8",
-        },
-      }),
-      "/assets/uatu-logo.svg": new Response(Bun.file(logoAsset), {
-        headers: {
-          "content-type": "image/svg+xml",
-          "cache-control": "public, max-age=3600",
-        },
-      }),
-      "/api/state": {
-        GET: () => Response.json(watchSession.getStatePayload()),
-      },
-      "/api/document": {
-        GET: async request => {
-          const documentId = new URL(request.url).searchParams.get("id");
-          if (!documentId) {
-            return Response.json({ error: "missing document id" }, { status: 400 });
-          }
+async function runWatch(options: WatchOptions) {
+  const rootEntries = await resolveWatchRoots(options.rootPaths, process.cwd());
+  const nonGitEntries = await findNonGitWatchEntries(rootEntries);
+  if (nonGitEntries.length > 0) {
+    const paths = formatWatchEntryPaths(nonGitEntries.map(result => result.entry));
+    const plural = nonGitEntries.length === 1 ? "path is" : "paths are";
+    if (!options.force) {
+      throw new Error(`watch ${plural} not inside a git repository: ${paths}. Use --force to watch non-git paths anyway.`);
+    }
+    console.error(`uatu: warning: watching non-git ${nonGitEntries.length === 1 ? "path" : "paths"} with --force; indexing may be slow: ${paths}`);
+  }
 
-          try {
-            const document = await renderDocument(watchSession.getRoots(), documentId);
-            return Response.json(document);
-          } catch (error) {
-            const message = error instanceof Error ? error.message : "";
-            if (message === "document is binary") {
-              return Response.json({ error: "document is not viewable" }, { status: 415 });
+  const clearIndexingStatus = printIndexingStatus(rootEntries, process.stdout);
+  let watchSession: ReturnType<typeof createWatchSession> | null = null;
+  let server: ReturnType<typeof Bun.serve> | null = null;
+
+  try {
+    watchSession = createWatchSession(rootEntries, options.follow, {
+      respectGitignore: options.respectGitignore,
+    });
+    await watchSession.start();
+
+    server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: options.port,
+      idleTimeout: SERVE_IDLE_TIMEOUT_SECONDS,
+      routes: {
+        "/": index,
+        "/assets/mermaid.min.js": new Response(Bun.file(mermaidAsset), {
+          headers: {
+            "content-type": "application/javascript; charset=utf-8",
+          },
+        }),
+        "/assets/uatu-logo.svg": new Response(Bun.file(logoAsset), {
+          headers: {
+            "content-type": "image/svg+xml",
+            "cache-control": "public, max-age=3600",
+          },
+        }),
+        "/api/state": {
+          GET: () => Response.json(watchSession!.getStatePayload()),
+        },
+        "/api/document": {
+          GET: async request => {
+            const documentId = new URL(request.url).searchParams.get("id");
+            if (!documentId) {
+              return Response.json({ error: "missing document id" }, { status: 400 });
             }
-            return Response.json({ error: "document not found" }, { status: 404 });
-          }
-        },
-      },
-      "/api/events": {
-        GET: () => watchSession.eventsResponse(),
-      },
-      "/api/scope": {
-        POST: async request => {
-          let body: unknown;
-          try {
-            body = await request.json();
-          } catch {
-            return Response.json({ error: "invalid JSON body" }, { status: 400 });
-          }
 
-          const scope = (body as { scope?: unknown } | null)?.scope;
-          if (!scope || typeof scope !== "object") {
-            return Response.json({ error: "missing scope" }, { status: 400 });
-          }
-
-          const kind = (scope as { kind?: unknown }).kind;
-          if (kind === "folder") {
-            return Response.json({ scope: watchSession.setScope({ kind: "folder" }) });
-          }
-
-          if (kind === "file") {
-            const documentId = (scope as { documentId?: unknown }).documentId;
-            if (typeof documentId !== "string" || documentId.length === 0) {
-              return Response.json({ error: "missing documentId" }, { status: 400 });
-            }
-            if (!canSetFileScope(watchSession.getRoots(), documentId)) {
+            try {
+              const document = await renderDocument(watchSession!.getRoots(), documentId);
+              return Response.json(document);
+            } catch (error) {
+              const message = error instanceof Error ? error.message : "";
+              if (message === "document is binary") {
+                return Response.json({ error: "document is not viewable" }, { status: 415 });
+              }
               return Response.json({ error: "document not found" }, { status: 404 });
             }
-            return Response.json({ scope: watchSession.setScope({ kind: "file", documentId }) });
-          }
+          },
+        },
+        "/api/events": {
+          GET: () => watchSession!.eventsResponse(),
+        },
+        "/api/scope": {
+          POST: async request => {
+            let body: unknown;
+            try {
+              body = await request.json();
+            } catch {
+              return Response.json({ error: "invalid JSON body" }, { status: 400 });
+            }
 
-          return Response.json({ error: "unsupported scope kind" }, { status: 400 });
+            const scope = (body as { scope?: unknown } | null)?.scope;
+            if (!scope || typeof scope !== "object") {
+              return Response.json({ error: "missing scope" }, { status: 400 });
+            }
+
+            const kind = (scope as { kind?: unknown }).kind;
+            if (kind === "folder") {
+              return Response.json({ scope: watchSession!.setScope({ kind: "folder" }) });
+            }
+
+            if (kind === "file") {
+              const documentId = (scope as { documentId?: unknown }).documentId;
+              if (typeof documentId !== "string" || documentId.length === 0) {
+                return Response.json({ error: "missing documentId" }, { status: 400 });
+              }
+              if (!canSetFileScope(watchSession!.getRoots(), documentId)) {
+                return Response.json({ error: "document not found" }, { status: 404 });
+              }
+              return Response.json({ scope: watchSession!.setScope({ kind: "file", documentId }) });
+            }
+
+            return Response.json({ error: "unsupported scope kind" }, { status: 400 });
+          },
         },
       },
-    },
-    fetch: createNavigationFetchHandler({
-      getUnscopedRoots: () => watchSession.getUnscopedRoots(),
-      getEntries: () => rootEntries,
-      getRespectGitignore: () => parsed.options.respectGitignore,
-      getServer: () => server,
-    }),
-  });
+      fetch: createNavigationFetchHandler({
+        getUnscopedRoots: () => watchSession!.getUnscopedRoots(),
+        getEntries: () => rootEntries,
+        getRespectGitignore: () => options.respectGitignore,
+        getServer: () => server!,
+      }),
+    });
+  } catch (error) {
+    clearIndexingStatus();
+    if (watchSession) {
+      void Promise.resolve()
+        .then(() => watchSession!.stop())
+        .catch(() => undefined);
+    }
+    if (server) {
+      void Promise.resolve()
+        .then(() => server!.stop(true))
+        .catch(() => undefined);
+    }
+    throw error;
+  }
+
+  clearIndexingStatus();
+  // TypeScript narrowing: both are set if the try block above completed.
+  if (!server || !watchSession) {
+    throw new Error("failed to start watch session");
+  }
 
   const url = `http://127.0.0.1:${server.port}`;
   printStartupBanner(process.stdout);
   console.log(url);
 
-  if (parsed.options.openBrowser) {
+  if (options.openBrowser) {
     const opened = await openBrowser(url);
     if (!opened) {
       console.error(`uatu: unable to open browser automatically; open ${url}`);
@@ -173,10 +220,10 @@ async function main() {
     // (chokidar/fsevents sometimes never resolves close()), waiting would
     // block the shutdown indefinitely. The OS reclaims everything once we exit.
     void Promise.resolve()
-      .then(() => watchSession.stop())
+      .then(() => watchSession!.stop())
       .catch(() => undefined);
     void Promise.resolve()
-      .then(() => server.stop(true))
+      .then(() => server!.stop(true))
       .catch(() => undefined);
 
     hardExit(0);
@@ -221,6 +268,10 @@ async function main() {
       // still cover the common cases.
     }
   }
+}
+
+function formatWatchEntryPaths(entries: WatchEntry[]): string {
+  return entries.map(entry => entry.absolutePath).join(", ");
 }
 
 void main();

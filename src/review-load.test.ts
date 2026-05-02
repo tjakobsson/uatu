@@ -85,8 +85,37 @@ describe("review-load repository snapshots", () => {
     expect(load.drivers.some(driver => driver.kind === "risk" && driver.label === "Auth")).toBe(true);
     expect(load.drivers.some(driver => driver.kind === "support" && driver.label === "Tests")).toBe(true);
     expect(load.drivers.some(driver => driver.kind === "ignore" && driver.label === "Generated")).toBe(true);
+    expect(load.configuredAreas.find(area => area.label === "Auth")?.matchedFiles).toContain("src/auth/session.ts");
+    expect(load.configuredAreas.find(area => area.label === "Tests")?.score).toBeLessThan(0);
+    expect(load.configuredAreas.find(area => area.label === "Generated")?.matchedFiles).toContain("dist/bundle.js");
     expect(load.ignoredFiles.map(file => file.path)).toContain("dist/bundle.js");
     expect(["medium", "high"]).toContain(load.level);
+  });
+
+  test("exposes configured areas even when none match the current change", async () => {
+    const repo = await createRepo();
+    await writeFile(
+      path.join(repo, ".uatu.json"),
+      JSON.stringify({
+        review: {
+          riskAreas: [{ label: "Auth", paths: ["src/auth/**"], score: 12 }],
+          supportAreas: [{ label: "Tests", paths: ["**/*.test.ts"], score: -6 }],
+          ignoreAreas: [{ label: "Generated", paths: ["dist/**"] }],
+        },
+      }),
+    );
+    await writeFile(path.join(repo, "notes.txt"), "changed\n");
+
+    const snapshots = await collectRepositorySnapshots(
+      [{ kind: "dir", absolutePath: repo }],
+      [{ id: repo, label: "repo", path: repo, docs: [], hiddenCount: 0 }],
+    );
+    const load = snapshots[0]!.reviewLoad;
+
+    expect(load.configuredAreas.map(area => area.label)).toEqual(["Auth", "Tests", "Generated"]);
+    expect(load.configuredAreas.every(area => area.matchedFiles.length === 0)).toBe(true);
+    expect(load.configuredAreas.every(area => area.score === 0)).toBe(true);
+    expect(load.drivers.some(driver => driver.kind === "risk" || driver.kind === "support" || driver.kind === "ignore")).toBe(false);
   });
 
   test("unconfigured paths contribute mechanical cost without path modifiers", async () => {
@@ -101,6 +130,7 @@ describe("review-load repository snapshots", () => {
 
     expect(drivers.some(driver => driver.kind === "mechanical")).toBe(true);
     expect(drivers.some(driver => driver.kind === "risk" || driver.kind === "support")).toBe(false);
+    expect(snapshots[0]!.reviewLoad.configuredAreas).toEqual([]);
   });
 
   test("collects full commit messages without per-commit lookups", async () => {

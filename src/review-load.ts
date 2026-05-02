@@ -10,6 +10,7 @@ import type {
   RepositoryReviewSnapshot,
   ReviewAreaConfig,
   ReviewBase,
+  ReviewConfiguredArea,
   ReviewLoadResult,
   ReviewScoreDriver,
   ReviewSettings,
@@ -536,6 +537,13 @@ function scoreReviewLoad(
   const ignoredPaths = new Set(ignoredMatches.flatMap(match => match.files));
   const scoredFiles = files.filter(file => !ignoredPaths.has(file.path));
   const ignoredFiles = files.filter(file => ignoredPaths.has(file.path));
+  const riskMatches = matchAreas(scoredFiles, settings.riskAreas);
+  const supportMatches = matchAreas(scoredFiles, settings.supportAreas);
+  const configuredAreas: ReviewConfiguredArea[] = [
+    ...buildConfiguredAreas(settings.riskAreas, riskMatches, "risk"),
+    ...buildConfiguredAreas(settings.supportAreas, supportMatches, "support"),
+    ...buildConfiguredAreas(settings.ignoreAreas, ignoredMatches, "ignore"),
+  ];
   const drivers: ReviewScoreDriver[] = [];
 
   for (const match of ignoredMatches) {
@@ -562,8 +570,8 @@ function scoreReviewLoad(
   addMechanicalDriver(drivers, "Renames", Math.min(10, renameCount * 5), `${renameCount} rename or move${renameCount === 1 ? "" : "s"}`, []);
   addMechanicalDriver(drivers, "Dependency/config files", Math.min(14, dependencyCount * 7), `${dependencyCount} dependency or config file${dependencyCount === 1 ? "" : "s"}`, []);
 
-  applyAreaDrivers(drivers, scoredFiles, settings.riskAreas, "risk");
-  applyAreaDrivers(drivers, scoredFiles, settings.supportAreas, "support");
+  addAreaDrivers(drivers, riskMatches, "risk");
+  addAreaDrivers(drivers, supportMatches, "support");
 
   for (const warning of settingsWarnings) {
     drivers.push({ kind: "warning", label: "Configuration warning", score: 0, detail: warning, files: [] });
@@ -581,6 +589,7 @@ function scoreReviewLoad(
     changedFiles: scoredFiles,
     ignoredFiles,
     drivers,
+    configuredAreas,
     settingsWarnings,
     message: null,
   };
@@ -599,23 +608,13 @@ function addMechanicalDriver(
   drivers.push({ kind: "mechanical", label, score, detail, files });
 }
 
-function applyAreaDrivers(
+function addAreaDrivers(
   drivers: ReviewScoreDriver[],
-  files: ChangedFileSummary[],
-  areas: ReviewAreaConfig[],
+  matches: { area: ReviewAreaConfig; files: string[] }[],
   kind: "risk" | "support",
 ) {
-  for (const match of matchAreas(files, areas)) {
-    const baseScore = match.area.score ?? 0;
-    const perFile = match.area.perFile ?? 0;
-    let score = baseScore + perFile * match.files.length;
-    if (kind === "risk" && match.area.max !== undefined) {
-      score = Math.min(score, Math.abs(match.area.max));
-    }
-    if (kind === "support") {
-      const maxDiscount = Math.abs(match.area.maxDiscount ?? match.area.max ?? Math.abs(score));
-      score = -Math.min(Math.abs(score), maxDiscount);
-    }
+  for (const match of matches) {
+    const score = scoreAreaMatch(match.area, match.files.length, kind);
     drivers.push({
       kind,
       label: match.area.label,
@@ -624,6 +623,46 @@ function applyAreaDrivers(
       files: match.files,
     });
   }
+}
+
+function buildConfiguredAreas(
+  areas: ReviewAreaConfig[],
+  matches: { area: ReviewAreaConfig; files: string[] }[],
+  kind: ReviewConfiguredArea["kind"],
+): ReviewConfiguredArea[] {
+  return areas.map(area => {
+    const match = matches.find(candidate => candidate.area === area);
+    const matchedFiles = match?.files ?? [];
+    return {
+      kind,
+      label: area.label,
+      paths: area.paths,
+      matchedFiles,
+      score: matchedFiles.length > 0 ? scoreAreaMatch(area, matchedFiles.length, kind) : 0,
+    };
+  });
+}
+
+function scoreAreaMatch(
+  area: ReviewAreaConfig,
+  fileCount: number,
+  kind: ReviewConfiguredArea["kind"],
+): number {
+  if (kind === "ignore") {
+    return 0;
+  }
+
+  const baseScore = area.score ?? 0;
+  const perFile = area.perFile ?? 0;
+  let score = baseScore + perFile * fileCount;
+  if (kind === "risk" && area.max !== undefined) {
+    score = Math.min(score, Math.abs(area.max));
+  }
+  if (kind === "support") {
+    const maxDiscount = Math.abs(area.maxDiscount ?? area.max ?? Math.abs(score));
+    score = -Math.min(Math.abs(score), maxDiscount);
+  }
+  return score;
 }
 
 function matchAreas(files: ChangedFileSummary[], areas: ReviewAreaConfig[]) {
@@ -711,6 +750,7 @@ function unavailableReviewLoad(
     changedFiles: [],
     ignoredFiles: [],
     drivers: [],
+    configuredAreas: [],
     settingsWarnings: [],
     message,
   };
