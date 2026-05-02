@@ -43,6 +43,7 @@ project-specific checks matter.
 - **Whole-repo browsing** with `.uatuignore` and `.gitignore` filtering
 - **Review-oriented sidebar panes** for change overview, files, and git history
 - **Review burden meter** based on deterministic git diff size, file spread, and configurable path scoring
+- **Git-backed codebase** watching by default, with explicit `--force` for non-git folders
 - **Single-file** or multi-root scope from the CLI
 
 ## Upcoming
@@ -95,16 +96,20 @@ To unlink later: `bun unlink` from the repo root.
 ## Usage
 
 ```bash
-uatu watch [PATH...] [--no-open] [--no-follow] [--no-gitignore] [--port <PORT>]
+uatu watch [PATH...] [--force] [--no-open] [--no-follow] [--no-gitignore] [--port <PORT>]
 ```
 
 `PATH` may be a directory, multiple directories, or a single non-binary file.
+By default, each path must be inside a git worktree. This prevents accidental
+startup over broad folders such as your home directory. Use `--force` to watch a
+non-git path anyway; `uatu` will warn that indexing may be slow.
 
 ```bash
 uatu watch .
 uatu watch docs notes --no-open
 uatu watch testdata/watch-docs --no-follow --port 4321
 uatu watch . --no-gitignore
+uatu watch ~/Downloads/docs --force
 uatu watch README.md
 uatu watch GUIDE.adoc
 ```

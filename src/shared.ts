@@ -99,6 +99,14 @@ export type ReviewScoreDriver = {
   files: string[];
 };
 
+export type ReviewConfiguredArea = {
+  kind: "risk" | "support" | "ignore";
+  label: string;
+  paths: string[];
+  matchedFiles: string[];
+  score: number;
+};
+
 export type ReviewLoadResult = {
   status: "available" | "non-git" | "unavailable";
   score: number;
@@ -108,6 +116,7 @@ export type ReviewLoadResult = {
   changedFiles: ChangedFileSummary[];
   ignoredFiles: ChangedFileSummary[];
   drivers: ReviewScoreDriver[];
+  configuredAreas: ReviewConfiguredArea[];
   settingsWarnings: string[];
   message: string | null;
 };

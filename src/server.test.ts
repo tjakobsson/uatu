@@ -7,9 +7,11 @@ import {
   createWatchSession,
   canSetFileScope,
   DEFAULT_PORT,
+  findNonGitWatchEntries,
   getAssetRoots,
   parseCommand,
   prefersHtmlNavigation,
+  printIndexingStatus,
   printStartupBanner,
   renderDocument,
   resolveStaticFileRequest,
@@ -19,7 +21,9 @@ import {
   spaShellResponse,
   staticFileResponse,
   STARTUP_BANNER,
+  usageText,
 } from "./server";
+import { safeGit } from "./review-load";
 
 const tempDirectories: string[] = [];
 
@@ -40,10 +44,11 @@ describe("parseCommand", () => {
     expect(parsed.options.follow).toBe(true);
     expect(parsed.options.openBrowser).toBe(true);
     expect(parsed.options.port).toBe(DEFAULT_PORT);
+    expect(parsed.options.force).toBe(false);
   });
 
   test("accepts positional roots and startup flags", () => {
-    const parsed = parseCommand(["watch", "docs", "notes", "--no-open", "--no-follow", "--port", "5000"]);
+    const parsed = parseCommand(["watch", "docs", "notes", "--force", "--no-open", "--no-follow", "--port", "5000"]);
     expect(parsed.kind).toBe("watch");
 
     if (parsed.kind !== "watch") {
@@ -54,6 +59,7 @@ describe("parseCommand", () => {
     expect(parsed.options.openBrowser).toBe(false);
     expect(parsed.options.follow).toBe(false);
     expect(parsed.options.port).toBe(5000);
+    expect(parsed.options.force).toBe(true);
   });
 
   test("respectGitignore defaults to true and is disabled by --no-gitignore", () => {
@@ -64,6 +70,10 @@ describe("parseCommand", () => {
     const opted = parseCommand(["watch", "--no-gitignore"]);
     if (opted.kind !== "watch") throw new Error("expected watch");
     expect(opted.options.respectGitignore).toBe(false);
+  });
+
+  test("usage documents the --force flag", () => {
+    expect(usageText()).toContain("--force");
   });
 });
 
@@ -131,6 +141,33 @@ describe("resolveWatchRoots", () => {
   });
 });
 
+describe("findNonGitWatchEntries", () => {
+  test("accepts directory and file entries inside a git worktree", async () => {
+    const repo = await mkdtemp(path.join(os.tmpdir(), "uatu-git-root-"));
+    tempDirectories.push(repo);
+    await safeGit(repo, ["init", "--initial-branch=main"]);
+    const readme = path.join(repo, "README.md");
+    await writeFile(readme, "# Readme\n");
+
+    const entries = await resolveWatchRoots([repo, readme], repo);
+
+    await expect(findNonGitWatchEntries(entries)).resolves.toEqual([]);
+  });
+
+  test("reports every entry outside a git worktree", async () => {
+    const first = await mkdtemp(path.join(os.tmpdir(), "uatu-non-git-a-"));
+    const second = await mkdtemp(path.join(os.tmpdir(), "uatu-non-git-b-"));
+    tempDirectories.push(first, second);
+    const note = path.join(second, "note.md");
+    await writeFile(note, "# Note\n");
+
+    const entries = await resolveWatchRoots([first, note], first);
+    const nonGit = await findNonGitWatchEntries(entries);
+
+    expect(nonGit.map(result => result.entry.absolutePath).sort()).toEqual([first, note].sort());
+  });
+});
+
 describe("printStartupBanner", () => {
   test("prints the ASCII banner with a leading newline when stdout is a TTY", () => {
     const chunks: string[] = [];
@@ -144,6 +181,29 @@ describe("printStartupBanner", () => {
   test("writes nothing when stdout is not a TTY", () => {
     const chunks: string[] = [];
     printStartupBanner({ isTTY: false, write: chunk => chunks.push(chunk) });
+    expect(chunks).toHaveLength(0);
+  });
+
+  test("prints and clears indexing status when stdout is a TTY", () => {
+    const chunks: string[] = [];
+    const clear = printIndexingStatus([{ kind: "dir", absolutePath: "/repo" }], {
+      isTTY: true,
+      write: chunk => chunks.push(chunk),
+    });
+
+    expect(chunks.join("")).toContain("Indexing /repo...");
+    clear();
+    expect(chunks.join("")).toContain("\r");
+  });
+
+  test("writes no indexing status when stdout is not a TTY", () => {
+    const chunks: string[] = [];
+    const clear = printIndexingStatus([{ kind: "dir", absolutePath: "/repo" }], {
+      isTTY: false,
+      write: chunk => chunks.push(chunk),
+    });
+
+    clear();
     expect(chunks).toHaveLength(0);
   });
 });

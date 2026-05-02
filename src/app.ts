@@ -843,7 +843,7 @@ function renderReviewScoreDetails(repository: RepositoryReviewSnapshot) {
   }
 
   const mechanicalDrivers = load.drivers.filter(driver => driver.kind === "mechanical");
-  const configuredDrivers = load.drivers.filter(driver => driver.kind !== "mechanical");
+  const warningDrivers = load.drivers.filter(driver => driver.kind === "warning");
   const highDelta = load.score - load.thresholds.high;
   const mediumDelta = load.score - load.thresholds.medium;
   const comparison =
@@ -879,8 +879,27 @@ function renderReviewScoreDetails(repository: RepositoryReviewSnapshot) {
       <h2>Mechanical Statistics</h2>
       ${renderScoreDriverList(mechanicalDrivers, "No mechanical review cost was detected.")}
       <h2>Configuration and Warnings</h2>
-      ${renderScoreDriverList(configuredDrivers, "No configured risk, support, ignore, or warning drivers matched this change.")}
+      ${renderReviewConfigurationList(warningDrivers, load.configuredAreas)}
     </section>
+  `;
+}
+
+function renderReviewConfigurationList(
+  drivers: RepositoryReviewSnapshot["reviewLoad"]["drivers"],
+  areas: RepositoryReviewSnapshot["reviewLoad"]["configuredAreas"],
+): string {
+  const items = [
+    ...drivers.map(renderScoreDriverItem),
+    ...areas.map(renderConfiguredAreaItem),
+  ];
+  if (items.length === 0) {
+    return `<p class="pane-empty">No project-specific review scoring configuration or warnings are active for this change.</p>`;
+  }
+
+  return `
+    <ul class="score-preview-list">
+      ${items.join("")}
+    </ul>
   `;
 }
 
@@ -893,32 +912,56 @@ function renderScoreDriverList(
   }
   return `
     <ul class="score-preview-list">
-      ${drivers.map(driver => {
-        const score = driver.score > 0 ? `+${driver.score}` : String(driver.score);
-        const files = driver.files.length > 0
-          ? `<small>${escapeHtml(driver.files.slice(0, 8).join(", "))}${driver.files.length > 8 ? "..." : ""}</small>`
-          : "";
-        const help = mechanicalDriverHelp(driver.label);
-        const helpMarkup = help
-          ? `
-            <span class="score-term-help" tabindex="0" aria-label="${escapeHtmlAttribute(`${driver.label}: ${help}`)}">
-              ?
-              <span class="score-term-tooltip" role="tooltip">${escapeHtml(help)}</span>
-            </span>
-          `
-          : "";
-        return `
-          <li class="is-${escapeHtmlAttribute(driver.kind)}">
-            <span>
-              <span class="score-driver-label"><strong>${escapeHtml(driver.label)}</strong>${helpMarkup}</span>
-              ${escapeHtml(driver.detail)}
-              ${files}
-            </span>
-            <code>${escapeHtml(score)}</code>
-          </li>
-        `;
-      }).join("")}
+      ${drivers.map(renderScoreDriverItem).join("")}
     </ul>
+  `;
+}
+
+function renderScoreDriverItem(driver: RepositoryReviewSnapshot["reviewLoad"]["drivers"][number]): string {
+  const score = driver.score > 0 ? `+${driver.score}` : String(driver.score);
+  const files = driver.files.length > 0
+    ? `<small>${escapeHtml(driver.files.slice(0, 8).join(", "))}${driver.files.length > 8 ? "..." : ""}</small>`
+    : "";
+  const help = mechanicalDriverHelp(driver.label);
+  const helpMarkup = help
+    ? `
+      <span class="score-term-help" tabindex="0" aria-label="${escapeHtmlAttribute(`${driver.label}: ${help}`)}">
+        ?
+        <span class="score-term-tooltip" role="tooltip">${escapeHtml(help)}</span>
+      </span>
+    `
+    : "";
+  return `
+    <li class="is-${escapeHtmlAttribute(driver.kind)}">
+      <span>
+        <span class="score-driver-label"><strong>${escapeHtml(driver.label)}</strong>${helpMarkup}</span>
+        ${escapeHtml(driver.detail)}
+        ${files}
+      </span>
+      <code>${escapeHtml(score)}</code>
+    </li>
+  `;
+}
+
+function renderConfiguredAreaItem(area: RepositoryReviewSnapshot["reviewLoad"]["configuredAreas"][number]): string {
+  const score = area.score > 0 ? `+${area.score}` : String(area.score);
+  const matchedCount = area.matchedFiles.length;
+  const detail = matchedCount > 0
+    ? `${capitalize(area.kind)} area matched ${matchedCount} file${matchedCount === 1 ? "" : "s"}`
+    : `${capitalize(area.kind)} area configured; no files matched this change`;
+  const extra = matchedCount > 0
+    ? area.matchedFiles.slice(0, 8).join(", ") + (area.matchedFiles.length > 8 ? "..." : "")
+    : `Patterns: ${area.paths.join(", ")}`;
+
+  return `
+    <li class="is-${escapeHtmlAttribute(area.kind)}">
+      <span>
+        <span class="score-driver-label"><strong>${escapeHtml(area.label)}</strong></span>
+        ${escapeHtml(detail)}
+        <small>${escapeHtml(extra)}</small>
+      </span>
+      <code>${escapeHtml(score)}</code>
+    </li>
   `;
 }
 

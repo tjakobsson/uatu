@@ -9,7 +9,7 @@ import { classifyFile } from "./file-classify";
 import { languageForName } from "./file-languages";
 import { loadIgnoreMatcher, type IgnoreMatcher } from "./ignore-engine";
 import { decodeHtmlEntities, renderCodeAsHtml, renderMarkdownToHtml } from "./markdown";
-import { collectRepositorySnapshots } from "./review-load";
+import { collectRepositorySnapshots, safeGit } from "./review-load";
 import {
   defaultDocumentId,
   findDocument,
@@ -108,6 +108,7 @@ export type WatchOptions = {
   follow: boolean;
   port: number;
   respectGitignore: boolean;
+  force: boolean;
 };
 
 export type ParsedCommand =
@@ -132,7 +133,7 @@ export function usageText(build: BuildInfo = BUILD): string {
   return `uatu ${formatBuildIdentifier(build)}
 
 Usage:
-  uatu watch [PATH...] [--no-open] [--no-follow] [--no-gitignore] [--port <PORT>]
+  uatu watch [PATH...] [--force] [--no-open] [--no-follow] [--no-gitignore] [--port <PORT>]
   uatu --help
   uatu --version
 
@@ -140,6 +141,7 @@ Options:
   --no-open        Do not open a browser automatically
   --no-follow      Start with follow mode disabled
   --no-gitignore   Do not honor .gitignore patterns when indexing files
+  --force          Watch non-git paths anyway; indexing may be slow
   -p, --port       Bind the local server to a specific port
   -h, --help       Show help
   -V, --version    Show version
@@ -170,6 +172,28 @@ export function printStartupBanner(
   stream.write(`\n${STARTUP_BANNER}\n\n`);
 }
 
+export function printIndexingStatus(
+  entries: WatchEntry[],
+  stream: { isTTY?: boolean; write(chunk: string): unknown } = process.stdout,
+): () => void {
+  if (!stream.isTTY) {
+    return () => undefined;
+  }
+
+  const label = entries.length === 1 ? entries[0]!.absolutePath : `${entries.length} watch roots`;
+  const message = `Indexing ${label}...`;
+  let cleared = false;
+  stream.write(message);
+
+  return () => {
+    if (cleared) {
+      return;
+    }
+    cleared = true;
+    stream.write(`\r${" ".repeat(message.length)}\r`);
+  };
+}
+
 export function parseCommand(argv: string[]): ParsedCommand {
   if (argv.length === 0 || argv[0] === "-h" || argv[0] === "--help") {
     return { kind: "help" };
@@ -187,6 +211,7 @@ export function parseCommand(argv: string[]): ParsedCommand {
   let follow = true;
   let port = DEFAULT_PORT;
   let respectGitignore = DEFAULT_RESPECT_GITIGNORE;
+  let force = false;
   const rootPaths: string[] = [];
 
   for (let index = 1; index < argv.length; index += 1) {
@@ -204,6 +229,11 @@ export function parseCommand(argv: string[]): ParsedCommand {
 
     if (arg === "--no-gitignore") {
       respectGitignore = false;
+      continue;
+    }
+
+    if (arg === "--force") {
+      force = true;
       continue;
     }
 
@@ -246,6 +276,7 @@ export function parseCommand(argv: string[]): ParsedCommand {
       follow,
       port,
       respectGitignore,
+      force,
     },
   };
 }
@@ -253,6 +284,22 @@ export function parseCommand(argv: string[]): ParsedCommand {
 export type WatchEntry =
   | { kind: "dir"; absolutePath: string }
   | { kind: "file"; absolutePath: string; parentDir: string };
+
+export type NonGitWatchEntry = {
+  entry: WatchEntry;
+};
+
+export async function findNonGitWatchEntries(entries: WatchEntry[]): Promise<NonGitWatchEntry[]> {
+  const checked = await Promise.all(entries.map(async entry => {
+    const probePath = entry.kind === "dir" ? entry.absolutePath : entry.parentDir;
+    const result = await safeGit(probePath, ["rev-parse", "--show-toplevel"]);
+    return result.ok && result.stdout.trim()
+      ? null
+      : { entry };
+  }));
+
+  return checked.filter((entry): entry is NonGitWatchEntry => Boolean(entry));
+}
 
 export async function resolveWatchRoots(inputPaths: string[], cwd: string): Promise<WatchEntry[]> {
   const resolved = new Map<string, WatchEntry>();
