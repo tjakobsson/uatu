@@ -32,8 +32,107 @@ export type BuildSummary = {
 
 export type Scope = { kind: "folder" } | { kind: "file"; documentId: string };
 
+export type ReviewBurdenLevel = "low" | "medium" | "high";
+
+export type ReviewThresholds = {
+  medium: number;
+  high: number;
+};
+
+export type ReviewAreaConfig = {
+  label: string;
+  paths: string[];
+  score?: number;
+  perFile?: number;
+  max?: number;
+  maxDiscount?: number;
+};
+
+export type ReviewSettings = {
+  baseRef?: string;
+  thresholds: ReviewThresholds;
+  riskAreas: ReviewAreaConfig[];
+  supportAreas: ReviewAreaConfig[];
+  ignoreAreas: ReviewAreaConfig[];
+};
+
+export type RepositoryMetadata = {
+  id: string;
+  rootPath: string;
+  label: string;
+  watchedRootIds: string[];
+  status: "git" | "non-git" | "unavailable";
+  branch: string | null;
+  detached: boolean;
+  commitShort: string | null;
+  dirty: boolean;
+  message: string | null;
+};
+
+export type ReviewBaseMode =
+  | "configured"
+  | "remote-default"
+  | "fallback"
+  | "dirty-worktree-only"
+  | "unavailable";
+
+export type ReviewBase = {
+  mode: ReviewBaseMode;
+  ref: string | null;
+  mergeBase: string | null;
+};
+
+export type ChangedFileSummary = {
+  path: string;
+  oldPath: string | null;
+  status: string;
+  additions: number;
+  deletions: number;
+  hunks: number;
+};
+
+export type ReviewScoreDriver = {
+  kind: "mechanical" | "risk" | "support" | "ignore" | "warning";
+  label: string;
+  score: number;
+  detail: string;
+  files: string[];
+};
+
+export type ReviewLoadResult = {
+  status: "available" | "non-git" | "unavailable";
+  score: number;
+  level: ReviewBurdenLevel;
+  thresholds: ReviewThresholds;
+  base: ReviewBase;
+  changedFiles: ChangedFileSummary[];
+  ignoredFiles: ChangedFileSummary[];
+  drivers: ReviewScoreDriver[];
+  settingsWarnings: string[];
+  message: string | null;
+};
+
+export type CommitLogEntry = {
+  sha: string;
+  subject: string;
+  message: string;
+  author: string | null;
+  relativeTime: string | null;
+};
+
+export type RepositoryReviewSnapshot = {
+  id: string;
+  rootPath: string;
+  label: string;
+  watchedRootIds: string[];
+  metadata: RepositoryMetadata;
+  reviewLoad: ReviewLoadResult;
+  commitLog: CommitLogEntry[];
+};
+
 export type StatePayload = {
   roots: RootGroup[];
+  repositories: RepositoryReviewSnapshot[];
   initialFollow: boolean;
   defaultDocumentId: string | null;
   changedId: string | null;

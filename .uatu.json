@@ -1,0 +1,17 @@
+{
+  "review": {
+    "baseRef": "origin/main",
+    "thresholds": { "medium": 35, "high": 70 },
+    "riskAreas": [
+      { "label": "Auth", "paths": ["src/auth/**"], "score": 25, "perFile": 2, "max": 35 }
+    ],
+    "supportAreas": [
+      { "label": "Tests", "paths": ["**/*.test.ts", "tests/**"], "score": -10, "perFile": -1, "maxDiscount": 15 }
+    ],
+    "ignoreAreas": [
+      { "label": "Generated", "paths": ["dist/**", "**/*.generated.ts"] },
+      { "label": "Agent configurations", "paths": [".claude/**", ".opencode/**", ".agents/**"] }
+    ]
+  }
+}
+
