@@ -9,12 +9,14 @@ import { classifyFile } from "./file-classify";
 import { languageForName } from "./file-languages";
 import { loadIgnoreMatcher, type IgnoreMatcher } from "./ignore-engine";
 import { decodeHtmlEntities, renderCodeAsHtml, renderMarkdownToHtml } from "./markdown";
+import { collectRepositorySnapshots } from "./review-load";
 import {
   defaultDocumentId,
   findDocument,
   hasDocument,
   type BuildSummary,
   type DocumentMeta,
+  type RepositoryReviewSnapshot,
   type RootGroup,
   type Scope,
   type StatePayload,
@@ -691,9 +693,11 @@ export function createStatePayload(
   initialFollow: boolean,
   changedId: string | null = null,
   scope: Scope = { kind: "folder" },
+  repositories: RepositoryReviewSnapshot[] = [],
 ): StatePayload {
   return {
     roots,
+    repositories,
     initialFollow,
     defaultDocumentId: defaultDocumentId(roots),
     changedId: changedId && hasDocument(roots, changedId) ? changedId : null,
@@ -743,6 +747,7 @@ export function createWatchSession(
 ) {
   const respectGitignore = options.respectGitignore ?? DEFAULT_RESPECT_GITIGNORE;
   let roots: RootGroup[] = [];
+  let repositories: RepositoryReviewSnapshot[] = [];
   // The unscoped index holds every viewable doc under the watched roots,
   // ignoring the current pin. Server-side direct-link dispatch consults this
   // so a navigation to `/guides/setup.md` while pinned to `README.md` still
@@ -802,13 +807,17 @@ export function createWatchSession(
 
   const refresh = async (changedId: string | null) => {
     const nextRoots = await scanRoots(entries, { respectGitignore, matcherCache });
+    const nextRepositories = await collectRepositorySnapshots(entries, nextRoots).catch(error => {
+      console.error(`uatu: failed to refresh git review data: ${error instanceof Error ? error.message : String(error)}`);
+      return repositories;
+    });
 
     if (scope.kind === "file" && !hasDocument(nextRoots, scope.documentId)) {
       scope = { kind: "folder" };
     }
 
     const visibleRoots = applyScope(nextRoots);
-    const nextFingerprint = fingerprintRoots(visibleRoots);
+    const nextFingerprint = createStateFingerprint(visibleRoots, nextRepositories);
     const changedDoc = changedId ? findDocument(visibleRoots, changedId) : undefined;
     const changedDocumentId =
       changedDoc && changedDoc.kind !== "binary" ? changedId : null;
@@ -816,10 +825,11 @@ export function createWatchSession(
 
     roots = visibleRoots;
     unscopedRoots = nextRoots;
+    repositories = nextRepositories;
     stateFingerprint = nextFingerprint;
 
     if (shouldBroadcast) {
-      broadcast(createStatePayload(roots, initialFollow, changedDocumentId, scope));
+      broadcast(createStatePayload(roots, initialFollow, changedDocumentId, scope, repositories));
     }
   };
 
@@ -919,9 +929,13 @@ export function createWatchSession(
 
       await watcherReady;
       const scanned = await scanRoots(entries, { respectGitignore, matcherCache });
+      repositories = await collectRepositorySnapshots(entries, scanned).catch(error => {
+        console.error(`uatu: failed to initialize git review data: ${error instanceof Error ? error.message : String(error)}`);
+        return [];
+      });
       unscopedRoots = scanned;
       roots = applyScope(scanned);
-      stateFingerprint = fingerprintRoots(roots);
+      stateFingerprint = createStateFingerprint(roots, repositories);
       reconcileTimer = setInterval(() => {
         void refresh(null).catch(error => {
           console.error(`uatu: failed to reconcile state: ${error instanceof Error ? error.message : String(error)}`);
@@ -957,9 +971,12 @@ export function createWatchSession(
     getScope() {
       return scope;
     },
+    getRepositories() {
+      return repositories;
+    },
     setScope,
     getStatePayload(changedId: string | null = null) {
-      return createStatePayload(roots, initialFollow, changedId, scope);
+      return createStatePayload(roots, initialFollow, changedId, scope, repositories);
     },
     eventsResponse() {
       let currentSubscriber: EventController | null = null;
@@ -968,7 +985,7 @@ export function createWatchSession(
         start(controller) {
           currentSubscriber = controller;
           subscribers.add(controller);
-          controller.enqueue(encoder.encode(`event: state\ndata: ${JSON.stringify(createStatePayload(roots, initialFollow, null, scope))}\n\n`));
+          controller.enqueue(encoder.encode(`event: state\ndata: ${JSON.stringify(createStatePayload(roots, initialFollow, null, scope, repositories))}\n\n`));
         },
         cancel() {
           if (currentSubscriber) {
@@ -1122,6 +1139,28 @@ function fingerprintRoots(roots: RootGroup[]): string {
         relativePath: doc.relativePath,
         mtimeMs: doc.mtimeMs,
         kind: doc.kind,
+      })),
+    })),
+  );
+}
+
+function createStateFingerprint(roots: RootGroup[], repositories: RepositoryReviewSnapshot[]): string {
+  return `${fingerprintRoots(roots)}\n${fingerprintRepositories(repositories)}`;
+}
+
+function fingerprintRepositories(repositories: RepositoryReviewSnapshot[]): string {
+  return JSON.stringify(
+    repositories.map(repository => ({
+      id: repository.id,
+      rootPath: repository.rootPath,
+      watchedRootIds: repository.watchedRootIds,
+      metadata: repository.metadata,
+      reviewLoad: repository.reviewLoad,
+      commitLog: repository.commitLog.map(commit => ({
+        sha: commit.sha,
+        subject: commit.subject,
+        message: commit.message,
+        author: commit.author,
       })),
     })),
   );

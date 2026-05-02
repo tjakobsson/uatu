@@ -9,6 +9,7 @@ import {
   shouldRefreshPreview,
   type BuildSummary,
   type DocumentMeta,
+  type RepositoryReviewSnapshot,
   type RootGroup,
   type Scope,
   type StatePayload,
@@ -25,10 +26,33 @@ type RenderedDocument = {
 };
 
 const SIDEBAR_COLLAPSED_KEY = "uatu:sidebar-collapsed";
+const SIDEBAR_PANES_KEY = "uatu:sidebar-panes";
+const SIDEBAR_WIDTH_KEY = "uatu:sidebar-width";
+const GIT_LOG_LIMIT_KEY = "uatu:git-log-limit";
+const SIDEBAR_MIN_WIDTH = 260;
+const SIDEBAR_MAX_WIDTH = 620;
+const PANE_DEFS = [
+  { id: "change-overview", label: "Change Overview" },
+  { id: "files", label: "Files" },
+  { id: "git-log", label: "Git Log" },
+] as const;
+type PaneId = (typeof PANE_DEFS)[number]["id"];
+type PaneState = Record<PaneId, { visible: boolean; collapsed: boolean; height: number | null }>;
+type PreviewMode =
+  | { kind: "document" }
+  | { kind: "review-score"; repositoryId: string }
+  | { kind: "commit" }
+  | { kind: "empty" };
 
 const appShellElement = document.querySelector<HTMLDivElement>(".app-shell");
 const previewBaseElement = document.querySelector<HTMLBaseElement>("#preview-base");
 const treeElement = document.querySelector<HTMLDivElement>("#tree");
+const changeOverviewElement = document.querySelector<HTMLDivElement>("#change-overview");
+const gitLogElement = document.querySelector<HTMLDivElement>("#git-log");
+const gitLogLimitElement = document.querySelector<HTMLSelectElement>("#git-log-limit");
+const panelsToggleElement = document.querySelector<HTMLButtonElement>("#panels-toggle");
+const panelsMenuElement = document.querySelector<HTMLDivElement>("#panels-menu");
+const sidebarResizerElement = document.querySelector<HTMLDivElement>("#sidebar-resizer");
 const previewElement = document.querySelector<HTMLElement>("#preview");
 const previewTitleElement = document.querySelector<HTMLElement>("#preview-title");
 const previewPathElement = document.querySelector<HTMLElement>("#preview-path");
@@ -46,6 +70,12 @@ if (
   !appShellElement ||
   !previewBaseElement ||
   !treeElement ||
+  !changeOverviewElement ||
+  !gitLogElement ||
+  !gitLogLimitElement ||
+  !panelsToggleElement ||
+  !panelsMenuElement ||
+  !sidebarResizerElement ||
   !previewElement ||
   !previewTitleElement ||
   !previewPathElement ||
@@ -64,15 +94,22 @@ if (
 
 const appState = {
   roots: [] as RootGroup[],
+  repositories: [] as RepositoryReviewSnapshot[],
   selectedId: null as string | null,
+  previewMode: { kind: "document" } as PreviewMode,
   followEnabled: true,
   scope: { kind: "folder" } as Scope,
+  panes: readPaneState(),
+  gitLogLimit: readGitLogLimitPreference(),
   // Per-directory open/closed state the user explicitly set by clicking a
   // directory's <summary>. Session-only; wins over the default-open rule.
   dirOverrides: new Map<string, "open" | "closed">(),
 };
 
 initSidebarCollapse();
+initSidebarPanes();
+initSidebarWidth();
+initGitLogControls();
 initBrandLogo();
 initInPageAnchorHandler();
 initCrossDocAnchorHandler();
@@ -219,6 +256,7 @@ function initCrossDocAnchorHandler() {
     event.preventDefault();
     appState.followEnabled = false;
     appState.selectedId = doc.id;
+    appState.previewMode = { kind: "document" };
     pushSelection(doc.id, doc.relativePath);
     revealSelectedFile();
     syncFollowToggle();
@@ -270,6 +308,16 @@ function pushSelection(documentId: string, relativePath: string) {
   window.history.pushState({ documentId }, "", url);
 }
 
+function pushReviewScore(repositoryId: string) {
+  const url = new URL("/", window.location.origin);
+  url.searchParams.set("reviewScore", repositoryId);
+  const nextPath = `${url.pathname}${url.search}`;
+  if (window.location.pathname === url.pathname && window.location.search === url.search) {
+    return;
+  }
+  window.history.pushState({ reviewScoreRepositoryId: repositoryId }, "", nextPath);
+}
+
 // Replace the current history entry with a new selection. Used for follow-mode
 // auto-switches (so the URL stays accurate without polluting the back stack)
 // and on initial boot (so `history.state` carries the document id for
@@ -316,6 +364,7 @@ followToggleElement.addEventListener("click", () => {
     const latestId = defaultDocumentId(appState.roots);
     if (latestId && latestId !== appState.selectedId) {
       appState.selectedId = latestId;
+      appState.previewMode = { kind: "document" };
       const latestDoc = findDocumentById(latestId);
       if (latestDoc) {
         pushSelection(latestId, latestDoc.relativePath);
@@ -394,6 +443,7 @@ treeElement.addEventListener("click", event => {
 
   appState.followEnabled = false;
   appState.selectedId = documentId;
+  appState.previewMode = { kind: "document" };
   const doc = findDocumentById(documentId);
   if (doc) {
     pushSelection(documentId, doc.relativePath);
@@ -403,6 +453,68 @@ treeElement.addEventListener("click", event => {
   renderSidebar();
   void loadDocument(documentId);
 });
+
+gitLogElement.addEventListener("click", event => {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) {
+    return;
+  }
+
+  const button = target.closest<HTMLButtonElement>("button[data-repository-id][data-commit-sha]");
+  if (!button) {
+    return;
+  }
+
+  const repository = appState.repositories.find(candidate => candidate.id === button.dataset.repositoryId);
+  const commit = repository?.commitLog.find(candidate => candidate.sha === button.dataset.commitSha);
+  if (!repository || !commit) {
+    return;
+  }
+
+  appState.followEnabled = false;
+  appState.selectedId = null;
+  appState.previewMode = { kind: "commit" };
+  syncFollowToggle();
+  syncPinToggle();
+  renderSidebar();
+  renderCommitMessage(repository, commit);
+});
+
+changeOverviewElement.addEventListener("click", event => {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) {
+    return;
+  }
+
+  const button = target.closest<HTMLButtonElement>("button[data-review-score-repository-id]");
+  if (!button) {
+    return;
+  }
+
+  const repository = appState.repositories.find(candidate => candidate.id === button.dataset.reviewScoreRepositoryId);
+  if (!repository || repository.reviewLoad.status !== "available") {
+    return;
+  }
+
+  appState.followEnabled = false;
+  appState.selectedId = null;
+  appState.previewMode = { kind: "review-score", repositoryId: repository.id };
+  syncFollowToggle();
+  syncPinToggle();
+  pushReviewScore(repository.id);
+  renderSidebar();
+  renderReviewScoreDetails(repository);
+});
+
+function initGitLogControls() {
+  gitLogLimitElement.value = String(appState.gitLogLimit);
+  gitLogLimitElement.addEventListener("change", () => {
+    const nextLimit = Number.parseInt(gitLogLimitElement.value, 10);
+    appState.gitLogLimit = isGitLogLimit(nextLimit) ? nextLimit : 25;
+    persistGitLogLimit();
+    renderGitLog();
+  });
+}
 
 // Handle browser back/forward navigation. The browser has already moved the
 // URL by the time this fires, so we re-resolve the new pathname against the
@@ -417,6 +529,20 @@ window.addEventListener("popstate", () => {
     syncFollowToggle();
   }
 
+  const reviewScoreRepositoryId = reviewScoreRepositoryIdFromUrl();
+  if (reviewScoreRepositoryId) {
+    const repository = appState.repositories.find(candidate => candidate.id === reviewScoreRepositoryId);
+    appState.previewMode = { kind: "review-score", repositoryId: reviewScoreRepositoryId };
+    appState.selectedId = null;
+    renderSidebar();
+    if (repository) {
+      renderReviewScoreDetails(repository);
+    } else {
+      renderEmptyPreview("Review score unavailable", "Repository data is not available for this score view.");
+    }
+    return;
+  }
+
   let urlRelativePath = "";
   try {
     urlRelativePath = decodeURIComponent(window.location.pathname).replace(/^\/+/, "");
@@ -428,11 +554,13 @@ window.addEventListener("popstate", () => {
     const fallbackId = defaultDocumentId(appState.roots);
     if (fallbackId) {
       appState.selectedId = fallbackId;
+      appState.previewMode = { kind: "document" };
       revealSelectedFile();
       renderSidebar();
       void loadDocument(fallbackId);
     } else {
       appState.selectedId = null;
+      appState.previewMode = { kind: "empty" };
       renderSidebar();
       renderEmptyPreview("No document selected", "Waiting for viewable files");
     }
@@ -442,6 +570,7 @@ window.addEventListener("popstate", () => {
   const requestedDoc = findDocumentByRelativePath(urlRelativePath);
   if (requestedDoc && requestedDoc.kind !== "binary") {
     appState.selectedId = requestedDoc.id;
+    appState.previewMode = { kind: "document" };
     revealSelectedFile();
     renderSidebar();
     void loadDocument(requestedDoc.id).then(() => {
@@ -465,9 +594,15 @@ window.addEventListener("popstate", () => {
   }
 
   appState.selectedId = null;
+  appState.previewMode = { kind: "empty" };
   renderSidebar();
   renderEmptyPreview("Document not found", `Document not found at ${urlRelativePath}.`);
 });
+
+function reviewScoreRepositoryIdFromUrl(): string | null {
+  const value = new URL(window.location.href).searchParams.get("reviewScore");
+  return value && value.trim() ? value : null;
+}
 
 void loadInitialState();
 
@@ -490,16 +625,23 @@ async function loadInitialState() {
   const payload = (await response.json()) as StatePayload;
 
   appState.roots = payload.roots;
+  appState.repositories = payload.repositories ?? [];
   appState.scope = payload.scope;
   syncStateGeneration(payload.generatedAt);
   renderBuildBadge(payload.build);
 
   let directLinkMessage: { title: string; body: string } | null = null;
+  const initialReviewScoreRepositoryId = reviewScoreRepositoryIdFromUrl();
 
-  if (!urlRelativePath) {
+  if (initialReviewScoreRepositoryId) {
+    appState.followEnabled = false;
+    appState.selectedId = null;
+    appState.previewMode = { kind: "review-score", repositoryId: initialReviewScoreRepositoryId };
+  } else if (!urlRelativePath) {
     // Default boot at `/` — today's behavior.
     appState.followEnabled = payload.initialFollow;
     appState.selectedId = payload.defaultDocumentId;
+    appState.previewMode = { kind: "document" };
   } else {
     const requestedDoc = findDocumentByRelativePath(urlRelativePath);
     if (requestedDoc && requestedDoc.kind !== "binary") {
@@ -507,12 +649,14 @@ async function loadInitialState() {
       // override the server-provided default selection.
       appState.followEnabled = false;
       appState.selectedId = requestedDoc.id;
+      appState.previewMode = { kind: "document" };
     } else if (payload.scope.kind === "file") {
       // Direct link to a doc outside the pinned scope. Keep the pinned doc
       // as the selection so the sidebar reflects it, but render a "session
       // pinned" message in place of the preview (per design D4).
       appState.followEnabled = false;
       appState.selectedId = payload.defaultDocumentId;
+      appState.previewMode = { kind: "empty" };
       const pinnedDoc = appState.selectedId
         ? findDocumentById(appState.selectedId)
         : null;
@@ -526,6 +670,7 @@ async function loadInitialState() {
       // Direct link that doesn't resolve to any known doc in the index.
       appState.followEnabled = false;
       appState.selectedId = null;
+      appState.previewMode = { kind: "empty" };
       directLinkMessage = {
         title: "Document not found",
         body: `Document not found at ${urlRelativePath}.`,
@@ -541,14 +686,21 @@ async function loadInitialState() {
   // Populate history.state with the document id so subsequent popstate
   // events have an unambiguous target without re-resolving the path each
   // time. The initial entry has `state === null` until we set it.
-  if (appState.selectedId) {
+  if (appState.previewMode.kind === "document" && appState.selectedId) {
     const selected = findDocumentById(appState.selectedId);
     if (selected) {
       replaceSelection(appState.selectedId, selected.relativePath);
     }
   }
 
-  if (directLinkMessage) {
+  if (appState.previewMode.kind === "review-score") {
+    const repository = appState.repositories.find(candidate => candidate.id === appState.previewMode.repositoryId);
+    if (repository && repository.reviewLoad.status === "available") {
+      renderReviewScoreDetails(repository);
+    } else {
+      renderEmptyPreview("Review score unavailable", "Repository data is not available for this score view.");
+    }
+  } else if (directLinkMessage) {
     renderEmptyPreview(directLinkMessage.title, directLinkMessage.body);
   } else if (appState.selectedId) {
     await loadDocument(appState.selectedId);
@@ -581,8 +733,28 @@ function connectEvents() {
     const shouldReload = shouldRefreshPreview(previousSelectedId, payload.changedId);
 
     appState.roots = payload.roots;
+    appState.repositories = payload.repositories ?? [];
     appState.scope = payload.scope;
     syncStateGeneration(payload.generatedAt);
+
+    if (appState.previewMode.kind === "review-score") {
+      syncPinToggle();
+      renderSidebar();
+      const repository = appState.repositories.find(candidate => candidate.id === appState.previewMode.repositoryId);
+      if (repository && repository.reviewLoad.status === "available") {
+        renderReviewScoreDetails(repository);
+      } else {
+        renderEmptyPreview("Review score unavailable", "Repository data is not available for this score view.");
+      }
+      return;
+    }
+
+    if (appState.previewMode.kind === "commit") {
+      syncPinToggle();
+      renderSidebar();
+      return;
+    }
+
     appState.selectedId = nextSelectedDocumentId(
       payload.roots,
       previousSelectedId,
@@ -623,11 +795,13 @@ async function loadDocument(documentId: string) {
   const response = await fetch(`/api/document?id=${encodeURIComponent(documentId)}`);
 
   if (!response.ok) {
+    appState.previewMode = { kind: "empty" };
     renderEmptyPreview("Document unavailable", "The selected file no longer exists.");
     return;
   }
 
   const payload = (await response.json()) as RenderedDocument;
+  appState.previewMode = { kind: "document" };
   previewTitleElement.textContent = payload.title;
   previewPathElement.textContent = payload.path;
   setPreviewType(payload);
@@ -640,6 +814,155 @@ async function loadDocument(documentId: string) {
   }
   attachCopyButtons(previewElement);
   syncPinToggle();
+}
+
+function renderCommitMessage(
+  repository: RepositoryReviewSnapshot,
+  commit: RepositoryReviewSnapshot["commitLog"][number],
+) {
+  previewTitleElement.textContent = commit.subject;
+  previewPathElement.textContent = `${repository.label} · ${commit.sha}`;
+  clearPreviewType();
+  previewBaseElement.href = new URL("/", window.location.origin).toString();
+  previewElement.classList.remove("empty");
+  previewElement.innerHTML = `
+    <section class="commit-preview">
+      <header>
+        <p>${escapeHtml([commit.author, commit.relativeTime].filter(Boolean).join(" · "))}</p>
+        <code>${escapeHtml(commit.sha)}</code>
+      </header>
+      <pre>${escapeHtml(commit.message)}</pre>
+    </section>
+  `;
+}
+
+function renderReviewScoreDetails(repository: RepositoryReviewSnapshot) {
+  const load = repository.reviewLoad;
+  if (load.status !== "available") {
+    return;
+  }
+
+  const mechanicalDrivers = load.drivers.filter(driver => driver.kind === "mechanical");
+  const configuredDrivers = load.drivers.filter(driver => driver.kind !== "mechanical");
+  const highDelta = load.score - load.thresholds.high;
+  const mediumDelta = load.score - load.thresholds.medium;
+  const comparison =
+    load.score >= load.thresholds.high
+      ? `${highDelta} point${Math.abs(highDelta) === 1 ? "" : "s"} above the high threshold`
+      : load.score >= load.thresholds.medium
+        ? `${mediumDelta} point${Math.abs(mediumDelta) === 1 ? "" : "s"} above the medium threshold`
+        : `${load.thresholds.medium - load.score} point${Math.abs(load.thresholds.medium - load.score) === 1 ? "" : "s"} below the medium threshold`;
+
+  previewTitleElement.textContent = "Review burden score";
+  previewPathElement.textContent = repository.label;
+  clearPreviewType();
+  previewBaseElement.href = new URL("/", window.location.origin).toString();
+  previewElement.classList.remove("empty");
+  previewElement.innerHTML = `
+    <section class="score-preview is-${escapeHtmlAttribute(load.level)}">
+      <header>
+        <div class="score-preview-total">
+          <p class="score-preview-kicker">${escapeHtml(capitalize(load.level))} review burden</p>
+          <h1>${escapeHtml(String(load.score))}</h1>
+        </div>
+        <dl>
+          <div class="is-low"><dt>Low</dt><dd>&lt; ${escapeHtml(String(load.thresholds.medium))}</dd></div>
+          <div class="is-medium"><dt>Medium</dt><dd>${escapeHtml(String(load.thresholds.medium))}-${escapeHtml(String(load.thresholds.high - 1))}</dd></div>
+          <div class="is-high"><dt>High</dt><dd>&ge; ${escapeHtml(String(load.thresholds.high))}</dd></div>
+        </dl>
+      </header>
+      <p>
+        This is an additive review-burden index, not a percentage and not a code-quality score.
+        It compares the current change against this repository's thresholds; this score is
+        ${escapeHtml(comparison)}.
+      </p>
+      <h2>Mechanical Statistics</h2>
+      ${renderScoreDriverList(mechanicalDrivers, "No mechanical review cost was detected.")}
+      <h2>Configuration and Warnings</h2>
+      ${renderScoreDriverList(configuredDrivers, "No configured risk, support, ignore, or warning drivers matched this change.")}
+    </section>
+  `;
+}
+
+function renderScoreDriverList(
+  drivers: RepositoryReviewSnapshot["reviewLoad"]["drivers"],
+  emptyMessage: string,
+): string {
+  if (drivers.length === 0) {
+    return `<p class="pane-empty">${escapeHtml(emptyMessage)}</p>`;
+  }
+  return `
+    <ul class="score-preview-list">
+      ${drivers.map(driver => {
+        const score = driver.score > 0 ? `+${driver.score}` : String(driver.score);
+        const files = driver.files.length > 0
+          ? `<small>${escapeHtml(driver.files.slice(0, 8).join(", "))}${driver.files.length > 8 ? "..." : ""}</small>`
+          : "";
+        const help = mechanicalDriverHelp(driver.label);
+        const helpMarkup = help
+          ? `
+            <span class="score-term-help" tabindex="0" aria-label="${escapeHtmlAttribute(`${driver.label}: ${help}`)}">
+              ?
+              <span class="score-term-tooltip" role="tooltip">${escapeHtml(help)}</span>
+            </span>
+          `
+          : "";
+        return `
+          <li class="is-${escapeHtmlAttribute(driver.kind)}">
+            <span>
+              <span class="score-driver-label"><strong>${escapeHtml(driver.label)}</strong>${helpMarkup}</span>
+              ${escapeHtml(driver.detail)}
+              ${files}
+            </span>
+            <code>${escapeHtml(score)}</code>
+          </li>
+        `;
+      }).join("")}
+    </ul>
+  `;
+}
+
+function mechanicalDriverHelp(label: string): string | null {
+  switch (label) {
+    case "Changed files":
+      return "How many files changed and may need review.";
+    case "Touched lines":
+      return "How many lines were added or removed across those files.";
+    case "Diff hunks":
+      return "How many separate changed spots there are. One file can have several spots if edits are spread out.";
+    case "Directory spread":
+      return "How many top-level parts of the project are touched, such as src, tests, or docs.";
+    case "Renames":
+      return "Files that moved or changed name, which can take extra attention to follow.";
+    case "Dependency/config files":
+      return "Changes to setup, build, dependency, or CI files that can affect the project broadly.";
+    default:
+      return null;
+  }
+}
+
+function readGitLogLimitPreference(): number {
+  try {
+    const value = Number(window.localStorage.getItem(GIT_LOG_LIMIT_KEY));
+    if (isGitLogLimit(value)) {
+      return value;
+    }
+  } catch {
+    // Ignore storage failures (private mode, quota, etc.).
+  }
+  return 25;
+}
+
+function persistGitLogLimit() {
+  try {
+    window.localStorage.setItem(GIT_LOG_LIMIT_KEY, String(appState.gitLogLimit));
+  } catch {
+    // Ignore storage failures (private mode, quota, etc.).
+  }
+}
+
+function isGitLogLimit(value: number): value is 10 | 25 | 50 | 100 {
+  return value === 10 || value === 25 || value === 50 || value === 100;
 }
 
 // Attach a line-number gutter to each <pre><code> in the container. The gutter
@@ -759,6 +1082,12 @@ async function postScope(scope: Scope) {
 }
 
 function renderSidebar() {
+  syncPaneDom();
+  renderPanelsMenu();
+  renderChangeOverview();
+  renderGitLog();
+  schedulePaneHeightNormalization();
+
   const totalCount = appState.roots.reduce((sum, root) => sum + root.docs.length, 0);
   const binaryCount = appState.roots.reduce(
     (sum, root) => sum + root.docs.filter(doc => doc.kind === "binary").length,
@@ -794,6 +1123,422 @@ function renderSidebar() {
       `;
     })
     .join("");
+}
+
+function initSidebarPanes() {
+  panelsToggleElement.addEventListener("click", () => {
+    const expanded = panelsToggleElement.getAttribute("aria-expanded") === "true";
+    panelsToggleElement.setAttribute("aria-expanded", String(!expanded));
+    panelsMenuElement.hidden = expanded;
+  });
+
+  panelsMenuElement.addEventListener("change", event => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement)) {
+      return;
+    }
+    const paneId = target.value as PaneId;
+    if (!isPaneId(paneId)) {
+      return;
+    }
+    appState.panes[paneId].visible = target.checked;
+    if (target.checked) {
+      appState.panes[paneId].collapsed = false;
+    }
+    persistPaneState();
+    renderSidebar();
+  });
+
+  document.querySelectorAll<HTMLButtonElement>("[data-pane-hide]").forEach(button => {
+    button.addEventListener("click", () => {
+      const paneId = button.dataset.paneHide as PaneId | undefined;
+      if (!paneId || !isPaneId(paneId)) {
+        return;
+      }
+      appState.panes[paneId].visible = false;
+      persistPaneState();
+      renderSidebar();
+    });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>("[data-pane-collapse]").forEach(button => {
+    button.addEventListener("click", () => {
+      const paneId = button.dataset.paneCollapse as PaneId | undefined;
+      if (!paneId || !isPaneId(paneId)) {
+        return;
+      }
+      appState.panes[paneId].collapsed = !appState.panes[paneId].collapsed;
+      persistPaneState();
+      renderSidebar();
+    });
+  });
+
+  document.querySelectorAll<HTMLElement>("[data-pane-resizer]").forEach(resizer => {
+    resizer.addEventListener("pointerdown", event => {
+      const paneId = resizer.dataset.paneResizer as PaneId | undefined;
+      const pane = paneId ? document.querySelector<HTMLElement>(`[data-pane-id="${paneId}"]`) : null;
+      if (!paneId || !isPaneId(paneId) || !pane) {
+        return;
+      }
+      event.preventDefault();
+      resizer.setPointerCapture(event.pointerId);
+      normalizePaneHeightsToStack();
+      const startY = event.clientY;
+      const startHeight = pane.getBoundingClientRect().height;
+      const nextPane = nextVisiblePane(paneId);
+      const nextStartHeight = nextPane?.getBoundingClientRect().height ?? 0;
+      const totalHeight = startHeight + nextStartHeight;
+      const minHeight = 72;
+
+      const onMove = (moveEvent: PointerEvent) => {
+        const delta = moveEvent.clientY - startY;
+        const maxHeight = nextPane ? totalHeight - minHeight : 520;
+        const nextHeight = Math.max(minHeight, Math.min(maxHeight, startHeight + delta));
+        appState.panes[paneId].height = Math.round(nextHeight);
+        if (nextPane) {
+          const nextPaneId = nextPane.dataset.paneId as PaneId | undefined;
+          if (nextPaneId && isPaneId(nextPaneId)) {
+            appState.panes[nextPaneId].height = Math.round(totalHeight - nextHeight);
+          }
+        }
+        syncPaneDom();
+      };
+      const onUp = () => {
+        persistPaneState();
+        resizer.removeEventListener("pointermove", onMove);
+        resizer.removeEventListener("pointerup", onUp);
+        resizer.removeEventListener("pointercancel", onUp);
+      };
+      resizer.addEventListener("pointermove", onMove);
+      resizer.addEventListener("pointerup", onUp);
+      resizer.addEventListener("pointercancel", onUp);
+    });
+  });
+
+  syncPaneDom();
+  renderPanelsMenu();
+}
+
+function nextVisiblePane(paneId: PaneId): HTMLElement | null {
+  const index = PANE_DEFS.findIndex(pane => pane.id === paneId);
+  for (const candidate of PANE_DEFS.slice(index + 1)) {
+    const state = appState.panes[candidate.id];
+    if (!state.visible || state.collapsed) {
+      continue;
+    }
+    return document.querySelector<HTMLElement>(`[data-pane-id="${candidate.id}"]`);
+  }
+  return null;
+}
+
+function readPaneState(): PaneState {
+  const fallback = defaultPaneState();
+  try {
+    const raw = window.localStorage.getItem(SIDEBAR_PANES_KEY);
+    if (!raw) {
+      return fallback;
+    }
+    const parsed = JSON.parse(raw) as Partial<PaneState>;
+    for (const pane of PANE_DEFS) {
+      const value = parsed[pane.id];
+      if (!value || typeof value !== "object") {
+        continue;
+      }
+      fallback[pane.id] = {
+        visible: typeof value.visible === "boolean" ? value.visible : fallback[pane.id].visible,
+        collapsed: typeof value.collapsed === "boolean" ? value.collapsed : fallback[pane.id].collapsed,
+        height: typeof value.height === "number" && Number.isFinite(value.height) ? value.height : null,
+      };
+    }
+  } catch {
+    return fallback;
+  }
+  return fallback;
+}
+
+function defaultPaneState(): PaneState {
+  return {
+    "change-overview": { visible: true, collapsed: false, height: 210 },
+    files: { visible: true, collapsed: false, height: null },
+    "git-log": { visible: true, collapsed: false, height: 120 },
+  };
+}
+
+function persistPaneState() {
+  try {
+    window.localStorage.setItem(SIDEBAR_PANES_KEY, JSON.stringify(appState.panes));
+  } catch {
+    // Ignore storage failures (private mode, quota, etc.).
+  }
+}
+
+function syncPaneDom() {
+  const growPaneId = paneIdToGrow();
+  for (const pane of PANE_DEFS) {
+    const element = document.querySelector<HTMLElement>(`[data-pane-id="${pane.id}"]`);
+    if (!element) {
+      continue;
+    }
+    const state = appState.panes[pane.id];
+    element.hidden = !state.visible;
+    element.classList.toggle("is-collapsed", state.collapsed);
+    if (state.height && !state.collapsed) {
+      element.style.flex = `${pane.id === growPaneId ? 1 : 0} 1 ${state.height}px`;
+    } else {
+      element.style.removeProperty("flex");
+    }
+    const button = element.querySelector<HTMLButtonElement>("[data-pane-collapse]");
+    if (button) {
+      button.textContent = state.collapsed ? "+" : "−";
+      button.setAttribute("aria-label", `${state.collapsed ? "Expand" : "Collapse"} ${pane.label}`);
+    }
+  }
+}
+
+function paneIdToGrow(): PaneId | null {
+  const filesState = appState.panes.files;
+  if (filesState.visible && !filesState.collapsed) {
+    return "files";
+  }
+  const visible = PANE_DEFS.filter(pane => {
+    const state = appState.panes[pane.id];
+    return state.visible && !state.collapsed;
+  });
+  return visible.at(-1)?.id ?? null;
+}
+
+let paneNormalizationFrame = 0;
+
+function schedulePaneHeightNormalization() {
+  if (paneNormalizationFrame !== 0) {
+    window.cancelAnimationFrame(paneNormalizationFrame);
+  }
+  paneNormalizationFrame = window.requestAnimationFrame(() => {
+    paneNormalizationFrame = 0;
+    normalizePaneHeightsToStack();
+  });
+}
+
+function normalizePaneHeightsToStack() {
+  const stack = document.querySelector<HTMLElement>(".pane-stack");
+  if (!stack) {
+    return;
+  }
+
+  const visibleExpanded = PANE_DEFS
+    .map(pane => ({
+      id: pane.id,
+      element: document.querySelector<HTMLElement>(`[data-pane-id="${pane.id}"]`),
+      state: appState.panes[pane.id],
+    }))
+    .filter((pane): pane is { id: PaneId; element: HTMLElement; state: PaneState[PaneId] } =>
+      Boolean(pane.element && pane.state.visible && !pane.state.collapsed),
+    );
+
+  if (visibleExpanded.length === 0) {
+    return;
+  }
+
+  const collapsedHeight = PANE_DEFS.reduce((sum, pane) => {
+    const state = appState.panes[pane.id];
+    if (!state.visible || !state.collapsed) {
+      return sum;
+    }
+    const element = document.querySelector<HTMLElement>(`[data-pane-id="${pane.id}"]`);
+    return sum + (element?.getBoundingClientRect().height ?? 0);
+  }, 0);
+  const availableHeight = Math.max(0, stack.clientHeight - collapsedHeight);
+  if (availableHeight <= 0) {
+    return;
+  }
+
+  const minHeight = Math.min(72, Math.floor(availableHeight / visibleExpanded.length));
+  const heights = new Map<PaneId, number>();
+  for (const pane of visibleExpanded) {
+    heights.set(pane.id, Math.max(minHeight, pane.state.height ?? pane.element.getBoundingClientRect().height));
+  }
+
+  const total = Array.from(heights.values()).reduce((sum, height) => sum + height, 0);
+  if (total > availableHeight) {
+    const scale = availableHeight / total;
+    for (const [paneId, height] of heights) {
+      heights.set(paneId, Math.max(minHeight, Math.floor(height * scale)));
+    }
+  }
+
+  let normalizedTotal = Array.from(heights.values()).reduce((sum, height) => sum + height, 0);
+  const growPaneId = paneIdToGrow() ?? visibleExpanded.at(-1)?.id;
+  if (growPaneId && normalizedTotal < availableHeight) {
+    heights.set(growPaneId, (heights.get(growPaneId) ?? minHeight) + (availableHeight - normalizedTotal));
+    normalizedTotal = availableHeight;
+  }
+
+  for (const pane of visibleExpanded) {
+    const height = heights.get(pane.id) ?? minHeight;
+    pane.state.height = Math.round(height);
+    pane.element.style.flex = `0 0 ${Math.round(height)}px`;
+  }
+}
+
+function renderPanelsMenu() {
+  panelsMenuElement.innerHTML = PANE_DEFS.map(pane => {
+    const checked = appState.panes[pane.id].visible ? " checked" : "";
+    return `
+      <label class="panel-option">
+        <input type="checkbox" value="${escapeHtmlAttribute(pane.id)}"${checked} />
+        <span>${escapeHtml(pane.label)}</span>
+      </label>
+    `;
+  }).join("");
+}
+
+function isPaneId(value: string): value is PaneId {
+  return PANE_DEFS.some(pane => pane.id === value);
+}
+
+function renderChangeOverview() {
+  if (appState.repositories.length === 0) {
+    changeOverviewElement.innerHTML = `<div class="pane-empty">Repository data is unavailable.</div>`;
+    return;
+  }
+
+  changeOverviewElement.innerHTML = appState.repositories
+    .map(repository => {
+      const meta = repository.metadata;
+      if (meta.status !== "git" || repository.reviewLoad.status !== "available") {
+        return `
+          <section class="review-repo">
+            <h3>${escapeHtml(repository.label)}</h3>
+            <p class="pane-empty">${escapeHtml(meta.message ?? repository.reviewLoad.message ?? "No git repository is available.")}</p>
+          </section>
+        `;
+      }
+
+      const load = repository.reviewLoad;
+      const baseLabel =
+        load.base.ref && load.base.mode !== "dirty-worktree-only"
+          ? `${load.base.ref} (${baseModeLabel(load.base.mode)})`
+          : baseModeLabel(load.base.mode);
+      const drivers = load.drivers.length > 0
+        ? load.drivers.filter(driver => driver.kind !== "mechanical")
+        : [];
+      const visibleDrivers = drivers.length > 0
+        ? `<ul class="score-drivers">${drivers.map(renderDriver).join("")}</ul>`
+        : "";
+      const warnings = load.settingsWarnings.map(warning => `<div class="config-warning">${escapeHtml(warning)}</div>`).join("");
+      const ignored = load.ignoredFiles.length > 0
+        ? `<div class="ignored-summary">${load.ignoredFiles.length} ignored file${load.ignoredFiles.length === 1 ? "" : "s"} excluded</div>`
+        : "";
+
+      return `
+        <section class="review-repo">
+          <h3>${escapeHtml(repository.label)}</h3>
+          <dl class="repo-facts">
+            <div><dt>Branch</dt><dd>${escapeHtml(meta.branch ?? `detached ${meta.commitShort ?? ""}`.trim())}</dd></div>
+            <div><dt>Commit</dt><dd>${escapeHtml(meta.commitShort ?? "unknown")}</dd></div>
+            <div><dt>Status</dt><dd>${meta.dirty ? "dirty" : "clean"}</dd></div>
+            <div><dt>Base</dt><dd>${escapeHtml(baseLabel)}</dd></div>
+          </dl>
+          <button
+            type="button"
+            class="burden-meter is-${escapeHtmlAttribute(load.level)}"
+            data-review-score-repository-id="${escapeHtmlAttribute(repository.id)}"
+            aria-label="Show review burden score explanation for ${escapeHtmlAttribute(repository.label)}"
+            title="Show score explanation"
+          >
+            <span>${escapeHtml(capitalize(load.level))} review burden</span>
+            <strong>${load.score}</strong>
+          </button>
+          ${warnings}
+          ${ignored}
+          ${visibleDrivers}
+        </section>
+      `;
+    })
+    .join("");
+}
+
+function renderDriver(driver: RepositoryReviewSnapshot["reviewLoad"]["drivers"][number]): string {
+  const score = driver.score > 0 ? `+${driver.score}` : String(driver.score);
+  const files = driver.files.length > 0
+    ? `<span class="driver-files">${escapeHtml(driver.files.slice(0, 3).join(", "))}${driver.files.length > 3 ? "…" : ""}</span>`
+    : "";
+  return `
+    <li class="score-driver is-${escapeHtmlAttribute(driver.kind)}">
+      <span class="driver-main"><strong>${escapeHtml(driver.label)}</strong><span>${escapeHtml(driver.detail)}</span>${files}</span>
+      <code>${escapeHtml(score)}</code>
+    </li>
+  `;
+}
+
+function renderGitLog() {
+  gitLogLimitElement.value = String(appState.gitLogLimit);
+
+  if (appState.repositories.length === 0) {
+    gitLogElement.innerHTML = `<div class="pane-empty">No commit log available.</div>`;
+    return;
+  }
+
+  gitLogElement.innerHTML = appState.repositories.map(repository => {
+    if (repository.metadata.status !== "git") {
+      return `
+        <section class="git-log-group">
+          <h3>${escapeHtml(repository.label)}</h3>
+          <p class="pane-empty">No git log for this watched root.</p>
+        </section>
+      `;
+    }
+    const commits = repository.commitLog.slice(0, appState.gitLogLimit);
+    if (commits.length === 0) {
+      return `
+        <section class="git-log-group">
+          <h3>${escapeHtml(repository.label)}</h3>
+          <p class="pane-empty">No commits found.</p>
+        </section>
+      `;
+    }
+    return `
+      <section class="git-log-group">
+        <h3>${escapeHtml(repository.label)}</h3>
+        <p class="git-log-count">${commits.length} of ${repository.commitLog.length} commits</p>
+        <ol class="commit-log">
+          ${commits.map(commit => `
+            <li>
+              <button
+                type="button"
+                data-repository-id="${escapeHtmlAttribute(repository.id)}"
+                data-commit-sha="${escapeHtmlAttribute(commit.sha)}"
+                title="Show full commit message"
+              >
+                <code>${escapeHtml(commit.sha)}</code>
+                <span>${escapeHtml(commit.subject)}</span>
+                <small>${escapeHtml([commit.author, commit.relativeTime].filter(Boolean).join(" · "))}</small>
+              </button>
+            </li>
+          `).join("")}
+        </ol>
+      </section>
+    `;
+  }).join("");
+}
+
+function baseModeLabel(mode: RepositoryReviewSnapshot["reviewLoad"]["base"]["mode"]): string {
+  switch (mode) {
+    case "configured":
+      return "configured base";
+    case "remote-default":
+      return "remote default";
+    case "fallback":
+      return "fallback base";
+    case "dirty-worktree-only":
+      return "dirty worktree only";
+    case "unavailable":
+      return "base unavailable";
+  }
+}
+
+function capitalize(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 // Directories default to closed (matching VS Code / Finder / GitHub conventions).
@@ -968,6 +1713,65 @@ function renderBuildBadge(build: BuildSummary) {
 function initSidebarCollapse() {
   const stored = readCollapsedPreference();
   setSidebarCollapsed(stored, { persist: false });
+}
+
+function initSidebarWidth() {
+  setSidebarWidth(readSidebarWidthPreference(), { persist: false });
+
+  sidebarResizerElement.addEventListener("pointerdown", event => {
+    if (appShellElement.classList.contains("is-sidebar-collapsed")) {
+      return;
+    }
+
+    event.preventDefault();
+    sidebarResizerElement.setPointerCapture(event.pointerId);
+    document.body.classList.add("is-resizing-sidebar");
+
+    const onMove = (moveEvent: PointerEvent) => {
+      setSidebarWidth(moveEvent.clientX);
+    };
+    const onUp = () => {
+      document.body.classList.remove("is-resizing-sidebar");
+      sidebarResizerElement.removeEventListener("pointermove", onMove);
+      sidebarResizerElement.removeEventListener("pointerup", onUp);
+      sidebarResizerElement.removeEventListener("pointercancel", onUp);
+    };
+
+    sidebarResizerElement.addEventListener("pointermove", onMove);
+    sidebarResizerElement.addEventListener("pointerup", onUp);
+    sidebarResizerElement.addEventListener("pointercancel", onUp);
+  });
+}
+
+function readSidebarWidthPreference(): number {
+  try {
+    const value = Number(window.localStorage.getItem(SIDEBAR_WIDTH_KEY));
+    if (Number.isFinite(value)) {
+      return clampSidebarWidth(value);
+    }
+  } catch {
+    // Ignore storage failures (private mode, quota, etc.).
+  }
+  return 300;
+}
+
+function setSidebarWidth(width: number, options: { persist?: boolean } = {}) {
+  const nextWidth = clampSidebarWidth(width);
+  document.documentElement.style.setProperty("--sidebar-width", `${nextWidth}px`);
+
+  if (options.persist === false) {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(nextWidth));
+  } catch {
+    // Ignore storage failures (private mode, quota, etc.).
+  }
+}
+
+function clampSidebarWidth(width: number): number {
+  return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, Math.round(width)));
 }
 
 function readCollapsedPreference(): boolean {

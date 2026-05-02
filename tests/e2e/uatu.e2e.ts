@@ -38,6 +38,20 @@ async function waitForPreviewToSettle(page: Page): Promise<void> {
   }
 }
 
+function sidebarPanesFitVisibleHeight(page: Page): () => Promise<boolean> {
+  return async () =>
+    page.evaluate(() => {
+      const body = document.querySelector<HTMLElement>(".sidebar-body");
+      const panes = Array.from(document.querySelectorAll<HTMLElement>(".sidebar-pane:not([hidden])"));
+      if (!body || panes.length === 0) {
+        return false;
+      }
+      const bodyBox = body.getBoundingClientRect();
+      const lastPaneBox = panes.at(-1)?.getBoundingClientRect();
+      return Boolean(lastPaneBox && lastPaneBox.bottom <= bodyBox.bottom + 1);
+    });
+}
+
 
 test("renders GFM content and Mermaid diagrams", async ({ page }) => {
   await page.getByRole("button", { name: "diagram.md" }).click();
@@ -152,6 +166,160 @@ test("sidebar collapse preference persists across reloads", async ({ page }) => 
 
   await page.locator("#sidebar-expand").click();
   await expect(page.locator(".app-shell")).not.toHaveClass(/is-sidebar-collapsed/);
+});
+
+test("sidebar opens with Change Overview, Files, and Git Log panes", async ({ page }) => {
+  await expect(page.locator('[data-pane-id="change-overview"]')).toBeVisible();
+  await expect(page.locator('[data-pane-id="files"]')).toBeVisible();
+  await expect(page.locator('[data-pane-id="git-log"]')).toBeVisible();
+  await expect(page.locator('[data-pane-id="files"] #tree')).toBeVisible();
+  await expect.poll(sidebarPanesFitVisibleHeight(page)).toBe(true);
+  await expect(page.locator(".sidebar-body")).toHaveCSS("overflow-y", "hidden");
+  const filesHeight = (await page.locator('[data-pane-id="files"]').boundingBox())?.height ?? 0;
+  const gitLogHeight = (await page.locator('[data-pane-id="git-log"]').boundingBox())?.height ?? 0;
+  expect(filesHeight).toBeGreaterThan(gitLogHeight);
+  await page.locator('[data-pane-id="files"]').getByRole("button", { name: "diagram.md" }).click();
+  await expect(page.locator("#preview-path")).toHaveText("diagram.md");
+});
+
+test("sidebar panes can be hidden, restored, resized, and survive whole-sidebar collapse", async ({ page }) => {
+  const overviewPane = page.locator('[data-pane-id="change-overview"]');
+  await expect(overviewPane).toBeVisible();
+
+  await overviewPane.getByRole("button", { name: "Hide Change Overview" }).click();
+  await expect(overviewPane).toBeHidden();
+
+  await page.locator("#panels-toggle").click();
+  await page.locator('#panels-menu label:has-text("Change Overview") input').check();
+  await expect(overviewPane).toBeVisible();
+
+  const before = (await overviewPane.boundingBox())?.height ?? 0;
+  const resizer = page.locator('[data-pane-resizer="change-overview"]');
+  const box = await resizer.boundingBox();
+  expect(box).not.toBeNull();
+  await page.mouse.move((box?.x ?? 0) + 4, (box?.y ?? 0) + 3);
+  await page.mouse.down();
+  await page.mouse.move((box?.x ?? 0) + 4, (box?.y ?? 0) + 45);
+  await page.mouse.up();
+  const after = (await overviewPane.boundingBox())?.height ?? 0;
+  expect(after).toBeGreaterThan(before + 20);
+  await expect.poll(sidebarPanesFitVisibleHeight(page)).toBe(true);
+
+  await page.locator("#sidebar-collapse").click();
+  await expect(page.locator(".app-shell")).toHaveClass(/is-sidebar-collapsed/);
+  await page.locator("#sidebar-expand").click();
+  await expect(overviewPane).toBeVisible();
+
+  const sidebarBefore = (await page.locator(".sidebar").boundingBox())?.width ?? 0;
+  const sidebarResizerBox = await page.locator("#sidebar-resizer").boundingBox();
+  expect(sidebarResizerBox).not.toBeNull();
+  await page.mouse.move((sidebarResizerBox?.x ?? 0) + 3, (sidebarResizerBox?.y ?? 0) + 20);
+  await page.mouse.down();
+  await page.mouse.move((sidebarResizerBox?.x ?? 0) + 85, (sidebarResizerBox?.y ?? 0) + 20);
+  await page.mouse.up();
+  const sidebarAfter = (await page.locator(".sidebar").boundingBox())?.width ?? 0;
+  expect(sidebarAfter).toBeGreaterThan(sidebarBefore + 50);
+
+  await page.reload();
+  await expect(overviewPane).toBeVisible();
+  const reloaded = (await overviewPane.boundingBox())?.height ?? 0;
+  expect(reloaded).toBeGreaterThan(before + 20);
+  const sidebarReloaded = (await page.locator(".sidebar").boundingBox())?.width ?? 0;
+  expect(sidebarReloaded).toBeGreaterThan(sidebarBefore + 50);
+});
+
+test("Change Overview and Git Log render git-backed review load with configured explanations", async ({ page, request }) => {
+  await request.post("/__e2e/reset", {
+    data: {
+      git: true,
+      uatuConfig: {
+        review: {
+          baseRef: "main",
+          thresholds: { medium: 8, high: 20 },
+          riskAreas: [{ label: "Auth", paths: ["src/auth/**"], score: 12, perFile: 1, max: 20 }],
+          supportAreas: [{ label: "Docs", paths: ["**/*.md"], score: -2, maxDiscount: 4 }],
+          ignoreAreas: [{ label: "Generated", paths: ["dist/**"] }],
+        },
+      },
+      dirty: {
+        "src/auth/session.ts": "export const changed = true;\n",
+        "dist/generated.js": "generated\n",
+      },
+    },
+  });
+  await page.goto("/");
+
+  const overview = page.locator("#change-overview");
+  await expect(overview).toContainText("feature/review-load");
+  await expect(overview).toContainText("configured base");
+  await expect(overview).toContainText("review burden");
+  await expect(overview).toContainText("Auth");
+  await expect(overview).toContainText("Generated");
+  await expect(overview).toContainText("src/auth/session.ts");
+  await expect(overview).not.toContainText("Changed files");
+  await expect(overview).not.toContainText("Touched lines");
+  await expect(overview).not.toContainText("Diff hunks");
+  await expect(overview).not.toContainText("Directory spread");
+
+  await overview.locator("button[title='Show score explanation']").click();
+  await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
+  await expect.poll(() => new URL(page.url()).searchParams.has("reviewScore")).toBe(true);
+  await expect(page.locator("#preview-title")).toHaveText("Review burden score");
+  await expect(page.locator("#preview")).toContainText("additive review-burden index");
+  await expect(page.locator("#preview")).toContainText("Mechanical Statistics");
+  await expect(page.locator("#preview")).toContainText("Changed files");
+  await expect(page.locator("#preview h2", { hasText: "Changed Files" })).toHaveCount(0);
+  await expect(page.locator("#preview")).toContainText("High");
+  await expect(page.locator(".score-preview-total")).toHaveCSS("background-color", "rgb(255, 241, 240)");
+  await expect(page.locator(".score-preview dl .is-low")).toHaveCSS("background-color", "rgb(239, 250, 242)");
+  await expect(page.locator(".score-preview dl .is-medium")).toHaveCSS("background-color", "rgb(255, 248, 220)");
+  await expect(page.locator(".score-preview dl .is-high")).toHaveCSS("background-color", "rgb(255, 241, 240)");
+  await expect(page.locator("#preview")).not.toContainText("Commits");
+  const diffHunksHelp = page.locator(".score-term-help", { hasText: "?" }).filter({ has: page.locator(".score-term-tooltip", { hasText: "separate changed spots" }) });
+  await diffHunksHelp.hover();
+  await expect(diffHunksHelp.locator(".score-term-tooltip")).toBeVisible();
+  const directorySpreadHelp = page.locator(".score-term-help", { has: page.locator(".score-term-tooltip", { hasText: "top-level parts of the project" }) });
+  await directorySpreadHelp.hover();
+  await expect(directorySpreadHelp.locator(".score-term-tooltip")).toBeVisible();
+  const scoreUrl = page.url();
+  await page.reload();
+  await expect(page.locator("#preview-title")).toHaveText("Review burden score");
+  expect(page.url()).toBe(scoreUrl);
+  await fs.writeFile(workspacePath("README.md"), "# Uatu\n\nScore view should stay open.\n", "utf8");
+  await expect(page.locator("#preview-title")).toHaveText("Review burden score");
+  await expect.poll(() => new URL(page.url()).searchParams.has("reviewScore")).toBe(true);
+
+  const gitLog = page.locator("#git-log");
+  await expect(gitLog).toContainText("add feature doc");
+  await expect(gitLog.locator(".commit-log code").first()).toHaveText(/[0-9a-f]{7,12}/);
+  await expect(page.locator("#git-log-limit")).toHaveValue("25");
+  await page.locator("#git-log-limit").selectOption("10");
+  await expect(gitLog.locator(".commit-log button")).toHaveCount(10);
+  await expect(gitLog).toHaveCSS("overflow-y", "auto");
+
+  const featureCommit = gitLog.locator(".commit-log button", { hasText: "add feature doc" });
+  await page.locator("#git-log-limit").selectOption("25");
+  await featureCommit.click();
+  await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator("#preview-title")).toHaveText("add feature doc");
+  await expect(page.locator("#preview")).toContainText("Full commit message body for review-load hover.");
+});
+
+test("Change Overview displays non-git and invalid settings fallback states", async ({ page, request }) => {
+  await request.post("/__e2e/reset", { data: { nonGit: true } });
+  await page.goto("/");
+  await expect(page.locator("#change-overview")).toContainText("No git repository is available");
+
+  await request.post("/__e2e/reset", {
+    data: {
+      git: true,
+      extras: { ".uatu.json": "{ nope" },
+      dirty: { "README.md": "# Changed\n" },
+    },
+  });
+  await page.goto("/");
+  await expect(page.locator("#change-overview")).toContainText("Invalid .uatu.json");
+  await expect(page.locator("#change-overview")).toContainText("review burden");
 });
 
 test("pin toggle narrows the sidebar to the current document and ignores changes elsewhere", async ({ page }) => {

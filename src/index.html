@@ -40,16 +40,77 @@
 
         <div class="sidebar-meta">
           <span id="document-count">0 files</span>
+          <div class="panels-control">
+            <button
+              id="panels-toggle"
+              class="mini-button"
+              type="button"
+              aria-expanded="false"
+              aria-controls="panels-menu"
+              title="Show or hide sidebar panes"
+            >
+              Panels
+            </button>
+            <div id="panels-menu" class="panels-menu" hidden></div>
+          </div>
         </div>
 
-        <div class="sidebar-body">
-          <div id="tree" class="tree"></div>
+        <div class="sidebar-body pane-stack">
+          <section class="sidebar-pane" data-pane-id="change-overview">
+            <header class="pane-header">
+              <h2>Change Overview</h2>
+              <div class="pane-actions">
+                <button class="pane-action" type="button" data-pane-collapse="change-overview" aria-label="Collapse Change Overview" title="Collapse pane">−</button>
+                <button class="pane-action" type="button" data-pane-hide="change-overview" aria-label="Hide Change Overview" title="Hide pane">×</button>
+              </div>
+            </header>
+            <div id="change-overview" class="pane-body"></div>
+            <div class="pane-resizer" data-pane-resizer="change-overview" role="separator" aria-orientation="horizontal" aria-label="Resize Change Overview"></div>
+          </section>
+          <section class="sidebar-pane" data-pane-id="files">
+            <header class="pane-header">
+              <h2>Files</h2>
+              <div class="pane-actions">
+                <button class="pane-action" type="button" data-pane-collapse="files" aria-label="Collapse Files" title="Collapse pane">−</button>
+                <button class="pane-action" type="button" data-pane-hide="files" aria-label="Hide Files" title="Hide pane">×</button>
+              </div>
+            </header>
+            <div class="pane-body">
+              <div id="tree" class="tree"></div>
+            </div>
+            <div class="pane-resizer" data-pane-resizer="files" role="separator" aria-orientation="horizontal" aria-label="Resize Files"></div>
+          </section>
+          <section class="sidebar-pane" data-pane-id="git-log">
+            <header class="pane-header">
+              <h2>Git Log</h2>
+              <div class="pane-actions">
+                <label class="pane-select-label" for="git-log-limit">History</label>
+                <select id="git-log-limit" class="pane-select" title="Commit history length">
+                  <option value="10">10</option>
+                  <option value="25" selected>25</option>
+                  <option value="50">50</option>
+                  <option value="100">100</option>
+                </select>
+                <button class="pane-action" type="button" data-pane-collapse="git-log" aria-label="Collapse Git Log" title="Collapse pane">−</button>
+                <button class="pane-action" type="button" data-pane-hide="git-log" aria-label="Hide Git Log" title="Hide pane">×</button>
+              </div>
+            </header>
+            <div id="git-log" class="pane-body"></div>
+          </section>
         </div>
 
         <footer class="sidebar-footer">
           <span id="build-badge" class="build-badge" title="Build identifier"></span>
         </footer>
       </aside>
+      <div
+        id="sidebar-resizer"
+        class="sidebar-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize sidebar"
+        title="Resize sidebar"
+      ></div>
 
       <button
         id="sidebar-expand"
