@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { Window } from "happy-dom";
+import { parseHTML } from "linkedom";
 
 import {
   __resetMermaidStateForTests,
@@ -19,12 +19,10 @@ describe("replaceMermaidCodeBlocks", () => {
 });
 
 describe("rendered diagram normalization", () => {
-  let win: Window;
   let doc: Document;
 
   beforeEach(() => {
-    win = new Window();
-    doc = win.document as unknown as Document;
+    doc = parseHTML("<!doctype html><html><body></body></html>").document as unknown as Document;
     __resetMermaidStateForTests();
   });
 
@@ -91,12 +89,10 @@ describe("rendered diagram normalization", () => {
 });
 
 describe("renderMermaidDiagrams theme inputs", () => {
-  let win: Window;
   let doc: Document;
 
   beforeEach(() => {
-    win = new Window();
-    doc = win.document as unknown as Document;
+    doc = parseHTML("<!doctype html><html><body></body></html>").document as unknown as Document;
     __resetMermaidStateForTests();
   });
 

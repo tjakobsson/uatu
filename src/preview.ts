@@ -97,7 +97,9 @@ export function normalizeMermaidSvg(svg: SVGElement): void {
   //
   // Reading `svg.style.maxWidth` is safe; only assigning to `svg.style.*`
   // tripped the Safari "Invalid value for <svg> attribute width=" bug.
-  const intendedMaxWidth = svg.style.maxWidth;
+  // Coalesce to "" because some non-browser DOM impls used in tests return
+  // undefined for unset properties instead of the spec-mandated empty string.
+  const intendedMaxWidth = svg.style.maxWidth ?? "";
   const match = intendedMaxWidth.match(/^([\d.]+)px$/);
   if (match) {
     svg.setAttribute("width", match[1]);
