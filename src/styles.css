@@ -1455,10 +1455,181 @@ h2 {
 }
 
 .preview .mermaid {
-  display: grid;
+  display: flex;
   justify-content: center;
-  overflow-x: auto;
   padding: 1rem 0;
+}
+
+/* Honor Mermaid's intended display size. The trigger shrink-wraps the SVG
+   so each diagram renders at the size the library chose — small flowcharts
+   stay compact, complex diagrams grow, wide flowcharts span the column. The
+   modal viewer is the "look closer" affordance for any diagram. */
+.mermaid-trigger {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: zoom-in;
+  appearance: none;
+  text-align: inherit;
+  color: inherit;
+  font: inherit;
+}
+
+.mermaid-trigger:focus {
+  outline: none;
+}
+
+.mermaid-trigger:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+}
+
+.mermaid-trigger > svg {
+  display: block;
+  /* SVG keeps its `width="W"` attribute (Mermaid's intended display size)
+     so the SVG has an explicit intrinsic width. `max-width: 100%`
+     (`!important` to beat Mermaid's own inline max-width which can exceed
+     the preview column on wide LR flowcharts) caps that on narrow
+     containers, and `height: auto` then recomputes height from viewBox
+     so the aspect ratio is preserved. */
+  max-width: 100% !important;
+  height: auto !important;
+}
+
+.mermaid-trigger-badge {
+  position: absolute;
+  top: 0.4rem;
+  right: 0.4rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  padding: 0;
+  font-size: 0.95rem;
+  line-height: 1;
+  color: var(--text-subtle);
+  background: var(--surface-muted);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.mermaid-trigger:hover .mermaid-trigger-badge,
+.mermaid-trigger:focus-visible .mermaid-trigger-badge {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .mermaid-trigger-badge {
+    opacity: 1;
+  }
+}
+
+.mermaid-viewer {
+  /* Fullscreen modal — use the entire browser canvas. */
+  width: 100vw;
+  height: 100vh;
+  max-width: 100vw;
+  max-height: 100vh;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: #ffffff;
+  color: var(--text-strong);
+  overflow: hidden;
+}
+
+.mermaid-viewer::backdrop {
+  background: rgba(15, 23, 42, 0.55);
+}
+
+.mermaid-viewer-viewport {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  cursor: grab;
+  background: var(--surface-muted);
+  touch-action: none;
+}
+
+.mermaid-viewer-viewport.is-panning {
+  cursor: grabbing;
+}
+
+.mermaid-viewer-stage {
+  /* Anchored at viewport (0,0) so JS-managed translate(tx, ty) scale(s) is
+     the single source of position truth. Earlier we relied on flex centering
+     plus a JS-computed center offset; the two compose and push the stage
+     off-screen for non-square shapes. */
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: inline-block;
+  transform-origin: 0 0;
+  will-change: transform;
+  user-select: none;
+  pointer-events: none;
+}
+
+.mermaid-viewer-stage > svg {
+  display: block;
+  max-width: none;
+  width: auto;
+  height: auto;
+}
+
+.mermaid-viewer-toolbar {
+  position: absolute;
+  bottom: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  gap: 0.25rem;
+  padding: 0.3rem;
+  background: #ffffff;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.18);
+}
+
+.mermaid-viewer-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2rem;
+  height: 2rem;
+  padding: 0 0.6rem;
+  font-size: 1.1rem;
+  line-height: 1;
+  color: var(--text-strong);
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  appearance: none;
+}
+
+.mermaid-viewer-button:hover {
+  background: var(--surface-muted);
+}
+
+.mermaid-viewer-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.mermaid-viewer-close {
+  font-size: 1.3rem;
+  color: var(--text-subtle);
 }
 
 /* AsciiDoc-specific styling. We deliberately do NOT ship Asciidoctor's default

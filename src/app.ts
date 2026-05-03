@@ -1,5 +1,6 @@
 import { fileIconForName } from "./file-icons";
-import { renderMermaidDiagrams, replaceMermaidCodeBlocks } from "./preview";
+import { closeMermaidViewer, ensureMermaidViewer } from "./mermaid-viewer";
+import { renderMermaidDiagrams, replaceMermaidCodeBlocks, type MermaidThemeInputs } from "./preview";
 import {
   buildTreeNodes,
   defaultDocumentId,
@@ -919,6 +920,31 @@ function connectEvents() {
   });
 }
 
+function currentMermaidThemeInputs(): MermaidThemeInputs {
+  // The active UI theme is light today. When the theme system lands, this
+  // returns the inputs that match the active theme so diagrams stay coherent.
+  return { theme: "default" };
+}
+
+function handleMermaidTriggerClick(event: MouseEvent): void {
+  const target = event.target;
+  if (!(target instanceof Element)) {
+    return;
+  }
+  const trigger = target.closest<HTMLButtonElement>("button.mermaid-trigger");
+  if (!trigger || !previewElement.contains(trigger)) {
+    return;
+  }
+  const svg = trigger.querySelector<SVGElement>("svg");
+  if (!svg) {
+    return;
+  }
+  event.preventDefault();
+  ensureMermaidViewer().open({ svg, returnFocusTo: trigger });
+}
+
+previewElement.addEventListener("click", handleMermaidTriggerClick);
+
 async function loadDocument(documentId: string) {
   const response = await fetch(`/api/document?id=${encodeURIComponent(documentId)}`);
 
@@ -935,8 +961,9 @@ async function loadDocument(documentId: string) {
   setPreviewType(payload);
   previewElement.classList.remove("empty");
   setPreviewBase(payload.path);
+  closeMermaidViewer();
   previewElement.innerHTML = replaceMermaidCodeBlocks(payload.html);
-  await renderMermaidDiagrams(previewElement);
+  await renderMermaidDiagrams(previewElement, currentMermaidThemeInputs());
   if (payload.kind === "text") {
     attachLineNumbers(previewElement);
   }
@@ -948,6 +975,7 @@ function renderCommitMessage(
   repository: RepositoryReviewSnapshot,
   commit: RepositoryReviewSnapshot["commitLog"][number],
 ) {
+  closeMermaidViewer();
   previewTitleElement.textContent = commit.subject;
   previewPathElement.textContent = `${repository.label} · ${commit.sha}`;
   clearPreviewType();
@@ -981,6 +1009,7 @@ function renderReviewScoreDetails(repository: RepositoryReviewSnapshot) {
         ? `${mediumDelta} point${Math.abs(mediumDelta) === 1 ? "" : "s"} above the medium threshold`
         : `${load.thresholds.medium - load.score} point${Math.abs(load.thresholds.medium - load.score) === 1 ? "" : "s"} below the medium threshold`;
 
+  closeMermaidViewer();
   previewTitleElement.textContent = "Review burden score";
   previewPathElement.textContent = repository.label;
   clearPreviewType();
@@ -1822,6 +1851,7 @@ window.setInterval(() => {
 }, 1000);
 
 function renderEmptyPreview(title: string, body: string) {
+  closeMermaidViewer();
   previewTitleElement.textContent = title;
   previewPathElement.textContent = body;
   clearPreviewType();
