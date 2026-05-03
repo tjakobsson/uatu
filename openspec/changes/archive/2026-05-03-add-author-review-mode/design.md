@@ -93,6 +93,83 @@ The naming was settled after exploration: "Live" was rejected because it implied
 
 **Rationale**: All affected requirements live in `document-watch-browser`: the Mode control, the Follow behavior, the score label in the `Change Overview` pane, and the startup configuration flags. The score *computation* spec stays exactly as-is.
 
+### D9: Visual differentiation is structural/typographic, not chromatic
+
+**Decision**: To make Mode unmistakably visible without depending on color (theming work will own colors later), the two Modes differ along five non-chromatic axes, all reinforcing the same posture:
+
+1. **Sidebar brand subtitle** — `Codebase Watcher` is replaced by a Mode-aware subtitle: `Authoring session` (Author) or `Review session` (Review). Always visible at the top-left.
+2. **Persistent Mode pill** — A small uppercase pill (`AUTHORING` / `REVIEWING`) sits directly under the brand subtitle. Structural border + neutral background; no accent color.
+3. **Mode-glyph icons in toolbar segments** — The Author segment carries a pencil glyph; the Review segment carries an eye glyph. Reinforces active mode peripherally even when only the toolbar is in view.
+4. **Connection indicator wording and dot animation** — In Author with the channel live, the indicator reads `Online` with a pulsing dot (current behavior). In Review with the channel live, it reads `Reading — auto-refresh paused` with a *steady* dot. The "reading" treatment communicates: connection is live, UI is intentionally still. Reconnecting / connecting states keep their existing wording in both Modes.
+5. **Preview "framed read" treatment** — Review wraps the preview area in a subtle inset border/shadow (a "card" feel for content being studied). Author has no frame; the preview merges with the chrome.
+
+**Rationale**: Five small structural cues are far stronger together than any one of them alone. Each can stand on its own without color and each survives a theme swap. The combination ensures that no matter where the user's eye is — sidebar header, toolbar, preview area, or connection indicator — the active Mode is glanceable.
+
+**Alternatives considered**:
+- *Mode-aware accent color* — strongest visual punch, but explicitly out of scope because the upcoming theming work will own the color palette and this would either fight that work or be undone by it.
+- *Top-of-screen mode banner* — heavier and more intrusive than what's needed; rejected as too "alert"-flavored for a posture toggle.
+- *Mode-aware default pane sizing* — addressed by D12 (per-mode pane catalog with independent persistence); see below.
+
+### D10: Mode toggle lives in the sidebar, not the preview toolbar
+
+**Decision**: The Mode toggle is rendered in a dedicated row at the top of the sidebar, directly under the brand block. It is removed from the preview toolbar.
+
+**Rationale**: Mode is a session-level posture; Follow (and previously Pin) are document-level mechanics. Mixing them in one toolbar implied parity that doesn't exist. Putting Mode in the sidebar header anchors it next to the other Mode-aware affordances that already live there (subtitle, pill, segments) and removes the implicit "they're all the same kind of thing" framing of the preview toolbar.
+
+### D11: Remove the Pin UI affordance
+
+**Decision**: The in-UI Pin/Unpin chip and its handlers are removed entirely. The server-side `Scope` mechanism stays intact so `uatu watch FILE.md` continues to support single-file watching from the CLI.
+
+**Rationale**: Pin was a workaround for "I want to focus on this one file while a folder watch is running" — but that's exactly what Mode + the upcoming workflow features will own properly. The chip's coexistence with the new Mode toggle would have read as duplicate posture controls. Single-file CLI watch covers the remaining "narrow scope to one file" use case for now.
+
+**Migration**: User scripts that depended on the in-UI pin have no replacement in this change; they should switch to single-file CLI watch (`uatu watch path/to/file.md`) for the same effective scope.
+
+### D12: Per-mode pane catalog with independent persistence
+
+**Decision**: Pane composition is Mode-aware. The pane catalog and per-pane state (visibility, collapse, height) are stored separately for each Mode under `uatu:sidebar-panes:author` and `uatu:sidebar-panes:review`. Switching Mode reads the persisted state for the destination Mode and re-renders the sidebar.
+
+**Catalog**:
+- **Author** — `Change Overview`, `Files`. Git Log is intentionally absent: Author is "what I'm making now"; historical commit context belongs in Review.
+- **Review** — `Change Overview`, `Files`, `Git Log`.
+
+The panels-restore menu only lists panes that belong to the current Mode's catalog, so a hidden pane in Author cannot be "restored" into a Review-only pane and vice versa.
+
+**Rationale**: Different postures want different surfaces. Per-mode persistence means each Mode "remembers its layout" — a user who collapses `Files` in Review keeps their compact Review layout while still getting a comfortable Files pane in Author. The earlier deferred concern in D9 ("changing layout under the user is disorienting") is addressed here by being explicit about it: when you flip Mode, layout changing is exactly the point — it's part of changing posture.
+
+### D13: Files pane offers an All/Changed toggle when git is available
+
+**Decision**: When the watched root is git-backed and the review-load result is `available`, the `Files` pane exposes a small two-segment toggle (`All` / `Changed`) in the pane header. The default view is **All** (the existing full-tree listing). When the user switches to **Changed**, the pane lists `reviewLoad.changedFiles` with a status glyph (`M`/`A`/`D`/`R`), filename, and `+adds -dels` summary; renames render `oldPath → path`. When git is unavailable or the review-load result is non-git/unavailable, the toggle is hidden and the pane renders the existing full tree.
+
+The view choice persists separately per Mode under `uatu:files-view:{mode}` so each Mode remembers what the user prefers there.
+
+**Rationale**: The original design (Changed-only when git is available) cleanly captured "the working list is what changed", but it broke a load-bearing capability: cross-document navigation through the sidebar to *any* file in the project, not just changed ones. Tests exposed this immediately — every test that clicked a fixture file (e.g. `README.md`) failed because the fixture lives inside the uatu git repo, the changed-files filter activated, and unchanged fixture files were no longer listed.
+
+The toggle keeps the new view available without removing the existing one. Defaulting to **All** preserves all existing behavior; **Changed** is an opt-in lens that becomes useful precisely when the user wants to focus on a Change.
+
+**Edge cases**:
+- *Toggle hidden when git unavailable* — there's nothing to toggle to.
+- *Deleted files* in Changed view render with the `D` glyph and a non-clickable treatment.
+- *Renamed files* in Changed view show both old and new paths.
+- *Empty changed set* — Changed view renders an empty state ("No changes against the base"); user can flip to All if they want.
+- *Cross-document navigation to an unchanged file* still works in either view via URLs and in-document links. In Changed view the destination just isn't listed in the sidebar.
+
+**Alternatives considered**:
+- *Default = Changed when git available* — original design; breaks tests and the "browse the whole repo" flow.
+- *Two separate panes (`Changed` and `All Files`)* — duplicates the listing and consumes more vertical space.
+- *Auto-switch to Changed when changedFiles is non-empty* — magic that surprises users; toggle gives them control.
+
+### D14: Folder icons in the fallback file tree
+
+**Decision**: Directory rows in the non-git fallback tree carry a folder glyph next to the directory name, matching the existing file glyphs.
+
+**Rationale**: The non-git fallback is the only path that still renders a hierarchical tree. With files already iconified and folders not, the tree felt visually thin. A folder glyph brings parity and makes the tree feel intentional rather than like an unstyled `<details>`.
+
+### D15: Slightly wider default sidebar
+
+**Decision**: Bump `--sidebar-width` from 300px to 360px. Existing users who customized their sidebar width keep their persisted value via localStorage.
+
+**Rationale**: The new sidebar header carries more content than before — brand row + subtitle + Mode pill + Mode toggle row. 300px was tight even before; with the additions it crowds. 360px gives the new affordances room to breathe without making the preview noticeably narrower.
+
 ## Risks / Trade-offs
 
 - **Risk**: Reviewers in Review mode wonder "why isn't the preview updating?" and don't connect it to Mode. → **Mitigation**: render the Follow control as visibly disabled with a tooltip naming Mode as the cause, instead of hiding it.

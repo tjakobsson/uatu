@@ -11,11 +11,14 @@ import { loadIgnoreMatcher, type IgnoreMatcher } from "./ignore-engine";
 import { decodeHtmlEntities, renderCodeAsHtml, renderMarkdownToHtml } from "./markdown";
 import { collectRepositorySnapshots, safeGit } from "./review-load";
 import {
+  DEFAULT_MODE,
   defaultDocumentId,
   findDocument,
   hasDocument,
+  isMode,
   type BuildSummary,
   type DocumentMeta,
+  type Mode,
   type RepositoryReviewSnapshot,
   type RootGroup,
   type Scope,
@@ -109,6 +112,10 @@ export type WatchOptions = {
   port: number;
   respectGitignore: boolean;
   force: boolean;
+  // When the user passes `--mode=author|review`, this is set and takes
+  // precedence over the SPA's persisted localStorage preference at boot.
+  // Undefined means "no startup override; let the browser decide".
+  startupMode?: Mode;
 };
 
 export type ParsedCommand =
@@ -133,7 +140,7 @@ export function usageText(build: BuildInfo = BUILD): string {
   return `uatu ${formatBuildIdentifier(build)}
 
 Usage:
-  uatu watch [PATH...] [--force] [--no-open] [--no-follow] [--no-gitignore] [--port <PORT>]
+  uatu watch [PATH...] [--force] [--no-open] [--no-follow] [--no-gitignore] [--mode <MODE>] [--port <PORT>]
   uatu --help
   uatu --version
 
@@ -142,6 +149,7 @@ Options:
   --no-follow      Start with follow mode disabled
   --no-gitignore   Do not honor .gitignore patterns when indexing files
   --force          Watch non-git paths anyway; indexing may be slow
+  --mode <MODE>    Start in 'author' or 'review' mode (default: persisted browser preference, or 'author')
   -p, --port       Bind the local server to a specific port
   -h, --help       Show help
   -V, --version    Show version
@@ -212,6 +220,7 @@ export function parseCommand(argv: string[]): ParsedCommand {
   let port = DEFAULT_PORT;
   let respectGitignore = DEFAULT_RESPECT_GITIGNORE;
   let force = false;
+  let startupMode: Mode | undefined;
   const rootPaths: string[] = [];
 
   for (let index = 1; index < argv.length; index += 1) {
@@ -261,11 +270,36 @@ export function parseCommand(argv: string[]): ParsedCommand {
       continue;
     }
 
+    if (arg === "--mode" || arg.startsWith("--mode=")) {
+      let value: string | undefined;
+      if (arg === "--mode") {
+        value = argv[index + 1];
+        if (!value) {
+          throw new Error("missing value for --mode");
+        }
+        index += 1;
+      } else {
+        value = arg.slice("--mode=".length);
+      }
+      if (!isMode(value)) {
+        throw new Error(`invalid --mode value: '${value}' (expected 'author' or 'review')`);
+      }
+      startupMode = value;
+      continue;
+    }
+
     if (arg.startsWith("-")) {
       throw new Error(`unknown flag: ${arg}`);
     }
 
     rootPaths.push(arg);
+  }
+
+  // Review mode forces follow off — the UI gates Follow on Mode, and the
+  // session-level follow flag is the source of truth that's broadcast to the
+  // SPA at boot.
+  if (startupMode === "review") {
+    follow = false;
   }
 
   return {
@@ -277,6 +311,7 @@ export function parseCommand(argv: string[]): ParsedCommand {
       port,
       respectGitignore,
       force,
+      startupMode,
     },
   };
 }
@@ -741,6 +776,7 @@ export function createStatePayload(
   changedId: string | null = null,
   scope: Scope = { kind: "folder" },
   repositories: RepositoryReviewSnapshot[] = [],
+  startupMode?: Mode,
 ): StatePayload {
   return {
     roots,
@@ -751,6 +787,7 @@ export function createStatePayload(
     generatedAt: Date.now(),
     build: BUILD_SUMMARY,
     scope,
+    ...(startupMode ? { startupMode } : {}),
   };
 }
 
@@ -785,6 +822,7 @@ export async function openBrowser(url: string): Promise<boolean> {
 export type WatchSessionOptions = {
   usePolling?: boolean;
   respectGitignore?: boolean;
+  startupMode?: Mode;
 };
 
 export function createWatchSession(
@@ -793,6 +831,7 @@ export function createWatchSession(
   options: WatchSessionOptions = {},
 ) {
   const respectGitignore = options.respectGitignore ?? DEFAULT_RESPECT_GITIGNORE;
+  const startupMode = options.startupMode;
   let roots: RootGroup[] = [];
   let repositories: RepositoryReviewSnapshot[] = [];
   // The unscoped index holds every viewable doc under the watched roots,
@@ -876,7 +915,7 @@ export function createWatchSession(
     stateFingerprint = nextFingerprint;
 
     if (shouldBroadcast) {
-      broadcast(createStatePayload(roots, initialFollow, changedDocumentId, scope, repositories));
+      broadcast(createStatePayload(roots, initialFollow, changedDocumentId, scope, repositories, startupMode));
     }
   };
 
@@ -1023,7 +1062,7 @@ export function createWatchSession(
     },
     setScope,
     getStatePayload(changedId: string | null = null) {
-      return createStatePayload(roots, initialFollow, changedId, scope, repositories);
+      return createStatePayload(roots, initialFollow, changedId, scope, repositories, startupMode);
     },
     eventsResponse() {
       let currentSubscriber: EventController | null = null;
@@ -1032,7 +1071,7 @@ export function createWatchSession(
         start(controller) {
           currentSubscriber = controller;
           subscribers.add(controller);
-          controller.enqueue(encoder.encode(`event: state\ndata: ${JSON.stringify(createStatePayload(roots, initialFollow, null, scope, repositories))}\n\n`));
+          controller.enqueue(encoder.encode(`event: state\ndata: ${JSON.stringify(createStatePayload(roots, initialFollow, null, scope, repositories, startupMode))}\n\n`));
         },
         cancel() {
           if (currentSubscriber) {

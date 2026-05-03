@@ -6,7 +6,7 @@
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   background: #ffffff;
   color: #24292f;
-  --sidebar-width: 300px;
+  --sidebar-width: 360px;
   --sidebar-rail-width: 36px;
   --border-soft: #e6eaef;
   --border-medium: #d0d7de;
@@ -152,8 +152,8 @@ body.is-resizing-sidebar {
 
 .brand-logo {
   display: block;
-  width: 28px;
-  height: 28px;
+  width: 56px;
+  height: 56px;
   flex-shrink: 0;
 }
 
@@ -1941,3 +1941,384 @@ h2 {
     padding: 15px;
   }
 }
+
+/* Mode control row at the top of the sidebar (under the brand). */
+.sidebar-mode-row {
+  margin: 0.6rem 0 0.4rem;
+}
+
+/* Mode control (Author / Review segmented toggle) */
+.mode-control {
+  display: flex;
+  align-items: stretch;
+  padding: 0.2rem;
+  border-radius: 0.5rem;
+  background: var(--surface-muted);
+  border: 1px solid var(--border-soft);
+  width: 100%;
+}
+
+.mode-control .mode-segment {
+  flex: 1 1 0;
+  justify-content: center;
+}
+
+.mode-segment {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.4rem 0.7rem;
+  border: 0;
+  background: transparent;
+  color: var(--text-subtle);
+  border-radius: 0.4rem;
+  font-size: 0.8rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.mode-segment:hover:not(.is-active) {
+  color: var(--text-strong);
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.mode-segment.is-active {
+  background: #ffffff;
+  color: var(--accent);
+  box-shadow: 0 1px 2px rgba(36, 41, 47, 0.08);
+  cursor: default;
+}
+
+.mode-segment:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Follow chip variant: disabled by Mode = Review */
+.chip-button.is-mode-disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+  text-decoration-color: rgba(36, 41, 47, 0.3);
+}
+
+.chip-button.is-mode-disabled .chip-dot {
+  background: #cfd5db;
+}
+
+/* Burden meter — three-part header (label group + score) */
+.burden-summary {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.burden-headline {
+  font-weight: 500;
+  color: var(--text-strong);
+}
+
+.burden-level {
+  display: inline-block;
+  padding: 0.05rem 0.35rem;
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-radius: 0.3rem;
+  background: rgba(36, 41, 47, 0.08);
+  color: var(--text-subtle);
+}
+
+.burden-meter.is-low .burden-level {
+  background: #c8eed5;
+  color: #1a5d34;
+}
+
+.burden-meter.is-medium .burden-level {
+  background: #f4d99a;
+  color: #6b4900;
+}
+
+.burden-meter.is-high .burden-level {
+  background: #ffc8c4;
+  color: #8b1f1a;
+}
+
+/* Stale-content hint strip — shown above the preview header in Review */
+.stale-hint {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.45rem 1.5rem;
+  background: #fff8dc;
+  border-bottom: 1px solid #f0cf7a;
+  color: #6f4e00;
+  font-size: 0.82rem;
+}
+
+.stale-hint[hidden] {
+  display: none;
+}
+
+.stale-hint.is-deleted {
+  background: #fff1f0;
+  border-bottom-color: #ffb3ad;
+  color: #8b1f1a;
+}
+
+.stale-hint-message {
+  flex: 1 1 auto;
+  font-weight: 500;
+}
+
+.stale-hint-action {
+  flex-shrink: 0;
+  padding: 0.25rem 0.75rem;
+  border: 1px solid currentColor;
+  background: transparent;
+  color: inherit;
+  border-radius: 0.35rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.stale-hint-action:hover {
+  background: rgba(36, 41, 47, 0.05);
+}
+
+.stale-hint-action:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 1px;
+}
+
+/* Mode visual differentiation — structural cues that survive theming. */
+
+/* Persistent Mode pill in the sidebar brand area. */
+.mode-pill {
+  display: inline-block;
+  margin-top: 0.3rem;
+  padding: 0.1rem 0.45rem;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border: 1px solid var(--border-medium, #cfd5db);
+  border-radius: 0.25rem;
+  background: var(--surface-muted);
+  color: var(--text-subtle);
+}
+
+.mode-pill[data-mode-pill="review"] {
+  border-style: dashed;
+}
+
+/* Mode-glyph icons inside the toolbar Mode segments. */
+.mode-segment {
+  gap: 0.35rem;
+}
+
+.mode-segment .mode-glyph {
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+.mode-segment.is-active .mode-glyph {
+  opacity: 1;
+}
+
+/* Connection indicator: in Review the live channel is steady (not pulsing) and
+   reads "Reading — auto-refresh paused" so the suppressed-UI contract is
+   visible. */
+.connection-state.is-mode-review.is-live .indicator-dot {
+  background: var(--text-subtle, #6e7781);
+  animation: none;
+}
+
+.connection-state.is-mode-review.is-live {
+  color: var(--text-subtle, #6e7781);
+  font-style: italic;
+}
+
+/* Preview "framed read" treatment in Review only. The frame is layered onto
+   the inner article so the sticky preview-header keeps its existing chrome
+   while the *content* feels contained. */
+.preview-shell.is-mode-review #preview {
+  border: 1px solid var(--border-soft);
+  border-radius: 0.5rem;
+  box-shadow: inset 0 0 0 1px rgba(36, 41, 47, 0.02);
+  padding: 1.5rem 1.75rem;
+  background: #ffffff;
+}
+
+/* Files pane — All/Changed view toggle in the pane header. */
+.files-view-toggle {
+  display: inline-flex;
+  align-items: stretch;
+  margin-right: 0.35rem;
+  padding: 0.1rem;
+  background: var(--surface-muted);
+  border: 1px solid var(--border-soft);
+  border-radius: 0.35rem;
+}
+
+.files-view-toggle[hidden] {
+  display: none;
+}
+
+.files-view-segment {
+  padding: 0.15rem 0.5rem;
+  border: 0;
+  background: transparent;
+  color: var(--text-subtle);
+  font-size: 0.7rem;
+  font-weight: 500;
+  border-radius: 0.25rem;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.files-view-segment:hover:not(.is-active) {
+  color: var(--text-strong);
+}
+
+.files-view-segment.is-active {
+  background: #ffffff;
+  color: var(--text-strong);
+  cursor: default;
+  box-shadow: 0 1px 2px rgba(36, 41, 47, 0.06);
+}
+
+.files-view-segment:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.tree-folder-icon {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 0.3rem;
+  color: var(--text-subtle);
+  flex-shrink: 0;
+}
+
+/* Files pane — changed-vs-base list. */
+.changed-file-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.changed-file {
+  margin: 0;
+}
+
+.changed-file-button,
+.changed-file-disabled {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.3rem 0.45rem;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.78rem;
+  text-align: left;
+  border-radius: 0.3rem;
+  cursor: pointer;
+}
+
+.changed-file-disabled {
+  cursor: default;
+  color: var(--text-subtle);
+  font-style: italic;
+}
+
+.changed-file-button:hover {
+  background: var(--surface-muted);
+}
+
+.changed-file-button.is-selected {
+  background: var(--surface-muted);
+  font-weight: 600;
+}
+
+.changed-file-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.changed-file-status {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.2rem;
+  height: 1.2rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  border-radius: 0.25rem;
+  background: var(--surface-muted);
+  border: 1px solid var(--border-soft);
+}
+
+.changed-file-status.is-added {
+  background: #effaf2;
+  border-color: #b7e4c7;
+  color: #1a5d34;
+}
+
+.changed-file-status.is-modified {
+  background: #fff8dc;
+  border-color: #f0cf7a;
+  color: #6b4900;
+}
+
+.changed-file-status.is-deleted {
+  background: #fff1f0;
+  border-color: #ffb3ad;
+  color: #8b1f1a;
+}
+
+.changed-file-status.is-renamed,
+.changed-file-status.is-copied {
+  background: #eef4ff;
+  border-color: #b8cfff;
+  color: #1a3d8c;
+}
+
+.changed-file-path {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.74rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.changed-file-counts {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.25rem;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.7rem;
+}
+
+.changed-file-counts .adds {
+  color: #1a5d34;
+}
+
+.changed-file-counts .dels {
+  color: #8b1f1a;
+}
+

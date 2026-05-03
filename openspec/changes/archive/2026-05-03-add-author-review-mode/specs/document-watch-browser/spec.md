@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Provide a top-level Author/Review Mode control
-The browser UI SHALL expose a top-level **Mode** control with two values: **Author** and **Review**. Mode SHALL default to **Author** when no preference is stored. The selected Mode SHALL persist across reloads in the same browser for that origin. Mode MUST gate Follow availability and MUST gate file-change-driven preview switching as defined elsewhere in this spec. Mode MUST NOT alter the underlying review-burden score, level, drivers, thresholds, or the contents of the score-explanation preview; only the score's headline label in the `Change Overview` pane may differ by Mode. While Mode is **Review**, the Follow control MUST remain visible but disabled, with affordance text or tooltip naming Mode as the reason it is unavailable.
+The browser UI SHALL expose a top-level **Mode** control with two values: **Author** and **Review**. The Mode control SHALL be placed in a dedicated row at the top of the sidebar, separately from the document-level controls in the preview toolbar (Follow). The Mode control MUST NOT be rendered inside the preview toolbar. Mode SHALL default to **Author** when no preference is stored. The selected Mode SHALL persist across reloads in the same browser for that origin. Mode MUST gate Follow availability and MUST gate file-change-driven preview switching as defined elsewhere in this spec. Mode MUST NOT alter the underlying review-burden score, level, drivers, thresholds, or the contents of the score-explanation preview; only the score's headline label in the `Change Overview` pane may differ by Mode. While Mode is **Review**, the Follow control MUST remain visible but disabled, with affordance text or tooltip naming Mode as the reason it is unavailable.
 
 #### Scenario: Default Mode is Author
 - **WHEN** a user opens the browser UI with no Mode preference stored
@@ -84,6 +84,108 @@ While the active Mode is **Review**, the system SHALL render a stale-content hin
 - **THEN** the active preview's header strip shows a "file no longer exists on disk" hint state
 - **AND** the hint exposes a close or back affordance instead of a refresh affordance
 - **AND** the previously rendered content remains visible until the user acts on the hint
+
+### Requirement: Compose sidebar panes per Mode with independent persistence
+The browser UI SHALL expose a Mode-aware pane catalog. The Author Mode catalog SHALL include `Change Overview` and `Files`. The Review Mode catalog SHALL include `Change Overview`, `Files`, and `Git Log`. The panels-restore control SHALL list only panes that belong to the active Mode's catalog. Pane visibility, per-pane collapse, and vertical pane sizing SHALL persist separately for each Mode (e.g. under distinct `localStorage` keys per Mode), so each Mode independently remembers its own layout. Switching Mode MUST re-read the persisted state for the destination Mode and re-render the sidebar.
+
+#### Scenario: Author Mode does not show Git Log
+- **WHEN** Mode is **Author**
+- **THEN** the sidebar pane stack does not include a `Git Log` pane
+- **AND** the panels-restore control does not list `Git Log` as a restorable pane
+
+#### Scenario: Review Mode shows Git Log
+- **WHEN** Mode is **Review**
+- **THEN** the sidebar pane stack includes a `Git Log` pane
+- **AND** the panels-restore control lists `Git Log` as a restorable pane
+
+#### Scenario: Pane state persists separately per Mode
+- **WHEN** the user hides or resizes a pane while Mode is **Author**
+- **AND** the user switches Mode to **Review**, makes a different pane state change, and switches back to **Author**
+- **THEN** the Author pane state is restored to what the user left in **Author**
+- **AND** the Review pane state remains as the user left it in **Review**
+
+### Requirement: Provide an All/Changed view toggle in the Files pane
+When the watched repository is git-backed AND the review-load result for that repository has status `available`, the `Files` pane SHALL expose a view toggle with two values: **All** (the default) and **Changed**. The selected view SHALL persist across reloads in the same browser for that origin and SHALL be tracked separately for each Mode. The toggle MUST NOT appear when git is unavailable or the review-load result is non-git or unavailable; in that case the `Files` pane SHALL render the existing full-tree listing.
+
+When the **Changed** view is active, the `Files` pane SHALL list the changed files reported by the review-load result instead of the full file tree. Each visible entry MUST display a status indicator (added, modified, deleted, renamed), the file path, and a compact summary of additions and deletions (`+N -M`). Renamed entries MUST display both the previous path and the new path. Deleted entries MUST be rendered as non-clickable since there is no on-disk content to preview. Manual selection of a non-deleted entry MUST switch the active preview to that file using the same selection mechanics as the existing tree.
+
+When the **All** view is active (the default), the `Files` pane SHALL render the existing full-tree listing.
+
+#### Scenario: Default Files view is All when git is available
+- **WHEN** the watched root is git-backed AND no Files-view preference is stored for the active Mode
+- **THEN** the `Files` pane shows the full file tree
+- **AND** the view toggle reads "All"
+
+#### Scenario: Files-view toggle is hidden when git is unavailable
+- **WHEN** the watched root is not git-backed OR the review-load result is non-git or unavailable
+- **THEN** the `Files` pane does not show a view toggle
+- **AND** the pane shows the existing full-tree listing
+
+#### Scenario: Switching to Changed shows the changed-vs-base list
+- **WHEN** the user selects the Changed view in the `Files` pane
+- **THEN** the pane lists only files reported as changed against the base
+- **AND** the full file tree is not rendered in the pane
+
+#### Scenario: Each changed-file entry shows status, path, and line counts
+- **WHEN** the Changed view is active in the `Files` pane
+- **THEN** each entry shows a status indicator distinguishing added, modified, deleted, and renamed
+- **AND** each entry shows the file path
+- **AND** each entry shows additions and deletions in a compact `+N -M` form
+
+#### Scenario: Renamed entries show both paths
+- **WHEN** a changed file's status is renamed
+- **THEN** the entry shows both the previous path and the new path
+
+#### Scenario: Deleted entries are non-clickable
+- **WHEN** a changed file's status is deleted
+- **THEN** that entry is rendered as non-clickable
+- **AND** clicking it does not change the active preview
+
+#### Scenario: View choice persists separately per Mode
+- **WHEN** the user selects Changed in **Author** Mode
+- **AND** the user switches to **Review** Mode and the Review view choice has not been changed
+- **AND** the user switches back to **Author** Mode
+- **THEN** the Author Files pane shows the Changed view
+
+### Requirement: Render directory rows in the file tree with a folder icon
+When the `Files` pane renders the full-tree fallback, each directory row SHALL include a folder icon next to the directory name. The icon SHALL be visually consistent with the existing file-type icons used on file rows.
+
+#### Scenario: Directory rows include a folder icon in the fallback tree
+- **WHEN** the `Files` pane renders the full-tree fallback
+- **THEN** each directory row displays a folder icon next to the directory name
+
+### Requirement: Make the active Mode visually unambiguous
+The browser UI SHALL make the active Mode visually distinguishable beyond the Mode segment toggle itself. The differentiation MUST be structural and typographic so that it remains legible across future theming work; it MUST NOT rely on chromatic accent alone. The differentiation SHALL include at minimum: a Mode-aware sidebar brand subtitle, a persistent Mode pill in the sidebar brand area, mode-glyph icons inside the Mode segments, a Mode-aware connection-indicator label and dot animation when the live channel is connected, and Mode-aware preview chrome. Switching Mode MUST update all of these affordances together.
+
+#### Scenario: Sidebar brand subtitle reflects the active Mode
+- **WHEN** the Mode is **Author**
+- **THEN** the sidebar brand subtitle reads "Authoring session"
+- **WHEN** the Mode is switched to **Review**
+- **THEN** the sidebar brand subtitle reads "Review session"
+
+#### Scenario: Persistent Mode pill reflects the active Mode
+- **WHEN** the Mode is **Author**
+- **THEN** a persistent pill in the sidebar brand area reads "Authoring"
+- **WHEN** the Mode is switched to **Review**
+- **THEN** the persistent pill reads "Reviewing"
+
+#### Scenario: Toolbar Mode segments carry mode-glyph icons
+- **WHEN** the Mode toggle is rendered
+- **THEN** the Author segment includes an icon distinct from the Review segment
+- **AND** both icons are present regardless of which Mode is currently active
+
+#### Scenario: Connection indicator differs in Review when the channel is live
+- **WHEN** Mode is **Author** and the live channel is connected
+- **THEN** the connection indicator shows the existing "Online" treatment with a pulsing dot
+- **WHEN** Mode is switched to **Review** while the live channel is connected
+- **THEN** the connection indicator label changes to a "Reading" wording that signals auto-refresh is paused
+- **AND** the indicator dot stops pulsing
+
+#### Scenario: Preview area carries a framed-read treatment in Review
+- **WHEN** Mode is **Review**
+- **THEN** the preview area carries a Mode-specific chrome treatment (e.g. an inset frame)
+- **WHEN** Mode is switched back to **Author**
+- **THEN** the Mode-specific preview chrome is removed and the preview returns to its default appearance
 
 ## MODIFIED Requirements
 
@@ -242,3 +344,9 @@ The browser UI SHALL render repository and review-load data in the `Change Overv
 - **WHEN** the user opens the score explanation from `Change Overview` in either Mode
 - **THEN** the score-explanation preview renders identical content
 - **AND** the preview does not contain Mode-dependent text
+
+## REMOVED Requirements
+
+### Requirement: Pin the session to a single non-binary file
+**Reason**: The in-UI Pin/Unpin chip is removed in favor of Mode-driven pane composition. Pin was a workaround for "narrow my view to one file" that the new Author/Review distinction (and the upcoming workflow features that build on it) replaces more cleanly. Coexistence of Pin and Mode would have read as duplicate posture controls.
+**Migration**: For single-file watching, use the existing CLI form `uatu watch path/to/file.md`. The server-side `Scope` mechanism that powered Pin is retained and continues to support single-file CLI watch sessions; only the in-browser Pin/Unpin affordance and its handlers are removed.

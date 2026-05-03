@@ -10,6 +10,7 @@ import logoAsset from "./assets/uatu-logo.svg" with { type: "file" };
 import index from "./index.html";
 import { E2E_PORT, E2E_WORKSPACE_ROOT, resetE2EWorkspace } from "./e2e";
 import { safeGit } from "./review-load";
+import { isMode, type Mode } from "./shared";
 import {
   createNavigationFetchHandler,
   createWatchSession,
@@ -22,6 +23,8 @@ import {
 
 let activeFilePath: string | null = null;
 let activeRespectGitignore = true;
+let activeStartupMode: Mode | undefined;
+let activeFollow = true;
 let activeWorkspaceRoot = E2E_WORKSPACE_ROOT;
 let activeEntries: WatchEntry[] = [];
 let watchSession = await createSession({ resetWorkspace: true });
@@ -112,6 +115,8 @@ server = Bun.serve({
           nonGit?: boolean;
           uatuConfig?: unknown;
           respectGitignore?: boolean;
+          startupMode?: string;
+          follow?: boolean;
         } = {};
         try {
           const text = await request.text();
@@ -126,6 +131,13 @@ server = Bun.serve({
         activeFilePath = typeof body.file === "string" ? body.file : null;
         activeRespectGitignore =
           typeof body.respectGitignore === "boolean" ? body.respectGitignore : true;
+        activeStartupMode = isMode(body.startupMode) ? body.startupMode : undefined;
+        // Mirror the CLI behavior: --mode=review forces follow off.
+        activeFollow = activeStartupMode === "review"
+          ? false
+          : typeof body.follow === "boolean"
+            ? body.follow
+            : true;
 
         const previousWorkspaceRoot = activeWorkspaceRoot;
         activeWorkspaceRoot = E2E_WORKSPACE_ROOT;
@@ -200,9 +212,10 @@ async function createSession(options: { resetWorkspace: boolean }) {
     : [activeWorkspaceRoot];
   const entries = await resolveWatchRoots(entryPaths, process.cwd());
   activeEntries = entries;
-  const session = createWatchSession(entries, true, {
+  const session = createWatchSession(entries, activeFollow, {
     usePolling: true,
     respectGitignore: activeRespectGitignore,
+    startupMode: activeStartupMode,
   });
   await session.start();
   return session;

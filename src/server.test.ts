@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  createStatePayload,
   createWatchSession,
   canSetFileScope,
   DEFAULT_PORT,
@@ -74,6 +75,63 @@ describe("parseCommand", () => {
 
   test("usage documents the --force flag", () => {
     expect(usageText()).toContain("--force");
+  });
+
+  test("startupMode defaults to undefined when --mode is not provided", () => {
+    const parsed = parseCommand(["watch"]);
+    if (parsed.kind !== "watch") throw new Error("expected watch");
+    expect(parsed.options.startupMode).toBeUndefined();
+  });
+
+  test("--mode=author parses as the author startup mode", () => {
+    const parsed = parseCommand(["watch", "--mode=author"]);
+    if (parsed.kind !== "watch") throw new Error("expected watch");
+    expect(parsed.options.startupMode).toBe("author");
+  });
+
+  test("--mode review (space form) parses as the review startup mode", () => {
+    const parsed = parseCommand(["watch", "--mode", "review"]);
+    if (parsed.kind !== "watch") throw new Error("expected watch");
+    expect(parsed.options.startupMode).toBe("review");
+  });
+
+  test("--mode=review forces follow off even without --no-follow", () => {
+    const parsed = parseCommand(["watch", "--mode=review"]);
+    if (parsed.kind !== "watch") throw new Error("expected watch");
+    expect(parsed.options.startupMode).toBe("review");
+    expect(parsed.options.follow).toBe(false);
+  });
+
+  test("--mode=author leaves the existing follow default intact", () => {
+    const parsed = parseCommand(["watch", "--mode=author"]);
+    if (parsed.kind !== "watch") throw new Error("expected watch");
+    expect(parsed.options.startupMode).toBe("author");
+    expect(parsed.options.follow).toBe(true);
+  });
+
+  test("--mode rejects unknown values with a clear error", () => {
+    expect(() => parseCommand(["watch", "--mode=write"])).toThrow(/invalid --mode value/);
+    expect(() => parseCommand(["watch", "--mode", "diff"])).toThrow(/invalid --mode value/);
+  });
+
+  test("--mode requires a value in the space form", () => {
+    expect(() => parseCommand(["watch", "--mode"])).toThrow(/missing value for --mode/);
+  });
+
+  test("usage documents the --mode flag", () => {
+    expect(usageText()).toContain("--mode");
+  });
+});
+
+describe("createStatePayload", () => {
+  test("omits startupMode when not provided", () => {
+    const payload = createStatePayload([], true, null, { kind: "folder" }, []);
+    expect("startupMode" in payload).toBe(false);
+  });
+
+  test("includes startupMode when provided", () => {
+    const payload = createStatePayload([], false, null, { kind: "folder" }, [], "review");
+    expect(payload.startupMode).toBe("review");
   });
 });
 

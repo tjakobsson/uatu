@@ -19,6 +19,13 @@ UatuCode is used in two distinct stances that have opposite UX requirements: **a
   - The same score is labeled **"Change review burden"**.
 - Switching `Author → Review` turns Follow off. Switching `Review → Author` makes Follow available again but does not auto-enable it.
 - The review-burden score value, level (low/medium/high), drivers, thresholds, and the existing detailed score-explanation preview are unchanged. Only the headline label in `Change Overview` differs by Mode.
+- **Visually differentiate the two Modes** so the user can tell at a glance which one is active without reading the toggle. The differentiation MUST be structural/typographic (no chromatic accent) so it remains legible across the future theming work. Specifically: the sidebar brand subtitle reads `Authoring session` or `Review session`; a persistent `AUTHORING` / `REVIEWING` pill sits in the sidebar brand area; the Mode segments carry mode-glyph icons; the connection indicator label and dot animation differ in Review (steady "Reading — auto-refresh paused" instead of pulsing "Online"); and the preview area carries an inset "framed read" treatment in Review only.
+- **Move the Mode toggle out of the preview toolbar** and into a dedicated row at the top of the sidebar (directly under the brand). Mode is a session-level posture; Follow is a document-level mechanic. They no longer share a control bar.
+- **Remove the Pin UI affordance.** The in-UI pin/unpin toggle is gone; single-file CLI watching (`uatu watch FILE.md`) continues to work via the existing server-side scope mechanism.
+- **Make pane composition Mode-aware.** Author and Review have distinct pane catalogs even when individual panes overlap. Author exposes `Change Overview` and `Files`; Review exposes `Change Overview`, `Files`, and `Git Log`. Pane visibility/collapse/sizing persists separately per Mode so each Mode remembers its own layout.
+- **Files pane gains an All/Changed view toggle when git is available.** The All view (default) keeps the existing full-tree listing. The Changed view lists files changed vs the base, with a status glyph (M/A/D/R), filename, and `+adds -dels` summary; renames render as `oldPath → path`. The view choice persists per-Mode. When git is unavailable, the toggle is hidden and the pane shows the full tree as today.
+- **Add folder icons to the file-tree fallback** (non-git path) so directory rows have the same visual richness as file rows.
+- **Slightly wider default sidebar width** to accommodate the richer brand/header content (subtitle + pill + Mode row).
 
 ## Capabilities
 

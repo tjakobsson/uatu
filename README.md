@@ -39,7 +39,8 @@ project-specific checks matter.
 - **Syntax highlighting** for source files
 - **Cross-document navigation** — clicking a link to another `.md`/`.adoc` swaps the preview in place
 - **Live reload** over Server-Sent Events
-- **Follow** mode jumps to the latest changed file; **Pin** mode locks the session to one file
+- **Mode toggle** between **Author** (in-flow with auto-follow) and **Review** (stable navigation, no auto-switching, with a stale-content hint when the active file changes on disk)
+- **Follow** mode jumps to the latest changed file in Author mode; **Pin** mode locks the session to one file
 - **Whole-repo browsing** with `.uatuignore` and `.gitignore` filtering
 - **Review-oriented sidebar panes** for change overview, files, and git history
 - **Review burden meter** based on deterministic git diff size, file spread, and configurable path scoring
@@ -96,7 +97,7 @@ To unlink later: `bun unlink` from the repo root.
 ## Usage
 
 ```bash
-uatu watch [PATH...] [--force] [--no-open] [--no-follow] [--no-gitignore] [--port <PORT>]
+uatu watch [PATH...] [--force] [--no-open] [--no-follow] [--no-gitignore] [--mode <MODE>] [--port <PORT>]
 ```
 
 `PATH` may be a directory, multiple directories, or a single non-binary file.
@@ -110,6 +111,7 @@ uatu watch docs notes --no-open
 uatu watch testdata/watch-docs --no-follow --port 4321
 uatu watch . --no-gitignore
 uatu watch ~/Downloads/docs --force
+uatu watch . --mode review
 uatu watch README.md
 uatu watch GUIDE.adoc
 ```
@@ -117,6 +119,26 @@ uatu watch GUIDE.adoc
 Mid-session, click **Pin** in the preview header to narrow an already-running
 folder watch to the currently previewed document. Click again to restore the
 full sidebar.
+
+### Mode: Author vs Review
+
+The preview header shows a top-level **Mode** toggle with two values:
+
+- **Author** (default) — in-flow stance for active coding (often with an AI
+  assistant). The Follow chip is available; the review-burden score is
+  labeled "Reviewer burden forecast".
+- **Review** — stable navigation for peer-reviewing a Change. Follow is
+  disabled, and file-system change events do not switch the active preview.
+  Manual file selection still works. The same score is labeled "Change
+  review burden". When the file you're currently viewing changes on disk,
+  a hint strip appears above the preview header offering a manual refresh
+  (or a "Close" affordance if the file was deleted on disk); the rendered
+  content stays put until you act, so your scroll position and line
+  references aren't yanked out from under you.
+
+The selected Mode persists per browser via `localStorage`. Pass
+`--mode=author|review` on the CLI to override the persisted preference at
+startup; `--mode=review` also forces follow mode off for the session.
 
 ### Review panes
 
