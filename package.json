@@ -35,6 +35,6 @@
   "devDependencies": {
     "@playwright/test": "^1.54.2",
     "bun-types": "^1.3.13",
-    "happy-dom": "15"
+    "happy-dom": "20.8.9"
   }
 }
