@@ -35,7 +35,7 @@ project-specific checks matter.
 ## Features
 
 - **Markdown** and **AsciiDoc** rendering, styled for readability
-- **Mermaid** diagrams in fenced blocks and `[source,mermaid]` listings
+- **Mermaid** diagrams in fenced blocks and `[source,mermaid]` listings, fit to the preview width and openable in a fullscreen pan/zoom viewer
 - **Syntax highlighting** for source files
 - **Cross-document navigation** — clicking a link to another `.md`/`.adoc` swaps the preview in place
 - **Live reload** over Server-Sent Events
