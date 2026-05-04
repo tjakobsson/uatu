@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  attachWatcherCrashGuard,
+  buildWatcherIgnorePredicate,
   createStatePayload,
   createWatchSession,
   canSetFileScope,
@@ -24,6 +26,8 @@ import {
   STARTUP_BANNER,
   usageText,
 } from "./server";
+import { EventEmitter } from "node:events";
+import type { IgnoreMatcher } from "./ignore-engine";
 import { safeGit } from "./review-load";
 
 const tempDirectories: string[] = [];
@@ -970,3 +974,89 @@ describe("Accept-based navigation dispatch", () => {
     });
   });
 });
+
+describe("buildWatcherIgnorePredicate", () => {
+  test("ignores any path with a `.git` segment between it and a watched root", () => {
+    const root = "/tmp/uatu-watch-root";
+    const predicate = buildWatcherIgnorePredicate([root], new Map<string, IgnoreMatcher>());
+
+    expect(predicate(path.join(root, ".git", "index.lock"))).toBe(true);
+    expect(predicate(path.join(root, ".git", "refs", "heads", "main"))).toBe(true);
+    expect(predicate(path.join(root, "nested", ".git", "HEAD"))).toBe(true);
+  });
+
+  test("does not ignore regular files outside `.git/`", () => {
+    const root = "/tmp/uatu-watch-root";
+    const predicate = buildWatcherIgnorePredicate([root], new Map<string, IgnoreMatcher>());
+
+    expect(predicate(path.join(root, "README.md"))).toBe(false);
+    expect(predicate(path.join(root, "src", "index.ts"))).toBe(false);
+    // Substring-only matchers would false-positive on `something.git/`, so
+    // verify the segment-equality check distinguishes those.
+    expect(predicate(path.join(root, "something.git", "file.md"))).toBe(false);
+  });
+
+  test("returns false for paths outside any watched root", () => {
+    const root = "/tmp/uatu-watch-root";
+    const predicate = buildWatcherIgnorePredicate([root], new Map<string, IgnoreMatcher>());
+
+    expect(predicate("/elsewhere/.git/index.lock")).toBe(false);
+    expect(predicate("/elsewhere/README.md")).toBe(false);
+  });
+
+  test("defers to the per-root IgnoreMatcher for non-`.git` paths", () => {
+    const root = "/tmp/uatu-watch-root";
+    const matcherCache = new Map<string, IgnoreMatcher>();
+    matcherCache.set(root, {
+      shouldIgnore: (rel: string) => rel === "secret.txt",
+      toChokidarIgnored: () => (testPath: string) =>
+        path.relative(root, testPath) === "secret.txt",
+    });
+    const predicate = buildWatcherIgnorePredicate([root], matcherCache);
+
+    expect(predicate(path.join(root, "secret.txt"))).toBe(true);
+    expect(predicate(path.join(root, "README.md"))).toBe(false);
+  });
+});
+
+describe("attachWatcherCrashGuard", () => {
+  test("attaches an `error` listener so a synthetic EINVAL does not throw", () => {
+    const emitter = new EventEmitter();
+    attachWatcherCrashGuard(emitter);
+
+    const synthetic = Object.assign(new Error("synthetic"), { code: "EINVAL" });
+    // Without an `error` listener, EventEmitter throws synchronously on emit.
+    // The listener installed by attachWatcherCrashGuard must absorb this.
+    expect(() => emitter.emit("error", synthetic)).not.toThrow();
+    expect(emitter.listenerCount("error")).toBeGreaterThan(0);
+  });
+});
+
+describe("createWatchSession watcher resilience", () => {
+  test("a synthetic EINVAL on the underlying watcher does not crash the host", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-watcher-resilience-"));
+    tempDirectories.push(tempDirectory);
+    await writeFile(path.join(tempDirectory, "README.md"), "# Readme\n");
+
+    const entries = await resolveWatchRoots([tempDirectory], tempDirectory);
+    const session = createWatchSession(entries, true, { respectGitignore: false });
+    await session.start();
+
+    try {
+      const internal = (session as unknown as {
+        _internalWatcher(): NodeJS.EventEmitter | null;
+      })._internalWatcher();
+      expect(internal).not.toBeNull();
+
+      const synthetic = Object.assign(new Error("synthetic EINVAL on .git/index.lock"), {
+        code: "EINVAL",
+        errno: -22,
+      });
+      expect(() => internal!.emit("error", synthetic)).not.toThrow();
+      expect(session.getRoots()).toBeDefined();
+    } finally {
+      await session.stop();
+    }
+  });
+});
+
