@@ -831,9 +831,11 @@ export type WatchSessionOptions = {
 //      root. `.git/` is git's working metadata; transient files inside it
 //      (notably `.git/index.lock`) race with native fs.watch on macOS and
 //      crash the process with EINVAL when chokidar emits an unhandled error.
-//      This is the ONLY hardcoded directory we filter here — see openspec
-//      change fix-watcher-crash-on-transient-paths design.md Decision 1 for
-//      why we do not mirror the broader indexer denylist.
+//      This is the ONLY hardcoded directory we filter here — the broader
+//      indexer denylist (`node_modules`, `.next`, etc.) is intentionally NOT
+//      mirrored, because in the typical case it's already covered by the
+//      user's `.gitignore` and spreading the heuristic into the watcher
+//      would deepen an existing hack rather than minimize it.
 //   2. Defer to the per-root IgnoreMatcher (built from .uatuignore /
 //      .gitignore) for everything else.
 export function buildWatcherIgnorePredicate(
@@ -866,8 +868,12 @@ export function buildWatcherIgnorePredicate(
 // "process does not crash"; logging policy is intentionally minimal.
 export function attachWatcherCrashGuard(emitter: NodeJS.EventEmitter): void {
   emitter.on("error", err => {
+    const code =
+      err instanceof Error && typeof (err as NodeJS.ErrnoException).code === "string"
+        ? ` (${(err as NodeJS.ErrnoException).code})`
+        : "";
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`uatu: watcher error: ${message}`);
+    console.error(`uatu: watcher error${code}: ${message}`);
   });
 }
 
