@@ -121,8 +121,6 @@ const followToggleElement = document.querySelector<HTMLButtonElement>("#follow-t
 const modeControlElement = document.querySelector<HTMLDivElement>("#mode-control");
 const modeAuthorButton = document.querySelector<HTMLButtonElement>("#mode-author");
 const modeReviewButton = document.querySelector<HTMLButtonElement>("#mode-review");
-const modeSubtitleElement = document.querySelector<HTMLElement>("#mode-subtitle");
-const modePillElement = document.querySelector<HTMLElement>("#mode-pill");
 const previewShellElement = document.querySelector<HTMLElement>(".preview-shell");
 const filesViewToggleElement = document.querySelector<HTMLDivElement>("#files-view-toggle");
 const filesViewAllButton = document.querySelector<HTMLButtonElement>("#files-view-all");
@@ -155,8 +153,6 @@ if (
   !modeControlElement ||
   !modeAuthorButton ||
   !modeReviewButton ||
-  !modeSubtitleElement ||
-  !modePillElement ||
   !previewShellElement ||
   !filesViewToggleElement ||
   !filesViewAllButton ||
@@ -2114,12 +2110,6 @@ function syncModeControl() {
   modeReviewButton.setAttribute("aria-checked", String(!isAuthor));
   modeReviewButton.classList.toggle("is-active", !isAuthor);
 
-  // Brand subtitle and persistent pill — strongest at-a-glance cues for "which
-  // mode am I in" since they sit in the always-visible sidebar header.
-  modeSubtitleElement.textContent = isAuthor ? "Authoring session" : "Review session";
-  modePillElement.textContent = isAuthor ? "Authoring" : "Reviewing";
-  modePillElement.dataset.modePill = appState.mode;
-
   // Body / preview-shell classes drive the Mode-aware preview chrome.
   document.body.classList.toggle("is-mode-author", isAuthor);
   document.body.classList.toggle("is-mode-review", !isAuthor);
@@ -2182,12 +2172,12 @@ function applyMode(next: Mode) {
   }
 
   // Mode change clears any visible hint. When switching from Review (with a
-  // changed-on-disk hint) to Author, also re-render the active preview so the
-  // user lands on the current on-disk content rather than the stale render.
-  const hadChangedHint =
-    previous === "review" &&
-    appState.staleHint?.kind === "changed" &&
-    appState.staleHint.documentId === appState.selectedId;
+  // hint pointed at the active doc) to Author, resolve the staleness eagerly
+  // so the user doesn't briefly see dead content waiting for the next SSE.
+  const activeHint =
+    previous === "review" && appState.staleHint?.documentId === appState.selectedId
+      ? appState.staleHint
+      : null;
 
   applyStaleHint(nextStaleHint(appState.staleHint, { kind: "mode-changed", nextMode: next }));
 
@@ -2196,8 +2186,14 @@ function applyMode(next: Mode) {
   renderSidebar();
   schedulePaneHeightNormalization();
 
-  if (next === "author" && hadChangedHint && appState.selectedId) {
-    void loadDocument(appState.selectedId);
+  if (next === "author" && activeHint && appState.selectedId) {
+    if (activeHint.kind === "changed") {
+      void loadDocument(appState.selectedId);
+    } else {
+      appState.selectedId = null;
+      renderEmptyPreview("File no longer on disk", "The file you were viewing has been deleted.");
+      renderSidebar();
+    }
   }
 }
 

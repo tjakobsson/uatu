@@ -2,7 +2,7 @@
   <img src="./uatu-logo.svg" alt="uatu" width="156" height="160" />
 </p>
 
-<h1 align="center">uatu</h1>
+<h1 align="center">UatuCode</h1>
 
 <p align="center">
   <strong>Codebase Watcher</strong><br/>

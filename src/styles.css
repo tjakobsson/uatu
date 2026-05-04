@@ -157,24 +157,16 @@ body.is-resizing-sidebar {
   flex-shrink: 0;
 }
 
-.brand-text {
-  min-width: 0;
-}
-
-.brand-text .eyebrow {
+.brand-wordmark {
   margin: 0;
-  text-transform: uppercase;
-  letter-spacing: 0.22em;
-  color: var(--navy);
-  font-size: 0.62rem;
+  min-width: 0;
+  font-size: 1.5rem;
   font-weight: 700;
-}
-
-.brand-text h1 {
-  margin: 0.1rem 0 0;
-  font-size: 0.95rem;
-  font-weight: 600;
+  letter-spacing: -0.01em;
   color: var(--text-strong);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .sidebar-meta {
@@ -2098,25 +2090,6 @@ h2 {
 }
 
 /* Mode visual differentiation — structural cues that survive theming. */
-
-/* Persistent Mode pill in the sidebar brand area. */
-.mode-pill {
-  display: inline-block;
-  margin-top: 0.3rem;
-  padding: 0.1rem 0.45rem;
-  font-size: 0.62rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  border: 1px solid var(--border-medium, #cfd5db);
-  border-radius: 0.25rem;
-  background: var(--surface-muted);
-  color: var(--text-subtle);
-}
-
-.mode-pill[data-mode-pill="review"] {
-  border-style: dashed;
-}
 
 /* Mode-glyph icons inside the toolbar Mode segments. */
 .mode-segment {

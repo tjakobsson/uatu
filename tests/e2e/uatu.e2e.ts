@@ -1638,17 +1638,12 @@ test("Active file deleted on disk in Review shows the deleted hint variant", asy
   expect(stillVisible).toBe(before);
 });
 
-test("Mode visual differentiation: subtitle, pill, segment glyphs, connection indicator, and preview frame all reflect Mode", async ({ page }) => {
-  const subtitle = page.locator("#mode-subtitle");
-  const pill = page.locator("#mode-pill");
+test("Mode visual differentiation: segment glyphs, connection indicator, and preview frame all reflect Mode", async ({ page }) => {
   const connectionLabel = page.locator("#connection-state .connection-label");
   const previewShell = page.locator(".preview-shell");
   const indicatorDot = page.locator("#connection-state .indicator-dot");
 
   // Author baseline.
-  await expect(subtitle).toHaveText("Authoring session");
-  await expect(pill).toHaveText("Authoring");
-  await expect(pill).toHaveAttribute("data-mode-pill", "author");
   await expect(connectionLabel).toHaveText("Online");
   await expect(previewShell).not.toHaveClass(/is-mode-review/);
 
@@ -1664,9 +1659,6 @@ test("Mode visual differentiation: subtitle, pill, segment glyphs, connection in
 
   // Switch to Review.
   await page.locator("#mode-review").click();
-  await expect(subtitle).toHaveText("Review session");
-  await expect(pill).toHaveText("Reviewing");
-  await expect(pill).toHaveAttribute("data-mode-pill", "review");
   await expect(connectionLabel).toHaveText("Reading — auto-refresh paused");
   await expect(previewShell).toHaveClass(/is-mode-review/);
 
@@ -1678,8 +1670,6 @@ test("Mode visual differentiation: subtitle, pill, segment glyphs, connection in
 
   // Switch back to Author and confirm everything restores.
   await page.locator("#mode-author").click();
-  await expect(subtitle).toHaveText("Authoring session");
-  await expect(pill).toHaveText("Authoring");
   await expect(connectionLabel).toHaveText("Online");
   await expect(previewShell).not.toHaveClass(/is-mode-review/);
 });
