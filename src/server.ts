@@ -825,6 +825,58 @@ export type WatchSessionOptions = {
   startupMode?: Mode;
 };
 
+// Builds the predicate chokidar consults to decide whether to attach a native
+// watcher to a path. Two layers:
+//   1. Always exclude any path with a `.git` segment between it and a watched
+//      root. `.git/` is git's working metadata; transient files inside it
+//      (notably `.git/index.lock`) race with native fs.watch on macOS and
+//      crash the process with EINVAL when chokidar emits an unhandled error.
+//      This is the ONLY hardcoded directory we filter here — the broader
+//      indexer denylist (`node_modules`, `.next`, etc.) is intentionally NOT
+//      mirrored, because in the typical case it's already covered by the
+//      user's `.gitignore` and spreading the heuristic into the watcher
+//      would deepen an existing hack rather than minimize it.
+//   2. Defer to the per-root IgnoreMatcher (built from .uatuignore /
+//      .gitignore) for everything else.
+export function buildWatcherIgnorePredicate(
+  dirRoots: string[],
+  matcherCache: Map<string, IgnoreMatcher>,
+): (testPath: string) => boolean {
+  return (testPath: string): boolean => {
+    for (const rootPath of dirRoots) {
+      const rel = path.relative(rootPath, testPath);
+      if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) {
+        continue;
+      }
+      if (rel.split(path.sep).includes(".git")) {
+        return true;
+      }
+      const matcher = matcherCache.get(rootPath);
+      if (!matcher) {
+        continue;
+      }
+      return matcher.toChokidarIgnored()(testPath);
+    }
+    return false;
+  };
+}
+
+// Without an `error` listener, chokidar's underlying EventEmitter throws
+// synchronously when an "error" event fires — taking the host process down.
+// Real-world failures we have seen include `EINVAL` from a `watch` syscall
+// against `.git/index.lock` after git unlinks it. The contract here is
+// "process does not crash"; logging policy is intentionally minimal.
+export function attachWatcherCrashGuard(emitter: NodeJS.EventEmitter): void {
+  emitter.on("error", err => {
+    const code =
+      err instanceof Error && typeof (err as NodeJS.ErrnoException).code === "string"
+        ? ` (${(err as NodeJS.ErrnoException).code})`
+        : "";
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`uatu: watcher error${code}: ${message}`);
+  });
+}
+
 export function createWatchSession(
   entries: WatchEntry[],
   initialFollow: boolean,
@@ -851,20 +903,7 @@ export function createWatchSession(
   const watchPaths = entries.map(entry => entry.absolutePath);
   const dirRoots = entries.filter(entry => entry.kind === "dir").map(entry => entry.absolutePath);
 
-  const isPathIgnored = (testPath: string): boolean => {
-    for (const rootPath of dirRoots) {
-      const matcher = matcherCache.get(rootPath);
-      if (!matcher) {
-        continue;
-      }
-      const rel = path.relative(rootPath, testPath);
-      if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) {
-        continue;
-      }
-      return matcher.toChokidarIgnored()(testPath);
-    }
-    return false;
-  };
+  const isPathIgnored = buildWatcherIgnorePredicate(dirRoots, matcherCache);
 
   let watcher: ReturnType<typeof chokidar.watch> | null = null;
 
@@ -1012,6 +1051,7 @@ export function createWatchSession(
       });
 
       watcher.on("all", handleWatcherEvent);
+      attachWatcherCrashGuard(watcher);
 
       await watcherReady;
       const scanned = await scanRoots(entries, { respectGitignore, matcherCache });
@@ -1059,6 +1099,12 @@ export function createWatchSession(
     },
     getRepositories() {
       return repositories;
+    },
+    // Test-only handle: lets the regression suite emit synthetic chokidar
+    // errors against the real underlying watcher to verify the crash guard.
+    // Not part of the production API surface.
+    _internalWatcher(): NodeJS.EventEmitter | null {
+      return watcher;
     },
     setScope,
     getStatePayload(changedId: string | null = null) {

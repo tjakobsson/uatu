@@ -277,7 +277,7 @@ The Mermaid renderer SHALL be initialized with theme inputs that can be supplied
 - **AND** the new visuals match the active UI theme
 
 ### Requirement: Keep the indexed view and preview current
-The system SHALL detect file creation, deletion, rename, and modification events under watched roots, applying the same ignore filter the indexer uses, and update the indexed sidebar view accordingly. When the currently selected file changes on disk, the preview MUST refresh automatically. Binary classification SHALL be re-evaluated when a file is renamed or modified so that an extension change (e.g. `data.bin` → `data.json`) reflects in the tree's clickability and render path. The live update channel MUST remain available during normal idle periods without requiring user action or emitting spurious server timeout warnings for expected long-lived connections.
+The system SHALL detect file creation, deletion, rename, and modification events under watched roots, applying the same ignore filter the indexer uses, and update the indexed sidebar view accordingly. When the currently selected file changes on disk, the preview MUST refresh automatically. Binary classification SHALL be re-evaluated when a file is renamed or modified so that an extension change (e.g. `data.bin` → `data.json`) reflects in the tree's clickability and render path. The live update channel MUST remain available during normal idle periods without requiring user action or emitting spurious server timeout warnings for expected long-lived connections. The watcher MUST NOT attach native filesystem watchers to any path whose location relative to a watched root contains a `.git` directory segment, since that directory is git's working metadata and is never user-authored content the indexer surfaces. The watcher MUST tolerate transient errors from the underlying filesystem watcher implementation (for example, an `EINVAL` from a `watch` syscall against a file that has already been removed) without terminating the host process; such errors MAY be logged but MUST NOT propagate as unhandled errors.
 
 #### Scenario: A new file appears in the sidebar
 - **WHEN** a new non-ignored file is created within a watched root
@@ -295,6 +295,16 @@ The system SHALL detect file creation, deletion, rename, and modification events
 - **WHEN** the browser remains connected to the live update channel during a normal idle period with no file changes
 - **THEN** the watch session remains available without requiring the user to reconnect
 - **AND** the server does not emit a timeout warning for that expected idle connection
+
+#### Scenario: The watcher does not descend into `.git/`
+- **WHEN** a path under a watched root has any path segment equal to `.git` between the watched root and the path itself
+- **THEN** the watcher's ignore predicate returns true for that path
+- **AND** no native filesystem watcher is attached to it
+
+#### Scenario: A transient watch-syscall failure does not crash the process
+- **WHEN** the underlying filesystem watcher emits an error event for a single watch target (for example, an `EINVAL` from a `watch` syscall against a file that has already been unlinked)
+- **THEN** the host process does not terminate
+- **AND** the watch session remains available for subsequent events
 
 ### Requirement: Follow the latest changed non-binary file
 When follow mode is enabled AND the active Mode is **Author**, the system SHALL switch the active preview to the latest changed non-binary file under the watched roots. Markdown and non-Markdown text files SHALL both be eligible to change the active preview under follow mode. Binary file changes MUST NOT change the active preview. Manual file selection in the sidebar MUST disable follow mode and pin the selected file until follow mode is enabled again. When the user transitions follow mode from disabled to enabled while in **Author** Mode, the system SHALL immediately switch the active preview to the most recently modified non-binary file under the watched roots, rather than waiting for the next change event. When a follow-driven auto-switch changes the active document, the system MUST update the browser URL via `history.replaceState` (not `pushState`) so the address bar stays accurate while the back stack reflects only user-initiated navigation. While the active Mode is **Review**, follow mode MUST be off, the Follow control MUST be unavailable for interaction, and file-system change events MUST NOT switch the active preview. Manual file selection from the `Files` pane and other manual navigation (e.g. `Git Log` commit clicks, direct URLs) MUST continue to work in **Review** Mode. In **Author** Mode, in-place refresh of the currently displayed file's content when that file changes on disk SHALL continue to work as today. In **Review** Mode, the system MUST NOT automatically re-render the active preview when the currently displayed file changes on disk; the stale-content hint behavior is governed by the "Show a stale-content hint in Review when the active file changes on disk" requirement.
