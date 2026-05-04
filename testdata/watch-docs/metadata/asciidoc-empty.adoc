@@ -1,0 +1,9 @@
+= Plain AsciiDoc
+
+This document has only a doctitle — no header attributes, no author or
+revision lines. The metadata card is omitted so the rendering looks
+identical to how AsciiDoc rendered before metadata support landed.
+
+== Section
+
+Body content.

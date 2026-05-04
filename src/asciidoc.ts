@@ -3,6 +3,13 @@ import { fromHtml } from "hast-util-from-html";
 import { defaultSchema, sanitize, type Schema } from "hast-util-sanitize";
 import { toHtml } from "hast-util-to-html";
 
+import {
+  type DocumentMetadata,
+  type DocumentMetadataAuthor,
+  type RawMetadataValue,
+  isAsciidocInternalAttribute,
+  normalizeMetadata,
+} from "./document-metadata";
 import { escapeHtml, highlightCodeBlocks, SYNTAX_HIGHLIGHT_BYTES_LIMIT } from "./markdown";
 
 const asciidoctor = Asciidoctor();
@@ -140,11 +147,19 @@ const sanitizeSchema: Schema = (() => {
   };
 })();
 
-export function renderAsciidocToHtml(source: string): string {
+export type RenderedAsciidoc = {
+  html: string;
+  metadata: DocumentMetadata | undefined;
+};
+
+export function renderAsciidocToHtml(source: string): RenderedAsciidoc {
   // Match the Markdown size threshold: above the limit, skip Asciidoctor
   // entirely and render as plain escaped text so the browser stays responsive.
   if (source.length >= SYNTAX_HIGHLIGHT_BYTES_LIMIT) {
-    return `<pre><code class="hljs">${escapeHtml(source)}</code></pre>`;
+    return {
+      html: `<pre><code class="hljs">${escapeHtml(source)}</code></pre>`,
+      metadata: undefined,
+    };
   }
 
   // SECURE matches GitHub's posture (no `include::`, no filesystem/URI reads,
@@ -152,17 +167,122 @@ export function renderAsciidocToHtml(source: string): string {
   // emits the level-0 doctitle as <h1>. `relfilesuffix=.adoc` keeps the
   // author's extension on cross-document `xref:` and `<<>>` shorthand instead
   // of Asciidoctor's default `.html` rewrite.
-  const rawHtml = asciidoctor.convert(source, {
+  //
+  // We split `convert()` into `load()` + `doc.convert()` so the parsed
+  // Document model is available for metadata extraction. The two-step form
+  // produces byte-identical body HTML — `convert()` is implemented as a
+  // load+convert pair internally.
+  const doc = asciidoctor.load(source, {
     safe: "secure",
     standalone: false,
     attributes: { showtitle: true, relfilesuffix: ".adoc" },
   });
+  const rawHtml = doc.convert();
 
   const html = typeof rawHtml === "string" ? rawHtml : "";
   const normalized = normalizeAsciidoctorListings(html);
   const tree = fromHtml(normalized, { fragment: true });
   const safe = sanitize(tree, sanitizeSchema);
-  return highlightCodeBlocks(rewriteInPageAnchors(toHtml(safe)));
+  return {
+    html: highlightCodeBlocks(rewriteInPageAnchors(toHtml(safe))),
+    metadata: extractAsciidocMetadata(doc),
+  };
+}
+
+// Asciidoctor exposes the document title via `getDocumentTitle()` and every
+// header attribute via `getAttributes()`. Authors are surfaced as numbered
+// `author_N` / `email_N` keys on the attribute map (1-indexed, with
+// `authorcount` declaring how many were declared). We use the attribute map
+// directly rather than `getAuthors()` because the latter returns Opal-wrapped
+// objects whose property access is brittle across Asciidoctor versions.
+function extractAsciidocMetadata(doc: ReturnType<Asciidoctor["load"]>): DocumentMetadata | undefined {
+  const attrs = doc.getAttributes() as Record<string, unknown>;
+  const raw: Record<string, RawMetadataValue> = {};
+
+  const authors = collectAsciidocAuthors(attrs);
+  if (authors.length > 0) {
+    raw.authors = authors;
+  }
+
+  for (const [key, value] of Object.entries(attrs)) {
+    if (typeof value !== "string" || value === "") {
+      continue;
+    }
+    if (isAsciidocAuthorAttribute(key)) {
+      continue;
+    }
+    if (key === "doctitle" || key === "title") {
+      // The doctitle is surfaced explicitly below via `getDocumentTitle()`.
+      // Asciidoctor also exposes the same string under `:title:` and
+      // `:doctitle:` — skip both so they don't shadow our explicit value.
+      continue;
+    }
+    if (isAsciidocInternalAttribute(key)) {
+      // Filter Asciidoctor's runtime defaults (caption labels, doctype/safe
+      // mode metadata, asset-directory paths, etc.) at this layer so the
+      // "is there any author metadata?" check below can decide cleanly
+      // without the internals padding the count.
+      continue;
+    }
+    raw[key] = value;
+  }
+
+  // Title is "secondary" for AsciiDoc: every `.adoc` file authored as a
+  // document declares one (`= Heading` is the conventional opener), and the
+  // body already renders that heading as `<h1>`. Surfacing a card with ONLY
+  // a title would mean every existing fixture suddenly grows a card without
+  // any other useful information — duplicating what the heading already shows.
+  // So we only include the title when at least one other metadata field is
+  // present, mirroring the design's "card is editorial, not archival" stance.
+  if (Object.keys(raw).length > 0) {
+    const title = doc.getDocumentTitle();
+    if (typeof title === "string" && title.trim() !== "") {
+      raw.title = title;
+    }
+  }
+
+  return normalizeMetadata(raw, "asciidoc");
+}
+
+function collectAsciidocAuthors(attrs: Record<string, unknown>): DocumentMetadataAuthor[] {
+  const countRaw = attrs.authorcount;
+  const count = typeof countRaw === "number" ? countRaw : Number.parseInt(String(countRaw ?? "0"), 10);
+  if (!Number.isFinite(count) || count <= 0) {
+    return [];
+  }
+  const authors: DocumentMetadataAuthor[] = [];
+  for (let index = 1; index <= count; index += 1) {
+    // For a single-author document declared via `:author:` (rather than the
+    // positional second line), Asciidoctor sets `author` / `email` but does
+    // NOT set `author_1` / `email_1`. Fall back to the bare keys when the
+    // numbered ones are absent.
+    const nameRaw =
+      attrs[`author_${index}`] ?? (index === 1 ? attrs.author : undefined);
+    if (typeof nameRaw !== "string" || nameRaw.trim() === "") {
+      continue;
+    }
+    const emailRaw =
+      attrs[`email_${index}`] ?? (index === 1 ? attrs.email : undefined);
+    authors.push(
+      typeof emailRaw === "string" && emailRaw.trim() !== ""
+        ? { name: nameRaw.trim(), email: emailRaw.trim() }
+        : { name: nameRaw.trim() },
+    );
+  }
+  return authors;
+}
+
+const ASCIIDOC_AUTHOR_ATTR_PREFIXES = ["author", "email", "firstname", "middlename", "lastname", "authorinitials"];
+
+function isAsciidocAuthorAttribute(key: string): boolean {
+  // We've already populated `raw.authors` from the numbered `author_N` /
+  // `email_N` family before reaching the attribute loop, so every author-
+  // related key is filtered out here to keep them from re-appearing as
+  // extras. `authorcount` is internal scaffolding and never reaches the card.
+  if (key === "authors" || key === "authorcount") {
+    return true;
+  }
+  return ASCIIDOC_AUTHOR_ATTR_PREFIXES.some(prefix => key === prefix || key.startsWith(`${prefix}_`));
 }
 
 // hast-util-sanitize prefixes element `id` attributes with `user-content-` to

@@ -8,7 +8,7 @@ test.beforeEach(async ({ page, request }) => {
   await page.goto("/");
   await expect(page.getByRole("button", { name: "README.md" })).toBeVisible();
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Online");
-  await expect(page.locator("#document-count")).toHaveText("8 files");
+  await expect(page.locator("#document-count")).toHaveText("16 files");
   await waitForPreviewToSettle(page);
   await page.getByRole("button", { name: "README.md" }).click();
   await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
@@ -820,7 +820,7 @@ test("a non-Markdown text file appears in the tree and renders as syntax-highlig
     data: { extras: { "config.yaml": "key: value\nport: 4321\n" } },
   });
   await page.goto("/");
-  await expect(page.locator("#document-count")).toHaveText("9 files");
+  await expect(page.locator("#document-count")).toHaveText("17 files");
 
   const yamlButton = page.getByRole("button", { name: "config.yaml" });
   await expect(yamlButton).toBeVisible();
@@ -959,7 +959,7 @@ test("sidebar counter shows the binary subcount when binary files are present", 
     data: { extras: { "logo.png": pngBytes } },
   });
   await page.goto("/");
-  await expect(page.locator("#document-count")).toHaveText("9 files · 1 binary");
+  await expect(page.locator("#document-count")).toHaveText("17 files · 1 binary");
 });
 
 test("sidebar counter shows the hidden subcount for .uatuignore-filtered files", async ({ page, request }) => {
@@ -973,11 +973,10 @@ test("sidebar counter shows the hidden subcount for .uatuignore-filtered files",
     },
   });
   await page.goto("/");
-  // Visible: 8 testdata files (README.md, diagram.md, mermaid-shapes.md,
-  // asciidoc-cheatsheet.adoc, guides/setup.md, guides/notes.adoc,
-  // links-demo.md, links-demo.adoc) plus the `.uatuignore` file itself (it
-  // is not matched by its own `*.lock` pattern). Hidden: bun.lock, yarn.lock.
-  await expect(page.locator("#document-count")).toHaveText("9 files · 2 hidden");
+  // Visible: 16 testdata files (8 base fixtures + 8 metadata fixtures) plus
+  // the `.uatuignore` file itself (it is not matched by its own `*.lock`
+  // pattern). Hidden: bun.lock, yarn.lock.
+  await expect(page.locator("#document-count")).toHaveText("17 files · 2 hidden");
 });
 
 test("connection indicator is rendered in the preview header so it stays visible when the sidebar is collapsed", async ({ page }) => {
@@ -1777,4 +1776,89 @@ test("Folder icons render on directory rows in the fallback tree", async ({ page
   // The default fixture has a `guides/` directory.
   const guides = page.locator(".tree-dir", { has: page.locator("text=guides") }).first();
   await expect(guides.locator(".tree-folder-icon svg")).toBeVisible();
+});
+
+test("metadata card surfaces YAML frontmatter above the body", async ({ page }) => {
+  await page.locator('#tree details summary:has-text("metadata")').first().click();
+  await page.getByRole("button", { name: "markdown-yaml.md" }).click();
+  await expect(page.locator("#preview-path")).toHaveText("metadata/markdown-yaml.md");
+  const card = page.locator("#preview .metadata-card");
+  await expect(card).toBeVisible();
+  // The card is a collapsed disclosure by default. Open it to inspect rows.
+  await expect(card).not.toHaveAttribute("open", "");
+  await card.locator(".metadata-card-summary").click();
+  await expect(card).toHaveAttribute("open", "");
+  // Curated rows render in a stable order, then extras follow.
+  const labels = card.locator(".metadata-card-row .metadata-card-label");
+  await expect(labels).toHaveText([
+    "Title",
+    "Author",
+    "Date",
+    "Description",
+    "Tags",
+    "Status",
+    "slug",
+  ]);
+  // The body's first heading still renders below the card.
+  const cardBox = await card.boundingBox();
+  const heading = page.locator("#preview h1").first();
+  const headingBox = await heading.boundingBox();
+  expect(cardBox).toBeTruthy();
+  expect(headingBox).toBeTruthy();
+  expect(headingBox!.y).toBeGreaterThan(cardBox!.y);
+  // The leading `---` MUST NOT survive as a thematic break.
+  await expect(page.locator("#preview hr")).toHaveCount(0);
+});
+
+test("metadata card open/closed state persists across documents", async ({ page }) => {
+  await page.locator('#tree details summary:has-text("metadata")').first().click();
+  await page.getByRole("button", { name: "markdown-yaml.md" }).click();
+  await expect(page.locator("#preview-path")).toHaveText("metadata/markdown-yaml.md");
+
+  // Open it on the first doc.
+  const firstCard = page.locator("#preview .metadata-card");
+  await expect(firstCard).not.toHaveAttribute("open", "");
+  await firstCard.locator(".metadata-card-summary").click();
+  await expect(firstCard).toHaveAttribute("open", "");
+
+  // Navigate to another metadata-bearing doc — the card should still be open.
+  await page.getByRole("button", { name: "asciidoc-attrs.adoc" }).click();
+  await expect(page.locator("#preview-path")).toHaveText("metadata/asciidoc-attrs.adoc");
+  const secondCard = page.locator("#preview .metadata-card");
+  await expect(secondCard).toHaveAttribute("open", "");
+
+  // Close it on the second doc, then go back — should now be closed everywhere.
+  await secondCard.locator(".metadata-card-summary").click();
+  await expect(secondCard).not.toHaveAttribute("open", "");
+
+  await page.getByRole("button", { name: "markdown-yaml.md" }).click();
+  await expect(page.locator("#preview-path")).toHaveText("metadata/markdown-yaml.md");
+  await expect(page.locator("#preview .metadata-card")).not.toHaveAttribute("open", "");
+});
+
+test("a Markdown file with no frontmatter shows no metadata card", async ({ page }) => {
+  await page.locator('#tree details summary:has-text("metadata")').first().click();
+  await page.getByRole("button", { name: "markdown-empty.md" }).click();
+  await expect(page.locator("#preview-path")).toHaveText("metadata/markdown-empty.md");
+  await expect(page.locator("#preview .metadata-card")).toHaveCount(0);
+});
+
+test("metadata values containing <script> are rendered as escaped text, not executed", async ({ page }) => {
+  // Build the fixture in-place so the assertion is wholly self-contained and
+  // does not require a hostile fixture to live in the repo permanently.
+  const hostile = `---\ntitle: Safe Title\ndescription: '<script>window.__pwned = true</script>'\n---\n\n# Body\n`;
+  await fs.writeFile(workspacePath("metadata", "hostile.md"), hostile, "utf8");
+  await page.locator('#tree details summary:has-text("metadata")').first().click();
+  await expect(page.getByRole("button", { name: "hostile.md" })).toBeVisible();
+  await page.getByRole("button", { name: "hostile.md" }).click();
+  await expect(page.locator("#preview-path")).toHaveText("metadata/hostile.md");
+  // The card renders, the description text is visible as escaped characters,
+  // but the script never executes.
+  const card = page.locator("#preview .metadata-card");
+  await expect(card).toBeVisible();
+  await card.locator(".metadata-card-summary").click();
+  await expect(card.locator(".metadata-card-body")).toContainText("<script>");
+  await expect(card.locator("script")).toHaveCount(0);
+  const pwned = await page.evaluate(() => (window as unknown as { __pwned?: boolean }).__pwned === true);
+  expect(pwned).toBe(false);
 });
