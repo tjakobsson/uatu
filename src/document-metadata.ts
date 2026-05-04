@@ -327,25 +327,30 @@ export function hasAnyMetadata(metadata: DocumentMetadata): boolean {
 // "parsed cleanly, no recognized keys" — the normalize layer then folds that
 // into a no-card outcome.
 export function parseSimpleYaml(source: string): Record<string, RawMetadataValue> | undefined {
-  let parsed: unknown;
+  // The try/catch wraps the entire post-parse flow, not just `yamlParse`.
+  // The `yaml` package detects circular merge-key anchors and throws, but
+  // that contract isn't guaranteed across versions — if a self-referential
+  // anchor ever resolves into an actual circular JS object, `flattenInto`
+  // would recurse until the stack blows. Treating any post-parse exception
+  // as "malformed → no card" keeps the renderer process alive.
   try {
-    parsed = yamlParse(source);
+    const parsed = yamlParse(source);
+    if (parsed === null || typeof parsed === "string" || typeof parsed === "number" || typeof parsed === "boolean") {
+      // A plain scalar isn't a recognizable metadata document.
+      return undefined;
+    }
+    if (Array.isArray(parsed)) {
+      return undefined;
+    }
+    if (typeof parsed !== "object") {
+      return undefined;
+    }
+    const flat: Record<string, RawMetadataValue> = {};
+    flattenInto(flat, parsed as Record<string, unknown>, "");
+    return flat;
   } catch {
     return undefined;
   }
-  if (parsed === null || typeof parsed === "string" || typeof parsed === "number" || typeof parsed === "boolean") {
-    // A plain scalar isn't a recognizable metadata document.
-    return undefined;
-  }
-  if (Array.isArray(parsed)) {
-    return undefined;
-  }
-  if (typeof parsed !== "object") {
-    return undefined;
-  }
-  const flat: Record<string, RawMetadataValue> = {};
-  flattenInto(flat, parsed as Record<string, unknown>, "");
-  return flat;
 }
 
 function flattenInto(
@@ -399,7 +404,7 @@ function flattenInto(
   }
 }
 
-function stripYamlScalar(value: string): string | undefined {
+function stripQuotedScalar(value: string): string | undefined {
   if (value.length === 0) {
     return "";
   }
@@ -445,7 +450,7 @@ function splitFlowArray(inner: string): string[] | undefined {
       continue;
     }
     if (ch === ",") {
-      const stripped = stripYamlScalar(buffer.trim());
+      const stripped = stripQuotedScalar(buffer.trim());
       if (stripped === undefined) {
         return undefined;
       }
@@ -455,7 +460,7 @@ function splitFlowArray(inner: string): string[] | undefined {
     }
     buffer += ch;
   }
-  const last = stripYamlScalar(buffer.trim());
+  const last = stripQuotedScalar(buffer.trim());
   if (last === undefined) {
     return undefined;
   }
