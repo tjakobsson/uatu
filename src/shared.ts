@@ -139,6 +139,12 @@ export type RepositoryReviewSnapshot = {
   commitLog: CommitLogEntry[];
 };
 
+export type Mode = "author" | "review";
+
+export const MODE_STORAGE_KEY = "uatu:mode";
+
+export const DEFAULT_MODE: Mode = "author";
+
 export type StatePayload = {
   roots: RootGroup[];
   repositories: RepositoryReviewSnapshot[];
@@ -148,7 +154,51 @@ export type StatePayload = {
   generatedAt: number;
   build: BuildSummary;
   scope: Scope;
+  startupMode?: Mode;
 };
+
+export function isMode(value: unknown): value is Mode {
+  return value === "author" || value === "review";
+}
+
+export function reviewBurdenHeadlineLabel(mode: Mode): string {
+  return mode === "review" ? "Change review burden" : "Reviewer burden forecast";
+}
+
+type ModeStorage = {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+};
+
+export function readModePreference(
+  storage: ModeStorage | null | undefined,
+  startupMode?: Mode,
+): Mode {
+  if (startupMode && isMode(startupMode)) {
+    return startupMode;
+  }
+  if (!storage) {
+    return DEFAULT_MODE;
+  }
+  try {
+    const raw = storage.getItem(MODE_STORAGE_KEY);
+    return isMode(raw) ? raw : DEFAULT_MODE;
+  } catch {
+    return DEFAULT_MODE;
+  }
+}
+
+export function writeModePreference(
+  storage: ModeStorage | null | undefined,
+  mode: Mode,
+): void {
+  if (!storage) return;
+  try {
+    storage.setItem(MODE_STORAGE_KEY, mode);
+  } catch {
+    // localStorage may be disabled or full; persistence is best-effort.
+  }
+}
 
 export type TreeNode = {
   kind: "dir" | "doc";

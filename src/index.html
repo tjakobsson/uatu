@@ -12,11 +12,8 @@
       <aside class="sidebar">
         <div class="sidebar-header">
           <div class="brand">
-            <img class="brand-logo" alt="" width="28" height="28" aria-hidden="true" data-src="/assets/uatu-logo.svg" />
-            <div class="brand-text">
-              <p class="eyebrow">uatu</p>
-              <h1>Codebase Watcher</h1>
-            </div>
+            <img class="brand-logo" alt="" width="56" height="56" aria-hidden="true" data-src="/assets/uatu-logo.svg" />
+            <h1 class="brand-wordmark">UatuCode</h1>
           </div>
           <button
             id="sidebar-collapse"
@@ -36,6 +33,60 @@
               />
             </svg>
           </button>
+        </div>
+
+        <div class="sidebar-mode-row">
+          <div
+            id="mode-control"
+            class="mode-control"
+            role="radiogroup"
+            aria-label="Mode"
+            title="Switch between Author and Review mode"
+          >
+            <button
+              id="mode-author"
+              class="mode-segment"
+              type="button"
+              role="radio"
+              aria-checked="true"
+              data-mode-value="author"
+              title="Author: in-flow with auto-follow available"
+            >
+              <svg class="mode-glyph" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+                <path
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.4"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M2 14l1-3 8-8 2 2-8 8-3 1zM10 4l2 2"
+                />
+              </svg>
+              <span>Author</span>
+            </button>
+            <button
+              id="mode-review"
+              class="mode-segment"
+              type="button"
+              role="radio"
+              aria-checked="false"
+              data-mode-value="review"
+              title="Review: stable navigation, follow off"
+            >
+              <svg class="mode-glyph" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+                <path
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.4"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M1.5 8c1.5-3 4-4.5 6.5-4.5S13 5 14.5 8C13 11 10.5 12.5 8 12.5S3 11 1.5 8z"
+                />
+                <circle cx="8" cy="8" r="2" fill="currentColor" />
+              </svg>
+              <span>Review</span>
+            </button>
+          </div>
         </div>
 
         <div class="sidebar-meta">
@@ -71,6 +122,32 @@
             <header class="pane-header">
               <h2>Files</h2>
               <div class="pane-actions">
+                <div
+                  id="files-view-toggle"
+                  class="files-view-toggle"
+                  role="radiogroup"
+                  aria-label="Files view"
+                  hidden
+                >
+                  <button
+                    id="files-view-all"
+                    class="files-view-segment"
+                    type="button"
+                    role="radio"
+                    aria-checked="true"
+                    data-files-view="all"
+                    title="Show all files in the watched roots"
+                  >All</button>
+                  <button
+                    id="files-view-changed"
+                    class="files-view-segment"
+                    type="button"
+                    role="radio"
+                    aria-checked="false"
+                    data-files-view="changed"
+                    title="Show only files changed against the base"
+                  >Changed</button>
+                </div>
                 <button class="pane-action" type="button" data-pane-collapse="files" aria-label="Collapse Files" title="Collapse pane">−</button>
                 <button class="pane-action" type="button" data-pane-hide="files" aria-label="Hide Files" title="Hide pane">×</button>
               </div>
@@ -132,6 +209,22 @@
       </button>
 
       <main class="preview-shell">
+        <div
+          id="stale-hint"
+          class="stale-hint"
+          role="status"
+          aria-live="polite"
+          hidden
+        >
+          <span id="stale-hint-message" class="stale-hint-message"></span>
+          <button
+            id="stale-hint-action"
+            class="stale-hint-action"
+            type="button"
+          >
+            Refresh
+          </button>
+        </div>
         <header class="preview-header">
           <div class="preview-heading">
             <p class="eyebrow">Preview</p>
@@ -155,23 +248,6 @@
             >
               <span class="chip-dot" aria-hidden="true"></span>
               <span class="chip-label">Follow</span>
-            </button>
-            <button
-              id="pin-toggle"
-              class="chip-button"
-              type="button"
-              aria-pressed="false"
-              aria-label="Pin preview to this file"
-              title="Pin preview to this file"
-              hidden
-            >
-              <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" class="chip-icon">
-                <path
-                  fill="currentColor"
-                  d="M10.1 1.3a.5.5 0 0 1 .8 0l3.8 3.8a.5.5 0 0 1 0 .8l-1 1a.5.5 0 0 1-.5.1L11 6.6l-2.4 2.4.5 2.5a.5.5 0 0 1-.2.5l-1 .8a.5.5 0 0 1-.7-.1L4 8.9l-3 3a.6.6 0 0 1-.9-.8l3-3L0 4.7a.5.5 0 0 1-.1-.7l.8-1a.5.5 0 0 1 .5-.2l2.5.5L6.1 1a.5.5 0 0 1 .5-.1l2.2.5 1.3-.1z"
-                />
-              </svg>
-              <span class="chip-label">Pin</span>
             </button>
           </div>
         </header>

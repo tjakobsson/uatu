@@ -542,18 +542,25 @@ test("sidebar collapse preference persists across reloads", async ({ page }) => 
   await expect(page.locator(".app-shell")).not.toHaveClass(/is-sidebar-collapsed/);
 });
 
-test("sidebar opens with Change Overview, Files, and Git Log panes", async ({ page }) => {
+test("Author Mode sidebar shows Change Overview and Files only; Review Mode adds Git Log", async ({ page }) => {
+  // Default Mode is Author — Git Log is intentionally hidden because past
+  // commits aren't an Author concern.
   await expect(page.locator('[data-pane-id="change-overview"]')).toBeVisible();
   await expect(page.locator('[data-pane-id="files"]')).toBeVisible();
-  await expect(page.locator('[data-pane-id="git-log"]')).toBeVisible();
+  await expect(page.locator('[data-pane-id="git-log"]')).toBeHidden();
   await expect(page.locator('[data-pane-id="files"] #tree')).toBeVisible();
   await expect.poll(sidebarPanesFitVisibleHeight(page)).toBe(true);
   await expect(page.locator(".sidebar-body")).toHaveCSS("overflow-y", "hidden");
+
+  await page.locator('[data-pane-id="files"]').getByRole("button", { name: "diagram.md" }).click();
+  await expect(page.locator("#preview-path")).toHaveText("diagram.md");
+
+  // Switch to Review — Git Log should appear, with Files getting the spare height.
+  await page.locator("#mode-review").click();
+  await expect(page.locator('[data-pane-id="git-log"]')).toBeVisible();
   const filesHeight = (await page.locator('[data-pane-id="files"]').boundingBox())?.height ?? 0;
   const gitLogHeight = (await page.locator('[data-pane-id="git-log"]').boundingBox())?.height ?? 0;
   expect(filesHeight).toBeGreaterThan(gitLogHeight);
-  await page.locator('[data-pane-id="files"]').getByRole("button", { name: "diagram.md" }).click();
-  await expect(page.locator("#preview-path")).toHaveText("diagram.md");
 });
 
 test("sidebar panes can be hidden, restored, resized, and survive whole-sidebar collapse", async ({ page }) => {
@@ -606,6 +613,9 @@ test("Change Overview and Git Log render git-backed review load with configured 
   await request.post("/__e2e/reset", {
     data: {
       git: true,
+      // Git Log is a Review-mode pane; boot in Review so this test can assert
+      // against it.
+      startupMode: "review",
       uatuConfig: {
         review: {
           baseRef: "main",
@@ -626,7 +636,9 @@ test("Change Overview and Git Log render git-backed review load with configured 
   const overview = page.locator("#change-overview");
   await expect(overview).toContainText("feature/review-load");
   await expect(overview).toContainText("configured base");
-  await expect(overview).toContainText("review burden");
+  // Test boots in Review (so Git Log assertions work), so the headline reads
+  // "Change review burden" rather than the Author-mode forecast label.
+  await expect(overview).toContainText("Change review burden");
   await expect(overview).toContainText("Auth");
   await expect(overview).toContainText("Generated");
   await expect(overview).toContainText("src/auth/session.ts");
@@ -682,7 +694,8 @@ test("Change Overview and Git Log render git-backed review load with configured 
 });
 
 test("Git Log commit links support URL history and reloads", async ({ page, request }) => {
-  await request.post("/__e2e/reset", { data: { git: true } });
+  // Git Log lives in the Review-mode pane catalog only.
+  await request.post("/__e2e/reset", { data: { git: true, startupMode: "review" } });
   await page.goto("/");
   await expect(page.locator("#preview-path")).toHaveText("README.md");
 
@@ -705,8 +718,8 @@ test("Git Log commit links support URL history and reloads", async ({ page, requ
   await expect(page.locator("#preview-path")).toHaveText("README.md");
   await expect(page.locator('button[data-document-id$="README.md"]')).toHaveClass(/is-selected/);
 
-  await page.locator("#follow-toggle").click();
-  await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "true");
+  // Follow is unavailable in Review (where Git Log lives) — that assertion
+  // belongs in the Mode tests.
 
   await page.goForward();
   await expect(page.locator("#preview-title")).toHaveText("add feature doc");
@@ -724,7 +737,8 @@ test("Git Log commit links support URL history and reloads", async ({ page, requ
 });
 
 test("commit preview URLs show an unavailable state when data is missing", async ({ page, request }) => {
-  await request.post("/__e2e/reset", { data: { git: true } });
+  // Git Log assertion only meaningful in Review.
+  await request.post("/__e2e/reset", { data: { git: true, startupMode: "review" } });
   await page.goto("/?repository=missing-repo&commit=deadbeef");
 
   await expect(page.locator("#preview-title")).toHaveText("Commit preview unavailable");
@@ -747,28 +761,7 @@ test("Change Overview displays non-git and invalid settings fallback states", as
   });
   await page.goto("/");
   await expect(page.locator("#change-overview")).toContainText("Invalid .uatu.json");
-  await expect(page.locator("#change-overview")).toContainText("review burden");
-});
-
-test("pin toggle narrows the sidebar to the current document and ignores changes elsewhere", async ({ page }) => {
-  await expect(page.locator("#document-count")).toHaveText("8 files");
-  await page.locator("#pin-toggle").click();
-  await expect(page.locator("#pin-toggle")).toHaveAttribute("aria-pressed", "true");
-  await expect(page.locator("#document-count")).toHaveText("1 file");
-  await expect(page.locator("#follow-toggle")).toBeDisabled();
-  await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
-
-  const offPinPath = "guides/setup.md";
-  await fs.writeFile(workspacePath(offPinPath), "# Setup\n\nOff-pin change should be ignored.\n", "utf8");
-
-  await page.waitForTimeout(500);
-  await expect(page.locator("#preview-path")).toHaveText("README.md");
-  await expect(page.locator("#document-count")).toHaveText("1 file");
-
-  await page.locator("#pin-toggle").click();
-  await expect(page.locator("#pin-toggle")).toHaveAttribute("aria-pressed", "false");
-  await expect(page.locator("#document-count")).toHaveText("8 files");
-  await expect(page.locator("#follow-toggle")).toBeEnabled();
+  await expect(page.locator("#change-overview")).toContainText("Reviewer burden forecast");
 });
 
 test("connection indicator exposes live and reconnecting classes", async ({ page }) => {
@@ -1377,24 +1370,29 @@ test("follow auto-switch updates the URL via replaceState (back stack does not g
   expect(finalDepth).toBe(initialDepth);
 });
 
-test("direct-link to a doc outside the pinned scope renders the session-pinned message", async ({ page }) => {
-  // Pin README via the UI so the watch session enters file-scope mode while
-  // the unscoped index still knows about every other doc.
-  await page.locator("#pin-toggle").click();
-  await expect(page.locator("#pin-toggle")).toHaveAttribute("aria-pressed", "true");
+test("direct-link to a doc outside the file-scoped session renders the session-pinned message", async ({ page, request }) => {
+  // The Pin UI affordance is gone, but the server-side file-scope mechanism
+  // is preserved (CLI single-file watch still uses it; future workflows may
+  // expose it again). Hit the /api/scope endpoint directly to put the
+  // folder-scoped session into file-mode without restarting it.
+  await request.post("/api/scope", {
+    data: { scope: { kind: "file", documentId: workspacePath("README.md") } },
+  });
+  await page.goto("/");
   await expect(page.locator("#document-count")).toHaveText("1 file");
 
-  // Now navigate to a doc outside the pinned scope. The server returns the
-  // SPA shell because the doc exists in the unscoped index; the SPA boots,
-  // sees scope.kind === "file" with a different documentId, and renders the
-  // empty-preview state with a "session pinned" message.
+  // Now navigate to a doc outside the file-scope. The server returns the
+  // SPA shell because the doc exists in the unscoped index (the original
+  // folder watch); the SPA boots, sees scope.kind === "file" with a
+  // different documentId, and renders the empty-preview state with a
+  // "session pinned" message.
   await page.goto("/guides/setup.md");
 
   await expect(page.locator("#preview-title")).toHaveText("Session pinned");
   await expect(page.locator("#preview-path")).toContainText("Session pinned to README.md");
   await expect(page.locator("#preview")).toHaveClass(/empty/);
 
-  // Sidebar still shows only the pinned file (scope unchanged).
+  // Sidebar still shows only the scoped file.
   await expect(page.locator("#document-count")).toHaveText("1 file");
   await expect(page.getByRole("button", { name: "README.md" })).toBeVisible();
   await expect(page.getByRole("button", { name: "setup.md" })).toHaveCount(0);
@@ -1504,4 +1502,279 @@ test("user can re-enable follow after a direct-link arrival and catch up to the 
   await page.locator("#follow-toggle").click();
   await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator("#preview-path")).toHaveText("guides/setup.md");
+});
+
+test("default Mode is Author with the forecast headline label", async ({ page, request }) => {
+  await request.post("/__e2e/reset", { data: { git: true } });
+  await page.goto("/");
+  await expect(page.locator("#mode-author")).toHaveAttribute("aria-checked", "true");
+  await expect(page.locator("#mode-review")).toHaveAttribute("aria-checked", "false");
+  await expect(page.locator("#follow-toggle")).toBeEnabled();
+  const overview = page.locator("#change-overview");
+  await expect(overview.locator(".burden-headline")).toHaveText("Reviewer burden forecast");
+});
+
+test("Mode persists across reload via localStorage", async ({ page, request }) => {
+  await request.post("/__e2e/reset", { data: { git: true } });
+  await page.goto("/");
+  await page.locator("#mode-review").click();
+  await expect(page.locator("#mode-review")).toHaveAttribute("aria-checked", "true");
+  await page.reload();
+  await expect(page.locator("#mode-review")).toHaveAttribute("aria-checked", "true");
+  await expect(page.locator("#mode-author")).toHaveAttribute("aria-checked", "false");
+  await expect(page.locator("#follow-toggle")).toBeDisabled();
+  const overview = page.locator("#change-overview");
+  await expect(overview.locator(".burden-headline")).toHaveText("Change review burden");
+});
+
+test("switching Author -> Review disables Follow and switching back leaves it off", async ({ page }) => {
+  await page.locator("#mode-review").click();
+  await expect(page.locator("#follow-toggle")).toBeDisabled();
+  await expect(page.locator("#follow-toggle")).toHaveClass(/is-mode-disabled/);
+  await page.locator("#mode-author").click();
+  await expect(page.locator("#follow-toggle")).toBeEnabled();
+  // Author should NOT auto-enable Follow — the user must opt back in.
+  await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
+});
+
+test("CLI --mode=review boots in Review with Follow off", async ({ page, request }) => {
+  await request.post("/__e2e/reset", { data: { startupMode: "review", git: true } });
+  await page.goto("/");
+  await expect(page.locator("#mode-review")).toHaveAttribute("aria-checked", "true");
+  await expect(page.locator("#follow-toggle")).toBeDisabled();
+  const overview = page.locator("#change-overview");
+  await expect(overview.locator(".burden-headline")).toHaveText("Change review burden");
+});
+
+test("CLI --mode flag overrides persisted preference at startup", async ({ page, request }) => {
+  // First boot: persist Review.
+  await request.post("/__e2e/reset", { data: { git: true } });
+  await page.goto("/");
+  await page.locator("#mode-review").click();
+  await expect(page.locator("#mode-review")).toHaveAttribute("aria-checked", "true");
+  // Second boot with CLI override to author — must win at startup.
+  await request.post("/__e2e/reset", { data: { startupMode: "author", git: true } });
+  await page.reload();
+  await expect(page.locator("#mode-author")).toHaveAttribute("aria-checked", "true");
+  await expect(page.locator("#mode-review")).toHaveAttribute("aria-checked", "false");
+});
+
+test("Review mode does not switch active preview when a different file changes", async ({ page }) => {
+  await page.locator("#mode-review").click();
+  await expect(page.locator("#preview-path")).toHaveText("README.md");
+  await fs.writeFile(workspacePath("guides", "setup.md"), "# Setup\n\nReview suppresses switching.\n", "utf8");
+  // Wait long enough that any auto-switch would have landed (debounced to ~150ms server-side).
+  await page.waitForTimeout(700);
+  await expect(page.locator("#preview-path")).toHaveText("README.md");
+});
+
+test("Review mode allows manual file selection from the Files pane", async ({ page }) => {
+  await page.locator("#mode-review").click();
+  await page.getByRole("button", { name: "diagram.md" }).click();
+  await expect(page.locator("#preview-path")).toHaveText("diagram.md");
+});
+
+test("Review mode shows a stale-content hint when the active file changes on disk", async ({ page }) => {
+  await page.locator("#mode-review").click();
+  // Capture the rendered title BEFORE the disk change so we can prove the
+  // preview did not auto-re-render.
+  const titleBefore = await page.locator("#preview h1, #preview h2, #preview h3").first().textContent();
+  await fs.writeFile(workspacePath("README.md"), "# Renamed Heading\n\nNew content.\n", "utf8");
+  await expect(page.locator("#stale-hint")).toBeVisible();
+  await expect(page.locator("#stale-hint")).toHaveClass(/is-changed/);
+  await expect(page.locator("#stale-hint-message")).toHaveText("This file has changed on disk.");
+  await expect(page.locator("#stale-hint-action")).toHaveText("Refresh");
+  // Stale content still showing.
+  const titleStillStale = await page.locator("#preview h1, #preview h2, #preview h3").first().textContent();
+  expect(titleStillStale).toBe(titleBefore);
+  // Refresh acts on the hint.
+  await page.locator("#stale-hint-action").click();
+  await expect(page.locator("#stale-hint")).toBeHidden();
+  await expect(page.locator("#preview h1").first()).toHaveText("Renamed Heading");
+});
+
+test("Review hint coalesces multiple changes and clears on manual navigation", async ({ page }) => {
+  await page.locator("#mode-review").click();
+  await fs.writeFile(workspacePath("README.md"), "# First Edit\n\n.\n", "utf8");
+  await expect(page.locator("#stale-hint")).toBeVisible();
+  await fs.writeFile(workspacePath("README.md"), "# Second Edit\n\n.\n", "utf8");
+  await fs.writeFile(workspacePath("README.md"), "# Third Edit\n\n.\n", "utf8");
+  // Still exactly one hint visible.
+  await expect(page.locator("#stale-hint")).toHaveCount(1);
+  await expect(page.locator("#stale-hint")).toBeVisible();
+  // Manual navigation clears the hint.
+  await page.getByRole("button", { name: "diagram.md" }).click();
+  await expect(page.locator("#stale-hint")).toBeHidden();
+});
+
+test("Switching to Author clears the hint and re-renders to current on-disk content", async ({ page }) => {
+  await page.locator("#mode-review").click();
+  await fs.writeFile(workspacePath("README.md"), "# Mode Switch Refresh\n\n.\n", "utf8");
+  await expect(page.locator("#stale-hint")).toBeVisible();
+  await page.locator("#mode-author").click();
+  await expect(page.locator("#stale-hint")).toBeHidden();
+  await expect(page.locator("#preview h1").first()).toHaveText("Mode Switch Refresh");
+});
+
+test("Stale hint never appears in Author mode", async ({ page }) => {
+  // Default test setup leaves us in Author. Modify the active file.
+  await fs.writeFile(workspacePath("README.md"), "# Author Inline Refresh\n\n.\n", "utf8");
+  // Wait for the in-place refresh path to land.
+  await expect(page.locator("#preview h1").first()).toHaveText("Author Inline Refresh");
+  await expect(page.locator("#stale-hint")).toBeHidden();
+});
+
+test("Active file deleted on disk in Review shows the deleted hint variant", async ({ page }) => {
+  await page.locator("#mode-review").click();
+  // Capture pre-deletion content marker.
+  const before = await page.locator("#preview h1").first().textContent();
+  await fs.unlink(workspacePath("README.md"));
+  await expect(page.locator("#stale-hint")).toBeVisible();
+  await expect(page.locator("#stale-hint")).toHaveClass(/is-deleted/);
+  await expect(page.locator("#stale-hint-message")).toHaveText("This file no longer exists on disk.");
+  await expect(page.locator("#stale-hint-action")).toHaveText("Close");
+  // Stale rendered content is still visible until the user acts.
+  const stillVisible = await page.locator("#preview h1").first().textContent();
+  expect(stillVisible).toBe(before);
+});
+
+test("Mode visual differentiation: segment glyphs, connection indicator, and preview frame all reflect Mode", async ({ page }) => {
+  const connectionLabel = page.locator("#connection-state .connection-label");
+  const previewShell = page.locator(".preview-shell");
+  const indicatorDot = page.locator("#connection-state .indicator-dot");
+
+  // Author baseline.
+  await expect(connectionLabel).toHaveText("Online");
+  await expect(previewShell).not.toHaveClass(/is-mode-review/);
+
+  // Both segments expose a glyph regardless of which is active.
+  await expect(page.locator("#mode-author .mode-glyph")).toHaveCount(1);
+  await expect(page.locator("#mode-review .mode-glyph")).toHaveCount(1);
+
+  // Author live dot is animated (pulsing).
+  const authorDotAnim = await indicatorDot.evaluate((el) =>
+    getComputedStyle(el).animationName,
+  );
+  expect(authorDotAnim).not.toBe("none");
+
+  // Switch to Review.
+  await page.locator("#mode-review").click();
+  await expect(connectionLabel).toHaveText("Reading — auto-refresh paused");
+  await expect(previewShell).toHaveClass(/is-mode-review/);
+
+  // Review live dot is steady (animation cleared).
+  const reviewDotAnim = await indicatorDot.evaluate((el) =>
+    getComputedStyle(el).animationName,
+  );
+  expect(reviewDotAnim).toBe("none");
+
+  // Switch back to Author and confirm everything restores.
+  await page.locator("#mode-author").click();
+  await expect(connectionLabel).toHaveText("Online");
+  await expect(previewShell).not.toHaveClass(/is-mode-review/);
+});
+
+test("Score number and level are identical across Mode switches; only the headline label differs", async ({ page, request }) => {
+  await request.post("/__e2e/reset", { data: { git: true } });
+  await page.goto("/");
+  const overview = page.locator("#change-overview");
+  const meter = overview.locator(".burden-meter").first();
+  const headline = meter.locator(".burden-headline");
+  const level = meter.locator(".burden-level");
+  const score = meter.locator("strong");
+
+  await expect(headline).toHaveText("Reviewer burden forecast");
+  const authorLevel = await level.textContent();
+  const authorScore = await score.textContent();
+  const meterClassAuthor = await meter.getAttribute("class");
+
+  await page.locator("#mode-review").click();
+  await expect(headline).toHaveText("Change review burden");
+  expect(await level.textContent()).toBe(authorLevel);
+  expect(await score.textContent()).toBe(authorScore);
+  expect(await meter.getAttribute("class")).toBe(meterClassAuthor);
+});
+
+test("Mode toggle is rendered in the sidebar, not the preview toolbar", async ({ page }) => {
+  // Sidebar contains it.
+  await expect(page.locator(".sidebar-mode-row #mode-control")).toBeVisible();
+  // Preview toolbar does not.
+  await expect(page.locator(".preview-toolbar #mode-control")).toHaveCount(0);
+});
+
+test("Pin UI affordance is removed", async ({ page }) => {
+  await expect(page.locator("#pin-toggle")).toHaveCount(0);
+});
+
+test("Files pane: View toggle is hidden when no git base is detected", async ({ page, request }) => {
+  await request.post("/__e2e/reset", { data: { nonGit: true } });
+  await page.goto("/");
+  await expect(page.locator("#files-view-toggle")).toBeHidden();
+  // Tree fallback still renders normally.
+  await expect(page.getByRole("button", { name: "README.md" })).toBeVisible();
+});
+
+test("Files pane: View toggle defaults to All and switches to Changed when git is available", async ({ page, request }) => {
+  await request.post("/__e2e/reset", { data: { git: true, dirty: { "README.md": "# Modified\n" } } });
+  await page.goto("/");
+  await expect(page.locator("#files-view-toggle")).toBeVisible();
+  // Default = All — README.md (and other fixture files) are listed in the tree.
+  await expect(page.locator("#files-view-all")).toHaveAttribute("aria-checked", "true");
+  await expect(page.locator("#files-view-changed")).toHaveAttribute("aria-checked", "false");
+  await expect(page.getByRole("button", { name: "README.md" })).toBeVisible();
+  // Switch to Changed.
+  await page.locator("#files-view-changed").click();
+  await expect(page.locator("#files-view-changed")).toHaveAttribute("aria-checked", "true");
+  // The Changed view replaces the tree with the changed-file list. Status
+  // glyph + path appear; line counts appear when git reports adds/dels.
+  const changedList = page.locator(".changed-file-list");
+  await expect(changedList).toBeVisible();
+  await expect(changedList).toContainText("README.md");
+  // Switch back to All — tree comes back.
+  await page.locator("#files-view-all").click();
+  await expect(page.getByRole("button", { name: "README.md" })).toBeVisible();
+});
+
+test("Files pane: View choice persists separately per Mode", async ({ page, request }) => {
+  await request.post("/__e2e/reset", { data: { git: true, dirty: { "README.md": "# Modified\n" } } });
+  await page.goto("/");
+  // Author defaults All — switch to Changed and verify persistence.
+  await page.locator("#files-view-changed").click();
+  await expect(page.locator("#files-view-changed")).toHaveAttribute("aria-checked", "true");
+  // Switch to Review (which defaults All) and confirm Review didn't inherit Author's Changed pick.
+  await page.locator("#mode-review").click();
+  await expect(page.locator("#files-view-all")).toHaveAttribute("aria-checked", "true");
+  // Flip back to Author — Changed restores.
+  await page.locator("#mode-author").click();
+  await expect(page.locator("#files-view-changed")).toHaveAttribute("aria-checked", "true");
+});
+
+test("Per-mode pane state: hiding Change Overview in Author does not hide it in Review", async ({ page }) => {
+  // Hide Change Overview while in Author.
+  await page.locator('[data-pane-id="change-overview"]').getByRole("button", { name: "Hide Change Overview" }).click();
+  await expect(page.locator('[data-pane-id="change-overview"]')).toBeHidden();
+  // Switch to Review — Change Overview should still be visible (separate pane state).
+  await page.locator("#mode-review").click();
+  await expect(page.locator('[data-pane-id="change-overview"]')).toBeVisible();
+  // Switch back to Author — still hidden.
+  await page.locator("#mode-author").click();
+  await expect(page.locator('[data-pane-id="change-overview"]')).toBeHidden();
+});
+
+test("Panels-restore menu does not list Git Log in Author Mode", async ({ page }) => {
+  await page.locator("#panels-toggle").click();
+  await expect(page.locator('#panels-menu label:has-text("Change Overview")')).toBeVisible();
+  await expect(page.locator('#panels-menu label:has-text("Files")')).toBeVisible();
+  await expect(page.locator('#panels-menu label:has-text("Git Log")')).toHaveCount(0);
+  // Close menu, switch to Review — Git Log appears.
+  await page.locator("#panels-toggle").click();
+  await page.locator("#mode-review").click();
+  await page.locator("#panels-toggle").click();
+  await expect(page.locator('#panels-menu label:has-text("Git Log")')).toBeVisible();
+});
+
+test("Folder icons render on directory rows in the fallback tree", async ({ page }) => {
+  // The default fixture has a `guides/` directory.
+  const guides = page.locator(".tree-dir", { has: page.locator("text=guides") }).first();
+  await expect(guides.locator(".tree-folder-icon svg")).toBeVisible();
 });

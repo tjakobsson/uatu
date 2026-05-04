@@ -71,6 +71,7 @@ async function runWatch(options: WatchOptions) {
   try {
     watchSession = createWatchSession(rootEntries, options.follow, {
       respectGitignore: options.respectGitignore,
+      startupMode: options.startupMode,
     });
     await watchSession.start();
 
