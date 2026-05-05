@@ -1,0 +1,18 @@
+= API Reference (AsciiDoc)
+:author: Tobias Jakobsson
+:revnumber: 1.2
+:revdate: 2026-05-04
+:description: Reference documentation for the public API surface.
+:keywords: api, reference, draft
+:status: draft
+:custom-attr: author-supplied
+
+This document declares its metadata via AsciiDoc header attributes.
+The metadata card surfaces the curated fields in a consistent shape
+with the Markdown YAML/TOML form. The `:custom-attr:` lands in the
+"extras" list because the curated set does not include it.
+
+== Endpoints
+
+* `GET /things` — list everything
+* `POST /things` — create a thing

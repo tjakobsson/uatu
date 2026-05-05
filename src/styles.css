@@ -146,8 +146,10 @@ body.is-resizing-sidebar {
 .brand {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 0.7rem;
   min-width: 0;
+  flex: 1;
 }
 
 .brand-logo {
@@ -1095,6 +1097,121 @@ h2 {
   min-height: 40vh;
 }
 
+.metadata-card {
+  margin: 0 0 1rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 0.375rem;
+  background: #f9fafb;
+  font-size: 0.8125rem;
+  color: var(--text-subtle);
+}
+
+.metadata-card-summary {
+  padding: 0.45rem 0.75rem;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  outline-offset: 2px;
+  /* Three layers to suppress the native disclosure triangle across browsers. */
+}
+
+.metadata-card-summary::-webkit-details-marker {
+  display: none;
+}
+
+.metadata-card-summary::marker {
+  content: "";
+}
+
+.metadata-card-summary-label {
+  display: inline-block;
+  font-weight: 600;
+  color: var(--text-subtle);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-right: 0.6rem;
+}
+
+.metadata-card-summary-teaser {
+  color: #1f2328;
+  margin-right: 0.6rem;
+}
+
+.metadata-card-summary-count {
+  color: var(--text-subtle);
+  font-size: 0.75rem;
+}
+
+/* Render a "·" separator only when a teaser actually precedes the count. */
+.metadata-card-summary-teaser + .metadata-card-summary-count::before {
+  content: "·";
+  margin-right: 0.5rem;
+  color: var(--text-subtle);
+}
+
+.metadata-card-body {
+  padding: 0.5rem 0.75rem 0.65rem;
+  border-top: 1px solid var(--border-soft);
+  display: grid;
+  gap: 0.25rem;
+}
+
+.metadata-card-row {
+  display: grid;
+  grid-template-columns: 7rem 1fr;
+  gap: 0.75rem;
+  align-items: baseline;
+}
+
+.metadata-card-label {
+  color: var(--text-subtle);
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.metadata-card-value {
+  color: #1f2328;
+  word-break: break-word;
+}
+
+.metadata-card-row-extra {
+  font-size: 0.75rem;
+}
+
+.metadata-card-row-extra .metadata-card-label {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.7rem;
+  color: var(--text-subtle);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.metadata-card-row-extra .metadata-card-value {
+  color: var(--text-subtle);
+}
+
+.metadata-card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.metadata-card-tag {
+  display: inline-block;
+  padding: 0.05rem 0.45rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 0.75rem;
+  background: #ffffff;
+  font-size: 0.7rem;
+  color: var(--text-subtle);
+}
+
+.metadata-card-email {
+  color: var(--text-subtle);
+  font-weight: 400;
+}
+
 .commit-preview {
   display: grid;
   gap: 1rem;
@@ -1936,7 +2053,7 @@ h2 {
 
 /* Mode control row at the top of the sidebar (under the brand). */
 .sidebar-mode-row {
-  margin: 0.6rem 0 0.4rem;
+  margin: 1.1rem 0 0.4rem;
 }
 
 /* Mode control (Author / Review segmented toggle) */
@@ -2116,17 +2233,6 @@ h2 {
 .connection-state.is-mode-review.is-live {
   color: var(--text-subtle, #6e7781);
   font-style: italic;
-}
-
-/* Preview "framed read" treatment in Review only. The frame is layered onto
-   the inner article so the sticky preview-header keeps its existing chrome
-   while the *content* feels contained. */
-.preview-shell.is-mode-review #preview {
-  border: 1px solid var(--border-soft);
-  border-radius: 0.5rem;
-  box-shadow: inset 0 0 0 1px rgba(36, 41, 47, 0.02);
-  padding: 1.5rem 1.75rem;
-  background: #ffffff;
 }
 
 /* Files pane — All/Changed view toggle in the pane header. */

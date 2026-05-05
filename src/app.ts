@@ -24,6 +24,19 @@ import {
 } from "./shared";
 import { nextStaleHint, type StaleHint } from "./stale-hint";
 
+type RenderedDocumentAuthor = { name: string; email?: string };
+
+type RenderedDocumentMetadata = {
+  title?: string;
+  authors?: RenderedDocumentAuthor[];
+  date?: string;
+  revision?: string;
+  description?: string;
+  tags?: string[];
+  status?: string;
+  extras?: Record<string, string>;
+};
+
 type RenderedDocument = {
   id: string;
   title: string;
@@ -31,6 +44,7 @@ type RenderedDocument = {
   html: string;
   kind: "markdown" | "asciidoc" | "text";
   language: string | null;
+  metadata?: RenderedDocumentMetadata;
 };
 
 const SIDEBAR_COLLAPSED_KEY = "uatu:sidebar-collapsed";
@@ -38,6 +52,26 @@ const SIDEBAR_PANES_KEY_PREFIX = "uatu:sidebar-panes:";
 const SIDEBAR_WIDTH_KEY = "uatu:sidebar-width";
 const GIT_LOG_LIMIT_KEY = "uatu:git-log-limit";
 const FILES_VIEW_KEY_PREFIX = "uatu:files-view:";
+// Persists the user's last open/closed choice for the document metadata card
+// across documents and reloads. The expectation is "if I opened it once, I
+// want to see it on every other doc too" — and the converse for closing.
+const METADATA_CARD_OPEN_KEY = "uatu:metadata-card-open";
+
+function readMetadataCardOpenPreference(): boolean {
+  try {
+    return window.localStorage.getItem(METADATA_CARD_OPEN_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeMetadataCardOpenPreference(open: boolean): void {
+  try {
+    window.localStorage.setItem(METADATA_CARD_OPEN_KEY, open ? "1" : "0");
+  } catch {
+    // best-effort persistence; localStorage may be disabled
+  }
+}
 
 type FilesView = "all" | "changed";
 
@@ -1056,12 +1090,97 @@ async function loadDocument(documentId: string) {
   previewElement.classList.remove("empty");
   setPreviewBase(payload.path);
   closeMermaidViewer();
-  previewElement.innerHTML = replaceMermaidCodeBlocks(payload.html);
+  const cardHtml = renderMetadataCard(payload.metadata);
+  previewElement.innerHTML = cardHtml + replaceMermaidCodeBlocks(payload.html);
+  attachMetadataCardToggleListener(previewElement);
   await renderMermaidDiagrams(previewElement, currentMermaidThemeInputs());
   if (payload.kind === "text") {
     attachLineNumbers(previewElement);
   }
   attachCopyButtons(previewElement);
+}
+
+function attachMetadataCardToggleListener(container: HTMLElement): void {
+  const card = container.querySelector<HTMLDetailsElement>(".metadata-card");
+  if (!card) {
+    return;
+  }
+  card.addEventListener("toggle", () => {
+    writeMetadataCardOpenPreference(card.open);
+  });
+}
+
+function renderMetadataCard(metadata: RenderedDocumentMetadata | undefined): string {
+  if (!metadata) {
+    return "";
+  }
+  // The server has already passed every reachable string through escapeHtml,
+  // so values are safe to drop into innerHTML directly. The structural shell
+  // here uses fixed tag names — no author-controlled HTML reaches the DOM.
+  const rows: string[] = [];
+
+  if (metadata.title) {
+    rows.push(curatedRow("Title", metadata.title));
+  }
+  if (metadata.authors && metadata.authors.length > 0) {
+    const formatted = metadata.authors
+      .map(author =>
+        author.email
+          ? `${author.name} <span class="metadata-card-email">&lt;${author.email}&gt;</span>`
+          : author.name,
+      )
+      .join(", ");
+    rows.push(curatedRow(metadata.authors.length === 1 ? "Author" : "Authors", formatted));
+  }
+  if (metadata.date) {
+    rows.push(curatedRow("Date", metadata.date));
+  }
+  if (metadata.revision) {
+    rows.push(curatedRow("Revision", metadata.revision));
+  }
+  if (metadata.description) {
+    rows.push(curatedRow("Description", metadata.description));
+  }
+  if (metadata.tags && metadata.tags.length > 0) {
+    const chips = metadata.tags
+      .map(tag => `<span class="metadata-card-tag">${tag}</span>`)
+      .join("");
+    rows.push(`<div class="metadata-card-row"><span class="metadata-card-label">Tags</span><span class="metadata-card-value metadata-card-tags">${chips}</span></div>`);
+  }
+  if (metadata.status) {
+    rows.push(curatedRow("Status", metadata.status));
+  }
+  if (metadata.extras) {
+    for (const [key, value] of Object.entries(metadata.extras)) {
+      rows.push(`<div class="metadata-card-row metadata-card-row-extra"><span class="metadata-card-label">${key}</span><span class="metadata-card-value">${value}</span></div>`);
+    }
+  }
+
+  if (rows.length === 0) {
+    return "";
+  }
+
+  // Collapsed-by-default disclosure with a deliberately spare summary —
+  // "METADATA · N fields". Earlier iterations also surfaced a teaser of
+  // the most-distinguishing fields, but it duplicated the body's <h1> and
+  // added visual noise without telling the reader much they couldn't get
+  // by simply opening the disclosure. The body shows the rows in a tight
+  // key/value layout. Using <details>/<summary> means no JS for toggle
+  // behaviour and the disclosure remains keyboard-accessible by default.
+  const fieldCount = rows.length;
+  const countLabel = fieldCount === 1 ? "1 field" : `${fieldCount} fields`;
+  const openAttr = readMetadataCardOpenPreference() ? " open" : "";
+  return `<details class="metadata-card" aria-label="Document metadata"${openAttr}>` +
+    `<summary class="metadata-card-summary">` +
+    `<span class="metadata-card-summary-label">Metadata</span>` +
+    `<span class="metadata-card-summary-count">${countLabel}</span>` +
+    `</summary>` +
+    `<div class="metadata-card-body">${rows.join("")}</div>` +
+    `</details>`;
+}
+
+function curatedRow(label: string, value: string): string {
+  return `<div class="metadata-card-row"><span class="metadata-card-label">${label}</span><span class="metadata-card-value">${value}</span></div>`;
 }
 
 function renderCommitMessage(

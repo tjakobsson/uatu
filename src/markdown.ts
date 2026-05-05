@@ -3,7 +3,15 @@ import { defaultSchema, sanitize, type Schema } from "hast-util-sanitize";
 import { toHtml } from "hast-util-to-html";
 import hljs from "highlight.js/lib/common";
 import { micromark } from "micromark";
+import { frontmatter, frontmatterHtml } from "micromark-extension-frontmatter";
 import { gfm, gfmHtml } from "micromark-extension-gfm";
+
+import {
+  type DocumentMetadata,
+  normalizeMetadata,
+  parseSimpleToml,
+  parseSimpleYaml,
+} from "./document-metadata";
 
 const CODE_BLOCK_PATTERN = /<pre><code(?:\s+class="language-([^"]+)")?>([\s\S]*?)<\/code><\/pre>/g;
 
@@ -40,16 +48,50 @@ const sanitizeSchema: Schema = {
   },
 };
 
-export function renderMarkdownToHtml(source: string): string {
+// Match the leading `---\n…\n---` (YAML) or `+++\n…\n+++` (TOML) block at
+// document start. The closing fence must be followed by a newline or EOF so a
+// document that opens with a thematic-break-shaped paragraph (e.g.
+// `---\nfoo\n--- bar`) does not get misread as frontmatter.
+const FRONTMATTER_PATTERN = /^(---|\+{3})\r?\n([\s\S]*?)\r?\n\1(?:\r?\n|$)/;
+
+export type RenderedMarkdown = {
+  html: string;
+  metadata: DocumentMetadata | undefined;
+};
+
+export function renderMarkdownToHtml(source: string): RenderedMarkdown {
+  const metadata = extractMarkdownMetadata(source);
+
+  // micromark-extension-frontmatter consumes the leading frontmatter block from
+  // the token stream so it never lands in body HTML — even when our local
+  // metadata extractor decides the block is malformed and bails out. We still
+  // pass the original source through so micromark sees the leading delimiter
+  // it knows how to consume; downstream we only surface metadata when our own
+  // parser succeeded.
   const rawHtml = micromark(source, {
     allowDangerousHtml: true,
-    extensions: [gfm()],
-    htmlExtensions: [gfmHtml()],
+    extensions: [gfm(), frontmatter(["yaml", "toml"])],
+    htmlExtensions: [gfmHtml(), frontmatterHtml(["yaml", "toml"])],
   });
 
   const tree = fromHtml(rawHtml, { fragment: true });
   const safe = sanitize(tree, sanitizeSchema);
-  return highlightCodeBlocks(toHtml(safe));
+  return { html: highlightCodeBlocks(toHtml(safe)), metadata };
+}
+
+function extractMarkdownMetadata(source: string): DocumentMetadata | undefined {
+  const match = source.match(FRONTMATTER_PATTERN);
+  if (!match) {
+    return undefined;
+  }
+  const fence = match[1]!;
+  const body = match[2] ?? "";
+
+  const raw = fence === "---" ? parseSimpleYaml(body) : parseSimpleToml(body);
+  if (!raw) {
+    return undefined;
+  }
+  return normalizeMetadata(raw, fence === "---" ? "yaml" : "toml");
 }
 
 export function highlightCodeBlocks(html: string): string {

@@ -1,0 +1,13 @@
+= Release Notes
+Tobias Jakobsson <tobias@example.com>; Jane Doe
+v1.2, 2026-05-04: Initial release
+
+This document uses the positional second-line author entry and third-line
+revision entry instead of `:attr:` lines. The metadata card surfaces both
+authors (with the email visible for the first) and the revision number,
+date, and remark.
+
+== Highlights
+
+* New endpoint `/things`
+* Improved error reporting

@@ -5,6 +5,7 @@ import path from "node:path";
 import type { ReadableStreamDefaultController } from "node:stream/web";
 
 import { renderAsciidocToHtml } from "./asciidoc";
+import { type DocumentMetadata, sanitizeMetadata } from "./document-metadata";
 import { classifyFile } from "./file-classify";
 import { languageForName } from "./file-languages";
 import { loadIgnoreMatcher, type IgnoreMatcher } from "./ignore-engine";
@@ -130,6 +131,7 @@ export type RenderedDocument = {
   html: string;
   kind: "markdown" | "asciidoc" | "text";
   language: string | null;
+  metadata?: DocumentMetadata;
 };
 
 export type StaticFileResolution = { status: "found"; filePath: string } | { status: "not-found" };
@@ -476,12 +478,21 @@ export async function renderDocument(roots: RootGroup[], documentId: string): Pr
     document.kind === "markdown" || document.kind === "asciidoc"
       ? null
       : languageForName(document.name) ?? null;
-  const html =
-    document.kind === "markdown"
-      ? renderMarkdownToHtml(source)
-      : document.kind === "asciidoc"
-        ? renderAsciidocToHtml(source)
-        : renderCodeAsHtml(source, language ?? undefined);
+
+  let html: string;
+  let metadata: DocumentMetadata | undefined;
+  if (document.kind === "markdown") {
+    const rendered = renderMarkdownToHtml(source);
+    html = rendered.html;
+    metadata = sanitizeMetadata(rendered.metadata);
+  } else if (document.kind === "asciidoc") {
+    const rendered = renderAsciidocToHtml(source);
+    html = rendered.html;
+    metadata = sanitizeMetadata(rendered.metadata);
+  } else {
+    html = renderCodeAsHtml(source, language ?? undefined);
+    metadata = undefined;
+  }
 
   return {
     id: document.id,
@@ -493,6 +504,7 @@ export async function renderDocument(roots: RootGroup[], documentId: string): Pr
     html,
     kind: document.kind,
     language,
+    ...(metadata ? { metadata } : {}),
   };
 }
 
