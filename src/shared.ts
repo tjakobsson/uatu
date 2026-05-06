@@ -200,6 +200,45 @@ export function writeModePreference(
   }
 }
 
+// View mode controls how the preview body renders the active document:
+// "rendered" runs Markdown / AsciiDoc through their full pipelines, "source"
+// shows the file's verbatim text inside the source-rendering `<pre><code>`
+// path. The Selection Inspector pane only captures line ranges from the
+// "source" view since the rendered HTML has no source-position information.
+export type ViewMode = "source" | "rendered";
+
+export const VIEW_MODE_STORAGE_KEY = "uatu:view-mode";
+
+export const DEFAULT_VIEW_MODE: ViewMode = "rendered";
+
+export function isViewMode(value: unknown): value is ViewMode {
+  return value === "source" || value === "rendered";
+}
+
+export function readViewModePreference(storage: ModeStorage | null | undefined): ViewMode {
+  if (!storage) {
+    return DEFAULT_VIEW_MODE;
+  }
+  try {
+    const raw = storage.getItem(VIEW_MODE_STORAGE_KEY);
+    return isViewMode(raw) ? raw : DEFAULT_VIEW_MODE;
+  } catch {
+    return DEFAULT_VIEW_MODE;
+  }
+}
+
+export function writeViewModePreference(
+  storage: ModeStorage | null | undefined,
+  view: ViewMode,
+): void {
+  if (!storage) return;
+  try {
+    storage.setItem(VIEW_MODE_STORAGE_KEY, view);
+  } catch {
+    // best-effort persistence
+  }
+}
+
 export type TreeNode = {
   kind: "dir" | "doc";
   name: string;

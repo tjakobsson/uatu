@@ -115,7 +115,7 @@ The system SHALL attempt to open the browser automatically and SHALL start with 
 #### Scenario: Review mode forces follow off even when --no-follow is omitted
 - **WHEN** a user runs `uatu watch docs --mode=review`
 - **THEN** the watch session starts with follow mode disabled regardless of the follow flag
-- **AND** the Follow control is rendered as disabled with an affordance naming Mode as the reason
+- **AND** the Follow control is not rendered in Review (i.e., the chip is hidden, not merely disabled)
 
 ### Requirement: Browse supported documents from watched roots
 The browser UI SHALL display a sidebar tree grouped by watched root. The tree SHALL list every file accepted by the ignore and exposure filters under each root, recursively. Files classified as Markdown, AsciiDoc, or as viewable text SHALL render as clickable entries that can become the active preview. Files classified as binary SHALL render as non-clickable entries that show a file-type icon but cannot change the active preview. Files matching default-denied secret patterns, hardcoded ignored names, `.uatuignore`, or active `.gitignore` rules MUST NOT appear in the sidebar. The preview pane SHALL render the currently selected non-binary file: Markdown files through the Markdown pipeline, AsciiDoc files through the AsciiDoc pipeline, other text files through the syntax-highlighted code render path.
@@ -328,7 +328,7 @@ The system SHALL detect file creation, deletion, rename, and modification events
 - **AND** the watch session remains available for subsequent events
 
 ### Requirement: Follow the latest changed non-binary file
-When follow mode is enabled AND the active Mode is **Author**, the system SHALL switch the active preview to the latest changed non-binary file under the watched roots. Markdown and non-Markdown text files SHALL both be eligible to change the active preview under follow mode. Binary file changes MUST NOT change the active preview. Manual file selection in the sidebar MUST disable follow mode and pin the selected file until follow mode is enabled again. When the user transitions follow mode from disabled to enabled while in **Author** Mode, the system SHALL immediately switch the active preview to the most recently modified non-binary file under the watched roots, rather than waiting for the next change event. When a follow-driven auto-switch changes the active document, the system MUST update the browser URL via `history.replaceState` (not `pushState`) so the address bar stays accurate while the back stack reflects only user-initiated navigation. While the active Mode is **Review**, follow mode MUST be off, the Follow control MUST be unavailable for interaction, and file-system change events MUST NOT switch the active preview. Manual file selection from the `Files` pane and other manual navigation (e.g. `Git Log` commit clicks, direct URLs) MUST continue to work in **Review** Mode. In **Author** Mode, in-place refresh of the currently displayed file's content when that file changes on disk SHALL continue to work as today. In **Review** Mode, the system MUST NOT automatically re-render the active preview when the currently displayed file changes on disk; the stale-content hint behavior is governed by the "Show a stale-content hint in Review when the active file changes on disk" requirement.
+When follow mode is enabled AND the active Mode is **Author**, the system SHALL switch the active preview to the latest changed non-binary file under the watched roots. Markdown and non-Markdown text files SHALL both be eligible to change the active preview under follow mode. Binary file changes MUST NOT change the active preview. Manual file selection in the sidebar MUST disable follow mode and pin the selected file until follow mode is enabled again. When the user transitions follow mode from disabled to enabled while in **Author** Mode, the system SHALL immediately switch the active preview to the most recently modified non-binary file under the watched roots, rather than waiting for the next change event. When a follow-driven auto-switch changes the active document, the system MUST update the browser URL via `history.replaceState` (not `pushState`) so the address bar stays accurate while the back stack reflects only user-initiated navigation. While the active Mode is **Review**, follow mode MUST be off, the Follow control MUST NOT be rendered (the chip is hidden in the preview toolbar), and file-system change events MUST NOT switch the active preview. When the user transitions from **Author** to **Review**, the system SHALL snapshot the user's current Follow choice; when the user later transitions from **Review** back to **Author**, the system SHALL restore Follow to that snapshot value so the user's Author-mode Follow choice round-trips through Review automatically and they do not have to re-enable Follow after every Review peek. Manual file selection from the `Files` pane and other manual navigation (e.g. `Git Log` commit clicks, direct URLs) MUST continue to work in **Review** Mode. In **Author** Mode, in-place refresh of the currently displayed file's content when that file changes on disk SHALL continue to work as today. In **Review** Mode, the system MUST NOT automatically re-render the active preview when the currently displayed file changes on disk; the stale-content hint behavior is governed by the "Show a stale-content hint in Review when the active file changes on disk" requirement.
 
 #### Scenario: Follow mode switches to the latest changed Markdown file
 - **WHEN** Mode is **Author** and follow mode is enabled and a Markdown file changes under a watched root
@@ -382,6 +382,23 @@ When follow mode is enabled AND the active Mode is **Author**, the system SHALL 
 - **WHEN** Mode is **Author** and the currently displayed file changes on disk
 - **THEN** the preview re-renders the new content for that same file
 - **AND** the active selection does not switch to a different file when Follow is off
+
+#### Scenario: Follow control is hidden in Review mode
+- **WHEN** Mode is **Review**
+- **THEN** the `Follow` chip in the preview toolbar is not rendered (hidden, not merely disabled)
+
+#### Scenario: Follow ON in Author round-trips through Review back to Author
+- **WHEN** Mode is **Author** and the user has Follow enabled
+- **AND** the user switches to **Review**
+- **AND** later switches back to **Author**
+- **THEN** Follow is restored to enabled automatically without user action
+- **AND** the Follow chip is visible and shows the active state
+
+#### Scenario: Follow OFF in Author round-trips through Review back to Author
+- **WHEN** Mode is **Author** and the user has Follow disabled
+- **AND** the user switches to **Review**
+- **AND** later switches back to **Author**
+- **THEN** Follow remains disabled (the user's Author-mode preference is preserved)
 
 ### Requirement: Serve adjacent files from watched roots as static content
 For any request path that does not match a known API or built-in asset route, the server SHALL inspect the request's `Accept` header to distinguish top-level navigation requests from sub-resource fetches. When the `Accept` header prefers `text/html` AND the request path resolves to a known non-binary document under a watched root, the server MUST return the SPA shell (the same response served at `/`) so the SPA can render the document with its full UI. For all other requests — including requests whose `Accept` does not prefer `text/html`, requests that resolve to a binary file, and requests that do not resolve to any document — the server SHALL attempt to resolve the path against the union of watched roots and, if the path maps to an existing allowed file inside a watched root, serve that file statically. Static fallback serving MUST apply the same hardcoded ignore, default secret-file denylist, `.uatuignore`, and active `.gitignore` exposure rules as the browser tree. Static fallback serving MUST verify containment after resolving real filesystem paths and MUST NOT serve files reached through symlink escapes outside the watched root. The rendered preview HTML MUST preserve the author's original `src` and `href` URLs verbatim (no URL rewriting); the browser SHALL resolve those references using a per-document base so that relative references such as `<img src="./hero.svg">` in a README just work. Any requested path that resolves outside every watched root, is ignored, is secret-like, is malformed, or cannot be safely resolved MUST receive a non-success response and MUST NOT read or stream the file.
@@ -711,24 +728,37 @@ The browser UI SHALL provide a control that collapses the sidebar into a narrow 
 - **THEN** the document list returns to its previous width
 
 ### Requirement: Animate the live connection indicator
-While the browser UI is connected to the live update channel, the connection indicator SHALL animate with a subtle pulse so the live state is visually distinguishable from a static label. When the channel enters a reconnecting state, the pulse MUST stop and the indicator MUST communicate the reconnecting state without animation. The pulse MUST be disabled when the user's operating system requests reduced motion. The connection indicator MUST be rendered outside the collapsible sidebar (for example, in the preview header) so that users who collapse the sidebar can still observe the live channel state.
+While the browser UI is connected to the live update channel, the connection indicator SHALL animate with a subtle pulse so the live state is visually distinguishable from a static label. When the channel enters a reconnecting state, the pulse MUST stop and the indicator MUST communicate the reconnecting state without animation. The pulse MUST be disabled when the user's operating system requests reduced motion. The indicator's label MUST read `Connected` while the channel is open, `Reconnecting` while it is recovering, and `Connecting` before the first successful connect. The indicator MUST expose a hover tooltip whose text describes the current connection state to the uatu backend (for example, `Connected to the uatu backend`). The connection indicator SHALL be rendered inside the sidebar header, stacked beneath the `UatuCode` wordmark, so the indicator visually belongs to the application chrome rather than the per-document preview controls. As a tradeoff of this placement, collapsing the sidebar MAY hide the indicator along with the rest of the sidebar chrome.
 
 #### Scenario: The indicator pulses while connected to the server
 - **WHEN** the browser UI's event channel is open
-- **THEN** the connection indicator displays a pulsing animation labeled `Online`
+- **THEN** the connection indicator displays a pulsing animation labeled `Connected`
+- **AND** the indicator's hover tooltip reads `Connected to the uatu backend`
 
 #### Scenario: Reconnecting stops the pulse
 - **WHEN** the browser UI's event channel reports an error and enters a reconnecting state
-- **THEN** the indicator stops pulsing and communicates the reconnecting state
+- **THEN** the indicator stops pulsing
+- **AND** the label reads `Reconnecting`
+- **AND** the hover tooltip describes the reconnecting state
 
 #### Scenario: Reduced-motion users see no animation
 - **WHEN** the operating system reports a reduced-motion preference
 - **THEN** the indicator does not pulse even while connected
 - **AND** the live state is still communicated (e.g. via color and label)
 
-#### Scenario: Indicator stays visible while the sidebar is collapsed
+#### Scenario: Indicator label is the same in both Modes
+- **WHEN** the channel is open and the user toggles between **Author** and **Review** Modes
+- **THEN** the indicator label remains `Connected` in both Modes
+- **AND** the indicator's pulse animation continues in both Modes
+
+#### Scenario: Indicator lives under the UatuCode wordmark
+- **WHEN** the SPA renders the sidebar header
+- **THEN** the connection indicator is rendered inside `.sidebar-header > .brand > .brand-text`, immediately below the `UatuCode` wordmark
+- **AND** the connection indicator is NOT rendered in the preview toolbar
+
+#### Scenario: Indicator hides when the sidebar is collapsed
 - **WHEN** a user collapses the sidebar
-- **THEN** the connection indicator remains visible elsewhere in the UI
+- **THEN** the connection indicator is no longer visible (it lives inside the sidebar chrome that the collapse hides)
 
 ### Requirement: Scroll the sidebar independently of the preview
 The sidebar SHALL scroll within its own container and MUST NOT scroll together with the preview pane. The sidebar header (title, controls, and meta row) MUST remain visible while the sidebar's document list scrolls, and the sidebar MUST remain in place while the preview scrolls.

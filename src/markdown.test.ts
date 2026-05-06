@@ -220,13 +220,13 @@ describe("renderMarkdownToHtml frontmatter", () => {
 describe("renderCodeAsHtml", () => {
   test("emits language-X class for known languages", () => {
     const html = renderCodeAsHtml("const answer = 42;\n", "javascript");
-    expect(html).toContain('<pre><code class="hljs language-javascript">');
+    expect(html).toContain('<pre class="uatu-source-pre"><code class="hljs language-javascript">');
     expect(html).toContain("hljs-keyword");
   });
 
   test("omits language- class when language is undefined", () => {
     const html = renderCodeAsHtml("plain text\n", undefined);
-    expect(html).toContain('<pre><code class="hljs">');
+    expect(html).toContain('<pre class="uatu-source-pre"><code class="hljs">');
     expect(html).not.toContain("language-");
   });
 
@@ -239,7 +239,7 @@ describe("renderCodeAsHtml", () => {
   test("bypasses syntax highlighting above the size threshold", () => {
     const big = "a".repeat(SYNTAX_HIGHLIGHT_BYTES_LIMIT + 1);
     const html = renderCodeAsHtml(big, "javascript");
-    expect(html).toContain('<pre><code class="hljs">');
+    expect(html).toContain('<pre class="uatu-source-pre"><code class="hljs">');
     expect(html).not.toContain("hljs-");
     expect(html).not.toContain("language-javascript");
   });

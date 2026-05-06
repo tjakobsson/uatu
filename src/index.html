@@ -13,7 +13,13 @@
         <div class="sidebar-header">
           <div class="brand">
             <img class="brand-logo" alt="" width="56" height="56" aria-hidden="true" data-src="/assets/uatu-logo.svg" />
-            <h1 class="brand-wordmark">UatuCode</h1>
+            <div class="brand-text">
+              <h1 class="brand-wordmark">UatuCode</h1>
+              <span id="connection-state" class="connection-state" title="Connecting to the uatu backend">
+                <span class="indicator-dot" aria-hidden="true"></span>
+                <span class="connection-label">Connecting</span>
+              </span>
+            </div>
           </div>
           <button
             id="sidebar-collapse"
@@ -173,6 +179,32 @@
               </div>
             </header>
             <div id="git-log" class="pane-body"></div>
+            <div class="pane-resizer" data-pane-resizer="git-log" role="separator" aria-orientation="horizontal" aria-label="Resize Git Log"></div>
+          </section>
+          <section class="sidebar-pane" data-pane-id="selection-inspector">
+            <header class="pane-header">
+              <h2>Selection Inspector</h2>
+              <div class="pane-actions">
+                <button class="pane-action" type="button" data-pane-collapse="selection-inspector" aria-label="Collapse Selection Inspector" title="Collapse pane">−</button>
+                <button class="pane-action" type="button" data-pane-hide="selection-inspector" aria-label="Hide Selection Inspector" title="Hide pane">×</button>
+              </div>
+            </header>
+            <div id="selection-inspector" class="pane-body">
+              <p class="pane-empty" data-selection-inspector-empty>No selection</p>
+              <button
+                class="selection-inspector-control"
+                type="button"
+                data-selection-inspector-control
+                data-state="placeholder"
+                hidden
+              ></button>
+              <span
+                class="selection-inspector-status"
+                role="status"
+                aria-live="polite"
+                data-selection-inspector-status
+              ></span>
+            </div>
           </section>
         </div>
 
@@ -235,10 +267,33 @@
             </div>
           </div>
           <div class="preview-toolbar" role="group" aria-label="Preview controls">
-            <span id="connection-state" class="connection-state" title="Live update channel">
-              <span class="indicator-dot" aria-hidden="true"></span>
-              <span class="connection-label">Connecting</span>
-            </span>
+            <div
+              id="view-control"
+              class="view-control"
+              role="radiogroup"
+              aria-label="View"
+              title="Switch between Rendered and Source view"
+              hidden
+            >
+              <button
+                id="view-rendered"
+                class="view-segment"
+                type="button"
+                role="radio"
+                aria-checked="true"
+                data-view-value="rendered"
+                title="Rendered view"
+              >Rendered</button>
+              <button
+                id="view-source"
+                class="view-segment"
+                type="button"
+                role="radio"
+                aria-checked="false"
+                data-view-value="source"
+                title="Source view (raw text with line numbers)"
+              >Source</button>
+            </div>
             <button
               id="follow-toggle"
               class="chip-button"

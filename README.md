@@ -42,7 +42,8 @@ project-specific checks matter.
 - **Mode toggle** between **Author** (in-flow with auto-follow) and **Review** (stable navigation, no auto-switching, with a stale-content hint when the active file changes on disk)
 - **Follow** mode jumps to the latest changed file in Author mode; **Pin** mode locks the session to one file
 - **Whole-repo browsing** with `.uatuignore` and `.gitignore` filtering
-- **Review-oriented sidebar panes** for change overview, files, and git history
+- **Source / Rendered view toggle** for Markdown and AsciiDoc documents (raw text with line numbers, or fully rendered HTML)
+- **Review-oriented sidebar panes** for change overview, files, git history, and a Selection Inspector that produces Claude-Code-style `@path#L<a>-<b>` references from text marked in the source view
 - **Review burden meter** based on deterministic git diff size, file spread, and configurable path scoring
 - **Git-backed codebase** watching by default, with explicit `--force` for non-git folders
 - **Single-file** or multi-root scope from the CLI
@@ -147,6 +148,11 @@ The expanded sidebar is organized into panes:
 - **Change Overview** shows git repository status, review base detection, dirty state, review burden level, score drivers, ignored-file summaries, and `.uatu.json` warnings.
 - **Files** contains the document tree and preserves existing selection, follow, pin, binary-file, relative-time, and directory open/closed behavior.
 - **Git Log** shows a bounded recent commit list for each detected repository.
+- **Selection Inspector** (Review mode only) observes the user's current selection inside the preview and renders one of three states: a placeholder ("No selection") when nothing is marked, an active hint ("Switch to Source view to capture a line range.") when text is marked in Rendered view, or a clickable `@path#L<a>-<b>` reference when text is marked inside the whole-file Source view. Single-line selections collapse to `@path#L<n>`. Clicking the reference copies it to the clipboard. The pane is Review-only because Author mode's Follow auto-switches the active preview, which would routinely yank captures out from under the pane.
+
+### Source / Rendered view toggle
+
+For Markdown and AsciiDoc documents, the preview header exposes a Source / Rendered toggle. Rendered (the default) is the parsed-HTML preview UatuCode has always shown; Source displays the file's verbatim text inside a syntax-highlighted `<pre><code>` block with the line-number gutter. The preference is global (one setting for the whole UI, like Mode and Follow) and is persisted in `localStorage`. Source view is what enables the Selection Inspector pane to produce `@path#L<a>-<b>` references — line counting is only deterministic when operating against the whole-file source DOM. Plain source / code files (which have no separate rendered representation) hide the toggle.
 
 Pane visibility, per-pane collapse, and vertical pane sizes are persisted in
 browser `localStorage`. The whole-sidebar collapse button remains separate from

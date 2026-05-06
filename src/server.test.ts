@@ -401,8 +401,9 @@ describe("renderDocument", () => {
     const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
     const rendered = await renderDocument(roots, filePath);
     expect(rendered.title).toBe("config.yaml");
-    expect(rendered.html).toContain('<pre><code class="hljs language-yaml">');
+    expect(rendered.html).toContain('<pre class="uatu-source-pre"><code class="hljs language-yaml">');
     expect(rendered.kind).toBe("text");
+    expect(rendered.view).toBe("source");
     expect(rendered.language).toBe("yaml");
   });
 
@@ -487,6 +488,72 @@ describe("renderDocument", () => {
 
   test("rejects an unknown id with not-found", async () => {
     await expect(renderDocument([], "/nope")).rejects.toThrow("document not found");
+  });
+
+  test("source view of a markdown document returns verbatim text in a uatu-source-pre block", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-render-md-source-"));
+    tempDirectories.push(tempDirectory);
+    const filePath = path.join(tempDirectory, "README.md");
+    const verbatim = "# Hello\n\nworld\n";
+    await writeFile(filePath, verbatim);
+
+    const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
+    const rendered = await renderDocument(roots, filePath, { view: "source" });
+    expect(rendered.title).toBe("README.md");
+    expect(rendered.kind).toBe("markdown");
+    expect(rendered.view).toBe("source");
+    expect(rendered.language).toBe("markdown");
+    expect(rendered.html).toContain('<pre class="uatu-source-pre">');
+    // Verbatim source must be present (entity-encoded) — markdown markup is
+    // displayed, not parsed.
+    expect(rendered.html).toContain("# Hello");
+    // Rendered HTML for the markdown body MUST NOT appear in source view.
+    expect(rendered.html).not.toContain("<p>world</p>");
+  });
+
+  test("source view of an asciidoc document returns verbatim text in a uatu-source-pre block", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-render-adoc-source-"));
+    tempDirectories.push(tempDirectory);
+    const filePath = path.join(tempDirectory, "README.adoc");
+    await writeFile(filePath, "= Hello\n\nworld\n\nNOTE: heads up\n");
+
+    const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
+    const rendered = await renderDocument(roots, filePath, { view: "source" });
+    expect(rendered.title).toBe("README.adoc");
+    expect(rendered.kind).toBe("asciidoc");
+    expect(rendered.view).toBe("source");
+    expect(rendered.language).toBe("asciidoc");
+    expect(rendered.html).toContain('<pre class="uatu-source-pre">');
+    expect(rendered.html).toContain("= Hello");
+  });
+
+  test("rendered view of a markdown document returns parsed HTML and the rendered view marker", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-render-md-rendered-"));
+    tempDirectories.push(tempDirectory);
+    const filePath = path.join(tempDirectory, "README.md");
+    await writeFile(filePath, "# Hello\n\nworld\n");
+
+    const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
+    const rendered = await renderDocument(roots, filePath, { view: "rendered" });
+    expect(rendered.kind).toBe("markdown");
+    expect(rendered.view).toBe("rendered");
+    expect(rendered.html).toContain("<p>world</p>");
+    expect(rendered.html).not.toContain("uatu-source-pre");
+  });
+
+  test("source view forced for text/source files even when rendered is requested", async () => {
+    // Text/source files have no separate rendered representation, so a
+    // request for view=rendered still produces source rendering.
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-render-text-rendered-"));
+    tempDirectories.push(tempDirectory);
+    const filePath = path.join(tempDirectory, "config.yaml");
+    await writeFile(filePath, "key: value\n");
+
+    const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
+    const rendered = await renderDocument(roots, filePath, { view: "rendered" });
+    expect(rendered.kind).toBe("text");
+    expect(rendered.view).toBe("source");
+    expect(rendered.html).toContain('<pre class="uatu-source-pre">');
   });
 });
 

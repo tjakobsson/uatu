@@ -22,6 +22,7 @@ import {
   type WatchEntry,
   type WatchOptions,
 } from "./server";
+import { isViewMode } from "./shared";
 
 async function main() {
   let parsed;
@@ -97,13 +98,17 @@ async function runWatch(options: WatchOptions) {
         },
         "/api/document": {
           GET: async request => {
-            const documentId = new URL(request.url).searchParams.get("id");
+            const url = new URL(request.url);
+            const documentId = url.searchParams.get("id");
             if (!documentId) {
               return Response.json({ error: "missing document id" }, { status: 400 });
             }
 
+            const rawView = url.searchParams.get("view");
+            const view = rawView && isViewMode(rawView) ? rawView : undefined;
+
             try {
-              const document = await renderDocument(watchSession!.getRoots(), documentId);
+              const document = await renderDocument(watchSession!.getRoots(), documentId, { view });
               return Response.json(document);
             } catch (error) {
               const message = error instanceof Error ? error.message : "";

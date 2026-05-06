@@ -10,7 +10,7 @@ import logoAsset from "./assets/uatu-logo.svg" with { type: "file" };
 import index from "./index.html";
 import { E2E_PORT, E2E_WORKSPACE_ROOT, resetE2EWorkspace } from "./e2e";
 import { safeGit } from "./review-load";
-import { isMode, type Mode } from "./shared";
+import { isMode, isViewMode, type Mode } from "./shared";
 import {
   createNavigationFetchHandler,
   createWatchSession,
@@ -52,13 +52,17 @@ server = Bun.serve({
     },
     "/api/document": {
       GET: async request => {
-        const documentId = new URL(request.url).searchParams.get("id");
+        const url = new URL(request.url);
+        const documentId = url.searchParams.get("id");
         if (!documentId) {
           return Response.json({ error: "missing document id" }, { status: 400 });
         }
 
+        const rawView = url.searchParams.get("view");
+        const view = rawView && isViewMode(rawView) ? rawView : undefined;
+
         try {
-          const document = await renderDocument(watchSession.getRoots(), documentId);
+          const document = await renderDocument(watchSession.getRoots(), documentId, { view });
           return Response.json(document);
         } catch (error) {
           const message = error instanceof Error ? error.message : "";

@@ -50,6 +50,14 @@ const LANGUAGES_BY_EXTENSION: Record<string, string> = {
   ".r": "r",
   ".diff": "diff",
   ".patch": "diff",
+  // Source-view of Markdown / AsciiDoc files uses these so the verbatim text
+  // is highlighted as markup; the rendered (HTML) view does not depend on
+  // these entries.
+  ".md": "markdown",
+  ".markdown": "markdown",
+  ".mdx": "markdown",
+  ".adoc": "asciidoc",
+  ".asciidoc": "asciidoc",
 };
 
 const LANGUAGES_BY_FILENAME: Record<string, string> = {
