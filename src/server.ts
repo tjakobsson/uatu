@@ -24,6 +24,7 @@ import {
   type RootGroup,
   type Scope,
   type StatePayload,
+  type ViewMode,
 } from "./shared";
 import { BUILD, formatBuildIdentifier, type BuildInfo } from "./version";
 
@@ -130,8 +131,18 @@ export type RenderedDocument = {
   path: string;
   html: string;
   kind: "markdown" | "asciidoc" | "text";
+  // The rendering applied for this response. "rendered" runs Markdown /
+  // AsciiDoc through their full pipelines; "source" returns the file's
+  // verbatim text in a `<pre class="uatu-source-pre"><code>` block. Text /
+  // source files (kind === "text") are always rendered as "source" since they
+  // have no separate rendered representation.
+  view: ViewMode;
   language: string | null;
   metadata?: DocumentMetadata;
+};
+
+export type RenderDocumentOptions = {
+  view?: ViewMode;
 };
 
 export type StaticFileResolution = { status: "found"; filePath: string } | { status: "not-found" };
@@ -463,7 +474,11 @@ export async function scanRoots(
   return roots;
 }
 
-export async function renderDocument(roots: RootGroup[], documentId: string): Promise<RenderedDocument> {
+export async function renderDocument(
+  roots: RootGroup[],
+  documentId: string,
+  options: RenderDocumentOptions = {},
+): Promise<RenderedDocument> {
   const document = findDocument(roots, documentId);
   if (!document) {
     throw new Error("document not found");
@@ -474,35 +489,57 @@ export async function renderDocument(roots: RootGroup[], documentId: string): Pr
   }
 
   const source = await fs.readFile(document.id, "utf8");
-  const language =
+  const requestedView: ViewMode = options.view ?? "rendered";
+  // Text / source files have no separate rendered representation, so a
+  // request for "rendered" still produces source rendering. Markdown and
+  // AsciiDoc honor the requested view.
+  const effectiveView: ViewMode =
     document.kind === "markdown" || document.kind === "asciidoc"
-      ? null
-      : languageForName(document.name) ?? null;
+      ? requestedView
+      : "source";
 
   let html: string;
   let metadata: DocumentMetadata | undefined;
-  if (document.kind === "markdown") {
+  let language: string | null;
+  let title: string;
+
+  if (effectiveView === "source") {
+    // Whole-file source rendering: `<pre class="uatu-source-pre"><code>...`,
+    // syntax-highlighted by file kind. Markdown / AsciiDoc files highlight
+    // as their own markup languages (see file-languages.ts).
+    language = languageForName(document.name) ?? null;
+    html = renderCodeAsHtml(source, language ?? undefined);
+    metadata = undefined;
+    title = document.name;
+  } else if (document.kind === "markdown") {
     const rendered = renderMarkdownToHtml(source);
     html = rendered.html;
     metadata = sanitizeMetadata(rendered.metadata);
+    language = null;
+    title = extractTitle(html, document.name);
   } else if (document.kind === "asciidoc") {
     const rendered = renderAsciidocToHtml(source);
     html = rendered.html;
     metadata = sanitizeMetadata(rendered.metadata);
+    language = null;
+    title = extractTitle(html, document.name);
   } else {
+    // `effectiveView === "rendered"` was forced to "source" above for any
+    // non-markdown/non-asciidoc kind, so this branch is unreachable. Kept as
+    // an exhaustive guard for the type-checker.
+    language = languageForName(document.name) ?? null;
     html = renderCodeAsHtml(source, language ?? undefined);
     metadata = undefined;
+    title = document.name;
   }
 
   return {
     id: document.id,
     path: document.relativePath,
-    title:
-      document.kind === "markdown" || document.kind === "asciidoc"
-        ? extractTitle(html, document.name)
-        : document.name,
+    title,
     html,
     kind: document.kind,
+    view: effectiveView,
     language,
     ...(metadata ? { metadata } : {}),
   };

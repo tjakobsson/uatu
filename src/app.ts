@@ -2,6 +2,12 @@ import { fileIconForName } from "./file-icons";
 import { closeMermaidViewer, ensureMermaidViewer } from "./mermaid-viewer";
 import { renderMermaidDiagrams, replaceMermaidCodeBlocks, type MermaidThemeInputs } from "./preview";
 import {
+  createSelectionInspector,
+  formatReference,
+  type PaneState,
+  type SelectionInspector,
+} from "./selection-inspector";
+import {
   DEFAULT_MODE,
   buildTreeNodes,
   defaultDocumentId,
@@ -9,9 +15,11 @@ import {
   hasDocument,
   nextSelectedDocumentId,
   readModePreference,
+  readViewModePreference,
   reviewBurdenHeadlineLabel,
   shouldRefreshPreview,
   writeModePreference,
+  writeViewModePreference,
   type BuildSummary,
   type ChangedFileSummary,
   type DocumentMeta,
@@ -21,6 +29,7 @@ import {
   type Scope,
   type StatePayload,
   type TreeNode,
+  type ViewMode,
 } from "./shared";
 import { nextStaleHint, type StaleHint } from "./stale-hint";
 
@@ -43,6 +52,7 @@ type RenderedDocument = {
   path: string;
   html: string;
   kind: "markdown" | "asciidoc" | "text";
+  view: ViewMode;
   language: string | null;
   metadata?: RenderedDocumentMetadata;
 };
@@ -105,14 +115,19 @@ const ALL_PANE_DEFS = [
   { id: "change-overview", label: "Change Overview" },
   { id: "files", label: "Files" },
   { id: "git-log", label: "Git Log" },
+  { id: "selection-inspector", label: "Selection Inspector" },
 ] as const;
 type PaneId = (typeof ALL_PANE_DEFS)[number]["id"];
 type PaneDef = (typeof ALL_PANE_DEFS)[number];
 type PaneState = Record<PaneId, { visible: boolean; collapsed: boolean; height: number | null }>;
 
+const AUTHOR_HIDDEN_PANES: ReadonlySet<PaneId> = new Set(["git-log", "selection-inspector"]);
+
 const PANE_DEFS_BY_MODE: Record<Mode, readonly PaneDef[]> = {
-  // Author hides Git Log entirely — past commits are a Review concern.
-  author: ALL_PANE_DEFS.filter(pane => pane.id !== "git-log"),
+  // Author hides Git Log (past commits are a Review concern) and Selection
+  // Inspector (Author's Follow auto-switches the active preview, which would
+  // routinely yank captured selections out from under the pane).
+  author: ALL_PANE_DEFS.filter(pane => !AUTHOR_HIDDEN_PANES.has(pane.id)),
   review: ALL_PANE_DEFS,
 };
 
@@ -155,6 +170,9 @@ const followToggleElement = document.querySelector<HTMLButtonElement>("#follow-t
 const modeControlElement = document.querySelector<HTMLDivElement>("#mode-control");
 const modeAuthorButton = document.querySelector<HTMLButtonElement>("#mode-author");
 const modeReviewButton = document.querySelector<HTMLButtonElement>("#mode-review");
+const viewControlElement = document.querySelector<HTMLDivElement>("#view-control");
+const viewRenderedButton = document.querySelector<HTMLButtonElement>("#view-rendered");
+const viewSourceButton = document.querySelector<HTMLButtonElement>("#view-source");
 const previewShellElement = document.querySelector<HTMLElement>(".preview-shell");
 const filesViewToggleElement = document.querySelector<HTMLDivElement>("#files-view-toggle");
 const filesViewAllButton = document.querySelector<HTMLButtonElement>("#files-view-all");
@@ -168,6 +186,15 @@ const connectionLabelElement = connectionStateElement?.querySelector<HTMLElement
 const buildBadgeElement = document.querySelector<HTMLElement>("#build-badge");
 const sidebarCollapseElement = document.querySelector<HTMLButtonElement>("#sidebar-collapse");
 const sidebarExpandElement = document.querySelector<HTMLButtonElement>("#sidebar-expand");
+const selectionInspectorEmptyElement = document.querySelector<HTMLElement>(
+  "[data-selection-inspector-empty]",
+);
+const selectionInspectorControlElement = document.querySelector<HTMLButtonElement>(
+  "[data-selection-inspector-control]",
+);
+const selectionInspectorStatusElement = document.querySelector<HTMLElement>(
+  "[data-selection-inspector-status]",
+);
 
 if (
   !appShellElement ||
@@ -187,6 +214,9 @@ if (
   !modeControlElement ||
   !modeAuthorButton ||
   !modeReviewButton ||
+  !viewControlElement ||
+  !viewRenderedButton ||
+  !viewSourceButton ||
   !previewShellElement ||
   !filesViewToggleElement ||
   !filesViewAllButton ||
@@ -199,7 +229,10 @@ if (
   !connectionLabelElement ||
   !buildBadgeElement ||
   !sidebarCollapseElement ||
-  !sidebarExpandElement
+  !sidebarExpandElement ||
+  !selectionInspectorEmptyElement ||
+  !selectionInspectorControlElement ||
+  !selectionInspectorStatusElement
 ) {
   throw new Error("uatu UI failed to initialize");
 }
@@ -210,9 +243,22 @@ const appState = {
   selectedId: null as string | null,
   previewMode: { kind: "document" } as PreviewMode,
   followEnabled: true,
+  // Snapshot of the user's Follow choice while they were last in Author mode.
+  // Captured when transitioning Author → Review (since Review forces Follow
+  // off to honor the "no auto-switching" contract) and restored on the
+  // reverse transition. Default `true` matches Author's natural default for
+  // first-time users who boot directly into Review and then switch back.
+  authorFollowPreference: true,
   // Author / Review posture. Resolved on boot from the CLI startupMode override
   // (when present) or persisted localStorage; falls back to DEFAULT_MODE.
   mode: DEFAULT_MODE as Mode,
+  // Source / Rendered view preference for documents with a non-trivial
+  // rendered representation (Markdown / AsciiDoc). Global, not per-document;
+  // matches the persistence pattern of `mode` and Follow. Resolved on boot
+  // from localStorage; defaults to "rendered". Files without a separate
+  // rendered representation (text / source / code) ignore this — the server
+  // forces source rendering for them.
+  viewMode: readViewModePreference(safeLocalStorage()) as ViewMode,
   // Per-active-file stale-content hint state. Only set in Review mode; cleared
   // by manual navigation, mode switch back to Author, or refresh action.
   staleHint: null as StaleHint | null,
@@ -234,6 +280,120 @@ initGitLogControls();
 initBrandLogo();
 initInPageAnchorHandler();
 initCrossDocAnchorHandler();
+
+const selectionInspector: SelectionInspector = createSelectionInspector({
+  previewElement,
+  getActiveDocumentPath: activeDocumentPath,
+  isSourceView: () => isPreviewSourceView(),
+});
+selectionInspector.subscribe(renderSelectionInspector);
+
+function activeDocumentPath(): string | null {
+  if (appState.previewMode.kind !== "document") {
+    return null;
+  }
+  if (!appState.selectedId) {
+    return null;
+  }
+  const doc = findDocumentById(appState.selectedId);
+  return doc?.relativePath ?? null;
+}
+
+// Whether the active preview body is currently rendered as the whole-file
+// source `<pre class="uatu-source-pre">` block. True for any view-mode that
+// produces source rendering, including text/source files and Markdown /
+// AsciiDoc when the user has flipped to Source view.
+function isPreviewSourceView(): boolean {
+  return previewElement.querySelector("pre.uatu-source-pre") !== null;
+}
+
+let copyResetTimeoutId: number | null = null;
+
+function showCopyConfirmation(): void {
+  selectionInspectorStatusElement.textContent = "Copied";
+  if (copyResetTimeoutId !== null) {
+    window.clearTimeout(copyResetTimeoutId);
+  }
+  copyResetTimeoutId = window.setTimeout(() => {
+    selectionInspectorStatusElement.textContent = "";
+    copyResetTimeoutId = null;
+  }, 1000);
+}
+
+async function copyToClipboard(text: string): Promise<void> {
+  // Prefer the modern API (works on localhost which is a secure context).
+  // Fall back to a hidden-textarea + execCommand if the API is missing or
+  // throws — defensive against locked-down browsers, even though uatu's
+  // localhost target rarely hits that path.
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+  } catch {
+    // Fall through to legacy path below.
+  }
+  const scratch = document.createElement("textarea");
+  scratch.value = text;
+  scratch.setAttribute("readonly", "");
+  scratch.style.position = "fixed";
+  scratch.style.opacity = "0";
+  document.body.appendChild(scratch);
+  scratch.select();
+  try {
+    document.execCommand("copy");
+  } catch {
+    // Best effort — silent failure here is acceptable given the localhost
+    // target. The visual confirmation already fired so the user's mental
+    // model is "I clicked, it copied"; debugging unfindable failures is
+    // unlikely at this scale.
+  } finally {
+    document.body.removeChild(scratch);
+  }
+}
+
+function renderSelectionInspector(state: PaneState): void {
+  if (state.kind === "placeholder") {
+    selectionInspectorEmptyElement.hidden = false;
+    selectionInspectorControlElement.hidden = true;
+    selectionInspectorControlElement.textContent = "";
+    selectionInspectorControlElement.dataset.state = "placeholder";
+    selectionInspectorControlElement.removeAttribute("title");
+    return;
+  }
+
+  selectionInspectorEmptyElement.hidden = true;
+  selectionInspectorControlElement.hidden = false;
+
+  if (state.kind === "hint") {
+    selectionInspectorControlElement.dataset.state = "hint";
+    selectionInspectorControlElement.textContent =
+      "Switch to Source view to capture a line range.";
+    selectionInspectorControlElement.title =
+      "Click to flip the preview to Source view, where line ranges can be captured.";
+    return;
+  }
+
+  // state.kind === "reference"
+  const label = formatReference(state.record);
+  selectionInspectorControlElement.dataset.state = "reference";
+  selectionInspectorControlElement.textContent = label;
+  selectionInspectorControlElement.title = `Click to copy ${label} to the clipboard.`;
+}
+
+selectionInspectorControlElement.addEventListener("click", event => {
+  event.preventDefault();
+  const state = selectionInspector.current();
+  if (state.kind === "hint") {
+    applyViewMode("source");
+    return;
+  }
+  if (state.kind === "reference") {
+    void copyToClipboard(formatReference(state.record)).then(() => {
+      showCopyConfirmation();
+    });
+  }
+});
 
 function initBrandLogo() {
   const logo = document.querySelector<HTMLImageElement>(".brand-logo");
@@ -1038,6 +1198,10 @@ function connectEvents() {
     renderSidebar();
 
     if (appState.selectedId && (shouldReload || appState.selectedId !== previousSelectedId)) {
+      if (shouldReload) {
+        // The file changed on disk — any cached payload is now stale.
+        forgetDocumentCache(appState.selectedId);
+      }
       await loadDocument(appState.selectedId);
       return;
     }
@@ -1073,16 +1237,27 @@ function handleMermaidTriggerClick(event: MouseEvent): void {
 
 previewElement.addEventListener("click", handleMermaidTriggerClick);
 
-async function loadDocument(documentId: string) {
-  const response = await fetch(`/api/document?id=${encodeURIComponent(documentId)}`);
+// Per-document, per-view cache so toggling Source ↔ Rendered for an
+// already-loaded document is instantaneous. Dropped entries are recreated on
+// the next fetch; we drop a document's entry when navigating away to bound
+// memory across long sessions.
+type DocumentViewCacheEntry = { source?: RenderedDocument; rendered?: RenderedDocument };
+const documentViewCache = new Map<string, DocumentViewCacheEntry>();
 
-  if (!response.ok) {
-    appState.previewMode = { kind: "empty" };
-    renderEmptyPreview("Document unavailable", "The selected file no longer exists.");
-    return;
-  }
+function rememberDocumentPayload(payload: RenderedDocument): void {
+  const entry = documentViewCache.get(payload.id) ?? {};
+  entry[payload.view] = payload;
+  documentViewCache.set(payload.id, entry);
+}
 
-  const payload = (await response.json()) as RenderedDocument;
+function forgetDocumentCache(documentId: string): void {
+  documentViewCache.delete(documentId);
+}
+
+// Mount a fetched document payload into the preview body. Centralizes the
+// DOM mutations that follow either a cache hit (toggle path) or a fresh
+// network fetch (loadDocument).
+async function applyDocumentPayload(payload: RenderedDocument): Promise<void> {
   appState.previewMode = { kind: "document" };
   previewTitleElement.textContent = payload.title;
   previewPathElement.textContent = payload.path;
@@ -1094,10 +1269,47 @@ async function loadDocument(documentId: string) {
   previewElement.innerHTML = cardHtml + replaceMermaidCodeBlocks(payload.html);
   attachMetadataCardToggleListener(previewElement);
   await renderMermaidDiagrams(previewElement, currentMermaidThemeInputs());
-  if (payload.kind === "text") {
+  // Source rendering — for text/source files always, and for markdown /
+  // asciidoc when the user is in Source view — needs the line-number gutter
+  // so the inspector pane can produce accurate `@path#L<a>-<b>` references.
+  if (payload.view === "source") {
     attachLineNumbers(previewElement);
   }
   attachCopyButtons(previewElement);
+  syncViewToggle(payload);
+  // The previous document's content (and any selection within it) was just
+  // replaced. Re-evaluate so the pane reflects the new state instead of a
+  // stale capture from the prior document.
+  selectionInspector.recompute();
+}
+
+async function loadDocument(documentId: string) {
+  // `loadDocument` always fetches fresh — callers that want the cached
+  // payload for the active document should look it up themselves
+  // (currently only `applyViewMode`, for instantaneous Source ↔ Rendered
+  // toggling). Drop the cached entry for the document we are about to
+  // refetch, plus any other document's cache (the cache is bounded to one
+  // doc × two views).
+  for (const cachedId of documentViewCache.keys()) {
+    if (cachedId !== documentId) {
+      documentViewCache.delete(cachedId);
+    }
+  }
+  forgetDocumentCache(documentId);
+
+  const response = await fetch(
+    `/api/document?id=${encodeURIComponent(documentId)}&view=${encodeURIComponent(appState.viewMode)}`,
+  );
+
+  if (!response.ok) {
+    appState.previewMode = { kind: "empty" };
+    renderEmptyPreview("Document unavailable", "The selected file no longer exists.");
+    return;
+  }
+
+  const payload = (await response.json()) as RenderedDocument;
+  rememberDocumentPayload(payload);
+  await applyDocumentPayload(payload);
 }
 
 function attachMetadataCardToggleListener(container: HTMLElement): void {
@@ -1191,6 +1403,7 @@ function renderCommitMessage(
   previewTitleElement.textContent = commit.subject;
   previewPathElement.textContent = `${repository.label} · ${commit.sha}`;
   clearPreviewType();
+  hideViewToggle();
   previewBaseElement.href = new URL("/", window.location.origin).toString();
   previewElement.classList.remove("empty");
   previewElement.innerHTML = `
@@ -1202,6 +1415,7 @@ function renderCommitMessage(
       <pre>${escapeHtml(commit.message)}</pre>
     </section>
   `;
+  selectionInspector.recompute();
 }
 
 // The score-explanation preview is Mode-independent by construction: this
@@ -1257,9 +1471,11 @@ function renderReviewScoreDetails(repository: RepositoryReviewSnapshot) {
   previewTitleElement.textContent = "Review burden score";
   previewPathElement.textContent = repository.label;
   clearPreviewType();
+  hideViewToggle();
   previewBaseElement.href = new URL("/", window.location.origin).toString();
   previewElement.classList.remove("empty");
   previewElement.innerHTML = buildScoreExplanationHTML(load);
+  selectionInspector.recompute();
 }
 
 function renderReviewConfigurationList(
@@ -1458,12 +1674,20 @@ function flashCopyButton(button: HTMLButtonElement, label: string, modifier: str
 }
 
 function setPreviewType(payload: RenderedDocument) {
-  const label =
+  const baseLabel =
     payload.kind === "markdown"
       ? "markdown"
       : payload.kind === "asciidoc"
         ? "asciidoc"
         : payload.language ?? "text";
+  // When the user has flipped a markdown / asciidoc document into source
+  // view, surface that in the type badge so it is obvious why the body looks
+  // different. Text / source files are always source-rendered and do not get
+  // the suffix.
+  const label =
+    payload.view === "source" && (payload.kind === "markdown" || payload.kind === "asciidoc")
+      ? `${baseLabel} (source)`
+      : baseLabel;
   previewTypeElement.textContent = label;
   previewTypeElement.hidden = false;
 }
@@ -1779,6 +2003,7 @@ function defaultPaneState(): PaneState {
     "change-overview": { visible: true, collapsed: false, height: 210 },
     files: { visible: true, collapsed: false, height: null },
     "git-log": { visible: true, collapsed: false, height: 120 },
+    "selection-inspector": { visible: true, collapsed: false, height: 160 },
   };
 }
 
@@ -2188,8 +2413,12 @@ function renderEmptyPreview(title: string, body: string) {
   previewTitleElement.textContent = title;
   previewPathElement.textContent = body;
   clearPreviewType();
+  hideViewToggle();
   previewElement.classList.add("empty");
   previewElement.innerHTML = `<p>${escapeHtml(body)}</p>`;
+  // Any prior selection rooted in document content is now invalid and the
+  // preview is no longer in document mode — clear the inspector pane.
+  selectionInspector.recompute();
 }
 
 function syncFollowToggle() {
@@ -2200,6 +2429,11 @@ function syncFollowToggle() {
 
   const pinned = appState.scope.kind === "file";
   const reviewMode = appState.mode === "review";
+  // Review mode does not auto-follow by contract — there is no scenario in
+  // which the chip is interactive in Review, so hide it entirely rather than
+  // showing a disabled control. Pinned still renders the chip (greyed) since
+  // the user can resolve that state from elsewhere.
+  followToggleElement.hidden = reviewMode;
   const pressed = appState.followEnabled && !pinned && !reviewMode;
   followToggleElement.setAttribute("aria-pressed", String(pressed));
   followToggleElement.classList.toggle("is-active", pressed);
@@ -2233,11 +2467,56 @@ function syncModeControl() {
   document.body.classList.toggle("is-mode-author", isAuthor);
   document.body.classList.toggle("is-mode-review", !isAuthor);
   previewShellElement.classList.toggle("is-mode-review", !isAuthor);
-
-  // Re-derive the connection indicator since its wording and dot animation
-  // depend on Mode when the channel is live.
-  syncConnectionDisplay();
 }
+
+// Reflect the current view-mode preference and the active document's actual
+// rendering on the Source / Rendered toggle. The toggle is hidden whenever
+// the active document does not have a separate rendered representation
+// (text / source / code files) and whenever the preview is not in document
+// mode. The toggle is otherwise always present so the user can flip views.
+function syncViewToggle(payload: RenderedDocument | null): void {
+  const showToggle =
+    payload !== null && (payload.kind === "markdown" || payload.kind === "asciidoc");
+  viewControlElement.hidden = !showToggle;
+  if (!showToggle) {
+    return;
+  }
+  const isSource = appState.viewMode === "source";
+  viewSourceButton.setAttribute("aria-checked", String(isSource));
+  viewSourceButton.classList.toggle("is-active", isSource);
+  viewRenderedButton.setAttribute("aria-checked", String(!isSource));
+  viewRenderedButton.classList.toggle("is-active", !isSource);
+}
+
+// Hide the toggle for non-document previews (commit, review-score, empty).
+function hideViewToggle(): void {
+  viewControlElement.hidden = true;
+}
+
+function applyViewMode(next: ViewMode): void {
+  if (appState.viewMode === next) {
+    return;
+  }
+  appState.viewMode = next;
+  writeViewModePreference(safeLocalStorage(), next);
+  // Re-render the active document in the new view. Prefer the cached
+  // payload when both representations are already in memory — this is what
+  // makes Source ↔ Rendered toggling feel instantaneous and avoids a flash
+  // of empty preview during the round-trip. Fall back to a network fetch
+  // when the new view hasn't been loaded yet.
+  if (appState.previewMode.kind !== "document" || !appState.selectedId) {
+    return;
+  }
+  const cached = documentViewCache.get(appState.selectedId)?.[next];
+  if (cached) {
+    void applyDocumentPayload(cached);
+    return;
+  }
+  void loadDocument(appState.selectedId);
+}
+
+viewRenderedButton.addEventListener("click", () => applyViewMode("rendered"));
+viewSourceButton.addEventListener("click", () => applyViewMode("source"));
 
 function applyStaleHint(next: StaleHint | null) {
   appState.staleHint = next;
@@ -2283,11 +2562,15 @@ function applyMode(next: Mode) {
   // Files-view choice is also per-mode.
   appState.filesView = readFilesView(next);
 
-  // Switching to Review forces follow off so the Review-mode contract holds
-  // (no auto-switching). Switching to Author leaves follow as it was — we
-  // never auto-enable, the user opts back in.
-  if (next === "review" && appState.followEnabled) {
+  // Author <-> Review round-trip: snapshot Author's Follow choice on the way
+  // out, restore it on the way back. Review must force Follow off (the
+  // "no auto-switching" contract); without the snapshot, the user would
+  // have to re-enable Follow every time they peek into Review and back.
+  if (previous === "author" && next === "review") {
+    appState.authorFollowPreference = appState.followEnabled;
     appState.followEnabled = false;
+  } else if (previous === "review" && next === "author") {
+    appState.followEnabled = appState.authorFollowPreference;
   }
 
   // Mode change clears any visible hint. When switching from Review (with a
@@ -2307,6 +2590,10 @@ function applyMode(next: Mode) {
 
   if (next === "author" && activeHint && appState.selectedId) {
     if (activeHint.kind === "changed") {
+      // The on-disk content changed while the user was in Review and a
+      // stale hint was active. Drop the cached payload before reloading so
+      // we don't serve the stale rendering.
+      forgetDocumentCache(appState.selectedId);
       void loadDocument(appState.selectedId);
     } else {
       appState.selectedId = null;
@@ -2361,6 +2648,9 @@ staleHintActionElement.addEventListener("click", () => {
   // Changed: re-render the active preview to the latest content for the same file.
   applyStaleHint(nextStaleHint(hint, { kind: "refresh-action" }));
   if (appState.selectedId) {
+    // The on-disk content is what triggered this hint — any cached payload
+    // for the active doc is stale. Drop it so loadDocument refetches.
+    forgetDocumentCache(appState.selectedId);
     void loadDocument(appState.selectedId);
   }
 });
@@ -2371,33 +2661,28 @@ let connectionRawState: ConnectionRawState = "connecting";
 
 function setConnectionState(state: ConnectionRawState, _label: string) {
   // The label argument is preserved for source-call clarity but the actual
-  // display text is derived in syncConnectionDisplay so it can take Mode
-  // into account (live + Review reads as "Reading — auto-refresh paused"
-  // with a steady dot).
+  // display text is derived in syncConnectionDisplay.
   connectionRawState = state;
   syncConnectionDisplay();
 }
 
 function syncConnectionDisplay() {
-  connectionStateElement.classList.remove(
-    "is-live",
-    "is-reconnecting",
-    "is-connecting",
-    "is-mode-review",
-  );
+  connectionStateElement.classList.remove("is-live", "is-reconnecting", "is-connecting");
   connectionStateElement.classList.add(`is-${connectionRawState}`);
   let label: string;
+  let title: string;
   if (connectionRawState === "reconnecting") {
     label = "Reconnecting";
+    title = "Reconnecting to the uatu backend";
   } else if (connectionRawState === "connecting") {
     label = "Connecting";
-  } else if (appState.mode === "review") {
-    label = "Reading — auto-refresh paused";
-    connectionStateElement.classList.add("is-mode-review");
+    title = "Connecting to the uatu backend";
   } else {
-    label = "Online";
+    label = "Connected";
+    title = "Connected to the uatu backend";
   }
   connectionLabelElement.textContent = label;
+  connectionStateElement.title = title;
 }
 
 function renderBuildBadge(build: BuildSummary) {

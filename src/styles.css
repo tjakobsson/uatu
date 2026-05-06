@@ -146,7 +146,6 @@ body.is-resizing-sidebar {
 .brand {
   display: flex;
   align-items: center;
-  justify-content: center;
   gap: 0.7rem;
   min-width: 0;
   flex: 1;
@@ -157,6 +156,14 @@ body.is-resizing-sidebar {
   width: 56px;
   height: 56px;
   flex-shrink: 0;
+}
+
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+  min-width: 0;
 }
 
 .brand-wordmark {
@@ -231,17 +238,18 @@ body.is-resizing-sidebar {
 .connection-state {
   display: inline-flex;
   align-items: center;
-  gap: 0.4rem;
-}
-
-.preview-toolbar .connection-state {
-  padding: 0.35rem 0.7rem 0.35rem 0.55rem;
-  font-size: 0.78rem;
+  gap: 0.35rem;
+  font-size: 0.72rem;
   font-weight: 500;
   color: var(--text-subtle);
+  letter-spacing: 0.01em;
 }
 
-.preview-toolbar .connection-state.is-live {
+.connection-state[hidden] {
+  display: none;
+}
+
+.connection-state.is-live {
   color: var(--text-strong);
 }
 
@@ -414,6 +422,15 @@ h2 {
   flex-shrink: 0;
 }
 
+/* When everything inside is `hidden` (e.g., Review mode viewing a source
+   file: the view toggle is hidden because there's no rendered alternative,
+   and the follow chip is hidden because Review suppresses follow), drop the
+   pill chrome entirely so an empty circle does not float in the toolbar
+   slot. */
+.preview-toolbar:not(:has(> *:not([hidden]))) {
+  display: none;
+}
+
 .chip-button {
   display: inline-flex;
   align-items: center;
@@ -427,6 +444,10 @@ h2 {
   font-weight: 500;
   cursor: pointer;
   transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.chip-button[hidden] {
+  display: none;
 }
 
 .chip-button:hover:not(:disabled) {
@@ -631,6 +652,55 @@ h2 {
   color: var(--text-subtle);
   font-size: 0.78rem;
   line-height: 1.45;
+}
+
+.selection-inspector-control[hidden] {
+  display: none;
+}
+
+.selection-inspector-control {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 0.3rem;
+  background: #fbfcfd;
+  color: var(--text-strong);
+  font-family: "SFMono-Regular", "Menlo", "Monaco", "Consolas", monospace;
+  font-size: 0.74rem;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+  word-break: break-all;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+
+.selection-inspector-control[data-state="hint"] {
+  font-family: inherit;
+  font-size: 0.78rem;
+  color: var(--text-subtle);
+  word-break: normal;
+}
+
+.selection-inspector-control:hover {
+  background: #f3f5f7;
+  border-color: var(--accent);
+}
+
+.selection-inspector-control:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.selection-inspector-status {
+  display: block;
+  margin-top: 0.35rem;
+  min-height: 0.9rem;
+  color: var(--accent);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
 }
 
 .tree {
@@ -2103,6 +2173,52 @@ h2 {
   outline-offset: 1px;
 }
 
+/* View control (Rendered / Source segmented toggle in the preview header).
+   Same visual language as .mode-control but compact for the toolbar context. */
+.view-control {
+  display: inline-flex;
+  align-items: stretch;
+  padding: 0.15rem;
+  border-radius: 0.4rem;
+  background: var(--surface-muted);
+  border: 1px solid var(--border-soft);
+}
+
+.view-control[hidden] {
+  display: none;
+}
+
+.view-segment {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25rem 0.6rem;
+  border: 0;
+  background: transparent;
+  color: var(--text-subtle);
+  border-radius: 0.3rem;
+  font-size: 0.74rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.view-segment:hover:not(.is-active) {
+  color: var(--text-strong);
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.view-segment.is-active {
+  background: #ffffff;
+  color: var(--accent);
+  box-shadow: 0 1px 2px rgba(36, 41, 47, 0.08);
+  cursor: default;
+}
+
+.view-segment:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 /* Follow chip variant: disabled by Mode = Review */
 .chip-button.is-mode-disabled {
   cursor: not-allowed;
@@ -2222,18 +2338,6 @@ h2 {
   opacity: 1;
 }
 
-/* Connection indicator: in Review the live channel is steady (not pulsing) and
-   reads "Reading — auto-refresh paused" so the suppressed-UI contract is
-   visible. */
-.connection-state.is-mode-review.is-live .indicator-dot {
-  background: var(--text-subtle, #6e7781);
-  animation: none;
-}
-
-.connection-state.is-mode-review.is-live {
-  color: var(--text-subtle, #6e7781);
-  font-style: italic;
-}
 
 /* Files pane — All/Changed view toggle in the pane header. */
 .files-view-toggle {
