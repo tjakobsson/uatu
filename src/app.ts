@@ -277,7 +277,6 @@ initSidebarCollapse();
 initSidebarPanes();
 initSidebarWidth();
 initGitLogControls();
-initBrandLogo();
 initInPageAnchorHandler();
 initCrossDocAnchorHandler();
 
@@ -396,14 +395,6 @@ selectionInspectorControlElement.addEventListener("click", event => {
     });
   }
 });
-
-function initBrandLogo() {
-  const logo = document.querySelector<HTMLImageElement>(".brand-logo");
-  const src = logo?.dataset.src;
-  if (logo && src) {
-    logo.src = src;
-  }
-}
 
 // Intercept clicks on in-page anchor links (`<a href="#x">`) in the preview and
 // scroll the matching element into view directly. Letting the browser handle

@@ -158,6 +158,29 @@ body.is-resizing-sidebar {
   flex-shrink: 0;
 }
 
+.brand-logo #eye {
+  transform-box: view-box;
+  transform-origin: 404px 415px;
+  animation: blink 10s infinite;
+  animation-play-state: paused;
+}
+
+.brand-logo:hover #eye {
+  animation-play-state: running;
+}
+
+@keyframes blink {
+  0%, 96%, 100% { transform: scaleY(1); }
+  97%, 98%      { transform: scaleY(0.06); }
+  99%           { transform: scaleY(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brand-logo #eye {
+    animation: none;
+  }
+}
+
 .brand-text {
   display: flex;
   flex-direction: column;
