@@ -4,7 +4,7 @@ import { renderMermaidDiagrams, replaceMermaidCodeBlocks, type MermaidThemeInput
 import {
   createSelectionInspector,
   formatReference,
-  type PaneState,
+  type PaneState as InspectorPaneState,
   type SelectionInspector,
 } from "./selection-inspector";
 import {
@@ -343,16 +343,18 @@ async function copyToClipboard(text: string): Promise<void> {
   try {
     document.execCommand("copy");
   } catch {
-    // Best effort — silent failure here is acceptable given the localhost
-    // target. The visual confirmation already fired so the user's mental
-    // model is "I clicked, it copied"; debugging unfindable failures is
-    // unlikely at this scale.
+    // Best effort — swallow the error so the caller's `.then()` still
+    // runs and the user sees the "Copied" flash. The localhost target
+    // makes this fallback path rare in practice; if it ever fires AND
+    // execCommand also fails, the user gets a false-positive
+    // confirmation. Acceptable at this scale; revisit if real users
+    // report broken pastes.
   } finally {
     document.body.removeChild(scratch);
   }
 }
 
-function renderSelectionInspector(state: PaneState): void {
+function renderSelectionInspector(state: InspectorPaneState): void {
   if (state.kind === "placeholder") {
     selectionInspectorEmptyElement.hidden = false;
     selectionInspectorControlElement.hidden = true;
@@ -1287,15 +1289,10 @@ async function loadDocument(documentId: string) {
   // `loadDocument` always fetches fresh — callers that want the cached
   // payload for the active document should look it up themselves
   // (currently only `applyViewMode`, for instantaneous Source ↔ Rendered
-  // toggling). Drop the cached entry for the document we are about to
-  // refetch, plus any other document's cache (the cache is bounded to one
-  // doc × two views).
-  for (const cachedId of documentViewCache.keys()) {
-    if (cachedId !== documentId) {
-      documentViewCache.delete(cachedId);
-    }
-  }
-  forgetDocumentCache(documentId);
+  // toggling). The cache is bounded to one doc × two views, so a full
+  // clear has the same effect as targeted purge + invalidate, with less
+  // ceremony.
+  documentViewCache.clear();
 
   const response = await fetch(
     `/api/document?id=${encodeURIComponent(documentId)}&view=${encodeURIComponent(appState.viewMode)}`,
