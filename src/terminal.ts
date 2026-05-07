@@ -174,6 +174,12 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
 
     socket.addEventListener("open", () => {
       didOpen = true;
+      // Send the initial size so the server's PTY matches the viewport before
+      // the first keystroke. The fit-addon-driven ResizeObserver below covers
+      // subsequent changes.
+      if (term && socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+      }
     });
 
     socket.addEventListener("message", event => {
@@ -209,15 +215,6 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
         return;
       }
       if (term) term.write("\r\n\x1b[2m[disconnected]\x1b[0m\r\n");
-    });
-
-    socket.addEventListener("open", () => {
-      // Send the initial size so the server's PTY matches the viewport
-      // before the first keystroke. The fit-addon-driven ResizeObserver
-      // below covers subsequent changes.
-      if (term && socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
-      }
     });
 
     const encoder = new TextEncoder();

@@ -11,18 +11,14 @@ import type { PtyProcess } from "./terminal-pty";
 
 type SocketData = { sessionId: string };
 
-// Output captured during a disconnect-with-no-reconnect-yet window. Bounded so
-// a long disconnect with a chatty shell doesn't grow without limit.
-const RECONNECT_BUFFER_MAX = 8 * 1024; // 8 KiB
 const DEFAULT_RECONNECT_GRACE_MS = 5_000;
+// WebSocket.OPEN. Not exposed as a named constant on Bun's ServerWebSocket type.
+const WS_OPEN = 1;
 
 type Session = {
   id: string;
   pty: PtyProcess;
   socket: ServerWebSocket<SocketData> | null;
-  // Output that arrived while no socket was attached. Replayed on reattach.
-  buffer: Uint8Array[];
-  bufferBytes: number;
   // Grace timer: when fired, the PTY is killed and the session is removed.
   reapTimer: ReturnType<typeof setTimeout> | null;
   cols: number;
@@ -114,8 +110,6 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
         id,
         pty,
         socket,
-        buffer: [],
-        bufferBytes: 0,
         reapTimer: null,
         cols,
         rows,
@@ -124,25 +118,21 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
 
       pty.onData(chunk => {
         const bytes = typeof chunk === "string" ? new TextEncoder().encode(chunk) : (chunk as unknown as Uint8Array);
-        if (session.socket && session.socket.readyState === 1) {
+        if (session.socket && session.socket.readyState === WS_OPEN) {
           try {
             session.socket.send(bytes);
-            return;
           } catch {
-            // Fall through and buffer for a possible reconnect.
+            // Socket is closing/closed; the close handler will reap the PTY.
           }
         }
-        // Buffer for reconnect, dropping oldest if we exceed the cap.
-        session.buffer.push(bytes);
-        session.bufferBytes += bytes.byteLength;
-        while (session.bufferBytes > RECONNECT_BUFFER_MAX && session.buffer.length > 0) {
-          const dropped = session.buffer.shift()!;
-          session.bufferBytes -= dropped.byteLength;
-        }
+        // v1 model: each WS upgrade calls prepareSession() which mints a fresh
+        // session id, so output produced after a disconnect can never reach a
+        // future client. Drop it on the floor and rely on shell-side scrollback
+        // to recover anything important.
       });
 
       pty.onExit(({ exitCode, signal }) => {
-        if (session.socket && session.socket.readyState === 1) {
+        if (session.socket && session.socket.readyState === WS_OPEN) {
           try {
             session.socket.send(JSON.stringify({ type: "exit", exitCode, signal }));
           } catch {
@@ -199,12 +189,10 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
     close(socket) {
       const session = sessions.get(socket.data.sessionId);
       if (!session) return;
-      // Detach the socket but keep the PTY alive briefly. If a reattach with
-      // the same session id arrives we can flush buffered output. With v1's
-      // "spawn-on-attach" model, no client currently calls back with the same
-      // session id — but the buffer + grace timer are still valuable as a
-      // safety net against hangs and as the foundation for richer reconnect
-      // semantics in a follow-up change.
+      // Detach the socket and start the reap timer. v1 spawns-on-attach with a
+      // fresh session id per upgrade, so a reattach with this same id is not
+      // expected; the grace window mainly absorbs page-reload timing without
+      // killing the shell mid-handshake.
       session.socket = null;
       if (session.reapTimer) clearTimeout(session.reapTimer);
       session.reapTimer = setTimeout(() => {

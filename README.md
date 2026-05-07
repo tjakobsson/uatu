@@ -188,7 +188,11 @@ security envelope than the rest of uatu:
   `0.0.0.0`. Other hosts on your network can't reach uatu.
 - **Per-server token.** A 32-byte token is minted at startup and embedded
   in the URL printed to stdout. The server requires it on the WebSocket
-  upgrade for `/api/terminal`.
+  upgrade for `/api/terminal`. Because the URL is written to stdout in
+  plaintext, it can also land in shell history, CI logs, or recorded
+  terminal sessions; if you pipe `uatu`'s output somewhere persistent,
+  treat the token like any other short-lived credential. Restarting `uatu`
+  rotates the token.
 - **Origin allowlist.** The upgrade rejects any `Origin` other than
   `http://127.0.0.1:<port>`, `http://localhost:<port>`, or the PWA's
   origin.
