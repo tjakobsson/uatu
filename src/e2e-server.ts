@@ -6,6 +6,10 @@ import path from "node:path";
 
 import mermaidAsset from "mermaid/dist/mermaid.min.js" with { type: "file" };
 import logoAsset from "./assets/uatu-logo.svg" with { type: "file" };
+import icon192Asset from "./assets/icon-192.png" with { type: "file" };
+import icon512Asset from "./assets/icon-512.png" with { type: "file" };
+import manifestAsset from "./assets/manifest.webmanifest" with { type: "file" };
+import swAsset from "./assets/sw.js" with { type: "file" };
 
 import index from "./index.html";
 import { E2E_PORT, E2E_WORKSPACE_ROOT, resetE2EWorkspace } from "./e2e";
@@ -20,6 +24,15 @@ import {
   SERVE_IDLE_TIMEOUT_SECONDS,
   type WatchEntry,
 } from "./server";
+import {
+  TERMINAL_COOKIE_NAME,
+  constantTimeEqual,
+  formatTerminalCookie,
+  isAllowedOrigin,
+  readCookie,
+} from "./terminal-auth";
+import { terminalBackendAvailable } from "./terminal-backend";
+import { createTerminalServer } from "./terminal-server";
 
 let activeFilePath: string | null = null;
 let activeRespectGitignore = true;
@@ -27,7 +40,11 @@ let activeStartupMode: Mode | undefined;
 let activeFollow = true;
 let activeWorkspaceRoot = E2E_WORKSPACE_ROOT;
 let activeEntries: WatchEntry[] = [];
+const terminalEnabled = await terminalBackendAvailable();
 let watchSession = await createSession({ resetWorkspace: true });
+const terminalServer = terminalEnabled
+  ? createTerminalServer({ cwd: activeWorkspaceRoot })
+  : null;
 
 let server: ReturnType<typeof Bun.serve>;
 server = Bun.serve({
@@ -45,6 +62,31 @@ server = Bun.serve({
       headers: {
         "content-type": "image/svg+xml",
         "cache-control": "public, max-age=3600",
+      },
+    }),
+    "/assets/icon-192.png": new Response(Bun.file(icon192Asset), {
+      headers: {
+        "content-type": "image/png",
+        "cache-control": "public, max-age=86400",
+      },
+    }),
+    "/assets/icon-512.png": new Response(Bun.file(icon512Asset), {
+      headers: {
+        "content-type": "image/png",
+        "cache-control": "public, max-age=86400",
+      },
+    }),
+    "/manifest.webmanifest": new Response(Bun.file(manifestAsset), {
+      headers: {
+        "content-type": "application/manifest+json",
+        "cache-control": "public, max-age=3600",
+      },
+    }),
+    "/sw.js": new Response(Bun.file(swAsset), {
+      headers: {
+        "content-type": "application/javascript; charset=utf-8",
+        "cache-control": "no-cache",
+        "service-worker-allowed": "/",
       },
     }),
     "/api/state": {
@@ -108,6 +150,13 @@ server = Bun.serve({
 
         return Response.json({ error: "unsupported scope kind" }, { status: 400 });
       },
+    },
+    "/__e2e/terminal-token": {
+      // Tests don't see the URL token (the e2e server doesn't print it to
+      // stdout the way cli.ts does), so this exposes it directly. Localhost-
+      // only by Bun.serve's hostname binding; not a real auth bypass — only
+      // present in the e2e build.
+      GET: () => Response.json({ token: watchSession.getTerminalToken(), enabled: terminalEnabled }),
     },
     "/__e2e/reset": {
       POST: async request => {
@@ -183,13 +232,86 @@ server = Bun.serve({
       },
     },
   },
-  fetch: createNavigationFetchHandler({
-    getUnscopedRoots: () => watchSession.getUnscopedRoots(),
-    getEntries: () => activeEntries,
-    getRespectGitignore: () => activeRespectGitignore,
-    getServer: () => server,
-  }),
+  fetch: (request, srv) => {
+    const requestUrl = new URL(request.url);
+    if (requestUrl.pathname === "/api/terminal") {
+      return handleTerminalUpgrade(request, requestUrl, srv);
+    }
+    if (requestUrl.pathname === "/api/auth" && request.method === "POST") {
+      return handleAuth(request);
+    }
+    return navigationFetch(request);
+  },
+  websocket: terminalServer
+    ? {
+        open: socket => {
+          void terminalServer.open(socket as never);
+        },
+        message: (socket, msg) => {
+          terminalServer.message(socket as never, msg as never);
+        },
+        close: socket => {
+          terminalServer.close(socket as never);
+        },
+      }
+    : undefined,
 });
+
+const navigationFetch = createNavigationFetchHandler({
+  getUnscopedRoots: () => watchSession.getUnscopedRoots(),
+  getEntries: () => activeEntries,
+  getRespectGitignore: () => activeRespectGitignore,
+  getServer: () => server,
+});
+
+// Mirror cli.ts's auth handler. Tests POST a known token here to seed the
+// `uatu_term` cookie before navigating; subsequent WS upgrades authenticate
+// via the cookie alone.
+async function handleAuth(request: Request): Promise<Response> {
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ error: "invalid JSON body" }, { status: 400 });
+  }
+  const provided = (body as { token?: unknown } | null)?.token;
+  if (typeof provided !== "string" || provided.length === 0) {
+    return Response.json({ error: "missing token" }, { status: 400 });
+  }
+  if (!constantTimeEqual(provided, watchSession.getTerminalToken())) {
+    return Response.json({ error: "invalid token" }, { status: 401 });
+  }
+  return new Response(JSON.stringify({ ok: true }), {
+    status: 200,
+    headers: {
+      "content-type": "application/json",
+      "set-cookie": formatTerminalCookie(provided),
+    },
+  });
+}
+
+function handleTerminalUpgrade(
+  request: Request,
+  requestUrl: URL,
+  srv: typeof Bun extends { serve: (...args: never) => infer S } ? S : never,
+): Response | undefined {
+  if (!terminalServer) return new Response("terminal disabled", { status: 503 });
+  const expected = watchSession.getTerminalToken();
+  const queryToken = requestUrl.searchParams.get("t") ?? "";
+  const cookieToken = readCookie(request.headers.get("Cookie"), TERMINAL_COOKIE_NAME);
+  if (!constantTimeEqual(queryToken, expected) && !constantTimeEqual(cookieToken, expected)) {
+    return new Response("unauthorized", { status: 401 });
+  }
+  if (!isAllowedOrigin(request.headers.get("Origin"), srv)) {
+    return new Response("forbidden origin", { status: 403 });
+  }
+  const session = terminalServer.prepareSession();
+  const ok = (srv.upgrade as (req: Request, opts: { data: unknown }) => boolean)(request, {
+    data: session,
+  });
+  if (!ok) return new Response("upgrade failed", { status: 500 });
+  return undefined;
+}
 
 console.log(`http://127.0.0.1:${server.port}`);
 
@@ -220,6 +342,7 @@ async function createSession(options: { resetWorkspace: boolean }) {
     usePolling: true,
     respectGitignore: activeRespectGitignore,
     startupMode: activeStartupMode,
+    terminalEnabled,
   });
   await session.start();
   return session;

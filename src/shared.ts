@@ -145,6 +145,13 @@ export const MODE_STORAGE_KEY = "uatu:mode";
 
 export const DEFAULT_MODE: Mode = "author";
 
+export type TerminalAvailability = "enabled" | "disabled";
+
+export type TerminalConfigPayload = {
+  fontFamily?: string;
+  fontSize?: number;
+};
+
 export type StatePayload = {
   roots: RootGroup[];
   repositories: RepositoryReviewSnapshot[];
@@ -155,6 +162,8 @@ export type StatePayload = {
   build: BuildSummary;
   scope: Scope;
   startupMode?: Mode;
+  terminal?: TerminalAvailability;
+  terminalConfig?: TerminalConfigPayload;
 };
 
 export function isMode(value: unknown): value is Mode {

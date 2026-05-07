@@ -49,6 +49,7 @@ describe("parseCommand", () => {
     expect(parsed.options.follow).toBe(true);
     expect(parsed.options.openBrowser).toBe(true);
     expect(parsed.options.port).toBe(DEFAULT_PORT);
+    expect(parsed.options.portExplicit).toBe(false);
     expect(parsed.options.force).toBe(false);
   });
 
@@ -64,7 +65,22 @@ describe("parseCommand", () => {
     expect(parsed.options.openBrowser).toBe(false);
     expect(parsed.options.follow).toBe(false);
     expect(parsed.options.port).toBe(5000);
+    expect(parsed.options.portExplicit).toBe(true);
     expect(parsed.options.force).toBe(true);
+  });
+
+  test("accepts --port 0 for an ephemeral kernel-assigned port", () => {
+    const parsed = parseCommand(["watch", "--port", "0"]);
+    expect(parsed.kind).toBe("watch");
+    if (parsed.kind !== "watch") return;
+    expect(parsed.options.port).toBe(0);
+    expect(parsed.options.portExplicit).toBe(true);
+  });
+
+  test("rejects negative or out-of-range ports", () => {
+    expect(() => parseCommand(["watch", "--port", "-1"])).toThrow();
+    expect(() => parseCommand(["watch", "--port", "70000"])).toThrow();
+    expect(() => parseCommand(["watch", "--port", "abc"])).toThrow();
   });
 
   test("respectGitignore defaults to true and is disabled by --no-gitignore", () => {

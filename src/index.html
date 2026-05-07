@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>uatu</title>
     <base id="preview-base" href="/" />
+    <meta name="theme-color" content="#0a1c38" />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
@@ -246,6 +247,7 @@
         </svg>
       </button>
 
+      <div class="main-stack">
       <main class="preview-shell">
         <div
           id="stale-hint"
@@ -310,6 +312,16 @@
               <span class="chip-dot" aria-hidden="true"></span>
               <span class="chip-label">Follow</span>
             </button>
+            <button
+              id="terminal-toggle"
+              class="chip-button"
+              type="button"
+              aria-pressed="false"
+              title="Toggle terminal panel (Ctrl+`)"
+              hidden
+            >
+              <span class="chip-label">Terminal</span>
+            </button>
           </div>
         </header>
 
@@ -317,6 +329,34 @@
           <p>Add a directory with supported documents or save a file to get started.</p>
         </article>
       </main>
+        <div
+          id="terminal-resizer"
+          class="panel-resizer"
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="Resize terminal"
+          title="Resize terminal"
+          hidden
+        ></div>
+        <section
+          id="terminal-panel"
+          class="terminal-panel"
+          aria-label="Terminal"
+          hidden
+        >
+          <header class="terminal-panel-header">
+            <span class="terminal-panel-title">Terminal</span>
+            <button
+              id="terminal-close"
+              class="terminal-panel-close"
+              type="button"
+              aria-label="Hide terminal"
+              title="Hide terminal (Ctrl+`)"
+            >×</button>
+          </header>
+          <div id="terminal-host" class="terminal-host"></div>
+        </section>
+      </div>
     </div>
 
     <script type="module" src="./app.ts"></script>
