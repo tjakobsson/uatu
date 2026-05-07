@@ -4,6 +4,10 @@ import readline from "node:readline";
 
 import mermaidAsset from "mermaid/dist/mermaid.min.js" with { type: "file" };
 import logoAsset from "./assets/uatu-logo.svg" with { type: "file" };
+import icon192Asset from "./assets/icon-192.png" with { type: "file" };
+import icon512Asset from "./assets/icon-512.png" with { type: "file" };
+import manifestAsset from "./assets/manifest.webmanifest" with { type: "file" };
+import swAsset from "./assets/sw.js" with { type: "file" };
 import index from "./index.html";
 import {
   createNavigationFetchHandler,
@@ -14,6 +18,7 @@ import {
   createWatchSession,
   openBrowser,
   canSetFileScope,
+  PORT_SCAN_LIMIT,
   SERVE_IDLE_TIMEOUT_SECONDS,
   usageText,
   versionText,
@@ -23,6 +28,17 @@ import {
   type WatchOptions,
 } from "./server";
 import { isViewMode } from "./shared";
+import { findFreePort } from "./port-probe";
+import { terminalBackendAvailable } from "./terminal-backend";
+import {
+  TERMINAL_COOKIE_NAME,
+  constantTimeEqual,
+  formatTerminalCookie,
+  isAllowedOrigin,
+  readCookie,
+} from "./terminal-auth";
+import { loadTerminalConfig } from "./terminal-config";
+import { createTerminalServer } from "./terminal-server";
 
 async function main() {
   let parsed;
@@ -68,17 +84,121 @@ async function runWatch(options: WatchOptions) {
   const clearIndexingStatus = printIndexingStatus(rootEntries, process.stdout);
   let watchSession: ReturnType<typeof createWatchSession> | null = null;
   let server: ReturnType<typeof Bun.serve> | null = null;
+  let terminalServer: ReturnType<typeof createTerminalServer> | null = null;
+
+  // Resolve the actual port to bind. When the user passed `--port`, honor it
+  // strictly (no roll). When they didn't, pre-flight probe for a free port
+  // starting at the default so PWA install identity stays stable across
+  // launches even when something else briefly takes 4711.
+  let chosenPort = options.port;
+  if (!options.portExplicit && options.port !== 0) {
+    chosenPort = await findFreePort(options.port, PORT_SCAN_LIMIT);
+    if (chosenPort !== options.port) {
+      console.error(`uatu: port ${options.port} in use, using ${chosenPort}`);
+    }
+  }
+
+  // Probe the PTY backend up front so /api/state and the printed URL can both
+  // tell the truth about whether the terminal feature is available.
+  const terminalEnabled = await terminalBackendAvailable();
+  const terminalConfigResult = terminalEnabled
+    ? await loadTerminalConfig(rootEntries[0]?.absolutePath ?? process.cwd())
+    : { config: {}, warnings: [] };
+  for (const warning of terminalConfigResult.warnings) {
+    console.error(`uatu: ${warning}`);
+  }
 
   try {
     watchSession = createWatchSession(rootEntries, options.follow, {
       respectGitignore: options.respectGitignore,
       startupMode: options.startupMode,
+      terminalEnabled,
+      terminalConfig: terminalConfigResult.config,
     });
     await watchSession.start();
 
+    if (terminalEnabled) {
+      terminalServer = createTerminalServer({
+        cwd: rootEntries[0]?.absolutePath ?? process.cwd(),
+      });
+    }
+
+    const navigationFetch = createNavigationFetchHandler({
+      getUnscopedRoots: () => watchSession!.getUnscopedRoots(),
+      getEntries: () => rootEntries,
+      getRespectGitignore: () => options.respectGitignore,
+      getServer: () => server!,
+    });
+
+    const handleTerminalUpgrade = (
+      request: Request,
+      requestUrl: URL,
+      srv: typeof Bun extends { serve: (...args: never) => infer S } ? S : never,
+    ): Response | undefined => {
+      if (!terminalServer) {
+        return new Response("terminal disabled", { status: 503 });
+      }
+      const expected = watchSession!.getTerminalToken();
+      // Accept either the URL token (first-visit path) or the auth cookie
+      // (PWA / subsequent visits). PWA installs share cookies with the
+      // browser session that minted them, so a user who visited /?t=<token>
+      // once before installing keeps working — no re-auth needed.
+      const queryToken = requestUrl.searchParams.get("t") ?? "";
+      const cookieToken = readCookie(request.headers.get("Cookie"), TERMINAL_COOKIE_NAME);
+      const tokenOk =
+        constantTimeEqual(queryToken, expected) || constantTimeEqual(cookieToken, expected);
+      if (!tokenOk) {
+        return new Response("unauthorized", { status: 401 });
+      }
+      const origin = request.headers.get("Origin");
+      if (!isAllowedOrigin(origin, srv)) {
+        return new Response("forbidden origin", { status: 403 });
+      }
+      const session = terminalServer.prepareSession();
+      const upgraded = srv.upgrade(request, { data: session });
+      if (!upgraded) {
+        return new Response("upgrade failed", { status: 500 });
+      }
+      // Bun docs: when `upgrade()` succeeds, return `undefined` so the runtime
+      // doesn't race a stub response against the WebSocket handshake.
+      return undefined;
+    };
+
+    // POST /api/auth { token } — validate the token and set a same-origin
+    // HttpOnly cookie. The cookie is what makes the PWA install path work:
+    // `start_url` is "/" with no query, so without persisted credentials a
+    // freshly-launched PWA window has nothing to authenticate with. The
+    // cookie is HttpOnly (no JS access — token can't be exfiltrated by an
+    // XSS in any sibling document) and SameSite=Strict (no cross-site
+    // request can carry it).
+    const handleAuth = async (request: Request): Promise<Response> => {
+      let body: unknown;
+      try {
+        body = await request.json();
+      } catch {
+        return Response.json({ error: "invalid JSON body" }, { status: 400 });
+      }
+      const provided = (body as { token?: unknown } | null)?.token;
+      if (typeof provided !== "string" || provided.length === 0) {
+        return Response.json({ error: "missing token" }, { status: 400 });
+      }
+      const expected = watchSession!.getTerminalToken();
+      if (!constantTimeEqual(provided, expected)) {
+        return Response.json({ error: "invalid token" }, { status: 401 });
+      }
+      const cookie = formatTerminalCookie(provided);
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+          "set-cookie": cookie,
+        },
+      });
+    };
+
     server = Bun.serve({
       hostname: "127.0.0.1",
-      port: options.port,
+      port: chosenPort,
       idleTimeout: SERVE_IDLE_TIMEOUT_SECONDS,
       routes: {
         "/": index,
@@ -91,6 +211,36 @@ async function runWatch(options: WatchOptions) {
           headers: {
             "content-type": "image/svg+xml",
             "cache-control": "public, max-age=3600",
+          },
+        }),
+        "/assets/icon-192.png": new Response(Bun.file(icon192Asset), {
+          headers: {
+            "content-type": "image/png",
+            "cache-control": "public, max-age=86400",
+          },
+        }),
+        "/assets/icon-512.png": new Response(Bun.file(icon512Asset), {
+          headers: {
+            "content-type": "image/png",
+            "cache-control": "public, max-age=86400",
+          },
+        }),
+        "/manifest.webmanifest": new Response(Bun.file(manifestAsset), {
+          headers: {
+            "content-type": "application/manifest+json",
+            "cache-control": "public, max-age=3600",
+          },
+        }),
+        "/sw.js": new Response(Bun.file(swAsset), {
+          headers: {
+            "content-type": "application/javascript; charset=utf-8",
+            // No-cache: when a uatu upgrade changes the SW logic, the new
+            // worker must reach the user on the next reload instead of
+            // being shadowed by a cached older version.
+            "cache-control": "no-cache",
+            // Allow the worker to control the entire site even though it's
+            // served from /sw.js (no path-prefix nesting needed).
+            "service-worker-allowed": "/",
           },
         }),
         "/api/state": {
@@ -156,12 +306,32 @@ async function runWatch(options: WatchOptions) {
           },
         },
       },
-      fetch: createNavigationFetchHandler({
-        getUnscopedRoots: () => watchSession!.getUnscopedRoots(),
-        getEntries: () => rootEntries,
-        getRespectGitignore: () => options.respectGitignore,
-        getServer: () => server!,
-      }),
+      fetch: (request, srv) => {
+        const requestUrl = new URL(request.url);
+        if (requestUrl.pathname === "/api/terminal") {
+          return handleTerminalUpgrade(request, requestUrl, srv);
+        }
+        if (requestUrl.pathname === "/api/auth" && request.method === "POST") {
+          return handleAuth(request);
+        }
+        return navigationFetch(request);
+      },
+      websocket: terminalServer
+        ? {
+            open: socket => {
+              void terminalServer!.open(socket as unknown as Parameters<NonNullable<typeof terminalServer>["open"]>[0]);
+            },
+            message: (socket, data) => {
+              terminalServer!.message(
+                socket as unknown as Parameters<NonNullable<typeof terminalServer>["message"]>[0],
+                data,
+              );
+            },
+            close: socket => {
+              terminalServer!.close(socket as unknown as Parameters<NonNullable<typeof terminalServer>["close"]>[0]);
+            },
+          }
+        : undefined,
     });
   } catch (error) {
     clearIndexingStatus();
@@ -175,6 +345,13 @@ async function runWatch(options: WatchOptions) {
         .then(() => server!.stop(true))
         .catch(() => undefined);
     }
+    if (terminalServer) {
+      try {
+        terminalServer.disposeAll();
+      } catch {
+        // Already failing — best-effort.
+      }
+    }
     throw error;
   }
 
@@ -184,7 +361,11 @@ async function runWatch(options: WatchOptions) {
     throw new Error("failed to start watch session");
   }
 
-  const url = `http://127.0.0.1:${server.port}`;
+  const baseUrl = `http://127.0.0.1:${server.port}`;
+  // Token is appended only when the terminal feature is on so unrelated runs
+  // don't surface a confusing `?t=` in the printed URL. The browser strips it
+  // from `location` on first load and stores it for later WS upgrades.
+  const url = terminalEnabled ? `${baseUrl}/?t=${encodeURIComponent(watchSession.getTerminalToken())}` : baseUrl;
   printStartupBanner(process.stdout);
   console.log(url);
 
@@ -231,6 +412,13 @@ async function runWatch(options: WatchOptions) {
     void Promise.resolve()
       .then(() => server!.stop(true))
       .catch(() => undefined);
+    if (terminalServer) {
+      try {
+        terminalServer.disposeAll();
+      } catch {
+        // Ignore — we are already exiting.
+      }
+    }
 
     hardExit(0);
   };

@@ -17,6 +17,50 @@
   --navy: #0a1c38;
   --teal: #1ca8a7;
   --surface-muted: #f3f5f7;
+
+  /* Embedded terminal palette. The light-on-dark scheme stays consistent
+     across uatu's overall light theme — terminals look wrong when bright. */
+  --terminal-bg: #0b1220;
+  --terminal-fg: #e6edf3;
+  --terminal-cursor: #e6edf3;
+  --terminal-selection-bg: rgba(28, 168, 167, 0.4);
+  /* Prefer locally-installed Nerd Fonts so user shell prompts (powerline,
+     starship, p10k, etc.) render their glyphs instead of TOFU squares.
+     The "Mono" variants force icons to single-cell width, which matters in
+     a terminal grid. Falls through to plain monospace for users without any
+     Nerd Font installed. */
+  --terminal-font-family:
+    "FiraCode Nerd Font Mono",
+    "FiraCode Nerd Font",
+    "JetBrainsMono Nerd Font Mono",
+    "JetBrainsMono Nerd Font",
+    "Hack Nerd Font Mono",
+    "Hack Nerd Font",
+    "MesloLGS Nerd Font Mono",
+    "MesloLGS NF",
+    "CaskaydiaCove Nerd Font Mono",
+    "Cascadia Code",
+    "SF Mono",
+    Menlo,
+    Consolas,
+    "Liberation Mono",
+    monospace;
+  --terminal-ansi-black: #1f2937;
+  --terminal-ansi-red: #f87171;
+  --terminal-ansi-green: #4ade80;
+  --terminal-ansi-yellow: #facc15;
+  --terminal-ansi-blue: #60a5fa;
+  --terminal-ansi-magenta: #c084fc;
+  --terminal-ansi-cyan: #22d3ee;
+  --terminal-ansi-white: #cbd5f5;
+  --terminal-ansi-bright-black: #475569;
+  --terminal-ansi-bright-red: #fca5a5;
+  --terminal-ansi-bright-green: #86efac;
+  --terminal-ansi-bright-yellow: #fde68a;
+  --terminal-ansi-bright-blue: #93c5fd;
+  --terminal-ansi-bright-magenta: #d8b4fe;
+  --terminal-ansi-bright-cyan: #67e8f9;
+  --terminal-ansi-bright-white: #f8fafc;
 }
 
 * {
@@ -318,12 +362,174 @@ h2 {
 }
 
 /* Preview header: flat, sticky, soft shadow instead of blur+gradient. */
-.preview-shell {
+.main-stack {
   grid-area: preview;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.preview-shell {
+  flex: 1 1 auto;
   padding: 0 1.75rem 1.5rem;
   overflow: auto;
   min-height: 0;
   min-width: 0;
+}
+
+/* Drag handle for the bottom terminal panel. Mirrors the sidebar resizer's
+   visual rules but on the horizontal axis. */
+.panel-resizer {
+  flex: 0 0 auto;
+  height: 4px;
+  cursor: row-resize;
+  background: var(--border-soft);
+  position: relative;
+}
+
+.panel-resizer:hover,
+body.is-resizing-terminal .panel-resizer {
+  background: var(--accent-soft);
+}
+
+.terminal-panel {
+  flex: 0 0 auto;
+  height: var(--terminal-panel-height, 240px);
+  min-height: 120px;
+  background: var(--terminal-bg, #0b1220);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--terminal-fg, #e6edf3);
+}
+
+.terminal-panel[hidden] {
+  display: none;
+}
+
+.terminal-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.35rem 0.75rem;
+  background: rgba(0, 0, 0, 0.18);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: rgba(230, 237, 243, 0.7);
+}
+
+.terminal-panel-close {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+}
+
+.terminal-panel-close:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+}
+
+.terminal-host {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 0.4rem 0.6rem;
+  background: var(--terminal-bg, #0b1220);
+}
+
+.terminal-host .xterm {
+  height: 100%;
+}
+
+.terminal-host .xterm-viewport {
+  background: transparent !important;
+}
+
+/* Re-auth form shown inside the terminal panel when a WebSocket upgrade
+   is rejected (stale cookie / PWA first launch / token mismatch). */
+.terminal-auth {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: stretch;
+  gap: 0.6rem;
+  max-width: 28rem;
+  margin: 0 auto;
+  padding: 1.5rem;
+  color: var(--terminal-fg, #e6edf3);
+}
+
+.terminal-auth-heading {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.terminal-auth-help {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: rgba(230, 237, 243, 0.65);
+}
+
+.terminal-auth-form {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.2rem;
+}
+
+.terminal-auth-input {
+  flex: 1 1 auto;
+  appearance: none;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  padding: 0.45rem 0.6rem;
+  color: inherit;
+  font: inherit;
+  font-family: var(--terminal-font-family);
+  font-size: 0.85rem;
+}
+
+.terminal-auth-input:focus {
+  outline: 2px solid var(--accent, #0969da);
+  outline-offset: 1px;
+  border-color: transparent;
+}
+
+.terminal-auth-submit {
+  appearance: none;
+  background: var(--accent, #0969da);
+  border: 0;
+  border-radius: 4px;
+  color: #ffffff;
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0 0.9rem;
+  cursor: pointer;
+}
+
+.terminal-auth-submit:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.terminal-auth-status {
+  margin: 0.1rem 0 0;
+  min-height: 1.2em;
+  font-size: 0.78rem;
+  color: rgba(230, 237, 243, 0.55);
 }
 
 .preview-header {

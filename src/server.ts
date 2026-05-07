@@ -24,6 +24,8 @@ import {
   type RootGroup,
   type Scope,
   type StatePayload,
+  type TerminalAvailability,
+  type TerminalConfigPayload,
   type ViewMode,
 } from "./shared";
 import { BUILD, formatBuildIdentifier, type BuildInfo } from "./version";
@@ -103,7 +105,13 @@ const secretFileNames = new Set([
 ]);
 const secretFileSuffixes = [".pem", ".key", ".p12", ".pfx"];
 
-export const DEFAULT_PORT = 4312;
+// Stable default so the eventual PWA install identity (origin =
+// http://127.0.0.1:<port>) is consistent across restarts. If 4711 is taken,
+// cli.ts walks upward to the first free port — but only when the user did NOT
+// pass `--port`, which is a deliberate choice. An explicit port is honored
+// strictly so that a user binding to a fixed port doesn't get silently rolled.
+export const DEFAULT_PORT = 4711;
+export const PORT_SCAN_LIMIT = 32;
 export const SERVE_IDLE_TIMEOUT_SECONDS = 0;
 export const DEFAULT_RESPECT_GITIGNORE = true;
 
@@ -112,6 +120,10 @@ export type WatchOptions = {
   openBrowser: boolean;
   follow: boolean;
   port: number;
+  // True when the user passed `-p` / `--port`. Roll-on-conflict is only
+  // applied to the default port (false). An explicit `--port 0` keeps this
+  // true so we don't double-roll an already-ephemeral request.
+  portExplicit: boolean;
   respectGitignore: boolean;
   force: boolean;
   // When the user passes `--mode=author|review`, this is set and takes
@@ -231,6 +243,7 @@ export function parseCommand(argv: string[]): ParsedCommand {
   let openBrowser = true;
   let follow = true;
   let port = DEFAULT_PORT;
+  let portExplicit = false;
   let respectGitignore = DEFAULT_RESPECT_GITIGNORE;
   let force = false;
   let startupMode: Mode | undefined;
@@ -274,11 +287,13 @@ export function parseCommand(argv: string[]): ParsedCommand {
       }
 
       const parsed = Number.parseInt(value, 10);
-      if (!Number.isInteger(parsed) || parsed <= 0) {
+      // 0 = "ask the kernel for an ephemeral port". Anything <0 is invalid.
+      if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65535) {
         throw new Error(`invalid port: ${value}`);
       }
 
       port = parsed;
+      portExplicit = true;
       index += 1;
       continue;
     }
@@ -322,6 +337,7 @@ export function parseCommand(argv: string[]): ParsedCommand {
       openBrowser,
       follow,
       port,
+      portExplicit,
       respectGitignore,
       force,
       startupMode,
@@ -826,6 +842,8 @@ export function createStatePayload(
   scope: Scope = { kind: "folder" },
   repositories: RepositoryReviewSnapshot[] = [],
   startupMode?: Mode,
+  terminalEnabled?: boolean,
+  terminalConfig?: TerminalConfigPayload,
 ): StatePayload {
   return {
     roots,
@@ -837,6 +855,8 @@ export function createStatePayload(
     build: BUILD_SUMMARY,
     scope,
     ...(startupMode ? { startupMode } : {}),
+    ...(terminalEnabled === undefined ? {} : { terminal: (terminalEnabled ? "enabled" : "disabled") as TerminalAvailability }),
+    ...(terminalEnabled && terminalConfig && (terminalConfig.fontFamily || terminalConfig.fontSize) ? { terminalConfig } : {}),
   };
 }
 
@@ -872,7 +892,19 @@ export type WatchSessionOptions = {
   usePolling?: boolean;
   respectGitignore?: boolean;
   startupMode?: Mode;
+  terminalEnabled?: boolean;
+  terminalConfig?: TerminalConfigPayload;
 };
+
+// 32 random bytes, base64url-encoded — sufficient entropy that brute-forcing
+// over the localhost websocket is not viable. Regenerated per server start.
+function createTerminalToken(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]!);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
 
 // Builds the predicate chokidar consults to decide whether to attach a native
 // watcher to a path. Two layers:
@@ -933,6 +965,9 @@ export function createWatchSession(
 ) {
   const respectGitignore = options.respectGitignore ?? DEFAULT_RESPECT_GITIGNORE;
   const startupMode = options.startupMode;
+  const terminalEnabled = options.terminalEnabled ?? false;
+  const terminalConfig: TerminalConfigPayload | undefined = options.terminalConfig;
+  const terminalToken = createTerminalToken();
   let roots: RootGroup[] = [];
   let repositories: RepositoryReviewSnapshot[] = [];
   // The unscoped index holds every viewable doc under the watched roots,
@@ -1003,7 +1038,7 @@ export function createWatchSession(
     stateFingerprint = nextFingerprint;
 
     if (shouldBroadcast) {
-      broadcast(createStatePayload(roots, initialFollow, changedDocumentId, scope, repositories, startupMode));
+      broadcast(createStatePayload(roots, initialFollow, changedDocumentId, scope, repositories, startupMode, terminalEnabled, terminalConfig));
     }
   };
 
@@ -1149,6 +1184,12 @@ export function createWatchSession(
     getRepositories() {
       return repositories;
     },
+    getTerminalToken() {
+      return terminalToken;
+    },
+    isTerminalEnabled() {
+      return terminalEnabled;
+    },
     // Test-only handle: lets the regression suite emit synthetic chokidar
     // errors against the real underlying watcher to verify the crash guard.
     // Not part of the production API surface.
@@ -1157,7 +1198,7 @@ export function createWatchSession(
     },
     setScope,
     getStatePayload(changedId: string | null = null) {
-      return createStatePayload(roots, initialFollow, changedId, scope, repositories, startupMode);
+      return createStatePayload(roots, initialFollow, changedId, scope, repositories, startupMode, terminalEnabled, terminalConfig);
     },
     eventsResponse() {
       let currentSubscriber: EventController | null = null;
@@ -1166,7 +1207,7 @@ export function createWatchSession(
         start(controller) {
           currentSubscriber = controller;
           subscribers.add(controller);
-          controller.enqueue(encoder.encode(`event: state\ndata: ${JSON.stringify(createStatePayload(roots, initialFollow, null, scope, repositories, startupMode))}\n\n`));
+          controller.enqueue(encoder.encode(`event: state\ndata: ${JSON.stringify(createStatePayload(roots, initialFollow, null, scope, repositories, startupMode, terminalEnabled, terminalConfig))}\n\n`));
         },
         cancel() {
           if (currentSubscriber) {

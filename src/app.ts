@@ -1,6 +1,15 @@
 import { fileIconForName } from "./file-icons";
 import { closeMermaidViewer, ensureMermaidViewer } from "./mermaid-viewer";
 import { renderMermaidDiagrams, replaceMermaidCodeBlocks, type MermaidThemeInputs } from "./preview";
+import { captureTerminalToken, mountTerminalPanel, type TerminalPanelHandle } from "./terminal";
+import {
+  clampTerminalHeight as clampTerminalHeightShared,
+  readTerminalHeightPreference as readTerminalHeightPreferenceShared,
+  readTerminalVisiblePreference as readTerminalVisiblePreferenceShared,
+  writeTerminalHeightPreference as writeTerminalHeightPreferenceShared,
+  writeTerminalVisiblePreference as writeTerminalVisiblePreferenceShared,
+  type StorageLike,
+} from "./terminal-pane-state";
 import {
   createSelectionInspector,
   formatReference,
@@ -973,6 +982,48 @@ function renderCommitPreviewUnavailable(resolved: Exclude<CommitPreviewResolutio
   );
 }
 
+// Pull the URL token into sessionStorage and strip it from `location.search`
+// before anything else reads the URL. Pathname/hash are preserved.
+captureTerminalToken();
+
+// Inject PWA links at runtime rather than declaring them in index.html. Bun's
+// HTML bundler tries to resolve every <link href="..."> as a build-time
+// asset, but `/manifest.webmanifest` and `/assets/icon-*.png` are routes
+// served by the uatu server — there's no source file to bundle. Adding them
+// from JS bypasses the bundler entirely.
+function injectPwaLinks() {
+  if (typeof document === "undefined") return;
+  const head = document.head;
+  if (!head) return;
+  if (head.querySelector('link[rel="manifest"]')) return;
+  const manifest = document.createElement("link");
+  manifest.rel = "manifest";
+  manifest.href = "/manifest.webmanifest";
+  head.appendChild(manifest);
+  for (const size of ["192", "512"] as const) {
+    const icon = document.createElement("link");
+    icon.rel = "icon";
+    icon.type = "image/png";
+    icon.setAttribute("sizes", `${size}x${size}`);
+    icon.href = `/assets/icon-${size}.png`;
+    head.appendChild(icon);
+  }
+}
+injectPwaLinks();
+
+// Register the pass-through service worker so Edge/Chrome/Brave surface the
+// PWA install affordance. Failures are logged once and otherwise ignored —
+// uatu does not depend on the worker for any feature, only its presence.
+if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker
+      .register("/sw.js", { scope: "/" })
+      .catch(error => {
+        console.warn("uatu: service worker registration failed", error);
+      });
+  });
+}
+
 void loadInitialState();
 
 async function loadInitialState() {
@@ -998,6 +1049,7 @@ async function loadInitialState() {
   appState.scope = payload.scope;
   syncStateGeneration(payload.generatedAt);
   renderBuildBadge(payload.build);
+  setupTerminalPanel(payload.terminal === "enabled", payload.terminalConfig);
 
   // Mode precedence: CLI --mode override (`startupMode` in the payload) wins
   // at boot, then the persisted browser preference, then DEFAULT_MODE. Whatever
@@ -2774,6 +2826,143 @@ function setSidebarCollapsed(collapsed: boolean, options: { persist?: boolean } 
 
 function syncStateGeneration(generatedAt: number) {
   document.body.dataset.stateGeneratedAt = String(generatedAt);
+}
+
+const TERMINAL_TOKEN_KEY_LOCAL = "uatu:terminal-token";
+
+let terminalHandle: TerminalPanelHandle | null = null;
+let terminalSetupRan = false;
+
+// Thin browser-bound wrappers around the pure helpers in
+// `terminal-pane-state.ts`. Production code uses these; tests exercise the
+// pure helpers directly with an in-memory storage stub.
+const sessionStorageRef: StorageLike = window.sessionStorage;
+const localStorageRef: StorageLike = window.localStorage;
+
+function readTerminalVisiblePreference(): boolean {
+  return readTerminalVisiblePreferenceShared(sessionStorageRef);
+}
+
+function writeTerminalVisiblePreference(visible: boolean): void {
+  writeTerminalVisiblePreferenceShared(sessionStorageRef, visible);
+}
+
+function readTerminalHeightPreference(): number | null {
+  return readTerminalHeightPreferenceShared(localStorageRef);
+}
+
+function writeTerminalHeightPreference(height: number): void {
+  writeTerminalHeightPreferenceShared(localStorageRef, height);
+}
+
+function clampTerminalHeight(value: number): number {
+  return clampTerminalHeightShared(value, window.innerHeight);
+}
+
+function setupTerminalPanel(enabled: boolean, config?: { fontFamily?: string; fontSize?: number }) {
+  if (terminalSetupRan) return;
+  terminalSetupRan = true;
+
+  const panel = document.getElementById("terminal-panel");
+  const host = document.getElementById("terminal-host");
+  const resizer = document.getElementById("terminal-resizer");
+  const toggle = document.getElementById("terminal-toggle");
+  const close = document.getElementById("terminal-close");
+  if (!panel || !host || !resizer || !toggle || !close) return;
+
+  if (!enabled) {
+    // Stay completely out of the way when the backend isn't loadable.
+    return;
+  }
+
+  toggle.removeAttribute("hidden");
+
+  const persistedHeight = readTerminalHeightPreference();
+  if (persistedHeight !== null) {
+    document.documentElement.style.setProperty("--terminal-panel-height", `${clampTerminalHeight(persistedHeight)}px`);
+  }
+
+  terminalHandle = mountTerminalPanel({
+    container: host,
+    getToken: () => {
+      try {
+        return window.sessionStorage.getItem(TERMINAL_TOKEN_KEY_LOCAL);
+      } catch {
+        return null;
+      }
+    },
+    fontFamily: config?.fontFamily,
+    fontSize: config?.fontSize,
+  });
+
+  function setVisible(visible: boolean, persist = true) {
+    if (visible) {
+      panel!.removeAttribute("hidden");
+      resizer!.removeAttribute("hidden");
+      toggle!.setAttribute("aria-pressed", "true");
+      terminalHandle?.attach();
+      // Allow layout to settle before fitting (xterm needs a real rect).
+      requestAnimationFrame(() => terminalHandle?.fit());
+    } else {
+      panel!.setAttribute("hidden", "");
+      resizer!.setAttribute("hidden", "");
+      toggle!.setAttribute("aria-pressed", "false");
+      terminalHandle?.detach();
+    }
+    if (persist) writeTerminalVisiblePreference(visible);
+  }
+
+  function toggleVisible() {
+    const visible = !panel!.hasAttribute("hidden");
+    setVisible(!visible);
+  }
+
+  toggle.addEventListener("click", toggleVisible);
+  close.addEventListener("click", () => setVisible(false));
+
+  // Ctrl+` (and Cmd+` on macOS): toggle terminal panel. Bound at the document
+  // level so it works whether or not xterm has focus. Don't shadow the user's
+  // normal backtick typing inside the terminal — only intercept when the
+  // modifier is held.
+  document.addEventListener("keydown", event => {
+    if (event.key !== "`" && event.key !== "´") return;
+    if (!event.ctrlKey && !event.metaKey) return;
+    if (event.altKey || event.shiftKey) return;
+    event.preventDefault();
+    toggleVisible();
+  });
+
+  // Drag-to-resize. Mirrors the sidebar resizer's pattern (no animation, body
+  // class for cursor lock, CSS variable for the live value).
+  resizer.addEventListener("pointerdown", event => {
+    event.preventDefault();
+    document.body.classList.add("is-resizing-terminal");
+    const startY = event.clientY;
+    const startHeight = panel!.getBoundingClientRect().height;
+
+    function onMove(ev: PointerEvent) {
+      const delta = startY - ev.clientY;
+      const next = clampTerminalHeight(startHeight + delta);
+      document.documentElement.style.setProperty("--terminal-panel-height", `${next}px`);
+      terminalHandle?.fit();
+    }
+
+    function onUp() {
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+      document.body.classList.remove("is-resizing-terminal");
+      const finalHeight = panel!.getBoundingClientRect().height;
+      writeTerminalHeightPreference(finalHeight);
+    }
+
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp);
+  });
+
+  // Restore visibility from the previous session in this tab.
+  if (readTerminalVisiblePreference()) {
+    setVisible(true, false);
+  }
 }
 
 function escapeHtml(value: string): string {

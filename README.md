@@ -47,6 +47,8 @@ project-specific checks matter.
 - **Review burden meter** based on deterministic git diff size, file spread, and configurable path scoring
 - **Git-backed codebase** watching by default, with explicit `--force` for non-git folders
 - **Single-file** or multi-root scope from the CLI
+- **Embedded terminal** in a hidden-by-default bottom panel toggled with `Ctrl+`` — real PTY in the watched repo via Bun's built-in terminal API, ANSI-color dark theme that picks up locally-installed Nerd Fonts, configurable via `terminal.fontFamily` / `terminal.fontSize` in `.uatu.json`
+- **Installable as a PWA** on Edge / Chrome / Brave (and as "Add to Dock" in Safari) so TUI editors and other keyboard-heavy tools don't fight the browser for `Cmd+W`, `Cmd+T`, `Cmd+L`, or `Cmd+R`
 
 ## Upcoming
 
@@ -56,6 +58,10 @@ project-specific checks matter.
 - **AI assistance across workflows** later, layered on top of transparent signals rather than replacing them
 
 ## Install
+
+Requires **Bun ≥ 1.3.5** (for the built-in PTY API used by the embedded
+terminal — older Bun degrades the terminal feature gracefully but the rest of
+uatu still works).
 
 ```bash
 bun install
@@ -73,6 +79,11 @@ Build a standalone binary:
 bun run build
 ./dist/uatu watch .
 ```
+
+The standalone binary embeds Bun's runtime, so the terminal feature works
+without any extra setup on macOS and Linux. Windows is pending Bun's
+upstream Windows PTY work; until then `terminal: "disabled"` is reported on
+Windows and the toolbar terminal toggle stays hidden.
 
 ### Install globally with `bun link`
 
@@ -120,6 +131,84 @@ uatu watch GUIDE.adoc
 Mid-session, click **Pin** in the preview header to narrow an already-running
 folder watch to the currently previewed document. Click again to restore the
 full sidebar.
+
+### Default port and PWA install identity
+
+The server binds to `127.0.0.1:4711` by default. If 4711 is already in use,
+uatu scans upward for the next free port and warns on stderr. Pinning a
+default keeps the PWA install identity stable across launches — installed
+PWAs are keyed on origin (host + port), so a moving port creates a new
+installable app every restart.
+
+Override at any time with `--port <n>`. Pass `--port 0` to opt back into
+ephemeral kernel-assigned ports (handy when you want to run multiple uatu
+instances and don't care about PWA install identity).
+
+> **Breaking from earlier versions.** The default port changed from 4312 to
+> 4711. If you had bookmarks, scripts, or PWA installs pinned to 4312, pass
+> `--port 4312` to keep the old behavior, or update the pinned origin to
+> 4711.
+
+### Embedded terminal
+
+A hidden-by-default bottom panel hosts an `xterm.js` terminal connected to
+a real PTY in the watched repo. Toggle it with **`Ctrl+`** (also `Cmd+`` on
+macOS), or click the **Terminal** chip in the preview toolbar.
+
+- **Theme.** Dark by default, ANSI-color palette tuned to the rest of the
+  uatu UI. The font stack prefers locally-installed Nerd Fonts (FiraCode,
+  JetBrainsMono, Hack, MesloLGS, CaskaydiaCove) so shell prompts that use
+  Powerline / starship glyphs render correctly.
+- **`.uatu.json` overrides.** Set `terminal.fontFamily` (string) and
+  `terminal.fontSize` (number 8–32) to override the defaults per-project:
+  ```json
+  { "terminal": { "fontFamily": "Berkeley Mono, monospace", "fontSize": 14 } }
+  ```
+- **Lifecycle.** v1 is one PTY per browser; closing the panel kills the
+  shell, opening it spawns a new one. Use `nohup` / `disown` for tasks you
+  want to survive a panel close.
+
+### Installing as a desktop app (PWA)
+
+On Chrome, Edge, or Brave, an install icon appears in the address bar after
+loading the URL. Click it to install **UatuCode** as a standalone window.
+On Safari (macOS Sonoma+), use **File → Add to Dock**.
+
+The standalone window has no browser chrome, so keyboard shortcuts that the
+browser would normally intercept (`Cmd+W`, `Cmd+T`, `Cmd+L`, `Cmd+R`) reach
+the embedded terminal — making nvim, helix, and other TUI editors usable
+inside uatu without conflict.
+
+### Security posture of the terminal
+
+Because the terminal endpoint accepts shell input, it has a stricter
+security envelope than the rest of uatu:
+
+- **Localhost binding.** The server only listens on `127.0.0.1`, never on
+  `0.0.0.0`. Other hosts on your network can't reach uatu.
+- **Per-server token.** A 32-byte token is minted at startup and embedded
+  in the URL printed to stdout. The server requires it on the WebSocket
+  upgrade for `/api/terminal`.
+- **Origin allowlist.** The upgrade rejects any `Origin` other than
+  `http://127.0.0.1:<port>`, `http://localhost:<port>`, or the PWA's
+  origin.
+- **HttpOnly cookie persistence.** Visiting `?t=<token>` once mints a
+  `uatu_term` cookie (HttpOnly + SameSite=Strict) so subsequent PWA
+  launches authenticate without re-pasting the token. The cookie rotates
+  with the in-memory token on every uatu restart.
+- **Re-auth UI.** When the cookie is stale (typically after a uatu
+  restart), the panel shows a "Reconnect to uatu" form. Paste a fresh
+  token from the new uatu's stdout to refresh the cookie.
+
+### Safari and Nerd Fonts
+
+Safari 17+ blocks pages from seeing user-installed fonts (anti-fingerprinting
+protection). Locally-installed Nerd Fonts will not resolve in the terminal
+on Safari, even though they are correctly listed in the font-family chain.
+Chrome / Edge / Brave have no such restriction. Recommendation: use
+Chrome-family for uatu, or install via "Add to Dock" in Safari and accept
+that prompts using Nerd Font glyphs will show TOFU squares there until Bun
+or the upstream font story changes.
 
 ### Mode: Author vs Review
 

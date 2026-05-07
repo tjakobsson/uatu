@@ -14,6 +14,7 @@ const root = path.resolve(import.meta.dir, "..");
 const outDir = path.join(root, "dist");
 await mkdir(outDir, { recursive: true });
 
+
 const result = Bun.spawnSync({
   cmd: [
     "bun",
