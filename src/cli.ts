@@ -154,8 +154,15 @@ async function runWatch(options: WatchOptions) {
       if (!isAllowedOrigin(origin, srv)) {
         return new Response("forbidden origin", { status: 403 });
       }
-      const session = terminalServer.prepareSession();
-      const upgraded = srv.upgrade(request, { data: session });
+      const sessionId = requestUrl.searchParams.get("sessionId") ?? "";
+      const result = terminalServer.prepareSession(sessionId);
+      if (result.kind === "invalid") {
+        return new Response("invalid or missing sessionId", { status: 400 });
+      }
+      if (result.kind === "collision") {
+        return new Response("sessionId in use", { status: 409 });
+      }
+      const upgraded = srv.upgrade(request, { data: { sessionId } });
       if (!upgraded) {
         return new Response("upgrade failed", { status: 500 });
       }

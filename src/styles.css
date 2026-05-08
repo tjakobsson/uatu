@@ -378,14 +378,25 @@ h2 {
   min-width: 0;
 }
 
-/* Drag handle for the bottom terminal panel. Mirrors the sidebar resizer's
-   visual rules but on the horizontal axis. */
+/* Drag handle for the terminal panel. Orientation switches with the dock:
+   horizontal bar above the panel when bottom-docked, vertical strip on the
+   left edge when right-docked. */
 .panel-resizer {
   flex: 0 0 auto;
-  height: 4px;
-  cursor: row-resize;
   background: var(--border-soft);
   position: relative;
+}
+
+.panel-resizer[data-orientation="horizontal"] {
+  height: 4px;
+  width: auto;
+  cursor: row-resize;
+}
+
+.panel-resizer[data-orientation="vertical"] {
+  width: 4px;
+  height: auto;
+  cursor: col-resize;
 }
 
 .panel-resizer:hover,
@@ -395,8 +406,6 @@ body.is-resizing-terminal .panel-resizer {
 
 .terminal-panel {
   flex: 0 0 auto;
-  height: var(--terminal-panel-height, 240px);
-  min-height: 120px;
   background: var(--terminal-bg, #0b1220);
   display: flex;
   flex-direction: column;
@@ -404,8 +413,88 @@ body.is-resizing-terminal .panel-resizer {
   color: var(--terminal-fg, #e6edf3);
 }
 
+.terminal-panel[data-dock="bottom"] {
+  height: var(--terminal-panel-height, 240px);
+  min-height: 120px;
+  width: auto;
+}
+
+.terminal-panel[data-dock="right"] {
+  width: var(--terminal-panel-width, 360px);
+  min-width: 280px;
+  height: auto;
+}
+
 .terminal-panel[hidden] {
   display: none;
+}
+
+/* Minimized: only the header stays visible. PTYs remain attached so output
+   accumulates in xterm scrollback while collapsed. */
+.terminal-panel[data-display="minimized"] .terminal-panes {
+  display: none;
+}
+
+/* Bottom-dock minimized: collapse height to the header bar, full width. */
+.terminal-panel[data-dock="bottom"][data-display="minimized"] {
+  height: auto !important;
+  min-height: 0 !important;
+}
+
+/* Right-dock minimized: collapse width to a narrow vertical strip with the
+   title rotated and controls stacked, so the chrome geometry matches the
+   dock orientation rather than leaving a stubby horizontal-bar fragment. */
+.terminal-panel[data-dock="right"][data-display="minimized"] {
+  width: 36px !important;
+  min-width: 0 !important;
+}
+
+.terminal-panel[data-dock="right"][data-display="minimized"] .terminal-panel-header {
+  flex-direction: column;
+  height: 100%;
+  padding: 0.4rem 0;
+  border-bottom: none;
+  border-left: 1px solid rgba(255, 255, 255, 0.05);
+  gap: 0.35rem;
+}
+
+.terminal-panel[data-dock="right"][data-display="minimized"] .terminal-panel-title {
+  /* vertical-rl + rotate(180deg) = text reads bottom-to-top, the common
+     "sidebar tab" orientation for Latin text. Title is pushed BELOW the
+     controls so the actionable affordances sit at the top of the strip
+     where the eye lands first. */
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  flex: 0 0 auto;
+  order: 1;
+  margin-top: 0.5rem;
+}
+
+.terminal-panel[data-dock="right"][data-display="minimized"] .terminal-panel-controls {
+  flex-direction: column;
+  gap: 0.1rem;
+  order: 0;
+  padding-top: 0.1rem;
+}
+
+/* Fullscreen: overlay the main grid area while keeping the sidebar / topbar
+   visible (the panel is a child of .main-stack, which is grid-area: preview). */
+.terminal-panel[data-display="fullscreen"] {
+  position: absolute;
+  inset: 0;
+  height: auto !important;
+  width: auto !important;
+  z-index: 5;
+}
+
+.main-stack {
+  position: relative;
+}
+
+/* Right-dock variant: switch the .main-stack to flex-row so the panel sits
+   beside the preview instead of below it. The panel-resizer follows along. */
+.app-shell:has(.terminal-panel[data-dock="right"]:not([hidden])) .main-stack {
+  flex-direction: row;
 }
 
 .terminal-panel-header {
@@ -413,45 +502,354 @@ body.is-resizing-terminal .panel-resizer {
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
-  padding: 0.35rem 0.75rem;
+  padding: 0.35rem 0.5rem 0.35rem 0.75rem;
   background: rgba(0, 0, 0, 0.18);
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
   font-size: 0.78rem;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: rgba(230, 237, 243, 0.7);
+  flex: 0 0 auto;
 }
 
+.terminal-panel-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+}
+
+.terminal-panel-button,
 .terminal-panel-close {
   appearance: none;
   background: transparent;
   border: 0;
   color: inherit;
-  font-size: 1.1rem;
+  font-size: 1rem;
   line-height: 1;
   cursor: pointer;
-  padding: 0.1rem 0.35rem;
+  padding: 0.25rem 0.4rem;
   border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
+.terminal-panel-button:hover,
 .terminal-panel-close:hover {
   background: rgba(255, 255, 255, 0.08);
   color: #ffffff;
 }
 
-.terminal-host {
+.terminal-panel-button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.terminal-panel-button[aria-pressed="true"] {
+  background: rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+}
+
+.terminal-panel-close {
+  font-size: 1.1rem;
+}
+
+/* State-driven icon swap. Each control carries both glyphs in HTML; CSS
+   reveals only the one that matches current panel state so the affordance
+   reflects the action that clicking the button will perform. */
+.dock-glyph,
+.state-glyph,
+.split-glyph {
+  display: none;
+}
+
+.terminal-panel[data-dock="bottom"] .split-glyph-horizontal {
+  display: inline-block;
+}
+
+.terminal-panel[data-dock="right"] .split-glyph-vertical {
+  display: inline-block;
+}
+
+.terminal-panel[data-dock="bottom"] .dock-glyph-right {
+  display: inline-block;
+}
+
+.terminal-panel[data-dock="right"] .dock-glyph-bottom {
+  display: inline-block;
+}
+
+/* Minimize / restore icons mirror the dock axis so the affordance matches
+   the direction the panel will collapse into or expand out of:
+     bottom-dock + normal       → collapse-down  (line _)
+     bottom-dock + minimized    → restore-up     (chevron ^)
+     right-dock  + normal       → collapse-right (chevron >)
+     right-dock  + minimized    → restore-left   (chevron <)
+*/
+.terminal-panel[data-dock="bottom"]:not([data-display="minimized"]) .state-glyph-min-collapse-down {
+  display: inline-block;
+}
+
+.terminal-panel[data-dock="right"]:not([data-display="minimized"]) .state-glyph-min-collapse-right {
+  display: inline-block;
+}
+
+.terminal-panel[data-dock="bottom"][data-display="minimized"] .state-glyph-min-restore-up {
+  display: inline-block;
+}
+
+.terminal-panel[data-dock="right"][data-display="minimized"] .state-glyph-min-restore-left {
+  display: inline-block;
+}
+
+.terminal-panel[data-display="fullscreen"] .state-glyph-fs-exit {
+  display: inline-block;
+}
+
+.terminal-panel:not([data-display="fullscreen"]) .state-glyph-fs-enter {
+  display: inline-block;
+}
+
+/* Container for one or two panes. Orientation flips with the dock axis so
+   splits render perpendicular to the dominant direction. */
+.terminal-panes {
   flex: 1 1 auto;
   min-height: 0;
-  padding: 0.4rem 0.6rem;
+  min-width: 0;
+  display: flex;
+}
+
+.terminal-panes[data-orientation="horizontal"] {
+  flex-direction: row;
+}
+
+.terminal-panes[data-orientation="vertical"] {
+  flex-direction: column;
+}
+
+.terminal-pane {
+  flex: 1 1 0;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  position: relative;
   background: var(--terminal-bg, #0b1220);
 }
 
-.terminal-host .xterm {
+/* Subtle ring on the active pane so the user knows where keystrokes / split
+   will land. Inset so it doesn't change layout. */
+.terminal-pane[data-active="true"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  box-shadow: inset 0 0 0 1px rgba(28, 168, 167, 0.55);
+}
+
+.terminal-pane-host {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  padding: 0.4rem 0.6rem;
+  /* xterm renders its `.xterm-screen` with absolute positioning sized to
+     its character grid; without an overflow clip on the host, the screen
+     can spill beyond the pane and intercept pointer events on the
+     inter-pane resizer (most visible in right-dock with vertical splits,
+     where the resizer is a thin horizontal strip between panes). */
+  overflow: hidden;
+  position: relative;
+}
+
+.terminal-pane-host .xterm {
   height: 100%;
 }
 
-.terminal-host .xterm-viewport {
+.terminal-pane-host .xterm-viewport {
   background: transparent !important;
+}
+
+.terminal-pane-close {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: rgba(230, 237, 243, 0.55);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  position: absolute;
+  top: 0.25rem;
+  right: 0.35rem;
+  opacity: 0;
+  transition: opacity 0.12s ease, background-color 0.12s ease;
+}
+
+.terminal-pane:hover .terminal-pane-close,
+.terminal-pane[data-active="true"] .terminal-pane-close {
+  opacity: 1;
+}
+
+.terminal-pane-close:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+}
+
+/* Resizer between two split panes. Orientation matches the panes container. */
+.terminal-pane-resizer {
+  flex: 0 0 auto;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.terminal-panes[data-orientation="horizontal"] .terminal-pane-resizer {
+  width: 4px;
+  cursor: col-resize;
+}
+
+.terminal-panes[data-orientation="vertical"] .terminal-pane-resizer {
+  height: 4px;
+  cursor: row-resize;
+}
+
+.terminal-pane-resizer:hover {
+  background: var(--accent-soft);
+}
+
+/* Sidebar entry-point row. Sits directly under the Author/Review row. */
+.sidebar-terminal-row {
+  padding: 0 0.75rem 0.5rem;
+  flex-shrink: 0;
+}
+
+.sidebar-terminal-row[hidden] {
+  display: none;
+}
+
+.terminal-toggle-button {
+  appearance: none;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.4rem 0.6rem;
+  background: transparent;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  color: var(--text-strong);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.82rem;
+  text-align: left;
+}
+
+.terminal-toggle-button:hover {
+  background: var(--surface-muted);
+  border-color: var(--border-medium);
+}
+
+.terminal-toggle-button[aria-pressed="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.terminal-toggle-label {
+  flex: 1 1 auto;
+}
+
+.terminal-toggle-kbd {
+  font: inherit;
+  font-size: 0.72rem;
+  font-family: var(--terminal-font-family);
+  padding: 0.05rem 0.35rem;
+  border-radius: 3px;
+  background: rgba(15, 23, 42, 0.06);
+  color: var(--text-subtle);
+  border: 1px solid var(--border-soft);
+  letter-spacing: 0;
+}
+
+.terminal-glyph {
+  flex: 0 0 auto;
+}
+
+/* Confirmation modal for destructive close. Centered overlay, default focus
+   on Cancel, Esc and backdrop click cancel. */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.modal-backdrop[hidden] {
+  display: none;
+}
+
+.modal-card {
+  background: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 20px 40px -10px rgba(15, 23, 42, 0.35);
+  padding: 1.25rem;
+  width: min(420px, calc(100% - 2rem));
+}
+
+.modal-title {
+  margin: 0 0 0.4rem;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.modal-body {
+  margin: 0 0 1rem;
+  font-size: 0.88rem;
+  color: var(--text-subtle);
+  line-height: 1.4;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.modal-button {
+  appearance: none;
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.45rem 0.85rem;
+  border-radius: 5px;
+  border: 1px solid var(--border-medium);
+  background: #ffffff;
+  color: var(--text-strong);
+  cursor: pointer;
+}
+
+.modal-button:hover {
+  background: var(--surface-muted);
+}
+
+.modal-button-default {
+  border-color: var(--border-medium);
+}
+
+.modal-button-danger {
+  background: #d1242f;
+  border-color: #d1242f;
+  color: #ffffff;
+}
+
+.modal-button-danger:hover {
+  background: #b91c25;
+}
+
+.modal-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 /* Re-auth form shown inside the terminal panel when a WebSocket upgrade

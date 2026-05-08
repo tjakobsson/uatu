@@ -47,7 +47,7 @@ project-specific checks matter.
 - **Review burden meter** based on deterministic git diff size, file spread, and configurable path scoring
 - **Git-backed codebase** watching by default, with explicit `--force` for non-git folders
 - **Single-file** or multi-root scope from the CLI
-- **Embedded terminal** in a hidden-by-default bottom panel toggled with `Ctrl+`` — real PTY in the watched repo via Bun's built-in terminal API, ANSI-color dark theme that picks up locally-installed Nerd Fonts, configurable via `terminal.fontFamily` / `terminal.fontSize` in `.uatu.json`
+- **Embedded terminal** in a hidden-by-default panel toggled with `Ctrl+`` — real PTY in the watched repo via Bun's built-in terminal API, ANSI-color dark theme that picks up locally-installed Nerd Fonts, configurable via `terminal.fontFamily` / `terminal.fontSize` in `.uatu.json`. Bottom or right-side dock, minimize / fullscreen, split for two concurrent PTYs (`Ctrl+Shift+``), confirmation prompt on close so a long-running session isn't lost to a stray click
 - **Installable as a PWA** on Edge / Chrome / Brave (and as "Add to Dock" in Safari) so TUI editors and other keyboard-heavy tools don't fight the browser for `Cmd+W`, `Cmd+T`, `Cmd+L`, or `Cmd+R`
 
 ## Upcoming
@@ -83,7 +83,7 @@ bun run build
 The standalone binary embeds Bun's runtime, so the terminal feature works
 without any extra setup on macOS and Linux. Windows is pending Bun's
 upstream Windows PTY work; until then `terminal: "disabled"` is reported on
-Windows and the toolbar terminal toggle stays hidden.
+Windows and the sidebar terminal toggle stays hidden.
 
 ### Install globally with `bun link`
 
@@ -151,9 +151,10 @@ instances and don't care about PWA install identity).
 
 ### Embedded terminal
 
-A hidden-by-default bottom panel hosts an `xterm.js` terminal connected to
-a real PTY in the watched repo. Toggle it with **`Ctrl+`** (also `Cmd+`` on
-macOS), or click the **Terminal** chip in the preview toolbar.
+A hidden-by-default panel hosts one or more `xterm.js` terminals connected
+to real PTYs in the watched repo. Toggle it with **`Ctrl+`** (also `Cmd+``
+on macOS), or click the **Terminal** button in the sidebar (under the
+Author/Review row).
 
 - **Theme.** Dark by default, ANSI-color palette tuned to the rest of the
   uatu UI. The font stack prefers locally-installed Nerd Fonts (FiraCode,
@@ -164,9 +165,22 @@ macOS), or click the **Terminal** chip in the preview toolbar.
   ```json
   { "terminal": { "fontFamily": "Berkeley Mono, monospace", "fontSize": 14 } }
   ```
-- **Lifecycle.** v1 is one PTY per browser; closing the panel kills the
-  shell, opening it spawns a new one. Use `nohup` / `disown` for tasks you
-  want to survive a panel close.
+- **Layout.** Dock the panel to the **bottom** or the **right** side via
+  the dock button in the header. **Minimize** collapses the panel to its
+  header bar while keeping every PTY attached; **fullscreen** expands the
+  panel to fill the main content area (sidebar + topbar stay accessible,
+  press `Esc` to exit). On viewports narrower than 720px, the right dock
+  falls back to the bottom automatically.
+- **Split.** Press the split button (or `Ctrl+Shift+`` / `Cmd+Shift+``) to
+  spawn a second concurrent PTY in the same panel. Each pane has its own
+  shell session, focus ring, and close button. Splits orient
+  perpendicular to the dock — side-by-side when bottom-docked, stacked
+  when right-docked. Maximum two panes per panel in v1.
+- **Close protection.** Clicking the panel's close button when a PTY is
+  attached prompts a confirmation modal so a stray click won't drop a
+  long-running `tail -f`, `claude code` session, or build. The keyboard
+  toggle (`Ctrl+``) and minimize / fullscreen buttons all preserve PTYs
+  and don't prompt.
 
 ### Installing as a desktop app (PWA)
 

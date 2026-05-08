@@ -1,8 +1,4 @@
-## Purpose
-
-Define the embedded terminal capability: a dockable panel in the UatuCode UI that hosts one or more `xterm.js`-rendered terminals connected to real PTY shell processes running in the watched repository's working directory, complete with token-gated transport, per-session WebSockets, persistence, theming, dock/display modes, multi-pane splits, and `.uatu.json`-driven font configuration.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Bottom panel hosts an interactive terminal
 The UI SHALL provide a panel that, when visible, hosts one or more `xterm.js`-rendered terminals connected to real PTY shell processes running in the watched repository's working directory. The panel SHALL be hidden by default on first load and SHALL default its dock position to the bottom of the main content area.
@@ -25,51 +21,6 @@ The UI SHALL provide a panel that, when visible, hosts one or more `xterm.js`-re
 - **AND** all attached terminal WebSockets are closed
 - **AND** the underlying PTY processes are terminated within the disconnect grace window
 - **AND** no confirmation prompt is shown
-
-### Requirement: Terminal works in the watched repository directory
-When the panel attaches a PTY, the shell SHALL start with its working directory set to the first watch root resolved by the CLI, and SHALL use the user's default login shell as reported by the `SHELL` environment variable (falling back to `/bin/sh` if unset or invalid).
-
-#### Scenario: PTY inherits watch root as cwd
-- **WHEN** uatu is started as `uatu watch ./some/dir` and the user opens the terminal panel
-- **AND** the user types `pwd` and presses Enter in the terminal
-- **THEN** the terminal output shows the absolute path of `./some/dir`
-
-#### Scenario: PTY uses default shell
-- **WHEN** the user's `SHELL` environment variable is set to `/opt/homebrew/bin/fish`
-- **AND** the user opens the terminal panel
-- **THEN** the spawned PTY runs `/opt/homebrew/bin/fish`
-
-### Requirement: Terminal honors `.uatu.json` font configuration
-The server SHALL read the optional `terminal` block from `.uatu.json` at the watch root and surface validated values via `/api/state.terminalConfig`. The browser SHALL apply `terminal.fontFamily` (string) and `terminal.fontSize` (number, 8–32) to the xterm instance when present. Invalid values SHALL be ignored with a warning printed to stderr; the rest of the block remains in effect. The default font stack (in `--terminal-font-family`) prefers locally-installed Nerd Fonts so user shell prompts render their glyphs without bundling a font.
-
-#### Scenario: Valid terminal config flows through state
-- **WHEN** `.uatu.json` contains `{"terminal": {"fontFamily": "FiraCode Nerd Font Mono", "fontSize": 14}}`
-- **AND** the user opens the terminal panel
-- **THEN** `/api/state` returns `{"terminalConfig": {"fontFamily": "FiraCode Nerd Font Mono", "fontSize": 14}}`
-- **AND** the rendered xterm instance uses those values
-
-#### Scenario: Out-of-range fontSize is dropped with a warning
-- **WHEN** `.uatu.json` contains `{"terminal": {"fontSize": 9999, "fontFamily": "Hack Nerd Font Mono"}}`
-- **THEN** the server logs a warning about the invalid `fontSize`
-- **AND** `/api/state.terminalConfig` contains `fontFamily` only
-
-#### Scenario: Missing terminal block falls back to defaults
-- **WHEN** `.uatu.json` has no `terminal` block (or no `.uatu.json` exists)
-- **THEN** `/api/state.terminalConfig` is absent
-- **AND** the browser uses the default font stack from `--terminal-font-family`
-
-### Requirement: Terminal is themed with the uatu ANSI dark palette
-The terminal SHALL render text using a dark ANSI 16-color palette that matches the uatu UI theme out of the box, with no required configuration. The palette SHALL be driven by CSS variables so it can be overridden centrally.
-
-#### Scenario: Default theme applied on first attach
-- **WHEN** a user opens the terminal panel on a fresh install
-- **THEN** the terminal background matches the uatu dark surface color
-- **AND** the foreground, cursor, selection background, and 16 ANSI colors all resolve to defined values (no `null` or browser-default colors)
-
-#### Scenario: Theme tracks CSS variable updates
-- **WHEN** the page's `--terminal-bg` CSS variable is changed at runtime
-- **AND** the terminal is re-themed (via re-attach or explicit refresh)
-- **THEN** the new background color is reflected in the terminal canvas
 
 ### Requirement: Terminal panel is resizable and persistent
 The panel SHALL be resizable via a drag handle on the edge facing the preview (top edge when bottom-docked, left edge when right-docked). When bottom-docked, height is clamped to `[120px, 70% of viewport height]`. When right-docked, width is clamped to `[280px, 60% of viewport width]`. The dock position, the most recent height (for bottom dock) and width (for right dock), the display mode, and the panel's hidden/visible state SHALL persist across reloads via `localStorage` and `sessionStorage`.
@@ -140,6 +91,8 @@ For each `sessionId`, the PTY SHALL be spawned on a successful WebSocket upgrade
 #### Scenario: Server shutdown kills all PTYs
 - **WHEN** the uatu server is stopped (Ctrl+C or idle timeout)
 - **THEN** every live PTY is terminated as part of shutdown
+
+## ADDED Requirements
 
 ### Requirement: Terminal entry point lives in the sidebar
 The control that toggles the terminal panel's visibility SHALL be located in the sidebar's mode-control region, adjacent to (and orthogonal with) the Author/Review mode controls. The control SHALL display the keyboard hint for the toggle shortcut. The terminal SHALL NOT be presented as a third mutually-exclusive mode alongside Author and Review.
@@ -272,16 +225,3 @@ The panel SHALL provide a split control that creates an additional concurrent te
 - **THEN** that pane is removed
 - **AND** the remaining panes expand to share the freed space
 - **AND** the panel and the other PTYs remain visible
-
-### Requirement: Terminal protocol carries input, output, and resize
-The browser-server protocol on the terminal WebSocket SHALL carry shell input as binary frames written to the PTY's stdin, shell output as binary frames written from the PTY's stdout/stderr, and terminal resize events as small JSON frames of the shape `{"type":"resize","cols":<n>,"rows":<n>}`.
-
-#### Scenario: Keystrokes reach the shell
-- **WHEN** the user types `echo hi` and presses Enter in the terminal
-- **THEN** within 200 milliseconds the terminal renders a line containing `hi` from the shell's stdout
-
-#### Scenario: Resize syncs the PTY
-- **WHEN** the panel is resized so xterm-addon-fit reports `cols=120, rows=30`
-- **THEN** the client sends a resize frame
-- **AND** the server calls the PTY's `resize(120, 30)`
-- **AND** running TUI applications redraw at the new dimensions

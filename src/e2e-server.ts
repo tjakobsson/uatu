@@ -305,9 +305,16 @@ function handleTerminalUpgrade(
   if (!isAllowedOrigin(request.headers.get("Origin"), srv)) {
     return new Response("forbidden origin", { status: 403 });
   }
-  const session = terminalServer.prepareSession();
+  const sessionId = requestUrl.searchParams.get("sessionId") ?? "";
+  const result = terminalServer.prepareSession(sessionId);
+  if (result.kind === "invalid") {
+    return new Response("invalid or missing sessionId", { status: 400 });
+  }
+  if (result.kind === "collision") {
+    return new Response("sessionId in use", { status: 409 });
+  }
   const ok = (srv.upgrade as (req: Request, opts: { data: unknown }) => boolean)(request, {
-    data: session,
+    data: { sessionId },
   });
   if (!ok) return new Response("upgrade failed", { status: 500 });
   return undefined;
