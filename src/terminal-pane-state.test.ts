@@ -193,8 +193,8 @@ describe("readTerminalPanelState — round-trip via new key", () => {
       bottomHeight: 280,
       rightWidth: 420,
       panes: [
-        { id: "a-pane", createdAt: 100 },
-        { id: "b-pane", createdAt: 200 },
+        { id: crypto.randomUUID(), createdAt: 100 },
+        { id: crypto.randomUUID(), createdAt: 200 },
       ],
     };
     writeTerminalPanelState(storage, state);
@@ -210,6 +210,7 @@ describe("readTerminalPanelState — round-trip via new key", () => {
   });
 
   it("filters out malformed pane entries", () => {
+    const validId = crypto.randomUUID();
     storage.setItem(
       TERMINAL_STATE_KEY,
       JSON.stringify({
@@ -218,14 +219,15 @@ describe("readTerminalPanelState — round-trip via new key", () => {
         bottomHeight: 200,
         rightWidth: 360,
         panes: [
-          { id: "valid", createdAt: 1 },
+          { id: validId, createdAt: 1 },
           { id: 42 },
           { createdAt: 1 },
+          { id: "not-a-uuid", createdAt: 1 },
           null,
         ],
       }),
     );
-    expect(readTerminalPanelState(storage).panes).toEqual([{ id: "valid", createdAt: 1 }]);
+    expect(readTerminalPanelState(storage).panes).toEqual([{ id: validId, createdAt: 1 }]);
   });
 
   it("treats corrupt JSON as missing and falls back to defaults", () => {

@@ -106,14 +106,19 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
       if (existing && existing.socket !== null) {
         // Lost a race against another upgrade for the same id (the pre-upgrade
         // gate is best-effort). Refuse the new socket so the older session
-        // keeps its PTY.
-        socket.close(1008, "sessionId in use");
+        // keeps its PTY. Using a 4xxx app-defined close code so the client
+        // can distinguish "your session was hijacked" from a generic
+        // disconnect; 1008 (policy violation) is too generic.
+        socket.close(4409, "sessionId in use");
         return;
       }
 
       if (existing) {
-        // Reattach path: cancel the reaper, swap in the new socket, re-emit
-        // the last known dimensions so the client's xterm matches the PTY.
+        // Reattach path: cancel the reaper and swap in the new socket. The
+        // PTY keeps running. The reattaching client will send its own
+        // `{ type: "resize", cols, rows }` from its WebSocket open handler,
+        // so the PTY's pty-side dimensions get re-synced to whatever the
+        // new tab's xterm reports — no server-side dimension replay needed.
         if (existing.reapTimer) clearTimeout(existing.reapTimer);
         existing.reapTimer = null;
         existing.socket = socket;

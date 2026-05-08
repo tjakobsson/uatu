@@ -223,7 +223,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
       term.write(bytes);
     });
 
-    socket.addEventListener("close", () => {
+    socket.addEventListener("close", event => {
       if (!didOpen) {
         // Connection failed BEFORE the WebSocket opened. The browser exposes
         // no upgrade status code on the close event, but a close-without-
@@ -232,8 +232,24 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
         // can re-authenticate (typical case: uatu was restarted and the
         // cookie went stale, or this is a PWA's first launch with no
         // cookie yet).
+        //
+        // Known false-positive: pre-upgrade HTTP 409 ("sessionId in use")
+        // also lands here because the WS never opens. The browser reports
+        // this as a generic close (code 1006) with no upstream-status
+        // detail, so we can't distinguish it from auth failure. In
+        // practice this only happens when two browser tabs share
+        // localStorage and try to claim the same persisted sessionId; the
+        // user pasting their token won't fix it. Acceptable trade-off in
+        // v1; a future fix could probe `/api/auth` to disambiguate.
         showPasteTokenUI();
         return;
+      }
+      // 4409 = our app-defined "sessionId hijacked" code (see
+      // terminal-server.ts in-open race guard). Close the pane silently —
+      // the controller's onClose callback below tears it down.
+      const isHijacked = event.code === 4409;
+      if (isHijacked && term) {
+        term.write("\r\n\x1b[2m[session claimed by another tab]\x1b[0m\r\n");
       }
       // User toggled the panel hidden; detach is intentional and the
       // pane should NOT be torn down — its sessionId is reused to

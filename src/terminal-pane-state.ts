@@ -95,9 +95,9 @@ export function readTerminalHeightPreference(storage: StorageLike): number | nul
   }
 }
 
-// Legacy height writer. Retained so the existing app.ts can keep compiling
-// during the multi-step refactor; production state writes go through
-// `writeTerminalPanelState`. Removable once no caller imports it.
+// Legacy height writer. Production code never calls this — state writes
+// go through `writeTerminalPanelState`. Kept exported so the migration
+// tests can plant a legacy value in storage to verify the upgrade path.
 export function writeTerminalHeightPreference(storage: StorageLike, height: number): void {
   try {
     storage.setItem(TERMINAL_HEIGHT_KEY, String(Math.round(height)));
@@ -141,11 +141,19 @@ function isDisplayMode(value: unknown): value is TerminalDisplayMode {
   return value === "normal" || value === "minimized" || value === "fullscreen";
 }
 
+// UUID v1-v5 + the nil UUID, lower-case. Matches the server's validator in
+// terminal-server.ts so a value that survives persistence is also one the
+// server will accept on the WS upgrade.
+const PANE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 function coercePane(value: unknown): TerminalPaneRecord | null {
   if (!value || typeof value !== "object") return null;
   const id = (value as { id?: unknown }).id;
   const createdAt = (value as { createdAt?: unknown }).createdAt;
-  if (typeof id !== "string" || id.length === 0) return null;
+  // Reject anything the server would reject with HTTP 400, otherwise a
+  // malformed persisted record causes the pane to immediately fail its
+  // WS upgrade and surface the (misleading) paste-token form.
+  if (typeof id !== "string" || !PANE_ID_RE.test(id)) return null;
   if (typeof createdAt !== "number" || !Number.isFinite(createdAt)) return null;
   return { id, createdAt };
 }

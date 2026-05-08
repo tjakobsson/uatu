@@ -3253,8 +3253,27 @@ function setupTerminalPanel(enabled: boolean, config?: { fontFamily?: string; fo
 
   let modalAcceptHandler: (() => void) | null = null;
   let modalPreviousFocus: HTMLElement | null = null;
+  const modalTitleEl = document.getElementById("terminal-confirm-title");
+  const modalBodyEl = document.getElementById("terminal-confirm-body");
 
-  function openConfirmModal(onAccept: () => void) {
+  // Modal copy varies with how many sessions the user is about to lose:
+  // closing one of several panes is a smaller action than closing the
+  // whole panel.
+  const MODAL_COPY = {
+    pane: {
+      title: "Close pane?",
+      body: "You'll lose this terminal session and any running processes.",
+    },
+    panel: {
+      title: "Close terminal?",
+      body: "You'll lose every shell session in this panel and any running processes.",
+    },
+  } as const;
+
+  function openConfirmModal(scope: "pane" | "panel", onAccept: () => void) {
+    const copy = MODAL_COPY[scope];
+    if (modalTitleEl) modalTitleEl.textContent = copy.title;
+    if (modalBodyEl) modalBodyEl.textContent = copy.body;
     modalPreviousFocus = (document.activeElement as HTMLElement) ?? null;
     modalAcceptHandler = onAccept;
     modal!.removeAttribute("hidden");
@@ -3281,7 +3300,7 @@ function setupTerminalPanel(enabled: boolean, config?: { fontFamily?: string; fo
       removePane(id);
       return;
     }
-    openConfirmModal(() => removePane(id));
+    openConfirmModal("pane", () => removePane(id));
   }
 
   // Header × — destructive close: tears down every pane AND clears the
@@ -3404,7 +3423,7 @@ function setupTerminalPanel(enabled: boolean, config?: { fontFamily?: string; fo
       closeAllPanes();
       return;
     }
-    openConfirmModal(() => closeAllPanes());
+    openConfirmModal("panel", () => closeAllPanes());
   });
 
   splitButton.addEventListener("click", () => splitActive());
@@ -3475,6 +3494,12 @@ function setupTerminalPanel(enabled: boolean, config?: { fontFamily?: string; fo
   // bottom = vertical drag (height), right = horizontal drag (width).
   resizer.addEventListener("pointerdown", event => {
     event.preventDefault();
+    // setPointerCapture so a drag that escapes the 4px resizer (or leaves
+    // the browser window momentarily) keeps receiving move/up events on
+    // this element. Without it, an interrupted drag could leave
+    // `is-resizing-terminal` stuck on <body> with the cursor and event
+    // routing in a "still resizing" state.
+    resizer.setPointerCapture(event.pointerId);
     const dock = effectiveDock();
     document.body.classList.add("is-resizing-terminal");
     const startX = event.clientX;
@@ -3496,7 +3521,12 @@ function setupTerminalPanel(enabled: boolean, config?: { fontFamily?: string; fo
       fitAll();
     }
 
-    function onUp() {
+    function onUp(ev: PointerEvent) {
+      try {
+        resizer.releasePointerCapture(ev.pointerId);
+      } catch {
+        // Pointer already released.
+      }
       document.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerup", onUp);
       document.body.classList.remove("is-resizing-terminal");
