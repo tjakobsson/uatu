@@ -124,4 +124,37 @@ describe("renderMermaidDiagrams theme inputs", () => {
     expect(initialize.mock.calls.length).toBe(3);
     expect(initialize.mock.calls[2][0].themeVariables).toEqual({ primaryColor: "#fff" });
   });
+
+  test("a bad diagram does not reject the batch and other diagrams still render", async () => {
+    // Regression: mid-edit typos (e.g., `flowchat` instead of `flowchart`)
+    // used to reject `mermaid.run`, surfacing as Bun's unhandled-rejection
+    // overlay and aborting the rest of `applyDocumentPayload`.
+    const initialize = mock(() => undefined);
+    const run = mock(async (options: { nodes: HTMLElement[]; suppressErrors?: boolean }) => {
+      // Stand in for Mermaid's `suppressErrors` behavior: paint an error
+      // indicator on bad nodes, an OK SVG on good nodes, resolve cleanly.
+      for (const node of options.nodes) {
+        const isBad = node.textContent?.includes("flowchat") ?? false;
+        node.innerHTML = isBad
+          ? '<svg data-mermaid-error="true"></svg>'
+          : '<svg data-mermaid-ok="true"></svg>';
+      }
+    });
+    (globalThis as { mermaid?: unknown }).mermaid = { initialize, run };
+
+    const container = doc.createElement("div");
+    container.innerHTML =
+      '<div class="mermaid">flowchart LR; A-->B;</div>' +
+      '<div class="mermaid">flowchat LR; X-->Y;</div>';
+
+    await expect(
+      renderMermaidDiagrams(container as unknown as ParentNode, { theme: "default" }),
+    ).resolves.toBeUndefined();
+
+    expect(run.mock.calls[0][0].suppressErrors).toBe(true);
+
+    const nodes = container.querySelectorAll(".mermaid");
+    expect(nodes[0].querySelector("svg[data-mermaid-ok]")).not.toBeNull();
+    expect(nodes[1].querySelector("svg[data-mermaid-error]")).not.toBeNull();
+  });
 });
