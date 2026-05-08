@@ -99,27 +99,43 @@ export type TerminalPanelHandle = {
   // Recompute character grid + send resize frame. Call after any panel-height
   // change. Cheap; safe to debounce or invoke from a ResizeObserver.
   fit(): void;
+  // Move keyboard focus into xterm. No-op when not attached.
+  focus(): void;
   isAttached(): boolean;
 };
 
 export type MountTerminalOptions = {
   container: HTMLElement;
   getToken: () => string | null;
+  // Per-pane session id (UUID). The server multiplexes multiple PTYs per
+  // browser tab by this id. Reusing a pane's id across page reload lets the
+  // server hand back the SAME PTY within its 5-second reconnect grace.
+  sessionId: string;
   // Optional per-session overrides sourced from `.uatu.json` via /api/state.
   // Falls back to CSS variable / built-in defaults when omitted.
   fontFamily?: string;
   fontSize?: number;
+  // Fires when the WebSocket closes for a reason OTHER than `detach()`
+  // (shell exited, server gone, connection dropped). Lets the controller
+  // tear down the dead pane automatically. NOT called on auth failure
+  // (close-before-open) — that path shows the paste-token form instead.
+  onClose?: () => void;
 };
 
-// Single-terminal panel. v1 spawns one PTY per browser; multi-tab is a future
-// change. Mount once at app boot and call attach()/detach() as the panel
-// shows/hides.
+// Per-pane terminal mount. The controller owns the panel-level concerns
+// (dock, display mode, split layout, visibility); this function owns the
+// xterm + WebSocket lifecycle for a single pane.
 export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanelHandle {
   let term: Terminal | null = null;
   let fit: FitAddon | null = null;
   let socket: WebSocket | null = null;
   let attached = false;
   let resizeObserver: ResizeObserver | null = null;
+  // Set to true when the caller invokes `detach()` so the close-event
+  // handler can distinguish "the panel hid me" from "the server hung up".
+  // Only the latter triggers `onClose` — hiding the panel must be
+  // reversible without auto-removing the pane.
+  let detachInitiated = false;
 
   function attach(): void {
     if (attached) return;
@@ -134,6 +150,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
 
   function connect(token: string | null): void {
     if (attached) return;
+    detachInitiated = false;
 
     term = new Terminal({
       theme: buildTheme(),
@@ -166,7 +183,11 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     wsUrl.pathname = "/api/terminal";
     // Token in URL when we have one (first-tab path); otherwise rely on the
     // HttpOnly auth cookie set by /api/auth (PWA / subsequent visits).
-    wsUrl.search = token ? `?t=${encodeURIComponent(token)}` : "";
+    // sessionId is always present — the server requires it for multiplexing.
+    const params = new URLSearchParams();
+    if (token) params.set("t", token);
+    params.set("sessionId", options.sessionId);
+    wsUrl.search = `?${params.toString()}`;
     socket = new WebSocket(wsUrl.toString());
     socket.binaryType = "arraybuffer";
 
@@ -202,7 +223,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
       term.write(bytes);
     });
 
-    socket.addEventListener("close", () => {
+    socket.addEventListener("close", event => {
       if (!didOpen) {
         // Connection failed BEFORE the WebSocket opened. The browser exposes
         // no upgrade status code on the close event, but a close-without-
@@ -211,10 +232,35 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
         // can re-authenticate (typical case: uatu was restarted and the
         // cookie went stale, or this is a PWA's first launch with no
         // cookie yet).
+        //
+        // Known false-positive: pre-upgrade HTTP 409 ("sessionId in use")
+        // also lands here because the WS never opens. The browser reports
+        // this as a generic close (code 1006) with no upstream-status
+        // detail, so we can't distinguish it from auth failure. In
+        // practice this only happens when two browser tabs share
+        // localStorage and try to claim the same persisted sessionId; the
+        // user pasting their token won't fix it. Acceptable trade-off in
+        // v1; a future fix could probe `/api/auth` to disambiguate.
         showPasteTokenUI();
         return;
       }
+      // 4409 = our app-defined "sessionId hijacked" code (see
+      // terminal-server.ts in-open race guard). Close the pane silently —
+      // the controller's onClose callback below tears it down.
+      const isHijacked = event.code === 4409;
+      if (isHijacked && term) {
+        term.write("\r\n\x1b[2m[session claimed by another tab]\x1b[0m\r\n");
+      }
+      // User toggled the panel hidden; detach is intentional and the
+      // pane should NOT be torn down — its sessionId is reused to
+      // reattach within the server's reconnect grace.
+      if (detachInitiated) return;
+      // Server-initiated close (shell exited or connection dropped).
+      // Surface a brief "[disconnected]" line for debug visibility, then
+      // signal the controller to remove the dead pane.
       if (term) term.write("\r\n\x1b[2m[disconnected]\x1b[0m\r\n");
+      attached = false;
+      options.onClose?.();
     });
 
     const encoder = new TextEncoder();
@@ -335,6 +381,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
   function detach(): void {
     if (!attached) return;
     attached = false;
+    detachInitiated = true;
     try {
       resizeObserver?.disconnect();
     } catch {
@@ -366,10 +413,19 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     }
   }
 
+  function focusNow(): void {
+    try {
+      term?.focus();
+    } catch {
+      // term has been disposed or hasn't opened yet — no-op.
+    }
+  }
+
   return {
     attach,
     detach,
     fit: fitNow,
+    focus: focusNow,
     isAttached: () => attached,
   };
 }

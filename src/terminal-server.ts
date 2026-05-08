@@ -15,6 +15,15 @@ const DEFAULT_RECONNECT_GRACE_MS = 5_000;
 // WebSocket.OPEN. Not exposed as a named constant on Bun's ServerWebSocket type.
 const WS_OPEN = 1;
 
+// Lower-cased UUID v1-v5 + the special nil UUID. Permissive enough to accept
+// whatever `crypto.randomUUID()` emits across browsers, strict enough that
+// anything caller-attacker-supplied in the URL gets rejected at the boundary.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+export function isValidSessionId(value: unknown): value is string {
+  return typeof value === "string" && UUID_RE.test(value);
+}
+
 type Session = {
   id: string;
   pty: PtyProcess;
@@ -40,14 +49,29 @@ export type TerminalServerOptions = {
   reconnectGraceMs?: number;
 };
 
+export type PrepareSessionResult =
+  // The id is well-formed and free; the upgrade should proceed and `open()`
+  // will spawn a fresh PTY.
+  | { kind: "fresh" }
+  // The id is well-formed and matches a session whose socket has detached but
+  // whose PTY is still in the reconnect-grace window. The upgrade should
+  // proceed and `open()` will reattach to the existing PTY.
+  | { kind: "reattach" }
+  // Caller passed a malformed / missing id. cli.ts maps this to HTTP 400.
+  | { kind: "invalid" }
+  // Caller's id matches an active session (socket still attached). cli.ts
+  // maps this to HTTP 409.
+  | { kind: "collision" };
+
 export type TerminalServer = {
   // Returns true if a PTY backend is loadable in this process. The CLI uses
   // this to decide whether to expose `terminal: "enabled"` in /api/state.
   isAvailable(): Promise<boolean>;
-  // Called from the route's pre-upgrade check. Generates the per-socket session
-  // id that will be passed through `server.upgrade(req, { data: { sessionId } })`
-  // and looked up again in the websocket handler.
-  prepareSession(): { sessionId: string };
+  // Pre-upgrade gate: validates the client-supplied `sessionId` and reports
+  // whether the upgrade should produce a fresh PTY, reattach to an existing
+  // one, or be rejected. cli.ts uses the result to choose the HTTP status
+  // code and to populate `socket.data` for the websocket handler.
+  prepareSession(sessionId: unknown): PrepareSessionResult;
   // Wired into Bun.serve's `websocket` config.
   open(socket: ServerWebSocket<SocketData>): Promise<void>;
   message(socket: ServerWebSocket<SocketData>, data: string | Buffer): void;
@@ -59,23 +83,48 @@ export type TerminalServer = {
 export function createTerminalServer(options: TerminalServerOptions): TerminalServer {
   const sessions = new Map<string, Session>();
   const graceMs = options.reconnectGraceMs ?? DEFAULT_RECONNECT_GRACE_MS;
-  let counter = 0;
 
   return {
     async isAvailable() {
       return (await resolveTerminalBackend()).available;
     },
 
-    prepareSession() {
-      // Predictable monotonically-increasing id is fine — this isn't a secret;
-      // the auth boundary is the URL token checked before upgrade(). The id
-      // only routes a particular socket to its session and is per-process.
-      counter += 1;
-      return { sessionId: `s${counter}` };
+    prepareSession(sessionId) {
+      if (!isValidSessionId(sessionId)) return { kind: "invalid" };
+      const existing = sessions.get(sessionId);
+      if (!existing) return { kind: "fresh" };
+      // A live socket means the same id is still in use — reject so concurrent
+      // PTYs from one tab don't get cross-wired.
+      if (existing.socket !== null) return { kind: "collision" };
+      // Detached but in the grace window — the next upgrade reattaches.
+      return { kind: "reattach" };
     },
 
     async open(socket) {
       const id = socket.data.sessionId;
+      const existing = sessions.get(id);
+      if (existing && existing.socket !== null) {
+        // Lost a race against another upgrade for the same id (the pre-upgrade
+        // gate is best-effort). Refuse the new socket so the older session
+        // keeps its PTY. Using a 4xxx app-defined close code so the client
+        // can distinguish "your session was hijacked" from a generic
+        // disconnect; 1008 (policy violation) is too generic.
+        socket.close(4409, "sessionId in use");
+        return;
+      }
+
+      if (existing) {
+        // Reattach path: cancel the reaper and swap in the new socket. The
+        // PTY keeps running. The reattaching client will send its own
+        // `{ type: "resize", cols, rows }` from its WebSocket open handler,
+        // so the PTY's pty-side dimensions get re-synced to whatever the
+        // new tab's xterm reports — no server-side dimension replay needed.
+        if (existing.reapTimer) clearTimeout(existing.reapTimer);
+        existing.reapTimer = null;
+        existing.socket = socket;
+        return;
+      }
+
       const backend = await resolveTerminalBackend();
       if (!backend.available) {
         // Available was checked pre-upgrade; if it's gone now something is
@@ -125,10 +174,9 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
             // Socket is closing/closed; the close handler will reap the PTY.
           }
         }
-        // v1 model: each WS upgrade calls prepareSession() which mints a fresh
-        // session id, so output produced after a disconnect can never reach a
-        // future client. Drop it on the floor and rely on shell-side scrollback
-        // to recover anything important.
+        // Output produced while the socket is detached (between disconnect and
+        // either reattach or reap) is dropped on the floor. Shell-side
+        // scrollback can recover anything important on reattach.
       });
 
       pty.onExit(({ exitCode, signal }) => {
@@ -189,10 +237,9 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
     close(socket) {
       const session = sessions.get(socket.data.sessionId);
       if (!session) return;
-      // Detach the socket and start the reap timer. v1 spawns-on-attach with a
-      // fresh session id per upgrade, so a reattach with this same id is not
-      // expected; the grace window mainly absorbs page-reload timing without
-      // killing the shell mid-handshake.
+      // Detach the socket and start the reap timer. A subsequent upgrade
+      // reusing the same sessionId within the grace window will land in the
+      // reattach path in `open()`.
       session.socket = null;
       if (session.reapTimer) clearTimeout(session.reapTimer);
       session.reapTimer = setTimeout(() => {

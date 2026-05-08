@@ -9,12 +9,20 @@ versions follow the `package.json`'s `version` field.
 
 ### Added
 
-- **Embedded terminal.** Hidden-by-default bottom panel with a real PTY
-  shell in the watched repo, toggled with `Ctrl+`` / `Cmd+``. xterm.js
-  rendering, ANSI-color dark theme, locally-installed Nerd Fonts picked up
-  by default, optional `.uatu.json` overrides via `terminal.fontFamily`
-  and `terminal.fontSize`. Backed by Bun's built-in
+- **Embedded terminal.** Hidden-by-default panel with a real PTY shell in
+  the watched repo, toggled with `Ctrl+`` / `Cmd+`` or the **Terminal**
+  button in the sidebar (under Author/Review). xterm.js rendering,
+  ANSI-color dark theme, locally-installed Nerd Fonts picked up by default,
+  optional `.uatu.json` overrides via `terminal.fontFamily` and
+  `terminal.fontSize`. Backed by Bun's built-in
   `Bun.spawn(..., { terminal })` API (Bun ≥ 1.3.5).
+- **Terminal panel UX:** confirmation modal on destructive close (so a
+  stray click doesn't drop a long-running `tail -f` or `claude code`
+  session); minimize / fullscreen controls (PTYs stay attached on either);
+  optional **right-side dock** in addition to bottom-dock; **split** to
+  run two PTYs concurrently in the same panel (`Ctrl+Shift+`` /
+  `Cmd+Shift+``). Dock, display mode, sizes, and active panes persist
+  across reloads.
 - **PWA install.** `/manifest.webmanifest`, 192/512 PNG icons, a minimal
   pass-through service worker, and a stable default origin so uatu can be
   installed as a desktop-style standalone webapp from Chrome / Edge /
@@ -43,7 +51,7 @@ versions follow the `package.json`'s `version` field.
 
 - Windows is unsupported for the terminal feature pending Bun's upstream
   Windows PTY work; on Windows uatu reports `terminal: "disabled"` and
-  hides the toolbar terminal toggle. The rest of uatu still runs.
+  hides the sidebar terminal toggle. The rest of uatu still runs.
 - Safari 17+ blocks pages from seeing user-installed fonts as
   anti-fingerprinting protection. Locally-installed Nerd Fonts will fall
   through to Menlo in the terminal on Safari; Chrome / Edge / Brave have
