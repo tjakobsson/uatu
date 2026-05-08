@@ -297,6 +297,21 @@ The Mermaid renderer SHALL be initialized with theme inputs that can be supplied
 - **THEN** those diagrams are re-rendered using the new theme inputs
 - **AND** the new visuals match the active UI theme
 
+### Requirement: Tolerate invalid Mermaid diagrams without aborting the preview
+The preview pane SHALL treat a Mermaid block whose source fails to parse or render as a per-block failure, not a document-level failure. The renderer MUST NOT propagate the failure as an unhandled promise rejection. The failing block SHALL display Mermaid's built-in inline error indicator at the position where the diagram would have rendered. Other Mermaid diagrams in the same document — both before and after the failing block — MUST continue to render normally. Non-diagram content (Markdown text, AsciiDoc sections, code blocks) MUST continue to render normally regardless of any Mermaid failure.
+
+#### Scenario: A diagram with invalid syntax does not break the preview
+- **WHEN** the watched document contains a Mermaid block with invalid syntax (for example, an unrecognized diagram keyword such as `flowchat` instead of `flowchart`)
+- **THEN** the preview render completes without an unhandled promise rejection
+- **AND** the failing block displays Mermaid's inline error indicator
+- **AND** the rest of the document — surrounding text and other rendered diagrams — appears as it would for a fully valid document
+
+#### Scenario: Other diagrams in the same document still render when one fails
+- **WHEN** the watched document contains two Mermaid blocks, one valid and one invalid
+- **THEN** the valid block renders as a diagram
+- **AND** the invalid block displays Mermaid's inline error indicator
+- **AND** the order of the two blocks does not change which one renders successfully
+
 ### Requirement: Keep the indexed view and preview current
 The system SHALL detect file creation, deletion, rename, and modification events under watched roots, applying the same ignore filter the indexer uses, and update the indexed sidebar view accordingly. When the currently selected file changes on disk, the preview MUST refresh automatically. Binary classification SHALL be re-evaluated when a file is renamed or modified so that an extension change (e.g. `data.bin` → `data.json`) reflects in the tree's clickability and render path. The live update channel MUST remain available during normal idle periods without requiring user action or emitting spurious server timeout warnings for expected long-lived connections. The watcher MUST NOT attach native filesystem watchers to any path whose location relative to a watched root contains a `.git` directory segment, since that directory is git's working metadata and is never user-authored content the indexer surfaces. The watcher MUST tolerate transient errors from the underlying filesystem watcher implementation (for example, an `EINVAL` from a `watch` syscall against a file that has already been removed) without terminating the host process; such errors MAY be logged but MUST NOT propagate as unhandled errors.
 

@@ -1,6 +1,6 @@
 type MermaidRuntime = {
   initialize: (options: { startOnLoad: boolean; securityLevel: string; theme: string; themeVariables?: Record<string, string> }) => void;
-  run: (options: { nodes: HTMLElement[] }) => Promise<void>;
+  run: (options: { nodes: HTMLElement[]; suppressErrors?: boolean }) => Promise<void>;
 };
 
 export type MermaidThemeInputs = {
@@ -37,7 +37,10 @@ export async function renderMermaidDiagrams(
     return;
   }
 
-  await mermaid.run({ nodes });
+  // suppressErrors keeps a single bad block (e.g., mid-edit `flowchat` typo)
+  // from rejecting the whole batch — Mermaid logs the error, paints its
+  // built-in syntax-error indicator on the failing node, and continues.
+  await mermaid.run({ nodes, suppressErrors: true });
 
   for (const node of nodes) {
     normalizeRenderedDiagram(node);
