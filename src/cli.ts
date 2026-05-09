@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import { promises as fs } from "node:fs";
 import readline from "node:readline";
 
 import mermaidAsset from "mermaid/dist/mermaid.min.js" with { type: "file" };
@@ -39,12 +40,44 @@ import {
 } from "./terminal-auth";
 import { loadTerminalConfig } from "./terminal-config";
 import { createTerminalServer } from "./terminal-server";
+import {
+  createCachePaths,
+  ensureCacheDir,
+  pruneOldDumps,
+  resolveCacheRoot,
+} from "./debug-cache";
+import {
+  MetricsRegistry,
+  NdjsonAppender,
+  start1HzSnapshotTick,
+  start5sSamplingTick,
+  writeSnapshotAtomic,
+} from "./debug-metrics";
+import { setGitMetricsSink } from "./review-load";
+import { parseWatchdogArgs, runWatchdog } from "./watchdog";
 
 async function main() {
+  // Watchdog mode short-circuits the rest of CLI parsing — when uatu is
+  // re-execed as the sibling watchdog, none of the parent's startup work
+  // (chokidar, server, terminal stack) should run. parseWatchdogArgs throws
+  // on malformed input, which we surface to stderr.
+  const argv = Bun.argv.slice(2);
+  if (argv[0] === "--watchdog") {
+    try {
+      const args = parseWatchdogArgs(argv.slice(1), process.env);
+      const code = await runWatchdog(args);
+      process.exit(code);
+    } catch (error) {
+      console.error(`uatu watchdog: ${error instanceof Error ? error.message : String(error)}`);
+      process.exit(2);
+    }
+    return;
+  }
+
   let parsed;
 
   try {
-    parsed = parseCommand(Bun.argv.slice(2));
+    parsed = parseCommand(argv);
   } catch (error) {
     console.error(`uatu: ${error instanceof Error ? error.message : String(error)}`);
     console.error(usageText());
@@ -70,6 +103,23 @@ async function main() {
 }
 
 async function runWatch(options: WatchOptions) {
+  // Diagnostic plumbing comes before any heavy startup work — the cache dir
+  // and the metrics registry are needed by createWatchSession and by the
+  // watchdog spawn. Failures in this layer must never fail the watch session.
+  const metrics = new MetricsRegistry();
+  setGitMetricsSink(metrics);
+  const cacheRoot = resolveCacheRoot();
+  try {
+    await ensureCacheDir(cacheRoot);
+    void pruneOldDumps(cacheRoot).catch(() => undefined);
+  } catch (error) {
+    console.error(`uatu: cache directory unavailable, diagnostics disabled: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const cachePaths = createCachePaths(cacheRoot);
+  const heartbeatPath = cachePaths.heartbeatPath(process.pid);
+  const snapshotPath = cachePaths.snapshotPath(process.pid);
+  const ndjsonPath = cachePaths.ndjsonPath(process.pid);
+
   const rootEntries = await resolveWatchRoots(options.rootPaths, process.cwd());
   const nonGitEntries = await findNonGitWatchEntries(rootEntries);
   if (nonGitEntries.length > 0) {
@@ -114,12 +164,14 @@ async function runWatch(options: WatchOptions) {
       startupMode: options.startupMode,
       terminalEnabled,
       terminalConfig: terminalConfigResult.config,
+      metrics,
     });
     await watchSession.start();
 
     if (terminalEnabled) {
       terminalServer = createTerminalServer({
         cwd: rootEntries[0]?.absolutePath ?? process.cwd(),
+        metrics,
       });
     }
 
@@ -279,6 +331,14 @@ async function runWatch(options: WatchOptions) {
         "/api/events": {
           GET: () => watchSession!.eventsResponse(),
         },
+        "/debug/metrics": {
+          GET: () => {
+            if (!options.debug) {
+              return new Response("Not found", { status: 404 });
+            }
+            return Response.json(metrics.snapshot());
+          },
+        },
         "/api/scope": {
           POST: async request => {
             let body: unknown;
@@ -383,6 +443,91 @@ async function runWatch(options: WatchOptions) {
     }
   }
 
+  // -------- Diagnostics: heartbeat + snapshot + sampling + watchdog --------
+  // The 1Hz heartbeat tick is what the watchdog watches for staleness. The
+  // snapshot tick keeps a tiny on-disk JSON of current counters that the
+  // watchdog can read into its dump bundle even when --debug is off. The
+  // 5s sampling tick records non-counter signals (fd count, memory, SSE).
+  // All ticks are unref()'d so they never keep the loop alive on their own.
+  start5sSamplingTick(metrics, () => watchSession!.getSseSubscriberCount());
+  const snapshotTick = start1HzSnapshotTick(
+    () => metrics.snapshot(),
+    async snapshot => {
+      // Heartbeat is just an mtime advance — separate from the snapshot
+      // contents — but we coalesce both into the same 1Hz tick so the
+      // process only wakes once per second.
+      await fs.utimes(heartbeatPath, new Date(), new Date()).catch(async () => {
+        // Heartbeat file may not exist yet (first tick after watchdog spawn,
+        // or cache dir was just created). Touch it.
+        await fs.writeFile(heartbeatPath, "").catch(() => undefined);
+      });
+      await writeSnapshotAtomic(snapshotPath, snapshot).catch(() => undefined);
+    },
+  );
+  void snapshotTick; // referenced for clarity, no need to stop explicitly
+
+  let ndjsonAppender: NdjsonAppender | null = null;
+  if (options.debug) {
+    ndjsonAppender = new NdjsonAppender(ndjsonPath);
+    const ndjsonHandle = setInterval(() => {
+      void ndjsonAppender!.append(metrics.snapshot()).catch(() => undefined);
+    }, 1000);
+    if (typeof ndjsonHandle.unref === "function") ndjsonHandle.unref();
+  }
+
+  // Touch the heartbeat once before spawning the watchdog so it's already
+  // present and recent when the child does its first stat.
+  await fs.writeFile(heartbeatPath, "").catch(() => undefined);
+
+  let watchdogChild: ReturnType<typeof Bun.spawn> | null = null;
+  if (options.watchdogEnabled) {
+    try {
+      // Re-execute uatu with the watchdog argv. In dev (`bun run src/cli.ts`)
+      // Bun.argv[1] is the script path and we must pass it. In a compiled
+      // binary, Bun.argv[1] is the first user-supplied argument and the
+      // process.execPath alone is the entry point.
+      const scriptArg = typeof Bun.argv[1] === "string" && /\.(ts|js)$/.test(Bun.argv[1])
+        ? [Bun.argv[1]]
+        : [];
+      const watchdogArgv = [
+        process.execPath,
+        ...scriptArg,
+        "--watchdog",
+        String(process.pid),
+        heartbeatPath,
+        cacheRoot,
+      ];
+      const watchdogEnv: Record<string, string> = { ...process.env } as Record<string, string>;
+      if (typeof options.watchdogTimeoutMs === "number") {
+        watchdogEnv.UATU_HEARTBEAT_TIMEOUT_MS = String(options.watchdogTimeoutMs);
+      }
+      // Keep the Subprocess reference alive — Bun reaps the child if the
+      // handle gets GC'd. Stored at outer-function scope on `watchdogChild`.
+      watchdogChild = Bun.spawn(watchdogArgv, {
+        env: watchdogEnv,
+        stdout: "inherit",
+        stderr: "inherit",
+        stdin: "ignore",
+      });
+      // Don't keep the parent's exit waiting on the watchdog — it tracks the
+      // parent independently and exits when the parent is gone.
+      (watchdogChild as unknown as { unref?: () => void }).unref?.();
+      // Surface unexpected early exits so the user knows the watchdog isn't
+      // protecting them. A clean exit (parent dies → watchdog observes ESRCH)
+      // produces code 0 too, but during normal operation it should stay alive
+      // for as long as the parent does.
+      void (watchdogChild as unknown as { exited: Promise<number> }).exited
+        .then(code => {
+          if (typeof code === "number" && code !== 0) {
+            console.error(`uatu: watchdog exited unexpectedly (code ${code})`);
+          }
+        })
+        .catch(() => undefined);
+    } catch (error) {
+      console.error(`uatu: failed to spawn watchdog (continuing without): ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   let shuttingDown = false;
   const hardExit = (code: number) => {
     try {
@@ -430,6 +575,9 @@ async function runWatch(options: WatchOptions) {
     hardExit(0);
   };
 
+  // These handlers cover the *healthy* shutdown path. When the JS event
+  // loop is wedged none of them can run — recovery from a wedge is the
+  // watchdog subprocess's job (see watchdog.ts).
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
   process.on("SIGHUP", shutdown);

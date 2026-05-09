@@ -141,6 +141,70 @@ describe("parseCommand", () => {
   test("usage documents the --mode flag", () => {
     expect(usageText()).toContain("--mode");
   });
+
+  test("debug defaults to false; watchdog defaults to enabled", () => {
+    const parsed = parseCommand(["watch"]);
+    if (parsed.kind !== "watch") throw new Error("expected watch");
+    expect(parsed.options.debug).toBe(false);
+    expect(parsed.options.watchdogEnabled).toBe(true);
+    expect(parsed.options.watchdogTimeoutMs).toBeUndefined();
+  });
+
+  test("--debug enables verbose metrics history", () => {
+    const parsed = parseCommand(["watch", "--debug"]);
+    if (parsed.kind !== "watch") throw new Error("expected watch");
+    expect(parsed.options.debug).toBe(true);
+  });
+
+  test("--no-watchdog suppresses the watchdog subprocess", () => {
+    const parsed = parseCommand(["watch", "--no-watchdog"]);
+    if (parsed.kind !== "watch") throw new Error("expected watch");
+    expect(parsed.options.watchdogEnabled).toBe(false);
+  });
+
+  test("--watchdog-timeout=<ms> parses as a positive integer", () => {
+    const parsed = parseCommand(["watch", "--watchdog-timeout=60000"]);
+    if (parsed.kind !== "watch") throw new Error("expected watch");
+    expect(parsed.options.watchdogTimeoutMs).toBe(60_000);
+  });
+
+  test("--watchdog-timeout (space form) requires a positive value", () => {
+    const parsed = parseCommand(["watch", "--watchdog-timeout", "5000"]);
+    if (parsed.kind !== "watch") throw new Error("expected watch");
+    expect(parsed.options.watchdogTimeoutMs).toBe(5_000);
+    expect(() => parseCommand(["watch", "--watchdog-timeout"])).toThrow(
+      /missing value for --watchdog-timeout/,
+    );
+    expect(() => parseCommand(["watch", "--watchdog-timeout=0"])).toThrow(
+      /invalid --watchdog-timeout/,
+    );
+    expect(() => parseCommand(["watch", "--watchdog-timeout=-50"])).toThrow(
+      /invalid --watchdog-timeout/,
+    );
+  });
+
+  test("UATU_DEBUG env var enables debug mode when --debug is absent", () => {
+    const previous = process.env.UATU_DEBUG;
+    process.env.UATU_DEBUG = "1";
+    try {
+      const parsed = parseCommand(["watch"]);
+      if (parsed.kind !== "watch") throw new Error("expected watch");
+      expect(parsed.options.debug).toBe(true);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.UATU_DEBUG;
+      } else {
+        process.env.UATU_DEBUG = previous;
+      }
+    }
+  });
+
+  test("usage documents the diagnostic flags", () => {
+    const text = usageText();
+    expect(text).toContain("--debug");
+    expect(text).toContain("--no-watchdog");
+    expect(text).toContain("--watchdog-timeout");
+  });
 });
 
 describe("createStatePayload", () => {
