@@ -90,9 +90,10 @@ export async function runWatchdog(args: WatchdogArgs): Promise<number> {
       continue;
     }
 
-    const ageMs = Date.now() - mtimeMs;
+    const now = Date.now();
+    const ageMs = now - mtimeMs;
     if (ageMs > timeoutMs) {
-      await captureAndKill(parentPid, paths, ageMs);
+      await captureAndKill(parentPid, paths, ageMs, now);
       return 0;
     }
 
@@ -104,6 +105,7 @@ async function captureAndKill(
   parentPid: number,
   paths: CachePaths,
   ageMs: number,
+  detectedAtMs: number,
 ): Promise<void> {
   const timestamp = formatDumpTimestamp();
   const stackPath = paths.dumpPath(parentPid, timestamp, "stack.txt");
@@ -124,7 +126,7 @@ async function captureAndKill(
     reason: "stale-heartbeat",
     pid: parentPid,
     ageMs,
-    detectedAtMs: Date.now(),
+    detectedAtMs,
     platform: process.platform,
     stackCaptured: !stack.partial,
     fdsCaptured: !fds.partial,

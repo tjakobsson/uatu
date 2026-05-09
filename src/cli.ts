@@ -511,18 +511,28 @@ async function runWatch(options: WatchOptions) {
       });
       // Don't keep the parent's exit waiting on the watchdog — it tracks the
       // parent independently and exits when the parent is gone.
-      (watchdogChild as unknown as { unref?: () => void }).unref?.();
+      const childWithUnref = watchdogChild as unknown as { unref?: () => void };
+      if (typeof childWithUnref.unref === "function") {
+        childWithUnref.unref();
+      } else {
+        // If Bun's Subprocess ever drops `unref`, `uatu watch` would block on
+        // exit waiting for the watchdog — surface it instead of hiding the bug.
+        console.warn("uatu: Bun.Subprocess.unref unavailable; watchdog may delay parent exit");
+      }
       // Surface unexpected early exits so the user knows the watchdog isn't
       // protecting them. A clean exit (parent dies → watchdog observes ESRCH)
       // produces code 0 too, but during normal operation it should stay alive
       // for as long as the parent does.
-      void (watchdogChild as unknown as { exited: Promise<number> }).exited
-        .then(code => {
-          if (typeof code === "number" && code !== 0) {
-            console.error(`uatu: watchdog exited unexpectedly (code ${code})`);
-          }
-        })
-        .catch(() => undefined);
+      const exited = (watchdogChild as unknown as { exited?: Promise<number> }).exited;
+      if (exited && typeof exited.then === "function") {
+        void exited
+          .then(code => {
+            if (typeof code === "number" && code !== 0) {
+              console.error(`uatu: watchdog exited unexpectedly (code ${code})`);
+            }
+          })
+          .catch(() => undefined);
+      }
     } catch (error) {
       console.error(`uatu: failed to spawn watchdog (continuing without): ${error instanceof Error ? error.message : String(error)}`);
     }

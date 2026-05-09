@@ -95,19 +95,28 @@ export class NdjsonAppender {
 
     const tmpPath = `${this.filePath}.trim`;
     const handle = await fs.open(this.filePath, "r");
+    let renameTrimmed = true;
     try {
       const targetSize = Math.floor(this.softCapBytes / 2);
       const startOffset = size - targetSize;
       const buffer = Buffer.alloc(targetSize);
       await handle.read(buffer, 0, targetSize, startOffset);
       // Snap to the next newline so the file starts on a clean line boundary.
+      // If the second half contains no newline at all, the buffer starts mid-
+      // JSON-line — discard it rather than poisoning the file with invalid NDJSON.
       const firstNewline = buffer.indexOf(0x0a);
-      const slice = firstNewline === -1 ? buffer : buffer.subarray(firstNewline + 1);
-      await fs.writeFile(tmpPath, slice);
+      if (firstNewline === -1) {
+        renameTrimmed = false;
+      } else {
+        const slice = buffer.subarray(firstNewline + 1);
+        await fs.writeFile(tmpPath, slice);
+      }
     } finally {
       await handle.close();
     }
-    await fs.rename(tmpPath, this.filePath);
+    if (renameTrimmed) {
+      await fs.rename(tmpPath, this.filePath);
+    }
   }
 }
 
