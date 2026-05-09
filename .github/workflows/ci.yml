@@ -50,3 +50,22 @@ jobs:
           path: |
             playwright-report
             test-results
+
+  validate-specs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.13
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Validate OpenSpec specs and changes
+        run: bunx @fission-ai/openspec validate --all --strict
