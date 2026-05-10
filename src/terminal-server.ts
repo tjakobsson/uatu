@@ -177,6 +177,9 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
       pty.onData(bytes => {
         if (session.socket && session.socket.readyState === WS_OPEN) {
           try {
+            // Bun's WebSocket.send consumes/copies the bytes before returning,
+            // so it is safe to forward the same Uint8Array Bun reuses across
+            // PTY data callbacks without copying first.
             session.socket.send(bytes);
           } catch {
             // Socket is closing/closed; the close handler will reap the PTY.

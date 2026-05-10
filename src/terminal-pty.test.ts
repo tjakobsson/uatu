@@ -38,8 +38,11 @@ async function runAndCollect(shellCommand: string): Promise<Uint8Array> {
     pty.onExit(() => resolve());
   });
   // Allow any post-exit data callbacks to flush. Bun closes the master fd
-  // shortly after the child exits; a single tick is enough in practice.
-  await new Promise(r => setTimeout(r, 50));
+  // shortly after the child exits and there's no documented ordering
+  // guarantee between the final `data` callback and `proc.exited`. 250ms
+  // is generous on a loaded CI runner without meaningfully slowing the
+  // suite; locally these tests still finish in ~150ms each.
+  await new Promise(r => setTimeout(r, 250));
   let total = 0;
   for (const c of chunks) total += c.length;
   const flat = new Uint8Array(total);
@@ -69,9 +72,11 @@ describe.skipIf(!backendOk)("spawnPty byte fidelity", () => {
     // guaranteeing several chunk boundaries within the stream.
     const N = 2200;
     const flat = await runAndCollect(
-      // printf in /bin/sh is portable; the \xe2\x94\x80 escape emits the
-      // exact UTF-8 bytes for U+2500 without any shell-side decode.
-      `printf '%.0s\\xe2\\x94\\x80' $(seq 1 ${N})`,
+      // Use POSIX octal escapes (\nnn) — \xHH is a bash extension that
+      // dash (Linux's /bin/sh) treats as literal characters, so a hex
+      // escape silently emits "\xe2\x94\x80" as 8-byte ASCII text on CI.
+      // \342\224\200 is the UTF-8 byte sequence for U+2500.
+      `printf '%.0s\\342\\224\\200' $(seq 1 ${N})`,
     );
 
     // The bug's signature: U+FFFD encoded as EF BF BD. Pre-fix this would
@@ -95,8 +100,8 @@ describe.skipIf(!backendOk)("spawnPty byte fidelity", () => {
     // Codepoint B: `│` U+2502 = E2 94 82
     const N = 800;
     const [a, b] = await Promise.all([
-      runAndCollect(`printf '%.0s\\xe2\\x94\\x80' $(seq 1 ${N})`),
-      runAndCollect(`printf '%.0s\\xe2\\x94\\x82' $(seq 1 ${N})`),
+      runAndCollect(`printf '%.0s\\342\\224\\200' $(seq 1 ${N})`),
+      runAndCollect(`printf '%.0s\\342\\224\\202' $(seq 1 ${N})`),
     ]);
 
     expect(countTriplet(a, 0xef, 0xbf, 0xbd)).toBe(0);
