@@ -41,7 +41,7 @@ project-specific checks matter.
 - **Live reload** over Server-Sent Events
 - **Mode toggle** between **Author** (in-flow with auto-follow) and **Review** (stable navigation, no auto-switching, with a stale-content hint when the active file changes on disk)
 - **Follow** mode jumps to the latest changed file in Author mode; **Pin** mode locks the session to one file
-- **Whole-repo browsing** with `.uatuignore` and `.gitignore` filtering
+- **Whole-repo browsing** with `.uatu.json tree.exclude` and `.gitignore` filtering on top of sane built-in defaults (`node_modules/`, `.git/`, `dist/`, `build/`, etc.)
 - **Source / Rendered view toggle** for Markdown and AsciiDoc documents (raw text with line numbers, or fully rendered HTML)
 - **Review-oriented sidebar panes** for change overview, files, git history, and a Selection Inspector that produces Claude-Code-style `@path#L<a>-<b>` references from text marked in the source view
 - **Review burden meter** based on deterministic git diff size, file spread, and configurable path scoring
@@ -297,15 +297,34 @@ sections are ignored, defaults are used, and warnings appear in Change Overview.
 
 ### What gets indexed
 
-Every file under each watched root, with these exclusions:
+Every file under each watched root, with these exclusions composed in one place:
 
-1. Hardcoded directory denylist (`node_modules/`, `.git/`, `dist/`, etc.).
-2. `.uatuignore` at the watch root (gitignore syntax, `!` negation).
-3. `.gitignore` at the watch root (default; opt out with `--no-gitignore`).
-4. Binary files appear in the sidebar but are non-clickable.
+1. Built-in directory denylist (`node_modules/`, `.git/`, `dist/`, `build/`, `.next/`, etc.) — always applied.
+2. `.uatu.json` `tree.exclude` at the watch root (gitignore syntax, `!` negation supported).
+3. `.gitignore` at the watch root (honored by default; opt out per session with `--no-gitignore`, or per project with `tree.respectGitignore: false` in `.uatu.json`; the CLI flag wins when both are set).
+
+Binary files appear in the sidebar (with the library's standard icon) and route
+to a "preview unavailable" view when clicked, matching VS Code.
 
 Files at or above 1 MB render without syntax highlighting so the browser stays
 responsive.
+
+Git status (added / modified / deleted / renamed / untracked) is surfaced as
+ambient row annotations on the single tree — there is no longer a separate
+"Changed" view. The previous `.uatuignore` file is retired; on session start
+uatu emits a one-line warning if it finds one, pointing you to
+`.uatu.json tree.exclude`.
+
+#### Example `.uatu.json` tree block
+
+```json
+{
+  "tree": {
+    "exclude": ["bun.lock", "*.log", "!debug.log"],
+    "respectGitignore": true
+  }
+}
+```
 
 ### Diagnostics and freeze recovery
 

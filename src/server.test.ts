@@ -391,10 +391,13 @@ describe("scanRoots", () => {
     expect(byPath.get("logo.png")).toBe("binary");
   });
 
-  test("respects .uatuignore patterns at the watch root", async () => {
-    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-scan-uatuignore-"));
+  test("respects .uatu.json tree.exclude patterns at the watch root", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-scan-tree-exclude-"));
     tempDirectories.push(tempDirectory);
-    await writeFile(path.join(tempDirectory, ".uatuignore"), "*.lock\n");
+    await writeFile(
+      path.join(tempDirectory, ".uatu.json"),
+      JSON.stringify({ tree: { exclude: ["*.lock"] } }),
+    );
     await writeFile(path.join(tempDirectory, "README.md"), "# Readme\n");
     await writeFile(path.join(tempDirectory, "bun.lock"), "lockfile contents\n");
 
@@ -402,8 +405,8 @@ describe("scanRoots", () => {
     const paths = roots[0]?.docs.map(doc => doc.relativePath) ?? [];
     expect(paths).toContain("README.md");
     expect(paths).not.toContain("bun.lock");
-    // Files filtered by `.uatuignore` are counted as hidden so the sidebar can
-    // surface that to the user.
+    // Files filtered by user-controlled patterns are counted as hidden so the
+    // sidebar can surface that to the user.
     expect(roots[0]?.hiddenCount).toBe(1);
   });
 
@@ -815,7 +818,10 @@ describe("watchSession scope", () => {
     const ignored = path.join(tempDirectory, "ignored.txt");
     const secret = path.join(tempDirectory, ".env.local");
     const binary = path.join(tempDirectory, "logo.png");
-    await writeFile(path.join(tempDirectory, ".uatuignore"), "ignored.txt\n");
+    await writeFile(
+      path.join(tempDirectory, ".uatu.json"),
+      JSON.stringify({ tree: { exclude: ["ignored.txt"] } }),
+    );
     await writeFile(readme, "# Readme\n");
     await writeFile(ignored, "ignored\n");
     await writeFile(secret, "TOKEN=secret\n");
@@ -866,15 +872,15 @@ describe("watchSession scope", () => {
     }
   });
 
-  test("editing .uatuignore at runtime reapplies the new patterns", async () => {
+  test("editing .uatu.json tree.exclude at runtime reapplies the new patterns", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-ignore-live-"));
     tempDirectories.push(tempDirectory);
     const readme = path.join(tempDirectory, "README.md");
     const lockfile = path.join(tempDirectory, "package-lock.json");
-    const ignoreFile = path.join(tempDirectory, ".uatuignore");
+    const uatuJson = path.join(tempDirectory, ".uatu.json");
     await writeFile(readme, "# Readme\n");
     await writeFile(lockfile, "{}\n");
-    await writeFile(ignoreFile, "");
+    await writeFile(uatuJson, JSON.stringify({ tree: { exclude: [] } }));
 
     const session = createWatchSession(
       [{ kind: "dir", absolutePath: tempDirectory }],
@@ -888,13 +894,13 @@ describe("watchSession scope", () => {
         session.getRoots().flatMap(root => root.docs).some(doc => doc.id === lockfile),
       );
 
-      await writeFile(ignoreFile, "package-lock.json\n");
+      await writeFile(uatuJson, JSON.stringify({ tree: { exclude: ["package-lock.json"] } }));
       await waitUntil(
         () => session.getRoots().flatMap(root => root.docs).every(doc => doc.id !== lockfile),
         4000,
       );
 
-      await writeFile(ignoreFile, "");
+      await writeFile(uatuJson, JSON.stringify({ tree: { exclude: [] } }));
       await waitUntil(
         () => session.getRoots().flatMap(root => root.docs).some(doc => doc.id === lockfile),
         4000,

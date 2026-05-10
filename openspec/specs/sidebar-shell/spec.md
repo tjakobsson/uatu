@@ -4,7 +4,7 @@
 TBD - created by archiving change split-document-watch-browser. Update Purpose after archive.
 ## Requirements
 ### Requirement: Organize sidebar content into resizable panes
-The browser UI SHALL organize the expanded sidebar as a stack of panes. The initial panes SHALL include `Change Overview`, `Files`, and `Git Log`. The existing document tree SHALL render inside the `Files` pane and MUST preserve existing document selection, directory open/closed state, follow-mode interaction, pin interaction, binary-file display, and relative-time behavior. Pane visibility, collapsed state, and vertical sizing SHALL persist across reloads in the same browser for that origin. The pane stack SHALL fill the available expanded-sidebar height and MUST NOT force the whole sidebar body to scroll. Scrollbars used inside panes and preview overflow regions SHOULD be thin and visually light while remaining discoverable. The existing whole-sidebar collapse and expand controls MUST remain separate from per-pane visibility and collapse controls.
+The browser UI SHALL organize the expanded sidebar as a stack of panes. The initial panes SHALL include `Change Overview`, `Files`, and `Git Log`. The document tree SHALL render inside the `Files` pane and MUST preserve existing document selection, follow-mode interaction, and pin interaction. Tree-internal behaviors that are now owned by the `@pierre/trees` library — directory expansion handling, binary-entry presentation, and any future row-annotation behavior such as relative-time labels — are governed by the `document-tree` capability rather than this requirement, and this requirement no longer asserts that they survive the library swap. Pane visibility, collapsed state, and vertical sizing SHALL persist across reloads in the same browser for that origin. The pane stack SHALL fill the available expanded-sidebar height and MUST NOT force the whole sidebar body to scroll. Scrollbars used inside panes and preview overflow regions SHOULD be thin and visually light while remaining discoverable. The existing whole-sidebar collapse and expand controls MUST remain separate from per-pane visibility and collapse controls.
 
 #### Scenario: Sidebar opens with default panes
 - **WHEN** a user opens the browser UI with no pane preferences stored
@@ -301,49 +301,6 @@ The browser UI SHALL expose a Mode-aware pane catalog. The Author Mode catalog S
 - **AND** the user switches Mode to **Review**, makes a different pane state change, and switches back to **Author**
 - **THEN** the Author pane state is restored to what the user left in **Author**
 - **AND** the Review pane state remains as the user left it in **Review**
-
-### Requirement: Provide an All/Changed view toggle in the Files pane
-When the watched repository is git-backed AND the review-load result for that repository has status `available`, the `Files` pane SHALL expose a view toggle with two values: **All** (the default) and **Changed**. The selected view SHALL persist across reloads in the same browser for that origin and SHALL be tracked separately for each Mode. The toggle MUST NOT appear when git is unavailable or the review-load result is non-git or unavailable; in that case the `Files` pane SHALL render the existing full-tree listing.
-
-When the **Changed** view is active, the `Files` pane SHALL list the changed files reported by the review-load result instead of the full file tree. Each visible entry MUST display a status indicator (added, modified, deleted, renamed), the file path, and a compact summary of additions and deletions (`+N -M`). Renamed entries MUST display both the previous path and the new path. Deleted entries MUST be rendered as non-clickable since there is no on-disk content to preview. Manual selection of a non-deleted entry MUST switch the active preview to that file using the same selection mechanics as the existing tree.
-
-When the **All** view is active (the default), the `Files` pane SHALL render the existing full-tree listing.
-
-#### Scenario: Default Files view is All when git is available
-- **WHEN** the watched root is git-backed AND no Files-view preference is stored for the active Mode
-- **THEN** the `Files` pane shows the full file tree
-- **AND** the view toggle reads "All"
-
-#### Scenario: Files-view toggle is hidden when git is unavailable
-- **WHEN** the watched root is not git-backed OR the review-load result is non-git or unavailable
-- **THEN** the `Files` pane does not show a view toggle
-- **AND** the pane shows the existing full-tree listing
-
-#### Scenario: Switching to Changed shows the changed-vs-base list
-- **WHEN** the user selects the Changed view in the `Files` pane
-- **THEN** the pane lists only files reported as changed against the base
-- **AND** the full file tree is not rendered in the pane
-
-#### Scenario: Each changed-file entry shows status, path, and line counts
-- **WHEN** the Changed view is active in the `Files` pane
-- **THEN** each entry shows a status indicator distinguishing added, modified, deleted, and renamed
-- **AND** each entry shows the file path
-- **AND** each entry shows additions and deletions in a compact `+N -M` form
-
-#### Scenario: Renamed entries show both paths
-- **WHEN** a changed file's status is renamed
-- **THEN** the entry shows both the previous path and the new path
-
-#### Scenario: Deleted entries are non-clickable
-- **WHEN** a changed file's status is deleted
-- **THEN** that entry is rendered as non-clickable
-- **AND** clicking it does not change the active preview
-
-#### Scenario: View choice persists separately per Mode
-- **WHEN** the user selects Changed in **Author** Mode
-- **AND** the user switches to **Review** Mode and the Review view choice has not been changed
-- **AND** the user switches back to **Author** Mode
-- **THEN** the Author Files pane shows the Changed view
 
 ### Requirement: Make the active Mode visually unambiguous
 The browser UI SHALL make the active Mode visually distinguishable beyond the Mode segment toggle itself. The differentiation MUST be structural and typographic so that it remains legible across future theming work; it MUST NOT rely on chromatic accent alone. The differentiation SHALL include at minimum: a Mode-aware sidebar brand subtitle, a persistent Mode pill in the sidebar brand area, mode-glyph icons inside the Mode segments, a Mode-aware connection-indicator label and dot animation when the live channel is connected, and Mode-aware preview chrome. Switching Mode MUST update all of these affordances together.

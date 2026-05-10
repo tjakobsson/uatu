@@ -1330,8 +1330,29 @@ body.is-resizing-terminal .panel-resizer {
   letter-spacing: 0.02em;
 }
 
+/* Files pane: the library owns its own virtualized scroll viewport, so the */
+/* pane body must give it an explicit (flex-allocated) height rather than */
+/* the default block layout + overflow:auto used by other panes. */
+.sidebar-pane[data-pane-id="files"] > .pane-body {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+
 .tree {
-  padding-bottom: 0.35rem;
+  /* @pierre/trees calls attachShadow() on this element and uses */
+  /* ResizeObserver to size its virtualization viewport. It MUST have a real */
+  /* height — flex: 1 1 auto + min-height: 0 lets it absorb spare pane height */
+  /* without forcing the pane to grow. */
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.tree-empty {
+  color: var(--text-subtle);
+  padding: 0.6rem 1.25rem;
+  font-size: 0.8rem;
 }
 
 .sidebar-footer {
@@ -1346,220 +1367,6 @@ body.is-resizing-terminal .panel-resizer {
   font-size: 0.7rem;
   color: var(--text-subtle);
   letter-spacing: 0.02em;
-}
-
-/* File tree — tighter rhythm, chevrons, accent-bar selection. */
-.root-group + .root-group {
-  margin-top: 1.25rem;
-}
-
-.root-title {
-  display: grid;
-  gap: 0.15rem;
-  margin-bottom: 0.5rem;
-  padding: 0 0.35rem;
-}
-
-.root-title strong {
-  color: var(--text-strong);
-  font-size: 0.82rem;
-  font-weight: 600;
-}
-
-.root-title span {
-  color: var(--text-subtle);
-  font-size: 0.72rem;
-  word-break: break-all;
-}
-
-.tree ul {
-  list-style: none;
-  margin: 0;
-  padding-left: 0.85rem;
-  border-left: 1px dashed transparent;
-}
-
-.tree .root-group > ul {
-  padding-left: 0;
-}
-
-.tree-node {
-  margin: 0;
-}
-
-.tree-node + .tree-node {
-  margin-top: 0.05rem;
-}
-
-.tree-dir > details {
-  margin: 0;
-}
-
-.tree-dir > details > summary {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  cursor: pointer;
-  color: var(--text-subtle);
-  padding: 0.25rem 0.35rem;
-  border-radius: 0.35rem;
-  list-style: none;
-  font-size: 0.82rem;
-  font-weight: 500;
-  user-select: none;
-}
-
-.tree-dir > details > summary::-webkit-details-marker {
-  display: none;
-}
-
-.tree-dir > details > summary::before {
-  content: "";
-  width: 0;
-  height: 0;
-  border-left: 4px solid currentColor;
-  border-top: 3px solid transparent;
-  border-bottom: 3px solid transparent;
-  transform: rotate(0deg);
-  transition: transform 0.15s ease;
-  flex-shrink: 0;
-}
-
-.tree-dir > details[open] > summary::before {
-  transform: rotate(90deg);
-}
-
-.tree-dir > details > summary:hover {
-  color: var(--text-strong);
-  background: #f6f8fa;
-}
-
-.tree-doc {
-  position: relative;
-}
-
-.tree-doc-button {
-  width: 100%;
-  text-align: left;
-  border: 0;
-  background: transparent;
-  color: var(--text-strong);
-  padding: 0.3rem 0.5rem 0.3rem 0.85rem;
-  border-radius: 0.35rem;
-  cursor: pointer;
-  font-size: 0.82rem;
-  font-weight: 400;
-  line-height: 1.35;
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  transition: background-color 0.12s ease, color 0.12s ease;
-}
-
-.tree-icon {
-  display: inline-flex;
-  align-items: center;
-  color: var(--text-subtle);
-  flex-shrink: 0;
-}
-
-.tree-doc-button.is-selected .tree-icon,
-.tree-doc-button:hover .tree-icon {
-  color: inherit;
-}
-
-.tree-label {
-  min-width: 0;
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tree-dir-name {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tree-mtime {
-  flex-shrink: 0;
-  color: var(--text-subtle);
-  font-size: 0.68rem;
-  font-variant-numeric: tabular-nums;
-  opacity: 0.7;
-  margin-left: 0.5rem;
-}
-
-.tree-doc-button:hover .tree-mtime,
-.tree-doc-button.is-selected .tree-mtime,
-.tree-dir > details > summary:hover .tree-mtime {
-  opacity: 1;
-}
-
-.tree-doc-button::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 0.4rem;
-  bottom: 0.4rem;
-  width: 2px;
-  border-radius: 1px;
-  background: transparent;
-  transition: background-color 0.12s ease;
-}
-
-.tree-doc-button:hover {
-  background: #f6f8fa;
-  color: var(--text-strong);
-}
-
-.tree-doc-button.is-selected {
-  background: var(--accent-soft);
-  color: var(--accent);
-  font-weight: 500;
-}
-
-.tree-doc-button.is-selected::before {
-  background: var(--accent);
-}
-
-.tree-doc-disabled {
-  width: 100%;
-  text-align: left;
-  padding: 0.3rem 0.5rem 0.3rem 0.85rem;
-  border-radius: 0.35rem;
-  font-size: 0.82rem;
-  font-weight: 400;
-  line-height: 1.35;
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  color: var(--text-subtle);
-  cursor: default;
-  user-select: none;
-}
-
-.tree-doc-disabled .tree-icon {
-  color: var(--text-subtle);
-  opacity: 0.7;
-}
-
-.tree-doc-disabled .tree-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  opacity: 0.85;
-}
-
-.tree-empty {
-  color: var(--text-subtle);
-  padding: 0.6rem 0.35rem;
-  font-size: 0.8rem;
 }
 
 .review-repo + .review-repo,
@@ -1792,6 +1599,31 @@ body.is-resizing-terminal .panel-resizer {
   place-items: center;
   color: var(--text-subtle);
   min-height: 40vh;
+}
+
+/* Inline image preview. Centered, fits within the preview pane, retains its */
+/* aspect ratio. A subtle checkerboard backdrop makes transparency obvious. */
+.image-preview {
+  display: grid;
+  place-items: center;
+  min-height: 40vh;
+  padding: 1rem;
+}
+
+.image-preview img {
+  max-width: 100%;
+  max-height: 75vh;
+  object-fit: contain;
+  background-color: #ffffff;
+  background-image:
+    linear-gradient(45deg, #f0f2f5 25%, transparent 25%),
+    linear-gradient(-45deg, #f0f2f5 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #f0f2f5 75%),
+    linear-gradient(-45deg, transparent 75%, #f0f2f5 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+  border: 1px solid var(--border-soft);
+  border-radius: 0.375rem;
 }
 
 .metadata-card {
@@ -2965,170 +2797,4 @@ body.is-resizing-terminal .panel-resizer {
   opacity: 1;
 }
 
-
-/* Files pane — All/Changed view toggle in the pane header. */
-.files-view-toggle {
-  display: inline-flex;
-  align-items: stretch;
-  margin-right: 0.35rem;
-  padding: 0.1rem;
-  background: var(--surface-muted);
-  border: 1px solid var(--border-soft);
-  border-radius: 0.35rem;
-}
-
-.files-view-toggle[hidden] {
-  display: none;
-}
-
-.files-view-segment {
-  padding: 0.15rem 0.5rem;
-  border: 0;
-  background: transparent;
-  color: var(--text-subtle);
-  font-size: 0.7rem;
-  font-weight: 500;
-  border-radius: 0.25rem;
-  cursor: pointer;
-  transition: background-color 0.15s ease, color 0.15s ease;
-}
-
-.files-view-segment:hover:not(.is-active) {
-  color: var(--text-strong);
-}
-
-.files-view-segment.is-active {
-  background: #ffffff;
-  color: var(--text-strong);
-  cursor: default;
-  box-shadow: 0 1px 2px rgba(36, 41, 47, 0.06);
-}
-
-.files-view-segment:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
-.tree-folder-icon {
-  display: inline-flex;
-  align-items: center;
-  margin-right: 0.3rem;
-  color: var(--text-subtle);
-  flex-shrink: 0;
-}
-
-/* Files pane — changed-vs-base list. */
-.changed-file-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.changed-file {
-  margin: 0;
-}
-
-.changed-file-button,
-.changed-file-disabled {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-  width: 100%;
-  padding: 0.3rem 0.45rem;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  font-size: 0.78rem;
-  text-align: left;
-  border-radius: 0.3rem;
-  cursor: pointer;
-}
-
-.changed-file-disabled {
-  cursor: default;
-  color: var(--text-subtle);
-  font-style: italic;
-}
-
-.changed-file-button:hover {
-  background: var(--surface-muted);
-}
-
-.changed-file-button.is-selected {
-  background: var(--surface-muted);
-  font-weight: 600;
-}
-
-.changed-file-main {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  min-width: 0;
-}
-
-.changed-file-status {
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 1.2rem;
-  height: 1.2rem;
-  font-size: 0.72rem;
-  font-weight: 700;
-  border-radius: 0.25rem;
-  background: var(--surface-muted);
-  border: 1px solid var(--border-soft);
-}
-
-.changed-file-status.is-added {
-  background: #effaf2;
-  border-color: #b7e4c7;
-  color: #1a5d34;
-}
-
-.changed-file-status.is-modified {
-  background: #fff8dc;
-  border-color: #f0cf7a;
-  color: #6b4900;
-}
-
-.changed-file-status.is-deleted {
-  background: #fff1f0;
-  border-color: #ffb3ad;
-  color: #8b1f1a;
-}
-
-.changed-file-status.is-renamed,
-.changed-file-status.is-copied {
-  background: #eef4ff;
-  border-color: #b8cfff;
-  color: #1a3d8c;
-}
-
-.changed-file-path {
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-  font-size: 0.74rem;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.changed-file-counts {
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: baseline;
-  gap: 0.25rem;
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-  font-size: 0.7rem;
-}
-
-.changed-file-counts .adds {
-  color: #1a5d34;
-}
-
-.changed-file-counts .dels {
-  color: #8b1f1a;
-}
 

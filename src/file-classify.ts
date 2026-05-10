@@ -42,7 +42,6 @@ const TEXT_FILENAMES = new Set([
   ".eslintrc",
   ".npmrc",
   ".nvmrc",
-  ".uatuignore",
 ]);
 
 const BINARY_EXTENSIONS = new Set([

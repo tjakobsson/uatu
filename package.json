@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@asciidoctor/core": "^3.0.4",
+    "@pierre/trees": "1.0.0-beta.3",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "chokidar": "^5.0.0",

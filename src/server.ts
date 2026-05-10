@@ -9,6 +9,7 @@ import { type DocumentMetadata, sanitizeMetadata } from "./document-metadata";
 import { classifyFile } from "./file-classify";
 import { languageForName } from "./file-languages";
 import { loadIgnoreMatcher, type IgnoreMatcher } from "./ignore-engine";
+import { warnAboutRetiredUatuignore } from "./uatuignore-warning";
 import { decodeHtmlEntities, renderCodeAsHtml, renderMarkdownToHtml } from "./markdown";
 import { collectRepositorySnapshots, safeGit } from "./review-load";
 import {
@@ -977,8 +978,8 @@ function createTerminalToken(): string {
 //      mirrored, because in the typical case it's already covered by the
 //      user's `.gitignore` and spreading the heuristic into the watcher
 //      would deepen an existing hack rather than minimize it.
-//   2. Defer to the per-root IgnoreMatcher (built from .uatuignore /
-//      .gitignore) for everything else.
+//   2. Defer to the per-root IgnoreMatcher (built from built-in defaults +
+//      .uatu.json tree.exclude + .gitignore) for everything else.
 export function buildWatcherIgnorePredicate(
   dirRoots: string[],
   matcherCache: Map<string, IgnoreMatcher>,
@@ -1138,10 +1139,12 @@ export function createWatchSession(
     metrics?.inc(`watcher.events_total.${eventName}`);
     const absolutePath = path.resolve(filePath);
 
-    // A root's `.uatuignore`/`.gitignore` itself just changed — drop the cached
-    // matcher so the upcoming scanRoots call rebuilds it from the new rules.
+    // A root's `.gitignore` or `.uatu.json` itself just changed — drop the
+    // cached matcher so the upcoming scanRoots call rebuilds it from the new
+    // rules. Both files feed the per-root IgnoreMatcher (.uatu.json tree.exclude
+    // and tree.respectGitignore are read via loadTreeConfig in ignore-engine).
     const baseName = path.basename(absolutePath);
-    if (baseName === ".uatuignore" || baseName === ".gitignore") {
+    if (baseName === ".gitignore" || baseName === ".uatu.json") {
       const parentDir = path.dirname(absolutePath);
       if (dirRoots.includes(parentDir)) {
         matcherCache.delete(parentDir);
@@ -1183,10 +1186,14 @@ export function createWatchSession(
 
   return {
     async start() {
+      // One-shot retirement notice for any .uatuignore files still on disk.
+      // Fire-and-forget — the warning MUST NOT prevent the session from starting.
+      void warnAboutRetiredUatuignore(dirRoots);
+
       // Pre-load matchers so the chokidar `ignored` predicate has something to
       // consult during the watcher's very first stat sweep. The cache is also
       // threaded into every subsequent scanRoots call so we don't re-read
-      // `.uatuignore` / `.gitignore` on every refresh.
+      // `.uatu.json` / `.gitignore` on every refresh.
       for (const rootPath of dirRoots) {
         const matcher = await loadIgnoreMatcher({ rootPath, respectGitignore });
         matcherCache.set(rootPath, matcher);
