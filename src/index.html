@@ -158,38 +158,13 @@
             <header class="pane-header">
               <h2>Files</h2>
               <div class="pane-actions">
-                <div
-                  id="files-view-toggle"
-                  class="files-view-toggle"
-                  role="radiogroup"
-                  aria-label="Files view"
-                  hidden
-                >
-                  <button
-                    id="files-view-all"
-                    class="files-view-segment"
-                    type="button"
-                    role="radio"
-                    aria-checked="true"
-                    data-files-view="all"
-                    title="Show all files in the watched roots"
-                  >All</button>
-                  <button
-                    id="files-view-changed"
-                    class="files-view-segment"
-                    type="button"
-                    role="radio"
-                    aria-checked="false"
-                    data-files-view="changed"
-                    title="Show only files changed against the base"
-                  >Changed</button>
-                </div>
                 <button class="pane-action" type="button" data-pane-collapse="files" aria-label="Collapse Files" title="Collapse pane">−</button>
                 <button class="pane-action" type="button" data-pane-hide="files" aria-label="Hide Files" title="Hide pane">×</button>
               </div>
             </header>
             <div class="pane-body">
               <div id="tree" class="tree"></div>
+              <p id="tree-empty-message" class="tree-empty" hidden>No files found in the watched roots.</p>
             </div>
             <div class="pane-resizer" data-pane-resizer="files" role="separator" aria-orientation="horizontal" aria-label="Resize Files"></div>
           </section>

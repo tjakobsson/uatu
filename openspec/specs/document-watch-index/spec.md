@@ -4,17 +4,17 @@
 TBD - created by archiving change split-document-watch-browser. Update Purpose after archive.
 ## Requirements
 ### Requirement: Browse supported documents from watched roots
-The browser UI SHALL display a sidebar tree grouped by watched root. The tree SHALL list every file accepted by the ignore and exposure filters under each root, recursively. Files classified as Markdown, AsciiDoc, or as viewable text SHALL render as clickable entries that can become the active preview. Files classified as binary SHALL render as non-clickable entries that show a file-type icon but cannot change the active preview. Files matching default-denied secret patterns, hardcoded ignored names, `.uatuignore`, or active `.gitignore` rules MUST NOT appear in the sidebar. The preview pane SHALL render the currently selected non-binary file: Markdown files through the Markdown pipeline, AsciiDoc files through the AsciiDoc pipeline, other text files through the syntax-highlighted code render path.
+The browser UI SHALL display a sidebar tree grouped by watched root. The tree SHALL list every file accepted by the ignore and exposure filters under each root, recursively. Files classified as Markdown, AsciiDoc, or as viewable text SHALL render as clickable entries that can become the active preview. Files classified as binary SHALL render as clickable entries: clicking a binary entry MUST route the preview to the existing "preview unavailable" view rather than rendering binary contents. Files matching the hardcoded directory denylist, default-denied secret patterns, hardcoded ignored names, `.uatu.json tree.exclude` patterns, or active `.gitignore` rules MUST NOT appear in the sidebar. The preview pane SHALL render the currently selected non-binary file: Markdown files through the Markdown pipeline, AsciiDoc files through the AsciiDoc pipeline, other text files through the syntax-highlighted code render path.
 
 #### Scenario: Sidebar lists every non-ignored file under each watched root
 - **WHEN** watched roots contain a mix of Markdown, AsciiDoc, source code, configuration, and binary files
 - **THEN** the sidebar displays all of those files within the hierarchy of their corresponding watched root
 - **AND** Markdown, AsciiDoc, and other text files appear as clickable entries
-- **AND** binary files appear as non-clickable entries
+- **AND** binary files appear as clickable entries that route to the preview-unavailable view when selected
 
 #### Scenario: Secret-like files are excluded by default
 - **WHEN** a watched root contains common secret-bearing files such as `.env`, `.env.local`, `.npmrc`, credential JSON, or private-key files
-- **THEN** those files do not appear as clickable or non-clickable sidebar entries
+- **THEN** those files do not appear as sidebar entries
 - **AND** they cannot become the active preview document by direct document ID request
 
 #### Scenario: Selecting a Markdown file renders its preview
@@ -37,10 +37,11 @@ The browser UI SHALL display a sidebar tree grouped by watched root. The tree SH
 - **THEN** the preview pane renders that file as syntax-highlighted code
 - **AND** the active selection updates to the chosen file
 
-#### Scenario: A binary entry cannot be selected
-- **WHEN** a user clicks a binary tree entry
-- **THEN** the active selection does not change
-- **AND** the preview is not refreshed
+#### Scenario: Selecting a binary entry routes to the preview-unavailable view
+- **WHEN** a user selects a binary tree entry
+- **THEN** the active selection updates to that file
+- **AND** the preview shows the existing preview-unavailable view for binary content
+- **AND** no binary bytes are streamed into the preview
 
 ### Requirement: Keep the indexed view and preview current
 The system SHALL detect file creation, deletion, rename, and modification events under watched roots, applying the same ignore filter the indexer uses, and update the indexed sidebar view accordingly. When the currently selected file changes on disk, the preview MUST refresh automatically. Binary classification SHALL be re-evaluated when a file is renamed or modified so that an extension change (e.g. `data.bin` → `data.json`) reflects in the tree's clickability and render path. The live update channel MUST remain available during normal idle periods without requiring user action or emitting spurious server timeout warnings for expected long-lived connections. The watcher MUST NOT attach native filesystem watchers to any path whose location relative to a watched root contains a `.git` directory segment, since that directory is git's working metadata and is never user-authored content the indexer surfaces. The watcher MUST tolerate transient errors from the underlying filesystem watcher implementation (for example, an `EINVAL` from a `watch` syscall against a file that has already been removed) without terminating the host process; such errors MAY be logged but MUST NOT propagate as unhandled errors.
@@ -146,7 +147,7 @@ When follow mode is enabled AND the active Mode is **Author**, the system SHALL 
 - **THEN** Follow remains disabled (the user's Author-mode preference is preserved)
 
 ### Requirement: Serve adjacent files from watched roots as static content
-For any request path that does not match a known API or built-in asset route, the server SHALL inspect the request's `Accept` header to distinguish top-level navigation requests from sub-resource fetches. When the `Accept` header prefers `text/html` AND the request path resolves to a known non-binary document under a watched root, the server MUST return the SPA shell (the same response served at `/`) so the SPA can render the document with its full UI. For all other requests — including requests whose `Accept` does not prefer `text/html`, requests that resolve to a binary file, and requests that do not resolve to any document — the server SHALL attempt to resolve the path against the union of watched roots and, if the path maps to an existing allowed file inside a watched root, serve that file statically. Static fallback serving MUST apply the same hardcoded ignore, default secret-file denylist, `.uatuignore`, and active `.gitignore` exposure rules as the browser tree. Static fallback serving MUST verify containment after resolving real filesystem paths and MUST NOT serve files reached through symlink escapes outside the watched root. The rendered preview HTML MUST preserve the author's original `src` and `href` URLs verbatim (no URL rewriting); the browser SHALL resolve those references using a per-document base so that relative references such as `<img src="./hero.svg">` in a README just work. Any requested path that resolves outside every watched root, is ignored, is secret-like, is malformed, or cannot be safely resolved MUST receive a non-success response and MUST NOT read or stream the file.
+For any request path that does not match a known API or built-in asset route, the server SHALL inspect the request's `Accept` header to distinguish top-level navigation requests from sub-resource fetches. When the `Accept` header prefers `text/html` AND the request path resolves to a known non-binary document under a watched root, the server MUST return the SPA shell (the same response served at `/`) so the SPA can render the document with its full UI. For all other requests — including requests whose `Accept` does not prefer `text/html`, requests that resolve to a binary file, and requests that do not resolve to any document — the server SHALL attempt to resolve the path against the union of watched roots and, if the path maps to an existing allowed file inside a watched root, serve that file statically. Static fallback serving MUST apply the same hardcoded ignore, default secret-file denylist, `.uatu.json tree.exclude` patterns, and active `.gitignore` exposure rules as the browser tree. Static fallback serving MUST verify containment after resolving real filesystem paths and MUST NOT serve files reached through symlink escapes outside the watched root. The rendered preview HTML MUST preserve the author's original `src` and `href` URLs verbatim (no URL rewriting); the browser SHALL resolve those references using a per-document base so that relative references such as `<img src="./hero.svg">` in a README just work. Any requested path that resolves outside every watched root, is ignored, is secret-like, is malformed, or cannot be safely resolved MUST receive a non-success response and MUST NOT read or stream the file.
 
 #### Scenario: A README's centered hero image loads via the static file fallback
 - **WHEN** a previewed Markdown file contains `<img src="./hero.svg">` whose target exists next to the document and is not ignored or secret-like
@@ -177,10 +178,10 @@ For any request path that does not match a known API or built-in asset route, th
 - **WHEN** a request path resolves (via `..`) outside every watched root
 - **THEN** the server responds with 404 and does not read the file
 
-#### Scenario: Ignored files are not served directly
-- **WHEN** a watched root contains a file hidden by `.uatuignore` or an active `.gitignore` rule
+#### Scenario: Excluded files are not served directly
+- **WHEN** a watched root contains a file hidden by `.uatu.json tree.exclude` or an active `.gitignore` rule
 - **THEN** a direct static fallback request for that file receives a non-success response
-- **AND** the server does not stream the ignored file contents
+- **AND** the server does not stream the excluded file contents
 
 #### Scenario: Symlink escapes are rejected
 - **WHEN** a request path maps through a symlink inside the watched root to a file outside the watched root
@@ -196,42 +197,8 @@ For any request path that does not match a known API or built-in asset route, th
 - **THEN** the server responds with a non-success response
 - **AND** request handling continues without an uncaught exception
 
-### Requirement: Filter the indexed file set with `.uatuignore`
-The system SHALL read a `.uatuignore` file at the watch root, when present, and apply its patterns as a filter on top of the hardcoded directory denylist. The file SHALL use gitignore-compatible syntax, including `!` negation patterns. Patterns in `.uatuignore` SHALL take precedence over patterns inherited from `.gitignore`. When a watched root is a single file path rather than a directory, `.uatuignore` SHALL NOT be consulted for that root. Per-directory nested `.uatuignore` files within the watch root SHALL be ignored in this version. Files filtered by `.uatuignore` MUST NOT appear in the sidebar tree, MUST NOT be eligible to change the active preview under follow mode, and MUST NOT trigger live-update broadcasts when changed. Filtering decisions SHALL reflect the current on-disk contents of `.uatuignore`: when the user edits the file mid-session, the next refresh MUST re-read it so newly-added patterns hide their matches and removed patterns restore previously-hidden files, without requiring the session to be restarted.
-
-#### Scenario: A `.uatuignore` pattern hides a file from the tree
-- **WHEN** the watch root contains a `.uatuignore` whose patterns match `bun.lock`
-- **AND** the watch root contains a `bun.lock` file
-- **THEN** the sidebar tree does not list `bun.lock`
-- **AND** modifying `bun.lock` does not change the active preview under follow mode
-
-#### Scenario: A `.uatuignore` negation un-ignores something `.gitignore` excluded
-- **WHEN** the watch root's `.gitignore` excludes `*.log`
-- **AND** the watch root's `.uatuignore` contains `!debug.log`
-- **THEN** the sidebar tree lists `debug.log`
-- **AND** every other `.log` file remains hidden
-
-#### Scenario: Single-file watch roots ignore `.uatuignore`
-- **WHEN** the watch session is started with `uatu watch script.py`
-- **AND** a `.uatuignore` file exists in `script.py`'s directory
-- **THEN** that `.uatuignore` does not affect the session
-- **AND** the watched file is shown in the sidebar regardless of `.uatuignore` patterns
-
-#### Scenario: Nested `.uatuignore` files are not consulted
-- **WHEN** the watch root contains a subdirectory `docs/` with its own `.uatuignore`
-- **THEN** the patterns in `docs/.uatuignore` do not affect filtering
-- **AND** only the root-level `.uatuignore` is read
-
-#### Scenario: Editing `.uatuignore` at runtime reapplies the new patterns
-- **WHEN** a watch session is running and the sidebar tree lists `package-lock.json`
-- **AND** the user appends `package-lock.json` to the watch root's `.uatuignore`
-- **THEN** the next refresh MUST drop `package-lock.json` from the sidebar tree
-- **AND** when the user removes that pattern from `.uatuignore` again
-- **THEN** the next refresh MUST list `package-lock.json` once more
-- **AND** the session is not restarted at any point
-
-### Requirement: Respect `.gitignore` by default with an opt-out flag
-The system SHALL read `.gitignore` at each watch root by default and apply its patterns to filter the indexed file set. The system SHALL provide a `--no-gitignore` flag on the `uatu watch` command that disables this behavior for the session. The hardcoded directory denylist (`node_modules`, `.git`, `dist`, `build`, etc.) MUST continue to apply regardless of `--no-gitignore`. Files filtered by `.gitignore` MUST NOT appear in the sidebar tree and MUST NOT be eligible for follow mode. When the session is honouring `.gitignore` (i.e. `--no-gitignore` was not passed), filtering SHALL reflect the current on-disk contents of `.gitignore`: edits made mid-session MUST take effect on the next refresh without requiring the session to be restarted.
+### Requirement: Respect `.gitignore` by default with an opt-out
+The system SHALL read `.gitignore` at each watch root by default and apply its patterns to filter the indexed file set. The system SHALL provide two ways to opt out of this behavior: a per-session CLI flag `--no-gitignore` on the `uatu watch` command, and a per-project setting `tree.respectGitignore: false` in the watch root's `.uatu.json`. When both are present, the CLI flag wins for the duration of that session. The hardcoded directory denylist (`node_modules`, `.git`, `dist`, `build`, etc.) MUST continue to apply regardless of either opt-out. Files filtered by `.gitignore` MUST NOT appear in the sidebar tree and MUST NOT be eligible for follow mode. When the session is honoring `.gitignore`, filtering SHALL reflect the current on-disk contents of `.gitignore`: edits made mid-session MUST take effect on the next refresh without requiring the session to be restarted.
 
 #### Scenario: `.gitignore` patterns hide files by default
 - **WHEN** the watch root's `.gitignore` excludes `*.log`
@@ -245,32 +212,53 @@ The system SHALL read `.gitignore` at each watch root by default and apply its p
 - **THEN** the sidebar tree lists `debug.log`
 - **AND** the hardcoded directory denylist still applies (e.g. `node_modules/` remains hidden)
 
+#### Scenario: `.uatu.json tree.respectGitignore: false` exposes gitignored files
+- **WHEN** the watch root's `.uatu.json` sets `tree.respectGitignore: false`
+- **AND** the watch root's `.gitignore` excludes `*.log`
+- **AND** the watch root contains `debug.log`
+- **THEN** the sidebar tree lists `debug.log`
+- **AND** the hardcoded directory denylist still applies
+
+#### Scenario: CLI flag wins over the .uatu.json setting
+- **WHEN** the watch root's `.uatu.json` sets `tree.respectGitignore: true`
+- **AND** the session is started with `uatu watch . --no-gitignore`
+- **THEN** `.gitignore` is NOT honored for the duration of the session
+
 #### Scenario: Editing `.gitignore` at runtime reapplies the new patterns
-- **WHEN** a watch session is running without `--no-gitignore` and the sidebar tree lists `notes.tmp`
+- **WHEN** a watch session is running and honoring `.gitignore` and the sidebar tree lists `notes.tmp`
 - **AND** the user appends `*.tmp` to the watch root's `.gitignore`
 - **THEN** the next refresh MUST drop `notes.tmp` from the sidebar tree
 - **AND** when the user removes that pattern from `.gitignore` again
 - **THEN** the next refresh MUST list `notes.tmp` once more
 - **AND** the session is not restarted at any point
 
-### Requirement: Detect binary files and list them as non-viewable
-The system SHALL classify every file accepted by the ignore filter as either a markdown document, a viewable text file, or a binary file. Binary files SHALL appear in the sidebar tree but MUST be rendered as non-clickable entries that cannot become the active preview. Selecting a binary tree row MUST NOT change the active document or trigger a render. Binary classification SHALL use a fast path of known-binary file extensions, and a content sniff (NUL bytes or excessive non-printable byte ratio in the first 8 KB) for files whose extensions are not in the known-text or known-binary lists.
+### Requirement: Detect binary files and route them to the right preview
+The system SHALL classify every file accepted by the ignore filter as either a Markdown document, an AsciiDoc document, a viewable text file, or a binary file. Binary files SHALL appear in the sidebar tree as clickable entries. Selecting a binary entry SHALL change the active document to that file and route the preview based on the file's extension: binaries with a viewable image extension (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.svg`, `.ico`, `.avif`, `.bmp`) SHALL render inline in the preview pane via `<img>`, served by uatu's static-file fallback; all other binaries SHALL render the existing preview-unavailable notice. Binary classification SHALL use a fast path of known-binary file extensions, and a content sniff (NUL bytes or excessive non-printable byte ratio in the first 8 KB) for files whose extensions are not in the known-text or known-binary lists. Binary entries (including images) MUST remain ineligible to change the active document under follow-mode auto-switch — the auto-switch only targets non-binary files.
 
-#### Scenario: A known-binary extension lists as disabled
-- **WHEN** the watch root contains `logo.png`
-- **THEN** the sidebar tree lists `logo.png` as a non-clickable entry
-- **AND** clicking `logo.png` does not change the active preview
+#### Scenario: An image file is rendered inline in the preview pane
+- **WHEN** the watch root contains `logo.png` and the user selects it from the tree
+- **THEN** the active selection updates to that file
+- **AND** the preview renders an `<img>` tag for the file rather than the preview-unavailable view
+- **AND** the image bytes are served by the static-file fallback (not the document-render API)
+
+#### Scenario: A non-image binary lists as a clickable entry routed to preview-unavailable
+- **WHEN** the watch root contains `archive.zip`
+- **THEN** the sidebar tree lists `archive.zip` as a clickable entry
+- **AND** clicking it updates the active selection to that file
+- **AND** the preview displays a "this file type isn't viewable" notice rather than streaming binary bytes
+- **AND** the preview does NOT display a "document not found" or "no longer exists" message
 
 #### Scenario: An unknown-extension binary blob is detected via content sniff
 - **WHEN** the watch root contains a file with an unfamiliar extension whose first 8 KB contain a NUL byte
-- **THEN** the sidebar tree lists that file as a non-clickable entry
+- **THEN** the sidebar tree lists that file as a clickable entry
+- **AND** selecting it routes the preview to the preview-unavailable notice (no image extension matched)
 
 #### Scenario: A plain text file with no extension is treated as text
 - **WHEN** the watch root contains a file named `Makefile` whose contents are plain ASCII
 - **THEN** the sidebar tree lists `Makefile` as a clickable entry
-- **AND** selecting `Makefile` renders its contents in the preview
+- **AND** selecting `Makefile` renders its contents in the preview as syntax-highlighted code
 
 #### Scenario: Binary files are excluded from the on-startup default document
-- **WHEN** the most recently modified file under the watched roots is a binary file
+- **WHEN** the most recently modified file under the watched roots is a binary file (image or otherwise)
 - **THEN** the on-startup default document is the most recently modified non-binary file instead
 

@@ -1,7 +1,7 @@
 // Maps a file name to the highlight.js language identifier the preview's code
-// render path should use. Mirrors the shape of `file-icons.ts`: one entry per
-// extension (or filename), trivially extensible. Resolution returns `undefined`
-// for unmapped names — the render path falls back to escaped plain text.
+// render path should use. One entry per extension (or filename), trivially
+// extensible. Resolution returns `undefined` for unmapped names — the render
+// path falls back to escaped plain text.
 
 const LANGUAGES_BY_EXTENSION: Record<string, string> = {
   ".ts": "typescript",

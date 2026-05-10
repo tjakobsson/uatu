@@ -1,4 +1,3 @@
-import { fileIconForName } from "./file-icons";
 import { closeMermaidViewer, ensureMermaidViewer } from "./mermaid-viewer";
 import { renderMermaidDiagrams, replaceMermaidCodeBlocks, type MermaidThemeInputs } from "./preview";
 import { captureTerminalToken, mountTerminalPanel, type TerminalPanelHandle } from "./terminal";
@@ -25,9 +24,7 @@ import {
 } from "./selection-inspector";
 import {
   DEFAULT_MODE,
-  buildTreeNodes,
   defaultDocumentId,
-  formatRelativeTime,
   hasDocument,
   nextSelectedDocumentId,
   readModePreference,
@@ -37,17 +34,16 @@ import {
   writeModePreference,
   writeViewModePreference,
   type BuildSummary,
-  type ChangedFileSummary,
   type DocumentMeta,
   type Mode,
   type RepositoryReviewSnapshot,
   type RootGroup,
   type Scope,
   type StatePayload,
-  type TreeNode,
   type ViewMode,
 } from "./shared";
 import { nextStaleHint, type StaleHint } from "./stale-hint";
+import { TreeView, type GitStatusForView } from "./tree-view";
 
 type RenderedDocumentAuthor = { name: string; email?: string };
 
@@ -77,7 +73,6 @@ const SIDEBAR_COLLAPSED_KEY = "uatu:sidebar-collapsed";
 const SIDEBAR_PANES_KEY_PREFIX = "uatu:sidebar-panes:";
 const SIDEBAR_WIDTH_KEY = "uatu:sidebar-width";
 const GIT_LOG_LIMIT_KEY = "uatu:git-log-limit";
-const FILES_VIEW_KEY_PREFIX = "uatu:files-view:";
 // Persists the user's last open/closed choice for the document metadata card
 // across documents and reloads. The expectation is "if I opened it once, I
 // want to see it on every other doc too" — and the converse for closing.
@@ -99,32 +94,6 @@ function writeMetadataCardOpenPreference(open: boolean): void {
   }
 }
 
-type FilesView = "all" | "changed";
-
-function isFilesView(value: unknown): value is FilesView {
-  return value === "all" || value === "changed";
-}
-
-function filesViewStorageKeyForMode(mode: Mode): string {
-  return `${FILES_VIEW_KEY_PREFIX}${mode}`;
-}
-
-function readFilesView(mode: Mode): FilesView {
-  try {
-    const raw = window.localStorage.getItem(filesViewStorageKeyForMode(mode));
-    return isFilesView(raw) ? raw : "all";
-  } catch {
-    return "all";
-  }
-}
-
-function writeFilesView(mode: Mode, view: FilesView): void {
-  try {
-    window.localStorage.setItem(filesViewStorageKeyForMode(mode), view);
-  } catch {
-    // best-effort persistence
-  }
-}
 const SIDEBAR_MIN_WIDTH = 260;
 const SIDEBAR_MAX_WIDTH = 620;
 const ALL_PANE_DEFS = [
@@ -172,6 +141,7 @@ type CommitPreviewResolution =
 const appShellElement = document.querySelector<HTMLDivElement>(".app-shell");
 const previewBaseElement = document.querySelector<HTMLBaseElement>("#preview-base");
 const treeElement = document.querySelector<HTMLDivElement>("#tree");
+const treeEmptyMessageElement = document.querySelector<HTMLElement>("#tree-empty-message");
 const changeOverviewElement = document.querySelector<HTMLDivElement>("#change-overview");
 const gitLogElement = document.querySelector<HTMLDivElement>("#git-log");
 const gitLogLimitElement = document.querySelector<HTMLSelectElement>("#git-log-limit");
@@ -190,9 +160,6 @@ const viewControlElement = document.querySelector<HTMLDivElement>("#view-control
 const viewRenderedButton = document.querySelector<HTMLButtonElement>("#view-rendered");
 const viewSourceButton = document.querySelector<HTMLButtonElement>("#view-source");
 const previewShellElement = document.querySelector<HTMLElement>(".preview-shell");
-const filesViewToggleElement = document.querySelector<HTMLDivElement>("#files-view-toggle");
-const filesViewAllButton = document.querySelector<HTMLButtonElement>("#files-view-all");
-const filesViewChangedButton = document.querySelector<HTMLButtonElement>("#files-view-changed");
 const staleHintElement = document.querySelector<HTMLDivElement>("#stale-hint");
 const staleHintMessageElement = document.querySelector<HTMLElement>("#stale-hint-message");
 const staleHintActionElement = document.querySelector<HTMLButtonElement>("#stale-hint-action");
@@ -216,6 +183,7 @@ if (
   !appShellElement ||
   !previewBaseElement ||
   !treeElement ||
+  !treeEmptyMessageElement ||
   !changeOverviewElement ||
   !gitLogElement ||
   !gitLogLimitElement ||
@@ -234,9 +202,6 @@ if (
   !viewRenderedButton ||
   !viewSourceButton ||
   !previewShellElement ||
-  !filesViewToggleElement ||
-  !filesViewAllButton ||
-  !filesViewChangedButton ||
   !staleHintElement ||
   !staleHintMessageElement ||
   !staleHintActionElement ||
@@ -278,15 +243,9 @@ const appState = {
   // Per-active-file stale-content hint state. Only set in Review mode; cleared
   // by manual navigation, mode switch back to Author, or refresh action.
   staleHint: null as StaleHint | null,
-  // Per-mode Files-pane view: "all" (full tree, default) or "changed"
-  // (changed-vs-base list, opt-in when git is available).
-  filesView: "all" as FilesView,
   scope: { kind: "folder" } as Scope,
   panes: readPaneState(DEFAULT_MODE),
   gitLogLimit: readGitLogLimitPreference(),
-  // Per-directory open/closed state the user explicitly set by clicking a
-  // directory's <summary>. Session-only; wins over the default-open rule.
-  dirOverrides: new Map<string, "open" | "closed">(),
 };
 
 initSidebarCollapse();
@@ -548,7 +507,6 @@ function initCrossDocAnchorHandler() {
     appState.selectedId = doc.id;
     appState.previewMode = { kind: "document" };
     pushSelection(doc.id, doc.relativePath);
-    revealSelectedFile();
     syncFollowToggle();
     renderSidebar();
     void loadDocument(doc.id).then(() => {
@@ -675,7 +633,6 @@ followToggleElement.addEventListener("click", () => {
       if (latestDoc) {
         pushSelection(latestId, latestDoc.relativePath);
       }
-      revealSelectedFile();
       renderSidebar();
       void loadDocument(latestId);
     }
@@ -684,64 +641,6 @@ followToggleElement.addEventListener("click", () => {
 
 sidebarCollapseElement.addEventListener("click", () => setSidebarCollapsed(true));
 sidebarExpandElement.addEventListener("click", () => setSidebarCollapsed(false));
-
-// Capture real user clicks on a directory's <summary> and record the resulting
-// open/closed state as an override. We don't use the <details> `toggle` event
-// because the browser fires a synthetic toggle for every element parsed with
-// `open=""` — which would cause every re-render to "auto-user-open" all open
-// directories, defeating the override system entirely.
-treeElement.addEventListener("click", event => {
-  const target = event.target;
-  if (!(target instanceof HTMLElement)) {
-    return;
-  }
-  const summary = target.closest("summary");
-  if (!summary) {
-    return;
-  }
-  const details = summary.parentElement;
-  if (!(details instanceof HTMLDetailsElement)) {
-    return;
-  }
-  const dirPath = details.dataset.dirPath;
-  if (!dirPath) {
-    return;
-  }
-  // The click fires before the browser toggles the element, so `details.open`
-  // here reflects the PRE-toggle state. The next state is the inverse.
-  const nextOpen = !details.open;
-  appState.dirOverrides.set(dirPath, nextOpen ? "open" : "closed");
-});
-
-treeElement.addEventListener("click", event => {
-  const target = event.target;
-  if (!(target instanceof HTMLElement)) {
-    return;
-  }
-
-  const button = target.closest<HTMLButtonElement>("button[data-document-id]");
-  if (!button) {
-    return;
-  }
-
-  const documentId = button.dataset.documentId;
-  if (!documentId) {
-    return;
-  }
-
-  appState.followEnabled = false;
-  appState.selectedId = documentId;
-  appState.previewMode = { kind: "document" };
-  applyStaleHint(nextStaleHint(appState.staleHint, { kind: "manual-navigation" }));
-  const doc = findDocumentById(documentId);
-  if (doc) {
-    pushSelection(documentId, doc.relativePath);
-  }
-  revealSelectedFile();
-  syncFollowToggle();
-  renderSidebar();
-  void loadDocument(documentId);
-});
 
 gitLogElement.addEventListener("click", event => {
   const target = event.target;
@@ -874,7 +773,6 @@ window.addEventListener("popstate", () => {
     if (fallbackId) {
       appState.selectedId = fallbackId;
       appState.previewMode = { kind: "document" };
-      revealSelectedFile();
       renderSidebar();
       void loadDocument(fallbackId);
     } else {
@@ -890,7 +788,6 @@ window.addEventListener("popstate", () => {
   if (requestedDoc && requestedDoc.kind !== "binary") {
     appState.selectedId = requestedDoc.id;
     appState.previewMode = { kind: "document" };
-    revealSelectedFile();
     renderSidebar();
     void loadDocument(requestedDoc.id).then(() => {
       if (window.location.hash) {
@@ -1068,7 +965,6 @@ async function loadInitialState() {
   // Pane state is per-mode; load the resolved mode's persisted layout (the
   // initial `appState.panes` was a placeholder for DEFAULT_MODE).
   appState.panes = readPaneState(resolvedMode);
-  appState.filesView = readFilesView(resolvedMode);
   syncModeControl();
 
   let directLinkMessage: { title: string; body: string } | null = null;
@@ -1124,7 +1020,6 @@ async function loadInitialState() {
     }
   }
 
-  revealSelectedFile();
   syncFollowToggle();
   renderSidebar();
 
@@ -1235,7 +1130,6 @@ function connectEvents() {
     // Reveal the newly-selected file only when selection actually changed —
     // so a user-closed ancestor isn't re-opened by unrelated state updates.
     if (appState.selectedId && appState.selectedId !== previousSelectedId) {
-      revealSelectedFile();
       // Server-driven selection change (follow auto-switch, or current doc
       // was deleted and we fell back to the default). The URL must follow
       // what's on screen, but we use replaceState — pushing here would
@@ -1335,6 +1229,31 @@ async function applyDocumentPayload(payload: RenderedDocument): Promise<void> {
   selectionInspector.recompute();
 }
 
+// File extensions that uatu can render directly in the preview pane as an
+// inline image. Kept conservative — formats that browsers reliably display
+// via `<img>` without polyfills. SVGs are included; they're served as
+// `image/svg+xml` by the static-file fallback and the browser sandboxes any
+// `<script>` inside an SVG loaded through `<img>`, so no XSS risk.
+const VIEWABLE_IMAGE_EXTENSIONS = new Set([
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".webp",
+  ".svg",
+  ".ico",
+  ".avif",
+  ".bmp",
+]);
+
+function isViewableImageName(name: string): boolean {
+  const lower = name.toLowerCase();
+  for (const ext of VIEWABLE_IMAGE_EXTENSIONS) {
+    if (lower.endsWith(ext)) return true;
+  }
+  return false;
+}
+
 async function loadDocument(documentId: string) {
   // `loadDocument` always fetches fresh — callers that want the cached
   // payload for the active document should look it up themselves
@@ -1343,6 +1262,21 @@ async function loadDocument(documentId: string) {
   // clear has the same effect as targeted purge + invalidate, with less
   // ceremony.
   documentViewCache.clear();
+
+  // Binary files have no rendered representation through the document API.
+  // Route them straight to a binary-specific preview: an inline `<img>` for
+  // viewable image extensions, a "preview unavailable" notice otherwise.
+  // Skipping the /api/document fetch also avoids the misleading 4xx error
+  // path that used to surface as "The selected file no longer exists."
+  const doc = findDocumentById(documentId);
+  if (doc?.kind === "binary") {
+    if (isViewableImageName(doc.name)) {
+      renderImagePreview(doc);
+    } else {
+      renderBinaryUnavailable(doc);
+    }
+    return;
+  }
 
   const response = await fetch(
     `/api/document?id=${encodeURIComponent(documentId)}&view=${encodeURIComponent(appState.viewMode)}`,
@@ -1357,6 +1291,37 @@ async function loadDocument(documentId: string) {
   const payload = (await response.json()) as RenderedDocument;
   rememberDocumentPayload(payload);
   await applyDocumentPayload(payload);
+}
+
+function renderImagePreview(doc: DocumentMeta): void {
+  closeMermaidViewer();
+  setPreviewBase(doc.relativePath);
+  previewTitleElement.textContent = doc.name;
+  previewPathElement.textContent = doc.relativePath;
+  clearPreviewType();
+  hideViewToggle();
+  previewElement.classList.remove("empty");
+  // The browser resolves `./<name>` via the per-document `<base href>` set by
+  // setPreviewBase, which already points at the document's directory under
+  // the watched root — the same path the static-file fallback knows how to
+  // serve. Encoded for safety against names with spaces / special chars.
+  // encodeURIComponent (not encodeURI) — doc.name is a bare filename with no
+  // path separators to preserve, and we MUST encode `#` and `?` so filenames
+  // like `screenshot#2.png` aren't truncated by the URL parser into a path
+  // ending at `screenshot` plus a `#2.png` fragment.
+  previewElement.innerHTML = `<div class="image-preview"><img alt="${escapeHtmlAttribute(doc.name)}" src="./${encodeURIComponent(doc.name)}"></div>`;
+  selectionInspector.recompute();
+}
+
+function renderBinaryUnavailable(doc: DocumentMeta): void {
+  closeMermaidViewer();
+  previewTitleElement.textContent = doc.name;
+  previewPathElement.textContent = doc.relativePath;
+  clearPreviewType();
+  hideViewToggle();
+  previewElement.classList.add("empty");
+  previewElement.innerHTML = `<p>This file type isn't viewable in uatu.</p>`;
+  selectionInspector.recompute();
 }
 
 function attachMetadataCardToggleListener(container: HTMLElement): void {
@@ -1753,6 +1718,74 @@ function setPreviewBase(relativePath: string) {
   previewBaseElement.href = new URL(`/${directory}`, window.location.origin).toString();
 }
 
+// The library-backed tree view. Created lazily on first non-empty render so
+// teardowns when the watched roots become empty don't leak a hidden instance.
+let treeView: TreeView | null = null;
+
+function ensureTreeView(): TreeView {
+  if (treeView === null) {
+    treeView = new TreeView({
+      container: treeElement,
+      onSelectDocument: handleTreeSelectDocument,
+    });
+  }
+  return treeView;
+}
+
+function handleTreeSelectDocument(documentId: string): void {
+  appState.followEnabled = false;
+  appState.selectedId = documentId;
+  appState.previewMode = { kind: "document" };
+  applyStaleHint(nextStaleHint(appState.staleHint, { kind: "manual-navigation" }));
+  const doc = findDocumentById(documentId);
+  if (doc) {
+    pushSelection(documentId, doc.relativePath);
+  }
+  syncFollowToggle();
+  renderSidebar();
+  void loadDocument(documentId);
+}
+
+function collectGitStatusEntries(repos: readonly RepositoryReviewSnapshot[]): GitStatusForView[] {
+  const out: GitStatusForView[] = [];
+  for (const repo of repos) {
+    if (repo.reviewLoad.status !== "available") {
+      continue;
+    }
+    for (const change of repo.reviewLoad.changedFiles) {
+      const status = mapChangedFileStatus(change.status);
+      if (!status) {
+        continue;
+      }
+      // A repository can span multiple watched roots; emit one entry per root
+      // so the annotation lands wherever the file is visible in the tree.
+      for (const rootId of repo.watchedRootIds) {
+        out.push({ relativePath: change.path, rootId, status });
+      }
+    }
+  }
+  return out;
+}
+
+function mapChangedFileStatus(raw: string): GitStatusForView["status"] | null {
+  const head = (raw[0] ?? "").toUpperCase();
+  switch (head) {
+    case "A":
+      return "added";
+    case "M":
+      return "modified";
+    case "D":
+      return "deleted";
+    case "R":
+      return "renamed";
+    case "U":
+    case "?":
+      return "untracked";
+    default:
+      return null;
+  }
+}
+
 function renderSidebar() {
   syncPaneDom();
   renderPanelsMenu();
@@ -1765,152 +1798,31 @@ function renderSidebar() {
     (sum, root) => sum + root.docs.filter(doc => doc.kind === "binary").length,
     0,
   );
-  const hiddenCount = appState.roots.reduce((sum, root) => sum + root.hiddenCount, 0);
 
   const segments = [`${totalCount} file${totalCount === 1 ? "" : "s"}`];
   if (binaryCount > 0) {
     segments.push(`${binaryCount} binary`);
   }
-  if (hiddenCount > 0) {
-    segments.push(`${hiddenCount} hidden`);
-  }
   documentCountElement.textContent = segments.join(" · ");
 
-  // Files-view toggle is only meaningful when there's a git base to diff
-  // against. Show it then; hide otherwise (the absence is the signal).
-  const reposWithChanges = appState.repositories.filter(
-    repo => repo.reviewLoad.status === "available",
-  );
-  syncFilesViewToggle(reposWithChanges.length > 0);
-
   if (totalCount === 0) {
-    treeElement.innerHTML = `<div class="tree-empty">No files found in the watched roots.</div>`;
-    return;
-  }
-
-  // Changed view (opt-in) lists changed-vs-base files when git is available.
-  // Otherwise (default, or git unavailable) render the full tree.
-  if (reposWithChanges.length > 0 && appState.filesView === "changed") {
-    treeElement.innerHTML = reposWithChanges
-      .map(repo => renderChangedFilesSection(repo))
-      .join("");
-    return;
-  }
-
-  treeElement.innerHTML = appState.roots
-    .map(root => {
-      const nodes = buildTreeNodes(root);
-      return `
-        <section class="root-group">
-          <header class="root-title">
-            <strong>${escapeHtml(root.label)}</strong>
-            <span>${escapeHtml(root.path)}</span>
-          </header>
-          ${renderNodes(nodes)}
-        </section>
-      `;
-    })
-    .join("");
-}
-
-function renderChangedFilesSection(repo: RepositoryReviewSnapshot): string {
-  const changes = repo.reviewLoad.changedFiles;
-  if (changes.length === 0) {
-    return `
-      <section class="root-group">
-        <header class="root-title">
-          <strong>${escapeHtml(repo.label)}</strong>
-          <span>${escapeHtml(repo.rootPath)}</span>
-        </header>
-        <div class="tree-empty">No changes against the base.</div>
-      </section>
-    `;
-  }
-  return `
-    <section class="root-group">
-      <header class="root-title">
-        <strong>${escapeHtml(repo.label)}</strong>
-        <span>${escapeHtml(repo.rootPath)} · ${changes.length} changed</span>
-      </header>
-      <ul class="changed-file-list">
-        ${changes.map(change => renderChangedFileRow(repo, change)).join("")}
-      </ul>
-    </section>
-  `;
-}
-
-function changedFileStatusInfo(status: string): { glyph: string; label: string; cls: string } {
-  const head = (status[0] ?? "").toUpperCase();
-  switch (head) {
-    case "A":
-      return { glyph: "+", label: "Added", cls: "is-added" };
-    case "D":
-      return { glyph: "−", label: "Deleted", cls: "is-deleted" };
-    case "R":
-      return { glyph: "→", label: "Renamed", cls: "is-renamed" };
-    case "C":
-      return { glyph: "⎘", label: "Copied", cls: "is-copied" };
-    case "M":
-    default:
-      return { glyph: "M", label: "Modified", cls: "is-modified" };
-  }
-}
-
-function findDocumentForChangedFile(
-  repo: RepositoryReviewSnapshot,
-  changePath: string,
-): DocumentMeta | null {
-  // ChangedFileSummary.path is relative to the repository root; doc.id is the
-  // absolute path. Compose and look up.
-  const absolutePath = `${repo.rootPath.replace(/\/$/, "")}/${changePath}`;
-  for (const root of appState.roots) {
-    for (const doc of root.docs) {
-      if (doc.id === absolutePath) {
-        return doc;
-      }
+    if (treeView !== null) {
+      treeView.dispose();
+      treeView = null;
     }
+    // The library attaches a shadow root to #tree once mounted, and that
+    // shadow root persists across innerHTML writes — so we keep the empty
+    // message as a sibling element instead of overwriting #tree's children.
+    treeElement.hidden = true;
+    treeEmptyMessageElement.hidden = false;
+    return;
   }
-  return null;
-}
 
-function renderChangedFileRow(
-  repo: RepositoryReviewSnapshot,
-  change: ChangedFileSummary,
-): string {
-  const status = changedFileStatusInfo(change.status);
-  const isDeleted = status.label === "Deleted";
-  const target = isDeleted ? null : findDocumentForChangedFile(repo, change.path);
-  const pathLabel = change.oldPath
-    ? `${escapeHtml(change.oldPath)} → ${escapeHtml(change.path)}`
-    : escapeHtml(change.path);
-  const counts = change.additions === 0 && change.deletions === 0
-    ? ""
-    : `<span class="changed-file-counts"><span class="adds">+${change.additions}</span><span class="dels">-${change.deletions}</span></span>`;
-  const statusBadge = `<span class="changed-file-status ${status.cls}" title="${escapeHtmlAttribute(status.label)}">${escapeHtml(status.glyph)}</span>`;
-
-  if (!target) {
-    return `
-      <li class="changed-file changed-file-disabled" title="${escapeHtmlAttribute(`${status.label}: ${change.path}`)}">
-        <span class="changed-file-main">
-          ${statusBadge}
-          <span class="changed-file-path">${pathLabel}</span>
-        </span>
-        ${counts}
-      </li>
-    `;
-  }
-  const isSelected = target.id === appState.selectedId;
-  return `
-    <li class="changed-file">
-      <button type="button" class="changed-file-button${isSelected ? " is-selected" : ""}" data-document-id="${escapeHtmlAttribute(target.id)}" title="${escapeHtmlAttribute(`${status.label}: ${change.path}`)}">
-        <span class="changed-file-main">
-          ${statusBadge}
-          <span class="changed-file-path">${pathLabel}</span>
-        </span>
-        ${counts}
-      </button>
-    </li>
-  `;
+  treeElement.hidden = false;
+  treeEmptyMessageElement.hidden = true;
+  const view = ensureTreeView();
+  view.update(appState.roots, appState.selectedId);
+  view.setGitStatus(collectGitStatusEntries(appState.repositories));
 }
 
 function initSidebarPanes() {
@@ -2343,118 +2255,6 @@ function capitalize(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
-// Directories default to closed (matching VS Code / Finder / GitHub conventions).
-// A user's explicit click on <summary> stores an override that wins for the
-// rest of the session.
-function shouldDirRenderOpen(dirPath: string): boolean {
-  return appState.dirOverrides.get(dirPath) === "open";
-}
-
-// When selection changes (initial load, follow-mode auto-switch, user click),
-// reveal the path to the selected file by marking its ancestor directories as
-// "open" in the same override map a manual click populates. Purely additive:
-// we never mark anything closed — if the user later collapses a revealed
-// ancestor, that stays collapsed (their next click stores "closed").
-function revealSelectedFile() {
-  if (!appState.selectedId) {
-    return;
-  }
-  for (const root of appState.roots) {
-    const doc = root.docs.find(candidate => candidate.id === appState.selectedId);
-    if (!doc) {
-      continue;
-    }
-    const parts = doc.relativePath.split("/").filter(Boolean);
-    let current = "";
-    for (let index = 0; index < parts.length - 1; index += 1) {
-      current = current ? `${current}/${parts[index]}` : parts[index]!;
-      appState.dirOverrides.set(current, "open");
-    }
-    return;
-  }
-}
-
-const FOLDER_ICON_SVG =
-  '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5a1 1 0 0 1 1-1h3l1.5 1.5H13a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4.5z"/></svg>';
-
-function renderNodes(nodes: TreeNode[]): string {
-  if (nodes.length === 0) {
-    return `<div class="tree-empty">No files in this root.</div>`;
-  }
-
-  return `<ul>${nodes
-    .map(node => {
-      if (node.kind === "dir") {
-        const openAttribute = shouldDirRenderOpen(node.path) ? " open" : "";
-        const dirMtime = renderTreeMtime(node.mtimeMs);
-        return `
-          <li class="tree-node tree-dir">
-            <details data-dir-path="${escapeHtmlAttribute(node.path)}"${openAttribute}>
-              <summary><span class="tree-icon tree-folder-icon" aria-hidden="true">${FOLDER_ICON_SVG}</span><span class="tree-dir-name">${escapeHtml(node.name)}</span>${dirMtime}</summary>
-              ${renderNodes(node.children ?? [])}
-            </details>
-          </li>
-        `;
-      }
-
-      const mtimeMarkup = renderTreeMtime(node.mtimeMs);
-
-      if (node.documentKind === "binary") {
-        return `
-          <li class="tree-node tree-doc">
-            <span class="tree-doc-disabled" title="Binary file — not viewable">
-              <span class="tree-icon">${fileIconForName(node.name)}</span>
-              <span class="tree-label">${escapeHtml(node.name)}</span>
-              ${mtimeMarkup}
-            </span>
-          </li>
-        `;
-      }
-
-      const isSelected = node.id === appState.selectedId;
-      return `
-        <li class="tree-node tree-doc">
-          <button type="button" class="tree-doc-button${isSelected ? " is-selected" : ""}" data-document-id="${escapeHtmlAttribute(node.id ?? "")}">
-            <span class="tree-icon">${fileIconForName(node.name)}</span>
-            <span class="tree-label">${escapeHtml(node.name)}</span>
-            ${mtimeMarkup}
-          </button>
-        </li>
-      `;
-    })
-    .join("")}</ul>`;
-}
-
-function renderTreeMtime(mtimeMs: number | undefined): string {
-  if (mtimeMs === undefined) {
-    return "";
-  }
-  const label = formatRelativeTime(mtimeMs, Date.now());
-  return `<span class="tree-mtime" data-mtime="${mtimeMs}">${escapeHtml(label)}</span>`;
-}
-
-// Refresh tree-mtime labels every second so they tick visibly. Each pass is a
-// DOM walk over ~one span per leaf + per directory; we skip the textContent
-// write when the formatted label hasn't changed (most ticks past the first
-// minute) so this stays cheap regardless of repo size. The server only
-// broadcasts state when fingerprints change, so we can't rely on SSE alone
-// to keep these labels fresh.
-window.setInterval(() => {
-  const now = Date.now();
-  document
-    .querySelectorAll<HTMLElement>(".tree-mtime[data-mtime]")
-    .forEach(element => {
-      const mtime = Number(element.dataset.mtime);
-      if (!Number.isFinite(mtime)) {
-        return;
-      }
-      const next = formatRelativeTime(mtime, now);
-      if (element.textContent !== next) {
-        element.textContent = next;
-      }
-    });
-}, 1000);
-
 function renderEmptyPreview(title: string, body: string) {
   closeMermaidViewer();
   previewTitleElement.textContent = title;
@@ -2606,8 +2406,6 @@ function applyMode(next: Mode) {
   // Each mode keeps its own pane state — visibility, collapse, height — so
   // flipping the toggle restores the layout the user left in that mode.
   appState.panes = readPaneState(next);
-  // Files-view choice is also per-mode.
-  appState.filesView = readFilesView(next);
 
   // Author <-> Review round-trip: snapshot Author's Follow choice on the way
   // out, restore it on the way back. Review must force Follow off (the
@@ -2652,30 +2450,6 @@ function applyMode(next: Mode) {
 
 modeAuthorButton.addEventListener("click", () => applyMode("author"));
 modeReviewButton.addEventListener("click", () => applyMode("review"));
-
-function syncFilesViewToggle(available: boolean) {
-  filesViewToggleElement.hidden = !available;
-  if (!available) {
-    return;
-  }
-  const isAll = appState.filesView === "all";
-  filesViewAllButton.setAttribute("aria-checked", String(isAll));
-  filesViewAllButton.classList.toggle("is-active", isAll);
-  filesViewChangedButton.setAttribute("aria-checked", String(!isAll));
-  filesViewChangedButton.classList.toggle("is-active", !isAll);
-}
-
-function applyFilesView(next: FilesView) {
-  if (appState.filesView === next) {
-    return;
-  }
-  appState.filesView = next;
-  writeFilesView(appState.mode, next);
-  renderSidebar();
-}
-
-filesViewAllButton.addEventListener("click", () => applyFilesView("all"));
-filesViewChangedButton.addEventListener("click", () => applyFilesView("changed"));
 
 staleHintActionElement.addEventListener("click", () => {
   const hint = appState.staleHint;

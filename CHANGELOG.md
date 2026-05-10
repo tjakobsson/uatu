@@ -9,6 +9,22 @@ versions follow the `package.json`'s `version` field.
 
 ### Added
 
+- **Document tree powered by [`@pierre/trees`](https://github.com/pierrecomputer/pierre/tree/main/packages/trees)** (`1.0.0-beta.3`, Apache-2.0). The Files-pane tree is now rendered by the library; uatu owns walking the filesystem and feeding it paths. Ambient git status (added / modified / deleted / renamed / untracked) appears as row annotations on every changed path.
+- **`.uatu.json` `tree` block** for tree filtering: `tree.exclude: string[]` (gitignore-compatible patterns including `!` negation) and `tree.respectGitignore: boolean` (default `true`; opt-out alternative to the `--no-gitignore` CLI flag — CLI flag wins when both are set).
+
+### Changed
+
+- **BREAKING — `.uatuignore` is retired.** Move patterns into `.uatu.json` `tree.exclude`. On session start, uatu emits a one-line warning if a `.uatuignore` file exists at any watched root, and does not honor its contents.
+- **BREAKING — All / Changed Files-pane toggle removed.** The "Changed" filtered view is replaced by ambient git-status row annotations on the single tree — diff state is always in context, never a separate page.
+- **BREAKING — Binary files are clickable, with inline image preview.** Selecting an image binary (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.svg`, `.ico`, `.avif`, `.bmp`) renders the image inline in the preview pane via `<img>` (served by the static-file fallback). Other binaries render a "this file type isn't viewable" notice. Previously these rows were non-clickable; the misleading "the selected file no longer exists" message has been fixed (it was hitting non-image binaries by accident).
+- **BREAKING — Sidebar file counter no longer shows `· N hidden`.** With one filtering source of truth (`.uatu.json` + built-in defaults + `.gitignore`), there is no longer a dual-source distinction to disclose. The counter shows `N files` or `N files · M binary`.
+
+### Deferred (returning in follow-up changes)
+
+- **Live mtime ticker.** The 1-second-ticking relative-time label on every tree row was uatu's signature cue but it's load-bearing against any third-party tree renderer. We accept that loss for now; expect it back as a row annotation or "recently active" pulse in a follow-up that targets `@pierre/trees`' `renderRowDecoration` slot.
+
+### Added (continued)
+
 - **Embedded terminal.** Hidden-by-default panel with a real PTY shell in
   the watched repo, toggled with `Ctrl+`` / `Cmd+`` or the **Terminal**
   button in the sidebar (under Author/Review). xterm.js rendering,
