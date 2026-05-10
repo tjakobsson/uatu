@@ -307,6 +307,50 @@ Every file under each watched root, with these exclusions:
 Files at or above 1 MB render without syntax highlighting so the browser stays
 responsive.
 
+### Diagnostics and freeze recovery
+
+`uatu watch` ships with a sibling **watchdog subprocess** and a small
+on-disk diagnostic surface, both intended to make `uatu` self-recovering
+and self-explaining if it ever wedges (see
+[issue #40](https://github.com/tjakobsson/uatu/issues/40)).
+
+By default the watchdog is on. It reads a heartbeat file the parent process
+touches every second; if the heartbeat goes stale beyond
+`--watchdog-timeout=<ms>` (default 30 000) — for example because the JS event
+loop is wedged on a native fsevents deadlock — the watchdog captures a
+forensic dump and force-kills the wedged parent so you don't have to escalate
+to `kill -9` from another terminal.
+
+```bash
+uatu watch                          # watchdog on, no verbose history
+uatu watch --debug                  # also writes a 1Hz NDJSON metrics log
+uatu watch --watchdog-timeout=60000 # tolerate longer pauses before force-kill
+uatu watch --no-watchdog            # escape hatch — disables the watchdog
+```
+
+Diagnostic files live under `$XDG_CACHE_HOME/uatu/` (or `~/.cache/uatu/` if
+`XDG_CACHE_HOME` is unset):
+
+| File | When |
+|---|---|
+| `heartbeat-<pid>` | Always, while `uatu watch` is healthy. |
+| `snapshot-<pid>.json` | Always, refreshed once per second. |
+| `debug-<pid>.ndjson` | Only with `--debug` (or `UATU_DEBUG=1`). Ring-buffered to ~10 MB. |
+| `dump-<pid>-<ts>.{stack,fds,metrics-tail,cause}.*` | Written by the watchdog when a freeze is detected. |
+
+When `--debug` is on, `GET /debug/metrics` returns the live counter snapshot
+as JSON.
+
+> **Privacy note.** Forensic dumps include absolute repository paths from
+> `lsof` (macOS) or `/proc/<pid>/fd/` (Linux). Review before sharing
+> externally.
+
+Forensic capture is platform-specific:
+- **macOS**: `sample <pid> 5` for stack, `lsof -Pan -p <pid>` for fds.
+- **Linux**: reads from `/proc/<pid>/` directly — no external commands.
+- **Windows**: capture is currently a sentinel; the watchdog still
+  force-terminates the wedged process.
+
 ## Validation
 
 ```bash

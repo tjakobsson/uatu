@@ -130,6 +130,13 @@ export type WatchOptions = {
   // precedence over the SPA's persisted localStorage preference at boot.
   // Undefined means "no startup override; let the browser decide".
   startupMode?: Mode;
+  // Diagnostic flags — see `watch-freeze-diagnostics` capability.
+  debug: boolean;
+  watchdogEnabled: boolean;
+  // Undefined means "use the watchdog's default (30s) or whatever
+  // UATU_HEARTBEAT_TIMEOUT_MS is set to in the env"; a number forces that
+  // value over the env.
+  watchdogTimeoutMs?: number;
 };
 
 export type ParsedCommand =
@@ -165,19 +172,22 @@ export function usageText(build: BuildInfo = BUILD): string {
   return `uatu ${formatBuildIdentifier(build)}
 
 Usage:
-  uatu watch [PATH...] [--force] [--no-open] [--no-follow] [--no-gitignore] [--mode <MODE>] [--port <PORT>]
+  uatu watch [PATH...] [--force] [--no-open] [--no-follow] [--no-gitignore] [--mode <MODE>] [--port <PORT>] [--debug]
   uatu --help
   uatu --version
 
 Options:
-  --no-open        Do not open a browser automatically
-  --no-follow      Start with follow mode disabled
-  --no-gitignore   Do not honor .gitignore patterns when indexing files
-  --force          Watch non-git paths anyway; indexing may be slow
-  --mode <MODE>    Start in 'author' or 'review' mode (default: persisted browser preference, or 'author')
-  -p, --port       Bind the local server to a specific port
-  -h, --help       Show help
-  -V, --version    Show version
+  --no-open               Do not open a browser automatically
+  --no-follow             Start with follow mode disabled
+  --no-gitignore          Do not honor .gitignore patterns when indexing files
+  --force                 Watch non-git paths anyway; indexing may be slow
+  --mode <MODE>           Start in 'author' or 'review' mode (default: persisted browser preference, or 'author')
+  -p, --port              Bind the local server to a specific port
+  --debug                 Record verbose 1Hz counter history under \$XDG_CACHE_HOME/uatu (or ~/.cache/uatu)
+  --no-watchdog           Suppress the companion watchdog subprocess (escape hatch — leaves no recovery on freeze)
+  --watchdog-timeout <ms> Override the heartbeat staleness threshold (default: 30000)
+  -h, --help              Show help
+  -V, --version           Show version
 `;
 }
 
@@ -247,6 +257,9 @@ export function parseCommand(argv: string[]): ParsedCommand {
   let respectGitignore = DEFAULT_RESPECT_GITIGNORE;
   let force = false;
   let startupMode: Mode | undefined;
+  let debug = false;
+  let watchdogEnabled = true;
+  let watchdogTimeoutMs: number | undefined;
   const rootPaths: string[] = [];
 
   for (let index = 1; index < argv.length; index += 1) {
@@ -298,6 +311,35 @@ export function parseCommand(argv: string[]): ParsedCommand {
       continue;
     }
 
+    if (arg === "--debug") {
+      debug = true;
+      continue;
+    }
+
+    if (arg === "--no-watchdog") {
+      watchdogEnabled = false;
+      continue;
+    }
+
+    if (arg === "--watchdog-timeout" || arg.startsWith("--watchdog-timeout=")) {
+      let value: string | undefined;
+      if (arg === "--watchdog-timeout") {
+        value = argv[index + 1];
+        if (!value) {
+          throw new Error("missing value for --watchdog-timeout");
+        }
+        index += 1;
+      } else {
+        value = arg.slice("--watchdog-timeout=".length);
+      }
+      const parsed = Number.parseInt(value, 10);
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        throw new Error(`invalid --watchdog-timeout value: '${value}'`);
+      }
+      watchdogTimeoutMs = parsed;
+      continue;
+    }
+
     if (arg === "--mode" || arg.startsWith("--mode=")) {
       let value: string | undefined;
       if (arg === "--mode") {
@@ -330,6 +372,16 @@ export function parseCommand(argv: string[]): ParsedCommand {
     follow = false;
   }
 
+  // UATU_DEBUG=1 (or any non-empty value) is equivalent to passing --debug.
+  // The flag wins on conflict — if --debug is passed, debug stays true; if
+  // it isn't, the env var can still enable it.
+  if (!debug) {
+    const envDebug = process.env.UATU_DEBUG;
+    if (typeof envDebug === "string" && envDebug.length > 0) {
+      debug = true;
+    }
+  }
+
   return {
     kind: "watch",
     options: {
@@ -341,6 +393,9 @@ export function parseCommand(argv: string[]): ParsedCommand {
       respectGitignore,
       force,
       startupMode,
+      debug,
+      watchdogEnabled,
+      watchdogTimeoutMs,
     },
   };
 }
@@ -894,6 +949,11 @@ export type WatchSessionOptions = {
   startupMode?: Mode;
   terminalEnabled?: boolean;
   terminalConfig?: TerminalConfigPayload;
+  // Optional metrics registry. When provided, the watch session will
+  // increment counters for watcher events and refresh lifecycle. Callers
+  // construct the registry so it can be shared with the snapshot writer
+  // and the /debug/metrics endpoint.
+  metrics?: import("./debug-metrics").MetricsRegistry;
 };
 
 // 32 random bytes, base64url-encoded — sufficient entropy that brute-forcing
@@ -968,6 +1028,7 @@ export function createWatchSession(
   const terminalEnabled = options.terminalEnabled ?? false;
   const terminalConfig: TerminalConfigPayload | undefined = options.terminalConfig;
   const terminalToken = createTerminalToken();
+  const metrics = options.metrics;
   let roots: RootGroup[] = [];
   let repositories: RepositoryReviewSnapshot[] = [];
   // The unscoped index holds every viewable doc under the watched roots,
@@ -1015,34 +1076,47 @@ export function createWatchSession(
   };
 
   const refresh = async (changedId: string | null) => {
-    const nextRoots = await scanRoots(entries, { respectGitignore, matcherCache });
-    const nextRepositories = await collectRepositorySnapshots(entries, nextRoots).catch(error => {
-      console.error(`uatu: failed to refresh git review data: ${error instanceof Error ? error.message : String(error)}`);
-      return repositories;
-    });
+    metrics?.set("refresh.in_flight", 1);
+    const startedAt = Date.now();
+    try {
+      const nextRoots = await scanRoots(entries, { respectGitignore, matcherCache });
+      const nextRepositories = await collectRepositorySnapshots(entries, nextRoots).catch(error => {
+        console.error(`uatu: failed to refresh git review data: ${error instanceof Error ? error.message : String(error)}`);
+        return repositories;
+      });
 
-    if (scope.kind === "file" && !hasDocument(nextRoots, scope.documentId)) {
-      scope = { kind: "folder" };
-    }
+      if (scope.kind === "file" && !hasDocument(nextRoots, scope.documentId)) {
+        scope = { kind: "folder" };
+      }
 
-    const visibleRoots = applyScope(nextRoots);
-    const nextFingerprint = createStateFingerprint(visibleRoots, nextRepositories);
-    const changedDoc = changedId ? findDocument(visibleRoots, changedId) : undefined;
-    const changedDocumentId =
-      changedDoc && changedDoc.kind !== "binary" ? changedId : null;
-    const shouldBroadcast = nextFingerprint !== stateFingerprint || changedDocumentId !== null;
+      const visibleRoots = applyScope(nextRoots);
+      const nextFingerprint = createStateFingerprint(visibleRoots, nextRepositories);
+      const changedDoc = changedId ? findDocument(visibleRoots, changedId) : undefined;
+      const changedDocumentId =
+        changedDoc && changedDoc.kind !== "binary" ? changedId : null;
+      const shouldBroadcast = nextFingerprint !== stateFingerprint || changedDocumentId !== null;
 
-    roots = visibleRoots;
-    unscopedRoots = nextRoots;
-    repositories = nextRepositories;
-    stateFingerprint = nextFingerprint;
+      roots = visibleRoots;
+      unscopedRoots = nextRoots;
+      repositories = nextRepositories;
+      stateFingerprint = nextFingerprint;
 
-    if (shouldBroadcast) {
-      broadcast(createStatePayload(roots, initialFollow, changedDocumentId, scope, repositories, startupMode, terminalEnabled, terminalConfig));
+      if (shouldBroadcast) {
+        broadcast(createStatePayload(roots, initialFollow, changedDocumentId, scope, repositories, startupMode, terminalEnabled, terminalConfig));
+      }
+      metrics?.inc("refresh.completed_total");
+      metrics?.set("refresh.last_success_at", Date.now());
+      metrics?.set("refresh.last_duration_ms", Date.now() - startedAt);
+    } catch (err) {
+      metrics?.inc("refresh.errored_total");
+      throw err;
+    } finally {
+      metrics?.set("refresh.in_flight", 0);
     }
   };
 
   const scheduleRefresh = (changedId: string | null) => {
+    metrics?.inc("refresh.scheduled_total");
     if (changedId) {
       pendingChangedId = changedId;
     }
@@ -1061,6 +1135,7 @@ export function createWatchSession(
   };
 
   const handleWatcherEvent = (eventName: string, filePath: string) => {
+    metrics?.inc(`watcher.events_total.${eventName}`);
     const absolutePath = path.resolve(filePath);
 
     // A root's `.uatuignore`/`.gitignore` itself just changed — drop the cached
@@ -1122,8 +1197,10 @@ export function createWatchSession(
         usePolling: options.usePolling ?? false,
         interval: 100,
         awaitWriteFinish: {
+          // Loosened from 25ms in 2026-05 (see add-watch-freeze-diagnostics)
+          // to reduce main-thread fs.stat pressure during heavy file churn.
           stabilityThreshold: 100,
-          pollInterval: 25,
+          pollInterval: 250,
         },
         ignored: isPathIgnored,
       });
@@ -1147,6 +1224,7 @@ export function createWatchSession(
       roots = applyScope(scanned);
       stateFingerprint = createStateFingerprint(roots, repositories);
       reconcileTimer = setInterval(() => {
+        metrics?.inc("reconcile.ticks_total");
         void refresh(null).catch(error => {
           console.error(`uatu: failed to reconcile state: ${error instanceof Error ? error.message : String(error)}`);
         });
@@ -1189,6 +1267,9 @@ export function createWatchSession(
     },
     isTerminalEnabled() {
       return terminalEnabled;
+    },
+    getSseSubscriberCount() {
+      return subscribers.size;
     },
     // Test-only handle: lets the regression suite emit synthetic chokidar
     // errors against the real underlying watcher to verify the crash guard.

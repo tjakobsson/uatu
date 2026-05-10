@@ -47,6 +47,9 @@ export type TerminalServerOptions = {
   // the 5s default; tests pass a small value (e.g. 50) so the SIGHUP path
   // can be exercised without a real-time pause.
   reconnectGraceMs?: number;
+  // Optional metrics sink — wired by cli.ts so the diagnostics layer can
+  // see PTY lifecycle without every caller threading the registry through.
+  metrics?: { inc(name: string): void; set(name: string, value: number): void; get(name: string): number };
 };
 
 export type PrepareSessionResult =
@@ -83,6 +86,10 @@ export type TerminalServer = {
 export function createTerminalServer(options: TerminalServerOptions): TerminalServer {
   const sessions = new Map<string, Session>();
   const graceMs = options.reconnectGraceMs ?? DEFAULT_RECONNECT_GRACE_MS;
+  const metrics = options.metrics;
+  const updateActive = (): void => {
+    metrics?.set("pty.sessions_active", sessions.size);
+  };
 
   return {
     async isAvailable() {
@@ -164,6 +171,8 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
         rows,
       };
       sessions.set(id, session);
+      metrics?.inc("pty.spawned_total");
+      updateActive();
 
       pty.onData(chunk => {
         const bytes = typeof chunk === "string" ? new TextEncoder().encode(chunk) : (chunk as unknown as Uint8Array);
@@ -194,6 +203,8 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
         }
         if (session.reapTimer) clearTimeout(session.reapTimer);
         sessions.delete(id);
+        metrics?.inc("pty.reaped_total");
+        updateActive();
       });
     },
 
@@ -249,6 +260,8 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
           // Already dead.
         }
         sessions.delete(session.id);
+        metrics?.inc("pty.reaped_total");
+        updateActive();
       }, graceMs);
       session.reapTimer.unref?.();
     },
@@ -263,6 +276,7 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
         }
       }
       sessions.clear();
+      updateActive();
     },
   };
 }

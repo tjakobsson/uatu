@@ -25,6 +25,15 @@ const GIT_MAX_BUFFER = 256 * 1024;
 const DEFAULT_THRESHOLDS: ReviewThresholds = { medium: 35, high: 70 };
 const MAX_COMMITS = 100;
 
+// Module-level metrics hook: cli.ts wires its registry in at startup so
+// safeGit can increment counters without every caller threading the
+// registry through. Optional and safe to leave unset (e.g. in tests).
+type GitMetricsSink = { inc(name: string): void };
+let gitMetricsSink: GitMetricsSink | null = null;
+export function setGitMetricsSink(sink: GitMetricsSink | null): void {
+  gitMetricsSink = sink;
+}
+
 type GitResult =
   | { ok: true; stdout: string; stderr: string }
   | { ok: false; stdout: string; stderr: string; message: string };
@@ -43,6 +52,7 @@ export async function safeGit(
   args: string[],
   options: { maxBuffer?: number; timeoutMs?: number } = {},
 ): Promise<GitResult> {
+  gitMetricsSink?.inc("git.execs_total");
   try {
     const { stdout, stderr } = await execFileAsync("git", args, {
       cwd,
@@ -53,7 +63,10 @@ export async function safeGit(
     });
     return { ok: true, stdout, stderr };
   } catch (error) {
-    const err = error as Error & { stdout?: string; stderr?: string };
+    const err = error as Error & { stdout?: string; stderr?: string; killed?: boolean; signal?: string };
+    if (err.killed === true || err.signal === "SIGTERM") {
+      gitMetricsSink?.inc("git.timeouts_total");
+    }
     return {
       ok: false,
       stdout: typeof err.stdout === "string" ? err.stdout : "",
