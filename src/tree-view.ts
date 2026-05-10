@@ -132,23 +132,6 @@ export class TreeView {
     this.tree.setGitStatus(out);
   }
 
-  // Sync the library's selection to a programmatic change (e.g. follow-mode
-  // auto-switch). Reveals ancestor folders before selecting. Suppresses the
-  // resulting onSelectionChange echo so we don't re-route into the same
-  // document.
-  syncSelectionToDocument(documentId: string | null): void {
-    if (this.tree === null) {
-      return;
-    }
-    if (documentId === null) {
-      return;
-    }
-    const path = this.pathForDocumentId(documentId);
-    if (path !== null) {
-      this.revealAndSelect(path);
-    }
-  }
-
   dispose(): void {
     if (this.tree !== null) {
       this.tree.unmount();

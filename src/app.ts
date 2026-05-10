@@ -1305,7 +1305,11 @@ function renderImagePreview(doc: DocumentMeta): void {
   // setPreviewBase, which already points at the document's directory under
   // the watched root — the same path the static-file fallback knows how to
   // serve. Encoded for safety against names with spaces / special chars.
-  previewElement.innerHTML = `<div class="image-preview"><img alt="${escapeHtmlAttribute(doc.name)}" src="./${encodeURI(doc.name)}"></div>`;
+  // encodeURIComponent (not encodeURI) — doc.name is a bare filename with no
+  // path separators to preserve, and we MUST encode `#` and `?` so filenames
+  // like `screenshot#2.png` aren't truncated by the URL parser into a path
+  // ending at `screenshot` plus a `#2.png` fragment.
+  previewElement.innerHTML = `<div class="image-preview"><img alt="${escapeHtmlAttribute(doc.name)}" src="./${encodeURIComponent(doc.name)}"></div>`;
   selectionInspector.recompute();
 }
 
