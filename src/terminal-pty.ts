@@ -9,6 +9,15 @@
 // "register N listeners" pattern terminal-server.ts grew up with. The
 // adapter routes a single Bun callback through to a list of listeners and
 // turns `proc.exited` into onExit notifications.
+//
+// Bytes pass through verbatim. We deliberately do NOT UTF-8 decode here:
+// kernel `read()` boundaries land mid-codepoint constantly when TUIs emit
+// dense multi-byte runs (e.g. `─` = E2 94 80), and `TextDecoder.decode`
+// without `{ stream: true }` would substitute U+FFFD for the orphaned
+// bytes. Even with stream:true, a module-level decoder would mix partial-
+// codepoint state across sessions. The right consumer of the byte stream
+// is xterm.js, whose `term.write(Uint8Array)` has a built-in stateful
+// UTF-8 decoder designed for exactly this pattern.
 
 export type PtyOptions = {
   cwd: string;
@@ -19,17 +28,15 @@ export type PtyOptions = {
 
 export type PtyProcess = {
   pid: number;
-  onData(listener: (data: string) => void): { dispose(): void };
+  onData(listener: (data: Uint8Array) => void): { dispose(): void };
   onExit(listener: (event: { exitCode: number; signal: number | null }) => void): { dispose(): void };
   write(data: string): void;
   resize(cols: number, rows: number): void;
   kill(signal?: string): void;
 };
 
-const decoder = new TextDecoder();
-
 export function spawnPty(shell: string, args: string[], options: PtyOptions): PtyProcess {
-  const dataListeners = new Set<(data: string) => void>();
+  const dataListeners = new Set<(data: Uint8Array) => void>();
   const exitListeners = new Set<(event: { exitCode: number; signal: number | null }) => void>();
   let exited = false;
   let exitInfo: { exitCode: number; signal: number | null } | null = null;
@@ -42,8 +49,7 @@ export function spawnPty(shell: string, args: string[], options: PtyOptions): Pt
       rows: options.rows,
       data(_terminal, bytes) {
         if (dataListeners.size === 0) return;
-        const text = decoder.decode(bytes);
-        for (const listener of dataListeners) listener(text);
+        for (const listener of dataListeners) listener(bytes);
       },
     },
   } as Parameters<typeof Bun.spawn>[1]);
@@ -65,7 +71,7 @@ export function spawnPty(shell: string, args: string[], options: PtyOptions): Pt
     get pid() {
       return proc2.pid;
     },
-    onData(listener) {
+    onData(listener: (data: Uint8Array) => void) {
       dataListeners.add(listener);
       return {
         dispose() {

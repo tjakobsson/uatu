@@ -174,8 +174,7 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
       metrics?.inc("pty.spawned_total");
       updateActive();
 
-      pty.onData(chunk => {
-        const bytes = typeof chunk === "string" ? new TextEncoder().encode(chunk) : (chunk as unknown as Uint8Array);
+      pty.onData(bytes => {
         if (session.socket && session.socket.readyState === WS_OPEN) {
           try {
             session.socket.send(bytes);
