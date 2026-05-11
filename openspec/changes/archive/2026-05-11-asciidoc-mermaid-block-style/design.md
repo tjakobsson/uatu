@@ -46,7 +46,7 @@ const extensionRegistry = asciidoctor.Extensions.create(function () {
   this.block(function () {
     this.named("mermaid");
     this.onContext(["listing", "literal", "open"]);
-    this.process((parent, reader) => {
+    this.process(function (parent, reader) {
       return this.createBlock(parent, "listing", reader.getLines(), {
         style: "source",
         language: "mermaid",
