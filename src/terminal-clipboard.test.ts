@@ -132,6 +132,22 @@ describe("handleClipboardKeyEvent: bare Ctrl+C", () => {
     expect(result).toBe(false);
     expect(writeText).toHaveBeenCalledTimes(1);
   });
+
+  it("is silent when writeText rejects (selection still cleared, event still swallowed)", async () => {
+    installClipboard({ writeText: async () => { throw new Error("permission denied"); } });
+    const term = makeTerm({ selection: "hello" });
+    const ev = makeEvent("c", { ctrl: true });
+
+    const result = call(ev, term);
+
+    expect(result).toBe(false);
+    expect(ev.preventDefault).toHaveBeenCalledTimes(1);
+    // Selection clears synchronously; the rejection is fire-and-forget.
+    expect(term.clearSelectionMock).toHaveBeenCalledTimes(1);
+    // Let the rejection settle without bubbling to the test runner.
+    await Promise.resolve();
+    await Promise.resolve();
+  });
 });
 
 describe("handleClipboardKeyEvent: bare Ctrl+V", () => {
@@ -207,6 +223,21 @@ describe("handleClipboardKeyEvent: Ctrl+Shift+C", () => {
     expect(result).toBe(false);
     expect(ev.preventDefault).toHaveBeenCalledTimes(1);
     expect(writeText).not.toHaveBeenCalled();
+  });
+
+  it("is silent when writeText rejects (event still swallowed, no throw)", async () => {
+    installClipboard({ writeText: async () => { throw new Error("denied"); } });
+    const term = makeTerm({ selection: "selection" });
+    const ev = makeEvent("c", { ctrl: true, shift: true });
+
+    const result = call(ev, term);
+
+    expect(result).toBe(false);
+    expect(ev.preventDefault).toHaveBeenCalledTimes(1);
+    // Ctrl+Shift+C does NOT clear selection (unlike bare Ctrl+C).
+    expect(term.clearSelectionMock).not.toHaveBeenCalled();
+    await Promise.resolve();
+    await Promise.resolve();
   });
 });
 
