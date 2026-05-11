@@ -1026,8 +1026,12 @@ test("renders the AsciiDoc cheat sheet with full heading depth, TOC, admonitions
   // Highlighted code (the cheat sheet has multiple [source,javascript] blocks).
   await expect(page.locator("#preview pre code.hljs.language-javascript").first()).toBeVisible();
 
-  // Mermaid diagram is hydrated client-side.
-  await expect(page.locator("#preview .mermaid svg")).toBeVisible();
+  // Both AsciiDoc mermaid forms — `[source,mermaid]` and the bare `[mermaid]`
+  // block style — hydrate client-side into rendered SVGs.
+  const diagrams = page.locator("#preview .mermaid svg");
+  await expect(diagrams).toHaveCount(2);
+  await expect(diagrams.first()).toBeVisible();
+  await expect(diagrams.nth(1)).toBeVisible();
 
   // Block quote and sidebar.
   await expect(page.locator("#preview .quoteblock")).toBeVisible();
