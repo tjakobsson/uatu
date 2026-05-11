@@ -261,10 +261,6 @@ const appState = {
   // Source-pane fraction of the split container size, stored per orientation
   // so flipping side-by-side <-> stacked restores each orientation's ratio.
   splitRatio: readSplitRatioPreference(safeLocalStorage()) as SplitRatio,
-  // True when narrow-width auto-stack is engaged: stored viewLayout is
-  // "split-h" but the preview is currently rendered as stacked because the
-  // pane is too narrow. The stored preference is unchanged.
-  splitAutoStacked: false,
   // Per-active-file stale-content hint state. Only set in Review mode; cleared
   // by manual navigation, mode switch back to Author, or refresh action.
   staleHint: null as StaleHint | null,
@@ -1289,13 +1285,22 @@ async function renderSplitForDocument(payload: RenderedDocument): Promise<void> 
   const cache = documentViewCache.get(payload.id) ?? {};
   let sourcePayload = cache.source;
   let renderedPayload = cache.rendered;
+  // Fetch any missing view(s) in parallel. The both-missing path is rare in
+  // practice (at least the active viewMode payload is usually warm by the
+  // time split is mounted), but handling it here avoids a fall-through to
+  // single rendering when the user enters split with a cold cache.
   if (!sourcePayload || !renderedPayload) {
-    const missingView: ViewMode = !sourcePayload ? "source" : "rendered";
-    const fetched = await fetchDocumentView(payload.id, missingView);
-    if (fetched) {
-      rememberDocumentPayload(fetched);
-      if (missingView === "source") sourcePayload = fetched;
-      else renderedPayload = fetched;
+    const [fetchedSource, fetchedRendered] = await Promise.all([
+      sourcePayload ? Promise.resolve(null) : fetchDocumentView(payload.id, "source"),
+      renderedPayload ? Promise.resolve(null) : fetchDocumentView(payload.id, "rendered"),
+    ]);
+    if (fetchedSource) {
+      rememberDocumentPayload(fetchedSource);
+      sourcePayload = fetchedSource;
+    }
+    if (fetchedRendered) {
+      rememberDocumentPayload(fetchedRendered);
+      renderedPayload = fetchedRendered;
     }
   }
   if (!sourcePayload || !renderedPayload) {
@@ -2587,7 +2592,12 @@ function currentRenderedPayload(): RenderedDocument | null {
 function applySplitRatioToDom(): void {
   const sourcePane = previewElement.querySelector<HTMLElement>(".preview-pane-source");
   if (!sourcePane) return;
-  const orientation: "h" | "v" = previewElement.classList.contains("is-split-v") ? "v" : "h";
+  // Auto-stack renders as a column even with the is-split-h class — pick the
+  // ratio axis to match the visual orientation, not just the stored class.
+  const isStackedVisually =
+    previewElement.classList.contains("is-split-v") ||
+    previewElement.getAttribute("data-auto-stack") === "true";
+  const orientation: "h" | "v" = isStackedVisually ? "v" : "h";
   const ratio = appState.splitRatio[orientation];
   if (orientation === "h") {
     sourcePane.style.flexBasis = `${ratio * 100}%`;
@@ -2614,7 +2624,13 @@ function attachSplitResizer(resizer: HTMLElement): void {
     event.preventDefault();
     resizer.setPointerCapture(event.pointerId);
     resizer.classList.add("is-dragging");
-    const orientation: "h" | "v" = previewElement.classList.contains("is-split-v") ? "v" : "h";
+    // Auto-stack mode keeps the stored `is-split-h` class but renders as a
+    // column visually; treat it as vertical for drag math so clientY drives
+    // the resize instead of clientX.
+    const isStackedVisually =
+      previewElement.classList.contains("is-split-v") ||
+      previewElement.getAttribute("data-auto-stack") === "true";
+    const orientation: "h" | "v" = isStackedVisually ? "v" : "h";
     const containerRect = previewElement.getBoundingClientRect();
     const total = orientation === "h" ? containerRect.width : containerRect.height;
     // Available space for the panes (subtract resizer width / height).
@@ -2659,22 +2675,18 @@ const AUTO_STACK_THRESHOLD = 2 * MIN_PANE_SIZE + 8;
 function applyAutoStackIfNeeded(): void {
   if (!previewElement.classList.contains("is-split")) {
     previewElement.removeAttribute("data-auto-stack");
-    appState.splitAutoStacked = false;
     return;
   }
   if (appState.viewLayout !== "split-h") {
     previewElement.removeAttribute("data-auto-stack");
-    appState.splitAutoStacked = false;
     return;
   }
   const width = previewElement.getBoundingClientRect().width;
   const shouldStack = width > 0 && width < AUTO_STACK_THRESHOLD;
   if (shouldStack) {
     previewElement.setAttribute("data-auto-stack", "true");
-    appState.splitAutoStacked = true;
   } else {
     previewElement.removeAttribute("data-auto-stack");
-    appState.splitAutoStacked = false;
   }
   applySplitRatioToDom();
 }
