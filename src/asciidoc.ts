@@ -14,6 +14,28 @@ import { escapeHtml, highlightCodeBlocks, SYNTAX_HIGHLIGHT_BYTES_LIMIT } from ".
 
 const asciidoctor = Asciidoctor();
 
+// `[mermaid]` is the canonical Asciidoctor Diagram block style for declaring a
+// mermaid diagram. We don't bundle Asciidoctor Diagram's server-side rasterizer
+// — instead we intercept `[mermaid]` blocks at parse time and rewrite them into
+// the same AST shape `[source,mermaid]` produces, so the existing
+// `normalizeAsciidoctorListings` / client-side `replaceMermaidCodeBlocks`
+// pipeline applies uniformly to both authoring forms.
+//
+// The DSL callbacks below MUST be plain functions, not arrows: Asciidoctor.js
+// uses `this` to dispatch to the BlockProcessorDsl / BlockProcessorInstance.
+const mermaidExtensionRegistry = asciidoctor.Extensions.create(function () {
+  this.block(function () {
+    this.named("mermaid");
+    this.onContext(["listing", "literal", "open"]);
+    this.process(function (parent, reader) {
+      return this.createBlock(parent, "listing", reader.getLines(), {
+        style: "source",
+        language: "mermaid",
+      });
+    });
+  });
+});
+
 // Asciidoctor wraps every [source,LANG] listing in
 // `<pre class="highlight"><code class="language-X" data-lang="X">…</code></pre>`.
 // Normalizing to the `<pre><code class="language-X">` shape that micromark
@@ -176,6 +198,7 @@ export function renderAsciidocToHtml(source: string): RenderedAsciidoc {
     safe: "secure",
     standalone: false,
     attributes: { showtitle: true, relfilesuffix: ".adoc" },
+    extension_registry: mermaidExtensionRegistry,
   });
   const rawHtml = doc.convert();
 
