@@ -114,18 +114,58 @@ graph TD; A-->B
     expect(hydrated).toContain("graph TD");
   });
 
-  test("bare [mermaid] block (no source style) renders as a literal block — matches GitHub", () => {
-    // GitHub does NOT recognize the bare [mermaid] form; we follow that.
+  test("bare [mermaid] block on a ---- listing renders as a language-mermaid code block", () => {
+    // `[mermaid]` is Asciidoctor Diagram's canonical block style. uatu's
+    // block-processor extension rewrites it into the same shape `[source,mermaid]`
+    // produces, so the client-side hydration path applies uniformly.
     const { html } = renderAsciidocToHtml(`[mermaid]
+----
+graph TD; A-->B
+----
+`);
+    expect(html).toContain('<pre><code class="language-mermaid">');
+    expect(html).toContain("graph TD;");
+
+    const hydrated = replaceMermaidCodeBlocks(html);
+    expect(hydrated).toContain('<div class="mermaid">');
+  });
+
+  test("bare [mermaid] block on a .... literal delimiter produces the same HTML as the ---- listing form", () => {
+    const dashes = renderAsciidocToHtml(`[mermaid]
+----
+graph TD; X-->Y
+----
+`).html;
+    const dots = renderAsciidocToHtml(`[mermaid]
 ....
 graph TD; X-->Y
 ....
+`).html;
+    expect(dots).toBe(dashes);
+  });
+
+  test("[mermaid] and [source,mermaid] produce byte-identical HTML for the same body", () => {
+    const bare = renderAsciidocToHtml(`[mermaid]
+----
+graph TD; A-->B
+----
+`).html;
+    const source = renderAsciidocToHtml(`[source,mermaid]
+----
+graph TD; A-->B
+----
+`).html;
+    expect(bare).toBe(source);
+  });
+
+  test("a bare ---- listing without the [mermaid] style still renders as a plain literal block", () => {
+    // Regression guard: the extension MUST NOT swallow every delimited block —
+    // only those declared with the `mermaid` block style above the delimiter.
+    const { html } = renderAsciidocToHtml(`----
+not a diagram, just preformatted text
+----
 `);
-    // No language-mermaid class to trigger the diagram path.
     expect(html).not.toContain("language-mermaid");
-    // Stays as a literal pre.
-    expect(html).toContain("literalblock");
-    expect(html).toContain("graph TD;");
 
     const hydrated = replaceMermaidCodeBlocks(html);
     expect(hydrated).not.toContain('<div class="mermaid">');

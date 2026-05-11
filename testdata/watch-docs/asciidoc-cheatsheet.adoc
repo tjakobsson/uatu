@@ -71,9 +71,9 @@ Another term::
 | done
 | highlight.js token coloring
 
-| `[source,mermaid]`
+| `[source,mermaid]` and `[mermaid]`
 | done
-| Hydrated client-side
+| Both forms hydrate client-side
 
 | `include::` directive
 | disabled
@@ -105,7 +105,7 @@ when [thing] occurs, do other-thing.
 
 == Mermaid Diagrams
 
-`[source,mermaid]` listings hydrate into a real diagram (matches GitHub):
+`[source,mermaid]` listings hydrate into a real diagram:
 
 [source,mermaid]
 ----
@@ -115,12 +115,24 @@ graph TD
   Sanitize --> Browser
 ----
 
-The bare `[mermaid]` block, by contrast, stays a literal block — also matching
-GitHub, which only recognizes the `[source,mermaid]` form:
+The bare `[mermaid]` block style is the canonical Asciidoctor Diagram syntax;
+uatu intercepts it at parse time so it hydrates the same way. Recognized over
+`----` (listing), `....` (literal), and `--` (open) delimiters:
 
 [mermaid]
 ....
-this would NOT render as a diagram
+graph LR
+  File[".adoc / .md file"] --> Watch
+  Watch --> Parser{Format?}
+  Parser -->|Markdown| MD["micromark + GFM"]
+  Parser -->|AsciiDoc| AD["Asciidoctor.js"]
+  MD --> Sanitize
+  AD --> Sanitize
+  Sanitize --> HL["highlight.js"]
+  HL --> HTML[Rendered HTML]
+  HTML --> Browser
+  HTML -.->|"language-mermaid"| Mermaid((Mermaid))
+  Mermaid -.-> Browser
 ....
 
 == Admonitions
