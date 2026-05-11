@@ -181,6 +181,12 @@ Author/Review row).
   long-running `tail -f`, `claude code` session, or build. The keyboard
   toggle (`Ctrl+``) and minimize / fullscreen buttons all preserve PTYs
   and don't prompt.
+- **Clipboard.** Windows-Terminal-parity shortcuts on Windows / Linux:
+  bare `Ctrl+C` copies when text is selected (otherwise sends SIGINT to
+  the shell), bare `Ctrl+V` pastes, and `Ctrl+Shift+C` / `Ctrl+Shift+V`
+  work the same. macOS keeps the standard `Cmd+C` / `Cmd+V`. Inside the
+  installed PWA, `Ctrl+Shift+C` is captured via the Keyboard Lock API so
+  Edge's DevTools shortcut doesn't steal it.
 
 ### Installing as a desktop app (PWA)
 

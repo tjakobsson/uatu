@@ -3,6 +3,12 @@ import { FitAddon } from "@xterm/addon-fit";
 
 import "@xterm/xterm/css/xterm.css";
 
+import {
+  acquireKeyboardLockOnce,
+  detectIsMac,
+  handleClipboardKeyEvent,
+} from "./terminal-clipboard";
+
 const TERMINAL_TOKEN_KEY = "uatu:terminal-token";
 
 // Reads a CSS custom property off `:root` and returns it trimmed, falling back
@@ -172,11 +178,21 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
       scrollback: 5000,
       allowProposedApi: false,
     });
+    // Windows-Terminal-parity clipboard shortcuts. Attached BEFORE open()
+    // because xterm.js consults this handler from its keydown listener; the
+    // listener is wired during open(). Mac short-circuits to passthrough
+    // inside the handler so Cmd+C / Cmd+V keep using xterm's defaults.
+    const isMac = detectIsMac();
+    term.attachCustomKeyEventHandler(event => handleClipboardKeyEvent(event, term!, isMac));
     fit = new FitAddon();
     term.loadAddon(fit);
     options.container.replaceChildren();
     term.open(options.container);
     fit.fit();
+    // Best-effort: in installed-PWA standalone mode, ask the browser to
+    // deliver KeyC to the page so Ctrl+Shift+C reaches our handler instead
+    // of opening Edge's DevTools. Page-singleton inside the helper.
+    acquireKeyboardLockOnce();
 
     const wsUrl = new URL(window.location.href);
     wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
