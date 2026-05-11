@@ -248,6 +248,109 @@ export function writeViewModePreference(
   }
 }
 
+// View layout controls how the preview body arranges the active document's
+// representations. "single" shows one representation at a time (chosen by
+// ViewMode); "split-h" places Source on the left and Rendered on the right;
+// "split-v" places Source on top and Rendered below. Layout is a single
+// global preference, persisted to localStorage, distinct from ViewMode.
+export type ViewLayout = "single" | "split-h" | "split-v";
+
+export const VIEW_LAYOUT_STORAGE_KEY = "uatu:view-layout";
+
+export const DEFAULT_VIEW_LAYOUT: ViewLayout = "single";
+
+export function isViewLayout(value: unknown): value is ViewLayout {
+  return value === "single" || value === "split-h" || value === "split-v";
+}
+
+export function readViewLayoutPreference(storage: ModeStorage | null | undefined): ViewLayout {
+  if (!storage) {
+    return DEFAULT_VIEW_LAYOUT;
+  }
+  try {
+    const raw = storage.getItem(VIEW_LAYOUT_STORAGE_KEY);
+    return isViewLayout(raw) ? raw : DEFAULT_VIEW_LAYOUT;
+  } catch {
+    return DEFAULT_VIEW_LAYOUT;
+  }
+}
+
+export function writeViewLayoutPreference(
+  storage: ModeStorage | null | undefined,
+  layout: ViewLayout,
+): void {
+  if (!storage) return;
+  try {
+    storage.setItem(VIEW_LAYOUT_STORAGE_KEY, layout);
+  } catch {
+    // best-effort persistence
+  }
+}
+
+// Split ratio is the Source pane's fraction of the available split-container
+// size along the active axis, stored independently per orientation so flipping
+// side-by-side <-> stacked restores each orientation's last user-chosen ratio.
+export type SplitRatio = { h: number; v: number };
+
+export const VIEW_SPLIT_RATIO_STORAGE_KEY = "uatu:view-split-ratio";
+
+export const DEFAULT_SPLIT_RATIO: SplitRatio = { h: 0.5, v: 0.5 };
+
+// Minimum/maximum stored ratio: panes can still be smaller during a transient
+// drag clamp, but the persisted value stays inside this range so it never gets
+// "stuck" at 0 or 1.
+const MIN_STORED_RATIO = 0.05;
+const MAX_STORED_RATIO = 0.95;
+
+function clampRatio(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+  if (value < MIN_STORED_RATIO) return MIN_STORED_RATIO;
+  if (value > MAX_STORED_RATIO) return MAX_STORED_RATIO;
+  return value;
+}
+
+export function readSplitRatioPreference(storage: ModeStorage | null | undefined): SplitRatio {
+  if (!storage) {
+    return { ...DEFAULT_SPLIT_RATIO };
+  }
+  try {
+    const raw = storage.getItem(VIEW_SPLIT_RATIO_STORAGE_KEY);
+    if (raw === null) {
+      return { ...DEFAULT_SPLIT_RATIO };
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") {
+      return { ...DEFAULT_SPLIT_RATIO };
+    }
+    const h = clampRatio((parsed as { h?: unknown }).h);
+    const v = clampRatio((parsed as { v?: unknown }).v);
+    return {
+      h: h ?? DEFAULT_SPLIT_RATIO.h,
+      v: v ?? DEFAULT_SPLIT_RATIO.v,
+    };
+  } catch {
+    return { ...DEFAULT_SPLIT_RATIO };
+  }
+}
+
+export function writeSplitRatioPreference(
+  storage: ModeStorage | null | undefined,
+  ratio: SplitRatio,
+): void {
+  if (!storage) return;
+  try {
+    const safe: SplitRatio = {
+      h: clampRatio(ratio.h) ?? DEFAULT_SPLIT_RATIO.h,
+      v: clampRatio(ratio.v) ?? DEFAULT_SPLIT_RATIO.v,
+    };
+    storage.setItem(VIEW_SPLIT_RATIO_STORAGE_KEY, JSON.stringify(safe));
+  } catch {
+    // best-effort persistence
+  }
+}
+
 export function flattenDocuments(roots: RootGroup[]): DocumentMeta[] {
   return roots.flatMap(root => root.docs);
 }

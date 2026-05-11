@@ -28,10 +28,14 @@ import {
   hasDocument,
   nextSelectedDocumentId,
   readModePreference,
+  readSplitRatioPreference,
+  readViewLayoutPreference,
   readViewModePreference,
   reviewBurdenHeadlineLabel,
   shouldRefreshPreview,
   writeModePreference,
+  writeSplitRatioPreference,
+  writeViewLayoutPreference,
   writeViewModePreference,
   type BuildSummary,
   type DocumentMeta,
@@ -39,7 +43,9 @@ import {
   type RepositoryReviewSnapshot,
   type RootGroup,
   type Scope,
+  type SplitRatio,
   type StatePayload,
+  type ViewLayout,
   type ViewMode,
 } from "./shared";
 import { nextStaleHint, type StaleHint } from "./stale-hint";
@@ -159,6 +165,10 @@ const modeReviewButton = document.querySelector<HTMLButtonElement>("#mode-review
 const viewControlElement = document.querySelector<HTMLDivElement>("#view-control");
 const viewRenderedButton = document.querySelector<HTMLButtonElement>("#view-rendered");
 const viewSourceButton = document.querySelector<HTMLButtonElement>("#view-source");
+const layoutChooserElement = document.querySelector<HTMLDivElement>("#layout-chooser");
+const layoutSingleButton = document.querySelector<HTMLButtonElement>("#layout-single");
+const layoutSplitHButton = document.querySelector<HTMLButtonElement>("#layout-split-h");
+const layoutSplitVButton = document.querySelector<HTMLButtonElement>("#layout-split-v");
 const previewShellElement = document.querySelector<HTMLElement>(".preview-shell");
 const staleHintElement = document.querySelector<HTMLDivElement>("#stale-hint");
 const staleHintMessageElement = document.querySelector<HTMLElement>("#stale-hint-message");
@@ -201,6 +211,10 @@ if (
   !viewControlElement ||
   !viewRenderedButton ||
   !viewSourceButton ||
+  !layoutChooserElement ||
+  !layoutSingleButton ||
+  !layoutSplitHButton ||
+  !layoutSplitVButton ||
   !previewShellElement ||
   !staleHintElement ||
   !staleHintMessageElement ||
@@ -240,6 +254,13 @@ const appState = {
   // rendered representation (text / source / code) ignore this — the server
   // forces source rendering for them.
   viewMode: readViewModePreference(safeLocalStorage()) as ViewMode,
+  // Preview layout for Markdown / AsciiDoc: "single" shows one representation
+  // (driven by viewMode); "split-h" and "split-v" show both side-by-side or
+  // stacked. Global preference, persisted to localStorage.
+  viewLayout: readViewLayoutPreference(safeLocalStorage()) as ViewLayout,
+  // Source-pane fraction of the split container size, stored per orientation
+  // so flipping side-by-side <-> stacked restores each orientation's ratio.
+  splitRatio: readSplitRatioPreference(safeLocalStorage()) as SplitRatio,
   // Per-active-file stale-content hint state. Only set in Review mode; cleared
   // by manual navigation, mode switch back to Author, or refresh action.
   staleHint: null as StaleHint | null,
@@ -1202,8 +1223,12 @@ function forgetDocumentCache(documentId: string): void {
 
 // Mount a fetched document payload into the preview body. Centralizes the
 // DOM mutations that follow either a cache hit (toggle path) or a fresh
-// network fetch (loadDocument).
+// network fetch (loadDocument). In single layout this renders just the
+// given payload; in split layouts it ensures both Source and Rendered
+// representations are cached and renders them together.
 async function applyDocumentPayload(payload: RenderedDocument): Promise<void> {
+  // Common header / title updates are payload-driven and identical across
+  // single and split layouts.
   appState.previewMode = { kind: "document" };
   previewTitleElement.textContent = payload.title;
   previewPathElement.textContent = payload.path;
@@ -1211,6 +1236,33 @@ async function applyDocumentPayload(payload: RenderedDocument): Promise<void> {
   previewElement.classList.remove("empty");
   setPreviewBase(payload.path);
   closeMermaidViewer();
+
+  if (appState.viewLayout === "single" || !documentSupportsSplit(payload)) {
+    await renderSinglePayload(payload);
+  } else {
+    await renderSplitForDocument(payload);
+  }
+
+  syncViewToggle(payload);
+  syncLayoutChooser(payload);
+  // The previous document's content (and any selection within it) was just
+  // replaced. Re-evaluate so the pane reflects the new state instead of a
+  // stale capture from the prior document.
+  selectionInspector.recompute();
+}
+
+// True for documents that can meaningfully render as both Source and Rendered.
+// Text / source / code files have no rendered representation distinct from
+// source, so the layout chooser and the split layouts are hidden for them.
+function documentSupportsSplit(payload: RenderedDocument | null): boolean {
+  return payload !== null && (payload.kind === "markdown" || payload.kind === "asciidoc");
+}
+
+// Render a single-pane layout for the given payload. This is the legacy
+// (pre-split) DOM shape: #preview itself carries the body content directly.
+async function renderSinglePayload(payload: RenderedDocument): Promise<void> {
+  previewElement.classList.remove("is-split", "is-split-h", "is-split-v");
+  previewElement.removeAttribute("data-auto-stack");
   const cardHtml = renderMetadataCard(payload.metadata);
   previewElement.innerHTML = cardHtml + replaceMermaidCodeBlocks(payload.html);
   attachMetadataCardToggleListener(previewElement);
@@ -1222,11 +1274,110 @@ async function applyDocumentPayload(payload: RenderedDocument): Promise<void> {
     attachLineNumbers(previewElement);
   }
   attachCopyButtons(previewElement);
-  syncViewToggle(payload);
-  // The previous document's content (and any selection within it) was just
-  // replaced. Re-evaluate so the pane reflects the new state instead of a
-  // stale capture from the prior document.
-  selectionInspector.recompute();
+}
+
+// Ensure both Source and Rendered payloads are available for the active
+// document, then mount them into the split-pane DOM. If one is missing from
+// the cache, fetch it without clearing the visible content (the caller has
+// already populated the header / type chip from `payload`). Falls back to
+// single rendering when the additional fetch fails.
+async function renderSplitForDocument(payload: RenderedDocument): Promise<void> {
+  const cache = documentViewCache.get(payload.id) ?? {};
+  let sourcePayload = cache.source;
+  let renderedPayload = cache.rendered;
+  // Fetch any missing view(s) in parallel. The both-missing path is rare in
+  // practice (at least the active viewMode payload is usually warm by the
+  // time split is mounted), but handling it here avoids a fall-through to
+  // single rendering when the user enters split with a cold cache.
+  if (!sourcePayload || !renderedPayload) {
+    const [fetchedSource, fetchedRendered] = await Promise.all([
+      sourcePayload ? Promise.resolve(null) : fetchDocumentView(payload.id, "source"),
+      renderedPayload ? Promise.resolve(null) : fetchDocumentView(payload.id, "rendered"),
+    ]);
+    if (fetchedSource) {
+      rememberDocumentPayload(fetchedSource);
+      sourcePayload = fetchedSource;
+    }
+    if (fetchedRendered) {
+      rememberDocumentPayload(fetchedRendered);
+      renderedPayload = fetchedRendered;
+    }
+  }
+  if (!sourcePayload || !renderedPayload) {
+    await renderSinglePayload(payload);
+    return;
+  }
+  await renderSplitPayloads(sourcePayload, renderedPayload);
+}
+
+// Fetch a single view of a document via the existing /api/document endpoint.
+// Returns null when the request fails (e.g., file was deleted on disk between
+// the initial fetch and the split-completion fetch) so callers can fall back
+// gracefully without clearing visible content.
+async function fetchDocumentView(
+  documentId: string,
+  view: ViewMode,
+): Promise<RenderedDocument | null> {
+  try {
+    const response = await fetch(
+      `/api/document?id=${encodeURIComponent(documentId)}&view=${encodeURIComponent(view)}`,
+    );
+    if (!response.ok) return null;
+    return (await response.json()) as RenderedDocument;
+  } catch {
+    return null;
+  }
+}
+
+// Mount two payloads as a split layout. The Source pane uses the same
+// source-rendering DOM shape that single Source view uses (whole-file `<pre>`
+// with the distinguishing `uatu-source-pre` class plus the line-number gutter),
+// so Selection Inspector detection logic continues to work without changes.
+async function renderSplitPayloads(
+  sourcePayload: RenderedDocument,
+  renderedPayload: RenderedDocument,
+): Promise<void> {
+  const orientation: "split-h" | "split-v" =
+    appState.viewLayout === "split-v" ? "split-v" : "split-h";
+  const orientationClass = orientation === "split-h" ? "is-split-h" : "is-split-v";
+  const otherOrientationClass = orientation === "split-h" ? "is-split-v" : "is-split-h";
+  previewElement.classList.add("is-split", orientationClass);
+  previewElement.classList.remove(otherOrientationClass);
+  // Metadata card lives only on the rendered side — duplicating it would
+  // double the document header for no benefit.
+  const cardHtml = renderMetadataCard(renderedPayload.metadata);
+
+  const sourcePane = document.createElement("div");
+  sourcePane.className = "preview-pane preview-pane-source markdown-body";
+  sourcePane.setAttribute("data-split-side", "source");
+  sourcePane.innerHTML = sourcePayload.html;
+
+  const resizer = document.createElement("div");
+  resizer.className = "preview-split-resizer";
+  resizer.setAttribute("role", "separator");
+  resizer.setAttribute("aria-orientation", orientation === "split-h" ? "vertical" : "horizontal");
+  resizer.setAttribute("aria-label", "Resize split panes");
+  resizer.setAttribute("tabindex", "0");
+
+  const renderedPane = document.createElement("div");
+  renderedPane.className = "preview-pane preview-pane-rendered markdown-body";
+  renderedPane.setAttribute("data-split-side", "rendered");
+  renderedPane.innerHTML = cardHtml + replaceMermaidCodeBlocks(renderedPayload.html);
+
+  previewElement.replaceChildren(sourcePane, resizer, renderedPane);
+
+  attachMetadataCardToggleListener(renderedPane);
+  await renderMermaidDiagrams(renderedPane, currentMermaidThemeInputs());
+  attachLineNumbers(sourcePane);
+  attachCopyButtons(sourcePane);
+  attachCopyButtons(renderedPane);
+
+  // Apply persisted ratio for the active orientation. The auto-stack
+  // ResizeObserver may further override the orientation visually, but the
+  // ratio is applied to whichever orientation is currently rendered.
+  applySplitRatioToDom();
+  attachSplitResizer(resizer);
+  applyAutoStackIfNeeded();
 }
 
 // File extensions that uatu can render directly in the preview pane as an
@@ -2319,11 +2470,11 @@ function syncModeControl() {
 // Reflect the current view-mode preference and the active document's actual
 // rendering on the Source / Rendered toggle. The toggle is hidden whenever
 // the active document does not have a separate rendered representation
-// (text / source / code files) and whenever the preview is not in document
-// mode. The toggle is otherwise always present so the user can flip views.
+// (text / source / code files), whenever the preview is not in document mode,
+// and whenever the layout is split (both representations are already visible).
 function syncViewToggle(payload: RenderedDocument | null): void {
   const showToggle =
-    payload !== null && (payload.kind === "markdown" || payload.kind === "asciidoc");
+    documentSupportsSplit(payload) && appState.viewLayout === "single";
   viewControlElement.hidden = !showToggle;
   if (!showToggle) {
     return;
@@ -2335,9 +2486,36 @@ function syncViewToggle(payload: RenderedDocument | null): void {
   viewRenderedButton.classList.toggle("is-active", !isSource);
 }
 
-// Hide the toggle for non-document previews (commit, review-score, empty).
+// Reflect the persisted layout preference on the layout chooser. The chooser
+// is hidden when the active document has no separate rendered representation
+// or the preview is not in document mode.
+function syncLayoutChooser(payload: RenderedDocument | null): void {
+  const showChooser = documentSupportsSplit(payload);
+  layoutChooserElement.hidden = !showChooser;
+  if (!showChooser) {
+    return;
+  }
+  const segments: Array<{ button: HTMLButtonElement; value: ViewLayout }> = [
+    { button: layoutSingleButton as HTMLButtonElement, value: "single" },
+    { button: layoutSplitHButton as HTMLButtonElement, value: "split-h" },
+    { button: layoutSplitVButton as HTMLButtonElement, value: "split-v" },
+  ];
+  for (const { button, value } of segments) {
+    const active = appState.viewLayout === value;
+    button.setAttribute("aria-checked", String(active));
+    button.classList.toggle("is-active", active);
+  }
+}
+
+// Hide both the Source/Rendered toggle and the layout chooser for non-document
+// previews (commit, review-score, empty). Also clear any split-layout classes
+// so the preview body resets to a normal flow container for the upcoming
+// non-document content.
 function hideViewToggle(): void {
   viewControlElement.hidden = true;
+  layoutChooserElement.hidden = true;
+  previewElement.classList.remove("is-split", "is-split-h", "is-split-v");
+  previewElement.removeAttribute("data-auto-stack");
 }
 
 function applyViewMode(next: ViewMode): void {
@@ -2362,8 +2540,169 @@ function applyViewMode(next: ViewMode): void {
   void loadDocument(appState.selectedId);
 }
 
+function applyViewLayout(next: ViewLayout): void {
+  if (appState.viewLayout === next) {
+    return;
+  }
+  appState.viewLayout = next;
+  writeViewLayoutPreference(safeLocalStorage(), next);
+  // Reflect the new state on both controls before re-rendering so the chooser
+  // visually responds even if the re-render is async.
+  syncLayoutChooser(currentRenderedPayload());
+  syncViewToggle(currentRenderedPayload());
+  if (appState.previewMode.kind !== "document" || !appState.selectedId) {
+    return;
+  }
+  // Re-render the active document into the new layout. For single layout
+  // we use the cached payload of the current viewMode; for split we let
+  // applyDocumentPayload fetch any missing view without flashing an empty
+  // state. If neither view is cached (rare — only when navigating away
+  // and back faster than the cache survives), fall back to loadDocument.
+  const cache = documentViewCache.get(appState.selectedId);
+  if (next === "single") {
+    const cached = cache?.[appState.viewMode];
+    if (cached) {
+      void applyDocumentPayload(cached);
+      return;
+    }
+  } else {
+    const seed = cache?.[appState.viewMode] ?? cache?.source ?? cache?.rendered;
+    if (seed) {
+      void applyDocumentPayload(seed);
+      return;
+    }
+  }
+  void loadDocument(appState.selectedId);
+}
+
+// Return the payload that's currently driving the preview header, if any.
+// Used by sync helpers that need a payload-shaped argument when re-rendering
+// state changes (layout, toggle) without a fresh fetch.
+function currentRenderedPayload(): RenderedDocument | null {
+  if (appState.previewMode.kind !== "document" || !appState.selectedId) {
+    return null;
+  }
+  const cache = documentViewCache.get(appState.selectedId);
+  return cache?.[appState.viewMode] ?? cache?.rendered ?? cache?.source ?? null;
+}
+
+// Apply the persisted ratio for the active split orientation to the source
+// pane's flex-basis. The rendered pane stretches via flex:1, so no explicit
+// size is needed there. No-op when no split is mounted.
+function applySplitRatioToDom(): void {
+  const sourcePane = previewElement.querySelector<HTMLElement>(".preview-pane-source");
+  if (!sourcePane) return;
+  // Auto-stack renders as a column even with the is-split-h class — pick the
+  // ratio axis to match the visual orientation, not just the stored class.
+  const isStackedVisually =
+    previewElement.classList.contains("is-split-v") ||
+    previewElement.getAttribute("data-auto-stack") === "true";
+  const orientation: "h" | "v" = isStackedVisually ? "v" : "h";
+  const ratio = appState.splitRatio[orientation];
+  if (orientation === "h") {
+    sourcePane.style.flexBasis = `${ratio * 100}%`;
+    sourcePane.style.width = "auto";
+    sourcePane.style.height = "";
+  } else {
+    sourcePane.style.flexBasis = `${ratio * 100}%`;
+    sourcePane.style.height = "auto";
+    sourcePane.style.width = "";
+  }
+}
+
+// Pointer-drag handler for the split resizer between Source and Rendered
+// panes. Modeled on the terminal-pane resizer pattern (setPointerCapture so
+// drags that escape the visible bar keep tracking, locked min-pane size,
+// orientation-aware delta math).
+const MIN_PANE_SIZE = 160; // CSS pixels
+
+function attachSplitResizer(resizer: HTMLElement): void {
+  resizer.addEventListener("pointerdown", event => {
+    const sourcePane = previewElement.querySelector<HTMLElement>(".preview-pane-source");
+    const renderedPane = previewElement.querySelector<HTMLElement>(".preview-pane-rendered");
+    if (!sourcePane || !renderedPane) return;
+    event.preventDefault();
+    resizer.setPointerCapture(event.pointerId);
+    resizer.classList.add("is-dragging");
+    // Auto-stack mode keeps the stored `is-split-h` class but renders as a
+    // column visually; treat it as vertical for drag math so clientY drives
+    // the resize instead of clientX.
+    const isStackedVisually =
+      previewElement.classList.contains("is-split-v") ||
+      previewElement.getAttribute("data-auto-stack") === "true";
+    const orientation: "h" | "v" = isStackedVisually ? "v" : "h";
+    const containerRect = previewElement.getBoundingClientRect();
+    const total = orientation === "h" ? containerRect.width : containerRect.height;
+    // Available space for the panes (subtract resizer width / height).
+    const resizerRect = resizer.getBoundingClientRect();
+    const resizerExtent = orientation === "h" ? resizerRect.width : resizerRect.height;
+    const usable = Math.max(1, total - resizerExtent);
+    const startPos = orientation === "h" ? event.clientX : event.clientY;
+    const startRatio = appState.splitRatio[orientation];
+    const sourceStart = startRatio * usable;
+    const minRatio = MIN_PANE_SIZE / usable;
+    const maxRatio = 1 - minRatio;
+
+    const onMove = (move: PointerEvent) => {
+      const delta = (orientation === "h" ? move.clientX : move.clientY) - startPos;
+      const nextSourceSize = sourceStart + delta;
+      let ratio = nextSourceSize / usable;
+      if (ratio < minRatio) ratio = minRatio;
+      if (ratio > maxRatio) ratio = maxRatio;
+      appState.splitRatio[orientation] = ratio;
+      applySplitRatioToDom();
+    };
+    const onUp = (up: PointerEvent) => {
+      resizer.releasePointerCapture(up.pointerId);
+      resizer.classList.remove("is-dragging");
+      resizer.removeEventListener("pointermove", onMove);
+      resizer.removeEventListener("pointerup", onUp);
+      resizer.removeEventListener("pointercancel", onUp);
+      writeSplitRatioPreference(safeLocalStorage(), appState.splitRatio);
+    };
+    resizer.addEventListener("pointermove", onMove);
+    resizer.addEventListener("pointerup", onUp);
+    resizer.addEventListener("pointercancel", onUp);
+  });
+}
+
+// Narrow-width auto-stack: when the stored preference is split-h but the
+// preview body is too narrow to render two readable panes, render as stacked.
+// The stored preference is unchanged. Threshold accounts for both panes at
+// their minimum size plus the resizer width.
+const AUTO_STACK_THRESHOLD = 2 * MIN_PANE_SIZE + 8;
+
+function applyAutoStackIfNeeded(): void {
+  if (!previewElement.classList.contains("is-split")) {
+    previewElement.removeAttribute("data-auto-stack");
+    return;
+  }
+  if (appState.viewLayout !== "split-h") {
+    previewElement.removeAttribute("data-auto-stack");
+    return;
+  }
+  const width = previewElement.getBoundingClientRect().width;
+  const shouldStack = width > 0 && width < AUTO_STACK_THRESHOLD;
+  if (shouldStack) {
+    previewElement.setAttribute("data-auto-stack", "true");
+  } else {
+    previewElement.removeAttribute("data-auto-stack");
+  }
+  applySplitRatioToDom();
+}
+
+// Install once at boot: a ResizeObserver on the preview body that triggers
+// the auto-stack fallback when the width crosses the threshold.
+const previewResizeObserver = new ResizeObserver(() => {
+  applyAutoStackIfNeeded();
+});
+previewResizeObserver.observe(previewElement);
+
 viewRenderedButton.addEventListener("click", () => applyViewMode("rendered"));
 viewSourceButton.addEventListener("click", () => applyViewMode("source"));
+layoutSingleButton.addEventListener("click", () => applyViewLayout("single"));
+layoutSplitHButton.addEventListener("click", () => applyViewLayout("split-h"));
+layoutSplitVButton.addEventListener("click", () => applyViewLayout("split-v"));
 
 function applyStaleHint(next: StaleHint | null) {
   appState.staleHint = next;

@@ -2678,6 +2678,172 @@ body.is-resizing-terminal .panel-resizer {
   outline-offset: 1px;
 }
 
+/* Layout chooser (single / side-by-side / stacked segmented toggle in the
+   preview header). Same visual language as .view-control but icon-only. */
+.layout-chooser {
+  display: inline-flex;
+  align-items: stretch;
+  padding: 0.15rem;
+  border-radius: 0.4rem;
+  background: var(--surface-muted);
+  border: 1px solid var(--border-soft);
+}
+
+.layout-chooser[hidden] {
+  display: none;
+}
+
+.layout-segment {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.2rem 0.4rem;
+  border: 0;
+  background: transparent;
+  color: var(--text-subtle);
+  border-radius: 0.3rem;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.layout-segment svg {
+  width: 16px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.layout-segment:hover:not(.is-active) {
+  color: var(--text-strong);
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.layout-segment.is-active {
+  background: #ffffff;
+  color: var(--accent);
+  box-shadow: 0 1px 2px rgba(36, 41, 47, 0.08);
+  cursor: default;
+}
+
+.layout-segment:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Split layout: when #preview carries .is-split, it switches from a body
+   container to a flex container holding two .preview-pane children plus a
+   draggable .preview-split-resizer between them. The default orientation
+   variant for .is-split-h is row; for .is-split-v it is column. The
+   data-auto-stack attribute (set by the ResizeObserver fallback) forces
+   column regardless of the preference class, without overwriting the class. */
+.preview.is-split {
+  display: flex;
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+}
+
+/* In split mode the preview itself needs a definite height so per-orientation
+   flex-basis ratios (% of container) on the panes resolve. Without this the
+   block-flow .preview would size to its content's height and stacked panes
+   would collapse to their natural content height instead of honoring the
+   stored ratio. We switch the preview-shell into a flex column container
+   when a split is mounted (via :has()) so .preview.is-split can grow to
+   fill the remaining vertical space below the sticky header. */
+.preview-shell:has(> .preview.is-split) {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.preview-shell:has(> .preview.is-split) > .preview.is-split {
+  flex: 1 1 0;
+  min-height: 0;
+}
+
+.preview.is-split.is-split-h {
+  flex-direction: row;
+}
+
+.preview.is-split.is-split-v,
+.preview.is-split[data-auto-stack="true"] {
+  flex-direction: column;
+}
+
+.preview-pane {
+  flex: 0 0 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 1.5rem 2rem;
+  box-sizing: border-box;
+}
+
+/* Both pane bodies inherit the .markdown-body typography rules from the
+   underlying .preview classes; we re-apply selectively so split panes
+   render identically to the single-view body. */
+.preview.is-split .preview-pane-source,
+.preview.is-split .preview-pane-rendered {
+  background: transparent;
+}
+
+/* In side-by-side, the source pane sets width via flex-basis driven by JS;
+   the rendered pane fills the remainder. In stacked (or auto-stacked) the
+   same applies for height. */
+.preview.is-split.is-split-h .preview-pane-source {
+  flex: 0 0 auto;
+}
+.preview.is-split.is-split-h .preview-pane-rendered {
+  flex: 1 1 auto;
+}
+
+.preview.is-split.is-split-v .preview-pane-source,
+.preview.is-split[data-auto-stack="true"] .preview-pane-source {
+  flex: 0 0 auto;
+}
+.preview.is-split.is-split-v .preview-pane-rendered,
+.preview.is-split[data-auto-stack="true"] .preview-pane-rendered {
+  flex: 1 1 auto;
+}
+
+.preview-split-resizer {
+  flex: 0 0 auto;
+  position: relative;
+  background: var(--border-soft);
+  transition: background-color 0.15s ease;
+  touch-action: none;
+  user-select: none;
+}
+
+.preview.is-split.is-split-h .preview-split-resizer {
+  width: 4px;
+  cursor: col-resize;
+  align-self: stretch;
+}
+
+.preview.is-split.is-split-v .preview-split-resizer,
+.preview.is-split[data-auto-stack="true"] .preview-split-resizer {
+  height: 4px;
+  width: 100%;
+  cursor: row-resize;
+}
+
+.preview-split-resizer:hover,
+.preview-split-resizer.is-dragging {
+  background: var(--accent);
+}
+
+/* Larger invisible hit-target around the 4px visible bar, matching the
+   terminal-pane resizer pattern so users don't have to be pixel-perfect. */
+.preview-split-resizer::before {
+  content: "";
+  position: absolute;
+  inset: -3px;
+}
+
 /* Follow chip variant: disabled by Mode = Review */
 .chip-button.is-mode-disabled {
   cursor: not-allowed;
