@@ -98,11 +98,14 @@ export function handleClipboardKeyEvent(
 
   if (key === "c") {
     if (shiftKey) {
-      // Ctrl+Shift+C: copy if there's a selection, but ALWAYS swallow so the
-      // browser's DevTools shortcut never fires (Keyboard Lock should already
-      // have prevented the OS from delivering this, but belt-and-suspenders).
+      // Ctrl+Shift+C: copy AND clear the selection so the user gets the same
+      // "the markings disappear, it copied" feedback Windows Terminal gives.
+      // ALWAYS swallow so the browser's DevTools shortcut never fires
+      // (Keyboard Lock should already have prevented the OS from delivering
+      // this, but belt-and-suspenders).
       if (term.hasSelection()) {
         writeClipboardText(term.getSelection());
+        term.clearSelection();
       }
       event.preventDefault();
       return false;

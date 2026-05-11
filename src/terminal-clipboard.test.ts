@@ -197,7 +197,7 @@ describe("handleClipboardKeyEvent: bare Ctrl+V", () => {
 });
 
 describe("handleClipboardKeyEvent: Ctrl+Shift+C", () => {
-  it("copies the selection and swallows the event", async () => {
+  it("copies the selection, clears it, and swallows the event", async () => {
     const { writeText } = installClipboard({});
     const term = makeTerm({ selection: "selection" });
     const ev = makeEvent("c", { ctrl: true, shift: true });
@@ -208,8 +208,9 @@ describe("handleClipboardKeyEvent: Ctrl+Shift+C", () => {
     expect(ev.preventDefault).toHaveBeenCalledTimes(1);
     expect(writeText).toHaveBeenCalledTimes(1);
     expect(writeText.mock.calls[0]?.[0]).toBe("selection");
-    // Unlike bare Ctrl+C, this branch does NOT clear the selection.
-    expect(term.clearSelectionMock).not.toHaveBeenCalled();
+    // Matches Windows Terminal: selection clears as user-feedback that the
+    // copy fired, identical to bare Ctrl+C.
+    expect(term.clearSelectionMock).toHaveBeenCalledTimes(1);
   });
 
   it("swallows the event with no clipboard write when there's no selection", () => {
@@ -234,8 +235,9 @@ describe("handleClipboardKeyEvent: Ctrl+Shift+C", () => {
 
     expect(result).toBe(false);
     expect(ev.preventDefault).toHaveBeenCalledTimes(1);
-    // Ctrl+Shift+C does NOT clear selection (unlike bare Ctrl+C).
-    expect(term.clearSelectionMock).not.toHaveBeenCalled();
+    // Selection still clears synchronously — the writeText rejection is
+    // fire-and-forget, so it doesn't gate the user-facing clear.
+    expect(term.clearSelectionMock).toHaveBeenCalledTimes(1);
     await Promise.resolve();
     await Promise.resolve();
   });

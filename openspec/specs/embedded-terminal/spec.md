@@ -320,10 +320,11 @@ Each terminal pane SHALL intercept a fixed set of clipboard keyboard shortcuts b
 - **AND** the byte `0x16` (`^V`) is NOT sent to the PTY
 - **AND** bracketed-paste markers are emitted around the pasted content when the shell has enabled bracketed-paste mode
 
-#### Scenario: Ctrl+Shift+C copies the selection
+#### Scenario: Ctrl+Shift+C copies the selection and clears it
 - **WHEN** the user has highlighted text in a terminal pane on Windows or Linux
 - **AND** the user presses `Ctrl+Shift+C`
 - **THEN** the highlighted text is written to the system clipboard
+- **AND** the terminal's selection is cleared (matches Windows Terminal — the disappearing markings are the user-visible confirmation that the copy fired)
 - **AND** no further handling fires (the browser's DevTools shortcut does not open)
 
 #### Scenario: Ctrl+Shift+C with no selection is a no-op
