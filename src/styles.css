@@ -1,5 +1,4 @@
 @import "github-markdown-css/github-markdown-light.css";
-@import "highlight.js/styles/github.css";
 
 :root {
   color-scheme: light;
@@ -2013,33 +2012,63 @@ body.is-resizing-terminal .panel-resizer {
   position: relative;
 }
 
-.preview pre.has-line-numbers {
-  display: flex;
-  align-items: stretch;
-  padding: 0;
+/* @pierre/diffs's File component renders its own line-number gutter inside
+   `<pre data-file><code data-code><div data-gutter>`. The host
+   `<div class="uatu-source-pre">` carries the github-markdown-css surround so
+   the source view feels at home in the preview pane. No uatu-side gutter
+   styles are needed — the File component supplies its own. */
+.preview .uatu-source-pre {
+  margin: 1rem 0;
+  /* The File component sets its own background and border on the <pre>.
+     Keep the host transparent so it inherits the page color and any
+     surrounding markdown-body context. */
 }
 
-.preview pre.has-line-numbers > .line-numbers {
-  flex-shrink: 0;
-  user-select: none;
-  text-align: right;
-  padding: 1rem 0.7rem 1rem 1rem;
-  margin: 0;
-  border-right: 1px solid var(--border-soft);
-  color: var(--text-subtle);
-  background: rgba(208, 215, 222, 0.18);
-  white-space: pre;
-  font-variant-numeric: tabular-nums;
-  font-size: inherit;
-  line-height: inherit;
+/* @pierre/diffs's bundled style.css applies the unlayered rule
+   `pre, code, [data-error-wrapper] { display: block }` globally — intended
+   for its own File-component DOM but unscoped, so every inline <code> in
+   prose collapses into a block. Revert it for any <code> that isn't a child
+   of <pre> and isn't the File component's grid container (<code data-code>).
+   This keeps Shiki's `<pre><code>` fenced blocks and the File component's
+   <code data-code> as block (where they need to be), while letting inline
+   <code> in Markdown / AsciiDoc paragraphs render as the user-agent default
+   inline element. `!important` is defensive against split-view rendering
+   where the source pane's inline core-CSS block (historically present)
+   used to re-register the same global rule. */
+:not(pre) > code:not([data-code]) {
+  display: inline !important;
 }
 
-.preview pre.has-line-numbers > code {
-  flex: 1 1 auto;
-  min-width: 0;
+/* Counter-fight: github-markdown-css's `.markdown-body pre code` rule
+   (specificity 0,1,2) sets `display: inline; overflow: visible` on every
+   <code> inside a <pre> inside `.markdown-body`. That beats @pierre/diffs's
+   `[data-code] { display: grid; overflow: scroll clip }` (specificity 0,1,0)
+   and breaks the File component in two ways:
+     1. display:grid is lost — gutter and content stack as block boxes
+        instead of laying out as columns of the 2-column grid (line numbers
+        on top, code below).
+     2. overflow:scroll is lost — long source lines extend past the grid
+        column but `<pre>` (the outer scroll container) doesn't see them as
+        overflow, so no horizontal scrollbar appears.
+   Force both back on the File component's marker attribute. `!important` is
+   the cleanest tool here because we don't control the github-markdown-css
+   selector and don't want to bump our specificity into ever-escalating
+   territory. */
+[data-code] {
+  display: grid !important;
+  overflow: scroll clip !important;
+}
+
+.preview .uatu-source-pre--plain {
+  /* Fallback for the >1 MB plain-text path: render as a regular code block. */
+  margin: 1rem 0;
+}
+
+.preview .uatu-source-pre--plain > pre {
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
   padding: 1rem;
-  display: block;
-  overflow: visible;
+  overflow: auto;
 }
 
 .code-copy {

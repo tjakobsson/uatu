@@ -1,10 +1,19 @@
-import { describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 
+import { preloadCodeHighlighter } from "./highlighter";
 import {
   renderCodeAsHtml,
   renderMarkdownToHtml,
   SYNTAX_HIGHLIGHT_BYTES_LIMIT,
 } from "./markdown";
+
+// The renderers depend on `@pierre/diffs`'s shared Shiki highlighter being
+// warm. In the running server this happens during watch-session startup; in
+// tests we preload up front. `preloadCodeHighlighter` is idempotent so cost
+// is paid once across all describe blocks in the suite.
+beforeAll(async () => {
+  await preloadCodeHighlighter();
+});
 
 describe("renderMarkdownToHtml", () => {
   test("renders common GFM features", () => {
@@ -34,17 +43,23 @@ Visit https://example.com and ~~remove~~ text.`);
   test("highlights known languages with github-style tokens", () => {
     const { html } = renderMarkdownToHtml("```js\nconst answer = 42;\n```");
 
-    expect(html).toContain('<pre><code class="hljs language-js">');
-    expect(html).toContain("hljs-keyword");
-    expect(html).toContain("hljs-number");
+    // Shiki emits a `<pre class="shiki ...">` wrapper plus per-token <span>
+    // elements carrying inline `--shiki-light` / `--shiki-dark` CSS variables.
+    // We assert these behavioral characteristics rather than a literal class.
+    expect(html).toMatch(/<pre[^>]*class="shiki[^"]*"/);
+    expect(html).toContain("--shiki-light:");
+    expect(html).toContain("--shiki-dark:");
+    expect(html).toContain("const");
+    expect(html).toContain("42");
   });
 
   test("falls back gracefully for unknown languages", () => {
     const { html } = renderMarkdownToHtml("```madeuplang\nnot a real language\n```");
 
-    expect(html).toContain('<pre><code class="hljs');
+    // Unknown info strings degrade to plain-text highlighting: still a Shiki
+    // <pre>, but the body is rendered as plain text with no keyword colors.
+    expect(html).toMatch(/<pre[^>]*class="shiki[^"]*"/);
     expect(html).toContain("not a real language");
-    expect(html).not.toContain("hljs-keyword");
   });
 
   test("passes through GitHub-style inline HTML blocks (e.g. centered README hero)", () => {
@@ -60,7 +75,7 @@ Visit https://example.com and ~~remove~~ text.`);
   test("still escapes HTML inside fenced code blocks", () => {
     const { html } = renderMarkdownToHtml("```html\n<script>alert(1)</script>\n```");
 
-    expect(html).toContain('<pre><code class="hljs');
+    expect(html).toMatch(/<pre[^>]*class="shiki[^"]*"/);
     expect(html).not.toContain("<script>alert(1)</script>");
     // Either named (&lt;) or numeric (&#x3C;) — both are valid HTML escapes.
     expect(html).toMatch(/&(lt;|#x3[Cc];)/);
@@ -218,29 +233,54 @@ describe("renderMarkdownToHtml frontmatter", () => {
 });
 
 describe("renderCodeAsHtml", () => {
-  test("emits language-X class for known languages", () => {
-    const html = renderCodeAsHtml("const answer = 42;\n", "javascript");
-    expect(html).toContain('<pre class="uatu-source-pre"><code class="hljs language-javascript">');
-    expect(html).toContain("hljs-keyword");
+  test("wraps the rendered code in the uatu-source-pre host", async () => {
+    const { html } = await renderCodeAsHtml(
+      "sample.js",
+      "const answer = 42;\n",
+      "javascript",
+    );
+    expect(html).toContain('<div class="uatu-source-pre">');
+    expect(html).toContain("<pre");
+    expect(html).toContain("<code");
   });
 
-  test("omits language- class when language is undefined", () => {
-    const html = renderCodeAsHtml("plain text\n", undefined);
-    expect(html).toContain('<pre class="uatu-source-pre"><code class="hljs">');
-    expect(html).not.toContain("language-");
+  test("exposes per-line data-line attributes for the Selection Inspector", async () => {
+    const { html } = await renderCodeAsHtml(
+      "sample.js",
+      "const a = 1;\nconst b = 2;\nconst c = 3;\n",
+      "javascript",
+    );
+    expect(html).toContain('data-line="1"');
+    expect(html).toContain('data-line="2"');
+    expect(html).toContain('data-line="3"');
   });
 
-  test("escapes raw HTML in the source so it never executes", () => {
-    const html = renderCodeAsHtml("<script>alert(1)</script>\n", "javascript");
+  test("returns hydration data carrying the raw source", async () => {
+    const source = "const answer = 42;\n";
+    const { hydration } = await renderCodeAsHtml("sample.js", source, "javascript");
+    expect(hydration.name).toBe("sample.js");
+    expect(hydration.contents).toBe(source);
+    expect(hydration.lang).toBe("javascript");
+  });
+
+  test("escapes raw HTML in the source so it never executes", async () => {
+    const { html } = await renderCodeAsHtml(
+      "sample.js",
+      "<script>alert(1)</script>\n",
+      "javascript",
+    );
     expect(html).not.toMatch(/<script\b/i);
     expect(html).toMatch(/&(lt;|#x3[Cc];)/);
   });
 
-  test("bypasses syntax highlighting above the size threshold", () => {
+  test("bypasses syntax highlighting above the size threshold", async () => {
     const big = "a".repeat(SYNTAX_HIGHLIGHT_BYTES_LIMIT + 1);
-    const html = renderCodeAsHtml(big, "javascript");
-    expect(html).toContain('<pre class="uatu-source-pre"><code class="hljs">');
-    expect(html).not.toContain("hljs-");
-    expect(html).not.toContain("language-javascript");
+    const { html } = await renderCodeAsHtml("sample.js", big, "javascript");
+    // Plain-text fallback: a bare <pre><code> inside the host, no Shiki spans
+    // and no token-color CSS variables.
+    expect(html).toContain('class="uatu-source-pre uatu-source-pre--plain"');
+    expect(html).toContain("<pre><code>");
+    expect(html).not.toContain("--shiki-");
+    expect(html).not.toContain('data-line="1"');
   });
 });

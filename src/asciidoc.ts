@@ -115,10 +115,10 @@ const sanitizeSchema: Schema = (() => {
     [
       "className",
       ...ALLOWED_ASCIIDOC_CLASSES,
-      // language-X for code listings (matches hljs's expectation later).
+      // language-X for code listings; the downstream Shiki highlight pass
+      // (`highlightCodeBlocks`) keys off this class to look up the language
+      // before re-emitting the block.
       /^language-/,
-      // hljs-X tokens added by the highlight pass downstream.
-      /^hljs/,
     ],
   ];
 
@@ -179,7 +179,7 @@ export function renderAsciidocToHtml(source: string): RenderedAsciidoc {
   // entirely and render as plain escaped text so the browser stays responsive.
   if (source.length >= SYNTAX_HIGHLIGHT_BYTES_LIMIT) {
     return {
-      html: `<pre><code class="hljs">${escapeHtml(source)}</code></pre>`,
+      html: `<pre><code>${escapeHtml(source)}</code></pre>`,
       metadata: undefined,
     };
   }

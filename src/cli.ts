@@ -55,6 +55,7 @@ import {
 } from "./debug-metrics";
 import { setGitMetricsSink } from "./review-load";
 import { parseWatchdogArgs, runWatchdog } from "./watchdog";
+import { getPierreDiffsCoreCSS, preloadCodeHighlighter } from "./highlighter";
 
 async function main() {
   // Watchdog mode short-circuits the rest of CLI parsing — when uatu is
@@ -119,6 +120,12 @@ async function runWatch(options: WatchOptions) {
   const heartbeatPath = cachePaths.heartbeatPath(process.pid);
   const snapshotPath = cachePaths.snapshotPath(process.pid);
   const ndjsonPath = cachePaths.ndjsonPath(process.pid);
+
+  // Kick off the syntax highlighter pre-warm concurrently with the rest of
+  // startup — the watcher does not depend on it, so file indexing runs in
+  // parallel. The HTTP server's `serve()` binding is gated on this resolving
+  // so the first preview request finds the highlighter ready (see D2).
+  const highlighterReady = preloadCodeHighlighter();
 
   const rootEntries = await resolveWatchRoots(options.rootPaths, process.cwd());
   const nonGitEntries = await findNonGitWatchEntries(rootEntries);
@@ -255,6 +262,11 @@ async function runWatch(options: WatchOptions) {
       });
     };
 
+    // Gate HTTP binding on the highlighter being warm. The watcher and the
+    // indexer are already running by this point — only the public endpoint is
+    // held back, so the first preview request finds Shiki grammars resolved.
+    await highlighterReady;
+
     server = Bun.serve({
       hostname: "127.0.0.1",
       port: chosenPort,
@@ -287,6 +299,17 @@ async function runWatch(options: WatchOptions) {
         "/manifest.webmanifest": new Response(Bun.file(manifestAsset), {
           headers: {
             "content-type": "application/manifest+json",
+            "cache-control": "public, max-age=3600",
+          },
+        }),
+        // @pierre/diffs's File-component CSS, extracted once at session
+        // startup and served from a single endpoint. Replaces the ~38 KB
+        // `<style data-core-css>` block that preloadFile would otherwise
+        // inline in every source-view response. The SPA shell pulls this in
+        // once via `<link rel="stylesheet">` in index.html.
+        "/_pierre/diffs-core.css": new Response(getPierreDiffsCoreCSS(), {
+          headers: {
+            "content-type": "text/css; charset=utf-8",
             "cache-control": "public, max-age=3600",
           },
         }),

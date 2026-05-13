@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -26,8 +26,16 @@ import {
   STARTUP_BANNER,
   usageText,
 } from "./server";
+import { preloadCodeHighlighter } from "./highlighter";
 import { EventEmitter } from "node:events";
 import type { IgnoreMatcher } from "./ignore-engine";
+
+// renderDocument's source-view path goes through @pierre/diffs's File component,
+// which depends on the shared Shiki highlighter being warm. The running server
+// awaits the preload at startup; in tests we mirror that one-shot warmup here.
+beforeAll(async () => {
+  await preloadCodeHighlighter();
+});
 import { safeGit } from "./review-load";
 
 const tempDirectories: string[] = [];
@@ -484,7 +492,8 @@ describe("renderDocument", () => {
     const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
     const rendered = await renderDocument(roots, filePath);
     expect(rendered.title).toBe("config.yaml");
-    expect(rendered.html).toContain('<pre class="uatu-source-pre"><code class="hljs language-yaml">');
+    expect(rendered.html).toContain('<div class="uatu-source-pre">');
+    expect(rendered.html).toContain('data-line="1"');
     expect(rendered.kind).toBe("text");
     expect(rendered.view).toBe("source");
     expect(rendered.language).toBe("yaml");
@@ -586,7 +595,7 @@ describe("renderDocument", () => {
     expect(rendered.kind).toBe("markdown");
     expect(rendered.view).toBe("source");
     expect(rendered.language).toBe("markdown");
-    expect(rendered.html).toContain('<pre class="uatu-source-pre">');
+    expect(rendered.html).toContain('<div class="uatu-source-pre">');
     // Verbatim source must be present (entity-encoded) — markdown markup is
     // displayed, not parsed.
     expect(rendered.html).toContain("# Hello");
@@ -606,7 +615,7 @@ describe("renderDocument", () => {
     expect(rendered.kind).toBe("asciidoc");
     expect(rendered.view).toBe("source");
     expect(rendered.language).toBe("asciidoc");
-    expect(rendered.html).toContain('<pre class="uatu-source-pre">');
+    expect(rendered.html).toContain('<div class="uatu-source-pre">');
     expect(rendered.html).toContain("= Hello");
   });
 
@@ -636,7 +645,7 @@ describe("renderDocument", () => {
     const rendered = await renderDocument(roots, filePath, { view: "rendered" });
     expect(rendered.kind).toBe("text");
     expect(rendered.view).toBe("source");
-    expect(rendered.html).toContain('<pre class="uatu-source-pre">');
+    expect(rendered.html).toContain('<div class="uatu-source-pre">');
   });
 });
 

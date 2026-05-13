@@ -2,14 +2,26 @@ import { describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 
 import {
-  characterOffsetWithin,
   computeState,
+  extractSourceTextFromHost,
   formatReference,
-  offsetToLine,
+  lineNumberForNode,
   type SelectionInspectorOptions,
 } from "./selection-inspector";
 
-type FakeRange = { commonAncestorContainer: Node; startContainer: Node; startOffset: number; endContainer: Node; endOffset: number };
+type FakeRange = {
+  commonAncestorContainer: Node;
+  startContainer: Node;
+  startOffset: number;
+  endContainer: Node;
+  endOffset: number;
+  // Optional override; defaults to the same value the surrounding fake
+  // selection's `toString()` returns, since a genuine `Range.toString()` and
+  // `Selection.toString()` agree for single-range selections under normal DOM
+  // semantics. The inspector reads both to defend against Chromium's
+  // grid-layout selection serializer (see selection-inspector.ts).
+  toString?: () => string;
+};
 
 function fakeSelection(opts: {
   collapsed: boolean;
@@ -21,14 +33,29 @@ function fakeSelection(opts: {
     isCollapsed: opts.collapsed,
     rangeCount: opts.rangeCount,
     toString: () => opts.text,
-    getRangeAt: () =>
-      (opts.range ?? {
+    getRangeAt: () => {
+      const baseRange = opts.range ?? {
         commonAncestorContainer: null as unknown as Node,
         startContainer: null as unknown as Node,
         startOffset: 0,
         endContainer: null as unknown as Node,
         endOffset: 0,
-      }) as Range,
+      };
+      // Mirror the surrounding selection's text on the range so the inspector's
+      // empty-text filter (which checks both `selection.toString()` and
+      // `range.toString()`) behaves like a real DOM selection. The explicit
+      // own-property check is necessary because plain object literals inherit
+      // `Object.prototype.toString`; using `??` to fall back on a missing
+      // override would never trigger, and `range.toString()` would silently
+      // return `"[object Object]"`.
+      const explicitToString = Object.prototype.hasOwnProperty.call(baseRange, "toString")
+        ? (baseRange as { toString?: () => string }).toString
+        : undefined;
+      return {
+        ...baseRange,
+        toString: explicitToString ?? (() => opts.text),
+      } as unknown as Range;
+    },
   } as unknown as Selection;
 }
 
@@ -45,6 +72,52 @@ function buildOptions(
     isSourceView: override.isSourceView ?? (() => true),
     getSelection: override.getSelection ?? (() => null),
   };
+}
+
+// Build a fixture that mirrors @pierre/diffs's File output: a host div carrying
+// `class="uatu-source-pre"`, a `<pre data-file>` inside it, and per-line
+// `<div data-line="N">` elements (each containing a token <span>) inside the
+// content container.
+function buildSourceFixture(lines: string[]): {
+  document: Document;
+  previewElement: HTMLElement;
+  sourceHost: Element;
+  lineElement: (n: number) => Element;
+  tokenIn: (n: number) => Node;
+} {
+  const renderedLines = lines
+    .map(
+      (text, index) =>
+        `<div data-line="${index + 1}" data-line-type="context" data-line-index="${index}"><span>${text}</span></div>`,
+    )
+    .join("");
+  const { document } = parseHTML(
+    `<!doctype html><html><body>
+      <article id='preview'>
+        <div class='uatu-source-pre'>
+          <pre data-file=''>
+            <code data-code=''>
+              <div data-gutter=''>${lines.map((_, i) => `<span data-line-number-content=''>${i + 1}</span>`).join("")}</div>
+              <div data-content=''>${renderedLines}</div>
+            </code>
+          </pre>
+        </div>
+      </article>
+    </body></html>`,
+  );
+  const previewElement = document.querySelector("#preview") as unknown as HTMLElement;
+  const sourceHost = document.querySelector(".uatu-source-pre") as unknown as Element;
+  const lineElement = (n: number) =>
+    document.querySelector(`[data-line="${n}"]`) as unknown as Element;
+  const tokenIn = (n: number) => {
+    const el = lineElement(n);
+    const span = el.querySelector("span");
+    if (!span || !span.firstChild) {
+      throw new Error(`no token text for line ${n}`);
+    }
+    return span.firstChild as unknown as Node;
+  };
+  return { document, previewElement, sourceHost, lineElement, tokenIn };
 }
 
 describe("formatReference", () => {
@@ -67,62 +140,50 @@ describe("formatReference", () => {
   });
 });
 
-describe("offsetToLine", () => {
-  test("returns 1 for offset 0 regardless of content", () => {
-    expect(offsetToLine("anything", 0)).toBe(1);
-    expect(offsetToLine("\n\n\n", 0)).toBe(1);
+describe("lineNumberForNode", () => {
+  test("returns the data-line attribute of the nearest ancestor", () => {
+    const { sourceHost, tokenIn } = buildSourceFixture(["line1", "line2", "line3"]);
+    expect(lineNumberForNode(tokenIn(1), sourceHost)).toBe(1);
+    expect(lineNumberForNode(tokenIn(2), sourceHost)).toBe(2);
+    expect(lineNumberForNode(tokenIn(3), sourceHost)).toBe(3);
   });
 
-  test("counts newlines preceding the offset", () => {
-    const text = "a\nb\nc\nd";
-    expect(offsetToLine(text, 0)).toBe(1);
-    expect(offsetToLine(text, 2)).toBe(2);
-    expect(offsetToLine(text, 4)).toBe(3);
-    expect(offsetToLine(text, 6)).toBe(4);
-  });
-
-  test("trimTrailingNewline keeps a range ending at the start of the next line on the previous line", () => {
-    // "line1\nline2\n" — offset 6 is right after the first '\n', i.e. the
-    // start of line 2. With trim, it should still report line 1 (the last
-    // line the selection actually covered).
-    const text = "line1\nline2\n";
-    expect(offsetToLine(text, 6)).toBe(2);
-    expect(offsetToLine(text, 6, { trimTrailingNewline: true })).toBe(1);
-  });
-
-  test("clamps offsets larger than the text length", () => {
-    expect(offsetToLine("abc", 999)).toBe(1);
-    expect(offsetToLine("a\nb", 999)).toBe(2);
-  });
-});
-
-describe("characterOffsetWithin", () => {
-  test("returns 0 for a target equal to root with offset 0", () => {
+  test("returns null when no ancestor carries data-line", () => {
     const { document } = parseHTML(
-      "<!doctype html><html><body><pre><code>hello\nworld</code></pre></body></html>",
+      `<!doctype html><html><body>
+        <article id='preview'><p id='para'>not a code line</p></article>
+      </body></html>`,
     );
-    const code = document.querySelector("code") as unknown as Node;
-    expect(characterOffsetWithin(code, code, 0)).toBe(0);
+    const previewElement = document.querySelector("#preview") as unknown as Element;
+    const para = document.querySelector("#para") as unknown as Element;
+    const text = para.firstChild as unknown as Node;
+    expect(lineNumberForNode(text, previewElement)).toBeNull();
   });
 
-  test("returns null when target is not contained by root", () => {
+  test("returns null for non-numeric data-line values", () => {
     const { document } = parseHTML(
-      "<!doctype html><html><body><pre><code>hello</code></pre><span id='outside'>world</span></body></html>",
+      `<!doctype html><html><body>
+        <div id='root'><div data-line='not-a-number'><span id='target'>x</span></div></div>
+      </body></html>`,
     );
-    const code = document.querySelector("code") as unknown as Node;
-    const outside = document.querySelector("#outside") as unknown as Node;
-    expect(characterOffsetWithin(code, outside, 0)).toBeNull();
+    const root = document.querySelector("#root") as unknown as Element;
+    const target = document.querySelector("#target") as unknown as Node;
+    expect(lineNumberForNode(target, root)).toBeNull();
   });
 
-  test("computes character offset for a text-node target", () => {
+  test("stops at the supplied root and ignores ancestors above it", () => {
     const { document } = parseHTML(
-      "<!doctype html><html><body><pre><code>hello\nworld</code></pre></body></html>",
+      `<!doctype html><html><body>
+        <div data-line='99'>
+          <div id='root'>
+            <span id='inside'>x</span>
+          </div>
+        </div>
+      </body></html>`,
     );
-    const code = document.querySelector("code") as unknown as Node;
-    const textNode = code.firstChild as Node;
-    expect(characterOffsetWithin(code, textNode, 0)).toBe(0);
-    expect(characterOffsetWithin(code, textNode, 5)).toBe(5);
-    expect(characterOffsetWithin(code, textNode, 6)).toBe(6); // start of "world"
+    const root = document.querySelector("#root") as unknown as Element;
+    const inside = document.querySelector("#inside") as unknown as Node;
+    expect(lineNumberForNode(inside, root)).toBeNull();
   });
 });
 
@@ -290,21 +351,15 @@ describe("computeState", () => {
     expect(state.kind).toBe("hint");
   });
 
-  test("returns reference for a Source-view selection rooted in pre.uatu-source-pre", () => {
-    const { document } = parseHTML(
-      `<!doctype html><html><body>
-        <article id='preview'><pre class='uatu-source-pre'><code id='wholefile'>line1
-line2
-line3
-line4</code></pre></article>
-      </body></html>`,
-    );
-    const previewElement = document.querySelector("#preview") as unknown as HTMLElement;
-    const code = document.querySelector("#wholefile") as unknown as Node;
-    const textNode = code.firstChild as Node;
-    // Selection spans from the start of "line2" to the end of "line3":
-    //   "line1\nline2\nline3\nline4"
-    //          ^6              ^17
+  test("returns reference for a Source-view selection spanning multiple data-line elements", () => {
+    const { previewElement, lineElement, tokenIn } = buildSourceFixture([
+      "line1",
+      "line2",
+      "line3",
+      "line4",
+    ]);
+    const startToken = tokenIn(2);
+    const endToken = tokenIn(3);
     const state = computeState(
       buildOptions({
         previewElement,
@@ -316,11 +371,13 @@ line4</code></pre></article>
             rangeCount: 1,
             text: "line2\nline3",
             range: {
-              commonAncestorContainer: textNode,
-              startContainer: textNode,
-              startOffset: 6,
-              endContainer: textNode,
-              endOffset: 17,
+              // Browsers usually set commonAncestor to a parent that contains
+              // both endpoints. The source host is a safe upper bound.
+              commonAncestorContainer: lineElement(2).parentElement as unknown as Node,
+              startContainer: startToken,
+              startOffset: 0,
+              endContainer: endToken,
+              endOffset: 5,
             },
           }),
       }),
@@ -330,18 +387,9 @@ line4</code></pre></article>
     expect(state.record).toEqual({ path: "src/app.ts", startLine: 2, endLine: 3 });
   });
 
-  test("collapses a single-line selection in source view to startLine === endLine", () => {
-    const { document } = parseHTML(
-      `<!doctype html><html><body>
-        <article id='preview'><pre class='uatu-source-pre'><code id='wholefile'>alpha
-beta
-gamma</code></pre></article>
-      </body></html>`,
-    );
-    const previewElement = document.querySelector("#preview") as unknown as HTMLElement;
-    const code = document.querySelector("#wholefile") as unknown as Node;
-    const textNode = code.firstChild as Node;
-    // "beta" — characters 6..10 of "alpha\nbeta\ngamma"
+  test("collapses a single-line selection to startLine === endLine", () => {
+    const { previewElement, lineElement, tokenIn } = buildSourceFixture(["alpha", "beta", "gamma"]);
+    const token = tokenIn(2);
     const state = computeState(
       buildOptions({
         previewElement,
@@ -353,11 +401,11 @@ gamma</code></pre></article>
             rangeCount: 1,
             text: "beta",
             range: {
-              commonAncestorContainer: textNode,
-              startContainer: textNode,
-              startOffset: 6,
-              endContainer: textNode,
-              endOffset: 10,
+              commonAncestorContainer: lineElement(2) as unknown as Node,
+              startContainer: token,
+              startOffset: 0,
+              endContainer: token,
+              endOffset: 4,
             },
           }),
       }),
@@ -367,23 +415,12 @@ gamma</code></pre></article>
     expect(state.record).toEqual({ path: "fixture.txt", startLine: 2, endLine: 2 });
   });
 
-  test("range ending at the start of the next line is reported on the previous line", () => {
-    // claudecode.nvim convention: a selection ending immediately after a
-    // newline reports the previous line as endLine, since the user's
-    // selection covered "those lines", not "up to the first character of
-    // the next."
-    const { document } = parseHTML(
-      `<!doctype html><html><body>
-        <article id='preview'><pre class='uatu-source-pre'><code id='wholefile'>alpha
-beta
-gamma</code></pre></article>
-      </body></html>`,
-    );
-    const previewElement = document.querySelector("#preview") as unknown as HTMLElement;
-    const code = document.querySelector("#wholefile") as unknown as Node;
-    const textNode = code.firstChild as Node;
-    // "alpha\n" — offset 0..6 (the trailing newline is included). End line
-    // should be 1, not 2.
+  test("range ending at the leading edge of the next data-line element clamps to the prior line", () => {
+    // The user dragged from the start of line 1 to "just before line 2"; the
+    // browser materializes the end as `<div data-line="2">` at offset 0.
+    // We report endLine = 1.
+    const { previewElement, lineElement, tokenIn } = buildSourceFixture(["alpha", "beta", "gamma"]);
+    const startToken = tokenIn(1);
     const state = computeState(
       buildOptions({
         previewElement,
@@ -395,11 +432,11 @@ gamma</code></pre></article>
             rangeCount: 1,
             text: "alpha\n",
             range: {
-              commonAncestorContainer: textNode,
-              startContainer: textNode,
+              commonAncestorContainer: lineElement(1).parentElement as unknown as Node,
+              startContainer: startToken,
               startOffset: 0,
-              endContainer: textNode,
-              endOffset: 6,
+              endContainer: lineElement(2) as unknown as Node,
+              endOffset: 0,
             },
           }),
       }),
@@ -422,5 +459,36 @@ gamma</code></pre></article>
       }),
     );
     expect(state.kind).toBe("placeholder");
+  });
+});
+
+describe("extractSourceTextFromHost", () => {
+  test("joins data-line elements with newlines and returns clean source", () => {
+    const { sourceHost } = buildSourceFixture(["const a = 1;", "const b = 2;", "const c = 3;"]);
+    expect(extractSourceTextFromHost(sourceHost)).toBe(
+      "const a = 1;\nconst b = 2;\nconst c = 3;",
+    );
+  });
+
+  test("excludes line-number digits from the gutter", () => {
+    // The fixture's gutter places "1", "2", "3" inside data-line-number-content
+    // spans. extractSourceTextFromHost MUST NOT include those digits.
+    const { sourceHost } = buildSourceFixture(["aaa", "bbb", "ccc"]);
+    const text = extractSourceTextFromHost(sourceHost);
+    expect(text).toBe("aaa\nbbb\nccc");
+    expect(text).not.toMatch(/^1/);
+    expect(text).not.toMatch(/\d{2,}/);
+  });
+
+  test("plain-text fallback (no data-line nodes) reads code.textContent directly", () => {
+    const { document } = parseHTML(
+      `<!doctype html><html><body>
+        <div class='uatu-source-pre uatu-source-pre--plain'>
+          <pre><code>line1\nline2\n</code></pre>
+        </div>
+      </body></html>`,
+    );
+    const host = document.querySelector(".uatu-source-pre") as unknown as Element;
+    expect(extractSourceTextFromHost(host)).toBe("line1\nline2");
   });
 });

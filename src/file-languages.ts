@@ -1,15 +1,17 @@
-// Maps a file name to the highlight.js language identifier the preview's code
-// render path should use. One entry per extension (or filename), trivially
-// extensible. Resolution returns `undefined` for unmapped names — the render
-// path falls back to escaped plain text.
+import type { BundledLanguage } from "@pierre/diffs";
 
-const LANGUAGES_BY_EXTENSION: Record<string, string> = {
+// Maps a file name to a Shiki `BundledLanguage` identifier the preview's code
+// render path passes to `@pierre/diffs`. One entry per extension (or filename),
+// trivially extensible. Resolution returns `undefined` for unmapped names —
+// the render path falls back to plain escaped text.
+
+const LANGUAGES_BY_EXTENSION: Record<string, BundledLanguage> = {
   ".ts": "typescript",
-  ".tsx": "typescript",
+  ".tsx": "tsx",
   ".cts": "typescript",
   ".mts": "typescript",
   ".js": "javascript",
-  ".jsx": "javascript",
+  ".jsx": "jsx",
   ".cjs": "javascript",
   ".mjs": "javascript",
   ".py": "python",
@@ -25,7 +27,7 @@ const LANGUAGES_BY_EXTENSION: Record<string, string> = {
   ".yml": "yaml",
   ".yaml": "yaml",
   ".json": "json",
-  ".jsonc": "json",
+  ".jsonc": "jsonc",
   ".xml": "xml",
   ".html": "html",
   ".htm": "html",
@@ -55,19 +57,19 @@ const LANGUAGES_BY_EXTENSION: Record<string, string> = {
   // these entries.
   ".md": "markdown",
   ".markdown": "markdown",
-  ".mdx": "markdown",
+  ".mdx": "mdx",
   ".adoc": "asciidoc",
   ".asciidoc": "asciidoc",
 };
 
-const LANGUAGES_BY_FILENAME: Record<string, string> = {
+const LANGUAGES_BY_FILENAME: Record<string, BundledLanguage> = {
   dockerfile: "dockerfile",
   makefile: "makefile",
   rakefile: "ruby",
   gemfile: "ruby",
 };
 
-export function languageForName(name: string): string | undefined {
+export function languageForName(name: string): BundledLanguage | undefined {
   const lower = name.toLowerCase();
 
   const byName = LANGUAGES_BY_FILENAME[lower];
@@ -81,4 +83,19 @@ export function languageForName(name: string): string | undefined {
   }
 
   return LANGUAGES_BY_EXTENSION[lower.slice(dotIndex)];
+}
+
+// The full set of languages this preview will ever ask Shiki to highlight.
+// Used by the server-side highlighter pre-warm so the first preview request
+// finds every supported grammar already loaded.
+export function allConfiguredLanguages(): BundledLanguage[] {
+  const set = new Set<BundledLanguage>();
+  for (const lang of Object.values(LANGUAGES_BY_EXTENSION)) set.add(lang);
+  for (const lang of Object.values(LANGUAGES_BY_FILENAME)) set.add(lang);
+  // Mermaid blocks are intercepted before highlighting, but include the
+  // grammar so any `[source,mermaid]` listing that somehow slips past the
+  // interception still renders as readable code rather than crashing the
+  // request.
+  set.add("mermaid");
+  return [...set];
 }

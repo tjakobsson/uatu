@@ -145,6 +145,17 @@ export type ParsedCommand =
   | { kind: "help" }
   | { kind: "version" };
 
+// Carried alongside the source-view HTML so the browser can hand the original
+// source contents to `@pierre/diffs`'s `File.hydrate()` and attach interactivity
+// to the prerendered DOM. Absent on rendered Markdown / AsciiDoc responses
+// (those have no source-view region to hydrate) and on the >1 MB plain-text
+// fallback (no token markup to hydrate).
+export type SourceHydrationPayload = {
+  name: string;
+  contents: string;
+  lang: string | undefined;
+};
+
 export type RenderedDocument = {
   id: string;
   title: string;
@@ -153,12 +164,14 @@ export type RenderedDocument = {
   kind: "markdown" | "asciidoc" | "text";
   // The rendering applied for this response. "rendered" runs Markdown /
   // AsciiDoc through their full pipelines; "source" returns the file's
-  // verbatim text in a `<pre class="uatu-source-pre"><code>` block. Text /
-  // source files (kind === "text") are always rendered as "source" since they
-  // have no separate rendered representation.
+  // verbatim text via @pierre/diffs's File component, wrapped in a host
+  // `<div class="uatu-source-pre">`. Text / source files (kind === "text")
+  // are always rendered as "source" since they have no separate rendered
+  // representation.
   view: ViewMode;
   language: string | null;
   metadata?: DocumentMetadata;
+  sourceHydration?: SourceHydrationPayload;
 };
 
 export type RenderDocumentOptions = {
@@ -574,15 +587,25 @@ export async function renderDocument(
   let metadata: DocumentMetadata | undefined;
   let language: string | null;
   let title: string;
+  let sourceHydration: SourceHydrationPayload | undefined;
 
   if (effectiveView === "source") {
-    // Whole-file source rendering: `<pre class="uatu-source-pre"><code>...`,
-    // syntax-highlighted by file kind. Markdown / AsciiDoc files highlight
-    // as their own markup languages (see file-languages.ts).
-    language = languageForName(document.name) ?? null;
-    html = renderCodeAsHtml(source, language ?? undefined);
+    // Whole-file source rendering via @pierre/diffs's File component: returns
+    // a hydratable `<pre data-file>` wrapped in `<div class="uatu-source-pre">`
+    // so the Selection Inspector can identify the source-view region by class.
+    // Markdown / AsciiDoc files highlight as their own markup languages
+    // (see file-languages.ts).
+    const lang = languageForName(document.name);
+    language = lang ?? null;
+    const rendered = await renderCodeAsHtml(document.name, source, lang);
+    html = rendered.html;
     metadata = undefined;
     title = document.name;
+    sourceHydration = {
+      name: rendered.hydration.name,
+      contents: rendered.hydration.contents,
+      lang: rendered.hydration.lang,
+    };
   } else if (document.kind === "markdown") {
     const rendered = renderMarkdownToHtml(source);
     html = rendered.html;
@@ -599,10 +622,17 @@ export async function renderDocument(
     // `effectiveView === "rendered"` was forced to "source" above for any
     // non-markdown/non-asciidoc kind, so this branch is unreachable. Kept as
     // an exhaustive guard for the type-checker.
-    language = languageForName(document.name) ?? null;
-    html = renderCodeAsHtml(source, language ?? undefined);
+    const lang = languageForName(document.name);
+    language = lang ?? null;
+    const rendered = await renderCodeAsHtml(document.name, source, lang);
+    html = rendered.html;
     metadata = undefined;
     title = document.name;
+    sourceHydration = {
+      name: rendered.hydration.name,
+      contents: rendered.hydration.contents,
+      lang: rendered.hydration.lang,
+    };
   }
 
   return {
@@ -614,6 +644,7 @@ export async function renderDocument(
     view: effectiveView,
     language,
     ...(metadata ? { metadata } : {}),
+    ...(sourceHydration ? { sourceHydration } : {}),
   };
 }
 

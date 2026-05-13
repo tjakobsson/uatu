@@ -33,6 +33,7 @@ import {
 } from "./terminal-auth";
 import { terminalBackendAvailable } from "./terminal-backend";
 import { createTerminalServer } from "./terminal-server";
+import { getPierreDiffsCoreCSS, preloadCodeHighlighter } from "./highlighter";
 
 let activeFilePath: string | null = null;
 let activeRespectGitignore = true;
@@ -41,6 +42,9 @@ let activeFollow = true;
 let activeWorkspaceRoot = E2E_WORKSPACE_ROOT;
 let activeEntries: WatchEntry[] = [];
 const terminalEnabled = await terminalBackendAvailable();
+// Pre-warm Shiki before the first request lands; the e2e server is short-lived
+// and tests assume highlighting is synchronous from the browser's perspective.
+await preloadCodeHighlighter();
 let watchSession = await createSession({ resetWorkspace: true });
 const terminalServer = terminalEnabled
   ? createTerminalServer({ cwd: activeWorkspaceRoot })
@@ -79,6 +83,12 @@ server = Bun.serve({
     "/manifest.webmanifest": new Response(Bun.file(manifestAsset), {
       headers: {
         "content-type": "application/manifest+json",
+        "cache-control": "public, max-age=3600",
+      },
+    }),
+    "/_pierre/diffs-core.css": new Response(getPierreDiffsCoreCSS(), {
+      headers: {
+        "content-type": "text/css; charset=utf-8",
         "cache-control": "public, max-age=3600",
       },
     }),

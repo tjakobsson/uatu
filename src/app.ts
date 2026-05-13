@@ -1,3 +1,5 @@
+import { SVGSpriteSheet } from "@pierre/diffs";
+
 import { closeMermaidViewer, ensureMermaidViewer } from "./mermaid-viewer";
 import { renderMermaidDiagrams, replaceMermaidCodeBlocks, type MermaidThemeInputs } from "./preview";
 import { captureTerminalToken, mountTerminalPanel, type TerminalPanelHandle } from "./terminal";
@@ -18,6 +20,7 @@ import {
 } from "./terminal-pane-state";
 import {
   createSelectionInspector,
+  extractSourceTextFromHost,
   formatReference,
   type PaneState as InspectorPaneState,
   type SelectionInspector,
@@ -64,6 +67,12 @@ type RenderedDocumentMetadata = {
   extras?: Record<string, string>;
 };
 
+type RenderedDocumentHydration = {
+  name: string;
+  contents: string;
+  lang?: string;
+};
+
 type RenderedDocument = {
   id: string;
   title: string;
@@ -73,6 +82,11 @@ type RenderedDocument = {
   view: ViewMode;
   language: string | null;
   metadata?: RenderedDocumentMetadata;
+  // Present on source-view responses where the prerendered HTML is the output
+  // of @pierre/diffs's File component. Used to attach interactivity to the
+  // already-mounted DOM via `File.hydrate()` so the gutter utility, selection
+  // helpers, and future per-line affordances all become live.
+  sourceHydration?: RenderedDocumentHydration;
 };
 
 const SIDEBAR_COLLAPSED_KEY = "uatu:sidebar-collapsed";
@@ -269,6 +283,8 @@ const appState = {
   gitLogLimit: readGitLogLimitPreference(),
 };
 
+ensureDiffsIconSprite();
+ensureDiffsCoreStylesheet();
 initSidebarCollapse();
 initSidebarPanes();
 initSidebarWidth();
@@ -295,11 +311,12 @@ function activeDocumentPath(): string | null {
 }
 
 // Whether the active preview body is currently rendered as the whole-file
-// source `<pre class="uatu-source-pre">` block. True for any view-mode that
-// produces source rendering, including text/source files and Markdown /
-// AsciiDoc when the user has flipped to Source view.
+// source-view host (`<div class="uatu-source-pre">` wrapping @pierre/diffs's
+// File component). True for any view-mode that produces source rendering,
+// including text/source files and Markdown / AsciiDoc when the user has
+// flipped to Source view.
 function isPreviewSourceView(): boolean {
-  return previewElement.querySelector("pre.uatu-source-pre") !== null;
+  return previewElement.querySelector(".uatu-source-pre") !== null;
 }
 
 let copyResetTimeoutId: number | null = null;
@@ -1271,7 +1288,7 @@ async function renderSinglePayload(payload: RenderedDocument): Promise<void> {
   // asciidoc when the user is in Source view — needs the line-number gutter
   // so the inspector pane can produce accurate `@path#L<a>-<b>` references.
   if (payload.view === "source") {
-    attachLineNumbers(previewElement);
+    hydrateSourceView(previewElement, payload.sourceHydration);
   }
   attachCopyButtons(previewElement);
 }
@@ -1368,7 +1385,7 @@ async function renderSplitPayloads(
 
   attachMetadataCardToggleListener(renderedPane);
   await renderMermaidDiagrams(renderedPane, currentMermaidThemeInputs());
-  attachLineNumbers(sourcePane);
+  hydrateSourceView(sourcePane, sourcePayload.sourceHydration);
   attachCopyButtons(sourcePane);
   attachCopyButtons(renderedPane);
 
@@ -1765,33 +1782,64 @@ function isGitLogLimit(value: number): value is 10 | 25 | 50 | 100 {
   return value === 10 || value === 25 || value === 50 || value === 100;
 }
 
-// Attach a line-number gutter to each <pre><code> in the container. The gutter
-// is a sibling <span> of <code>, NOT a child — copy-to-clipboard reads
-// `code.textContent` so line numbers are excluded automatically. `user-select:
-// none` on the gutter also keeps mouse-selection of the code clean.
-function attachLineNumbers(container: HTMLElement) {
-  const blocks = container.querySelectorAll<HTMLPreElement>("pre");
-  blocks.forEach(pre => {
-    const code = pre.querySelector<HTMLElement>("code");
-    if (!code) {
-      return;
-    }
-    if (pre.querySelector(".line-numbers")) {
-      return;
-    }
+// Ensure the @pierre/diffs SVG icon sprite is mounted exactly once in the
+// document. Per-render output strips the sprite server-side to avoid duplicate
+// element IDs across multiple renders; we inject the canonical copy here so
+// every `<use href="#diffs-icon-...">` reference resolves.
+function ensureDiffsIconSprite() {
+  if (document.querySelector("svg[data-icon-sprite]")) {
+    return;
+  }
+  const container = document.createElement("div");
+  container.hidden = true;
+  container.innerHTML = SVGSpriteSheet;
+  document.body.insertBefore(container, document.body.firstChild);
+}
 
-    const text = code.textContent ?? "";
-    const lineCount = Math.max(1, text.replace(/\n$/, "").split("\n").length);
-    const numbers = Array.from({ length: lineCount }, (_, index) => String(index + 1)).join("\n");
+// Inject the @pierre/diffs File-component CSS once per session. The server
+// serves the canonical copy from `/_pierre/diffs-core.css` (extracted at
+// startup, see highlighter.ts); injecting via JS lets us bypass Bun's HTML
+// bundler static-asset validation for runtime routes. Idempotent and runs
+// before any source view tries to render, so the grid layout is in place
+// for the first paint.
+function ensureDiffsCoreStylesheet() {
+  if (document.querySelector('link[data-pierre-diffs-core]')) {
+    return;
+  }
+  const link = document.createElement("link");
+  link.rel = "stylesheet";
+  link.href = "/_pierre/diffs-core.css";
+  link.dataset.pierreDiffsCore = "";
+  document.head.appendChild(link);
+}
 
-    const gutter = document.createElement("span");
-    gutter.className = "line-numbers";
-    gutter.setAttribute("aria-hidden", "true");
-    gutter.textContent = numbers;
-
-    pre.classList.add("has-line-numbers");
-    pre.insertBefore(gutter, code);
-  });
+// Mount the source-view region. The server-rendered HTML (from preloadFile)
+// is already complete on its own — token-highlighted code, line-number
+// gutter, and per-line `<div data-line="N">` elements that the Selection
+// Inspector reads. No client-side work is required to make the view usable.
+//
+// We deliberately do NOT call `File.hydrate()` here: hydration's value is in
+// the interactive surface (gutter-utility hover, selection-range API,
+// expand-context controls, per-line annotations) that uatu does not currently
+// consume. Skipping it avoids the duplicate-DOM regression hydrate produces
+// when applied to a host that already contains the complete prerendered HTML,
+// and keeps the per-render cost minimal. The wiring is intentionally close to
+// the surface so a future change that needs interactivity can call `new
+// File(...).hydrate({...})` here without further refactor.
+function hydrateSourceView(
+  host: HTMLElement,
+  hydration: RenderedDocumentHydration | undefined,
+) {
+  if (!hydration) {
+    return;
+  }
+  const fileContainer = host.querySelector<HTMLElement>(".uatu-source-pre");
+  if (!fileContainer) {
+    return;
+  }
+  // Reserved for future interactivity hookup; intentionally a no-op for now.
+  void fileContainer;
+  void hydration;
 }
 
 function attachCopyButtons(container: HTMLElement) {
@@ -1805,6 +1853,15 @@ function attachCopyButtons(container: HTMLElement) {
       return;
     }
 
+    // Distinguish source-view `<pre>` blocks (inside `.uatu-source-pre`) from
+    // fenced code blocks. Source-view content carries per-line `data-line`
+    // wrappers and a gutter region inside `<code>`, so `code.textContent`
+    // would include line digits — extractSourceTextFromHost walks the line
+    // elements and rebuilds the source. Fenced blocks emitted by Shiki's
+    // `codeToHtml` are flat (`<code><span class="line">...</span>\n...`),
+    // and `code.textContent` returns clean source.
+    const sourceHost = pre.closest<HTMLElement>(".uatu-source-pre");
+
     const button = document.createElement("button");
     button.type = "button";
     button.className = "code-copy";
@@ -1814,7 +1871,9 @@ function attachCopyButtons(container: HTMLElement) {
 
     button.addEventListener("click", async event => {
       event.preventDefault();
-      const text = code.textContent ?? "";
+      const text = sourceHost
+        ? extractSourceTextFromHost(sourceHost)
+        : code.textContent ?? "";
       try {
         await navigator.clipboard.writeText(text);
         flashCopyButton(button, "Copied!", "is-copied");

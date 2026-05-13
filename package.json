@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@asciidoctor/core": "^3.0.4",
+    "@pierre/diffs": "1.1.21",
     "@pierre/trees": "1.0.0-beta.3",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
@@ -29,7 +30,6 @@
     "hast-util-from-html": "^2.0.3",
     "hast-util-sanitize": "^5.0.2",
     "hast-util-to-html": "^9.0.5",
-    "highlight.js": "^11.11.1",
     "ignore": "^7.0.5",
     "mermaid": "^11.14.0",
     "micromark": "^4.0.2",

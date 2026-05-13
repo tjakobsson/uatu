@@ -810,7 +810,8 @@ test("a non-Markdown text file appears in the tree and renders as syntax-highlig
   await yamlButton.click();
 
   await expect(page.locator("#preview-path")).toHaveText("config.yaml");
-  await expect(page.locator('#preview pre code.hljs.language-yaml')).toBeVisible();
+  await expect(page.locator("#preview .uatu-source-pre")).toBeVisible();
+  await expect(page.locator("#preview .uatu-source-pre [data-line]").first()).toBeVisible();
 });
 
 test("a non-image binary appears in the tree and routes to the preview-unavailable view", async ({ page, request }) => {
@@ -917,7 +918,8 @@ test("follow mode switches the preview when a non-Markdown text file changes", a
   await fs.writeFile(workspacePath("config.yaml"), "key: changed\nport: 9999\n", "utf8");
 
   await expect(page.locator("#preview-path")).toHaveText("config.yaml");
-  await expect(page.locator('#preview pre code.hljs.language-yaml')).toBeVisible();
+  await expect(page.locator("#preview .uatu-source-pre")).toBeVisible();
+  await expect(page.locator("#preview .uatu-source-pre [data-line]").first()).toBeVisible();
 });
 
 test("enabling follow jumps to the most recently modified file", async ({ page }) => {
@@ -1024,7 +1026,10 @@ test("renders the AsciiDoc cheat sheet with full heading depth, TOC, admonitions
   await expect(page.locator("#preview .admonitionblock.warning")).toBeVisible();
 
   // Highlighted code (the cheat sheet has multiple [source,javascript] blocks).
-  await expect(page.locator("#preview pre code.hljs.language-javascript").first()).toBeVisible();
+  // Shiki emits `<pre class="shiki ...">` with per-token <span> elements carrying
+  // inline `--shiki-light` / `--shiki-dark` CSS variables — assert on that
+  // behavioral signal rather than the legacy hljs class names.
+  await expect(page.locator('#preview pre.shiki').first()).toBeVisible();
 
   // Both AsciiDoc mermaid forms — `[source,mermaid]` and the bare `[mermaid]`
   // block style — hydrate client-side into rendered SVGs.
@@ -1149,17 +1154,52 @@ test("non-Markdown code views show line numbers; Markdown fenced blocks do not",
   });
   await page.goto("/");
 
-  // Code view: line numbers visible
+  // Code view: line numbers visible (rendered by @pierre/diffs's File
+  // component as `<div data-gutter>` containing per-line spans).
   await treeRow(page, "config.yaml").click();
-  const codeViewGutter = page.locator("#preview pre.has-line-numbers .line-numbers");
+  const codeViewGutter = page.locator("#preview .uatu-source-pre [data-gutter]");
   await expect(codeViewGutter).toHaveCount(1);
-  await expect(codeViewGutter).toHaveText("1\n2\n3");
+  // The gutter renders the 3 source-line numbers.
+  await expect(
+    page.locator("#preview .uatu-source-pre [data-gutter] [data-line-number-content]"),
+  ).toHaveCount(3);
 
-  // Markdown view: fenced block has NO line numbers
+  // Regression guard: the gutter and content regions must render as columns
+  // of the File-component's CSS grid, NOT stacked vertically. github-markdown-css
+  // ships a `.markdown-body pre code { display: inline; overflow: visible }`
+  // rule that previously beat @pierre/diffs's `[data-code] { display: grid;
+  // overflow: scroll clip }` (higher specificity), which collapsed the grid
+  // (line numbers stacked above the code) AND suppressed the horizontal
+  // scrollbar for long lines. Verify (a) the grid layout (gutter left,
+  // content right) and (b) horizontal scroll engages when content exceeds
+  // the visible width.
+  const layout = await page.evaluate(() => {
+    const code = document.querySelector(".uatu-source-pre [data-code]");
+    const gutter = document.querySelector(".uatu-source-pre [data-gutter]");
+    const content = document.querySelector(".uatu-source-pre [data-content]");
+    if (!code || !gutter || !content) {
+      return { error: "missing elements" };
+    }
+    const g = gutter.getBoundingClientRect();
+    const c = content.getBoundingClientRect();
+    return {
+      codeDisplay: getComputedStyle(code).display,
+      codeOverflowX: getComputedStyle(code).overflowX,
+      sideBySide: Math.abs(g.top - c.top) < 5 && Math.abs(g.right - c.left) < 5,
+    };
+  });
+  expect(layout).toMatchObject({
+    codeDisplay: "grid",
+    codeOverflowX: "scroll",
+    sideBySide: true,
+  });
+
+  // Markdown view: fenced block has NO line-number gutter.
   await treeRow(page, "with-code.md").click();
+  // Exactly one fenced <pre> from Shiki, and no File-component gutter on it.
   await expect(page.locator("#preview pre")).toHaveCount(1);
-  await expect(page.locator("#preview pre .line-numbers")).toHaveCount(0);
-  await expect(page.locator("#preview pre.has-line-numbers")).toHaveCount(0);
+  await expect(page.locator("#preview pre [data-gutter]")).toHaveCount(0);
+  await expect(page.locator("#preview .uatu-source-pre")).toHaveCount(0);
 });
 
 test("AsciiDoc cross-document links render with the original .adoc extension (not .html)", async ({ page }) => {
@@ -1859,75 +1899,52 @@ async function clearSelection(page: Page): Promise<void> {
   });
 }
 
-// Anchor a selection on a known span of source-view text (under
-// `pre.uatu-source-pre code`). The test fixture's README.md is short and
-// stable, so we select the exact source lines we want by character offsets
-// inside the source `<code>` element.
+// Anchor a selection on a known span of source-view text. With @pierre/diffs's
+// File-component DOM, every source line is wrapped in `<div data-line="N">`
+// with token `<span>` children inside the host `<div class="uatu-source-pre">`.
+// We locate the start / end line elements by `data-line` attribute, then
+// resolve the first text node inside each to anchor the range. The Selection
+// Inspector reads line numbers by walking up to `[data-line]`, so any text
+// node inside the right line element produces the desired capture.
 async function selectSourceLineRange(
   page: Page,
   options: { startLine: number; endLine: number },
 ): Promise<void> {
   await page.evaluate(({ startLine, endLine }) => {
-    const code = document.querySelector("pre.uatu-source-pre code");
-    if (!code) {
-      throw new Error("selectSourceLineRange: no source-view code element");
+    const host = document.querySelector(".uatu-source-pre");
+    if (!host) {
+      throw new Error("selectSourceLineRange: no .uatu-source-pre host element");
     }
-    const text = code.textContent ?? "";
-    const lines = text.split("\n");
-    if (startLine < 1 || endLine < startLine || endLine > lines.length) {
+    const lineCount = host.querySelectorAll("[data-line]").length;
+    if (startLine < 1 || endLine < startLine || endLine > lineCount) {
       throw new Error(
-        `selectSourceLineRange: invalid range L${startLine}-${endLine} for ${lines.length}-line document`,
+        `selectSourceLineRange: invalid range L${startLine}-${endLine} for ${lineCount}-line document`,
       );
     }
-    let startOffset = 0;
-    for (let i = 1; i < startLine; i += 1) {
-      startOffset += lines[i - 1].length + 1; // +1 for the trailing newline
+    const startLineEl = host.querySelector(`[data-line="${startLine}"]`);
+    const endLineEl = host.querySelector(`[data-line="${endLine}"]`);
+    if (!startLineEl || !endLineEl) {
+      throw new Error(
+        `selectSourceLineRange: could not find data-line elements for L${startLine}-${endLine}`,
+      );
     }
-    let endOffset = startOffset;
-    for (let i = startLine; i <= endLine; i += 1) {
-      endOffset += lines[i - 1].length;
-      // Include the newline that terminates this line, except when it would
-      // walk past the end of the source (no newline after the final line in
-      // a file with no trailing newline). This mirrors how a user dragging a
-      // visual-line selection from line N to line M lands the focus at the
-      // start of line M+1 — and how `@path#L<a>-<b>` should resolve.
-      if (i < lines.length || (lines[i - 1].length > 0 && i === lines.length)) {
-        endOffset += 1;
-      }
-    }
-    if (endOffset > text.length) {
-      endOffset = text.length;
-    }
-    // The source view's `<code>` element wraps highlighted source which may
-    // be split into many text nodes by the syntax highlighter; we therefore
-    // need to walk to find the text nodes containing startOffset / endOffset.
-    function nodeAt(target: number): { node: Node; offset: number } | null {
-      let consumed = 0;
-      function walk(n: Node): { node: Node; offset: number } | null {
-        if (n.nodeType === 3) {
-          const len = (n.nodeValue ?? "").length;
-          if (target <= consumed + len) {
-            return { node: n, offset: target - consumed };
-          }
-          consumed += len;
-          return null;
-        }
-        for (const child of Array.from(n.childNodes)) {
-          const found = walk(child);
-          if (found) return found;
-        }
-        return null;
-      }
-      return walk(code!);
-    }
-    const startPos = nodeAt(startOffset);
-    const endPos = nodeAt(endOffset);
-    if (!startPos || !endPos) {
-      throw new Error("selectSourceLineRange: failed to resolve text nodes for range");
-    }
+    // Anchor the range on the line ELEMENTS themselves (not on their text
+    // descendants). Empty source lines render as `<div data-line="N">\n</div>`
+    // — anchoring on the whitespace-only text node inside makes
+    // `selection.toString()` return empty (Chromium's selection serializer
+    // collapses whitespace-only content inside grid layout), which trips the
+    // inspector's `text.length === 0` placeholder branch. Element-boundary
+    // anchoring sidesteps that: `range.setStart(el, 0)` positions the range
+    // at the leading edge of the element's children, and the selection text
+    // becomes the concatenation of all descendant content.
+    //
+    // The inspector reads line numbers from the closest [data-line] ancestor
+    // of `range.startContainer` / `range.endContainer`. With this anchoring
+    // those containers ARE the line elements themselves, so `lineNumberForNode`
+    // returns the line number on its very first iteration.
     const range = document.createRange();
-    range.setStart(startPos.node, startPos.offset);
-    range.setEnd(endPos.node, endPos.offset);
+    range.setStart(startLineEl, 0);
+    range.setEnd(endLineEl, endLineEl.childNodes.length);
     const selection = window.getSelection();
     if (!selection) {
       throw new Error("selectSourceLineRange: getSelection() returned null");
@@ -1941,9 +1958,11 @@ async function selectSourceLineRange(
 test("Source view captures a line range and shows it as @path#L<a>-<b> in Review mode", async ({ page }) => {
   await page.locator("#mode-review").click();
   // README.md is already loaded in beforeEach. Flip to source view so the
-  // preview body is rendered as a whole-file <pre class="uatu-source-pre">.
+  // preview body is rendered as a whole-file `<div class="uatu-source-pre">`
+  // hosting @pierre/diffs's File component (`<pre data-file>` with per-line
+  // `<div data-line="N">` elements).
   await page.locator("#view-source").click();
-  await expect(page.locator("pre.uatu-source-pre")).toBeVisible();
+  await expect(page.locator(".uatu-source-pre")).toBeVisible();
 
   const pane = page.locator('[data-pane-id="selection-inspector"]');
   await expect(pane).toBeVisible();
@@ -1966,7 +1985,7 @@ test("Source view captures a line range and shows it as @path#L<a>-<b> in Review
 test("Single-line source-view selection collapses to @path#L<n>", async ({ page }) => {
   await page.locator("#mode-review").click();
   await page.locator("#view-source").click();
-  await expect(page.locator("pre.uatu-source-pre")).toBeVisible();
+  await expect(page.locator(".uatu-source-pre")).toBeVisible();
 
   await selectSourceLineRange(page, { startLine: 5, endLine: 5 });
   const pane = page.locator('[data-pane-id="selection-inspector"]');
@@ -1977,7 +1996,7 @@ test("Clicking the captured reference copies it to the clipboard", async ({ page
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await page.locator("#mode-review").click();
   await page.locator("#view-source").click();
-  await expect(page.locator("pre.uatu-source-pre")).toBeVisible();
+  await expect(page.locator(".uatu-source-pre")).toBeVisible();
 
   await selectSourceLineRange(page, { startLine: 1, endLine: 3 });
   const control = page
@@ -1999,7 +2018,7 @@ test("Rendered view shows the hint and clicking it switches to Source view", asy
   // Default view is Rendered; do NOT click the source toggle.
   await expect(page.locator("#view-rendered")).toHaveAttribute("aria-checked", "true");
   await expect(page.locator("#view-source")).toHaveAttribute("aria-checked", "false");
-  await expect(page.locator("pre.uatu-source-pre")).toHaveCount(0);
+  await expect(page.locator(".uatu-source-pre")).toHaveCount(0);
 
   // Mark prose text in the rendered preview.
   await selectNodeContents(page, "#preview h1, #preview h2, #preview h3");
@@ -2012,7 +2031,7 @@ test("Rendered view shows the hint and clicking it switches to Source view", asy
 
   await control.click();
   await expect(page.locator("#view-source")).toHaveAttribute("aria-checked", "true");
-  await expect(page.locator("pre.uatu-source-pre")).toBeVisible();
+  await expect(page.locator(".uatu-source-pre")).toBeVisible();
 });
 
 test("Selection inside a rendered fenced code block produces the hint, not a reference", async ({ page }) => {
@@ -2028,10 +2047,11 @@ test("Selection inside a rendered fenced code block produces the hint, not a ref
   await clickTreeFile(page, "guides/fenced-fixture.md");
   await expect(page.locator("#preview-path")).toHaveText("guides/fenced-fixture.md");
   await page.locator("#view-rendered").click();
-  // The per-block fenced `<pre>` does NOT carry the uatu-source-pre class.
-  const fenced = page.locator("#preview pre:not(.uatu-source-pre) code");
+  // The per-block fenced `<pre>` is Shiki's `<pre class="shiki ...">` and is
+  // NOT inside the source-view host (`.uatu-source-pre`).
+  const fenced = page.locator("#preview pre.shiki code");
   await expect(fenced).toBeVisible();
-  await selectNodeContents(page, "#preview pre:not(.uatu-source-pre) code");
+  await selectNodeContents(page, "#preview pre.shiki code");
 
   const control = page
     .locator('[data-pane-id="selection-inspector"] [data-selection-inspector-control]');
@@ -2042,7 +2062,7 @@ test("Selection inside a rendered fenced code block produces the hint, not a ref
 test("Selection Inspector pane returns to placeholder after the selection is collapsed", async ({ page }) => {
   await page.locator("#mode-review").click();
   await page.locator("#view-source").click();
-  await expect(page.locator("pre.uatu-source-pre")).toBeVisible();
+  await expect(page.locator(".uatu-source-pre")).toBeVisible();
   const pane = page.locator('[data-pane-id="selection-inspector"]');
 
   await selectSourceLineRange(page, { startLine: 1, endLine: 2 });
@@ -2105,7 +2125,7 @@ test("View-mode preference persists across reload", async ({ page }) => {
 
   await page.reload();
   await expect(page.locator("#view-source")).toHaveAttribute("aria-checked", "true");
-  await expect(page.locator("pre.uatu-source-pre")).toBeVisible();
+  await expect(page.locator(".uatu-source-pre")).toBeVisible();
 });
 
 test("Layout chooser is visible for Markdown / AsciiDoc and hidden for source files", async ({ page }) => {
@@ -2138,7 +2158,7 @@ test("Side-by-side layout renders Source left, Rendered right, with both visible
 
   // Source pane carries the distinguishing whole-file <pre> class used by the
   // Selection Inspector, mirroring single Source view.
-  await expect(page.locator("#preview .preview-pane-source pre.uatu-source-pre")).toBeVisible();
+  await expect(page.locator("#preview .preview-pane-source .uatu-source-pre")).toBeVisible();
 
   // The Source/Rendered toggle is hidden when split is active — both views are
   // already showing, so there is nothing to toggle.
@@ -2194,7 +2214,7 @@ test("Switching to single layout preserves the Source / Rendered preference", as
   await expect(page.locator("#view-control")).toBeVisible();
   await expect(page.locator("#view-source")).toHaveAttribute("aria-checked", "true");
   // And the body is in source view, not rendered.
-  await expect(page.locator("#preview > pre.uatu-source-pre")).toBeVisible();
+  await expect(page.locator("#preview > .uatu-source-pre")).toBeVisible();
 });
 
 test("Dragging the split resizer reallocates space between panes", async ({ page }) => {

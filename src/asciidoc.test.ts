@@ -1,8 +1,13 @@
-import { describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 
 import { normalizeAsciidoctorListings, renderAsciidocToHtml, rewriteInPageAnchors } from "./asciidoc";
+import { preloadCodeHighlighter } from "./highlighter";
 import { SYNTAX_HIGHLIGHT_BYTES_LIMIT } from "./markdown";
 import { replaceMermaidCodeBlocks } from "./preview";
+
+beforeAll(async () => {
+  await preloadCodeHighlighter();
+});
 
 describe("renderAsciidocToHtml", () => {
   test("renders the level-0 doctitle as <h1>", () => {
@@ -87,15 +92,16 @@ See <<target>> for details.
     expect(html).toContain("note");
   });
 
-  test("emits highlight.js token coloring for [source,LANG] listings", () => {
+  test("emits Shiki token coloring for [source,LANG] listings", () => {
     const { html } = renderAsciidocToHtml(`[source,javascript]
 ----
 const answer = 42;
 ----
 `);
-    expect(html).toContain('<pre><code class="hljs language-javascript">');
-    expect(html).toContain("hljs-keyword");
-    expect(html).toContain("hljs-number");
+    expect(html).toMatch(/<pre[^>]*class="shiki[^"]*"/);
+    expect(html).toContain("--shiki-light:");
+    expect(html).toContain("const");
+    expect(html).toContain("42");
   });
 
   test("[source,mermaid] survives as a language-mermaid code block (client-side hydration)", () => {
@@ -107,7 +113,7 @@ graph TD; A-->B
     // The renderer leaves it as a plain language-mermaid block; the client-side
     // replaceMermaidCodeBlocks handler then hydrates it into a <div class="mermaid">.
     expect(html).toContain('<pre><code class="language-mermaid">');
-    expect(html).not.toContain("hljs-");
+    expect(html).not.toContain("--shiki-");
 
     const hydrated = replaceMermaidCodeBlocks(html);
     expect(hydrated).toContain('<div class="mermaid">');
@@ -177,9 +183,8 @@ not a diagram, just preformatted text
 not a real language
 ----
 `);
-    expect(html).toContain('<pre><code class="hljs');
+    expect(html).toMatch(/<pre[^>]*class="shiki[^"]*"/);
     expect(html).toContain("not a real language");
-    expect(html).not.toContain("hljs-keyword");
   });
 
   test("include:: directives are not resolved under SECURE safe mode", () => {
@@ -221,7 +226,7 @@ not a real language
   test("bypasses Asciidoctor and emits plain text above the size threshold", () => {
     const big = "= title\n\n" + "x".repeat(SYNTAX_HIGHLIGHT_BYTES_LIMIT);
     const { html } = renderAsciidocToHtml(big);
-    expect(html.startsWith('<pre><code class="hljs">')).toBe(true);
+    expect(html.startsWith('<pre><code>')).toBe(true);
     expect(html).not.toContain("<h1>");
     expect(html).not.toContain("admonitionblock");
   });
@@ -414,6 +419,6 @@ Body.
     const big = "= title\n\n" + "x".repeat(SYNTAX_HIGHLIGHT_BYTES_LIMIT);
     const { html, metadata } = renderAsciidocToHtml(big);
     expect(metadata).toBeUndefined();
-    expect(html.startsWith('<pre><code class="hljs">')).toBe(true);
+    expect(html.startsWith('<pre><code>')).toBe(true);
   });
 });
