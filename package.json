@@ -10,6 +10,7 @@
   },
   "scripts": {
     "dev": "bun run src/cli.ts watch",
+    "bench:render": "bun run scripts/bench-render.ts",
     "test": "bun test",
     "check:licenses": "bun run src/license-check.ts",
     "e2e:install": "playwright install chromium",
@@ -41,6 +42,7 @@
     "@fission-ai/openspec": "^1.2.0",
     "@playwright/test": "^1.54.2",
     "bun-types": "^1.3.13",
-    "linkedom": "^0.18.12"
+    "linkedom": "^0.18.12",
+    "mitata": "^1.0.34"
   }
 }
