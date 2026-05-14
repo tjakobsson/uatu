@@ -18,7 +18,6 @@ type ScenarioContext = RenderScenario & {
 };
 
 const fixtureRoot = path.resolve(import.meta.dir, "../testdata/render-benchmarks");
-const encoder = new TextEncoder();
 
 const scenarios: RenderScenario[] = [
   { name: "markdown-large rendered", relativePath: "markdown-large.md", view: "rendered" },
@@ -48,11 +47,15 @@ await run();
 
 async function collectScenarioContext(roots: RootGroup[]): Promise<ScenarioContext[]> {
   const contexts: ScenarioContext[] = [];
+  const encoder = new TextEncoder();
 
   for (const scenario of scenarios) {
     const documentId = findDocumentId(roots, scenario.relativePath);
     const sourceStat = await fs.stat(documentId);
     const rendered = await renderDocument(roots, documentId, { view: scenario.view });
+    if (rendered.html.length === 0) {
+      throw new Error(`empty render output for ${scenario.name}`);
+    }
     contexts.push({
       ...scenario,
       sourceBytes: sourceStat.size,
@@ -76,9 +79,9 @@ function findDocumentId(roots: RootGroup[], relativePath: string): string {
 
 function printScenarioContext(contexts: ScenarioContext[]): void {
   console.log("Document render benchmark context");
-  console.log("scenario\tview\tsource_bytes\toutput_bytes");
+  console.log("scenario\tsource_bytes\toutput_bytes");
   for (const context of contexts) {
-    console.log(`${context.name}\t${context.view}\t${context.sourceBytes}\t${context.outputBytes}`);
+    console.log(`${context.name}\t${context.sourceBytes}\t${context.outputBytes}`);
   }
   console.log("");
 }
