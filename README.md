@@ -132,6 +132,26 @@ Mid-session, click **Pin** in the preview header to narrow an already-running
 folder watch to the currently previewed document. Click again to restore the
 full sidebar.
 
+### Document render benchmarks
+
+Run the local document render benchmark baseline with:
+
+```bash
+bun run bench:render
+```
+
+The benchmark uses three committed large fixtures from
+`testdata/render-benchmarks/`: one Markdown architecture-style document, one
+AsciiDoc architecture-style document, and one TypeScript source file. It measures
+the existing `renderDocument()` path for rendered/source document views and the
+source-code view. Output starts with a tab-separated context table showing stable
+scenario names, view mode, source bytes, and rendered output bytes, then prints
+`mitata` timing results.
+
+Treat these numbers as an informational local baseline, not a hard pass/fail
+threshold. Compare runs on the same machine under similar load before drawing
+conclusions from small differences.
+
 ### Default port and PWA install identity
 
 The server binds to `127.0.0.1:4711` by default. If 4711 is already in use,

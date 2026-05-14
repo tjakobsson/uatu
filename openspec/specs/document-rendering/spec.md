@@ -3,6 +3,21 @@
 ## Purpose
 TBD - created by archiving change split-document-watch-browser. Update Purpose after archive.
 ## Requirements
+### Requirement: Preserve document rendering behavior while benchmarking
+Document render benchmarks SHALL measure existing rendering behavior without changing the rendered HTML, metadata extraction, source-view behavior, or safety guarantees defined by document rendering requirements.
+
+#### Scenario: Benchmarking does not alter Markdown rendering
+- **WHEN** Markdown render benchmarks are added
+- **THEN** existing Markdown rendering behavior and tests remain valid
+
+#### Scenario: Benchmarking does not alter AsciiDoc rendering
+- **WHEN** AsciiDoc render benchmarks are added
+- **THEN** existing AsciiDoc rendering behavior and tests remain valid
+
+#### Scenario: Benchmarking does not alter source rendering
+- **WHEN** source-code render benchmarks are added
+- **THEN** existing source-view rendering behavior and tests remain valid
+
 ### Requirement: Render GitHub-style Markdown in light mode
 The preview pane SHALL default to light mode and SHALL render Markdown using GitHub Flavored Markdown-compatible behavior for common GitHub README features. At minimum, the preview MUST support GitHub-style rendering for tables, task lists, strikethrough, autolinks, and fenced code blocks, and the resulting presentation SHALL follow GitHub's light Markdown visual style. The preview MUST also render block-level and inline raw HTML (matching GitHub's README behavior) so that common README idioms such as centered hero images and attribute-bearing elements render as real HTML rather than as escaped text. Rendered HTML MUST be sanitized against a whitelist modeled on GitHub's allowlist before reaching the browser: `<script>`, `<iframe>`, and other active-content elements MUST NOT execute, inline event handler attributes (such as `onerror`, `onclick`) MUST be stripped, and URL attributes MUST reject unsafe protocols such as `javascript:`. Raw HTML inside fenced code blocks MUST continue to be displayed as literal code, not interpreted. The preview MUST recognize a YAML or TOML frontmatter block at the start of a Markdown document — a block delimited by `---`/`---` (YAML) or `+++`/`+++` (TOML) appearing before any other content — and SHALL parse it out of the body so the leading delimiter is NOT rendered as a thematic break. Recognized frontmatter MUST be made available to the document metadata surface (see "Surface document metadata above the body"); when frontmatter is malformed and cannot be parsed, the preview MUST fall back to rendering the document as if no frontmatter existed (the leading `---` again behaves as a thematic break) and MUST NOT surface a parse error to the reader.
 
@@ -244,4 +259,3 @@ While the active Mode is **Review**, the system SHALL render a stale-content hin
 - **THEN** the active preview's header strip shows a "file no longer exists on disk" hint state
 - **AND** the hint exposes a close or back affordance instead of a refresh affordance
 - **AND** the previously rendered content remains visible until the user acts on the hint
-
