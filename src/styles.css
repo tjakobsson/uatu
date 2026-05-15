@@ -1038,14 +1038,16 @@ body.is-resizing-terminal .panel-resizer {
   flex-shrink: 0;
 }
 
+/* Toolbar in the preview header. View chooser and Layout chooser live
+   here as separate pills (they each carry their own background and
+   border via .view-control / .layout-chooser), so the toolbar itself is
+   just a flex container — no outer pill, no shared chrome. The two
+   concerns ("what view?" vs. "what arrangement?") read as distinct
+   controls instead of one continuous segmented set. */
 .preview-toolbar {
   display: inline-flex;
   align-items: center;
-  gap: 0.35rem;
-  padding: 0.25rem;
-  border-radius: 999px;
-  background: var(--surface-muted);
-  border: 1px solid var(--border-soft);
+  gap: 0.5rem;
   flex-shrink: 0;
 }
 
@@ -2580,9 +2582,24 @@ body.is-resizing-terminal .panel-resizer {
   }
 }
 
-/* Mode control row at the top of the sidebar (under the brand). */
+/* Mode control row at the top of the sidebar (under the brand). The row
+   carries the Author / Review segmented toggle (full-width) and the Follow
+   chip; Follow sits beside Mode because both control how the file
+   selection behaves, not what the current preview is rendering. */
 .sidebar-mode-row {
   margin: 1.1rem 0 0.4rem;
+  display: flex;
+  align-items: stretch;
+  gap: 0.4rem;
+}
+
+.sidebar-mode-row .mode-control {
+  flex: 1 1 auto;
+}
+
+.sidebar-mode-row #follow-toggle {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 /* Mode control (Author / Review segmented toggle) */
@@ -2676,6 +2693,14 @@ body.is-resizing-terminal .panel-resizer {
 .view-segment:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
+}
+
+/* The `display: inline-flex` declaration above overrides the user-agent
+   `[hidden] { display: none }` rule, so segments hidden via the HTML
+   `hidden` attribute would otherwise stay visible. Re-assert the hidden
+   semantics in author CSS. */
+.view-segment[hidden] {
+  display: none !important;
 }
 
 /* Layout chooser (single / side-by-side / stacked segmented toggle in the
@@ -2963,4 +2988,162 @@ body.is-resizing-terminal .panel-resizer {
   opacity: 1;
 }
 
+/* Diff view: host element for the @pierre/diffs FileDiff component, the
+   muted state cards (no-git / unchanged / binary), and the lightweight
+   fallback for very large diffs. Pierre writes into Shadow DOM under
+   .uatu-diff-host; the CSS variables below are forwarded to its host so
+   the diff matches the existing GitHub-light visual language. */
 
+.uatu-diff-host {
+  display: block;
+  width: 100%;
+  /* Map our existing diff tokens onto Pierre's documented CSS variables so
+     additions/deletions/hunk-header colors line up with the rest of the
+     UI. Pierre owns the precise variable names; mismatches are corrected
+     against the current Pierre release as needed. */
+  --diff-addition-bg: var(--diff-added-bg, #e6ffec);
+  --diff-deletion-bg: var(--diff-deleted-bg, #ffebe9);
+  --diff-hunk-header-fg: var(--hunk-header-fg, #57606a);
+}
+
+/* In-body content toolbars share the *exact* visual treatment as the
+   header `.view-control` so all segmented controls in the app — Rendered
+   / Source / Diff in the header, Unified / Split in the diff body, and
+   Single / Side by side / Stacked above the markdown body — read as the
+   same primitive. The container and segment rules below are intentionally
+   value-for-value identical to .view-control / .view-segment; only the
+   layout-specific margin sits the body toolbars below the header. */
+.uatu-diff-toolbar,
+.uatu-layout-toolbar {
+  display: inline-flex;
+  align-items: stretch;
+  padding: 0.15rem;
+  border-radius: 0.4rem;
+  background: var(--surface-muted);
+  border: 1px solid var(--border-soft);
+}
+
+.uatu-diff-toolbar-segment,
+.uatu-layout-toolbar-segment {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25rem 0.6rem;
+  border: 0;
+  background: transparent;
+  color: var(--text-subtle);
+  border-radius: 0.3rem;
+  font-size: 0.74rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.uatu-diff-toolbar-segment:hover:not(.is-active),
+.uatu-layout-toolbar-segment:hover:not(.is-active) {
+  color: var(--text-strong);
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.uatu-diff-toolbar-segment.is-active,
+.uatu-layout-toolbar-segment.is-active {
+  background: #ffffff;
+  color: var(--accent);
+  box-shadow: 0 1px 2px rgba(36, 41, 47, 0.08);
+  cursor: default;
+}
+
+.uatu-diff-toolbar-segment:focus-visible,
+.uatu-layout-toolbar-segment:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Position rules. Diff toolbar sits flush with the diff body inside its
+   host; layout toolbar lives as a sibling above #preview in .preview-shell
+   so the split layout's flex flow inside #preview stays untouched. */
+.uatu-diff-toolbar {
+  margin: 0.5rem 0.75rem 0;
+}
+.preview-shell > .uatu-layout-toolbar {
+  align-self: flex-start;
+  /* Top offset clears the pinned preview-header's blurred fade edge;
+     bottom margin stays tight so the toolbar visually attaches to the
+     preview card it controls. */
+  margin: 1rem 0 0.25rem;
+}
+
+.uatu-diff-body {
+  display: block;
+}
+
+.uatu-diff-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 8rem;
+  padding: 2rem 1.5rem;
+  color: var(--text-subtle);
+  font-size: 0.95rem;
+  text-align: center;
+  background: var(--surface-muted);
+  border: 1px dashed var(--border-soft);
+  border-radius: 0.5rem;
+  margin: 0.75rem;
+}
+
+.uatu-diff-fallback {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem;
+}
+
+.uatu-diff-fallback-notice {
+  padding: 0.4rem 0.6rem;
+  background: var(--surface-muted);
+  border: 1px solid var(--border-soft);
+  border-radius: 0.35rem;
+  font-size: 0.78rem;
+  color: var(--text-subtle);
+}
+
+.uatu-diff-fallback-pre {
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  background: #ffffff;
+  border: 1px solid var(--border-soft);
+  border-radius: 0.35rem;
+  font-family: var(--mono-font, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.82rem;
+  line-height: 1.45;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.uatu-diff-fallback-pre .uatu-diff-line-added {
+  background: var(--diff-added-bg, #e6ffec);
+  color: #1f6f3a;
+  display: inline;
+}
+
+.uatu-diff-fallback-pre .uatu-diff-line-deleted {
+  background: var(--diff-deleted-bg, #ffebe9);
+  color: #82071e;
+  display: inline;
+}
+
+.uatu-diff-fallback-pre .uatu-diff-line-hunk {
+  color: var(--hunk-header-fg, #57606a);
+  font-style: italic;
+  display: inline;
+}
+
+.uatu-diff-fallback-pre .uatu-diff-line-header {
+  color: var(--text-subtle);
+  display: inline;
+}
+
+.uatu-diff-fallback-pre .uatu-diff-line-context {
+  color: var(--text-strong);
+  display: inline;
+}

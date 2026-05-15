@@ -2,9 +2,11 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import { bench, run } from "mitata";
+import { parseHTML } from "linkedom";
 
 import { renderDocument, scanRoots, type WatchEntry } from "../src/server";
 import type { RootGroup, ViewMode } from "../src/shared";
+import { renderDocumentDiff, DIFF_MAX_BYTES } from "../src/document-diff-view";
 
 type RenderScenario = {
   name: string;
@@ -43,7 +45,61 @@ for (const scenario of scenarios) {
   });
 }
 
+// Diff-view bench scenarios. The Pierre Shadow-DOM render path needs a real
+// browser DOM and is exercised via Playwright; here we measure the lightweight
+// fallback emitter that drives very-large diffs and the non-git / unchanged /
+// binary state cards. Both paths run without invoking @pierre/diffs.
+const diffHost = installLinkedomDOM();
+const largeDiffPatch = synthesizeLargeDiff();
+
+bench("diff lightweight-fallback large patch", async () => {
+  await renderDocumentDiff(
+    diffHost,
+    {
+      kind: "text",
+      baseRef: "origin/main",
+      patch: largeDiffPatch,
+      bytes: largeDiffPatch.length,
+      addedLines: 5_000,
+      deletedLines: 5_000,
+    },
+    null,
+  );
+  if (!diffHost.firstChild) throw new Error("diff fallback produced no output");
+});
+
+bench("diff state-card unchanged", async () => {
+  await renderDocumentDiff(diffHost, { kind: "unchanged", baseRef: "origin/main" }, null);
+});
+
+console.log(`Diff bench context\nlarge_patch_bytes\t${largeDiffPatch.length}\nDIFF_MAX_BYTES\t${DIFF_MAX_BYTES}\n`);
+
 await run();
+
+function installLinkedomDOM(): HTMLElement {
+  const { document, window } = parseHTML("<!doctype html><html><body><div id='diff-host'></div></body></html>");
+  (globalThis as unknown as { document: unknown }).document = document;
+  (globalThis as unknown as { window: unknown }).window = window;
+  return document.getElementById("diff-host") as unknown as HTMLElement;
+}
+
+function synthesizeLargeDiff(): string {
+  // Synthesize a unified diff larger than DIFF_MAX_BYTES so the fallback
+  // path triggers. Five thousand added + five thousand deleted lines of
+  // realistic-shaped content keeps the bench representative without
+  // exploding total runtime.
+  const lines: string[] = [
+    "diff --git a/synthetic.ts b/synthetic.ts",
+    "--- a/synthetic.ts",
+    "+++ b/synthetic.ts",
+    "@@ -1,5000 +1,5000 @@",
+  ];
+  for (let i = 0; i < 5_000; i++) {
+    lines.push(`-const value${i} = ${i};`);
+    lines.push(`+const value${i} = ${i + 1};`);
+  }
+  return lines.join("\n") + "\n";
+}
 
 async function collectScenarioContext(roots: RootGroup[]): Promise<ScenarioContext[]> {
   const contexts: ScenarioContext[] = [];

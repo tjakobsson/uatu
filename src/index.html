@@ -100,6 +100,16 @@
               <span>Review</span>
             </button>
           </div>
+          <button
+            id="follow-toggle"
+            class="chip-button"
+            type="button"
+            aria-pressed="true"
+            title="Follow the latest changed document"
+          >
+            <span class="chip-dot" aria-hidden="true"></span>
+            <span class="chip-label">Follow</span>
+          </button>
         </div>
 
         <div class="sidebar-terminal-row" hidden>
@@ -278,7 +288,7 @@
               class="view-control"
               role="radiogroup"
               aria-label="View"
-              title="Switch between Rendered and Source view"
+              title="Switch between Rendered, Source, and Diff view"
               hidden
             >
               <button
@@ -299,70 +309,16 @@
                 data-view-value="source"
                 title="Source view (raw text with line numbers)"
               >Source</button>
-            </div>
-            <div
-              id="layout-chooser"
-              class="layout-chooser"
-              role="radiogroup"
-              aria-label="Layout"
-              title="Switch between single and split layouts"
-              hidden
-            >
               <button
-                id="layout-single"
-                class="layout-segment"
-                type="button"
-                role="radio"
-                aria-checked="true"
-                aria-label="Single pane"
-                data-layout-value="single"
-                title="Single pane"
-              >
-                <svg viewBox="0 0 16 12" aria-hidden="true" focusable="false">
-                  <rect x="1.5" y="1.5" width="13" height="9" rx="1.5" />
-                </svg>
-              </button>
-              <button
-                id="layout-split-h"
-                class="layout-segment"
+                id="view-diff"
+                class="view-segment"
                 type="button"
                 role="radio"
                 aria-checked="false"
-                aria-label="Side by side"
-                data-layout-value="split-h"
-                title="Side-by-side split"
-              >
-                <svg viewBox="0 0 16 12" aria-hidden="true" focusable="false">
-                  <rect x="1.5" y="1.5" width="13" height="9" rx="1.5" />
-                  <line x1="8" y1="1.5" x2="8" y2="10.5" />
-                </svg>
-              </button>
-              <button
-                id="layout-split-v"
-                class="layout-segment"
-                type="button"
-                role="radio"
-                aria-checked="false"
-                aria-label="Stacked"
-                data-layout-value="split-v"
-                title="Stacked (top / bottom) split"
-              >
-                <svg viewBox="0 0 16 12" aria-hidden="true" focusable="false">
-                  <rect x="1.5" y="1.5" width="13" height="9" rx="1.5" />
-                  <line x1="1.5" y1="6" x2="14.5" y2="6" />
-                </svg>
-              </button>
+                data-view-value="diff"
+                title="Diff view (changes against the review base)"
+              >Diff</button>
             </div>
-            <button
-              id="follow-toggle"
-              class="chip-button"
-              type="button"
-              aria-pressed="true"
-              title="Follow the latest changed document"
-            >
-              <span class="chip-dot" aria-hidden="true"></span>
-              <span class="chip-label">Follow</span>
-            </button>
           </div>
         </header>
 

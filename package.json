@@ -22,6 +22,7 @@
   },
   "dependencies": {
     "@asciidoctor/core": "^3.0.4",
+    "@pierre/diffs": "1.1.22",
     "@pierre/trees": "1.0.0-beta.3",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
@@ -36,6 +37,7 @@
     "micromark": "^4.0.2",
     "micromark-extension-frontmatter": "^2.0.0",
     "micromark-extension-gfm": "^3.0.0",
+    "shiki": "3.23.0",
     "yaml": "^2.6.1"
   },
   "devDependencies": {

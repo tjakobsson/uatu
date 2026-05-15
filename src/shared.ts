@@ -212,16 +212,17 @@ export function writeModePreference(
 // View mode controls how the preview body renders the active document:
 // "rendered" runs Markdown / AsciiDoc through their full pipelines, "source"
 // shows the file's verbatim text inside the source-rendering `<pre><code>`
-// path. The Selection Inspector pane only captures line ranges from the
-// "source" view since the rendered HTML has no source-position information.
-export type ViewMode = "source" | "rendered";
+// path, and "diff" renders the file's git diff against the resolved review
+// base. The Selection Inspector pane only captures line ranges from the
+// "source" view since the other views have no source-position information.
+export type ViewMode = "source" | "rendered" | "diff";
 
 export const VIEW_MODE_STORAGE_KEY = "uatu:view-mode";
 
 export const DEFAULT_VIEW_MODE: ViewMode = "rendered";
 
 export function isViewMode(value: unknown): value is ViewMode {
-  return value === "source" || value === "rendered";
+  return value === "source" || value === "rendered" || value === "diff";
 }
 
 export function readViewModePreference(storage: ModeStorage | null | undefined): ViewMode {
@@ -243,6 +244,46 @@ export function writeViewModePreference(
   if (!storage) return;
   try {
     storage.setItem(VIEW_MODE_STORAGE_KEY, view);
+  } catch {
+    // best-effort persistence
+  }
+}
+
+// Diff style controls how the Diff view's @pierre/diffs renderer arranges
+// added and deleted lines inside the diff itself. "unified" stacks them
+// vertically (the default, like classic `git diff` output); "split" puts
+// deletions on the left and additions on the right inside the Pierre
+// component. This is independent of the outer ViewLayout chooser — the
+// outer chooser is hidden when the Diff view is active.
+export type DiffStyle = "unified" | "split";
+
+export const DIFF_STYLE_STORAGE_KEY = "uatu:diff-style";
+
+export const DEFAULT_DIFF_STYLE: DiffStyle = "unified";
+
+export function isDiffStyle(value: unknown): value is DiffStyle {
+  return value === "unified" || value === "split";
+}
+
+export function readDiffStylePreference(storage: ModeStorage | null | undefined): DiffStyle {
+  if (!storage) {
+    return DEFAULT_DIFF_STYLE;
+  }
+  try {
+    const raw = storage.getItem(DIFF_STYLE_STORAGE_KEY);
+    return isDiffStyle(raw) ? raw : DEFAULT_DIFF_STYLE;
+  } catch {
+    return DEFAULT_DIFF_STYLE;
+  }
+}
+
+export function writeDiffStylePreference(
+  storage: ModeStorage | null | undefined,
+  style: DiffStyle,
+): void {
+  if (!storage) return;
+  try {
+    storage.setItem(DIFF_STYLE_STORAGE_KEY, style);
   } catch {
     // best-effort persistence
   }
