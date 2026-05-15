@@ -1,24 +1,34 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  DEFAULT_DIFF_STYLE,
   DEFAULT_MODE,
   DEFAULT_SPLIT_RATIO,
   DEFAULT_VIEW_LAYOUT,
+  DEFAULT_VIEW_MODE,
+  DIFF_STYLE_STORAGE_KEY,
   MODE_STORAGE_KEY,
   VIEW_LAYOUT_STORAGE_KEY,
+  VIEW_MODE_STORAGE_KEY,
   VIEW_SPLIT_RATIO_STORAGE_KEY,
   defaultDocumentId,
+  isDiffStyle,
   isMode,
   isViewLayout,
+  isViewMode,
   nextSelectedDocumentId,
+  readDiffStylePreference,
   readModePreference,
   readSplitRatioPreference,
   readViewLayoutPreference,
+  readViewModePreference,
   reviewBurdenHeadlineLabel,
   shouldRefreshPreview,
+  writeDiffStylePreference,
   writeModePreference,
   writeSplitRatioPreference,
   writeViewLayoutPreference,
+  writeViewModePreference,
   type Mode,
   type RootGroup,
 } from "./shared";
@@ -488,5 +498,85 @@ describe("writeSplitRatioPreference", () => {
       },
     };
     expect(() => writeSplitRatioPreference(throwing, { h: 0.5, v: 0.5 })).not.toThrow();
+  });
+});
+
+describe("isViewMode", () => {
+  test("accepts the three valid ViewMode strings", () => {
+    expect(isViewMode("rendered")).toBe(true);
+    expect(isViewMode("source")).toBe(true);
+    expect(isViewMode("diff")).toBe(true);
+  });
+
+  test("rejects everything else", () => {
+    expect(isViewMode(null)).toBe(false);
+    expect(isViewMode(undefined)).toBe(false);
+    expect(isViewMode("")).toBe(false);
+    expect(isViewMode("DIFF")).toBe(false);
+    expect(isViewMode("preview")).toBe(false);
+    expect(isViewMode(42)).toBe(false);
+  });
+});
+
+describe("readViewModePreference", () => {
+  test("returns the default when storage is null", () => {
+    expect(readViewModePreference(null)).toBe(DEFAULT_VIEW_MODE);
+    expect(readViewModePreference(undefined)).toBe(DEFAULT_VIEW_MODE);
+  });
+
+  test("round-trips persisted diff value", () => {
+    const storage = new MemoryStorage();
+    writeViewModePreference(storage, "diff");
+    expect(storage.getItem(VIEW_MODE_STORAGE_KEY)).toBe("diff");
+    expect(readViewModePreference(storage)).toBe("diff");
+  });
+
+  test("round-trips persisted source and rendered values", () => {
+    const storage = new MemoryStorage();
+    writeViewModePreference(storage, "source");
+    expect(readViewModePreference(storage)).toBe("source");
+    writeViewModePreference(storage, "rendered");
+    expect(readViewModePreference(storage)).toBe("rendered");
+  });
+
+  test("falls back to the default when stored value is invalid", () => {
+    const storage = new MemoryStorage();
+    storage.setItem(VIEW_MODE_STORAGE_KEY, "preview");
+    expect(readViewModePreference(storage)).toBe(DEFAULT_VIEW_MODE);
+  });
+});
+
+describe("isDiffStyle", () => {
+  test("accepts unified and split", () => {
+    expect(isDiffStyle("unified")).toBe(true);
+    expect(isDiffStyle("split")).toBe(true);
+  });
+
+  test("rejects everything else", () => {
+    expect(isDiffStyle(null)).toBe(false);
+    expect(isDiffStyle("stacked")).toBe(false);
+    expect(isDiffStyle("UNIFIED")).toBe(false);
+    expect(isDiffStyle(42)).toBe(false);
+  });
+});
+
+describe("readDiffStylePreference", () => {
+  test("returns the default when storage is null", () => {
+    expect(readDiffStylePreference(null)).toBe(DEFAULT_DIFF_STYLE);
+  });
+
+  test("round-trips unified and split", () => {
+    const storage = new MemoryStorage();
+    writeDiffStylePreference(storage, "split");
+    expect(storage.getItem(DIFF_STYLE_STORAGE_KEY)).toBe("split");
+    expect(readDiffStylePreference(storage)).toBe("split");
+    writeDiffStylePreference(storage, "unified");
+    expect(readDiffStylePreference(storage)).toBe("unified");
+  });
+
+  test("falls back to default for invalid stored value", () => {
+    const storage = new MemoryStorage();
+    storage.setItem(DIFF_STYLE_STORAGE_KEY, "stacked");
+    expect(readDiffStylePreference(storage)).toBe(DEFAULT_DIFF_STYLE);
   });
 });

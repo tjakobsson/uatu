@@ -15,6 +15,7 @@ import index from "./index.html";
 import { E2E_PORT, E2E_WORKSPACE_ROOT, resetE2EWorkspace } from "./e2e";
 import { safeGit } from "./review-load";
 import { isMode, isViewMode, type Mode } from "./shared";
+import { getDocumentDiff } from "./document-diff";
 import {
   createNavigationFetchHandler,
   createWatchSession,
@@ -112,6 +113,26 @@ server = Bun.serve({
             return Response.json({ error: "document is not viewable" }, { status: 415 });
           }
           return Response.json({ error: "document not found" }, { status: 404 });
+        }
+      },
+    },
+    "/api/document/diff": {
+      GET: async request => {
+        const url = new URL(request.url);
+        const documentId = url.searchParams.get("id");
+        if (!documentId) {
+          return Response.json({ error: "missing document id" }, { status: 400 });
+        }
+
+        try {
+          const payload = await getDocumentDiff(watchSession.getRoots(), documentId);
+          return Response.json(payload);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "";
+          if (message === "document not found") {
+            return Response.json({ error: "document not found" }, { status: 404 });
+          }
+          return Response.json({ error: "document diff failed" }, { status: 500 });
         }
       },
     },

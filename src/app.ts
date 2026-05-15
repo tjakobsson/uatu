@@ -27,17 +27,20 @@ import {
   defaultDocumentId,
   hasDocument,
   nextSelectedDocumentId,
+  readDiffStylePreference,
   readModePreference,
   readSplitRatioPreference,
   readViewLayoutPreference,
   readViewModePreference,
   reviewBurdenHeadlineLabel,
   shouldRefreshPreview,
+  writeDiffStylePreference,
   writeModePreference,
   writeSplitRatioPreference,
   writeViewLayoutPreference,
   writeViewModePreference,
   type BuildSummary,
+  type DiffStyle,
   type DocumentMeta,
   type Mode,
   type RepositoryReviewSnapshot,
@@ -48,6 +51,7 @@ import {
   type ViewLayout,
   type ViewMode,
 } from "./shared";
+import { renderDocumentDiff } from "./document-diff-view";
 import { nextStaleHint, type StaleHint } from "./stale-hint";
 import { TreeView, type GitStatusForView } from "./tree-view";
 
@@ -74,6 +78,29 @@ type RenderedDocument = {
   language: string | null;
   metadata?: RenderedDocumentMetadata;
 };
+
+// Mirrors the server's discriminated DocumentDiffResponse. The diff view's
+// state cards (unsupported / unchanged / binary) carry the resolved base ref
+// so the user knows what they're comparing against. When the server attaches
+// `oldContents` / `newContents` the client takes Pierre's two-blob input
+// path and unlocks expand-context.
+type DocumentDiffPayload =
+  | {
+      kind: "text";
+      baseRef: string;
+      patch: string;
+      bytes: number;
+      addedLines: number;
+      deletedLines: number;
+      oldContents?: string;
+      newContents?: string;
+      oldPath?: string;
+    }
+  | { kind: "unchanged"; baseRef: string }
+  | { kind: "binary"; baseRef: string }
+  | { kind: "unsupported-no-git" };
+
+const documentDiffCache = new Map<string, DocumentDiffPayload>();
 
 const SIDEBAR_COLLAPSED_KEY = "uatu:sidebar-collapsed";
 const SIDEBAR_PANES_KEY_PREFIX = "uatu:sidebar-panes:";
@@ -165,10 +192,7 @@ const modeReviewButton = document.querySelector<HTMLButtonElement>("#mode-review
 const viewControlElement = document.querySelector<HTMLDivElement>("#view-control");
 const viewRenderedButton = document.querySelector<HTMLButtonElement>("#view-rendered");
 const viewSourceButton = document.querySelector<HTMLButtonElement>("#view-source");
-const layoutChooserElement = document.querySelector<HTMLDivElement>("#layout-chooser");
-const layoutSingleButton = document.querySelector<HTMLButtonElement>("#layout-single");
-const layoutSplitHButton = document.querySelector<HTMLButtonElement>("#layout-split-h");
-const layoutSplitVButton = document.querySelector<HTMLButtonElement>("#layout-split-v");
+const viewDiffButton = document.querySelector<HTMLButtonElement>("#view-diff");
 const previewShellElement = document.querySelector<HTMLElement>(".preview-shell");
 const staleHintElement = document.querySelector<HTMLDivElement>("#stale-hint");
 const staleHintMessageElement = document.querySelector<HTMLElement>("#stale-hint-message");
@@ -211,10 +235,7 @@ if (
   !viewControlElement ||
   !viewRenderedButton ||
   !viewSourceButton ||
-  !layoutChooserElement ||
-  !layoutSingleButton ||
-  !layoutSplitHButton ||
-  !layoutSplitVButton ||
+  !viewDiffButton ||
   !previewShellElement ||
   !staleHintElement ||
   !staleHintMessageElement ||
@@ -261,6 +282,10 @@ const appState = {
   // Source-pane fraction of the split container size, stored per orientation
   // so flipping side-by-side <-> stacked restores each orientation's ratio.
   splitRatio: readSplitRatioPreference(safeLocalStorage()) as SplitRatio,
+  // Pierre's internal diff layout: "unified" (stacked, classic git-diff
+  // shape) or "split" (side-by-side inside the diff component). Distinct
+  // from `viewLayout` — applies only when viewMode === "diff".
+  diffStyle: readDiffStylePreference(safeLocalStorage()) as DiffStyle,
   // Per-active-file stale-content hint state. Only set in Review mode; cleared
   // by manual navigation, mode switch back to Author, or refresh action.
   staleHint: null as StaleHint | null,
@@ -1258,6 +1283,33 @@ function documentSupportsSplit(payload: RenderedDocument | null): boolean {
   return payload !== null && (payload.kind === "markdown" || payload.kind === "asciidoc");
 }
 
+// Per-document set of allowed ViewModes used by the view chooser. Markdown
+// and AsciiDoc support all three (Rendered, Source, Diff); plain text /
+// source files have no distinct rendered representation, so the chooser
+// only offers Source and Diff. Non-document previews return an empty set
+// and the chooser is hidden entirely.
+function availableViewModes(payload: RenderedDocument | null): Set<ViewMode> {
+  if (!payload) return new Set();
+  if (payload.kind === "markdown" || payload.kind === "asciidoc") {
+    return new Set<ViewMode>(["rendered", "source", "diff"]);
+  }
+  if (payload.kind === "text") {
+    return new Set<ViewMode>(["source", "diff"]);
+  }
+  return new Set();
+}
+
+// First viewMode the chooser should fall back to when the persisted preference
+// is not in the set available for the active document's kind. Mirrors the
+// existing "first available segment" rule (Rendered for markdown/asciidoc,
+// Source for text). Returns null when no segments are available.
+function firstAvailableViewMode(payload: RenderedDocument | null): ViewMode | null {
+  if (!payload) return null;
+  if (payload.kind === "markdown" || payload.kind === "asciidoc") return "rendered";
+  if (payload.kind === "text") return "source";
+  return null;
+}
+
 // Render a single-pane layout for the given payload. This is the legacy
 // (pre-split) DOM shape: #preview itself carries the body content directly.
 async function renderSinglePayload(payload: RenderedDocument): Promise<void> {
@@ -1265,6 +1317,11 @@ async function renderSinglePayload(payload: RenderedDocument): Promise<void> {
   previewElement.removeAttribute("data-auto-stack");
   const cardHtml = renderMetadataCard(payload.metadata);
   previewElement.innerHTML = cardHtml + replaceMermaidCodeBlocks(payload.html);
+  // For markdown / asciidoc, mount the inline layout chooser above the
+  // preview body so users can switch between Single / Side by side /
+  // Stacked from beside the content — same pattern as the diff view's
+  // Unified / Split.
+  mountLayoutToolbar(documentSupportsSplit(payload));
   attachMetadataCardToggleListener(previewElement);
   await renderMermaidDiagrams(previewElement, currentMermaidThemeInputs());
   // Source rendering — for text/source files always, and for markdown /
@@ -1364,6 +1421,7 @@ async function renderSplitPayloads(
   renderedPane.setAttribute("data-split-side", "rendered");
   renderedPane.innerHTML = cardHtml + replaceMermaidCodeBlocks(renderedPayload.html);
 
+  mountLayoutToolbar(true);
   previewElement.replaceChildren(sourcePane, resizer, renderedPane);
 
   attachMetadataCardToggleListener(renderedPane);
@@ -1411,8 +1469,10 @@ async function loadDocument(documentId: string) {
   // (currently only `applyViewMode`, for instantaneous Source ↔ Rendered
   // toggling). The cache is bounded to one doc × two views, so a full
   // clear has the same effect as targeted purge + invalidate, with less
-  // ceremony.
+  // ceremony. The diff cache is invalidated alongside since file-change
+  // events route through this same function.
   documentViewCache.clear();
+  documentDiffCache.delete(documentId);
 
   // Binary files have no rendered representation through the document API.
   // Route them straight to a binary-specific preview: an inline `<img>` for
@@ -1429,8 +1489,20 @@ async function loadDocument(documentId: string) {
     return;
   }
 
+  // Diff view bypasses the rendered/source pipeline entirely — it has its
+  // own endpoint and renderer. The /api/document fetch is skipped for now;
+  // toggling out of Diff will lazy-load the rendered/source view on demand.
+  if (appState.viewMode === "diff") {
+    await applyDiffForActiveDocument(documentId);
+    return;
+  }
+
+  // Server-side renderDocument only understands "rendered" | "source". If
+  // the viewMode is somehow "diff" we already short-circuited above; this
+  // assertion narrows the param so the response stays well-typed.
+  const apiView: "rendered" | "source" = appState.viewMode === "source" ? "source" : "rendered";
   const response = await fetch(
-    `/api/document?id=${encodeURIComponent(documentId)}&view=${encodeURIComponent(appState.viewMode)}`,
+    `/api/document?id=${encodeURIComponent(documentId)}&view=${encodeURIComponent(apiView)}`,
   );
 
   if (!response.ok) {
@@ -2473,49 +2545,112 @@ function syncModeControl() {
 // (text / source / code files), whenever the preview is not in document mode,
 // and whenever the layout is split (both representations are already visible).
 function syncViewToggle(payload: RenderedDocument | null): void {
-  const showToggle =
-    documentSupportsSplit(payload) && appState.viewLayout === "single";
+  const available = availableViewModes(payload);
+  // The view chooser stays visible whenever the document has at least one
+  // view to choose. In split layout Source and Rendered are both already
+  // visible — clicking them in that state only updates the persisted
+  // preference for when the user returns to single — but the Diff segment
+  // is the third option and MUST be reachable from split. Hiding the
+  // whole cluster to suppress a redundant Source / Rendered click would
+  // also bury Diff, which is worse than the redundancy.
+  const showToggle = available.size > 0;
   viewControlElement.hidden = !showToggle;
   if (!showToggle) {
     return;
   }
-  const isSource = appState.viewMode === "source";
-  viewSourceButton.setAttribute("aria-checked", String(isSource));
-  viewSourceButton.classList.toggle("is-active", isSource);
-  viewRenderedButton.setAttribute("aria-checked", String(!isSource));
-  viewRenderedButton.classList.toggle("is-active", !isSource);
-}
 
-// Reflect the persisted layout preference on the layout chooser. The chooser
-// is hidden when the active document has no separate rendered representation
-// or the preview is not in document mode.
-function syncLayoutChooser(payload: RenderedDocument | null): void {
-  const showChooser = documentSupportsSplit(payload);
-  layoutChooserElement.hidden = !showChooser;
-  if (!showChooser) {
-    return;
-  }
-  const segments: Array<{ button: HTMLButtonElement; value: ViewLayout }> = [
-    { button: layoutSingleButton as HTMLButtonElement, value: "single" },
-    { button: layoutSplitHButton as HTMLButtonElement, value: "split-h" },
-    { button: layoutSplitVButton as HTMLButtonElement, value: "split-v" },
+  // Show/hide each segment based on the active document's kind.
+  viewRenderedButton.hidden = !available.has("rendered");
+  viewSourceButton.hidden = !available.has("source");
+  viewDiffButton.hidden = !available.has("diff");
+
+  // If the persisted preference isn't valid for this kind, fall back to
+  // the first available segment without writing back to localStorage —
+  // the user's choice should re-engage as soon as they navigate to a
+  // document that supports it.
+  const effectiveMode = available.has(appState.viewMode)
+    ? appState.viewMode
+    : firstAvailableViewMode(payload) ?? appState.viewMode;
+
+  const segments: Array<{ button: HTMLButtonElement; value: ViewMode }> = [
+    { button: viewRenderedButton as HTMLButtonElement, value: "rendered" },
+    { button: viewSourceButton as HTMLButtonElement, value: "source" },
+    { button: viewDiffButton as HTMLButtonElement, value: "diff" },
   ];
   for (const { button, value } of segments) {
-    const active = appState.viewLayout === value;
+    const active = effectiveMode === value;
     button.setAttribute("aria-checked", String(active));
     button.classList.toggle("is-active", active);
   }
 }
 
-// Hide both the Source/Rendered toggle and the layout chooser for non-document
-// previews (commit, review-score, empty). Also clear any split-layout classes
-// so the preview body resets to a normal flow container for the upcoming
-// non-document content.
+// Reflect the persisted layout preference on the layout chooser. The chooser
+// is hidden when the active document has no separate rendered representation,
+// The layout chooser lives inline inside `#preview` now (see
+// `renderLayoutToolbar`), so there's no header element to keep in sync —
+// it's rebuilt every render to reflect `appState.viewLayout`. The
+// function is kept as a no-op so existing call sites stay valid.
+function syncLayoutChooser(_payload: RenderedDocument | null): void {
+  // Intentional no-op: layout toolbar is rendered as part of #preview.
+}
+
+// Ensure a layout toolbar exists (or doesn't) as a sibling above #preview
+// inside .preview-shell. Builds fresh each call so the active-segment
+// state always matches `appState.viewLayout` without a separate sync pass.
+function mountLayoutToolbar(show: boolean): void {
+  const previousToolbar = previewShellElement.querySelector<HTMLElement>(".uatu-layout-toolbar");
+  if (previousToolbar) {
+    previousToolbar.remove();
+  }
+  if (!show) return;
+  const toolbar = renderLayoutToolbar();
+  previewShellElement.insertBefore(toolbar, previewElement);
+}
+
+// Build the inline layout chooser that sits above the document body for
+// Markdown / AsciiDoc. Mirrors the .uatu-diff-toolbar pattern: small
+// segmented pill with text labels, an "is-active" segment, and a click
+// handler that defers to applyViewLayout.
+function renderLayoutToolbar(): HTMLElement {
+  const toolbar = document.createElement("div");
+  toolbar.className = "uatu-layout-toolbar";
+  toolbar.setAttribute("role", "radiogroup");
+  toolbar.setAttribute("aria-label", "Layout");
+
+  const segments: Array<{ value: ViewLayout; label: string; title: string }> = [
+    { value: "single", label: "Single", title: "Single pane" },
+    { value: "split-h", label: "Side by side", title: "Side-by-side split" },
+    { value: "split-v", label: "Stacked", title: "Stacked (top / bottom) split" },
+  ];
+
+  for (const segment of segments) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "uatu-layout-toolbar-segment";
+    button.setAttribute("role", "radio");
+    button.setAttribute("data-layout-value", segment.value);
+    button.setAttribute("aria-checked", String(segment.value === appState.viewLayout));
+    if (segment.value === appState.viewLayout) {
+      button.classList.add("is-active");
+    }
+    button.title = segment.title;
+    button.textContent = segment.label;
+    button.addEventListener("click", () => applyViewLayout(segment.value));
+    toolbar.appendChild(button);
+  }
+
+  return toolbar;
+}
+
+// Hide the Source/Rendered toggle for non-document previews (commit,
+// review-score, empty). Also clear any split-layout classes so the
+// preview body resets to a normal flow container for the upcoming
+// non-document content, and tear down the inline layout toolbar.
 function hideViewToggle(): void {
   viewControlElement.hidden = true;
-  layoutChooserElement.hidden = true;
   previewElement.classList.remove("is-split", "is-split-h", "is-split-v");
   previewElement.removeAttribute("data-auto-stack");
+  mountLayoutToolbar(false);
 }
 
 function applyViewMode(next: ViewMode): void {
@@ -2532,12 +2667,163 @@ function applyViewMode(next: ViewMode): void {
   if (appState.previewMode.kind !== "document" || !appState.selectedId) {
     return;
   }
+  if (next === "diff") {
+    void applyDiffForActiveDocument(appState.selectedId);
+    return;
+  }
   const cached = documentViewCache.get(appState.selectedId)?.[next];
   if (cached) {
     void applyDocumentPayload(cached);
     return;
   }
   void loadDocument(appState.selectedId);
+}
+
+async function applyDiffForActiveDocument(documentId: string): Promise<void> {
+  const cached = documentDiffCache.get(documentId);
+  if (cached) {
+    await renderDiffIntoPreview(documentId, cached);
+    return;
+  }
+  // No cache: do NOT clear #preview before the response is in hand. The
+  // previous view's content stays visible until we have something to swap
+  // in, matching the "no empty-state flash" rule established for Source ↔
+  // Rendered toggles.
+  const payload = await fetchDocumentDiff(documentId);
+  if (!payload) {
+    return;
+  }
+  documentDiffCache.set(documentId, payload);
+  // The user may have switched away while the fetch was in flight; only
+  // apply if the active selection AND view mode are still consistent.
+  if (
+    appState.previewMode.kind !== "document" ||
+    appState.selectedId !== documentId ||
+    appState.viewMode !== "diff"
+  ) {
+    return;
+  }
+  await renderDiffIntoPreview(documentId, payload);
+}
+
+async function fetchDocumentDiff(documentId: string): Promise<DocumentDiffPayload | null> {
+  try {
+    const response = await fetch(`/api/document/diff?id=${encodeURIComponent(documentId)}`);
+    if (!response.ok) {
+      return null;
+    }
+    return (await response.json()) as DocumentDiffPayload;
+  } catch {
+    return null;
+  }
+}
+
+async function renderDiffIntoPreview(documentId: string, payload: DocumentDiffPayload): Promise<void> {
+  // Pin previewMode to document so the header chrome (path, title, pin/follow
+  // controls) keeps treating this as a document preview.
+  appState.previewMode = { kind: "document" };
+
+  const doc = findDocumentById(documentId);
+  if (doc) {
+    previewTitleElement.textContent = doc.name;
+    previewPathElement.textContent = doc.relativePath;
+    setPreviewBase(doc.relativePath);
+  }
+  clearPreviewType();
+  previewElement.classList.remove("empty", "is-split", "is-split-h", "is-split-v");
+  previewElement.removeAttribute("data-auto-stack");
+  closeMermaidViewer();
+  // Diff view brings its own inline toolbar (Unified / Split) from the
+  // document-diff-view module; the markdown/asciidoc layout toolbar must
+  // not bleed across from a previous render of the same document.
+  mountLayoutToolbar(false);
+
+  const languageHint = doc ? extensionToLanguage(doc.name) : null;
+  // Wrap the diff host so styles target `.uatu-diff-host` consistently
+  // whether or not Pierre's Shadow DOM is in play.
+  previewElement.innerHTML = "";
+  const host = document.createElement("div");
+  host.className = "uatu-diff-host";
+  previewElement.appendChild(host);
+  await renderDocumentDiff(host, payload, languageHint, {
+    diffStyle: appState.diffStyle,
+    onDiffStyleChange: next => {
+      void applyDiffStyle(next);
+    },
+  });
+
+  // The Source / Rendered cache is cleared on every file selection, so
+  // `currentRenderedPayload()` returns null while the diff view is the
+  // primary representation. A minimal kind-only stub built from
+  // DocumentMeta lets `syncViewToggle` / `syncLayoutChooser` make the
+  // correct visibility decisions without needing a real RenderedDocument.
+  const choicePayload = doc ? renderedDocumentStubFromMeta(doc) : null;
+  syncViewToggle(choicePayload);
+  syncLayoutChooser(choicePayload);
+  selectionInspector.recompute();
+}
+
+// Minimal RenderedDocument-shape view chooser / layout chooser only consult
+// `kind`. When the diff view is the primary representation there is no real
+// RenderedDocument in the cache, so we construct a stub from the meta so
+// the chooser stays on screen with the right segments.
+function renderedDocumentStubFromMeta(meta: DocumentMeta): RenderedDocument | null {
+  if (meta.kind === "binary") return null;
+  return {
+    id: meta.id,
+    title: meta.name,
+    path: meta.relativePath,
+    html: "",
+    kind: meta.kind,
+    view: "rendered",
+    language: null,
+  };
+}
+
+async function applyDiffStyle(next: DiffStyle): Promise<void> {
+  if (appState.diffStyle === next) return;
+  appState.diffStyle = next;
+  writeDiffStylePreference(safeLocalStorage(), next);
+  // Re-render the active diff in place using the cached payload — no
+  // network round-trip, no full document reload, just a Pierre re-mount
+  // with the new layout option.
+  if (
+    appState.previewMode.kind !== "document"
+    || !appState.selectedId
+    || appState.viewMode !== "diff"
+  ) {
+    return;
+  }
+  const cached = documentDiffCache.get(appState.selectedId);
+  if (cached) {
+    await renderDiffIntoPreview(appState.selectedId, cached);
+  }
+}
+
+// Tiny adapter that uses the existing source-view language map (highlight.js
+// names) for the Diff view language hint. Pierre infers the language from
+// the patch filename on its own; this hint is a fallback for ambiguous cases.
+function extensionToLanguage(name: string): string | null {
+  const dot = name.lastIndexOf(".");
+  if (dot < 0) return null;
+  const ext = name.slice(dot).toLowerCase();
+  switch (ext) {
+    case ".ts": case ".mts": case ".cts": return "typescript";
+    case ".tsx": return "tsx";
+    case ".js": case ".mjs": case ".cjs": return "javascript";
+    case ".jsx": return "jsx";
+    case ".json": return "json";
+    case ".yml": case ".yaml": return "yaml";
+    case ".md": case ".markdown": return "markdown";
+    case ".adoc": case ".asciidoc": return "asciidoc";
+    case ".py": return "python";
+    case ".go": return "go";
+    case ".rs": return "rust";
+    case ".sh": case ".bash": case ".zsh": return "shell";
+    case ".css": return "css";
+    case ".html": case ".htm": return "html";
+    default: return null;
+  }
 }
 
 function applyViewLayout(next: ViewLayout): void {
@@ -2700,9 +2986,7 @@ previewResizeObserver.observe(previewElement);
 
 viewRenderedButton.addEventListener("click", () => applyViewMode("rendered"));
 viewSourceButton.addEventListener("click", () => applyViewMode("source"));
-layoutSingleButton.addEventListener("click", () => applyViewLayout("single"));
-layoutSplitHButton.addEventListener("click", () => applyViewLayout("split-h"));
-layoutSplitVButton.addEventListener("click", () => applyViewLayout("split-v"));
+viewDiffButton.addEventListener("click", () => applyViewMode("diff"));
 
 function applyStaleHint(next: StaleHint | null) {
   appState.staleHint = next;
