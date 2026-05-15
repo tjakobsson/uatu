@@ -187,7 +187,14 @@ async function detectRenameOldPath(
   compareRef: string,
   newRelativePath: string,
 ): Promise<string | null> {
-  const res = await safeGit(repoRoot, ["diff", "-M", "--name-status", compareRef]);
+  // Match the outer `git diff` call's buffer cap — `--name-status` over a
+  // branch with many changed files can easily exceed safeGit's 256 KB
+  // default, and a silent truncation that drops the rename entry for the
+  // viewed file would surface as a spurious delete+add in the rendered
+  // diff. 4 MB matches MAX_DIFF_BUFFER used by the patch fetch.
+  const res = await safeGit(repoRoot, ["diff", "-M", "--name-status", compareRef], {
+    maxBuffer: MAX_DIFF_BUFFER,
+  });
   if (!res.ok) {
     return null;
   }

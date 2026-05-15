@@ -51,7 +51,7 @@ import {
   type ViewLayout,
   type ViewMode,
 } from "./shared";
-import { renderDocumentDiff } from "./document-diff-view";
+import { renderDocumentDiff, type DocumentDiffPayload } from "./document-diff-view";
 import { nextStaleHint, type StaleHint } from "./stale-hint";
 import { TreeView, type GitStatusForView } from "./tree-view";
 
@@ -79,27 +79,9 @@ type RenderedDocument = {
   metadata?: RenderedDocumentMetadata;
 };
 
-// Mirrors the server's discriminated DocumentDiffResponse. The diff view's
-// state cards (unsupported / unchanged / binary) carry the resolved base ref
-// so the user knows what they're comparing against. When the server attaches
-// `oldContents` / `newContents` the client takes Pierre's two-blob input
-// path and unlocks expand-context.
-type DocumentDiffPayload =
-  | {
-      kind: "text";
-      baseRef: string;
-      patch: string;
-      bytes: number;
-      addedLines: number;
-      deletedLines: number;
-      oldContents?: string;
-      newContents?: string;
-      oldPath?: string;
-    }
-  | { kind: "unchanged"; baseRef: string }
-  | { kind: "binary"; baseRef: string }
-  | { kind: "unsupported-no-git" };
-
+// `DocumentDiffPayload` is imported from `./document-diff-view` (above) so
+// the client type stays in lockstep with the renderer's view of the
+// discriminated union.
 const documentDiffCache = new Map<string, DocumentDiffPayload>();
 
 const SIDEBAR_COLLAPSED_KEY = "uatu:sidebar-collapsed";
