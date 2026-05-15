@@ -37,7 +37,7 @@
     "micromark": "^4.0.2",
     "micromark-extension-frontmatter": "^2.0.0",
     "micromark-extension-gfm": "^3.0.0",
-    "shiki": "3.23.0",
+    "shiki": "4.0.2",
     "yaml": "^2.6.1"
   },
   "devDependencies": {
