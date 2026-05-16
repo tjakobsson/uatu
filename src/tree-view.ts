@@ -86,8 +86,14 @@ export class TreeView {
   // `data-uatu-filter-reveal="true"` onto the follow-override row whenever
   // the library re-paints its virtualized row list. The library does not
   // expose a way to add arbitrary attributes via its decoration API, so we
-  // do this from the outside.
+  // do this from the outside. Connected only while `followOverridePath` is
+  // non-null so we are not running a callback for every scroll/expand on
+  // the common (no override) path.
   private followOverrideObserver: MutationObserver | null = null;
+  // Style element injected into the shadow root so the reveal cue actually
+  // renders — document-level stylesheets cannot pierce the library's open
+  // shadow boundary, so a global rule in styles.css would be silently dead.
+  private revealCueStyleElement: HTMLStyleElement | null = null;
 
   constructor(options: TreeViewOptions) {
     this.container = options.container;
@@ -208,7 +214,8 @@ export class TreeView {
       Object.assign(this.container.style, LIGHT_TREE_THEME);
       this.tree.render({ fileTreeContainer: this.container });
       this.lastPathsKey = pathsFingerprint(renderedPaths);
-      this.ensureFollowOverrideObserver();
+      this.ensureRevealCueStyleElement();
+      this.syncFollowOverrideObserver();
       this.applyFollowOverrideAttribute();
       if (initialSelectedPath !== null) {
         this.revealAndSelect(initialSelectedPath);
@@ -235,7 +242,8 @@ export class TreeView {
       this.lastPathsKey = nextKey;
     }
 
-    this.ensureFollowOverrideObserver();
+    this.ensureRevealCueStyleElement();
+    this.syncFollowOverrideObserver();
     this.applyFollowOverrideAttribute();
 
     if (initialSelectedPath !== null) {
@@ -289,6 +297,9 @@ export class TreeView {
       this.followOverrideObserver.disconnect();
       this.followOverrideObserver = null;
     }
+    // The style element lives inside the library's shadow root, which the
+    // unmount call below tears down — so we just drop our reference here.
+    this.revealCueStyleElement = null;
     if (this.tree !== null) {
       this.tree.unmount();
       this.tree = null;
@@ -379,8 +390,19 @@ export class TreeView {
 
   // The library re-renders its virtualized rows on every scroll/expand/etc.,
   // and we don't get a hook into row creation. A MutationObserver inside its
-  // shadow root catches row insertions so we can stamp the reveal attribute.
-  private ensureFollowOverrideObserver(): void {
+  // shadow root catches row insertions/recycle so we can keep the reveal
+  // attribute on the follow-override row.
+  //
+  // Connected on demand — only while `followOverridePath` is non-null — so
+  // the common no-override case doesn't run a callback on every scroll.
+  private syncFollowOverrideObserver(): void {
+    if (this.followOverridePath === null) {
+      if (this.followOverrideObserver !== null) {
+        this.followOverrideObserver.disconnect();
+        this.followOverrideObserver = null;
+      }
+      return;
+    }
     if (this.followOverrideObserver !== null || this.tree === null) {
       return;
     }
@@ -401,6 +423,25 @@ export class TreeView {
       attributes: true,
       attributeFilter: ["data-item-path"],
     });
+  }
+
+  // Inject the reveal-cue CSS rule directly into the library's shadow root.
+  // Document-level stylesheets cannot reach across the shadow boundary, so a
+  // matching rule in styles.css would never apply. Idempotent — calling it
+  // repeatedly is cheap.
+  private ensureRevealCueStyleElement(): void {
+    if (this.revealCueStyleElement !== null) {
+      return;
+    }
+    const shadow = this.container.shadowRoot;
+    if (!shadow) {
+      return;
+    }
+    const style = document.createElement("style");
+    style.setAttribute("data-uatu-style", "filter-reveal-cue");
+    style.textContent = `[data-uatu-filter-reveal="true"] { opacity: 0.55; font-style: italic; }`;
+    shadow.appendChild(style);
+    this.revealCueStyleElement = style;
   }
 
   // Stamp `data-uatu-filter-reveal="true"` on every row currently mounted for
@@ -494,11 +535,15 @@ export function computeFilesPaneFilterMembership(
       continue;
     }
     const pathSet = new Set<string>();
+    // Normalise leading slashes for symmetry with `computeFilteredPaths`,
+    // which strips them off `doc.relativePath` before comparing. Without
+    // matching normalisation here, a stray leading slash from upstream
+    // would silently miss the allow-list.
     for (const entry of repo.reviewLoad.changedFiles) {
-      pathSet.add(entry.path);
+      pathSet.add(entry.path.replace(/^\/+/, ""));
     }
     for (const entry of repo.reviewLoad.ignoredFiles) {
-      pathSet.add(entry.path);
+      pathSet.add(entry.path.replace(/^\/+/, ""));
     }
     for (const rootId of repo.watchedRootIds) {
       const existing = allowedByRoot.get(rootId);

@@ -408,6 +408,22 @@ describe("computeFilesPaneFilterMembership", () => {
     expect(membership.allowedByRoot.size).toBe(0);
   });
 
+  it("strips a leading slash on incoming paths so the allow-set matches normalised doc paths", () => {
+    const repo = makeRepo({
+      id: "r1",
+      watchedRootIds: ["root-1"],
+      reviewLoad: {
+        changedFiles: [makeChange("/src/app.ts", "M")],
+        ignoredFiles: [makeChange("/dist/bundle.js", "M")],
+      },
+    });
+    const membership = computeFilesPaneFilterMembership([repo]);
+    const set = membership.allowedByRoot.get("root-1") ?? new Set();
+    expect(set.has("src/app.ts")).toBe(true);
+    expect(set.has("/src/app.ts")).toBe(false);
+    expect(set.has("dist/bundle.js")).toBe(true);
+  });
+
   it("fans out one repository's change set to every watched-root id it owns", () => {
     const repo = makeRepo({
       id: "r1",

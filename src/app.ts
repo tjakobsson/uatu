@@ -2177,7 +2177,9 @@ function formatFileCountDisplay(input: {
   totalCount: number;
   totalBinaryCount: number;
 }): string {
-  const filesWord = input.totalCount === 1 && !input.filterOn ? "file" : "files";
+  // "N of M file(s)" — the noun agrees with the SET size (M), not the
+  // subset (N): "1 of 1 file", "1 of 2 files", "2 of 5 files".
+  const filesWord = input.totalCount === 1 ? "file" : "files";
   const head = input.filterOn
     ? `${input.visibleCount} of ${input.totalCount} ${filesWord}`
     : `${input.totalCount} ${filesWord}`;

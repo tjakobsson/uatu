@@ -165,6 +165,13 @@ test("an active document outside the change set is revealed with a visual cue un
   const revealedRow = treeRow(page, "guides/setup.md");
   await expect(revealedRow).toBeAttached();
   await expect(revealedRow).toHaveAttribute("data-uatu-filter-reveal", "true");
+  // The visual cue (dim + italic) MUST actually render — the rule lives
+  // inside the `@pierre/trees` shadow root since document-level stylesheets
+  // can't pierce the shadow boundary.
+  const computedOpacity = await revealedRow.evaluate(el => getComputedStyle(el).opacity);
+  const computedFontStyle = await revealedRow.evaluate(el => getComputedStyle(el).fontStyle);
+  expect(Number(computedOpacity)).toBeLessThan(1);
+  expect(computedFontStyle).toBe("italic");
   // The chip stays on Changed — the reveal does not flip the filter off.
   await expect(page.locator("#files-pane-filter-changed")).toHaveAttribute(
     "aria-checked",

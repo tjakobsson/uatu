@@ -1264,14 +1264,9 @@ body.is-resizing-terminal .panel-resizer {
   outline-offset: 1px;
 }
 
-/* Subtle italic + dim treatment for rows the tree only shows because Follow
-   asked for them — keeps them visually distinct from the in-change rows
-   around them. Set on the row's host inside the @pierre/trees shadow root
-   via the MutationObserver-driven decoration path in tree-view.ts. */
-[data-uatu-filter-reveal="true"] {
-  opacity: 0.55;
-  font-style: italic;
-}
+/* The reveal-cue CSS for `data-uatu-filter-reveal="true"` rows lives
+   inside the @pierre/trees shadow root (injected by tree-view.ts), not
+   here — document-level stylesheets cannot pierce the shadow boundary. */
 
 .pane-select-label {
   color: var(--text-subtle);
