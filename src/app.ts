@@ -53,7 +53,12 @@ import {
 } from "./shared";
 import { renderDocumentDiff, type DocumentDiffPayload } from "./document-diff-view";
 import { nextStaleHint, type StaleHint } from "./stale-hint";
-import { TreeView, type GitStatusForView } from "./tree-view";
+import {
+  TreeView,
+  computeFilesPaneFilterMembership,
+  type FilesPaneFilterMembership,
+  type GitStatusForView,
+} from "./tree-view";
 
 type RenderedDocumentAuthor = { name: string; email?: string };
 
@@ -92,6 +97,36 @@ const GIT_LOG_LIMIT_KEY = "uatu:git-log-limit";
 // across documents and reloads. The expectation is "if I opened it once, I
 // want to see it on every other doc too" — and the converse for closing.
 const METADATA_CARD_OPEN_KEY = "uatu:metadata-card-open";
+
+// Files-pane filter chip: `all` shows the full tree, `changed` reduces the
+// tree to `reviewLoad.changedFiles ∪ ignoredFiles` plus ancestor directories.
+// Persisted per-Mode so Review and Author remember their own state.
+type FilesPaneFilter = "all" | "changed";
+const FILES_PANE_FILTER_KEY_PREFIX = "uatu.filesPaneFilter.";
+const DEFAULT_FILES_PANE_FILTER_BY_MODE: Record<Mode, FilesPaneFilter> = {
+  // Review opens onto the change set; users came here to review.
+  review: "changed",
+  // Author defaults to the full tree; Follow drives attention in that mode.
+  author: "all",
+};
+
+function readFilesPaneFilterPreference(mode: Mode): FilesPaneFilter {
+  const fallback = DEFAULT_FILES_PANE_FILTER_BY_MODE[mode];
+  try {
+    const raw = window.localStorage.getItem(`${FILES_PANE_FILTER_KEY_PREFIX}${mode}`);
+    return raw === "all" || raw === "changed" ? raw : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeFilesPaneFilterPreference(mode: Mode, value: FilesPaneFilter): void {
+  try {
+    window.localStorage.setItem(`${FILES_PANE_FILTER_KEY_PREFIX}${mode}`, value);
+  } catch {
+    // best-effort persistence; localStorage may be disabled
+  }
+}
 
 function readMetadataCardOpenPreference(): boolean {
   try {
@@ -180,6 +215,9 @@ const staleHintElement = document.querySelector<HTMLDivElement>("#stale-hint");
 const staleHintMessageElement = document.querySelector<HTMLElement>("#stale-hint-message");
 const staleHintActionElement = document.querySelector<HTMLButtonElement>("#stale-hint-action");
 const documentCountElement = document.querySelector<HTMLElement>("#document-count");
+const filesPaneFilterElement = document.querySelector<HTMLDivElement>("#files-pane-filter");
+const filesPaneFilterAllButton = document.querySelector<HTMLButtonElement>("#files-pane-filter-all");
+const filesPaneFilterChangedButton = document.querySelector<HTMLButtonElement>("#files-pane-filter-changed");
 const connectionStateElement = document.querySelector<HTMLElement>("#connection-state");
 const connectionLabelElement = connectionStateElement?.querySelector<HTMLElement>(".connection-label") ?? null;
 const buildBadgeElement = document.querySelector<HTMLElement>("#build-badge");
@@ -223,6 +261,9 @@ if (
   !staleHintMessageElement ||
   !staleHintActionElement ||
   !documentCountElement ||
+  !filesPaneFilterElement ||
+  !filesPaneFilterAllButton ||
+  !filesPaneFilterChangedButton ||
   !connectionStateElement ||
   !connectionLabelElement ||
   !buildBadgeElement ||
@@ -273,6 +314,10 @@ const appState = {
   staleHint: null as StaleHint | null,
   scope: { kind: "folder" } as Scope,
   panes: readPaneState(DEFAULT_MODE),
+  // Files-pane filter chip state for the active Mode. Resolved on boot and on
+  // Mode switch from `readFilesPaneFilterPreference` (with the per-Mode default
+  // when no value is persisted yet).
+  filesPaneFilter: readFilesPaneFilterPreference(DEFAULT_MODE) as FilesPaneFilter,
   gitLogLimit: readGitLogLimitPreference(),
 };
 
@@ -993,7 +1038,11 @@ async function loadInitialState() {
   // Pane state is per-mode; load the resolved mode's persisted layout (the
   // initial `appState.panes` was a placeholder for DEFAULT_MODE).
   appState.panes = readPaneState(resolvedMode);
+  // Same per-Mode persistence pattern: load the chip state for the resolved
+  // Mode (or its default) so the first paint matches the persisted choice.
+  appState.filesPaneFilter = readFilesPaneFilterPreference(resolvedMode);
   syncModeControl();
+  syncFilesPaneFilterControl();
 
   let directLinkMessage: { title: string; body: string } | null = null;
   const initialReviewScoreRepositoryId = reviewScoreRepositoryIdFromUrl();
@@ -2032,37 +2081,111 @@ function renderSidebar() {
   renderChangeOverview();
   renderGitLog();
   schedulePaneHeightNormalization();
+  // Refresh the chip's tooltip every render — `primaryReviewBaseLabel`
+  // depends on `appState.repositories` which changes on every refresh.
+  syncFilesPaneFilterControl();
 
   const totalCount = appState.roots.reduce((sum, root) => sum + root.docs.length, 0);
-  const binaryCount = appState.roots.reduce(
+  const totalBinaryCount = appState.roots.reduce(
     (sum, root) => sum + root.docs.filter(doc => doc.kind === "binary").length,
     0,
   );
-
-  const segments = [`${totalCount} file${totalCount === 1 ? "" : "s"}`];
-  if (binaryCount > 0) {
-    segments.push(`${binaryCount} binary`);
-  }
-  documentCountElement.textContent = segments.join(" · ");
 
   if (totalCount === 0) {
     if (treeView !== null) {
       treeView.dispose();
       treeView = null;
     }
+    documentCountElement.textContent = "0 files";
     // The library attaches a shadow root to #tree once mounted, and that
     // shadow root persists across innerHTML writes — so we keep the empty
     // message as a sibling element instead of overwriting #tree's children.
     treeElement.hidden = true;
     treeEmptyMessageElement.hidden = false;
+    treeEmptyMessageElement.textContent = "No files found in the watched roots.";
+    return;
+  }
+
+  const filterOn = appState.filesPaneFilter === "changed";
+  const filter = filterOn ? computeFilesPaneFilterMembership(appState.repositories) : null;
+
+  // Decide whether the filter has anything to render. The membership map's
+  // emptiness is the right proxy: a non-git workspace has no entries; a clean
+  // working tree has empty entries (because the change set is empty). Either
+  // way the chip should fall into the empty state.
+  const hasFilterMembership = filter !== null
+    ? filterMembershipHasAnyPath(filter)
+    : false;
+  const showFilterEmptyState = filterOn && !hasFilterMembership;
+
+  if (showFilterEmptyState) {
+    if (treeView !== null) {
+      treeView.dispose();
+      treeView = null;
+    }
+    treeElement.hidden = true;
+    treeEmptyMessageElement.hidden = false;
+    treeEmptyMessageElement.textContent = filterEmptyStateCopy(appState.repositories);
+    documentCountElement.textContent = formatFileCountDisplay({
+      filterOn: true,
+      visibleCount: 0,
+      visibleBinaryCount: 0,
+      totalCount,
+      totalBinaryCount,
+    });
     return;
   }
 
   treeElement.hidden = false;
   treeEmptyMessageElement.hidden = true;
   const view = ensureTreeView();
-  view.update(appState.roots, appState.selectedId);
+  view.update(appState.roots, appState.selectedId, { filter });
   view.setGitStatus(collectGitStatusEntries(appState.repositories));
+
+  documentCountElement.textContent = formatFileCountDisplay({
+    filterOn,
+    visibleCount: filterOn ? view.getVisibleLeafCount() : totalCount,
+    visibleBinaryCount: filterOn ? view.getVisibleBinaryLeafCount() : totalBinaryCount,
+    totalCount,
+    totalBinaryCount,
+  });
+}
+
+function filterMembershipHasAnyPath(filter: FilesPaneFilterMembership): boolean {
+  for (const allowed of filter.allowedByRoot.values()) {
+    if (allowed.size > 0) return true;
+  }
+  return false;
+}
+
+// Empty-state copy named in `sidebar-shell`: `No changes vs <base>` when at
+// least one repository's review-load is available, `Changed filter is
+// unavailable — no git repository` otherwise.
+function filterEmptyStateCopy(repos: readonly RepositoryReviewSnapshot[]): string {
+  const anyAvailable = repos.some(repo => repo.reviewLoad.status === "available");
+  if (!anyAvailable) {
+    return "Changed filter is unavailable — no git repository";
+  }
+  const label = primaryReviewBaseLabel();
+  return label ? `No changes vs ${label}` : "No changes vs the review base";
+}
+
+function formatFileCountDisplay(input: {
+  filterOn: boolean;
+  visibleCount: number;
+  visibleBinaryCount: number;
+  totalCount: number;
+  totalBinaryCount: number;
+}): string {
+  const filesWord = input.totalCount === 1 && !input.filterOn ? "file" : "files";
+  const head = input.filterOn
+    ? `${input.visibleCount} of ${input.totalCount} ${filesWord}`
+    : `${input.totalCount} ${filesWord}`;
+  const binaryCount = input.filterOn ? input.visibleBinaryCount : input.totalBinaryCount;
+  if (binaryCount > 0) {
+    return `${head} · ${binaryCount} binary`;
+  }
+  return head;
 }
 
 function initSidebarPanes() {
@@ -3057,6 +3180,10 @@ function applyMode(next: Mode) {
   // Each mode keeps its own pane state — visibility, collapse, height — so
   // flipping the toggle restores the layout the user left in that mode.
   appState.panes = readPaneState(next);
+  // Same per-Mode treatment for the Files-pane filter chip: switching Modes
+  // restores whatever filter state the destination Mode last had (defaults
+  // when never set).
+  appState.filesPaneFilter = readFilesPaneFilterPreference(next);
 
   // Author <-> Review round-trip: snapshot Author's Follow choice on the way
   // out, restore it on the way back. Review must force Follow off (the
@@ -3080,6 +3207,7 @@ function applyMode(next: Mode) {
   applyStaleHint(nextStaleHint(appState.staleHint, { kind: "mode-changed", nextMode: next }));
 
   syncModeControl();
+  syncFilesPaneFilterControl();
   syncFollowToggle();
   renderSidebar();
   schedulePaneHeightNormalization();
@@ -3101,6 +3229,59 @@ function applyMode(next: Mode) {
 
 modeAuthorButton.addEventListener("click", () => applyMode("author"));
 modeReviewButton.addEventListener("click", () => applyMode("review"));
+
+filesPaneFilterAllButton.addEventListener("click", () => applyFilesPaneFilter("all"));
+filesPaneFilterChangedButton.addEventListener("click", () => applyFilesPaneFilter("changed"));
+
+function applyFilesPaneFilter(next: FilesPaneFilter): void {
+  if (appState.filesPaneFilter === next) {
+    return;
+  }
+  appState.filesPaneFilter = next;
+  writeFilesPaneFilterPreference(appState.mode, next);
+  syncFilesPaneFilterControl();
+  renderSidebar();
+}
+
+function syncFilesPaneFilterControl(): void {
+  // Local non-null aliases — the if-throw guard above proves these refs are
+  // present, but TypeScript's control-flow analysis loses the narrowing once
+  // we step into a hoisted function body.
+  const allBtn = filesPaneFilterAllButton!;
+  const changedBtn = filesPaneFilterChangedButton!;
+  const isAll = appState.filesPaneFilter === "all";
+  allBtn.setAttribute("aria-checked", String(isAll));
+  allBtn.classList.toggle("is-active", isAll);
+  changedBtn.setAttribute("aria-checked", String(!isAll));
+  changedBtn.classList.toggle("is-active", !isAll);
+
+  // Tooltip on the Changed segment names the resolved review base when one is
+  // available so reviewers know what "Changed" is measured against. Falls back
+  // to a generic hint when no repository has an available review-load.
+  const baseLabel = primaryReviewBaseLabel();
+  changedBtn.title = baseLabel
+    ? `Show only files changed vs ${baseLabel}`
+    : "Show only changed files";
+}
+
+// First repository with an available review-load wins; the chip is global
+// across multi-root sessions, so a single base label is sufficient (and
+// degrading to a generic label is fine when bases differ or aren't available).
+function primaryReviewBaseLabel(): string | null {
+  for (const repo of appState.repositories) {
+    if (repo.reviewLoad.status !== "available") {
+      continue;
+    }
+    const base = repo.reviewLoad.base;
+    if (base.ref) {
+      return base.ref;
+    }
+    if (base.mode === "dirty-worktree-only") {
+      return "dirty worktree";
+    }
+  }
+  return null;
+}
 
 staleHintActionElement.addEventListener("click", () => {
   const hint = appState.staleHint;

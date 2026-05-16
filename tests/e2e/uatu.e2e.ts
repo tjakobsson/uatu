@@ -869,6 +869,10 @@ test("Tree annotates gitignored files with the 'ignored' status (distinct from u
   });
   await page.goto("/");
 
+  // Review's default filter (Changed) excludes gitignored files entirely —
+  // toggle to All so the annotation we're asserting is reachable.
+  await page.locator("#files-pane-filter-all").click();
+
   const row = treeRow(page, "a-local-only.json");
   await expect(row).toHaveAttribute("data-item-git-status", "ignored");
 });
@@ -1771,6 +1775,9 @@ test("Review mode does not switch active preview when a different file changes",
 
 test("Review mode allows manual file selection from the Files pane", async ({ page }) => {
   await page.locator("#mode-review").click();
+  // Review's chip defaults to Changed; this fixture has no git and no
+  // changes, so we toggle to All to keep the target file visible.
+  await page.locator("#files-pane-filter-all").click();
   await treeRow(page, "diagram.md").click();
   await expect(page.locator("#preview-path")).toHaveText("diagram.md");
 });
@@ -1796,6 +1803,10 @@ test("Review mode shows a stale-content hint when the active file changes on dis
 
 test("Review hint coalesces multiple changes and clears on manual navigation", async ({ page }) => {
   await page.locator("#mode-review").click();
+  // Toggle the Changed filter off so `diagram.md` is reachable for the
+  // manual-navigation clear step below (this fixture is non-git, so the
+  // chip would otherwise sit in the "filter unavailable" empty state).
+  await page.locator("#files-pane-filter-all").click();
   await fs.writeFile(workspacePath("README.md"), "# First Edit\n\n.\n", "utf8");
   await expect(page.locator("#stale-hint")).toBeVisible();
   await fs.writeFile(workspacePath("README.md"), "# Second Edit\n\n.\n", "utf8");
@@ -2228,6 +2239,9 @@ test("Selection inside a rendered fenced code block produces the hint, not a ref
   const fixture = "# Fenced fixture\n\n\`\`\`bash\nset -e\necho hello\n\`\`\`\n";
   await fs.writeFile(workspacePath("guides", "fenced-fixture.md"), fixture, "utf8");
   await page.locator("#mode-review").click();
+  // Switch the Changed filter off; this is a non-git fixture, where the
+  // chip's Changed state shows the "filter unavailable" empty state.
+  await page.locator("#files-pane-filter-all").click();
   await clickTreeFile(page, "guides/fenced-fixture.md");
   await expect(page.locator("#preview-path")).toHaveText("guides/fenced-fixture.md");
   await page.locator("#view-rendered").click();

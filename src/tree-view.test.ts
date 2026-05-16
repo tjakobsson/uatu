@@ -1,7 +1,14 @@
 import { describe, expect, it } from "bun:test";
 
-import type { RootGroup } from "./shared";
-import { ancestorPaths, buildPathInputs } from "./tree-view";
+import type { ChangedFileSummary, RepositoryReviewSnapshot, ReviewLoadResult, RootGroup } from "./shared";
+import {
+  ancestorPaths,
+  buildPathInputs,
+  computeFilesPaneFilterMembership,
+  computeFilteredPaths,
+  reconcileFilterExpansion,
+  type FilesPaneFilterMembership,
+} from "./tree-view";
 
 function makeRoot(overrides: Partial<RootGroup> & { id: string; label: string; docs: RootGroup["docs"] }): RootGroup {
   return {
@@ -196,5 +203,307 @@ describe("ancestorPaths", () => {
 
   it("handles multi-root-prefixed paths consistently", () => {
     expect(ancestorPaths("myproject/src/index.ts")).toEqual(["myproject/", "myproject/src/"]);
+  });
+});
+
+describe("computeFilteredPaths", () => {
+  const root = makeRoot({
+    id: "r1",
+    label: "proj",
+    docs: [
+      {
+        id: "/abs/proj/README.md",
+        name: "README.md",
+        relativePath: "README.md",
+        mtimeMs: 0,
+        rootId: "r1",
+        kind: "markdown",
+      },
+      {
+        id: "/abs/proj/src/auth/login.ts",
+        name: "login.ts",
+        relativePath: "src/auth/login.ts",
+        mtimeMs: 0,
+        rootId: "r1",
+        kind: "text",
+      },
+      {
+        id: "/abs/proj/src/auth/oauth.ts",
+        name: "oauth.ts",
+        relativePath: "src/auth/oauth.ts",
+        mtimeMs: 0,
+        rootId: "r1",
+        kind: "text",
+      },
+      {
+        id: "/abs/proj/docs/glossary.md",
+        name: "glossary.md",
+        relativePath: "docs/glossary.md",
+        mtimeMs: 0,
+        rootId: "r1",
+        kind: "markdown",
+      },
+    ],
+  });
+
+  it("keeps only docs in the allow-list plus their ancestor directories", () => {
+    const filter: FilesPaneFilterMembership = {
+      allowedByRoot: new Map([["r1", new Set(["src/auth/login.ts", "docs/glossary.md"])]]),
+    };
+    const { rootPrefix } = buildPathInputs([root]);
+    const { paths, ancestors } = computeFilteredPaths([root], rootPrefix, filter);
+    expect(new Set(paths)).toEqual(new Set(["src/auth/login.ts", "docs/glossary.md"]));
+    expect(new Set(ancestors)).toEqual(new Set(["src/", "src/auth/", "docs/"]));
+  });
+
+  it("returns empty arrays when no doc matches the allow-list", () => {
+    const filter: FilesPaneFilterMembership = {
+      allowedByRoot: new Map([["r1", new Set(["nonexistent.md"])]]),
+    };
+    const { rootPrefix } = buildPathInputs([root]);
+    const { paths, ancestors } = computeFilteredPaths([root], rootPrefix, filter);
+    expect(paths).toEqual([]);
+    expect(ancestors).toEqual([]);
+  });
+
+  it("filters every root out when the per-root allow-list is missing", () => {
+    const filter: FilesPaneFilterMembership = { allowedByRoot: new Map() };
+    const { rootPrefix } = buildPathInputs([root]);
+    const { paths } = computeFilteredPaths([root], rootPrefix, filter);
+    expect(paths).toEqual([]);
+  });
+
+  it("respects multi-root prefixes when the chip's allow-list is per repo-root path", () => {
+    const left = makeRoot({
+      id: "r1",
+      label: "docs",
+      docs: [
+        {
+          id: "/a/docs/intro.md",
+          name: "intro.md",
+          relativePath: "intro.md",
+          mtimeMs: 0,
+          rootId: "r1",
+          kind: "markdown",
+        },
+      ],
+    });
+    const right = makeRoot({
+      id: "r2",
+      label: "site",
+      docs: [
+        {
+          id: "/b/site/index.md",
+          name: "index.md",
+          relativePath: "index.md",
+          mtimeMs: 0,
+          rootId: "r2",
+          kind: "markdown",
+        },
+      ],
+    });
+    const filter: FilesPaneFilterMembership = {
+      allowedByRoot: new Map([["r2", new Set(["index.md"])]]),
+    };
+    const { rootPrefix } = buildPathInputs([left, right]);
+    const { paths } = computeFilteredPaths([left, right], rootPrefix, filter);
+    expect(paths).toEqual(["site/index.md"]);
+  });
+
+  it("ignores any allow-list path not present in the doc list (defensive)", () => {
+    const filter: FilesPaneFilterMembership = {
+      allowedByRoot: new Map([["r1", new Set(["README.md", "ghost.md"])]]),
+    };
+    const { rootPrefix } = buildPathInputs([root]);
+    const { paths, ancestors } = computeFilteredPaths([root], rootPrefix, filter);
+    expect(paths).toEqual(["README.md"]);
+    expect(ancestors).toEqual([]);
+  });
+});
+
+describe("computeFilesPaneFilterMembership", () => {
+  function makeChange(path: string, status = "M"): ChangedFileSummary {
+    return { path, oldPath: null, status, additions: 0, deletions: 0, hunks: 0 };
+  }
+
+  function makeRepo(overrides: {
+    id: string;
+    watchedRootIds: string[];
+    reviewLoad: Partial<ReviewLoadResult>;
+  }): RepositoryReviewSnapshot {
+    return {
+      id: overrides.id,
+      rootPath: `/tmp/${overrides.id}`,
+      label: overrides.id,
+      watchedRootIds: overrides.watchedRootIds,
+      metadata: {
+        id: overrides.id,
+        rootPath: `/tmp/${overrides.id}`,
+        label: overrides.id,
+        watchedRootIds: overrides.watchedRootIds,
+        status: "git",
+        branch: "main",
+        detached: false,
+        commitShort: null,
+        dirty: false,
+        message: null,
+      },
+      reviewLoad: {
+        status: "available",
+        score: 0,
+        level: "low",
+        thresholds: { medium: 10, high: 25 },
+        base: { mode: "configured", ref: "main", mergeBase: null },
+        changedFiles: [],
+        ignoredFiles: [],
+        gitIgnoredFiles: [],
+        drivers: [],
+        configuredAreas: [],
+        settingsWarnings: [],
+        message: null,
+        ...overrides.reviewLoad,
+      },
+      commitLog: [],
+    };
+  }
+
+  it("unions changedFiles and ignoredFiles per repo, keyed by watched-root id", () => {
+    const repo = makeRepo({
+      id: "r1",
+      watchedRootIds: ["root-1"],
+      reviewLoad: {
+        changedFiles: [makeChange("src/app.ts", "M"), makeChange("README.md", "?")],
+        ignoredFiles: [makeChange("dist/bundle.js", "M")],
+      },
+    });
+    const membership = computeFilesPaneFilterMembership([repo]);
+    const set = membership.allowedByRoot.get("root-1");
+    expect(set).toBeDefined();
+    expect(set).toEqual(new Set(["src/app.ts", "README.md", "dist/bundle.js"]));
+  });
+
+  it("excludes gitIgnoredFiles from the change set", () => {
+    const repo = makeRepo({
+      id: "r1",
+      watchedRootIds: ["root-1"],
+      reviewLoad: {
+        changedFiles: [makeChange("src/app.ts", "M")],
+        ignoredFiles: [],
+        gitIgnoredFiles: [".claude/settings.local.json"],
+      },
+    });
+    const membership = computeFilesPaneFilterMembership([repo]);
+    const set = membership.allowedByRoot.get("root-1") ?? new Set();
+    expect(set.has("src/app.ts")).toBe(true);
+    expect(set.has(".claude/settings.local.json")).toBe(false);
+  });
+
+  it("skips repositories whose review-load is not available", () => {
+    const repo = makeRepo({
+      id: "r1",
+      watchedRootIds: ["root-1"],
+      reviewLoad: { status: "non-git", changedFiles: [makeChange("README.md", "M")] },
+    });
+    const membership = computeFilesPaneFilterMembership([repo]);
+    expect(membership.allowedByRoot.size).toBe(0);
+  });
+
+  it("fans out one repository's change set to every watched-root id it owns", () => {
+    const repo = makeRepo({
+      id: "r1",
+      watchedRootIds: ["root-a", "root-b"],
+      reviewLoad: { changedFiles: [makeChange("shared.ts", "M")] },
+    });
+    const membership = computeFilesPaneFilterMembership([repo]);
+    expect(membership.allowedByRoot.get("root-a")).toEqual(new Set(["shared.ts"]));
+    expect(membership.allowedByRoot.get("root-b")).toEqual(new Set(["shared.ts"]));
+  });
+});
+
+describe("reconcileFilterExpansion", () => {
+  it("snapshots the user's currently-expanded set when transitioning All → Changed", () => {
+    const result = reconcileFilterExpansion({
+      previousFilterKind: "all",
+      nextFilterKind: "changed",
+      autoExpanded: ["src/", "src/auth/"],
+      currentlyExpanded: ["src/", "tests/", "docs/guides/"],
+      storedSnapshot: null,
+    });
+    expect(result.initialExpandedPaths).toEqual(["src/", "src/auth/"]);
+    expect(result.nextSnapshot).toEqual(["src/", "tests/", "docs/guides/"]);
+  });
+
+  it("restores the snapshot as initial expansion when transitioning Changed → All", () => {
+    const result = reconcileFilterExpansion({
+      previousFilterKind: "changed",
+      nextFilterKind: "all",
+      autoExpanded: ["src/"],
+      currentlyExpanded: null,
+      storedSnapshot: ["src/", "tests/", "docs/guides/"],
+    });
+    // Snapshot directories restored alongside the new auto-expand reveal,
+    // deduplicated and in first-seen order.
+    expect(result.initialExpandedPaths).toEqual(["src/", "tests/", "docs/guides/"]);
+    // Snapshot is consumed on restore so a subsequent All → Changed → All
+    // cycle without further user expansion does not double-feed stale dirs.
+    expect(result.nextSnapshot).toBeNull();
+  });
+
+  it("does not lose user-opened directories across All → Changed → All", () => {
+    const after_all_to_changed = reconcileFilterExpansion({
+      previousFilterKind: "all",
+      nextFilterKind: "changed",
+      autoExpanded: ["src/", "src/auth/"],
+      currentlyExpanded: ["src/", "src/auth/oauth/", "tests/"],
+      storedSnapshot: null,
+    });
+    const after_changed_to_all = reconcileFilterExpansion({
+      previousFilterKind: "changed",
+      nextFilterKind: "all",
+      autoExpanded: [],
+      currentlyExpanded: null,
+      storedSnapshot: after_all_to_changed.nextSnapshot,
+    });
+    expect(after_changed_to_all.initialExpandedPaths).toEqual([
+      "src/",
+      "src/auth/oauth/",
+      "tests/",
+    ]);
+  });
+
+  it("passes the auto-expand reveal through unchanged on same-kind transitions", () => {
+    const stayAll = reconcileFilterExpansion({
+      previousFilterKind: "all",
+      nextFilterKind: "all",
+      autoExpanded: ["docs/"],
+      currentlyExpanded: null,
+      storedSnapshot: null,
+    });
+    expect(stayAll.initialExpandedPaths).toEqual(["docs/"]);
+    expect(stayAll.nextSnapshot).toBeNull();
+
+    const stayChanged = reconcileFilterExpansion({
+      previousFilterKind: "changed",
+      nextFilterKind: "changed",
+      autoExpanded: ["src/auth/"],
+      currentlyExpanded: null,
+      storedSnapshot: ["src/", "docs/guides/"],
+    });
+    expect(stayChanged.initialExpandedPaths).toEqual(["src/auth/"]);
+    // Snapshot is preserved across same-kind transitions so the next
+    // Changed → All edge can still restore it.
+    expect(stayChanged.nextSnapshot).toEqual(["src/", "docs/guides/"]);
+  });
+
+  it("falls back to bare auto-expand when no snapshot exists on Changed → All", () => {
+    const result = reconcileFilterExpansion({
+      previousFilterKind: "changed",
+      nextFilterKind: "all",
+      autoExpanded: ["src/"],
+      currentlyExpanded: null,
+      storedSnapshot: null,
+    });
+    expect(result.initialExpandedPaths).toEqual(["src/"]);
+    expect(result.nextSnapshot).toBeNull();
   });
 });

@@ -247,7 +247,7 @@ body.is-resizing-sidebar {
 
 .sidebar-meta {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   align-items: center;
   margin: 1.1rem 0 0.85rem;
   color: var(--text-subtle);
@@ -1203,6 +1203,74 @@ body.is-resizing-terminal .panel-resizer {
   align-items: center;
   gap: 0.15rem;
   flex-shrink: 0;
+}
+
+/* Files-pane header carries the file count and the All/Changed filter chip
+   together so reviewers can read the count and the filter state as one unit. */
+.pane-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--text-subtle);
+  font-size: 0.72rem;
+}
+
+.document-count {
+  white-space: nowrap;
+}
+
+/* Segmented chip: same visual primitive as .mode-control, sized down to sit
+   alongside the file count inside a pane header. */
+.files-pane-filter {
+  display: inline-flex;
+  align-items: stretch;
+  padding: 0.1rem;
+  border-radius: 0.4rem;
+  background: var(--surface-muted);
+  border: 1px solid var(--border-soft);
+}
+
+.files-pane-filter-segment {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.15rem 0.45rem;
+  border: 0;
+  background: transparent;
+  color: var(--text-subtle);
+  border-radius: 0.3rem;
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.files-pane-filter-segment:hover:not(.is-active) {
+  color: var(--text-strong);
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.files-pane-filter-segment.is-active {
+  background: #ffffff;
+  color: var(--accent);
+  box-shadow: 0 1px 2px rgba(36, 41, 47, 0.08);
+  cursor: default;
+}
+
+.files-pane-filter-segment:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Subtle italic + dim treatment for rows the tree only shows because Follow
+   asked for them — keeps them visually distinct from the in-change rows
+   around them. Set on the row's host inside the @pierre/trees shadow root
+   via the MutationObserver-driven decoration path in tree-view.ts. */
+[data-uatu-filter-reveal="true"] {
+  opacity: 0.55;
+  font-style: italic;
 }
 
 .pane-select-label {
