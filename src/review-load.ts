@@ -137,13 +137,10 @@ async function snapshotGroup(
     collectCommitLog(group.rootPath),
     collectGitIgnoredFiles(group.rootPath, knownTreePaths),
   ]);
-  const reviewLoad = scoreReviewLoad(
-    changedFiles,
-    base,
-    settingsResult.settings,
-    settingsResult.warnings,
-  );
-  reviewLoad.gitIgnoredFiles = gitIgnoredFiles;
+  const reviewLoad: ReviewLoadResult = {
+    ...scoreReviewLoad(changedFiles, base, settingsResult.settings, settingsResult.warnings),
+    gitIgnoredFiles,
+  };
 
   return {
     id: group.id,
@@ -620,6 +617,10 @@ function scoreReviewLoad(
   const score = Math.max(0, Math.round(drivers.reduce((sum, driver) => sum + driver.score, 0)));
   const level = score >= settings.thresholds.high ? "high" : score >= settings.thresholds.medium ? "medium" : "low";
 
+  // Gitignored files are not a scoring concern — `snapshotGroup` spreads the
+  // returned value and supplies `gitIgnoredFiles` itself. The field is
+  // declared in the `ReviewLoadResult` shape but populated outside this
+  // function.
   return {
     status: "available",
     score,
@@ -628,8 +629,6 @@ function scoreReviewLoad(
     base,
     changedFiles: scoredFiles,
     ignoredFiles,
-    // Populated by snapshotGroup after the score is computed; gitignored
-    // files have no role in scoring, so the scorer leaves it empty here.
     gitIgnoredFiles: [],
     drivers,
     configuredAreas,
