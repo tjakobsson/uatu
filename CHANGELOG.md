@@ -10,6 +10,7 @@ versions follow the `package.json`'s `version` field.
 ### Added
 
 - **Document tree powered by [`@pierre/trees`](https://github.com/pierrecomputer/pierre/tree/main/packages/trees)** (`1.0.0-beta.3`, Apache-2.0). The Files-pane tree is now rendered by the library; uatu owns walking the filesystem and feeding it paths. Ambient git status (added / modified / deleted / renamed / untracked) appears as row annotations on every changed path.
+- **Untracked files surfaced as a distinct category.** Tree rows for untracked files now show the library's untracked annotation (previously they masqueraded as `added`); Change Overview gains a small "Includes untracked files" indicator when applicable; the score-explanation preview breaks out the untracked subcount alongside the existing change-shape inputs. Tracked-added files are now reported as `added` rather than being collapsed into `modified` (the diff pipeline now consults `git diff --name-status` for the per-file category letter).
 - **`.uatu.json` `tree` block** for tree filtering: `tree.exclude: string[]` (gitignore-compatible patterns including `!` negation) and `tree.respectGitignore: boolean` (default `true`; opt-out alternative to the `--no-gitignore` CLI flag — CLI flag wins when both are set).
 
 ### Changed

@@ -133,6 +133,194 @@ describe("review-load repository snapshots", () => {
     expect(snapshots[0]!.reviewLoad.configuredAreas).toEqual([]);
   });
 
+  test("reports untracked files with the distinct '?' status", async () => {
+    const repo = await createRepo();
+    await writeFile(path.join(repo, "scratch.md"), "# Scratch\n");
+
+    const snapshots = await collectRepositorySnapshots(
+      [{ kind: "dir", absolutePath: repo }],
+      [{ id: repo, label: "repo", path: repo, docs: [], hiddenCount: 0 }],
+    );
+
+    const entry = snapshots[0]?.reviewLoad.changedFiles.find(file => file.path === "scratch.md");
+    expect(entry).toBeDefined();
+    expect(entry?.status.startsWith("?")).toBe(true);
+  });
+
+  test("reports staged-but-uncommitted files with the 'A' status, not '?'", async () => {
+    const repo = await createRepo();
+    await writeFile(path.join(repo, "feature.md"), "# Feature\n");
+    await safeGit(repo, ["add", "feature.md"]);
+
+    const snapshots = await collectRepositorySnapshots(
+      [{ kind: "dir", absolutePath: repo }],
+      [{ id: repo, label: "repo", path: repo, docs: [], hiddenCount: 0 }],
+    );
+
+    const entry = snapshots[0]?.reviewLoad.changedFiles.find(file => file.path === "feature.md");
+    expect(entry).toBeDefined();
+    expect(entry?.status.startsWith("A")).toBe(true);
+    expect(entry?.status.startsWith("?")).toBe(false);
+  });
+
+  test("modified tracked files are reported with the 'M' status", async () => {
+    const repo = await createRepo();
+    await writeFile(path.join(repo, "README.md"), "# Readme (modified)\n");
+
+    const snapshots = await collectRepositorySnapshots(
+      [{ kind: "dir", absolutePath: repo }],
+      [{ id: repo, label: "repo", path: repo, docs: [], hiddenCount: 0 }],
+    );
+
+    const entry = snapshots[0]?.reviewLoad.changedFiles.find(file => file.path === "README.md");
+    expect(entry).toBeDefined();
+    expect(entry?.status.startsWith("M")).toBe(true);
+  });
+
+  test("deleted tracked files are reported with the 'D' status", async () => {
+    const repo = await createRepo();
+    await safeGit(repo, ["rm", "README.md"]);
+
+    const snapshots = await collectRepositorySnapshots(
+      [{ kind: "dir", absolutePath: repo }],
+      [{ id: repo, label: "repo", path: repo, docs: [], hiddenCount: 0 }],
+    );
+
+    const entry = snapshots[0]?.reviewLoad.changedFiles.find(file => file.path === "README.md");
+    expect(entry).toBeDefined();
+    expect(entry?.status.startsWith("D")).toBe(true);
+  });
+
+  test("renamed tracked files are reported with the 'R' status and an oldPath", async () => {
+    const repo = await createRepo();
+    await safeGit(repo, ["mv", "README.md", "GUIDE.md"]);
+
+    const snapshots = await collectRepositorySnapshots(
+      [{ kind: "dir", absolutePath: repo }],
+      [{ id: repo, label: "repo", path: repo, docs: [], hiddenCount: 0 }],
+    );
+
+    const entry = snapshots[0]?.reviewLoad.changedFiles.find(file => file.path === "GUIDE.md");
+    expect(entry).toBeDefined();
+    expect(entry?.status.startsWith("R")).toBe(true);
+    expect(entry?.oldPath).toBe("README.md");
+  });
+
+  test("untracked and staged-added states produce the same review-burden score", async () => {
+    const untrackedRepo = await createRepo();
+    await writeFile(path.join(untrackedRepo, "feature.md"), "# Feature\n");
+
+    const stagedRepo = await createRepo();
+    await writeFile(path.join(stagedRepo, "feature.md"), "# Feature\n");
+    await safeGit(stagedRepo, ["add", "feature.md"]);
+
+    const untrackedSnapshots = await collectRepositorySnapshots(
+      [{ kind: "dir", absolutePath: untrackedRepo }],
+      [{ id: untrackedRepo, label: "repo", path: untrackedRepo, docs: [], hiddenCount: 0 }],
+    );
+    const stagedSnapshots = await collectRepositorySnapshots(
+      [{ kind: "dir", absolutePath: stagedRepo }],
+      [{ id: stagedRepo, label: "repo", path: stagedRepo, docs: [], hiddenCount: 0 }],
+    );
+
+    expect(untrackedSnapshots[0]?.reviewLoad.score).toBe(stagedSnapshots[0]?.reviewLoad.score);
+    expect(untrackedSnapshots[0]?.reviewLoad.level).toBe(stagedSnapshots[0]?.reviewLoad.level);
+  });
+
+  test("exposes gitignored files visible in the tree via gitIgnoredFiles, not changedFiles", async () => {
+    const repo = await createRepo();
+    await writeFile(path.join(repo, ".gitignore"), "local-only.json\n");
+    await safeGit(repo, ["add", ".gitignore"]);
+    await safeGit(repo, ["-c", "commit.gpgsign=false", "commit", "-m", "add ignore"]);
+    await writeFile(path.join(repo, "local-only.json"), "{}\n");
+
+    const snapshots = await collectRepositorySnapshots(
+      [{ kind: "dir", absolutePath: repo }],
+      [
+        {
+          id: repo,
+          label: "repo",
+          path: repo,
+          // The probe filters by the tree's known paths; include this leaf so
+          // the intersection has something to match against.
+          docs: [
+            {
+              id: `${repo}/local-only.json`,
+              name: "local-only.json",
+              relativePath: "local-only.json",
+              mtimeMs: 0,
+              rootId: repo,
+              kind: "source",
+            },
+          ],
+          hiddenCount: 0,
+        },
+      ],
+    );
+
+    const load = snapshots[0]?.reviewLoad;
+    expect(load?.gitIgnoredFiles).toContain("local-only.json");
+    expect(load?.changedFiles.map(file => file.path)).not.toContain("local-only.json");
+    expect(load?.ignoredFiles.map(file => file.path)).not.toContain("local-only.json");
+  });
+
+  test("gitIgnoredFiles does not include files outside the tree's known paths", async () => {
+    const repo = await createRepo();
+    await writeFile(path.join(repo, ".gitignore"), "local-only.json\n");
+    await safeGit(repo, ["add", ".gitignore"]);
+    await safeGit(repo, ["-c", "commit.gpgsign=false", "commit", "-m", "add ignore"]);
+    await writeFile(path.join(repo, "local-only.json"), "{}\n");
+
+    // RootGroup with no docs: nothing in the tree, so nothing to intersect.
+    const snapshots = await collectRepositorySnapshots(
+      [{ kind: "dir", absolutePath: repo }],
+      [{ id: repo, label: "repo", path: repo, docs: [], hiddenCount: 0 }],
+    );
+
+    expect(snapshots[0]?.reviewLoad.gitIgnoredFiles).toEqual([]);
+  });
+
+  test("gitignored files do not affect the burden score", async () => {
+    const repoWithoutIgnored = await createRepo();
+    await writeFile(path.join(repoWithoutIgnored, "README.md"), "# changed\n");
+
+    const repoWithIgnored = await createRepo();
+    await writeFile(path.join(repoWithIgnored, "README.md"), "# changed\n");
+    await writeFile(path.join(repoWithIgnored, ".gitignore"), "ignored-leaf.json\n");
+    await writeFile(path.join(repoWithIgnored, "ignored-leaf.json"), "{}\n");
+    await safeGit(repoWithIgnored, ["add", ".gitignore"]);
+    await safeGit(repoWithIgnored, ["-c", "commit.gpgsign=false", "commit", "-m", "ignore"]);
+
+    const noIgnoredSnapshots = await collectRepositorySnapshots(
+      [{ kind: "dir", absolutePath: repoWithoutIgnored }],
+      [{ id: repoWithoutIgnored, label: "repo", path: repoWithoutIgnored, docs: [], hiddenCount: 0 }],
+    );
+    const ignoredSnapshots = await collectRepositorySnapshots(
+      [{ kind: "dir", absolutePath: repoWithIgnored }],
+      [
+        {
+          id: repoWithIgnored,
+          label: "repo",
+          path: repoWithIgnored,
+          docs: [
+            {
+              id: `${repoWithIgnored}/ignored-leaf.json`,
+              name: "ignored-leaf.json",
+              relativePath: "ignored-leaf.json",
+              mtimeMs: 0,
+              rootId: repoWithIgnored,
+              kind: "source",
+            },
+          ],
+          hiddenCount: 0,
+        },
+      ],
+    );
+
+    expect(ignoredSnapshots[0]?.reviewLoad.score).toBe(noIgnoredSnapshots[0]?.reviewLoad.score);
+    expect(ignoredSnapshots[0]?.reviewLoad.gitIgnoredFiles).toContain("ignored-leaf.json");
+  });
+
   test("collects full commit messages without per-commit lookups", async () => {
     const repo = await createRepo();
     await writeFile(path.join(repo, "feature.md"), "# Feature\n");

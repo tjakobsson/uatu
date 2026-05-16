@@ -115,6 +115,12 @@ export type ReviewLoadResult = {
   base: ReviewBase;
   changedFiles: ChangedFileSummary[];
   ignoredFiles: ChangedFileSummary[];
+  // Repo-root-relative paths of files in the tree that are matched by git's
+  // ignore rules (.gitignore, core.excludesFile, etc.). Pre-filtered server-
+  // side to paths uatu actually displays so we do not ship full ignored sets
+  // (e.g. node_modules contents) over the wire. These files contribute
+  // nothing to the score; their only consumer is tree row annotation.
+  gitIgnoredFiles: string[];
   drivers: ReviewScoreDriver[];
   configuredAreas: ReviewConfiguredArea[];
   settingsWarnings: string[];
