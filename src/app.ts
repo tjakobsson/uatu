@@ -1644,6 +1644,22 @@ export function buildScoreExplanationHTML(load: RepositoryReviewSnapshot["review
     return "";
   }
   const mechanicalDrivers = load.drivers.filter(driver => driver.kind === "mechanical");
+  // Presentation-only sub-driver: surface how many of the change's files are
+  // untracked, without altering the numeric score. Score is 0; the row is
+  // there as a categorical breakdown of files the mechanical "Changed files"
+  // count already includes.
+  const untrackedFiles = load.changedFiles
+    .filter(file => file.status.startsWith("?"))
+    .map(file => file.path);
+  if (untrackedFiles.length > 0) {
+    mechanicalDrivers.push({
+      kind: "mechanical",
+      label: "Untracked files",
+      score: 0,
+      detail: `${untrackedFiles.length} file${untrackedFiles.length === 1 ? "" : "s"} not yet in git`,
+      files: untrackedFiles,
+    });
+  }
   const warningDrivers = load.drivers.filter(driver => driver.kind === "warning");
   const highDelta = load.score - load.thresholds.high;
   const mediumDelta = load.score - load.thresholds.medium;
@@ -1790,6 +1806,8 @@ function mechanicalDriverHelp(label: string): string | null {
       return "Files that moved or changed name, which can take extra attention to follow.";
     case "Dependency/config files":
       return "Changes to setup, build, dependency, or CI files that can affect the project broadly.";
+    case "Untracked files":
+      return "Files in the workspace that are not yet tracked by git. They contribute to the change-shape inputs but are not in any commit or staged for one.";
     default:
       return null;
   }
@@ -1957,7 +1975,13 @@ function collectGitStatusEntries(repos: readonly RepositoryReviewSnapshot[]): Gi
     if (repo.reviewLoad.status !== "available") {
       continue;
     }
-    for (const change of repo.reviewLoad.changedFiles) {
+    // Annotations source from the union of changedFiles and ignoredFiles:
+    // `.uatu.json review.ignoreAreas` is a score policy ("don't inflate the
+    // burden with generated/scaffolding files"), not a visibility policy.
+    // The tree must still show that those files are changed in git, otherwise
+    // a reviewer cannot tell "I committed this" from "it's still untracked".
+    const allChanges = [...repo.reviewLoad.changedFiles, ...repo.reviewLoad.ignoredFiles];
+    for (const change of allChanges) {
       const status = mapChangedFileStatus(change.status);
       if (!status) {
         continue;
@@ -1966,6 +1990,15 @@ function collectGitStatusEntries(repos: readonly RepositoryReviewSnapshot[]): Gi
       // so the annotation lands wherever the file is visible in the tree.
       for (const rootId of repo.watchedRootIds) {
         out.push({ relativePath: change.path, rootId, status });
+      }
+    }
+    // Gitignored files: distinct from "changed" entirely — these are files
+    // on disk that git refuses to track. Annotating them as `ignored` lets a
+    // reviewer distinguish "this is a clean tracked file" from "git is
+    // intentionally not following this" (e.g. local-only settings).
+    for (const relativePath of repo.reviewLoad.gitIgnoredFiles) {
+      for (const rootId of repo.watchedRootIds) {
+        out.push({ relativePath, rootId, status: "ignored" });
       }
     }
   }
@@ -1986,6 +2019,8 @@ function mapChangedFileStatus(raw: string): GitStatusForView["status"] | null {
     case "U":
     case "?":
       return "untracked";
+    case "!":
+      return "ignored";
     default:
       return null;
   }
@@ -2345,6 +2380,16 @@ function renderChangeOverview() {
       const ignored = load.ignoredFiles.length > 0
         ? `<div class="ignored-summary">${load.ignoredFiles.length} ignored file${load.ignoredFiles.length === 1 ? "" : "s"} excluded</div>`
         : "";
+      // Workspace-state fact: include `ignoredFiles` too, since `ignoreAreas`
+      // is a score policy that should not hide categorical truth from the
+      // overview. The score-explanation preview's untracked sub-driver is
+      // the only consumer that intentionally filters to `changedFiles`.
+      const hasUntracked =
+        load.changedFiles.some(file => file.status.startsWith("?")) ||
+        load.ignoredFiles.some(file => file.status.startsWith("?"));
+      const untrackedIndicator = hasUntracked
+        ? `<div class="untracked-indicator" data-untracked-indicator>Includes untracked files</div>`
+        : "";
 
       return `
         <section class="review-repo">
@@ -2368,6 +2413,7 @@ function renderChangeOverview() {
             </span>
             <strong>${load.score}</strong>
           </button>
+          ${untrackedIndicator}
           ${warnings}
           ${ignored}
           ${visibleDrivers}

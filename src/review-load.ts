@@ -38,7 +38,15 @@ export async function collectRepositorySnapshots(
   roots: RootGroup[],
 ): Promise<RepositoryReviewSnapshot[]> {
   const groups = await detectRepositoryGroups(entries, roots);
-  const snapshots = await Promise.all(groups.map(group => snapshotGroup(group)));
+  const rootsById = new Map(roots.map(root => [root.id, root]));
+  const snapshots = await Promise.all(
+    groups.map(group => {
+      const groupRoots = group.watchedRootIds
+        .map(id => rootsById.get(id))
+        .filter((root): root is RootGroup => Boolean(root));
+      return snapshotGroup(group, groupRoots);
+    }),
+  );
   return snapshots.sort((left, right) => left.rootPath.localeCompare(right.rootPath));
 }
 
@@ -91,7 +99,10 @@ async function detectRepositoryGroups(
   return groups;
 }
 
-async function snapshotGroup(group: RepositoryGroup): Promise<RepositoryReviewSnapshot> {
+async function snapshotGroup(
+  group: RepositoryGroup,
+  roots: readonly RootGroup[],
+): Promise<RepositoryReviewSnapshot> {
   if (group.status !== "git") {
     const metadata = unavailableMetadata(group, "non-git", group.message);
     return {
@@ -120,14 +131,16 @@ async function snapshotGroup(group: RepositoryGroup): Promise<RepositoryReviewSn
   }
 
   const base = await resolveReviewBase(group.rootPath, settingsResult.settings.baseRef);
-  const changedFiles = await collectChangedFiles(group.rootPath, base);
-  const commitLog = await collectCommitLog(group.rootPath);
-  const reviewLoad = scoreReviewLoad(
-    changedFiles,
-    base,
-    settingsResult.settings,
-    settingsResult.warnings,
-  );
+  const knownTreePaths = await collectKnownTreePaths(group.rootPath, roots);
+  const [changedFiles, commitLog, gitIgnoredFiles] = await Promise.all([
+    collectChangedFiles(group.rootPath, base),
+    collectCommitLog(group.rootPath),
+    collectGitIgnoredFiles(group.rootPath, knownTreePaths),
+  ]);
+  const reviewLoad: ReviewLoadResult = {
+    ...scoreReviewLoad(changedFiles, base, settingsResult.settings, settingsResult.warnings),
+    gitIgnoredFiles,
+  };
 
   return {
     id: group.id,
@@ -219,6 +232,65 @@ async function collectChangedFiles(repoRoot: string, base: ReviewBase): Promise<
   return Array.from(combined.values()).sort((left, right) => left.path.localeCompare(right.path));
 }
 
+// Build the set of repo-root-relative paths that uatu's tree currently
+// displays for this repository group. Used to intersect git's ignored-files
+// list so we only ship the rows the client will actually annotate. Paths
+// are normalized to forward slashes regardless of platform so they match
+// the git output without per-OS branching. Both repoRoot and each
+// `root.path` are realpath-resolved so symlinks (notably `/tmp` →
+// `/private/tmp` on macOS, which `git rev-parse --show-toplevel` returns
+// in resolved form) do not produce spurious `..` ladders.
+async function collectKnownTreePaths(
+  repoRoot: string,
+  roots: readonly RootGroup[],
+): Promise<Set<string>> {
+  const known = new Set<string>();
+  const resolvedRepoRoot = await fs.realpath(repoRoot).catch(() => repoRoot);
+  for (const root of roots) {
+    const resolvedRootPath = await fs.realpath(root.path).catch(() => root.path);
+    const rootRelToRepo = path.relative(resolvedRepoRoot, resolvedRootPath).replace(/\\/g, "/");
+    for (const doc of root.docs) {
+      const repoRelative = rootRelToRepo
+        ? `${rootRelToRepo}/${doc.relativePath}`
+        : doc.relativePath;
+      known.add(repoRelative);
+    }
+  }
+  return known;
+}
+
+// Files present on disk that match git's standard ignore rules
+// (.gitignore, core.excludesFile, .git/info/exclude). We intersect against
+// `knownTreePaths` because the raw set can be enormous in repos with
+// node_modules / dist / .cache (tens of thousands of entries), and every
+// path beyond what the tree actually shows is wasted bytes over the wire.
+async function collectGitIgnoredFiles(repoRoot: string, knownTreePaths: Set<string>): Promise<string[]> {
+  if (knownTreePaths.size === 0) {
+    return [];
+  }
+  // The output of `--ignored --exclude-standard` is unbounded — in this repo
+  // it ships ~1.6 MB (mostly node_modules contents). The default 256 KB
+  // buffer would silently truncate and the exec would error out, leaving
+  // every gitignored file unannotated with no log trail. 16 MB is enough for
+  // any realistic repo; if it ever overflows, the safe-fail path returns
+  // [] and the only consequence is missing annotations (no crash).
+  const result = await safeGit(
+    repoRoot,
+    ["ls-files", "--others", "--ignored", "--exclude-standard"],
+    { maxBuffer: 16 * 1024 * 1024 },
+  );
+  if (!result.ok || !result.stdout.trim()) {
+    return [];
+  }
+  const out: string[] = [];
+  for (const line of result.stdout.trim().split("\n")) {
+    if (knownTreePaths.has(line)) {
+      out.push(line);
+    }
+  }
+  return out;
+}
+
 async function collectUntrackedFiles(repoRoot: string): Promise<ChangedFileSummary[]> {
   const result = await safeGit(repoRoot, ["ls-files", "--others", "--exclude-standard"]);
   if (!result.ok || !result.stdout.trim()) {
@@ -231,7 +303,7 @@ async function collectUntrackedFiles(repoRoot: string): Promise<ChangedFileSumma
     files.push({
       path: relativePath,
       oldPath: null,
-      status: "A",
+      status: "?",
       additions,
       deletions: 0,
       hunks: additions > 0 ? 1 : 0,
@@ -258,12 +330,37 @@ async function collectDiffFiles(repoRoot: string, rangeArgs: string[]): Promise<
     return [];
   }
 
-  const hunks = await countHunks(repoRoot, rangeArgs);
+  const [hunks, statusByPath] = await Promise.all([
+    countHunks(repoRoot, rangeArgs),
+    collectNameStatus(repoRoot, rangeArgs),
+  ]);
   return numstat.stdout
     .trim()
     .split("\n")
-    .map(line => parseNumstatLine(line, hunks))
+    .map(line => parseNumstatLine(line, hunks, statusByPath))
     .filter((file): file is ChangedFileSummary => Boolean(file));
+}
+
+// Keyed by the post-change path (the right-hand path for renames). Returns the
+// raw git letter (or `R<similarity>` / `C<similarity>` for renames and copies)
+// so callers can do the usual first-character switch.
+async function collectNameStatus(repoRoot: string, rangeArgs: string[]): Promise<Map<string, string>> {
+  const result = await safeGit(repoRoot, ["diff", "--name-status", "-M", ...rangeArgs]);
+  const map = new Map<string, string>();
+  if (!result.ok || !result.stdout.trim()) {
+    return map;
+  }
+  for (const line of result.stdout.trim().split("\n")) {
+    const parts = line.split("\t");
+    const status = parts[0];
+    if (!status) continue;
+    // Renames/copies: `R75\told\tnew` — the new path is the trailing field.
+    // Everything else: `M\tpath` (single path field).
+    const path = parts[parts.length - 1];
+    if (!path) continue;
+    map.set(path, status);
+  }
+  return map;
 }
 
 async function countHunks(repoRoot: string, rangeArgs: string[]): Promise<Map<string, number>> {
@@ -289,7 +386,11 @@ async function countHunks(repoRoot: string, rangeArgs: string[]): Promise<Map<st
   return hunks;
 }
 
-function parseNumstatLine(line: string, hunks: Map<string, number>): ChangedFileSummary | null {
+function parseNumstatLine(
+  line: string,
+  hunks: Map<string, number>,
+  statusByPath: Map<string, string>,
+): ChangedFileSummary | null {
   const [rawAdditions, rawDeletions, ...pathParts] = line.split("\t");
   const rawPath = pathParts.join("\t");
   if (!rawAdditions || !rawDeletions || !rawPath) {
@@ -299,10 +400,14 @@ function parseNumstatLine(line: string, hunks: Map<string, number>): ChangedFile
   const pathInfo = parseDiffPath(rawPath);
   const additions = rawAdditions === "-" ? 0 : Number.parseInt(rawAdditions, 10);
   const deletions = rawDeletions === "-" ? 0 : Number.parseInt(rawDeletions, 10);
+  // Prefer git's own name-status letter (handles A/M/D/R/C/T precisely); fall
+  // back to the rename-vs-modify heuristic when name-status is unavailable
+  // for this path (rare — only if the two git invocations disagree).
+  const status = statusByPath.get(pathInfo.path) ?? (pathInfo.oldPath ? "R" : "M");
   return {
     path: pathInfo.path,
     oldPath: pathInfo.oldPath,
-    status: pathInfo.oldPath ? "R" : "M",
+    status,
     additions: Number.isFinite(additions) ? additions : 0,
     deletions: Number.isFinite(deletions) ? deletions : 0,
     hunks: hunks.get(pathInfo.path) ?? 1,
@@ -512,6 +617,10 @@ function scoreReviewLoad(
   const score = Math.max(0, Math.round(drivers.reduce((sum, driver) => sum + driver.score, 0)));
   const level = score >= settings.thresholds.high ? "high" : score >= settings.thresholds.medium ? "medium" : "low";
 
+  // Gitignored files are not a scoring concern — `snapshotGroup` spreads the
+  // returned value and supplies `gitIgnoredFiles` itself. The field is
+  // declared in the `ReviewLoadResult` shape but populated outside this
+  // function.
   return {
     status: "available",
     score,
@@ -520,6 +629,7 @@ function scoreReviewLoad(
     base,
     changedFiles: scoredFiles,
     ignoredFiles,
+    gitIgnoredFiles: [],
     drivers,
     configuredAreas,
     settingsWarnings,
@@ -681,6 +791,7 @@ function unavailableReviewLoad(
     base: { mode: status === "non-git" ? "unavailable" : "dirty-worktree-only", ref: null, mergeBase: null },
     changedFiles: [],
     ignoredFiles: [],
+    gitIgnoredFiles: [],
     drivers: [],
     configuredAreas: [],
     settingsWarnings: [],

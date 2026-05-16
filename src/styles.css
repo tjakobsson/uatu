@@ -1471,6 +1471,16 @@ body.is-resizing-terminal .panel-resizer {
   font-size: 0.74rem;
 }
 
+.untracked-indicator {
+  margin: 0.35rem 0;
+  padding: 0.25rem 0.5rem;
+  border-left: 3px solid #6b7280;
+  background: #f3f4f6;
+  color: #374151;
+  font-size: 0.74rem;
+  line-height: 1.4;
+}
+
 .score-drivers,
 .commit-log {
   list-style: none;
