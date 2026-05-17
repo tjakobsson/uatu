@@ -13,12 +13,10 @@ import index from "./index.html";
 import {
   createNavigationFetchHandler,
   parseCommand,
-  renderDocument,
   resolveWatchRoots,
   findNonGitWatchEntries,
   createWatchSession,
   openBrowser,
-  canSetFileScope,
   PORT_SCAN_LIMIT,
   SERVE_IDLE_TIMEOUT_SECONDS,
   usageText,
@@ -27,35 +25,34 @@ import {
   printIndexingStatus,
   type WatchEntry,
   type WatchOptions,
-} from "./server";
-import { isViewMode } from "./shared";
-import { getDocumentDiff } from "./document-diff";
-import { findFreePort } from "./port-probe";
-import { terminalBackendAvailable } from "./terminal-backend";
+} from "./server/session";
+import { buildRoutes } from "./server/routes";
+import { findFreePort } from "./server/port-probe";
+import { terminalBackendAvailable } from "./terminal/backend";
 import {
   TERMINAL_COOKIE_NAME,
   constantTimeEqual,
   formatTerminalCookie,
   isAllowedOrigin,
   readCookie,
-} from "./terminal-auth";
-import { loadTerminalConfig } from "./terminal-config";
-import { createTerminalServer } from "./terminal-server";
+} from "./terminal/auth";
+import { loadTerminalConfig } from "./terminal/config";
+import { createTerminalServer } from "./terminal/server";
 import {
   createCachePaths,
   ensureCacheDir,
   pruneOldDumps,
   resolveCacheRoot,
-} from "./debug-cache";
+} from "./debug/cache";
 import {
   MetricsRegistry,
   NdjsonAppender,
   start1HzSnapshotTick,
   start5sSamplingTick,
   writeSnapshotAtomic,
-} from "./debug-metrics";
-import { setGitMetricsSink } from "./review-load";
-import { parseWatchdogArgs, runWatchdog } from "./watchdog";
+} from "./debug/metrics";
+import { setGitMetricsSink } from "./review/load";
+import { parseWatchdogArgs, runWatchdog } from "./watchdog/main";
 
 async function main() {
   // Watchdog mode short-circuits the rest of CLI parsing — when uatu is
@@ -261,138 +258,28 @@ async function runWatch(options: WatchOptions) {
       port: chosenPort,
       idleTimeout: SERVE_IDLE_TIMEOUT_SECONDS,
       routes: {
+        // `"/": index` MUST be a literal at this call site so Bun's
+        // bundler can analyze the route table during `bun build --compile`
+        // and wire up the HTMLBundle's chunk URLs. Routing through
+        // `buildRoutes` alone is opaque to that analysis and the compiled
+        // binary fails to serve /chunk-*.js. The remaining routes are
+        // deduplicated across cli.ts and tests/e2e/server.ts via
+        // `buildRoutes`.
         "/": index,
-        "/assets/mermaid.min.js": new Response(Bun.file(mermaidAsset), {
-          headers: {
-            "content-type": "application/javascript; charset=utf-8",
+        ...buildRoutes({
+          mode: "prod",
+          assets: {
+            mermaid: mermaidAsset,
+            logo: logoAsset,
+            icon192: icon192Asset,
+            icon512: icon512Asset,
+            manifest: manifestAsset,
+            sw: swAsset,
           },
+          getSession: () => watchSession!,
+          debug: options.debug,
+          getMetricsSnapshot: () => metrics.snapshot(),
         }),
-        "/assets/uatu-logo.svg": new Response(Bun.file(logoAsset), {
-          headers: {
-            "content-type": "image/svg+xml",
-            "cache-control": "public, max-age=3600",
-          },
-        }),
-        "/assets/icon-192.png": new Response(Bun.file(icon192Asset), {
-          headers: {
-            "content-type": "image/png",
-            "cache-control": "public, max-age=86400",
-          },
-        }),
-        "/assets/icon-512.png": new Response(Bun.file(icon512Asset), {
-          headers: {
-            "content-type": "image/png",
-            "cache-control": "public, max-age=86400",
-          },
-        }),
-        "/manifest.webmanifest": new Response(Bun.file(manifestAsset), {
-          headers: {
-            "content-type": "application/manifest+json",
-            "cache-control": "public, max-age=3600",
-          },
-        }),
-        "/sw.js": new Response(Bun.file(swAsset), {
-          headers: {
-            "content-type": "application/javascript; charset=utf-8",
-            // No-cache: when a uatu upgrade changes the SW logic, the new
-            // worker must reach the user on the next reload instead of
-            // being shadowed by a cached older version.
-            "cache-control": "no-cache",
-            // Allow the worker to control the entire site even though it's
-            // served from /sw.js (no path-prefix nesting needed).
-            "service-worker-allowed": "/",
-          },
-        }),
-        "/api/state": {
-          GET: () => Response.json(watchSession!.getStatePayload()),
-        },
-        "/api/document": {
-          GET: async request => {
-            const url = new URL(request.url);
-            const documentId = url.searchParams.get("id");
-            if (!documentId) {
-              return Response.json({ error: "missing document id" }, { status: 400 });
-            }
-
-            const rawView = url.searchParams.get("view");
-            const view = rawView && isViewMode(rawView) ? rawView : undefined;
-
-            try {
-              const document = await renderDocument(watchSession!.getRoots(), documentId, { view });
-              return Response.json(document);
-            } catch (error) {
-              const message = error instanceof Error ? error.message : "";
-              if (message === "document is binary") {
-                return Response.json({ error: "document is not viewable" }, { status: 415 });
-              }
-              return Response.json({ error: "document not found" }, { status: 404 });
-            }
-          },
-        },
-        "/api/document/diff": {
-          GET: async request => {
-            const url = new URL(request.url);
-            const documentId = url.searchParams.get("id");
-            if (!documentId) {
-              return Response.json({ error: "missing document id" }, { status: 400 });
-            }
-
-            try {
-              const payload = await getDocumentDiff(watchSession!.getRoots(), documentId);
-              return Response.json(payload);
-            } catch (error) {
-              const message = error instanceof Error ? error.message : "";
-              if (message === "document not found") {
-                return Response.json({ error: "document not found" }, { status: 404 });
-              }
-              return Response.json({ error: "document diff failed" }, { status: 500 });
-            }
-          },
-        },
-        "/api/events": {
-          GET: () => watchSession!.eventsResponse(),
-        },
-        "/debug/metrics": {
-          GET: () => {
-            if (!options.debug) {
-              return new Response("Not found", { status: 404 });
-            }
-            return Response.json(metrics.snapshot());
-          },
-        },
-        "/api/scope": {
-          POST: async request => {
-            let body: unknown;
-            try {
-              body = await request.json();
-            } catch {
-              return Response.json({ error: "invalid JSON body" }, { status: 400 });
-            }
-
-            const scope = (body as { scope?: unknown } | null)?.scope;
-            if (!scope || typeof scope !== "object") {
-              return Response.json({ error: "missing scope" }, { status: 400 });
-            }
-
-            const kind = (scope as { kind?: unknown }).kind;
-            if (kind === "folder") {
-              return Response.json({ scope: watchSession!.setScope({ kind: "folder" }) });
-            }
-
-            if (kind === "file") {
-              const documentId = (scope as { documentId?: unknown }).documentId;
-              if (typeof documentId !== "string" || documentId.length === 0) {
-                return Response.json({ error: "missing documentId" }, { status: 400 });
-              }
-              if (!canSetFileScope(watchSession!.getRoots(), documentId)) {
-                return Response.json({ error: "document not found" }, { status: 404 });
-              }
-              return Response.json({ scope: watchSession!.setScope({ kind: "file", documentId }) });
-            }
-
-            return Response.json({ error: "unsupported scope kind" }, { status: 400 });
-          },
-        },
       },
       fetch: (request, srv) => {
         const requestUrl = new URL(request.url);
