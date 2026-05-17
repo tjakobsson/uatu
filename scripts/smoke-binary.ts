@@ -6,7 +6,7 @@
 // surface under `bun build --compile` — like the HTMLBundle chunks
 // going unserved, or app.ts becoming a lazy `__esm()` module that
 // never runs at boot. Both of those bit the feature-folder refactor
-// in PR #58.
+// in PR #57.
 //
 // Two layers of checks:
 //   1. HTTP-level — chunk content-type, /api/state shape, SSE handshake
@@ -18,7 +18,7 @@
 //
 // Runtime: ~5s. Intended for CI after `bun run build`.
 
-import { chromium } from "@playwright/test";
+import { chromium, expect } from "@playwright/test";
 import { spawn } from "node:child_process";
 import path from "node:path";
 
@@ -83,7 +83,7 @@ try {
   // Chunk URL — Bun generates `/chunk-XXXX.js` references in the
   // compiled HTML. If `routes: buildRoutes(...)` hides the
   // HTMLBundle from Bun's bundler, this URL falls through to the
-  // SPA navigation fallback and returns HTML — the bug from PR #58.
+  // SPA navigation fallback and returns HTML — the bug from PR #57.
   const chunkMatch = rootBody.match(/\/chunk-[a-z0-9]+\.js/);
   if (!chunkMatch) {
     fail("no /chunk-*.js script tag found in served HTML");
@@ -146,9 +146,14 @@ try {
     page.on("pageerror", error => pageErrors.push(error.message));
 
     await page.goto(`${BASE}/`, { waitUntil: "load", timeout: 10_000 });
-    // Give the SPA a moment to fetch /api/state, settle the tree, and
-    // open the SSE connection.
-    await page.waitForTimeout(2500);
+    // Wait for the SPA to settle: SSE connection established and the
+    // document tree populated. Both come from `loadInitialState()` +
+    // the initial SSE state event — if either never runs, these waits
+    // time out, which is exactly the signal we want.
+    await expect(page.locator("#connection-state .connection-label"))
+      .toHaveText("Connected", { timeout: 10_000 });
+    await expect(page.locator("#document-count"))
+      .not.toHaveText("0 files", { timeout: 10_000 });
 
     const documentCount = (await page.locator("#document-count").textContent())?.trim() ?? "";
     const connectionLabel = (await page.locator(".connection-label").textContent())?.trim() ?? "";

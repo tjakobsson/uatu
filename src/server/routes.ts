@@ -1,7 +1,7 @@
 // Shared Bun.serve route table used by both the production CLI server
-// (cli.ts) and the e2e test harness server (e2e-server.ts). Twelve of the
-// fourteen routes are identical between the two; the rest are gated on the
-// `mode` discriminator below.
+// (cli.ts) and the e2e test harness server (tests/e2e/server.ts). Twelve
+// of the fourteen routes are identical between the two; the rest are gated
+// on the `mode` discriminator below.
 //
 // This module is deliberately *just* a router factory. Authentication,
 // terminal WebSocket upgrade, and the navigation fallback continue to live
@@ -55,9 +55,9 @@ export type ProdRouteDeps = BaseDeps & {
 
 export type E2ERouteDeps = BaseDeps & {
   mode: "e2e";
-  // The reset handler mutates module-level state in e2e-server.ts (active
-  // file path, workspace root, follow mode, etc.) and re-creates the watch
-  // session, so it stays a callback owned by the caller.
+  // The reset handler mutates module-level state in tests/e2e/server.ts
+  // (active file path, workspace root, follow mode, etc.) and re-creates
+  // the watch session, so it stays a callback owned by the caller.
   handleE2EReset: (request: Request) => Promise<Response>;
 };
 

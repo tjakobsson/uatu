@@ -42,7 +42,7 @@ jobs:
       - name: Smoke-test the compiled binary
         # Catches compile-mode-only bugs the e2e suite misses: it runs in
         # dev mode against tests/e2e/server.ts, not against ./dist/uatu.
-        # The feature-folder refactor (PR #58) shipped two such bugs that
+        # The feature-folder refactor (PR #57) shipped two such bugs that
         # this smoke would have caught — HTMLBundle chunks falling through
         # to the SPA fallback, and app.ts becoming a lazy __esm() module
         # whose init never ran at boot.
