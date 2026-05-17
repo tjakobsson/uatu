@@ -7,6 +7,10 @@ versions follow the `package.json`'s `version` field.
 
 ## Unreleased
 
+### Internal
+
+- **`src/` reorganized into feature folders.** The 80-file flat layout becomes 13 named folders (`shell/`, `preview/`, `sidebar/`, `terminal/`, `server/`, `document/`, `render/`, `review/`, `ignore/`, `watchdog/`, `debug/`, `pwa/`, `shared/`) plus three entrypoint files at root (`app.ts`, `cli.ts`, `styles.d.ts`). `src/app.ts` shrinks from 4183 to 405 lines as the SPA glue moves into the feature folders that own each region. The HTTP route table is now declared in exactly one place (`src/server/routes.ts`); the Playwright harness moves from `src/e2e-server.ts` to `tests/e2e/server.ts` so `src/` contains only shipped product code. The E2E suite's `tests/e2e/uatu.e2e.ts` (2719 lines, 115 tests) splits into 15 feature-named files. No user-visible behavior changes.
+
 ### Added
 
 - **Files-pane `All ↔ Changed` filter chip.** The Files-pane header gains a segmented chip that reduces the tree to `changedFiles ∪ ignoredFiles` (ancestor directories auto-expanded; gitignored entries excluded). Defaults `Changed` in Review and `All` in Author, persisted per Mode. The active document is always visible (follow-override reveals an out-of-set row with a subtle dim/italic cue), the file count displays `N of M files` under filter, and an empty filtered set surfaces an inline message naming the review base.

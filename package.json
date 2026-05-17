@@ -12,13 +12,14 @@
     "dev": "bun run src/cli.ts watch",
     "bench:render": "bun run scripts/bench-render.ts",
     "test": "bun test",
-    "check:licenses": "bun run src/license-check.ts",
+    "check:licenses": "bun run src/shared/license-check.ts",
     "e2e:install": "playwright install chromium",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
     "test:e2e:ui": "playwright test --ui",
     "test:e2e:debug": "playwright test --debug",
-    "build": "bun run scripts/build.ts"
+    "build": "bun run scripts/build.ts",
+    "smoke": "bun run scripts/smoke-binary.ts"
   },
   "dependencies": {
     "@asciidoctor/core": "^3.0.4",

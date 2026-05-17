@@ -1,6 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
 
-import { E2E_PORT } from "./src/e2e";
+import { E2E_PORT } from "./tests/e2e/config";
 
 export default defineConfig({
   testDir: "./tests/e2e",
@@ -18,7 +18,7 @@ export default defineConfig({
     trace: "on-first-retry",
   },
   webServer: {
-    command: "bun run src/e2e-server.ts",
+    command: "bun run tests/e2e/server.ts",
     url: `http://127.0.0.1:${E2E_PORT}`,
     timeout: 120_000,
     reuseExistingServer: false,

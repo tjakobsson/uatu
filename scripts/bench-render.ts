@@ -4,9 +4,9 @@ import path from "node:path";
 import { bench, run } from "mitata";
 import { parseHTML } from "linkedom";
 
-import { renderDocument, scanRoots, type WatchEntry } from "../src/server";
-import type { RootGroup, ViewMode } from "../src/shared";
-import { renderDocumentDiff, DIFF_MAX_BYTES } from "../src/document-diff-view";
+import { renderDocument, scanRoots, type WatchEntry } from "../src/server/session";
+import type { RootGroup, ViewMode } from "../src/shared/types";
+import { renderDocumentDiff, DIFF_MAX_BYTES } from "../src/preview/diff-view";
 
 type RenderScenario = {
   name: string;

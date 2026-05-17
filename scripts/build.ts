@@ -2,7 +2,7 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 
-import { PACKAGE_VERSION, readGitBuildInfo, type BuildInfo } from "../src/version";
+import { PACKAGE_VERSION, readGitBuildInfo, type BuildInfo } from "../src/shared/version";
 
 const git = readGitBuildInfo(PACKAGE_VERSION);
 const buildInfo: BuildInfo = {

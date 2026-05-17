@@ -157,6 +157,13 @@ bun run test:e2e        # Playwright
 bun run bench:render    # informational render baseline
 ```
 
+## For contributors
+
+A folder-by-folder tour of the codebase, request and state lifecycles, the
+terminal subsystem diagram, and "how to extend X" recipes live in
+[ARCHITECTURE.md](./ARCHITECTURE.md). [CLAUDE.md](./CLAUDE.md) is the terse
+quick-reference for Claude Code sessions.
+
 ## Repository workflow
 
 This repo uses [OpenSpec](./openspec) for change-driven work: branch, create
