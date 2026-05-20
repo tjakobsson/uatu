@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 import { promises as fs } from "node:fs";
 
 import { workspacePath } from "./config";
-import { treeRow } from "./tree-helpers";
+import { revealTreeRow, treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";
 
 test.beforeEach(async ({ page, request }) => {
@@ -103,11 +103,8 @@ test("tree distinguishes untracked rows from added rows via git-status annotatio
       git: true,
       startupMode: "review",
       // Create one fresh path not present in the committed fixture — it ends
-      // up untracked. The name starts with `a-` so the row sorts near the top
-      // of the file list and stays inside the tree's virtualization window
-      // (otherwise the row exists in the model but is not in the DOM).
-      // `feature.md` is committed on `feature/review-load`, so it is the
-      // natural foil: same workspace, distinct git category.
+      // up untracked. `feature.md` is committed on `feature/review-load`,
+      // so it is the natural foil: same workspace, distinct git category.
       dirty: {
         "a-untracked-scratch.md": "# Untracked scratch\n",
       },
@@ -115,9 +112,14 @@ test("tree distinguishes untracked rows from added rows via git-status annotatio
   });
   await page.goto("/");
 
+  // The library virtualizes rows and auto-scrolls to the initial selection on
+  // mount (README, alphabetically near the bottom). Reveal both targets so
+  // their rows are in the DOM before the attribute assertions run.
+  await revealTreeRow(page, "a-untracked-scratch.md");
   const untrackedRow = treeRow(page, "a-untracked-scratch.md");
   await expect(untrackedRow).toHaveAttribute("data-item-git-status", "untracked");
 
+  await revealTreeRow(page, "feature.md");
   const addedRow = treeRow(page, "feature.md");
   await expect(addedRow).toHaveAttribute("data-item-git-status", "added");
 });
@@ -240,6 +242,7 @@ test("Tree annotates ignoreAreas-matched untracked files with their git status (
   });
   await page.goto("/");
 
+  await revealTreeRow(page, "a-ignored-scratch.md");
   const row = treeRow(page, "a-ignored-scratch.md");
   await expect(row).toHaveAttribute("data-item-git-status", "untracked");
 });

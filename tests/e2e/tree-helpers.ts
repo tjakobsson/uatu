@@ -17,6 +17,22 @@ export function treeRow(page: Page, path: string): Locator {
   return page.locator(`[data-item-path="${escapeAttr(path)}"]`);
 }
 
+// Reveal a path's row in the DOM by asking the library to scroll it into the
+// virtualization window. As of `@pierre/trees` 1.0.0-beta.4 the tree
+// auto-scrolls the initially-selected row into view on first mount, which
+// pushes other rows out of the DOM. Call this before asserting on a specific
+// row that may be off-screen. `focus: false` keeps the keyboard-focus state
+// where it is — we only want the row in the DOM. Idempotent; no-op when the
+// row is already in view or unknown to the library.
+export async function revealTreeRow(page: Page, path: string): Promise<void> {
+  await page.locator("#tree").evaluate((el, p) => {
+    const tree = (el as unknown as {
+      __pierreFileTree?: { scrollToPath: (p: string, opts: { focus: boolean }) => void };
+    }).__pierreFileTree;
+    tree?.scrollToPath(p, { focus: false });
+  }, path);
+}
+
 // Click a leaf file in the tree, first expanding any collapsed ancestor
 // directories so the row is rendered. Use this instead of `treeRow(...).click()`
 // when the path has parent directories — the library collapses directories by

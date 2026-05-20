@@ -213,6 +213,9 @@ export class TreeView {
       this.container.innerHTML = "";
       Object.assign(this.container.style, LIGHT_TREE_THEME);
       this.tree.render({ fileTreeContainer: this.container });
+      // Pin the library instance to the host element so e2e tests can call
+      // `scrollToPath` to reveal virtualized rows for assertion.
+      (this.container as unknown as { __pierreFileTree: FileTree }).__pierreFileTree = this.tree;
       this.lastPathsKey = pathsFingerprint(renderedPaths);
       this.ensureRevealCueStyleElement();
       this.syncFollowOverrideObserver();
@@ -304,6 +307,7 @@ export class TreeView {
       this.tree.unmount();
       this.tree = null;
     }
+    delete (this.container as unknown as { __pierreFileTree?: FileTree }).__pierreFileTree;
     this.pathToDocumentId.clear();
     this.rootPrefixById.clear();
     this.renderedLeafCount = 0;

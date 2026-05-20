@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 import { promises as fs } from "node:fs";
 
 import { workspacePath } from "./config";
-import { treeRow } from "./tree-helpers";
+import { revealTreeRow, treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";
 
 test.beforeEach(async ({ page, request }) => {
@@ -26,6 +26,7 @@ test("Diff view renders the active file's git diff against the review base", asy
     },
   });
   await page.reload();
+  await revealTreeRow(page, "feature.md");
   await expect(treeRow(page, "feature.md")).toBeVisible();
   await treeRow(page, "feature.md").click();
   await expect(page.locator("#preview-path")).toHaveText("feature.md");
@@ -83,6 +84,7 @@ test("Diff view exposes a Unified / Split layout toggle that persists across rel
     },
   });
   await page.reload();
+  await revealTreeRow(page, "feature.md");
   await expect(treeRow(page, "feature.md")).toBeVisible();
   await treeRow(page, "feature.md").click();
   await page.locator("#view-diff").click();
