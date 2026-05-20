@@ -1,8 +1,10 @@
 // Stale-content hint chrome — historically used in Review mode to surface
-// disk-change hints. With Modes removed, no code path raises a hint, so
-// the chrome stays hidden in normal operation. The DOM elements and the
-// click handler remain so a future change can re-introduce a freeze-while-
-// reading affordance without rebuilding the chrome from scratch.
+// disk-change hints. With Modes removed, no code path sets a non-null hint
+// (callers that still pass through `nextStaleHint` with `manual-navigation`
+// or `refresh-action` events always resolve to `null`), so the chrome
+// stays hidden in normal operation. The DOM elements and the click handler
+// remain so a future change can re-introduce a freeze-while-reading
+// affordance without rebuilding the chrome from scratch.
 
 import { forgetDocumentCache, loadDocument } from "../preview/mount";
 import { renderSidebar } from "../sidebar/shell";

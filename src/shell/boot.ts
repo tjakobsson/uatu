@@ -89,7 +89,10 @@ export async function loadInitialState() {
     } else if (payload.scope.kind === "file") {
       // Direct link to a doc outside the CLI single-file watch scope. Keep
       // the scoped doc as the selection but render a "session scoped to a
-      // single file" message in place of the preview.
+      // single file" message in place of the preview. Follow stays at the
+      // server-provided default — it's meaningless in a single-file session
+      // (`syncFollowToggle` disables the chip when scope.kind === "file"),
+      // so we don't need to explicitly clear it here.
       appState.selectedId = payload.defaultDocumentId;
       appState.previewMode = { kind: "empty" };
       const scopedDoc = appState.selectedId
