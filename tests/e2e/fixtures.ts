@@ -1,19 +1,106 @@
-// Shared Playwright setup and helpers used by every feature-specific e2e
-// file. Splitting the legacy `uatu.e2e.ts` monolith into per-feature files
-// would otherwise mean copy-pasting this boot sequence 15 times.
+// Shared Playwright setup, worker-scoped server fixture, and feature-test
+// helpers. Tests import `{ test, expect }` from THIS file (not from
+// `@playwright/test`) so each Playwright worker gets its own server on a
+// distinct port + workspace path. `playwright.config.ts` therefore omits the
+// global `webServer` config — the fixture below handles spawn/teardown.
 
-import { expect, type APIRequestContext, type Page } from "@playwright/test";
+import { test as base, expect, type APIRequestContext, type Page } from "@playwright/test";
+import { spawn, type ChildProcess } from "node:child_process";
+import path from "node:path";
 
 import { treeRow } from "./tree-helpers";
 
-// Standard per-test boot used by the vast majority of feature suites:
-// reset the workspace, clear browser-side persisted preferences, wait for
-// the tree to mount, and establish a clean baseline (README.md selected
-// with follow disabled).
+// Workers index 0..N-1; we offset off a base port so concurrent runs in the
+// same shell don't fight each other.
+const BASE_PORT = Number.parseInt(process.env.UATU_E2E_BASE_PORT ?? "4173", 10);
+
+type WorkerFixtures = {
+  /** The port the worker's dedicated server is listening on. */
+  serverPort: number;
+};
+
+export const test = base.extend<{}, WorkerFixtures>({
+  serverPort: [
+    async ({}, use, workerInfo) => {
+      const port = BASE_PORT + workerInfo.workerIndex;
+      const workspace = path.resolve(
+        process.cwd(),
+        ".e2e",
+        `watch-docs-w${workerInfo.workerIndex}`,
+      );
+
+      // CRITICAL: set env on the WORKER PROCESS too. `workspacePath()` is
+      // called from test code (worker process), not the server child. If
+      // only the server sees the env, the worker writes files to the
+      // default `.e2e/watch-docs` while the server watches the per-worker
+      // path — writes never reach the watcher.
+      process.env.UATU_E2E_PORT = String(port);
+      process.env.UATU_E2E_WORKSPACE = workspace;
+
+      const child = spawn("bun", ["run", "tests/e2e/server.ts"], {
+        env: {
+          ...process.env,
+          UATU_E2E_PORT: String(port),
+          UATU_E2E_WORKSPACE: workspace,
+        },
+        stdio: ["ignore", "pipe", "inherit"],
+      });
+
+      // Wait for the "http://127.0.0.1:<port>" announce line on stdout.
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error(`e2e server (worker ${workerInfo.workerIndex}) did not start within 30s`));
+        }, 30_000);
+        child.stdout?.on("data", (chunk: Buffer) => {
+          if (chunk.toString().includes(`127.0.0.1:${port}`)) {
+            clearTimeout(timeout);
+            resolve();
+          }
+        });
+        child.on("error", reject);
+        child.on("exit", code => {
+          clearTimeout(timeout);
+          reject(new Error(`e2e server exited early (code ${code}) before announcing readiness`));
+        });
+      });
+
+      await use(port);
+
+      // Teardown. SIGTERM first; if it doesn't exit, SIGKILL.
+      child.kill("SIGTERM");
+      await new Promise<void>(resolve => {
+        const timeout = setTimeout(() => {
+          child.kill("SIGKILL");
+          resolve();
+        }, 2_000);
+        child.on("exit", () => {
+          clearTimeout(timeout);
+          resolve();
+        });
+      });
+    },
+    { scope: "worker", auto: true },
+  ],
+
+  // Pin `baseURL` to the worker's server so every page.goto / request hits
+  // the right port without test code having to think about it.
+  baseURL: async ({ serverPort }, use) => {
+    await use(`http://127.0.0.1:${serverPort}`);
+  },
+});
+
+export { expect };
+
+// Standard per-test boot used by the vast majority of feature suites: reset
+// the workspace, clear browser-side persisted preferences, wait for the tree
+// to mount, and establish a clean baseline (README.md selected, follow off).
 //
-// Tests that need a *different* startup posture (e.g. CLI `--mode=review`
-// boot, or a custom workspace prep before the first navigation) MUST NOT
-// call this helper — they manage their own beforeEach.
+// Follow's boot state is non-deterministic because @pierre/trees can fire
+// `onSelectionChange` asynchronously after our synchronous programmatic-
+// update guard closes, occasionally flipping follow to false via Rule A.
+// Rather than assert a specific boot state, normalize to follow=false by
+// clicking the chip if and only if it's currently `aria-pressed="true"`.
+// Either way the assertion below locks the deterministic post-state in.
 export async function standardBeforeEach(page: Page, request: APIRequestContext): Promise<void> {
   await request.post("/__e2e/reset");
   await page.goto("/");
@@ -30,21 +117,17 @@ export async function standardBeforeEach(page: Page, request: APIRequestContext)
   await page.reload();
   // Tree rows are rendered inside `@pierre/trees`' shadow DOM with
   // `role="treeitem"` and `data-item-path` — Playwright pierces the shadow
-  // root automatically when given a CSS selector, so `treeRow(...)` is the
-  // reliable readiness signal for "the tree is mounted with content."
+  // root automatically when given a CSS selector.
   await expect(treeRow(page, "README.md")).toBeVisible();
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
   await expect(page.locator("#document-count")).toHaveText("16 files");
   await waitForPreviewToSettle(page);
-  // Establish a clean baseline: manual selection of README.md with follow
-  // disabled. Click a non-README file first so the second click into README
-  // actually fires the library's onSelectionChange (the library de-dupes
-  // clicks on the already-selected row, which would otherwise leave the
-  // boot-time follow=true state untouched).
-  await treeRow(page, "diagram.md").click();
-  await expect(page.locator("#preview-path")).toHaveText("diagram.md");
-  await treeRow(page, "README.md").click();
   await expect(page.locator("#preview-path")).toHaveText("README.md");
+  // Normalize follow to off — click the chip iff it's currently on.
+  const pressed = await page.locator("#follow-toggle").getAttribute("aria-pressed");
+  if (pressed === "true") {
+    await page.locator("#follow-toggle").click();
+  }
   await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
 }
 

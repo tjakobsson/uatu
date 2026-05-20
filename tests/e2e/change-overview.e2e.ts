@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures";
 import { promises as fs } from "node:fs";
 
 import { workspacePath } from "./config";
@@ -19,7 +19,6 @@ test("Change Overview and Git Log render git-backed review load with configured 
       git: true,
       // Git Log is a Review-mode pane; boot in Review so this test can assert
       // against it.
-      startupMode: "review",
       uatuConfig: {
         review: {
           baseRef: "main",
@@ -40,9 +39,7 @@ test("Change Overview and Git Log render git-backed review load with configured 
   const overview = page.locator("#change-overview");
   await expect(overview).toContainText("feature/review-load");
   await expect(overview).toContainText("configured base");
-  // Test boots in Review (so Git Log assertions work), so the headline reads
-  // "Change review burden" rather than the Author-mode forecast label.
-  await expect(overview).toContainText("Change review burden");
+  await expect(overview).toContainText("Review burden");
   await expect(overview).toContainText("Auth");
   await expect(overview).toContainText("Generated");
   await expect(overview).toContainText("src/auth/session.ts");
@@ -101,7 +98,6 @@ test("tree distinguishes untracked rows from added rows via git-status annotatio
   await request.post("/__e2e/reset", {
     data: {
       git: true,
-      startupMode: "review",
       // Create one fresh path not present in the committed fixture — it ends
       // up untracked. `feature.md` is committed on `feature/review-load`,
       // so it is the natural foil: same workspace, distinct git category.
@@ -128,7 +124,6 @@ test("Change Overview renders an untracked categorical indicator when untracked 
   await request.post("/__e2e/reset", {
     data: {
       git: true,
-      startupMode: "review",
       dirty: {
         "a-untracked-scratch.md": "# Untracked scratch\n",
       },
@@ -145,7 +140,6 @@ test("Change Overview omits the untracked indicator when no untracked files are 
   await request.post("/__e2e/reset", {
     data: {
       git: true,
-      startupMode: "review",
       // No `dirty` writes — every file in the workspace is either committed
       // (initial fixture, history-N.md, feature.md) or staged-but-not-committed
       // via the test fixture's git init. No path remains untracked.
@@ -159,33 +153,10 @@ test("Change Overview omits the untracked indicator when no untracked files are 
   await expect(page.locator("#change-overview [data-untracked-indicator]")).toHaveCount(0);
 });
 
-test("Untracked indicator persists with identical text across Author and Review modes", async ({ page, request }) => {
-  await request.post("/__e2e/reset", {
-    data: {
-      git: true,
-      startupMode: "author",
-      dirty: {
-        "a-untracked-scratch.md": "# Untracked scratch\n",
-      },
-    },
-  });
-  await page.goto("/");
-
-  const indicator = page.locator("#change-overview [data-untracked-indicator]");
-  await expect(indicator).toBeVisible();
-  const authorText = (await indicator.textContent())?.trim();
-
-  await page.locator("#mode-review").click();
-  await expect(indicator).toBeVisible();
-  const reviewText = (await indicator.textContent())?.trim();
-  expect(reviewText).toBe(authorText);
-});
-
 test("Score-explanation preview breaks out the untracked subcount as a factual change-shape input", async ({ page, request }) => {
   await request.post("/__e2e/reset", {
     data: {
       git: true,
-      startupMode: "review",
       dirty: {
         "a-untracked-scratch.md": "# Untracked scratch\n",
       },
@@ -210,7 +181,6 @@ test("Score-explanation preview omits the untracked row when no untracked files 
   await request.post("/__e2e/reset", {
     data: {
       git: true,
-      startupMode: "review",
       // No dirty/untracked writes; the fixture's committed history exercises
       // the mechanical drivers without touching the untracked category.
     },
@@ -229,7 +199,6 @@ test("Tree annotates ignoreAreas-matched untracked files with their git status (
   await request.post("/__e2e/reset", {
     data: {
       git: true,
-      startupMode: "review",
       uatuConfig: {
         review: {
           ignoreAreas: [{ label: "Scratch", paths: ["a-ignored-*.md"] }],
@@ -251,7 +220,6 @@ test("Change Overview untracked indicator renders even when every untracked file
   await request.post("/__e2e/reset", {
     data: {
       git: true,
-      startupMode: "review",
       uatuConfig: {
         review: {
           ignoreAreas: [{ label: "Scratch", paths: ["a-ignored-*.md"] }],
@@ -287,7 +255,6 @@ test("Tree annotates gitignored files with the 'ignored' status (distinct from u
   await request.post("/__e2e/reset", {
     data: {
       git: true,
-      startupMode: "review",
       respectGitignore: false,
       extras: {
         ".gitignore": "a-local-only.json\n",
@@ -299,10 +266,10 @@ test("Tree annotates gitignored files with the 'ignored' status (distinct from u
   });
   await page.goto("/");
 
-  // Review's default filter (Changed) excludes gitignored files entirely —
-  // toggle to All so the annotation we're asserting is reachable.
-  await page.locator("#files-pane-filter-all").click();
-
+  // Reveal the row first — the library virtualizes off-screen rows, and
+  // `a-local-only.json` sits at the top of the tree, outside the initial
+  // viewport (which auto-scrolls to the selected README near the bottom).
+  await revealTreeRow(page, "a-local-only.json");
   const row = treeRow(page, "a-local-only.json");
   await expect(row).toHaveAttribute("data-item-git-status", "ignored");
 });
@@ -321,7 +288,7 @@ test("Change Overview displays non-git and invalid settings fallback states", as
   });
   await page.goto("/");
   await expect(page.locator("#change-overview")).toContainText("Invalid .uatu.json");
-  await expect(page.locator("#change-overview")).toContainText("Reviewer burden forecast");
+  await expect(page.locator("#change-overview")).toContainText("Review burden");
 });
 
 test("sidebar counter shows the binary subcount when binary files are present", async ({ page, request }) => {

@@ -4,12 +4,11 @@
 // folder owns the change-overview presentation in one place.
 
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
-import { reviewBurdenHeadlineLabel, type RepositoryReviewSnapshot } from "../shared/types";
+import type { RepositoryReviewSnapshot } from "../shared/types";
 import { applyStaleHint } from "../shell/stale-hint-mount";
 import { renderSidebar } from "./shell";
 import { syncFollowToggle } from "../shell/follow";
 import { pushReviewScore } from "../shell/history";
-import { primaryReviewBaseLabel } from "../shell/mode";
 import { nextStaleHint } from "../shell/stale-hint";
 import { appState } from "../shell/state";
 import type { FilesPaneFilterMembership, GitStatusForView } from "./tree-view";
@@ -85,7 +84,7 @@ export function renderChangeOverview() {
             title="Show score explanation"
           >
             <span class="burden-summary">
-              <span class="burden-headline">${escapeHtml(reviewBurdenHeadlineLabel(appState.mode))}</span>
+              <span class="burden-headline">Review burden</span>
               <span class="burden-level">${escapeHtml(capitalize(load.level))}</span>
             </span>
             <strong>${load.score}</strong>
@@ -118,6 +117,25 @@ export function filterMembershipHasAnyPath(filter: FilesPaneFilterMembership): b
     if (allowed.size > 0) return true;
   }
   return false;
+}
+
+// First repository with an available review-load wins; the chip is global
+// across multi-root sessions, so a single base label is sufficient (and
+// degrading to a generic label is fine when bases differ or aren't available).
+export function primaryReviewBaseLabel(): string | null {
+  for (const repo of appState.repositories) {
+    if (repo.reviewLoad.status !== "available") {
+      continue;
+    }
+    const base = repo.reviewLoad.base;
+    if (base.ref) {
+      return base.ref;
+    }
+    if (base.mode === "dirty-worktree-only") {
+      return "dirty worktree";
+    }
+  }
+  return null;
 }
 
 // Empty-state copy named in `sidebar-shell`: `No changes vs <base>` when at

@@ -12,7 +12,6 @@ import { initGitLogClickHandler, initGitLogControls } from "./sidebar/git-log";
 import { initChangeOverviewClickHandler } from "./sidebar/change-overview";
 import { initFilesPaneFilterControls } from "./sidebar/files-filter";
 import { initSelectionInspectorControl } from "./sidebar/selection-inspector-mount";
-import { initModeControls } from "./shell/mode";
 import { initFollowToggle } from "./shell/follow";
 import { initStaleHintActionHandler } from "./shell/stale-hint-mount";
 import { selectionInspector } from "./shell/inspector-instance";
@@ -32,9 +31,6 @@ const previewTitleElement = document.querySelector<HTMLElement>("#preview-title"
 const previewPathElement = document.querySelector<HTMLElement>("#preview-path");
 const previewTypeElement = document.querySelector<HTMLElement>("#preview-type");
 const followToggleElement = document.querySelector<HTMLButtonElement>("#follow-toggle");
-const modeControlElement = document.querySelector<HTMLDivElement>("#mode-control");
-const modeAuthorButton = document.querySelector<HTMLButtonElement>("#mode-author");
-const modeReviewButton = document.querySelector<HTMLButtonElement>("#mode-review");
 const viewControlElement = document.querySelector<HTMLDivElement>("#view-control");
 const viewRenderedButton = document.querySelector<HTMLButtonElement>("#view-rendered");
 const viewSourceButton = document.querySelector<HTMLButtonElement>("#view-source");
@@ -78,9 +74,6 @@ if (
   !previewPathElement ||
   !previewTypeElement ||
   !followToggleElement ||
-  !modeControlElement ||
-  !modeAuthorButton ||
-  !modeReviewButton ||
   !viewControlElement ||
   !viewRenderedButton ||
   !viewSourceButton ||
@@ -112,7 +105,6 @@ initGitLogControls();
 initGitLogClickHandler();
 initChangeOverviewClickHandler();
 initFilesPaneFilterControls();
-initModeControls();
 initFollowToggle();
 initStaleHintActionHandler();
 installAnchorHandlers();

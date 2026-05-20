@@ -7,6 +7,20 @@ versions follow the `package.json`'s `version` field.
 
 ## Unreleased
 
+### Changed
+
+- **BREAKING — Author / Review Modes removed.** The two-mode model is replaced by a single mode with Follow as the only behavioral toggle. The top-level Mode segmented control, mode-aware brand chrome, per-Mode pane and Files-pane-filter persistence, mode-gated Follow availability, and the mode-dependent review-burden headline label are all deleted. Review-only sidebar panes (Change Overview, Git Log, Diff view) remain available regardless of session state — toggle via the per-pane visibility menu. Follow is now an unconditional chip; it disables only when the session is scoped to a single file via the CLI. The Diff view auto-refreshes on disk change uniformly (the old Review-mode "stale content" hint is gone).
+- **BREAKING — `--mode=author|review` CLI flag deprecated.** For one release `uatu watch --mode=…` is accepted, ignored, and emits `warning: --mode is deprecated and has no effect; uatu is now single-mode` to stderr. The flag will be removed in the next release.
+- **First-boot storage migration.** The per-Mode `uatu:sidebar-panes:author` / `:review` and `uatu.filesPaneFilter.author` / `:review` keys collapse into single `uatu:sidebar-panes` / `uatu.filesPaneFilter` keys. On first boot after upgrade, the Author-mode layout is preferred (most users sat there); the Review-mode layout is discarded. The `uatu:mode` key is removed.
+
+### Fixed
+
+- **Flaky e2e tests around tree-mount selection ([#45](https://github.com/tjakobsson/uatu/issues/45) and the follow-toggle test).** The `@pierre/trees` library can fire `onSelectionChange` synchronously during `tree.render()` when given an `initialSelectedPaths` constructor option, and again during `resetPaths`-driven refreshes. Those callbacks were racing the SPA's boot-time `followEnabled = true` assignment and the test's click sequences. The fix extends `TreeView.duringProgrammaticUpdate`'s scope to cover initial mount and refresh paths via a re-entrant-safe `withProgrammaticUpdate(fn)` helper, so library-fired selection events are unambiguously distinguishable from real user clicks. The fix is bundled here because the same Mode coordination cost was inflating the race surface.
+
+### Internal
+
+- **E2E harness parallelized.** Playwright now runs `workers: 4` with `fullyParallel: true`. Each worker spawns its own server process on `4173 + workerIndex`, writing to `.e2e/watch-docs-w${workerIndex}`. The previous singleton `webServer` config in `playwright.config.ts` is replaced by a worker-scoped fixture in `tests/e2e/fixtures.ts` that spawns the server, awaits its `127.0.0.1:<port>` ready signal on stdout, and tears it down on worker exit. `tests/e2e/config.ts` now reads workspace + port lazily from `UATU_E2E_WORKSPACE` / `UATU_E2E_PORT` so each worker process sees the same paths its server uses. Total suite runtime drops from ~5.7 min (162 tests, serial) to **~1.0 min** (140 tests, 4 workers parallel). Test files now import `{ test, expect }` from `./fixtures` instead of `@playwright/test`.
+
 ### Internal
 
 - **`src/` reorganized into feature folders.** The 80-file flat layout becomes 13 named folders (`shell/`, `preview/`, `sidebar/`, `terminal/`, `server/`, `document/`, `render/`, `review/`, `ignore/`, `watchdog/`, `debug/`, `pwa/`, `shared/`) plus three entrypoint files at root (`app.ts`, `cli.ts`, `styles.d.ts`). `src/app.ts` shrinks from 4183 to 405 lines as the SPA glue moves into the feature folders that own each region. The HTTP route table is now declared in exactly one place (`src/server/routes.ts`); the Playwright harness moves from `src/e2e-server.ts` to `tests/e2e/server.ts` so `src/` contains only shipped product code. The E2E suite's `tests/e2e/uatu.e2e.ts` (2719 lines, 115 tests) splits into 15 feature-named files. No user-visible behavior changes.

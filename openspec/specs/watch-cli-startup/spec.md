@@ -83,7 +83,9 @@ The system SHALL provide a `uatu watch [PATH...]` command that accepts zero or m
 - **AND** git-backed roots continue to use the normal indexing behavior
 
 ### Requirement: Configure startup browser behavior
-The system SHALL attempt to open the browser automatically and SHALL start with follow mode enabled by default. The command MUST provide flags to disable browser auto-open and to disable follow mode before the watch session starts. The command MUST also provide a `--mode=author|review` flag that sets the initial UI Mode for the watch session. When the `--mode` flag is present at startup, it MUST take precedence over any persisted browser-side Mode preference for the initial SPA boot. When `--mode=review` is in effect at startup, follow mode MUST be off for the session regardless of the follow flag and MUST NOT be enabled by the SPA until the user switches Mode back to **Author**. The local browser URL MUST be printed whether or not the browser is opened successfully. When the SPA boots with `location.pathname` resolving to a known non-binary document (anything other than `/`), the SPA MUST disable follow mode for the session regardless of the CLI default — see "Force follow mode off when arriving via a direct document URL" for the full rule.
+The system SHALL attempt to open the browser automatically and SHALL start with follow mode enabled by default. The command MUST provide flags to disable browser auto-open (`--no-open`) and to disable follow mode (`--no-follow`) before the watch session starts. The local browser URL MUST be printed whether or not the browser is opened successfully. When the SPA boots with `location.pathname` resolving to a known non-binary document (anything other than `/`), the SPA MUST disable follow mode for the session regardless of the CLI default — see the `follow-mode` capability's "Follow defaults to ON; URL direct links force OFF on boot" requirement for the full rule.
+
+For one release after this change ships, the CLI MUST accept the legacy `--mode=author|review` flag for backward compatibility, emit a deprecation warning to stderr (`warning: --mode is deprecated and has no effect; uatu is now single-mode`), and otherwise ignore it. The flag MUST NOT affect any session behavior. In the release following that one, the flag MUST be removed entirely and `--mode` SHALL be treated as an unknown CLI argument.
 
 #### Scenario: Default startup opens the browser with follow enabled
 - **WHEN** a user runs `uatu watch docs`
@@ -102,21 +104,16 @@ The system SHALL attempt to open the browser automatically and SHALL start with 
 - **AND** the CLI was started without `--no-follow`
 - **THEN** the SPA boots with follow mode enabled
 
-#### Scenario: Mode flag sets the startup Mode
-- **WHEN** a user runs `uatu watch docs --mode=review`
-- **THEN** the SPA boots with Mode set to **Review**
-- **AND** follow mode is off for the session
-- **AND** the persisted browser-side Mode preference is overwritten to **Review** for that origin
+#### Scenario: Legacy --mode flag is accepted with a deprecation warning during the transition release
+- **WHEN** a user runs `uatu watch docs --mode=review` during the deprecation-window release
+- **THEN** the command emits `warning: --mode is deprecated and has no effect; uatu is now single-mode` to stderr
+- **AND** the watch session starts with follow mode enabled (the CLI default)
+- **AND** no Mode-related state is set anywhere in the system
 
-#### Scenario: Mode flag overrides persisted browser preference at startup
-- **WHEN** the browser has a persisted Mode preference of **Review**
-- **AND** the user runs `uatu watch docs --mode=author`
-- **THEN** the SPA boots with Mode set to **Author**
-
-#### Scenario: Review mode forces follow off even when --no-follow is omitted
-- **WHEN** a user runs `uatu watch docs --mode=review`
-- **THEN** the watch session starts with follow mode disabled regardless of the follow flag
-- **AND** the Follow control is not rendered in Review (i.e., the chip is hidden, not merely disabled)
+#### Scenario: --mode flag is rejected after the deprecation window
+- **WHEN** a user runs `uatu watch docs --mode=review` after the deprecation-window release has shipped
+- **THEN** the CLI exits with a non-zero status
+- **AND** stderr names `--mode` as an unknown argument
 
 ### Requirement: Configure startup diagnostic behavior
 The `uatu watch` command SHALL accept a `--debug` flag that enables verbose on-disk metrics history for the session. The same effect MUST be triggered when the environment variable `UATU_DEBUG` is set to a non-empty value. The command SHALL accept a `--no-watchdog` flag that suppresses the companion watchdog subprocess (intended as an escape hatch). The command SHALL accept a `--watchdog-timeout=<ms>` flag that overrides the default heartbeat staleness threshold; the same effect MUST be triggered when the environment variable `UATU_HEARTBEAT_TIMEOUT_MS` is set. None of these flags SHALL change the user-visible startup output (the URL line, the optional ASCII banner, the indexing status). Conflicting values between the flag and the environment variable MUST resolve in favor of the flag.

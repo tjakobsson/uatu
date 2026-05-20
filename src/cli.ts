@@ -159,7 +159,6 @@ async function runWatch(options: WatchOptions) {
   try {
     watchSession = createWatchSession(rootEntries, options.follow, {
       respectGitignore: options.respectGitignore,
-      startupMode: options.startupMode,
       terminalEnabled,
       terminalConfig: terminalConfigResult.config,
       metrics,

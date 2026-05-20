@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures";
 
 // Real-browser sanity for the terminal panel: toggle visibility from the
 // sidebar entry, exercise the close-confirmation modal, minimize/fullscreen,

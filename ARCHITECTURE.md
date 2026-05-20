@@ -39,135 +39,52 @@ Four boundaries to keep in mind:
 
 ## Folder tour
 
-`src/` is organized by feature. Three entrypoint files live at the root; everything else is in a folder named after its concern.
+`src/` is organized by feature. Three entrypoint files live at the root; everything else is in a folder named after its concern. Files are listed in each folder's `ls` — open the folder when you need a specific name.
 
 ```
 src/
-├── app.ts                  SPA entry — DOM queries, init calls, the
-│                           selectionInspector singleton, top-level boot
-│                           orchestration. ~190 lines.
-├── cli.ts                  CLI entry — flag parsing, port probing,
-│                           `Bun.serve({ routes: buildRoutes(...) })`,
-│                           watch loop, child-process watchdog.
-├── styles.d.ts             CSS module type declarations
-├── index.html, styles.css, assets/  HTML shell + CSS + bundled images,
-│                                    icons, manifest, service worker
+├── app.ts                SPA entry — DOM queries, init calls, top-level boot
+├── cli.ts                CLI entry — flag parsing, port probing, Bun.serve
+├── styles.d.ts           CSS module type declarations
+├── index.html, styles.css, assets/   HTML shell + CSS + bundled assets
 │
-├── shell/                  App-wide chrome and the appState singleton
-│   ├── state.ts              `appState` + storage primitives + the
-│   │                          PaneId / PreviewMode / FilesPaneFilter
-│   │                          types
-│   ├── boot.ts               `loadInitialState` — first /api/state
-│   │                          fetch + URL-aware document selection
-│   ├── events.ts             `connectEvents` — SSE → appState → re-render
-│   ├── history.ts            push/replace selection, popstate, scroll-
-│   │                          to-fragment, cssEscape
-│   ├── url.ts                review-score / commit-preview URL resolvers
-│   ├── connection.ts         status chip (live / reconnecting / connecting)
-│   │                          + build badge
-│   ├── pwa.ts                manifest links + service-worker registration
-│   ├── mode.ts               Author ↔ Review transitions
-│   ├── follow.ts             follow-mode toggle + click handler
-│   ├── stale-hint.ts         pure state-machine (library)
-│   ├── stale-hint-mount.ts   DOM glue for the hint banner
-│   └── storage.ts            findDocumentBy* + view helpers
-│
-├── preview/                The right pane — every renderer that mounts
-│                           HTML into #preview
-│   ├── mount.ts              applyDocumentPayload, single/split rendering,
-│   │                          the per-document payload cache, loadDocument
-│   ├── header.ts             title chip, path, type chip, <base href>
-│   ├── view-mode.ts          Source / Rendered / Diff radio chooser
-│   ├── layout.ts             Single / Side-by-side / Stacked + split resizer
-│   ├── diff.ts               git-diff view wired through @pierre/diffs
-│   ├── diff-view.ts          the @pierre/diffs adapter
-│   ├── anchors.ts            in-page (#heading) + cross-doc (.md / .adoc) clicks
-│   ├── mermaid.ts            click handler that opens the fullscreen viewer
-│   ├── mermaid-viewer.ts     the fullscreen pan/zoom modal
-│   ├── code-block.ts         line-number gutter + per-block copy buttons +
-│   │                          clipboard helpers
-│   ├── metadata-card.ts      YAML/AsciiDoc frontmatter card
-│   ├── image.ts              inline image preview for viewable extensions
-│   ├── binary.ts             "not viewable" fallback
-│   ├── empty.ts              empty / not-found preview state
-│   └── commit-message.ts     commit-preview body renderer
-│
-├── sidebar/                The left pane — every renderer that mounts
-│                           into the sidebar
-│   ├── shell.ts              renderSidebar + collapse + width
-│   ├── panes.ts              pane visibility, height, drag, panel menu
-│   ├── tree-view.ts          @pierre/trees adapter (the Files pane)
-│   ├── tree-config.ts        path-filter and reveal-on-load behavior
-│   ├── tree-mount.ts         tree-view singleton + click → loadDocument
-│   ├── change-overview.ts    Change Overview pane + click → score detail
-│   ├── git-log.ts            Git Log pane + commit-link clicks
-│   ├── files-filter.ts       All ↔ Changed chip
-│   ├── score-explanation.ts  Mode-independent score-detail HTML builder
-│   ├── selection-inspector.ts  inspector library (state machine)
-│   ├── selection-inspector-mount.ts  DOM glue + control click handler
-│   └── review-score-mount.ts  DOM mount for the score-detail preview
-│
-├── terminal/               The full xterm + PTY subsystem
-│   ├── panel.ts              the 700-line panel chrome (visibility,
-│   │                          dock, split, fullscreen, pane lifecycle)
-│   ├── client.ts             xterm.js mount + key handling + clipboard
-│   ├── server.ts             WebSocket server multiplexing PTY messages
-│   ├── pty.ts                Bun.spawn + PTY wrapper
-│   ├── backend.ts            availability detection (Bun PTY API)
-│   ├── auth.ts               cookie + origin checks
-│   ├── config.ts             font + sizing
-│   ├── pane-state.ts         persisted panel layout state
-│   └── clipboard.ts          terminal clipboard helpers
-│
-├── server/                 The HTTP server building blocks (note: the
-│                           Bun.serve call itself lives in src/cli.ts)
-│   ├── routes.ts             the single source of truth for the HTTP
-│   │                          route table — `buildRoutes({ mode, ... })`
-│   ├── session.ts            `createWatchSession`, `renderDocument`,
-│   │                          `resolveWatchRoots`, scope, asset/static
-│   │                          file resolution, navigation handler
-│   └── port-probe.ts         find an open port (with TOCTOU mitigation)
-│
-├── document/               Per-document data (not rendering)
-│   ├── metadata.ts           frontmatter / AsciiDoc header parser
-│   ├── diff.ts               git-diff fetcher
-│   ├── classify.ts           text vs binary, language detection
-│   ├── languages.ts          extension → highlight.js language map
-│   └── git-base-ref.ts       resolve "review base" (branch / merge-base)
-│
-├── render/                 Source → HTML (the transformation)
-│   ├── markdown.ts           micromark + frontmatter + GFM + Mermaid markers
-│   ├── asciidoc.ts           @asciidoctor/core wrapper
-│   └── preview.ts            sanitization + Mermaid replacement
-│
-├── review/
-│   └── load.ts               review-burden score data layer
-│
-├── ignore/
-│   ├── engine.ts             `.gitignore` + `.uatu.json tree.exclude`
-│   └── warning.ts            legacy `.uatuignore` deprecation warning
-│
-├── watchdog/                 Heartbeat-driven hang recovery
-│   ├── main.ts                 spawned sibling subprocess
-│   └── capture.ts              forensic dump bundle
-│
-├── debug/                    Observability
-│   ├── cache.ts                XDG-cache path resolution
-│   └── metrics.ts              event counters + 1Hz snapshot
-│
-├── pwa/                      (asset references; manifest + SW live in src/assets/)
-│
-└── shared/
-    ├── html.ts                 escapeHtml + escapeHtmlAttribute (leaf
-    │                            position to avoid circular imports)
-    ├── types.ts                cross-cutting types (Mode, ViewMode, etc.)
-    ├── license-check.ts        license audit
-    └── version.ts              git build metadata
+├── shell/                App-wide chrome and the appState singleton: boot,
+│                         SSE event handling, URL/history, follow-mode
+│                         capability, connection chip, PWA registration
+├── preview/              The right pane — every renderer that mounts HTML
+│                         into #preview: rendered / source / diff views,
+│                         layout chooser, mermaid, anchors, image/binary
+│                         fallbacks, metadata card, code-block decorations
+├── sidebar/              The left pane — sidebar shell, pane visibility/
+│                         sizing, the @pierre/trees-backed Files tree,
+│                         Change Overview, Git Log, Files-pane filter,
+│                         Selection Inspector
+├── terminal/             The full xterm + PTY subsystem: panel chrome,
+│                         xterm client, WebSocket server, PTY backend,
+│                         cookie/origin auth, persisted pane state
+├── server/               HTTP server building blocks (Bun.serve itself is
+│                         in cli.ts): the single-source-of-truth route
+│                         table, the WatchSession + render dispatch, the
+│                         port-probe helper
+├── document/             Per-document data (not rendering): metadata
+│                         parsing, diff fetcher, text/binary classifier,
+│                         language detection, review-base resolver
+├── render/               Source → HTML transformation: markdown
+│                         (micromark + GFM + frontmatter), asciidoc
+│                         (@asciidoctor/core), sanitization + mermaid markers
+├── review/               Review-burden score data layer
+├── ignore/               .gitignore + .uatu.json tree.exclude engine +
+│                         legacy .uatuignore deprecation warning
+├── watchdog/             Heartbeat-driven hang recovery — spawned sibling
+│                         subprocess + forensic dump bundle
+├── debug/                Observability — XDG-cache path resolution +
+│                         event-counter metrics
+├── pwa/                  PWA install affordance (manifest + SW asset refs)
+└── shared/               Cross-cutting helpers: html escape, types,
+                          license check, build version
 ```
 
-E2E tests live in `tests/e2e/` under feature-named files (`mermaid.e2e.ts`, `sidebar.e2e.ts`, `mode.e2e.ts`, etc.). The Playwright `webServer` is `tests/e2e/server.ts`, not in `src/`.
-
-Unit tests are colocated with their subjects: `foo.ts` and `foo.test.ts` sit in the same folder.
+Unit tests are colocated with their subjects (`foo.ts` and `foo.test.ts` sit in the same folder). E2E tests live in `tests/e2e/` under feature-named files (`mermaid.e2e.ts`, `sidebar.e2e.ts`, `document-tree.e2e.ts`, etc.); the Playwright `webServer` is `tests/e2e/server.ts`, not in `src/`.
 
 ## Request lifecycle
 
@@ -224,19 +141,26 @@ sequenceDiagram
   participant Sidebar as src/sidebar/shell.ts (renderSidebar)
   participant Preview as src/preview/mount.ts (loadDocument)
 
-  Watcher->>SSE: state event<br/>(new roots, repositories, scope, changedId)
+  Watcher->>SSE: state event (new roots, repositories, scope, changedId)
   SSE->>State: appState.roots / repositories / scope = ...
   SSE->>Sidebar: renderSidebar()
-  Note over SSE: Mode check:<br/>Review must NOT switch active preview
-  alt mode === "review"
-    SSE->>State: appState.staleHint = nextStaleHint(...)
-  else mode === "author" + follow on
-    SSE->>State: appState.selectedId = newest changed
+  Note over SSE: chooseSelectionForFileEvent (follow-mode)
+  alt Follow on
+    SSE->>State: appState.selectedId = changed file (Rule C)
     SSE->>Preview: loadDocument(newSelectedId)
+  else Follow off, selection is the changed file
+    SSE->>Preview: loadDocument(selectedId) — Rule D, reload in place
+  else Follow off, selection unrelated to change
+    Note over SSE: tree re-renders, selection unchanged
   end
 ```
 
-In Review mode, file-system events surface as a stale-content hint (`src/shell/stale-hint.ts`), never as a silent preview swap. The reviewer refreshes manually via the hint banner's action button.
+The four authoritative rules of the `follow-mode` capability — defined in `openspec/specs/follow-mode/spec.md` — are the only paths that change `appState.followEnabled` or `appState.selectedId`:
+
+- **Rule A** (user clicks a tree row): selection moves to that file; follow turns off. Guarded by `TreeView.duringProgrammaticUpdate` so library-fired callbacks during mount or `resetPaths` are not mistaken for user input.
+- **Rule B** (user clicks the Follow toggle): `followEnabled` flips. Turning on jumps to the newest-mtime file in the current session.
+- **Rule C** (file event + follow on): selection moves to the changed file.
+- **Rule D** (file event + follow off): selection unchanged; if the changed file equals the current selection, the preview reloads in place; otherwise just the tree refreshes.
 
 ## Terminal subsystem
 
@@ -262,22 +186,22 @@ flowchart LR
 
 The panel UI (~700 lines in `src/terminal/panel.ts`) handles dock position, split, fullscreen, focus, and message routing across multiple PTY panes. On Windows, `terminal/backend.ts` reports unavailable and the panel button is hidden — uatu doesn't degrade other features.
 
-## Review vs Author modes
+## Follow mode
 
-Mode is one of `author | review`, persisted in `localStorage` (`shell/state.ts`), with the CLI `--mode` flag overriding at boot. The mode transition logic lives in `src/shell/mode.ts`.
+uatu is a single-mode app. There is no Author vs. Review distinction; the only behavioral toggle is **Follow**, surfaced as a switch in the sidebar header. The full contract is specified in `openspec/specs/follow-mode/spec.md`; the four rules are summarized in the State lifecycle section above.
 
-| Aspect | Author | Review |
-|---|---|---|
-| Default `Follow` | on (auto-switch to newest file) | off (forced) |
-| File-system events switch the preview | yes (when `Follow` is on) | **no, ever** |
-| Stale-content hint when the active file changes | never | yes — surfaces a banner |
-| Files-pane filter default | `All` | `Changed` |
-| Panes visible | Change Overview, Files | + Git Log, + Selection Inspector |
-| Score-explanation preview | identical to Review | identical to Author |
-| Sidebar headline label | "Forecast" | "Burden" |
-| Visual cues | warmer chrome | cooler chrome (frame border, glyph) |
+| Aspect | Behavior |
+|---|---|
+| Default `Follow` at boot | on at `/`; forced off when arriving via a direct document URL (e.g. `/guides/setup.md`) |
+| `--no-follow` CLI flag | flips the default at `/` to off |
+| User clicks a tree row | selection moves; follow turns off (Rule A) |
+| User clicks the Follow switch | flips state; turning on jumps to the newest-mtime file (Rule B) |
+| File changes on disk + follow on | selection moves to the changed file (Rule C) |
+| File changes on disk + follow off | current file reloads in place if it's what changed; otherwise tree refreshes silently (Rule D) |
+| Single-file CLI invocation (`uatu watch some-file.md`) | Follow switch disabled — nothing else to follow |
+| Sidebar panes available | Change Overview, Files, Git Log, Selection Inspector — all always available; toggle via the per-pane visibility menu |
 
-The "identical score-explanation" contract is enforced by `src/sidebar/score-explanation.ts` having no access to `appState.mode` or any Mode-aware label selector — and the test `score-explanation.test.ts` asserts that property by importing the function directly.
+The `withProgrammaticUpdate(fn)` helper in `src/sidebar/tree-view.ts` is what makes Rule A reliable: it suppresses the `@pierre/trees` library's `onSelectionChange` callback during initial mount and `resetPaths`-driven refreshes so library-fired selections aren't mistaken for user clicks. That single helper is the root fix for the historical flake on `tests/e2e/preview-renderers.e2e.ts` (issue #45) and the `follow-mode auto-switch` test.
 
 ## How to extend
 
@@ -324,4 +248,4 @@ For tighter loops:
 - `bun test src/sidebar/git-log.test.ts` — single file
 - `bun x playwright test tests/e2e/mermaid.e2e.ts:127` — single e2e test
 - `bun run dev --no-gitignore` — exposes gitignored files in the tree
-- `bun run dev --mode review` — boot directly into Review mode
+- `bun run dev --no-follow` — boots with Follow disabled

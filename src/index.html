@@ -28,87 +28,83 @@
               </span>
             </div>
           </div>
-          <button
-            id="sidebar-collapse"
-            class="icon-button"
-            type="button"
-            aria-label="Collapse sidebar"
-            title="Collapse sidebar"
-          >
-            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-              <path
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.6"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                d="M10 3 5 8l5 5"
-              />
-            </svg>
-          </button>
+          <div class="sidebar-header-actions">
+            <div class="panels-control">
+              <button
+                id="panels-toggle"
+                class="icon-button"
+                type="button"
+                aria-expanded="false"
+                aria-controls="panels-menu"
+                aria-label="Show or hide sidebar panes"
+                title="Show or hide sidebar panes"
+              >
+                <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                  <rect
+                    x="2.25"
+                    y="2.75"
+                    width="11.5"
+                    height="10.5"
+                    rx="1.25"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.4"
+                  />
+                  <line
+                    x1="2.25"
+                    y1="6.5"
+                    x2="13.75"
+                    y2="6.5"
+                    stroke="currentColor"
+                    stroke-width="1.4"
+                    stroke-linecap="round"
+                  />
+                  <line
+                    x1="2.25"
+                    y1="9.75"
+                    x2="13.75"
+                    y2="9.75"
+                    stroke="currentColor"
+                    stroke-width="1.4"
+                    stroke-linecap="round"
+                  />
+                </svg>
+              </button>
+              <div id="panels-menu" class="panels-menu" hidden></div>
+            </div>
+            <button
+              id="sidebar-collapse"
+              class="icon-button"
+              type="button"
+              aria-label="Collapse sidebar"
+              title="Collapse sidebar"
+            >
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                <path
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.6"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M10 3 5 8l5 5"
+                />
+              </svg>
+            </button>
+          </div>
         </div>
 
         <div class="sidebar-mode-row">
-          <div
-            id="mode-control"
-            class="mode-control"
-            role="radiogroup"
-            aria-label="Mode"
-            title="Switch between Author and Review mode"
-          >
-            <button
-              id="mode-author"
-              class="mode-segment"
-              type="button"
-              role="radio"
-              aria-checked="true"
-              data-mode-value="author"
-              title="Author: in-flow with auto-follow available"
-            >
-              <svg class="mode-glyph" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
-                <path
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.4"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  d="M2 14l1-3 8-8 2 2-8 8-3 1zM10 4l2 2"
-                />
-              </svg>
-              <span>Author</span>
-            </button>
-            <button
-              id="mode-review"
-              class="mode-segment"
-              type="button"
-              role="radio"
-              aria-checked="false"
-              data-mode-value="review"
-              title="Review: stable navigation, follow off"
-            >
-              <svg class="mode-glyph" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
-                <path
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.4"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  d="M1.5 8c1.5-3 4-4.5 6.5-4.5S13 5 14.5 8C13 11 10.5 12.5 8 12.5S3 11 1.5 8z"
-                />
-                <circle cx="8" cy="8" r="2" fill="currentColor" />
-              </svg>
-              <span>Review</span>
-            </button>
-          </div>
           <button
             id="follow-toggle"
-            class="chip-button"
+            class="follow-switch"
             type="button"
             aria-pressed="true"
             title="Follow the latest changed document"
           >
-            <span class="chip-dot" aria-hidden="true"></span>
-            <span class="chip-label">Follow</span>
+            <span class="follow-switch-label">Follow</span>
+            <span class="follow-switch-track" aria-hidden="true">
+              <span class="follow-switch-thumb"></span>
+            </span>
           </button>
         </div>
 
@@ -133,22 +129,6 @@
             <span class="terminal-toggle-label">Terminal</span>
             <kbd class="terminal-toggle-kbd" aria-hidden="true">⌃`</kbd>
           </button>
-        </div>
-
-        <div class="sidebar-meta">
-          <div class="panels-control">
-            <button
-              id="panels-toggle"
-              class="mini-button"
-              type="button"
-              aria-expanded="false"
-              aria-controls="panels-menu"
-              title="Show or hide sidebar panes"
-            >
-              Panels
-            </button>
-            <div id="panels-menu" class="panels-menu" hidden></div>
-          </div>
         </div>
 
         <div class="sidebar-body pane-stack">

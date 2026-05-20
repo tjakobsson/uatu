@@ -1,10 +1,8 @@
 // Build the HTML for the review-burden score-explanation preview. Pure
 // function: takes a `reviewLoad` snapshot and returns a string. The
-// "Mode-independent by construction" contract — score-explanation must
-// render identically in Author and Review modes — is enforced by virtue
-// of this function having no access to `appState.mode` or any Mode-aware
-// label selector. The companion test asserts that property by direct
-// import (it used to brace-count the function body out of app.ts).
+// companion test asserts the output contains no Author/Review mode label —
+// a regression guard against accidentally re-introducing the per-Mode
+// headline labels removed in the simplify-modes-and-follow change.
 
 import type { RepositoryReviewSnapshot } from "../shared/types";
 

@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures";
 
 // Real-browser sanity for the PWA install path. The integration tests
 // confirm the assets serve with the right shape; this test confirms that

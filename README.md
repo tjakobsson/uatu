@@ -20,10 +20,12 @@
 
 `uatu` is a local watch UI for following what an AI coding agent is doing in
 a codebase. Point it at a directory, open the browser UI it prints, and it
-keeps a pleasant preview in sync with changing files. **Follow** jumps to the
-latest change; **Pin** locks the view to one file. Today it's a live preview
-and file browser; over time it grows toward a companion for onboarding, peer
-review, and self-assessment of cognitive debt.
+keeps a pleasant preview in sync with changing files. Flip the **Follow**
+switch on to jump to whichever file just changed; flip it off and click a
+file to stay there — the file you're viewing still reloads in place when it
+changes on disk. Today it's a live preview and file browser; over time it
+grows toward a companion for onboarding, peer review, and self-assessment of
+cognitive debt.
 
 ## Features
 
@@ -32,10 +34,10 @@ review, and self-assessment of cognitive debt.
 - Syntax highlighting for source files, plus per-file copy-to-clipboard on every code block
 - Cross-document `.md`/`.adoc` link navigation; live reload over SSE
 - **Rendered / Source / Diff** view chooser per document; Diff renders only the active file's changes against the resolved review base via [`@pierre/diffs`](https://diffs.com/)
-- **Author / Review** mode toggle with a stale-content hint in Review when the active file changes on disk
+- **Follow switch** for the agent-collab workflow — on = auto-jump to the latest changed file, off = stay on the file you're reading (it still reloads in place when it changes on disk)
 - Side-by-side / stacked split layouts for Source + Rendered
 - Whole-repo browsing with `.uatu.json tree.exclude` and `.gitignore` filtering on top of built-in defaults
-- Review-oriented sidebar (change overview, files, git log, selection inspector producing `@path#L<a>-<b>` references)
+- Sidebar with Change Overview, Files, Git Log, and a Selection Inspector that produces `@path#L<a>-<b>` references — toggle individual panes from the per-pane menu
 - Review burden meter based on git diff size, file spread, and configurable path scoring
 - Git preflight by default (`--force` to bypass for non-git folders); single-file or multi-root scope
 - Embedded terminal panel (real PTY via Bun) toggled with `Ctrl+`` — dark theme, Nerd Font detection, dock to bottom or right, split for two concurrent PTYs
@@ -59,19 +61,20 @@ everything else works.
 ## Usage
 
 ```bash
-uatu watch [PATH...] [--force] [--no-open] [--no-follow] [--no-gitignore] [--mode <MODE>] [--port <PORT>]
+uatu watch [PATH...] [--force] [--no-open] [--no-follow] [--no-gitignore] [--port <PORT>]
 ```
 
 ```bash
 uatu watch .
 uatu watch docs notes --no-open
-uatu watch . --mode review
-uatu watch README.md
+uatu watch . --no-follow
+uatu watch README.md                        # single-file scope
 uatu watch ~/Downloads/docs --force         # non-git, slow indexing
 ```
 
-Click **Pin** in the preview header to narrow a running folder watch to the
-current document. Click again to restore the full sidebar.
+To scope a session to a single file, pass that file's path directly:
+`uatu watch README.md`. The Follow switch is then disabled because there's
+nothing else to follow.
 
 The server binds to `127.0.0.1:4711` by default and scans upward if the port
 is taken; pass `--port 0` for an ephemeral port. **Breaking from earlier

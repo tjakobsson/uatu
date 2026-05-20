@@ -2,7 +2,7 @@
 // boot git-backed sessions because the chip's "Changed" state is built from
 // review-load, which only reports paths in a git context.
 
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page } from "./fixtures";
 
 import { revealTreeRow, treeRow } from "./tree-helpers";
 
@@ -29,38 +29,19 @@ async function bootSession(
   await expect(page.locator("#document-count")).not.toHaveText("0 files", { timeout: 5_000 });
 }
 
-test("chip defaults to Changed in Review and All in Author", async ({ page, request }) => {
-  await bootSession(page, request, { git: true, startupMode: "review" });
-  await expect(page.locator("#files-pane-filter-changed")).toHaveAttribute("aria-checked", "true");
-  await expect(page.locator("#files-pane-filter-all")).toHaveAttribute("aria-checked", "false");
-
-  await bootSession(page, request, { git: true, startupMode: "author" });
+test("chip defaults to All on first boot", async ({ page, request }) => {
+  await bootSession(page, request, { git: true });
   await expect(page.locator("#files-pane-filter-all")).toHaveAttribute("aria-checked", "true");
   await expect(page.locator("#files-pane-filter-changed")).toHaveAttribute("aria-checked", "false");
 });
 
-test("chip state persists per Mode across reloads independently", async ({ page, request }) => {
-  await bootSession(page, request, { git: true, startupMode: "author" });
-  // Author starts at All — flip to Changed and persist.
+test("chip state persists across reloads", async ({ page, request }) => {
+  await bootSession(page, request, { git: true });
   await page.locator("#files-pane-filter-changed").click();
   await expect(page.locator("#files-pane-filter-changed")).toHaveAttribute("aria-checked", "true");
   await page.reload();
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
   await expect(page.locator("#files-pane-filter-changed")).toHaveAttribute("aria-checked", "true");
-
-  // Switch to Review (default Changed); flip it to All and persist.
-  await page.locator("#mode-review").click();
-  await expect(page.locator("#files-pane-filter-all")).toHaveAttribute("aria-checked", "false");
-  await page.locator("#files-pane-filter-all").click();
-  await expect(page.locator("#files-pane-filter-all")).toHaveAttribute("aria-checked", "true");
-
-  // Back to Author — chip reads Changed (its persisted state), not Review's All.
-  await page.locator("#mode-author").click();
-  await expect(page.locator("#files-pane-filter-changed")).toHaveAttribute("aria-checked", "true");
-
-  // Back to Review — chip reads All (its persisted state), not Author's Changed.
-  await page.locator("#mode-review").click();
-  await expect(page.locator("#files-pane-filter-all")).toHaveAttribute("aria-checked", "true");
 });
 
 test("under filter Changed only change-set rows and their ancestors are present", async ({
@@ -69,14 +50,13 @@ test("under filter Changed only change-set rows and their ancestors are present"
 }) => {
   await bootSession(page, request, {
     git: true,
-    startupMode: "review",
     dirty: {
       // Two changes: one nested, one untracked at the root.
       "guides/setup.md": "# Setup\n\nEdited for review.\n",
       "a-untracked-scratch.md": "# scratch\n",
     },
   });
-  // Chip should already be on Changed (Review default).
+  await page.locator("#files-pane-filter-changed").click();
   await expect(page.locator("#files-pane-filter-changed")).toHaveAttribute("aria-checked", "true");
 
   // The two change-set leaves are present in the tree, plus the `guides/`
@@ -103,11 +83,11 @@ test("empty state names the review base when no changes are present under Change
 }) => {
   await bootSession(page, request, {
     git: true,
-    startupMode: "review",
     // Pin the review base to HEAD so the diff is empty (the e2e git fixture
     // is otherwise a feature branch with 13+ commits ahead of main).
     uatuConfig: { review: { baseRef: "HEAD" } },
   });
+  await page.locator("#files-pane-filter-changed").click();
   await expect(page.locator("#files-pane-filter-changed")).toHaveAttribute("aria-checked", "true");
   // Tree is hidden; the empty-state message names a base.
   await expect(page.locator("#tree")).toBeHidden();
@@ -122,7 +102,6 @@ test("empty state names the review base when no changes are present under Change
 
 test("empty state explains unavailability in non-git contexts", async ({ page, request }) => {
   await bootSession(page, request, { nonGit: true });
-  // Author defaults to All — flip to Changed to surface the empty-state copy.
   await page.locator("#files-pane-filter-changed").click();
   await expect(page.locator("#tree-empty-message")).toContainText(
     "Changed filter is unavailable",
@@ -137,18 +116,13 @@ test("an active document outside the change set is revealed with a visual cue un
   // separate file `guides/setup.md` is NOT touched (NOT in the change set).
   await bootSession(page, request, {
     git: true,
-    startupMode: "author",
     dirty: { "feature.md": "# Feature\n\nEdited for review.\n" },
   });
 
-  // User is on All; navigates to the unrelated file, then toggles Changed.
-  // (Manual navigation turns Follow off — exactly the scenario where the
-  // active doc can sit outside the filter set after toggling.)
-  await page.locator("#files-pane-filter-all").click();
+  // User navigates to the unrelated file. Manual navigation turns Follow off
+  // — exactly the scenario where the active doc can sit outside the filter
+  // set after toggling.
   const setupRow = treeRow(page, "guides/setup.md");
-  // setup.md lives under guides/ — expand it first if needed (treeRow doesn't
-  // expand ancestors, that's clickTreeFile's job). Reveal the folder row so
-  // virtualization surfaces it in the DOM.
   await revealTreeRow(page, "guides/");
   const guidesFolder = treeRow(page, "guides/");
   await expect(guidesFolder).toBeVisible();
@@ -187,7 +161,6 @@ test("an active document outside the change set is revealed with a visual cue un
 test("All → Changed → All restores manually-expanded directories", async ({ page, request }) => {
   await bootSession(page, request, {
     git: true,
-    startupMode: "author",
     dirty: { "feature.md": "# Feature\n\nEdited.\n" },
   });
 
@@ -211,14 +184,13 @@ test("All → Changed → All restores manually-expanded directories", async ({ 
 test("file count uses `N of M files` form under filter Changed", async ({ page, request }) => {
   await bootSession(page, request, {
     git: true,
-    startupMode: "review",
     dirty: {
       "a-untracked.md": "# untracked\n",
       "guides/setup.md": "# Setup\n\nEdited.\n",
     },
   });
 
-  // Chip on Changed (Review default). The count uses the N-of-M form.
+  await page.locator("#files-pane-filter-changed").click();
   const countText = page.locator("#document-count");
   await expect(countText).toContainText(/^\d+ of \d+ files/);
 
@@ -234,7 +206,6 @@ test("under Changed filter gitignored files are not rendered", async ({ page, re
   // driven exclusion under Changed is what this test pins.
   await bootSession(page, request, {
     git: true,
-    startupMode: "review",
     respectGitignore: false,
     extras: { ".gitignore": "ignored-by-git.md\n" },
     dirty: {
@@ -244,6 +215,7 @@ test("under Changed filter gitignored files are not rendered", async ({ page, re
       "feature.md": "# Feature\n\nEdited.\n",
     },
   });
+  await page.locator("#files-pane-filter-changed").click();
   await expect(page.locator("#files-pane-filter-changed")).toHaveAttribute("aria-checked", "true");
 
   await revealTreeRow(page, "feature.md");

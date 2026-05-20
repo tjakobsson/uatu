@@ -1,18 +1,8 @@
-// Tree-view mounting and selection handler. Holds the lazily-constructed
-// TreeView singleton and the click handler that translates a tree-row
-// selection into the app's "navigate to document" flow. Extracted from
-// `app.ts` so the sidebar feature folder owns the integration with the
-// library-backed tree view.
+// Tree-view mounting. Holds the lazily-constructed TreeView singleton; the
+// selection handler delegates to the `follow-mode` capability (Rule A).
 
-import { applyStaleHint } from "../shell/stale-hint-mount";
-import { findDocumentById } from "../shell/storage";
-import { syncFollowToggle } from "../shell/follow";
-import { loadDocument } from "../preview/mount";
-import { pushSelection } from "../shell/history";
-import { appState } from "../shell/state";
-import { nextStaleHint } from "../shell/stale-hint";
+import { applyUserRowClick } from "../shell/follow";
 import { TreeView } from "./tree-view";
-import { renderSidebar } from "./shell";
 
 const treeElementMaybe = document.querySelector<HTMLDivElement>("#tree");
 
@@ -30,7 +20,7 @@ export function ensureTreeView(): TreeView {
   if (treeView === null) {
     treeView = new TreeView({
       container: treeElement,
-      onSelectDocument: handleTreeSelectDocument,
+      onSelectDocument: applyUserRowClick,
     });
   }
   return treeView;
@@ -41,18 +31,4 @@ export function disposeTreeView(): void {
     treeView.dispose();
     treeView = null;
   }
-}
-
-export function handleTreeSelectDocument(documentId: string): void {
-  appState.followEnabled = false;
-  appState.selectedId = documentId;
-  appState.previewMode = { kind: "document" };
-  applyStaleHint(nextStaleHint(appState.staleHint, { kind: "manual-navigation" }));
-  const doc = findDocumentById(documentId);
-  if (doc) {
-    pushSelection(documentId, doc.relativePath);
-  }
-  syncFollowToggle();
-  renderSidebar();
-  void loadDocument(documentId);
 }

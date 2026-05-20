@@ -4,7 +4,7 @@
 TBD - created by archiving change split-document-watch-browser. Update Purpose after archive.
 ## Requirements
 ### Requirement: Organize sidebar content into resizable panes
-The browser UI SHALL organize the expanded sidebar as a stack of panes. The initial panes SHALL include `Change Overview`, `Files`, and `Git Log`. The document tree SHALL render inside the `Files` pane and MUST preserve existing document selection, follow-mode interaction, and pin interaction. Tree-internal behaviors that are now owned by the `@pierre/trees` library — directory expansion handling, binary-entry presentation, and any future row-annotation behavior such as relative-time labels — are governed by the `document-tree` capability rather than this requirement, and this requirement no longer asserts that they survive the library swap. Pane visibility, collapsed state, and vertical sizing SHALL persist across reloads in the same browser for that origin. The pane stack SHALL fill the available expanded-sidebar height and MUST NOT force the whole sidebar body to scroll. Scrollbars used inside panes and preview overflow regions SHOULD be thin and visually light while remaining discoverable. The existing whole-sidebar collapse and expand controls MUST remain separate from per-pane visibility and collapse controls.
+The browser UI SHALL organize the expanded sidebar as a stack of panes. The pane catalog SHALL include `Change Overview`, `Files`, and `Git Log`, all available regardless of session state — the user MAY toggle any pane's visibility via the per-pane visibility menu. The document tree SHALL render inside the `Files` pane and MUST preserve existing document selection and follow-mode interaction (see the `follow-mode` capability). Tree-internal behaviors that are owned by the `@pierre/trees` library — directory expansion handling, binary-entry presentation, and any future row-annotation behavior such as relative-time labels — are governed by the `document-tree` capability rather than this requirement, and this requirement no longer asserts that they survive the library swap. Pane visibility, collapsed state, and vertical sizing SHALL persist across reloads in the same browser for that origin under a single set of storage keys (no per-Mode partitioning). The pane stack SHALL fill the available expanded-sidebar height and MUST NOT force the whole sidebar body to scroll. Scrollbars used inside panes and preview overflow regions SHOULD be thin and visually light while remaining discoverable. The existing whole-sidebar collapse and expand controls MUST remain separate from per-pane visibility and collapse controls.
 
 #### Scenario: Sidebar opens with default panes
 - **WHEN** a user opens the browser UI with no pane preferences stored
@@ -14,7 +14,7 @@ The browser UI SHALL organize the expanded sidebar as a stack of panes. The init
 #### Scenario: Selecting a document from the Files pane
 - **WHEN** a user selects a non-binary document from the `Files` pane tree
 - **THEN** the preview loads that document
-- **AND** follow mode is disabled in the same way as selecting from the previous sidebar tree
+- **AND** Follow mode is disabled (Rule A of the `follow-mode` capability)
 
 #### Scenario: Pane visibility can be changed and restored
 - **WHEN** a user hides a sidebar pane
@@ -60,7 +60,7 @@ The browser UI SHALL allow users to resize the expanded sidebar horizontally. Th
 - **THEN** the expanded sidebar returns to the resized width
 
 ### Requirement: Render review-load summary in the Change Overview pane
-The browser UI SHALL render repository and review-load data in the `Change Overview` pane when that data is available. The pane MUST show whether the watched root is inside a git repository, the current branch or detached commit, dirty status, resolved review base or fallback mode, cognitive-load level, and score. The pane MUST NOT list raw mechanical statistics such as changed-file count, touched-line count, diff-hunk count, or directory spread directly in the sidebar. When the workspace contains at least one untracked entry — including entries excluded from the score by `.uatu.json review.ignoreAreas` — the pane MUST additionally render a categorical indicator that surfaces the presence of untracked files; the indicator answers a workspace-state question ("are there untracked files at all?") and therefore considers both `reviewLoad.changedFiles` and `reviewLoad.ignoredFiles`. That indicator MUST NOT include a count and MUST NOT render when no untracked entries are present in either array. The score MUST be clickable and MUST open a detailed scoring explanation in the main preview area. The pane MUST label the score as review burden or cognitive load and MUST NOT present it as code quality or correctness. The score's *headline label* in the pane SHALL depend on the active Mode: when Mode is **Author**, the headline label MUST be "Reviewer burden forecast"; when Mode is **Review**, the headline label MUST be "Change review burden". The numeric score, level pill, drivers, thresholds, configured area lists, warnings, the untracked categorical indicator, and the contents of the score-explanation preview MUST be identical in both Modes. The score-explanation preview MUST, when `reviewLoad.changedFiles` contains untracked entries, expose the untracked subcount as a distinct factual change-shape input alongside the existing mechanical drivers; this subcount describes the score and therefore MUST be sourced from `changedFiles` only (excluding `ignoredFiles`). It MUST appear only inside the score-explanation preview and MUST NOT alter the numeric review-burden score. If review-load data is unavailable, the pane SHALL show a clear unavailable or non-git message instead of failing to render.
+The browser UI SHALL render repository and review-load data in the `Change Overview` pane when that data is available. The pane MUST show whether the watched root is inside a git repository, the current branch or detached commit, dirty status, resolved review base or fallback mode, cognitive-load level, and score. The pane MUST NOT list raw mechanical statistics such as changed-file count, touched-line count, diff-hunk count, or directory spread directly in the sidebar. When the workspace contains at least one untracked entry — including entries excluded from the score by `.uatu.json review.ignoreAreas` — the pane MUST additionally render a categorical indicator that surfaces the presence of untracked files; the indicator answers a workspace-state question ("are there untracked files at all?") and therefore considers both `reviewLoad.changedFiles` and `reviewLoad.ignoredFiles`. That indicator MUST NOT include a count and MUST NOT render when no untracked entries are present in either array. The score MUST be clickable and MUST open a detailed scoring explanation in the main preview area. The pane MUST label the score as review burden or cognitive load and MUST NOT present it as code quality or correctness. The score's headline label SHALL be a single mode-independent string: "Review burden". The numeric score, level pill, drivers, thresholds, configured area lists, warnings, the untracked categorical indicator, and the contents of the score-explanation preview MUST remain consistent across sessions. The score-explanation preview MUST, when `reviewLoad.changedFiles` contains untracked entries, expose the untracked subcount as a distinct factual change-shape input alongside the existing mechanical drivers; this subcount describes the score and therefore MUST be sourced from `changedFiles` only (excluding `ignoredFiles`). It MUST appear only inside the score-explanation preview and MUST NOT alter the numeric review-burden score. If review-load data is unavailable, the pane SHALL show a clear unavailable or non-git message instead of failing to render.
 
 #### Scenario: Git-backed change has review-load data
 - **WHEN** the browser receives repository metadata and a computed review-load result
@@ -104,24 +104,10 @@ The browser UI SHALL render repository and review-load data in the `Change Overv
 - **AND** hovering or focusing a help marker shows a tooltip that explains what that statistic means in review-burden scoring
 - **AND** the explanation does not require clicking the marker
 
-#### Scenario: Author Mode shows the forecast headline label
-- **WHEN** the `Change Overview` pane is rendered with review-load data and Mode is **Author**
-- **THEN** the score's headline label reads "Reviewer burden forecast"
-
-#### Scenario: Review Mode shows the change-review headline label
-- **WHEN** the `Change Overview` pane is rendered with review-load data and Mode is **Review**
-- **THEN** the score's headline label reads "Change review burden"
-
-#### Scenario: Switching Mode does not change the score number or level
+#### Scenario: Headline label is a single mode-independent string
 - **WHEN** the `Change Overview` pane is rendered with review-load data
-- **AND** the user toggles Mode between **Author** and **Review**
-- **THEN** only the headline label string changes
-- **AND** the numeric score, level pill color, drivers, thresholds, and configured-area summaries remain identical
-
-#### Scenario: Score-explanation preview content is independent of Mode
-- **WHEN** the user opens the score explanation from `Change Overview` in either Mode
-- **THEN** the score-explanation preview renders identical content
-- **AND** the preview does not contain Mode-dependent text
+- **THEN** the score's headline label reads "Review burden"
+- **AND** no Mode-dependent string variant is rendered
 
 #### Scenario: Untracked categorical indicator appears when untracked files are present
 - **WHEN** the changed-files list received by the browser contains at least one entry with the untracked status
@@ -146,14 +132,8 @@ The browser UI SHALL render repository and review-load data in the `Change Overv
 - **THEN** the `Change Overview` pane renders the untracked categorical indicator
 - **AND** the score-explanation preview does NOT render the untracked subcount row (the score is unaffected by ignored entries)
 
-#### Scenario: Untracked indicator is identical across Author and Review modes
-- **WHEN** the changed-files list contains at least one untracked entry
-- **AND** the user toggles Mode between **Author** and **Review**
-- **THEN** the untracked categorical indicator continues to render in the `Change Overview` pane
-- **AND** the indicator text does not change between Modes
-
 ### Requirement: Render bounded commit history in the Git Log pane
-The browser UI SHALL render the bounded commit log for the selected or only detected repository in the `Git Log` pane. Each visible commit row MUST show at minimum the short SHA and subject. Each visible commit row MUST be a same-origin link to that commit's preview URL so standard browser link affordances are available. If multiple repositories are detected, the pane SHALL make clear which repository each log belongs to or provide a repository grouping/selection. The pane SHALL provide a history-length control for selecting how many commit rows are visible from the bounded data supplied by the server. The `Git Log` pane body SHALL scroll internally when the visible commit rows exceed its allocated height. If no commit log is available, the pane SHALL show an empty or unavailable state instead of failing to render.
+The browser UI SHALL render the bounded commit log for the selected or only detected repository in the `Git Log` pane. Each visible commit row MUST show at minimum the short SHA and subject. Each visible commit row MUST be a same-origin link to that commit's preview URL so standard browser link affordances are available. If multiple repositories are detected, the pane SHALL make clear which repository each log belongs to or provide a repository grouping/selection. The pane SHALL provide a history-length control for selecting how many commit rows are visible from the bounded data supplied by the server. The `Git Log` pane body SHALL scroll internally when the visible commit rows exceed its allocated height. If no commit log is available, the pane SHALL show an empty or unavailable state instead of failing to render. The Git Log pane is available at all times — it is not gated by Mode.
 
 #### Scenario: Single repository has commits
 - **WHEN** the browser receives a commit log for one detected repository
@@ -226,7 +206,7 @@ The browser UI SHALL provide a control that collapses the sidebar into a narrow 
 - **THEN** the document list returns to its previous width
 
 ### Requirement: Animate the live connection indicator
-While the browser UI is connected to the live update channel, the connection indicator SHALL animate with a subtle pulse so the live state is visually distinguishable from a static label. When the channel enters a reconnecting state, the pulse MUST stop and the indicator MUST communicate the reconnecting state without animation. The pulse MUST be disabled when the user's operating system requests reduced motion. The indicator's label MUST read `Connected` while the channel is open, `Reconnecting` while it is recovering, and `Connecting` before the first successful connect. The indicator MUST expose a hover tooltip whose text describes the current connection state to the uatu backend (for example, `Connected to the uatu backend`). The connection indicator SHALL be rendered inside the sidebar header, stacked beneath the `UatuCode` wordmark, so the indicator visually belongs to the application chrome rather than the per-document preview controls. As a tradeoff of this placement, collapsing the sidebar MAY hide the indicator along with the rest of the sidebar chrome.
+While the browser UI is connected to the live update channel, the connection indicator SHALL animate with a subtle pulse so the live state is visually distinguishable from a static label. When the channel enters a reconnecting state, the pulse MUST stop and the indicator MUST communicate the reconnecting state without animation. The pulse MUST be disabled when the user's operating system requests reduced motion. The indicator's label MUST read `Connected` while the channel is open, `Reconnecting` while it is recovering, and `Connecting` before the first successful connect. The indicator MUST expose a hover tooltip whose text describes the current connection state to the uatu backend (for example, `Connected to the uatu backend`). The connection indicator SHALL be rendered inside the sidebar header, stacked beneath the `UatuCode` wordmark, so the indicator visually belongs to the application chrome rather than the per-document preview controls. As a tradeoff of this placement, collapsing the sidebar MAY hide the indicator along with the rest of the sidebar chrome. The indicator's label and animation MUST NOT vary by any Mode-equivalent state — the SPA is a single mode.
 
 #### Scenario: The indicator pulses while connected to the server
 - **WHEN** the browser UI's event channel is open
@@ -243,11 +223,6 @@ While the browser UI is connected to the live update channel, the connection ind
 - **WHEN** the operating system reports a reduced-motion preference
 - **THEN** the indicator does not pulse even while connected
 - **AND** the live state is still communicated (e.g. via color and label)
-
-#### Scenario: Indicator label is the same in both Modes
-- **WHEN** the channel is open and the user toggles between **Author** and **Review** Modes
-- **THEN** the indicator label remains `Connected` in both Modes
-- **AND** the indicator's pulse animation continues in both Modes
 
 #### Scenario: Indicator lives under the UatuCode wordmark
 - **WHEN** the SPA renders the sidebar header
@@ -271,134 +246,28 @@ The sidebar SHALL scroll within its own container and MUST NOT scroll together w
 - **THEN** the preview pane does not scroll
 - **AND** the sidebar header remains visible at the top of the sidebar
 
-### Requirement: Provide a top-level Author/Review Mode control
-The browser UI SHALL expose a top-level **Mode** control with two values: **Author** and **Review**. The Mode control SHALL be placed in a dedicated row at the top of the sidebar, separately from the document-level controls in the preview toolbar (Follow). The Mode control MUST NOT be rendered inside the preview toolbar. Mode SHALL default to **Author** when no preference is stored. The selected Mode SHALL persist across reloads in the same browser for that origin. Mode MUST gate Follow availability and MUST gate file-change-driven preview switching as defined elsewhere in this spec. Mode MUST NOT alter the underlying review-burden score, level, drivers, thresholds, or the contents of the score-explanation preview; only the score's headline label in the `Change Overview` pane may differ by Mode. While Mode is **Review**, the Follow control MUST remain visible but disabled, with affordance text or tooltip naming Mode as the reason it is unavailable.
+### Requirement: Provide a Files-pane filter chip with single persisted state
 
-#### Scenario: Default Mode is Author
-- **WHEN** a user opens the browser UI with no Mode preference stored
-- **THEN** the Mode control reads **Author**
-- **AND** the Follow control is enabled
-- **AND** the `Change Overview` headline labels the score as "Reviewer burden forecast"
-
-#### Scenario: Selected Mode persists across reload
-- **WHEN** a user selects **Review** in the Mode control
-- **AND** the user reloads the page
-- **THEN** the Mode control still reads **Review**
-- **AND** the Follow control is disabled with an affordance naming Mode as the reason
-
-#### Scenario: Switching Author to Review disables Follow
-- **WHEN** the user is in **Author** with Follow enabled
-- **AND** the user switches the Mode control to **Review**
-- **THEN** Follow becomes disabled
-- **AND** the Follow control is rendered as not interactive
-
-#### Scenario: Switching Review to Author makes Follow available without auto-enabling it
-- **WHEN** the user is in **Review** and switches the Mode control to **Author**
-- **THEN** the Follow control becomes interactive again
-- **AND** Follow is not automatically turned on
-
-#### Scenario: Mode does not change the score value or level
-- **WHEN** the same Change is being reviewed
-- **AND** the user toggles the Mode control between **Author** and **Review**
-- **THEN** the numeric review-burden score is identical in both Modes
-- **AND** the review-burden level (`low`, `medium`, or `high`) is identical in both Modes
-- **AND** the score drivers and thresholds shown in the score-explanation preview are identical in both Modes
-
-#### Scenario: Author Mode labels the score as a reviewer burden forecast
-- **WHEN** Mode is **Author**
-- **THEN** the `Change Overview` pane labels the review-burden score as "Reviewer burden forecast"
-
-#### Scenario: Review Mode labels the score as a change review burden
-- **WHEN** Mode is **Review**
-- **THEN** the `Change Overview` pane labels the review-burden score as "Change review burden"
-
-### Requirement: Compose sidebar panes per Mode with independent persistence
-The browser UI SHALL expose a Mode-aware pane catalog. The Author Mode catalog SHALL include `Change Overview` and `Files`. The Review Mode catalog SHALL include `Change Overview`, `Files`, and `Git Log`. The panels-restore control SHALL list only panes that belong to the active Mode's catalog. Pane visibility, per-pane collapse, and vertical pane sizing SHALL persist separately for each Mode (e.g. under distinct `localStorage` keys per Mode), so each Mode independently remembers its own layout. Switching Mode MUST re-read the persisted state for the destination Mode and re-render the sidebar.
-
-#### Scenario: Author Mode does not show Git Log
-- **WHEN** Mode is **Author**
-- **THEN** the sidebar pane stack does not include a `Git Log` pane
-- **AND** the panels-restore control does not list `Git Log` as a restorable pane
-
-#### Scenario: Review Mode shows Git Log
-- **WHEN** Mode is **Review**
-- **THEN** the sidebar pane stack includes a `Git Log` pane
-- **AND** the panels-restore control lists `Git Log` as a restorable pane
-
-#### Scenario: Pane state persists separately per Mode
-- **WHEN** the user hides or resizes a pane while Mode is **Author**
-- **AND** the user switches Mode to **Review**, makes a different pane state change, and switches back to **Author**
-- **THEN** the Author pane state is restored to what the user left in **Author**
-- **AND** the Review pane state remains as the user left it in **Review**
-
-### Requirement: Make the active Mode visually unambiguous
-The browser UI SHALL make the active Mode visually distinguishable beyond the Mode segment toggle itself. The differentiation MUST be structural and typographic so that it remains legible across future theming work; it MUST NOT rely on chromatic accent alone. The differentiation SHALL include at minimum: a Mode-aware sidebar brand subtitle, a persistent Mode pill in the sidebar brand area, mode-glyph icons inside the Mode segments, a Mode-aware connection-indicator label and dot animation when the live channel is connected, and Mode-aware preview chrome. Switching Mode MUST update all of these affordances together.
-
-#### Scenario: Sidebar brand subtitle reflects the active Mode
-- **WHEN** the Mode is **Author**
-- **THEN** the sidebar brand subtitle reads "Authoring session"
-- **WHEN** the Mode is switched to **Review**
-- **THEN** the sidebar brand subtitle reads "Review session"
-
-#### Scenario: Persistent Mode pill reflects the active Mode
-- **WHEN** the Mode is **Author**
-- **THEN** a persistent pill in the sidebar brand area reads "Authoring"
-- **WHEN** the Mode is switched to **Review**
-- **THEN** the persistent pill reads "Reviewing"
-
-#### Scenario: Toolbar Mode segments carry mode-glyph icons
-- **WHEN** the Mode toggle is rendered
-- **THEN** the Author segment includes an icon distinct from the Review segment
-- **AND** both icons are present regardless of which Mode is currently active
-
-#### Scenario: Connection indicator differs in Review when the channel is live
-- **WHEN** Mode is **Author** and the live channel is connected
-- **THEN** the connection indicator shows the existing "Online" treatment with a pulsing dot
-- **WHEN** Mode is switched to **Review** while the live channel is connected
-- **THEN** the connection indicator label changes to a "Reading" wording that signals auto-refresh is paused
-- **AND** the indicator dot stops pulsing
-
-#### Scenario: Preview area carries a framed-read treatment in Review
-- **WHEN** Mode is **Review**
-- **THEN** the preview area carries a Mode-specific chrome treatment (e.g. an inset frame)
-- **WHEN** Mode is switched back to **Author**
-- **THEN** the Mode-specific preview chrome is removed and the preview returns to its default appearance
-
-### Requirement: Provide a Files-pane filter chip with per-Mode defaults and persistence
-
-The browser UI SHALL render a segmented binary chip in the `Files` pane header that toggles between `All` and `Changed`. The chip MUST be visually positioned beside the existing file count display so the relationship between filter state and the count is legible. The chip's default state SHALL depend on the active Mode: in **Review** Mode the default state SHALL be `Changed`; in **Author** Mode the default state SHALL be `All`. The chip's selected state SHALL persist across reloads in the same browser for that origin, independently per Mode (so Author and Review remember their own filter state). When Mode is switched, the chip state for the destination Mode MUST be read from persisted storage (or applied default if no persisted value exists) and the tree MUST re-render against the destination Mode's chip state.
+The browser UI SHALL render a segmented binary chip in the `Files` pane header that toggles between `All` and `Changed`. The chip MUST be visually positioned beside the existing file count display so the relationship between filter state and the count is legible. The chip's default state on first boot SHALL be `All`. The chip's selected state SHALL persist across reloads in the same browser for that origin under a single storage key (no per-Mode partitioning).
 
 When the filter is `Changed` and the union `reviewLoad.changedFiles ∪ reviewLoad.ignoredFiles` does not intersect any path the tree would otherwise render, the `Files` pane body SHALL render an empty-state message in place of the tree. The empty-state copy SHALL name the resolved review base (e.g. `No changes vs origin/main`) when `reviewLoad.status === "available"`. When `reviewLoad.status` is `"non-git"` or `"unavailable"`, the empty-state copy SHALL state that the Changed filter is unavailable because no git repository is present. The empty state MUST disappear and the tree MUST return as soon as the filter is toggled to `All` OR the change set becomes non-empty.
 
-The chip SHALL be operable by mouse and keyboard activation following the existing pane-control conventions in this capability. The chip MUST NOT modify Follow-mode state, Mode state, pane visibility, or any other sibling control; it affects only the rendered path set in the `Files` pane.
+The chip SHALL be operable by mouse and keyboard activation following the existing pane-control conventions in this capability. The chip MUST NOT modify Follow state, pane visibility, or any other sibling control; it affects only the rendered path set in the `Files` pane.
 
 #### Scenario: Chip renders in the Files-pane header beside the file count
 - **WHEN** the `Files` pane is rendered
 - **THEN** a segmented chip with options `All` and `Changed` is visible in the pane header
 - **AND** the chip is positioned beside the file count display
 
-#### Scenario: Default state is `Changed` in Review mode
-- **WHEN** the user opens uatu in Review mode for the first time (no persisted filter state for Review)
-- **THEN** the chip's selected state is `Changed`
-- **AND** the tree is filtered to the change set on first paint
-
-#### Scenario: Default state is `All` in Author mode
-- **WHEN** the user opens uatu in Author mode for the first time (no persisted filter state for Author)
+#### Scenario: Default state is `All` on first boot
+- **WHEN** the user opens uatu for the first time (no persisted filter state)
 - **THEN** the chip's selected state is `All`
 - **AND** the tree renders the full path set on first paint
 
-#### Scenario: Filter state persists per Mode across reloads
-- **WHEN** the user is in Author mode and toggles the chip to `Changed`
+#### Scenario: Filter state persists across reloads
+- **WHEN** the user toggles the chip to `Changed`
 - **AND** reloads the page
 - **THEN** the chip reads `Changed` and the tree is filtered
-- **AND** when the user then switches to Review mode, Review's persisted state (or default `Changed`) applies — Author's `Changed` does NOT leak into Review's persisted state, and vice versa
-
-#### Scenario: Switching Mode re-reads the destination Mode's filter state
-- **WHEN** the user has Author filter state `All` and Review filter state `Changed`
-- **AND** the user is in Author with the chip reading `All`
-- **AND** the user switches to Review
-- **THEN** the chip reads `Changed`
-- **AND** the tree re-renders against Review's filter state
 
 #### Scenario: Empty state names the review base when the change set is empty
 - **WHEN** the filter is `Changed`
@@ -418,9 +287,8 @@ The chip SHALL be operable by mouse and keyboard activation following the existi
 - **THEN** the empty state is removed
 - **AND** the full tree renders
 
-#### Scenario: Chip does NOT alter Follow-mode or Mode
+#### Scenario: Chip does NOT alter Follow-mode state
 - **WHEN** the user toggles the chip
-- **THEN** the active Mode is unchanged
-- **AND** the Follow-mode toggle state is unchanged
+- **THEN** the Follow-mode toggle state is unchanged
 - **AND** the active document selection is unchanged (unless follow-mode subsequently auto-switches for unrelated reasons)
 

@@ -1,14 +1,28 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-export const E2E_PORT = Number.parseInt(process.env.UATU_E2E_PORT ?? "4173", 10);
-export const E2E_FIXTURE_ROOT = path.resolve(process.cwd(), "testdata", "watch-docs");
-export const E2E_WORKSPACE_ROOT = path.resolve(process.cwd(), ".e2e", "watch-docs");
+// Test-harness configuration. Both port and workspace path are read lazily
+// from env so per-worker fixtures can override them per Playwright worker.
+// Each worker process inherits a unique `UATU_E2E_PORT` / `UATU_E2E_WORKSPACE`
+// from its server-spawn fixture, then reads them via these helpers.
 
-export async function resetE2EWorkspace(): Promise<void> {
-  await fs.mkdir(E2E_WORKSPACE_ROOT, { recursive: true });
-  await emptyDirectory(E2E_WORKSPACE_ROOT);
-  await copyDirectoryContents(E2E_FIXTURE_ROOT, E2E_WORKSPACE_ROOT);
+export function workspaceRoot(): string {
+  return (
+    process.env.UATU_E2E_WORKSPACE ?? path.resolve(process.cwd(), ".e2e", "watch-docs")
+  );
+}
+
+export function e2ePort(): number {
+  return Number.parseInt(process.env.UATU_E2E_PORT ?? "4173", 10);
+}
+
+export const E2E_FIXTURE_ROOT = path.resolve(process.cwd(), "testdata", "watch-docs");
+
+export async function resetE2EWorkspace(workspaceRootOverride?: string): Promise<void> {
+  const root = workspaceRootOverride ?? workspaceRoot();
+  await fs.mkdir(root, { recursive: true });
+  await emptyDirectory(root);
+  await copyDirectoryContents(E2E_FIXTURE_ROOT, root);
   // Ensure the root README has the latest mtime so it becomes the default
   // selection. Otherwise the directory-copy iteration order can put a nested
   // file's mtime later, which would (correctly) trigger reveal-on-load and
@@ -16,11 +30,11 @@ export async function resetE2EWorkspace(): Promise<void> {
   // Use a timestamp 10s in the future so that even after second-precision
   // truncation at the fs layer, it's strictly newer than every copied file.
   const future = new Date(Date.now() + 10_000);
-  await fs.utimes(path.join(E2E_WORKSPACE_ROOT, "README.md"), future, future);
+  await fs.utimes(path.join(root, "README.md"), future, future);
 }
 
 export function workspacePath(...parts: string[]): string {
-  return path.join(E2E_WORKSPACE_ROOT, ...parts);
+  return path.join(workspaceRoot(), ...parts);
 }
 
 async function emptyDirectory(directoryPath: string): Promise<void> {

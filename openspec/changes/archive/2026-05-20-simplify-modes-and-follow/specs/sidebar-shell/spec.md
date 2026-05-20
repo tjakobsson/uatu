@@ -1,0 +1,244 @@
+## MODIFIED Requirements
+
+### Requirement: Render review-load summary in the Change Overview pane
+The browser UI SHALL render repository and review-load data in the `Change Overview` pane when that data is available. The pane MUST show whether the watched root is inside a git repository, the current branch or detached commit, dirty status, resolved review base or fallback mode, cognitive-load level, and score. The pane MUST NOT list raw mechanical statistics such as changed-file count, touched-line count, diff-hunk count, or directory spread directly in the sidebar. When the workspace contains at least one untracked entry — including entries excluded from the score by `.uatu.json review.ignoreAreas` — the pane MUST additionally render a categorical indicator that surfaces the presence of untracked files; the indicator answers a workspace-state question ("are there untracked files at all?") and therefore considers both `reviewLoad.changedFiles` and `reviewLoad.ignoredFiles`. That indicator MUST NOT include a count and MUST NOT render when no untracked entries are present in either array. The score MUST be clickable and MUST open a detailed scoring explanation in the main preview area. The pane MUST label the score as review burden or cognitive load and MUST NOT present it as code quality or correctness. The score's headline label SHALL be a single mode-independent string: "Review burden". The numeric score, level pill, drivers, thresholds, configured area lists, warnings, the untracked categorical indicator, and the contents of the score-explanation preview MUST remain consistent across sessions. The score-explanation preview MUST, when `reviewLoad.changedFiles` contains untracked entries, expose the untracked subcount as a distinct factual change-shape input alongside the existing mechanical drivers; this subcount describes the score and therefore MUST be sourced from `changedFiles` only (excluding `ignoredFiles`). It MUST appear only inside the score-explanation preview and MUST NOT alter the numeric review-burden score. If review-load data is unavailable, the pane SHALL show a clear unavailable or non-git message instead of failing to render.
+
+#### Scenario: Git-backed change has review-load data
+- **WHEN** the browser receives repository metadata and a computed review-load result
+- **THEN** the `Change Overview` pane shows the branch or detached commit, dirty status, review base, cognitive-load level, and score
+- **AND** the pane does not show raw mechanical statistics such as `Changed files`, `Touched lines`, `Diff hunks`, or `Directory spread`
+
+#### Scenario: Watch root has no git repository
+- **WHEN** the browser receives a non-git repository state for the watched root
+- **THEN** the `Change Overview` pane states that no git repository is available
+- **AND** the document preview and `Files` pane remain usable
+
+#### Scenario: Review settings contain a warning
+- **WHEN** the review-load result includes a settings warning such as invalid `.uatu.json`
+- **THEN** the `Change Overview` pane displays that warning
+- **AND** the pane still displays any available default review-load result
+
+#### Scenario: Score drivers distinguish configured and factual inputs
+- **WHEN** a user clicks the review-burden score
+- **THEN** the main preview renders configured risk, support, and ignore area matches with their configured area names
+- **AND** mechanical drivers such as files, hunks, lines, and directories are labeled as factual change-shape inputs
+- **AND** Follow mode is disabled
+- **AND** the browser URL changes to a linkable score-explanation state
+
+#### Scenario: Score explanation remains active during refresh
+- **WHEN** a user has opened the score explanation from `Change Overview`
+- **AND** the watch session receives a file-change refresh
+- **THEN** the main preview remains on the score explanation
+- **AND** Follow mode remains disabled
+
+#### Scenario: Score explanation compares the numeric score
+- **WHEN** a user opens the score explanation from `Change Overview`
+- **THEN** the main preview explains that the score is an additive review-burden index, not a percentage or code-quality score
+- **AND** the preview shows the configured or default low, medium, and high thresholds
+- **AND** the score total and threshold cards use the corresponding low, medium, and high background colors
+- **AND** the preview explains whether the current score is below or above those thresholds
+- **AND** the preview does not render a separate `Changed Files` section
+
+#### Scenario: Mechanical statistics have inline explanations
+- **WHEN** a user opens the score explanation from `Change Overview`
+- **THEN** mechanical statistics such as `Changed files`, `Touched lines`, `Diff hunks`, and `Directory spread` expose help markers
+- **AND** hovering or focusing a help marker shows a tooltip that explains what that statistic means in review-burden scoring
+- **AND** the explanation does not require clicking the marker
+
+#### Scenario: Headline label is a single mode-independent string
+- **WHEN** the `Change Overview` pane is rendered with review-load data
+- **THEN** the score's headline label reads "Review burden"
+- **AND** no Mode-dependent string variant is rendered
+
+#### Scenario: Untracked categorical indicator appears when untracked files are present
+- **WHEN** the changed-files list received by the browser contains at least one entry with the untracked status
+- **THEN** the `Change Overview` pane renders a categorical indicator that the change includes untracked files
+- **AND** the indicator does not display a count
+- **AND** the rest of the pane (branch, commit, dirty status, base, score, level) renders unchanged
+
+#### Scenario: Untracked categorical indicator is absent when no untracked files are present
+- **WHEN** the changed-files list received by the browser contains no entries with the untracked status
+- **THEN** the `Change Overview` pane does NOT render the untracked categorical indicator
+- **AND** the pane shows no placeholder, empty row, or "0 untracked" affordance for that category
+
+#### Scenario: Score-explanation preview breaks out the untracked subcount
+- **WHEN** the changed-files list contains at least one untracked entry
+- **AND** the user opens the score explanation from `Change Overview`
+- **THEN** the preview renders the untracked subcount as a distinct factual change-shape input
+- **AND** the preview's numeric review-burden score is identical to the score that would be computed if untracked entries had been reported with status `"A"` rather than `"?"`
+
+#### Scenario: Untracked indicator renders when all untracked files are ignored by `ignoreAreas`
+- **WHEN** the changed-files list contains no untracked entries
+- **AND** the ignored-files list contains at least one untracked entry (i.e. an untracked path that matches a `.uatu.json review.ignoreAreas` pattern)
+- **THEN** the `Change Overview` pane renders the untracked categorical indicator
+- **AND** the score-explanation preview does NOT render the untracked subcount row (the score is unaffected by ignored entries)
+
+### Requirement: Organize sidebar content into resizable panes
+The browser UI SHALL organize the expanded sidebar as a stack of panes. The pane catalog SHALL include `Change Overview`, `Files`, and `Git Log`, all available regardless of session state — the user MAY toggle any pane's visibility via the per-pane visibility menu. The document tree SHALL render inside the `Files` pane and MUST preserve existing document selection and follow-mode interaction (see the `follow-mode` capability). Tree-internal behaviors that are owned by the `@pierre/trees` library — directory expansion handling, binary-entry presentation, and any future row-annotation behavior such as relative-time labels — are governed by the `document-tree` capability rather than this requirement, and this requirement no longer asserts that they survive the library swap. Pane visibility, collapsed state, and vertical sizing SHALL persist across reloads in the same browser for that origin under a single set of storage keys (no per-Mode partitioning). The pane stack SHALL fill the available expanded-sidebar height and MUST NOT force the whole sidebar body to scroll. Scrollbars used inside panes and preview overflow regions SHOULD be thin and visually light while remaining discoverable. The existing whole-sidebar collapse and expand controls MUST remain separate from per-pane visibility and collapse controls.
+
+#### Scenario: Sidebar opens with default panes
+- **WHEN** a user opens the browser UI with no pane preferences stored
+- **THEN** the expanded sidebar shows `Change Overview`, `Files`, and `Git Log` panes
+- **AND** the `Files` pane contains the document tree for watched roots
+
+#### Scenario: Selecting a document from the Files pane
+- **WHEN** a user selects a non-binary document from the `Files` pane tree
+- **THEN** the preview loads that document
+- **AND** Follow mode is disabled (Rule A of the `follow-mode` capability)
+
+#### Scenario: Pane visibility can be changed and restored
+- **WHEN** a user hides a sidebar pane
+- **THEN** that pane is removed from the expanded sidebar stack
+- **AND** a sidebar panels control allows the user to show that pane again
+
+#### Scenario: Pane size can be adjusted
+- **WHEN** a user resizes one sidebar pane relative to another
+- **THEN** the pane stack updates the affected pane heights
+- **AND** the pane stack remains within the current expanded-sidebar height
+- **AND** the updated pane sizes persist across reloads in the same browser for that origin
+
+#### Scenario: Pane content scrolls inside its allocated pane
+- **WHEN** pane content exceeds that pane's allocated height
+- **THEN** that pane body scrolls internally
+- **AND** the whole sidebar body does not gain a scrollbar
+- **AND** the scrollbar is thinner and lighter than the default heavy pane treatment where platform styling allows it
+
+#### Scenario: Spare height is assigned to the Files pane
+- **WHEN** the expanded pane stack has more vertical space than fixed contextual panes require
+- **THEN** the `Files` pane receives the spare space
+- **AND** the `Git Log` pane does not show excessive empty space beneath its content
+
+#### Scenario: Whole-sidebar collapse remains separate
+- **WHEN** a user collapses the whole sidebar
+- **THEN** the sidebar shrinks to the existing narrow rail
+- **AND** per-pane visibility and sizing preferences are preserved for when the sidebar is expanded again
+
+### Requirement: Render bounded commit history in the Git Log pane
+The browser UI SHALL render the bounded commit log for the selected or only detected repository in the `Git Log` pane. Each visible commit row MUST show at minimum the short SHA and subject. Each visible commit row MUST be a same-origin link to that commit's preview URL so standard browser link affordances are available. If multiple repositories are detected, the pane SHALL make clear which repository each log belongs to or provide a repository grouping/selection. The pane SHALL provide a history-length control for selecting how many commit rows are visible from the bounded data supplied by the server. The `Git Log` pane body SHALL scroll internally when the visible commit rows exceed its allocated height. If no commit log is available, the pane SHALL show an empty or unavailable state instead of failing to render. The Git Log pane is available at all times — it is not gated by Mode.
+
+#### Scenario: Single repository has commits
+- **WHEN** the browser receives a commit log for one detected repository
+- **THEN** the `Git Log` pane lists recent commits for that repository
+- **AND** each row includes the commit short SHA and subject
+- **AND** each row links to a commit preview URL containing that repository id and commit sha
+
+#### Scenario: Commit history length can be changed
+- **WHEN** a user selects a different history length in the `Git Log` pane
+- **THEN** the pane updates the visible commit rows to that selected limit
+- **AND** the selected history length persists across reloads in the same browser for that origin
+
+#### Scenario: Git Log pane scrolls internally
+- **WHEN** the visible commit rows exceed the `Git Log` pane height
+- **THEN** the `Git Log` pane body scrolls
+- **AND** the pane stack remains within the expanded-sidebar height
+
+#### Scenario: Commit click renders full message in preview
+- **WHEN** a user clicks a commit row in the `Git Log` pane without a modifier key and without requesting a new browsing context
+- **THEN** the main preview renders that commit's full commit message
+- **AND** Follow mode is disabled
+- **AND** the browser URL updates to the commit preview URL
+- **AND** a new entry is added to the browser history stack
+- **AND** no hover-only popover is required to read the full message
+
+#### Scenario: Commit row supports browser link affordances
+- **WHEN** a user uses a browser link affordance on a commit row such as copy link, open in new tab, or a modifier-click
+- **THEN** the commit row behaves as a normal same-origin link
+- **AND** the SPA click interception does not prevent the browser's requested link behavior
+
+#### Scenario: Multiple repositories have commits
+- **WHEN** the browser receives commit logs for multiple detected repositories
+- **THEN** the `Git Log` pane separates or labels commits by repository
+- **AND** the user can tell which repository a commit belongs to
+
+#### Scenario: Commit log is unavailable
+- **WHEN** no commit log is available for the watched repository context
+- **THEN** the `Git Log` pane displays an empty or unavailable state
+- **AND** the rest of the sidebar remains usable
+
+### Requirement: Animate the live connection indicator
+While the browser UI is connected to the live update channel, the connection indicator SHALL animate with a subtle pulse so the live state is visually distinguishable from a static label. When the channel enters a reconnecting state, the pulse MUST stop and the indicator MUST communicate the reconnecting state without animation. The pulse MUST be disabled when the user's operating system requests reduced motion. The indicator's label MUST read `Connected` while the channel is open, `Reconnecting` while it is recovering, and `Connecting` before the first successful connect. The indicator MUST expose a hover tooltip whose text describes the current connection state to the uatu backend (for example, `Connected to the uatu backend`). The connection indicator SHALL be rendered inside the sidebar header, stacked beneath the `UatuCode` wordmark, so the indicator visually belongs to the application chrome rather than the per-document preview controls. As a tradeoff of this placement, collapsing the sidebar MAY hide the indicator along with the rest of the sidebar chrome. The indicator's label and animation MUST NOT vary by any Mode-equivalent state — the SPA is a single mode.
+
+#### Scenario: The indicator pulses while connected to the server
+- **WHEN** the browser UI's event channel is open
+- **THEN** the connection indicator displays a pulsing animation labeled `Connected`
+- **AND** the indicator's hover tooltip reads `Connected to the uatu backend`
+
+#### Scenario: Reconnecting stops the pulse
+- **WHEN** the browser UI's event channel reports an error and enters a reconnecting state
+- **THEN** the indicator stops pulsing
+- **AND** the label reads `Reconnecting`
+- **AND** the hover tooltip describes the reconnecting state
+
+#### Scenario: Reduced-motion users see no animation
+- **WHEN** the operating system reports a reduced-motion preference
+- **THEN** the indicator does not pulse even while connected
+- **AND** the live state is still communicated (e.g. via color and label)
+
+#### Scenario: Indicator lives under the UatuCode wordmark
+- **WHEN** the SPA renders the sidebar header
+- **THEN** the connection indicator is rendered inside `.sidebar-header > .brand > .brand-text`, immediately below the `UatuCode` wordmark
+- **AND** the connection indicator is NOT rendered in the preview toolbar
+
+#### Scenario: Indicator hides when the sidebar is collapsed
+- **WHEN** a user collapses the sidebar
+- **THEN** the connection indicator is no longer visible (it lives inside the sidebar chrome that the collapse hides)
+
+### Requirement: Provide a Files-pane filter chip with single persisted state
+
+The browser UI SHALL render a segmented binary chip in the `Files` pane header that toggles between `All` and `Changed`. The chip MUST be visually positioned beside the existing file count display so the relationship between filter state and the count is legible. The chip's default state on first boot SHALL be `All`. The chip's selected state SHALL persist across reloads in the same browser for that origin under a single storage key (no per-Mode partitioning).
+
+When the filter is `Changed` and the union `reviewLoad.changedFiles ∪ reviewLoad.ignoredFiles` does not intersect any path the tree would otherwise render, the `Files` pane body SHALL render an empty-state message in place of the tree. The empty-state copy SHALL name the resolved review base (e.g. `No changes vs origin/main`) when `reviewLoad.status === "available"`. When `reviewLoad.status` is `"non-git"` or `"unavailable"`, the empty-state copy SHALL state that the Changed filter is unavailable because no git repository is present. The empty state MUST disappear and the tree MUST return as soon as the filter is toggled to `All` OR the change set becomes non-empty.
+
+The chip SHALL be operable by mouse and keyboard activation following the existing pane-control conventions in this capability. The chip MUST NOT modify Follow state, pane visibility, or any other sibling control; it affects only the rendered path set in the `Files` pane.
+
+#### Scenario: Chip renders in the Files-pane header beside the file count
+- **WHEN** the `Files` pane is rendered
+- **THEN** a segmented chip with options `All` and `Changed` is visible in the pane header
+- **AND** the chip is positioned beside the file count display
+
+#### Scenario: Default state is `All` on first boot
+- **WHEN** the user opens uatu for the first time (no persisted filter state)
+- **THEN** the chip's selected state is `All`
+- **AND** the tree renders the full path set on first paint
+
+#### Scenario: Filter state persists across reloads
+- **WHEN** the user toggles the chip to `Changed`
+- **AND** reloads the page
+- **THEN** the chip reads `Changed` and the tree is filtered
+
+#### Scenario: Empty state names the review base when the change set is empty
+- **WHEN** the filter is `Changed`
+- **AND** `reviewLoad.status === "available"`
+- **AND** `reviewLoad.changedFiles ∪ reviewLoad.ignoredFiles` is empty (or intersects no tree paths)
+- **THEN** the `Files` pane body renders an empty-state message naming the resolved review base (e.g. `No changes vs origin/main`)
+- **AND** the tree itself is not rendered
+
+#### Scenario: Empty state explains unavailability in non-git contexts
+- **WHEN** the filter is `Changed`
+- **AND** `reviewLoad.status` is `"non-git"` or `"unavailable"`
+- **THEN** the `Files` pane body renders an empty-state message stating that the Changed filter is unavailable because no git repository is present
+
+#### Scenario: Toggling to `All` clears the empty state
+- **WHEN** the empty state is being shown because the change set is empty under filter `Changed`
+- **AND** the user toggles the chip to `All`
+- **THEN** the empty state is removed
+- **AND** the full tree renders
+
+#### Scenario: Chip does NOT alter Follow-mode state
+- **WHEN** the user toggles the chip
+- **THEN** the Follow-mode toggle state is unchanged
+- **AND** the active document selection is unchanged (unless follow-mode subsequently auto-switches for unrelated reasons)
+
+## REMOVED Requirements
+
+### Requirement: Provide a top-level Author/Review Mode control
+**Reason**: The Author / Review Mode distinction is removed entirely. The agent-collaboration UX is served better by a single mode whose only behavioral toggle is Follow. The Mode segmented control, mode-dependent brand subtitle, mode-dependent persistence, and mode-gated Follow availability are all deleted. Follow is now always available and is owned by the new `follow-mode` capability.
+**Migration**: At first boot after upgrade, the SPA MUST migrate persisted state by reading the legacy `uatu:mode` key (if present), discarding its value, and removing the key. The default state of the SPA after migration matches the Author-mode default of the prior implementation. No CLI input is required.
+
+### Requirement: Compose sidebar panes per Mode with independent persistence
+**Reason**: With Mode removed, the pane catalog collapses to a single universal set (`Change Overview`, `Files`, `Git Log`), and per-pane state lives under a single set of storage keys. Per-Mode persistence is no longer meaningful.
+**Migration**: At first boot, the SPA MUST migrate `uatu:panes:author` to the new `uatu:panes` key if `uatu:panes` is not already set, then delete both `uatu:panes:author` and `uatu:panes:review`. The Author layout is preferred over the Review layout because most users spend the bulk of their time in the Author equivalent of the new single mode. The Review layout is discarded (it is reachable by re-toggling per-pane visibility from the new defaults).
+
+### Requirement: Make the active Mode visually unambiguous
+**Reason**: With Mode removed, there is no "active Mode" to disambiguate. The mode-aware sidebar brand subtitle, mode pill, mode-glyph icons, mode-aware connection-indicator label, and mode-aware preview chrome are all deleted. The brand area renders a single static subtitle ("Local document watch") and the connection indicator's label and animation are uniform across the application.
+**Migration**: No user input is required. The SPA's first paint after upgrade renders the unified chrome.

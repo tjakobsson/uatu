@@ -12,9 +12,15 @@ import manifestAsset from "../../src/assets/manifest.webmanifest" with { type: "
 import swAsset from "../../src/assets/sw.js" with { type: "file" };
 
 import index from "../../src/index.html";
-import { E2E_PORT, E2E_WORKSPACE_ROOT, resetE2EWorkspace } from "./config";
+import { e2ePort, resetE2EWorkspace, workspaceRoot } from "./config";
+
+// Per-process workspace root. Captured once at startup from the lazy
+// workspaceRoot() helper (which reads process.env.UATU_E2E_WORKSPACE if
+// set, falling back to the default). Per-worker test harnesses inject a
+// distinct value via env so each worker's server lives in its own dir.
+const E2E_WORKSPACE_ROOT = workspaceRoot();
+const E2E_PORT = e2ePort();
 import { safeGit } from "../../src/review/load";
-import { isMode, type Mode } from "../../src/shared/types";
 import {
   createNavigationFetchHandler,
   createWatchSession,
@@ -35,7 +41,6 @@ import { createTerminalServer } from "../../src/terminal/server";
 
 let activeFilePath: string | null = null;
 let activeRespectGitignore = true;
-let activeStartupMode: Mode | undefined;
 let activeFollow = true;
 let activeWorkspaceRoot = E2E_WORKSPACE_ROOT;
 let activeEntries: WatchEntry[] = [];
@@ -54,7 +59,6 @@ async function handleE2EReset(request: Request): Promise<Response> {
     nonGit?: boolean;
     uatuConfig?: unknown;
     respectGitignore?: boolean;
-    startupMode?: string;
     follow?: boolean;
   } = {};
   try {
@@ -70,13 +74,7 @@ async function handleE2EReset(request: Request): Promise<Response> {
   activeFilePath = typeof body.file === "string" ? body.file : null;
   activeRespectGitignore =
     typeof body.respectGitignore === "boolean" ? body.respectGitignore : true;
-  activeStartupMode = isMode(body.startupMode) ? body.startupMode : undefined;
-  // Mirror the CLI behavior: --mode=review forces follow off.
-  activeFollow = activeStartupMode === "review"
-    ? false
-    : typeof body.follow === "boolean"
-      ? body.follow
-      : true;
+  activeFollow = typeof body.follow === "boolean" ? body.follow : true;
 
   const previousWorkspaceRoot = activeWorkspaceRoot;
   activeWorkspaceRoot = E2E_WORKSPACE_ROOT;
@@ -257,7 +255,6 @@ async function createSession(options: { resetWorkspace: boolean }) {
   const session = createWatchSession(entries, activeFollow, {
     usePolling: true,
     respectGitignore: activeRespectGitignore,
-    startupMode: activeStartupMode,
     terminalEnabled,
   });
   await session.start();

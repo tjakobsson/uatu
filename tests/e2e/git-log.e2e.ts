@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures";
 
 import { treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";
@@ -13,7 +13,7 @@ test.afterEach(async ({ request }) => {
 
 test("Git Log commit links support URL history and reloads", async ({ page, request }) => {
   // Git Log lives in the Review-mode pane catalog only.
-  await request.post("/__e2e/reset", { data: { git: true, startupMode: "review" } });
+  await request.post("/__e2e/reset", { data: { git: true } });
   await page.goto("/");
   await expect(page.locator("#preview-path")).toHaveText("README.md");
 
@@ -55,7 +55,7 @@ test("Git Log commit links support URL history and reloads", async ({ page, requ
 
 test("commit preview URLs show an unavailable state when data is missing", async ({ page, request }) => {
   // Git Log assertion only meaningful in Review.
-  await request.post("/__e2e/reset", { data: { git: true, startupMode: "review" } });
+  await request.post("/__e2e/reset", { data: { git: true } });
   await page.goto("/?repository=missing-repo&commit=deadbeef");
 
   await expect(page.locator("#preview-title")).toHaveText("Commit preview unavailable");

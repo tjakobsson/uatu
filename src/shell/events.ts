@@ -3,7 +3,7 @@
 // stale-hint behavior, follow-mode auto-switching, and on-disk-change reloads
 // lives in here, intentionally close to its trigger (the SSE message).
 
-import { applyStaleHint } from "./stale-hint-mount";
+import { chooseSelectionForFileEvent } from "./follow";
 import { findDocumentById, syncStateGeneration } from "./storage";
 import { forgetDocumentCache, loadDocument } from "../preview/mount";
 import { renderEmptyPreview } from "../preview/empty";
@@ -11,11 +11,9 @@ import { renderReviewScoreDetails } from "../sidebar/review-score-mount";
 import { renderSidebar } from "../sidebar/shell";
 import {
   hasDocument,
-  nextSelectedDocumentId,
   shouldRefreshPreview,
   type StatePayload,
 } from "../shared/types";
-import { nextStaleHint } from "./stale-hint";
 import { setConnectionState } from "./connection";
 import { replaceSelection } from "./history";
 import { appState } from "./state";
@@ -59,31 +57,8 @@ export function connectEvents() {
       return;
     }
 
-    // Review mode contract: file-system events MUST NOT switch the active
-    // preview, and the active file MUST NOT silently re-render in place when
-    // it changes on disk. Sidebar / Change Overview / Git Log refresh
-    // normally; only preview selection and reload are gated. The reducer
-    // computes the stale-content hint state so the reviewer can refresh on
-    // their own clock.
-    if (appState.mode === "review") {
-      const activeId = appState.selectedId;
-      const activeStillExists = activeId
-        ? hasDocument(payload.roots, activeId)
-        : true;
-      applyStaleHint(
-        nextStaleHint(appState.staleHint, {
-          kind: "file-event",
-          mode: "review",
-          activeId,
-          changedId: payload.changedId,
-          activeStillExists,
-        }),
-      );
-      renderSidebar();
-      return;
-    }
-
-    appState.selectedId = nextSelectedDocumentId(
+    // Rule C/D selection decision (see follow-mode capability).
+    appState.selectedId = chooseSelectionForFileEvent(
       payload.roots,
       previousSelectedId,
       payload.changedId,

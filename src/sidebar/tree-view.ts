@@ -65,12 +65,15 @@ export class TreeView {
   // selection changes leave it intact. Calling resetPaths is what wipes the
   // library's internal expansion state, so we want to do it only when needed.
   private lastPathsKey = "";
-  // While true, the library's onSelectionChange callback is treated as an
-  // echo of our own programmatic select/deselect calls and is NOT forwarded
-  // to the routing flow. Used to guard `revealAndSelect`, which performs
-  // multiple library operations in a row (deselect previous, expand
-  // ancestors, select leaf) — each of which can fire the callback.
-  private duringProgrammaticUpdate = false;
+  // Path-narrow guard for the library's `onSelectionChange` callback. While
+  // we're performing a programmatic update, this holds the path we just
+  // asked the library to select. A callback echoing that same path is
+  // suppressed (it's the library reporting our own work back to us). A
+  // callback for a DIFFERENT path is forwarded — that's a real user click
+  // that happened to land during the update window. The earlier coarse
+  // boolean would have silently dropped those clicks; the path-narrow
+  // version preserves them.
+  private expectedSelectedPath: string | null = null;
   // Tracks the active filter kind so we can detect All↔Changed transitions
   // and snapshot/restore the user's full-tree expansion state across them.
   private lastFilterKind: "all" | "changed" = "all";
@@ -197,32 +200,40 @@ export class TreeView {
     this.renderedBinaryLeafCount = renderedBinaryLeafCount;
 
     if (this.tree === null) {
-      this.tree = new FileTree({
-        paths: renderedPaths,
-        initialExpansion: "closed",
-        initialExpandedPaths: autoExpanded,
-        initialSelectedPaths: initialSelectedPath ? [initialSelectedPath] : [],
-        icons: { set: "standard", colored: true },
-        onSelectionChange: selected => this.handleSelectionChange(selected),
+      // Initial mount. The library can fire `onSelectionChange` synchronously
+      // during `tree.render()` because we pass `initialSelectedPaths` to the
+      // constructor — without the programmatic-update guard, that callback
+      // would race the SPA's boot-time `followEnabled = true` assignment and
+      // Rule A could fire as if the user had clicked. See follow-mode spec
+      // ("Tree-mount user-click guard").
+      this.withProgrammaticUpdate(initialSelectedPath, () => {
+        this.tree = new FileTree({
+          paths: renderedPaths,
+          initialExpansion: "closed",
+          initialExpandedPaths: autoExpanded,
+          initialSelectedPaths: initialSelectedPath ? [initialSelectedPath] : [],
+          icons: { set: "standard", colored: true },
+          onSelectionChange: selected => this.handleSelectionChange(selected),
+        });
+        // Pass our container AS the file-tree host (not as a wrapper around a
+        // fresh `<file-tree-container>` element). The library calls
+        // attachShadow() on whatever we give it here — using our `#tree` div
+        // directly means its height = our container's height, which is what
+        // the library's virtualization needs to know how many rows to render.
+        this.container.innerHTML = "";
+        Object.assign(this.container.style, LIGHT_TREE_THEME);
+        this.tree.render({ fileTreeContainer: this.container });
+        // Pin the library instance to the host element so e2e tests can call
+        // `scrollToPath` to reveal virtualized rows for assertion.
+        (this.container as unknown as { __pierreFileTree: FileTree }).__pierreFileTree = this.tree;
+        this.lastPathsKey = pathsFingerprint(renderedPaths);
+        this.ensureRevealCueStyleElement();
+        this.syncFollowOverrideObserver();
+        this.applyFollowOverrideAttribute();
+        if (initialSelectedPath !== null) {
+          this.revealAndSelect(initialSelectedPath);
+        }
       });
-      // Pass our container AS the file-tree host (not as a wrapper around a
-      // fresh `<file-tree-container>` element). The library calls
-      // attachShadow() on whatever we give it here — using our `#tree` div
-      // directly means its height = our container's height, which is what
-      // the library's virtualization needs to know how many rows to render.
-      this.container.innerHTML = "";
-      Object.assign(this.container.style, LIGHT_TREE_THEME);
-      this.tree.render({ fileTreeContainer: this.container });
-      // Pin the library instance to the host element so e2e tests can call
-      // `scrollToPath` to reveal virtualized rows for assertion.
-      (this.container as unknown as { __pierreFileTree: FileTree }).__pierreFileTree = this.tree;
-      this.lastPathsKey = pathsFingerprint(renderedPaths);
-      this.ensureRevealCueStyleElement();
-      this.syncFollowOverrideObserver();
-      this.applyFollowOverrideAttribute();
-      if (initialSelectedPath !== null) {
-        this.revealAndSelect(initialSelectedPath);
-      }
       // Backstop the synchronous attribute stamp — the library may render
       // the override row on the next frame after first mount.
       if (this.followOverridePath !== null) {
@@ -231,27 +242,36 @@ export class TreeView {
       return;
     }
 
-    const nextKey = pathsFingerprint(renderedPaths);
-    if (
-      nextKey !== this.lastPathsKey
-      || previousFilterKind !== nextFilterKind
-    ) {
-      // Filesystem changed OR filter transitioned. resetPaths wipes the
-      // library's expansion state, so merge any preserved-open dirs (under
-      // All) with the new reveal set before resetting.
-      const preserved = nextFilterKind === "all" ? this.readExpandedPaths() : [];
-      const mergedReveal = mergeUnique(autoExpanded, preserved);
-      this.tree.resetPaths(renderedPaths, { initialExpandedPaths: mergedReveal });
-      this.lastPathsKey = nextKey;
-    }
+    // Update path: also wrap in the guard. resetPaths can fire
+    // onSelectionChange synchronously if the previously-selected path is no
+    // longer in the new path set, and revealAndSelect deliberately drives
+    // multiple selection mutations. Both must not be mistaken for user input.
+    this.withProgrammaticUpdate(initialSelectedPath, () => {
+      const tree = this.tree;
+      if (tree === null) return;
 
-    this.ensureRevealCueStyleElement();
-    this.syncFollowOverrideObserver();
-    this.applyFollowOverrideAttribute();
+      const nextKey = pathsFingerprint(renderedPaths);
+      if (
+        nextKey !== this.lastPathsKey
+        || previousFilterKind !== nextFilterKind
+      ) {
+        // Filesystem changed OR filter transitioned. resetPaths wipes the
+        // library's expansion state, so merge any preserved-open dirs (under
+        // All) with the new reveal set before resetting.
+        const preserved = nextFilterKind === "all" ? this.readExpandedPaths() : [];
+        const mergedReveal = mergeUnique(autoExpanded, preserved);
+        tree.resetPaths(renderedPaths, { initialExpandedPaths: mergedReveal });
+        this.lastPathsKey = nextKey;
+      }
 
-    if (initialSelectedPath !== null) {
-      this.revealAndSelect(initialSelectedPath);
-    }
+      this.ensureRevealCueStyleElement();
+      this.syncFollowOverrideObserver();
+      this.applyFollowOverrideAttribute();
+
+      if (initialSelectedPath !== null) {
+        this.revealAndSelect(initialSelectedPath);
+      }
+    });
 
     // revealAndSelect and resetPaths drive library re-renders that may not
     // be in the DOM yet by the time the synchronous applyFollowOverrideAttribute
@@ -327,36 +347,55 @@ export class TreeView {
     if (this.tree === null) {
       return;
     }
-    this.duringProgrammaticUpdate = true;
-    try {
+    this.withProgrammaticUpdate(path, () => {
+      const tree = this.tree;
+      if (tree === null) return;
       for (const ancestor of ancestorPaths(path)) {
-        const handle = this.tree.getItem(ancestor);
+        const handle = tree.getItem(ancestor);
         if (handle && handle.isDirectory() && !handle.isExpanded()) {
           handle.expand();
         }
       }
-      for (const previouslySelected of this.tree.getSelectedPaths()) {
+      for (const previouslySelected of tree.getSelectedPaths()) {
         if (previouslySelected === path) continue;
-        const handle = this.tree.getItem(previouslySelected);
+        const handle = tree.getItem(previouslySelected);
         if (handle && handle.isSelected()) {
           handle.deselect();
         }
       }
-      const leaf = this.tree.getItem(path);
+      const leaf = tree.getItem(path);
       if (leaf && !leaf.isSelected()) {
         leaf.select();
       }
+    });
+  }
+
+  // Re-entrant-safe guard. While `fn` runs, library callbacks whose path
+  // matches `expectedPath` are treated as echoes of our own select call and
+  // suppressed; callbacks for a DIFFERENT path are forwarded — that's a
+  // real user click that landed during the update window. Save/restore
+  // makes nested calls safe.
+  private withProgrammaticUpdate(expectedPath: string | null, fn: () => void): void {
+    const previous = this.expectedSelectedPath;
+    this.expectedSelectedPath = expectedPath;
+    try {
+      fn();
     } finally {
-      this.duringProgrammaticUpdate = false;
+      this.expectedSelectedPath = previous;
     }
   }
 
   private handleSelectionChange(selected: readonly string[]): void {
-    if (this.duringProgrammaticUpdate) {
-      return;
-    }
     const first = selected[0];
     if (!first) {
+      return;
+    }
+    // Suppress library echoes of our own programmatic select — the
+    // path matches what we just asked the library to do. Forward
+    // callbacks for any OTHER path, even during the update window:
+    // those are real user clicks, and dropping them would silently
+    // swallow user input under load.
+    if (first === this.expectedSelectedPath) {
       return;
     }
     const documentId = this.pathToDocumentId.get(first);
