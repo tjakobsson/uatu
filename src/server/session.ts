@@ -13,14 +13,11 @@ import { warnAboutRetiredUatuignore } from "../ignore/warning";
 import { decodeHtmlEntities, renderCodeAsHtml, renderMarkdownToHtml } from "../render/markdown";
 import { collectRepositorySnapshots, safeGit } from "../review/load";
 import {
-  DEFAULT_MODE,
   defaultDocumentId,
   findDocument,
   hasDocument,
-  isMode,
   type BuildSummary,
   type DocumentMeta,
-  type Mode,
   type RepositoryReviewSnapshot,
   type RootGroup,
   type Scope,
@@ -127,10 +124,6 @@ export type WatchOptions = {
   portExplicit: boolean;
   respectGitignore: boolean;
   force: boolean;
-  // When the user passes `--mode=author|review`, this is set and takes
-  // precedence over the SPA's persisted localStorage preference at boot.
-  // Undefined means "no startup override; let the browser decide".
-  startupMode?: Mode;
   // Diagnostic flags — see `watch-freeze-diagnostics` capability.
   debug: boolean;
   watchdogEnabled: boolean;
@@ -257,7 +250,6 @@ export function parseCommand(argv: string[]): ParsedCommand {
   let portExplicit = false;
   let respectGitignore = DEFAULT_RESPECT_GITIGNORE;
   let force = false;
-  let startupMode: Mode | undefined;
   let debug = false;
   let watchdogEnabled = true;
   let watchdogTimeoutMs: number | undefined;
@@ -342,20 +334,17 @@ export function parseCommand(argv: string[]): ParsedCommand {
     }
 
     if (arg === "--mode" || arg.startsWith("--mode=")) {
-      let value: string | undefined;
+      // Deprecation pass: accept the flag, warn, and ignore. Skip the value
+      // arg too so we don't mistake it for a watched path.
       if (arg === "--mode") {
-        value = argv[index + 1];
-        if (!value) {
+        if (!argv[index + 1]) {
           throw new Error("missing value for --mode");
         }
         index += 1;
-      } else {
-        value = arg.slice("--mode=".length);
       }
-      if (!isMode(value)) {
-        throw new Error(`invalid --mode value: '${value}' (expected 'author' or 'review')`);
-      }
-      startupMode = value;
+      process.stderr.write(
+        "warning: --mode is deprecated and has no effect; uatu is now single-mode\n",
+      );
       continue;
     }
 
@@ -364,13 +353,6 @@ export function parseCommand(argv: string[]): ParsedCommand {
     }
 
     rootPaths.push(arg);
-  }
-
-  // Review mode forces follow off — the UI gates Follow on Mode, and the
-  // session-level follow flag is the source of truth that's broadcast to the
-  // SPA at boot.
-  if (startupMode === "review") {
-    follow = false;
   }
 
   // UATU_DEBUG=1 (or any non-empty value) is equivalent to passing --debug.
@@ -393,7 +375,6 @@ export function parseCommand(argv: string[]): ParsedCommand {
       portExplicit,
       respectGitignore,
       force,
-      startupMode,
       debug,
       watchdogEnabled,
       watchdogTimeoutMs,
@@ -897,7 +878,6 @@ export function createStatePayload(
   changedId: string | null = null,
   scope: Scope = { kind: "folder" },
   repositories: RepositoryReviewSnapshot[] = [],
-  startupMode?: Mode,
   terminalEnabled?: boolean,
   terminalConfig?: TerminalConfigPayload,
 ): StatePayload {
@@ -910,7 +890,6 @@ export function createStatePayload(
     generatedAt: Date.now(),
     build: BUILD_SUMMARY,
     scope,
-    ...(startupMode ? { startupMode } : {}),
     ...(terminalEnabled === undefined ? {} : { terminal: (terminalEnabled ? "enabled" : "disabled") as TerminalAvailability }),
     ...(terminalEnabled && terminalConfig && (terminalConfig.fontFamily || terminalConfig.fontSize) ? { terminalConfig } : {}),
   };
@@ -947,7 +926,6 @@ export async function openBrowser(url: string): Promise<boolean> {
 export type WatchSessionOptions = {
   usePolling?: boolean;
   respectGitignore?: boolean;
-  startupMode?: Mode;
   terminalEnabled?: boolean;
   terminalConfig?: TerminalConfigPayload;
   // Optional metrics registry. When provided, the watch session will
@@ -1027,7 +1005,6 @@ export function createWatchSession(
   options: WatchSessionOptions = {},
 ) {
   const respectGitignore = options.respectGitignore ?? DEFAULT_RESPECT_GITIGNORE;
-  const startupMode = options.startupMode;
   const terminalEnabled = options.terminalEnabled ?? false;
   const terminalConfig: TerminalConfigPayload | undefined = options.terminalConfig;
   const terminalToken = createTerminalToken();
@@ -1105,7 +1082,7 @@ export function createWatchSession(
       stateFingerprint = nextFingerprint;
 
       if (shouldBroadcast) {
-        broadcast(createStatePayload(roots, initialFollow, changedDocumentId, scope, repositories, startupMode, terminalEnabled, terminalConfig));
+        broadcast(createStatePayload(roots, initialFollow, changedDocumentId, scope, repositories, terminalEnabled, terminalConfig));
       }
       metrics?.inc("refresh.completed_total");
       metrics?.set("refresh.last_success_at", Date.now());
@@ -1288,7 +1265,7 @@ export function createWatchSession(
     },
     setScope,
     getStatePayload(changedId: string | null = null) {
-      return createStatePayload(roots, initialFollow, changedId, scope, repositories, startupMode, terminalEnabled, terminalConfig);
+      return createStatePayload(roots, initialFollow, changedId, scope, repositories, terminalEnabled, terminalConfig);
     },
     eventsResponse() {
       let currentSubscriber: EventController | null = null;
@@ -1297,7 +1274,7 @@ export function createWatchSession(
         start(controller) {
           currentSubscriber = controller;
           subscribers.add(controller);
-          controller.enqueue(encoder.encode(`event: state\ndata: ${JSON.stringify(createStatePayload(roots, initialFollow, null, scope, repositories, startupMode, terminalEnabled, terminalConfig))}\n\n`));
+          controller.enqueue(encoder.encode(`event: state\ndata: ${JSON.stringify(createStatePayload(roots, initialFollow, null, scope, repositories, terminalEnabled, terminalConfig))}\n\n`));
         },
         cancel() {
           if (currentSubscriber) {

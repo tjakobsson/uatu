@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures";
 
 import { clickTreeFile, treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";

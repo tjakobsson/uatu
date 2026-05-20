@@ -3,7 +3,8 @@
 uatu is a local Bun-served PWA that watches a docs tree and previews
 Markdown / AsciiDoc with a review-load score and an embedded terminal.
 See `ARCHITECTURE.md` for the deeper picture (runtime, request lifecycle,
-state lifecycle, terminal subsystem, modes, how-to-extend recipes).
+state lifecycle, terminal subsystem, follow-mode rules, how-to-extend
+recipes).
 
 ## src/ folder map
 
@@ -18,8 +19,8 @@ src/
 ├── styles.d.ts     CSS module type declarations
 ├── index.html, styles.css, assets/
 │
-├── shell/          boot, events, history, url, connection, pwa, mode,
-│                   follow, state, storage, stale-hint — the
+├── shell/          boot, events, history, url, connection, pwa, follow,
+│                   follow-rules, state, storage, stale-hint — the
 │                   app-wide chrome and the appState singleton
 ├── preview/        the right pane — mounting rendered HTML, view-mode
 │                   chooser, layout (split/stacked), diff view,
@@ -59,8 +60,13 @@ src/
   Don't reach into `app.ts` for them — that path has caused
   circular-import TDZ bugs.
 - E2E tests live in `tests/e2e/` under feature-named files
-  (`mermaid.e2e.ts`, `sidebar.e2e.ts`, `mode.e2e.ts`, etc.) — there
-  is no monolithic `uatu.e2e.ts`.
+  (`mermaid.e2e.ts`, `sidebar.e2e.ts`, `document-tree.e2e.ts`, etc.) —
+  there is no monolithic `uatu.e2e.ts`.
+- **The follow-mode capability** owns the Follow toggle, its four rules
+  (Rule A user click, Rule B chip click, Rule C/D file event), and the
+  `TreeView.withProgrammaticUpdate(fn)` guard that distinguishes real
+  user clicks from library-fired callbacks. Spec at
+  `openspec/specs/follow-mode/spec.md`.
 
 ## Commands
 

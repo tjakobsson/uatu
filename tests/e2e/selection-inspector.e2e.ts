@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page } from "./fixtures";
 import { promises as fs } from "node:fs";
 
 import { workspacePath } from "./config";
@@ -125,8 +125,7 @@ async function selectSourceLineRange(
   }, options);
 }
 
-test("Source view captures a line range and shows it as @path#L<a>-<b> in Review mode", async ({ page }) => {
-  await page.locator("#mode-review").click();
+test("Source view captures a line range and shows it as @path#L<a>-<b>", async ({ page }) => {
   // README.md is already loaded in beforeEach. Flip to source view so the
   // preview body is rendered as a whole-file <pre class="uatu-source-pre">.
   await page.locator("#view-source").click();
@@ -151,7 +150,6 @@ test("Source view captures a line range and shows it as @path#L<a>-<b> in Review
 });
 
 test("Single-line source-view selection collapses to @path#L<n>", async ({ page }) => {
-  await page.locator("#mode-review").click();
   await page.locator("#view-source").click();
   await expect(page.locator("pre.uatu-source-pre")).toBeVisible();
 
@@ -162,7 +160,6 @@ test("Single-line source-view selection collapses to @path#L<n>", async ({ page 
 
 test("Clicking the captured reference copies it to the clipboard", async ({ page, context }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
-  await page.locator("#mode-review").click();
   await page.locator("#view-source").click();
   await expect(page.locator("pre.uatu-source-pre")).toBeVisible();
 
@@ -182,7 +179,6 @@ test("Clicking the captured reference copies it to the clipboard", async ({ page
 });
 
 test("Rendered view shows the hint and clicking it switches to Source view", async ({ page }) => {
-  await page.locator("#mode-review").click();
   // Default view is Rendered; do NOT click the source toggle.
   await expect(page.locator("#view-rendered")).toHaveAttribute("aria-checked", "true");
   await expect(page.locator("#view-source")).toHaveAttribute("aria-checked", "false");
@@ -211,10 +207,6 @@ test("Selection inside a rendered fenced code block produces the hint, not a ref
   // NOT as a source-aligned line range.
   const fixture = "# Fenced fixture\n\n\`\`\`bash\nset -e\necho hello\n\`\`\`\n";
   await fs.writeFile(workspacePath("guides", "fenced-fixture.md"), fixture, "utf8");
-  await page.locator("#mode-review").click();
-  // Switch the Changed filter off; this is a non-git fixture, where the
-  // chip's Changed state shows the "filter unavailable" empty state.
-  await page.locator("#files-pane-filter-all").click();
   await clickTreeFile(page, "guides/fenced-fixture.md");
   await expect(page.locator("#preview-path")).toHaveText("guides/fenced-fixture.md");
   await page.locator("#view-rendered").click();
@@ -230,7 +222,6 @@ test("Selection inside a rendered fenced code block produces the hint, not a ref
 });
 
 test("Selection Inspector pane returns to placeholder after the selection is collapsed", async ({ page }) => {
-  await page.locator("#mode-review").click();
   await page.locator("#view-source").click();
   await expect(page.locator("pre.uatu-source-pre")).toBeVisible();
   const pane = page.locator('[data-pane-id="selection-inspector"]');
@@ -243,33 +234,7 @@ test("Selection Inspector pane returns to placeholder after the selection is col
   await expect(pane.locator("[data-selection-inspector-control]")).toBeHidden();
 });
 
-test("Selection Inspector pane is hidden in Author mode and restored on switch back to Review", async ({ page }) => {
-  // Default mode after beforeEach is Author — pane must not be shown.
-  const pane = page.locator('[data-pane-id="selection-inspector"]');
-  await expect(pane).toBeHidden();
-
-  // The Panels visibility menu must not list "Selection Inspector" while in
-  // Author mode.
-  await page.locator("#panels-toggle").click();
-  await expect(page.locator('#panels-menu label:has-text("Selection Inspector")')).toHaveCount(0);
-  // Close the panels menu so it doesn't intercept later interactions.
-  await page.locator("#panels-toggle").click();
-
-  // Switch to Review — pane appears.
-  await page.locator("#mode-review").click();
-  await expect(pane).toBeVisible();
-
-  // Toggling back to Author hides it again.
-  await page.locator("#mode-author").click();
-  await expect(pane).toBeHidden();
-
-  // And toggling forward to Review restores it.
-  await page.locator("#mode-review").click();
-  await expect(pane).toBeVisible();
-});
-
-test("Selection Inspector pane visibility persists across page reload in Review mode", async ({ page }) => {
-  await page.locator("#mode-review").click();
+test("Selection Inspector pane visibility persists across page reload", async ({ page }) => {
   const pane = page.locator('[data-pane-id="selection-inspector"]');
   await expect(pane).toBeVisible();
 
@@ -278,9 +243,7 @@ test("Selection Inspector pane visibility persists across page reload in Review 
   await expect(pane).toBeHidden();
 
   await page.reload();
-  // Reload comes back in Review (mode is persisted) and the pane should still
-  // be hidden because the per-mode pane state survived the reload.
-  await expect(page.locator("#mode-review")).toHaveAttribute("aria-checked", "true");
+  // Reload should preserve the hidden state via the persisted pane store.
   await expect(pane).toBeHidden();
 
   // Restore via the Panels menu so the pane comes back, then reload again
@@ -290,6 +253,5 @@ test("Selection Inspector pane visibility persists across page reload in Review 
   await expect(pane).toBeVisible();
 
   await page.reload();
-  await expect(page.locator("#mode-review")).toHaveAttribute("aria-checked", "true");
   await expect(pane).toBeVisible();
 });

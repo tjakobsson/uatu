@@ -1,17 +1,13 @@
 // Sidebar pane infrastructure — visibility / collapse / resize / panel
-// menu. Extracted from `app.ts` so the sidebar's runtime pane lifecycle
-// lives next to the rest of the sidebar feature folder. The pure data
-// shapes (`PaneId`, `PaneState`, `PANE_DEFS_BY_MODE`, etc.) continue to
-// live in `shell/state.ts`; this module is the DOM-interaction half.
+// menu. The pure data shapes (`PaneId`, `PaneState`, `ALL_PANE_DEFS`) live
+// in `shell/state.ts`; this module is the DOM-interaction half.
 
 import { renderSidebar } from "./shell";
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
-import type { Mode } from "../shared/types";
 import {
   ALL_PANE_DEFS,
+  SIDEBAR_PANES_KEY,
   appState,
-  paneDefsForMode,
-  paneStorageKeyForMode,
   type PaneId,
   type PaneState,
 } from "../shell/state";
@@ -48,7 +44,7 @@ export function initSidebarPanes() {
     if (target.checked) {
       appState.panes[paneId].collapsed = false;
     }
-    persistPaneState(appState.mode);
+    persistPaneState();
     renderSidebar();
   });
 
@@ -59,7 +55,7 @@ export function initSidebarPanes() {
         return;
       }
       appState.panes[paneId].visible = false;
-      persistPaneState(appState.mode);
+      persistPaneState();
       renderSidebar();
     });
   });
@@ -71,7 +67,7 @@ export function initSidebarPanes() {
         return;
       }
       appState.panes[paneId].collapsed = !appState.panes[paneId].collapsed;
-      persistPaneState(appState.mode);
+      persistPaneState();
       renderSidebar();
     });
   });
@@ -107,7 +103,7 @@ export function initSidebarPanes() {
         syncPaneDom();
       };
       const onUp = () => {
-        persistPaneState(appState.mode);
+        persistPaneState();
         resizer.removeEventListener("pointermove", onMove);
         resizer.removeEventListener("pointerup", onUp);
         resizer.removeEventListener("pointercancel", onUp);
@@ -123,9 +119,8 @@ export function initSidebarPanes() {
 }
 
 export function nextVisiblePane(paneId: PaneId): HTMLElement | null {
-  const defs = paneDefsForMode(appState.mode);
-  const index = defs.findIndex(pane => pane.id === paneId);
-  for (const candidate of defs.slice(index + 1)) {
+  const index = ALL_PANE_DEFS.findIndex(pane => pane.id === paneId);
+  for (const candidate of ALL_PANE_DEFS.slice(index + 1)) {
     const state = appState.panes[candidate.id];
     if (!state.visible || state.collapsed) {
       continue;
@@ -135,9 +130,9 @@ export function nextVisiblePane(paneId: PaneId): HTMLElement | null {
   return null;
 }
 
-export function persistPaneState(mode: Mode) {
+export function persistPaneState(): void {
   try {
-    window.localStorage.setItem(paneStorageKeyForMode(mode), JSON.stringify(appState.panes));
+    window.localStorage.setItem(SIDEBAR_PANES_KEY, JSON.stringify(appState.panes));
   } catch {
     // Ignore storage failures (private mode, quota, etc.).
   }
@@ -145,18 +140,9 @@ export function persistPaneState(mode: Mode) {
 
 export function syncPaneDom() {
   const growPaneId = paneIdToGrow();
-  const currentDefs = paneDefsForMode(appState.mode);
-  const currentIds = new Set<PaneId>(currentDefs.map(pane => pane.id));
   for (const pane of ALL_PANE_DEFS) {
     const element = document.querySelector<HTMLElement>(`[data-pane-id="${pane.id}"]`);
     if (!element) {
-      continue;
-    }
-    if (!currentIds.has(pane.id)) {
-      // Pane is not in the active Mode's catalog — force-hide regardless of
-      // its persisted visibility flag for this mode.
-      element.hidden = true;
-      element.style.removeProperty("flex");
       continue;
     }
     const state = appState.panes[pane.id];
@@ -180,7 +166,7 @@ export function paneIdToGrow(): PaneId | null {
   if (filesState.visible && !filesState.collapsed) {
     return "files";
   }
-  const visible = paneDefsForMode(appState.mode).filter(pane => {
+  const visible = ALL_PANE_DEFS.filter(pane => {
     const state = appState.panes[pane.id];
     return state.visible && !state.collapsed;
   });
@@ -205,7 +191,7 @@ export function normalizePaneHeightsToStack() {
     return;
   }
 
-  const visibleExpanded = paneDefsForMode(appState.mode)
+  const visibleExpanded = ALL_PANE_DEFS
     .map(pane => ({
       id: pane.id,
       element: document.querySelector<HTMLElement>(`[data-pane-id="${pane.id}"]`),
@@ -219,7 +205,7 @@ export function normalizePaneHeightsToStack() {
     return;
   }
 
-  const collapsedHeight = paneDefsForMode(appState.mode).reduce((sum, pane) => {
+  const collapsedHeight = ALL_PANE_DEFS.reduce((sum, pane) => {
     const state = appState.panes[pane.id];
     if (!state.visible || !state.collapsed) {
       return sum;
@@ -261,7 +247,7 @@ export function normalizePaneHeightsToStack() {
 }
 
 export function renderPanelsMenu() {
-  panelsMenuElement.innerHTML = paneDefsForMode(appState.mode).map(pane => {
+  panelsMenuElement.innerHTML = ALL_PANE_DEFS.map(pane => {
     const checked = appState.panes[pane.id].visible ? " checked" : "";
     return `
       <label class="panel-option">

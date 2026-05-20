@@ -1,8 +1,8 @@
-// Stale-content hint chrome — the small bar that appears beneath the
-// preview header in Review mode when the active file has changed (or
-// been deleted) on disk while the reviewer was looking elsewhere.
-// The reducer logic and types live in `src/stale-hint.ts`; this module
-// is the DOM half.
+// Stale-content hint chrome — historically used in Review mode to surface
+// disk-change hints. With Modes removed, no code path raises a hint, so
+// the chrome stays hidden in normal operation. The DOM elements and the
+// click handler remain so a future change can re-introduce a freeze-while-
+// reading affordance without rebuilding the chrome from scratch.
 
 import { forgetDocumentCache, loadDocument } from "../preview/mount";
 import { renderSidebar } from "../sidebar/shell";

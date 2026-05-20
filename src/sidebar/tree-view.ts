@@ -197,32 +197,40 @@ export class TreeView {
     this.renderedBinaryLeafCount = renderedBinaryLeafCount;
 
     if (this.tree === null) {
-      this.tree = new FileTree({
-        paths: renderedPaths,
-        initialExpansion: "closed",
-        initialExpandedPaths: autoExpanded,
-        initialSelectedPaths: initialSelectedPath ? [initialSelectedPath] : [],
-        icons: { set: "standard", colored: true },
-        onSelectionChange: selected => this.handleSelectionChange(selected),
+      // Initial mount. The library can fire `onSelectionChange` synchronously
+      // during `tree.render()` because we pass `initialSelectedPaths` to the
+      // constructor — without the programmatic-update guard, that callback
+      // would race the SPA's boot-time `followEnabled = true` assignment and
+      // Rule A could fire as if the user had clicked. See follow-mode spec
+      // ("Tree-mount user-click guard").
+      this.withProgrammaticUpdate(() => {
+        this.tree = new FileTree({
+          paths: renderedPaths,
+          initialExpansion: "closed",
+          initialExpandedPaths: autoExpanded,
+          initialSelectedPaths: initialSelectedPath ? [initialSelectedPath] : [],
+          icons: { set: "standard", colored: true },
+          onSelectionChange: selected => this.handleSelectionChange(selected),
+        });
+        // Pass our container AS the file-tree host (not as a wrapper around a
+        // fresh `<file-tree-container>` element). The library calls
+        // attachShadow() on whatever we give it here — using our `#tree` div
+        // directly means its height = our container's height, which is what
+        // the library's virtualization needs to know how many rows to render.
+        this.container.innerHTML = "";
+        Object.assign(this.container.style, LIGHT_TREE_THEME);
+        this.tree.render({ fileTreeContainer: this.container });
+        // Pin the library instance to the host element so e2e tests can call
+        // `scrollToPath` to reveal virtualized rows for assertion.
+        (this.container as unknown as { __pierreFileTree: FileTree }).__pierreFileTree = this.tree;
+        this.lastPathsKey = pathsFingerprint(renderedPaths);
+        this.ensureRevealCueStyleElement();
+        this.syncFollowOverrideObserver();
+        this.applyFollowOverrideAttribute();
+        if (initialSelectedPath !== null) {
+          this.revealAndSelect(initialSelectedPath);
+        }
       });
-      // Pass our container AS the file-tree host (not as a wrapper around a
-      // fresh `<file-tree-container>` element). The library calls
-      // attachShadow() on whatever we give it here — using our `#tree` div
-      // directly means its height = our container's height, which is what
-      // the library's virtualization needs to know how many rows to render.
-      this.container.innerHTML = "";
-      Object.assign(this.container.style, LIGHT_TREE_THEME);
-      this.tree.render({ fileTreeContainer: this.container });
-      // Pin the library instance to the host element so e2e tests can call
-      // `scrollToPath` to reveal virtualized rows for assertion.
-      (this.container as unknown as { __pierreFileTree: FileTree }).__pierreFileTree = this.tree;
-      this.lastPathsKey = pathsFingerprint(renderedPaths);
-      this.ensureRevealCueStyleElement();
-      this.syncFollowOverrideObserver();
-      this.applyFollowOverrideAttribute();
-      if (initialSelectedPath !== null) {
-        this.revealAndSelect(initialSelectedPath);
-      }
       // Backstop the synchronous attribute stamp — the library may render
       // the override row on the next frame after first mount.
       if (this.followOverridePath !== null) {
@@ -231,27 +239,36 @@ export class TreeView {
       return;
     }
 
-    const nextKey = pathsFingerprint(renderedPaths);
-    if (
-      nextKey !== this.lastPathsKey
-      || previousFilterKind !== nextFilterKind
-    ) {
-      // Filesystem changed OR filter transitioned. resetPaths wipes the
-      // library's expansion state, so merge any preserved-open dirs (under
-      // All) with the new reveal set before resetting.
-      const preserved = nextFilterKind === "all" ? this.readExpandedPaths() : [];
-      const mergedReveal = mergeUnique(autoExpanded, preserved);
-      this.tree.resetPaths(renderedPaths, { initialExpandedPaths: mergedReveal });
-      this.lastPathsKey = nextKey;
-    }
+    // Update path: also wrap in the guard. resetPaths can fire
+    // onSelectionChange synchronously if the previously-selected path is no
+    // longer in the new path set, and revealAndSelect deliberately drives
+    // multiple selection mutations. Both must not be mistaken for user input.
+    this.withProgrammaticUpdate(() => {
+      const tree = this.tree;
+      if (tree === null) return;
 
-    this.ensureRevealCueStyleElement();
-    this.syncFollowOverrideObserver();
-    this.applyFollowOverrideAttribute();
+      const nextKey = pathsFingerprint(renderedPaths);
+      if (
+        nextKey !== this.lastPathsKey
+        || previousFilterKind !== nextFilterKind
+      ) {
+        // Filesystem changed OR filter transitioned. resetPaths wipes the
+        // library's expansion state, so merge any preserved-open dirs (under
+        // All) with the new reveal set before resetting.
+        const preserved = nextFilterKind === "all" ? this.readExpandedPaths() : [];
+        const mergedReveal = mergeUnique(autoExpanded, preserved);
+        tree.resetPaths(renderedPaths, { initialExpandedPaths: mergedReveal });
+        this.lastPathsKey = nextKey;
+      }
 
-    if (initialSelectedPath !== null) {
-      this.revealAndSelect(initialSelectedPath);
-    }
+      this.ensureRevealCueStyleElement();
+      this.syncFollowOverrideObserver();
+      this.applyFollowOverrideAttribute();
+
+      if (initialSelectedPath !== null) {
+        this.revealAndSelect(initialSelectedPath);
+      }
+    });
 
     // revealAndSelect and resetPaths drive library re-renders that may not
     // be in the DOM yet by the time the synchronous applyFollowOverrideAttribute
@@ -327,27 +344,40 @@ export class TreeView {
     if (this.tree === null) {
       return;
     }
-    this.duringProgrammaticUpdate = true;
-    try {
+    this.withProgrammaticUpdate(() => {
+      const tree = this.tree;
+      if (tree === null) return;
       for (const ancestor of ancestorPaths(path)) {
-        const handle = this.tree.getItem(ancestor);
+        const handle = tree.getItem(ancestor);
         if (handle && handle.isDirectory() && !handle.isExpanded()) {
           handle.expand();
         }
       }
-      for (const previouslySelected of this.tree.getSelectedPaths()) {
+      for (const previouslySelected of tree.getSelectedPaths()) {
         if (previouslySelected === path) continue;
-        const handle = this.tree.getItem(previouslySelected);
+        const handle = tree.getItem(previouslySelected);
         if (handle && handle.isSelected()) {
           handle.deselect();
         }
       }
-      const leaf = this.tree.getItem(path);
+      const leaf = tree.getItem(path);
       if (leaf && !leaf.isSelected()) {
         leaf.select();
       }
+    });
+  }
+
+  // Re-entrant-safe guard. Calls to `fn` (and anything `fn` calls) that
+  // fire the library's `onSelectionChange` callback will be suppressed at
+  // `handleSelectionChange`'s early-return. Nested calls are safe because
+  // we save/restore the prior value rather than blindly clearing the flag.
+  private withProgrammaticUpdate(fn: () => void): void {
+    const previous = this.duringProgrammaticUpdate;
+    this.duringProgrammaticUpdate = true;
+    try {
+      fn();
     } finally {
-      this.duringProgrammaticUpdate = false;
+      this.duringProgrammaticUpdate = previous;
     }
   }
 

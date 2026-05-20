@@ -245,34 +245,15 @@ body.is-resizing-sidebar {
   text-overflow: ellipsis;
 }
 
-.sidebar-meta {
-  display: flex;
-  justify-content: flex-end;
+.sidebar-header-actions {
+  display: inline-flex;
   align-items: center;
-  margin: 1.1rem 0 0.85rem;
-  color: var(--text-subtle);
-  font-size: 0.78rem;
+  gap: 0.15rem;
   flex-shrink: 0;
 }
 
 .panels-control {
   position: relative;
-}
-
-.mini-button {
-  border: 1px solid var(--border-soft);
-  background: #ffffff;
-  color: var(--text-subtle);
-  border-radius: 0.35rem;
-  padding: 0.2rem 0.45rem;
-  font: inherit;
-  font-size: 0.72rem;
-  cursor: pointer;
-}
-
-.mini-button:hover {
-  color: var(--text-strong);
-  background: #f6f8fa;
 }
 
 .panels-menu {
@@ -715,7 +696,8 @@ body.is-resizing-terminal .panel-resizer {
   background: var(--accent-soft);
 }
 
-/* Sidebar entry-point row. Sits directly under the Author/Review row. */
+/* Sidebar terminal row. Sits directly under the Follow row, sharing the
+   same padding scaffolding so the two controls align as siblings. */
 .sidebar-terminal-row {
   padding: 0 0.75rem 0.5rem;
   flex-shrink: 0;
@@ -1060,64 +1042,94 @@ body.is-resizing-terminal .panel-resizer {
   display: none;
 }
 
-.chip-button {
-  display: inline-flex;
+/* Follow toggle switch — the only behavioral toggle in the single-mode
+   app. Full-width sibling of `.terminal-toggle-button`: label on the
+   left, sliding track+thumb pinned to the right. Visual treatment
+   (border, padding, font) matches the terminal toggle so the two read
+   as siblings. The button keeps `aria-pressed` for assistive tech; CSS
+   keys all visual state on that. */
+.follow-switch {
+  appearance: none;
+  width: 100%;
+  display: flex;
   align-items: center;
-  gap: 0.4rem;
-  padding: 0.35rem 0.75rem;
-  border: 0;
+  gap: 0.45rem;
+  padding: 0.45rem 0.6rem;
   background: transparent;
-  color: var(--text-subtle);
-  border-radius: 999px;
-  font-size: 0.78rem;
-  font-weight: 500;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  color: var(--text-strong);
   cursor: pointer;
-  transition: background-color 0.15s ease, color 0.15s ease;
+  font: inherit;
+  font-size: 0.82rem;
+  text-align: left;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 
-.chip-button[hidden] {
+.follow-switch[hidden] {
   display: none;
 }
 
-.chip-button:hover:not(:disabled) {
-  color: var(--text-strong);
-  background: #ffffff;
+.follow-switch:hover:not(:disabled) {
+  background: var(--surface-muted);
+  border-color: var(--border-medium);
 }
 
-.chip-button.is-active {
-  background: #ffffff;
+.follow-switch[aria-pressed="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
   color: var(--accent);
-  box-shadow: 0 1px 2px rgba(36, 41, 47, 0.08);
 }
 
-.chip-button:disabled {
+.follow-switch:disabled {
   cursor: not-allowed;
   opacity: 0.55;
 }
 
-.chip-button .chip-dot {
-  width: 0.5rem;
-  height: 0.5rem;
-  border-radius: 999px;
-  background: #cfd5db;
-  display: inline-block;
+.follow-switch:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
-.chip-button.is-active .chip-dot {
+.follow-switch-label {
+  flex: 1 1 auto;
+  letter-spacing: 0.01em;
+}
+
+.follow-switch-track {
+  position: relative;
+  display: inline-block;
+  flex-shrink: 0;
+  width: 2.1rem;
+  height: 1.15rem;
+  border-radius: 999px;
+  background: #cfd5db;
+  transition: background-color 0.15s ease;
+}
+
+.follow-switch[aria-pressed="true"] .follow-switch-track {
   background: var(--accent);
 }
 
-.chip-button:disabled .chip-dot {
+.follow-switch:disabled .follow-switch-track {
   background: #cfd5db;
 }
 
-.chip-button .chip-icon {
-  color: currentColor;
-  transition: transform 0.15s ease;
+.follow-switch-thumb {
+  position: absolute;
+  top: 50%;
+  left: 0.15rem;
+  width: 0.85rem;
+  height: 0.85rem;
+  border-radius: 999px;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(36, 41, 47, 0.18);
+  transform: translateY(-50%);
+  transition: left 0.15s ease;
 }
 
-.chip-button.is-active .chip-icon {
-  transform: rotate(-45deg);
+.follow-switch[aria-pressed="true"] .follow-switch-thumb {
+  left: calc(100% - 0.85rem - 0.15rem);
 }
 
 .icon-button {
@@ -1221,7 +1233,7 @@ body.is-resizing-terminal .panel-resizer {
   white-space: nowrap;
 }
 
-/* Segmented chip: same visual primitive as .mode-control, sized down to sit
+/* Segmented chip: same visual primitive as the view-control, sized down to sit
    alongside the file count inside a pane header. */
 .files-pane-filter {
   display: inline-flex;
@@ -2655,75 +2667,15 @@ body.is-resizing-terminal .panel-resizer {
   }
 }
 
-/* Mode control row at the top of the sidebar (under the brand). The row
-   carries the Author / Review segmented toggle (full-width) and the Follow
-   chip; Follow sits beside Mode because both control how the file
-   selection behaves, not what the current preview is rendering. */
+/* Sidebar row holding the Follow switch. Mirrors the terminal row's
+   padding so Follow and Terminal read as sibling controls. */
 .sidebar-mode-row {
-  margin: 1.1rem 0 0.4rem;
-  display: flex;
-  align-items: stretch;
-  gap: 0.4rem;
-}
-
-.sidebar-mode-row .mode-control {
-  flex: 1 1 auto;
-}
-
-.sidebar-mode-row #follow-toggle {
+  padding: 0.85rem 0.75rem 0.5rem;
   flex-shrink: 0;
-  white-space: nowrap;
-}
-
-/* Mode control (Author / Review segmented toggle) */
-.mode-control {
-  display: flex;
-  align-items: stretch;
-  padding: 0.2rem;
-  border-radius: 0.5rem;
-  background: var(--surface-muted);
-  border: 1px solid var(--border-soft);
-  width: 100%;
-}
-
-.mode-control .mode-segment {
-  flex: 1 1 0;
-  justify-content: center;
-}
-
-.mode-segment {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.4rem 0.7rem;
-  border: 0;
-  background: transparent;
-  color: var(--text-subtle);
-  border-radius: 0.4rem;
-  font-size: 0.8rem;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background-color 0.15s ease, color 0.15s ease;
-}
-
-.mode-segment:hover:not(.is-active) {
-  color: var(--text-strong);
-  background: rgba(255, 255, 255, 0.6);
-}
-
-.mode-segment.is-active {
-  background: #ffffff;
-  color: var(--accent);
-  box-shadow: 0 1px 2px rgba(36, 41, 47, 0.08);
-  cursor: default;
-}
-
-.mode-segment:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
 }
 
 /* View control (Rendered / Source segmented toggle in the preview header).
-   Same visual language as .mode-control but compact for the toolbar context. */
+   Toolbar-compact segmented control. */
 .view-control {
   display: inline-flex;
   align-items: stretch;
@@ -2942,19 +2894,6 @@ body.is-resizing-terminal .panel-resizer {
   inset: -3px;
 }
 
-/* Follow chip variant: disabled by Mode = Review */
-.chip-button.is-mode-disabled {
-  cursor: not-allowed;
-  opacity: 0.5;
-  text-decoration: line-through;
-  text-decoration-thickness: 1px;
-  text-decoration-color: rgba(36, 41, 47, 0.3);
-}
-
-.chip-button.is-mode-disabled .chip-dot {
-  background: #cfd5db;
-}
-
 /* Burden meter — three-part header (label group + score) */
 .burden-summary {
   display: inline-flex;
@@ -3043,22 +2982,6 @@ body.is-resizing-terminal .panel-resizer {
 .stale-hint-action:focus-visible {
   outline: 2px solid currentColor;
   outline-offset: 1px;
-}
-
-/* Mode visual differentiation — structural cues that survive theming. */
-
-/* Mode-glyph icons inside the toolbar Mode segments. */
-.mode-segment {
-  gap: 0.35rem;
-}
-
-.mode-segment .mode-glyph {
-  flex-shrink: 0;
-  opacity: 0.7;
-}
-
-.mode-segment.is-active .mode-glyph {
-  opacity: 1;
 }
 
 /* Diff view: host element for the @pierre/diffs FileDiff component, the

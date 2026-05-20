@@ -4,7 +4,7 @@
 // live next to each other. The read/write storage helpers and the
 // per-Mode default map already live in `shell/state.ts`.
 
-import { primaryReviewBaseLabel } from "../shell/mode";
+import { primaryReviewBaseLabel } from "./change-overview";
 import { appState, type FilesPaneFilter, writeFilesPaneFilterPreference } from "../shell/state";
 import { renderSidebar } from "./shell";
 
@@ -23,7 +23,7 @@ export function applyFilesPaneFilter(next: FilesPaneFilter): void {
     return;
   }
   appState.filesPaneFilter = next;
-  writeFilesPaneFilterPreference(appState.mode, next);
+  writeFilesPaneFilterPreference(next);
   syncFilesPaneFilterControl();
   renderSidebar();
 }

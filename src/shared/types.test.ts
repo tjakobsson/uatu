@@ -2,34 +2,27 @@ import { describe, expect, test } from "bun:test";
 
 import {
   DEFAULT_DIFF_STYLE,
-  DEFAULT_MODE,
   DEFAULT_SPLIT_RATIO,
   DEFAULT_VIEW_LAYOUT,
   DEFAULT_VIEW_MODE,
   DIFF_STYLE_STORAGE_KEY,
-  MODE_STORAGE_KEY,
   VIEW_LAYOUT_STORAGE_KEY,
   VIEW_MODE_STORAGE_KEY,
   VIEW_SPLIT_RATIO_STORAGE_KEY,
   defaultDocumentId,
   isDiffStyle,
-  isMode,
   isViewLayout,
   isViewMode,
   nextSelectedDocumentId,
   readDiffStylePreference,
-  readModePreference,
   readSplitRatioPreference,
   readViewLayoutPreference,
   readViewModePreference,
-  reviewBurdenHeadlineLabel,
   shouldRefreshPreview,
   writeDiffStylePreference,
-  writeModePreference,
   writeSplitRatioPreference,
   writeViewLayoutPreference,
   writeViewModePreference,
-  type Mode,
   type RootGroup,
 } from "./types";
 
@@ -203,32 +196,6 @@ describe("nextSelectedDocumentId", () => {
   });
 });
 
-describe("isMode", () => {
-  test("accepts the two valid Mode strings", () => {
-    expect(isMode("author")).toBe(true);
-    expect(isMode("review")).toBe(true);
-  });
-
-  test("rejects everything else", () => {
-    expect(isMode(null)).toBe(false);
-    expect(isMode(undefined)).toBe(false);
-    expect(isMode("")).toBe(false);
-    expect(isMode("AUTHOR")).toBe(false);
-    expect(isMode("write")).toBe(false);
-    expect(isMode(42)).toBe(false);
-  });
-});
-
-describe("reviewBurdenHeadlineLabel", () => {
-  test("returns the forecast label in author mode", () => {
-    expect(reviewBurdenHeadlineLabel("author")).toBe("Reviewer burden forecast");
-  });
-
-  test("returns the change-review label in review mode", () => {
-    expect(reviewBurdenHeadlineLabel("review")).toBe("Change review burden");
-  });
-});
-
 class MemoryStorage {
   private store = new Map<string, string>();
   getItem(key: string): string | null {
@@ -238,93 +205,6 @@ class MemoryStorage {
     this.store.set(key, value);
   }
 }
-
-describe("readModePreference", () => {
-  test("returns the default when storage is null and no startup mode is given", () => {
-    expect(readModePreference(null)).toBe(DEFAULT_MODE);
-    expect(readModePreference(undefined)).toBe(DEFAULT_MODE);
-  });
-
-  test("returns the default when storage has no value", () => {
-    const storage = new MemoryStorage();
-    expect(readModePreference(storage)).toBe(DEFAULT_MODE);
-  });
-
-  test("returns the persisted value when valid", () => {
-    const storage = new MemoryStorage();
-    storage.setItem(MODE_STORAGE_KEY, "review");
-    expect(readModePreference(storage)).toBe("review");
-  });
-
-  test("returns the default when the persisted value is invalid", () => {
-    const storage = new MemoryStorage();
-    storage.setItem(MODE_STORAGE_KEY, "writer");
-    expect(readModePreference(storage)).toBe(DEFAULT_MODE);
-  });
-
-  test("startupMode overrides any persisted value", () => {
-    const storage = new MemoryStorage();
-    storage.setItem(MODE_STORAGE_KEY, "review");
-    expect(readModePreference(storage, "author")).toBe("author");
-  });
-
-  test("startupMode is ignored when not a valid Mode value", () => {
-    const storage = new MemoryStorage();
-    storage.setItem(MODE_STORAGE_KEY, "review");
-    expect(readModePreference(storage, "garbage" as unknown as Mode)).toBe("review");
-  });
-
-  test("boot precedence is startupMode > persisted > default", () => {
-    const noStorage = null;
-    const empty = new MemoryStorage();
-    const persisted = new MemoryStorage();
-    persisted.setItem(MODE_STORAGE_KEY, "review");
-
-    // No storage, no startup → default.
-    expect(readModePreference(noStorage)).toBe(DEFAULT_MODE);
-    // Empty storage, no startup → default.
-    expect(readModePreference(empty)).toBe(DEFAULT_MODE);
-    // Persisted only → persisted wins.
-    expect(readModePreference(persisted)).toBe("review");
-    // Persisted + startupMode → startupMode wins.
-    expect(readModePreference(persisted, "author")).toBe("author");
-    // No storage but startupMode set → startupMode wins.
-    expect(readModePreference(noStorage, "review")).toBe("review");
-  });
-
-  test("falls back to default when storage throws on read", () => {
-    const throwing = {
-      getItem: () => {
-        throw new Error("denied");
-      },
-      setItem: () => {},
-    };
-    expect(readModePreference(throwing)).toBe(DEFAULT_MODE);
-  });
-});
-
-describe("writeModePreference", () => {
-  test("persists the given mode through the storage", () => {
-    const storage = new MemoryStorage();
-    writeModePreference(storage, "review");
-    expect(storage.getItem(MODE_STORAGE_KEY)).toBe("review");
-  });
-
-  test("is a no-op when storage is null", () => {
-    expect(() => writeModePreference(null, "review")).not.toThrow();
-    expect(() => writeModePreference(undefined, "author")).not.toThrow();
-  });
-
-  test("swallows storage errors silently", () => {
-    const throwing = {
-      getItem: () => null,
-      setItem: () => {
-        throw new Error("quota exceeded");
-      },
-    };
-    expect(() => writeModePreference(throwing, "review")).not.toThrow();
-  });
-});
 
 describe("isViewLayout", () => {
   test("accepts the three valid ViewLayout strings", () => {

@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures";
 import { promises as fs } from "node:fs";
 
 import { workspacePath } from "./config";
@@ -40,16 +40,14 @@ test("relative image references in a README are served natively from the watched
     "utf8",
   );
 
-  await page.waitForTimeout(300);
-  // beforeEach left README.md selected. Click another file first so the
-  // library actually fires a selection change when we click README again
-  // (the library de-dupes "click already-selected row" events, which would
-  // skip the re-fetch we need to see the updated README content).
-  await treeRow(page, "diagram.md").click();
-  await expect(page.locator("#preview-path")).toHaveText("diagram.md");
-  await treeRow(page, "README.md").click();
+  // Reload to force a fresh /api/state + /api/document fetch. Rule D would
+  // ordinarily reload README in place when the SSE state event arrives, but
+  // the watcher's debounce can coalesce the hero.svg + README.md writes into
+  // a single event whose `changedId` is hero.svg, leaving the SPA's cached
+  // README content untouched. Under parallel test load this race is
+  // observable; the reload sidesteps it deterministically.
+  await page.reload();
   await expect(page.locator("#preview-path")).toHaveText("README.md");
-
   const img = page.locator('#preview img[alt="hero"]');
   await expect(img).toBeVisible();
 

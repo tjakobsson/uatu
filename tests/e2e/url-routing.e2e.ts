@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures";
 import { promises as fs } from "node:fs";
 
 import { workspacePath } from "./config";
@@ -113,11 +113,10 @@ test("follow auto-switch updates the URL via replaceState (back stack does not g
   expect(finalDepth).toBe(initialDepth);
 });
 
-test("direct-link to a doc outside the file-scoped session renders the session-pinned message", async ({ page, request }) => {
-  // The Pin UI affordance is gone, but the server-side file-scope mechanism
-  // is preserved (CLI single-file watch still uses it; future workflows may
-  // expose it again). Hit the /api/scope endpoint directly to put the
-  // folder-scoped session into file-mode without restarting it.
+test("direct-link to a doc outside the file-scoped session renders the single-file message", async ({ page, request }) => {
+  // The CLI single-file watch (`uatu watch some-file.md`) puts the session
+  // into file-scope. Hit the /api/scope endpoint directly to simulate that
+  // without restarting the watch session.
   await request.post("/api/scope", {
     data: { scope: { kind: "file", documentId: workspacePath("README.md") } },
   });
@@ -128,11 +127,11 @@ test("direct-link to a doc outside the file-scoped session renders the session-p
   // SPA shell because the doc exists in the unscoped index (the original
   // folder watch); the SPA boots, sees scope.kind === "file" with a
   // different documentId, and renders the empty-preview state with a
-  // "session pinned" message.
+  // single-file-session message.
   await page.goto("/guides/setup.md");
 
-  await expect(page.locator("#preview-title")).toHaveText("Session pinned");
-  await expect(page.locator("#preview-path")).toContainText("Session pinned to README.md");
+  await expect(page.locator("#preview-title")).toHaveText("Single-file session");
+  await expect(page.locator("#preview-path")).toContainText("scoped to README.md");
   await expect(page.locator("#preview")).toHaveClass(/empty/);
 
   // Sidebar still shows only the scoped file.

@@ -163,31 +163,27 @@ The `@pierre/diffs` library SHALL be loaded via a dynamic `import()` triggered t
 - **WHEN** the Diff view renders an `unsupported-no-git`, `unchanged`, `binary`, or large-diff fallback card
 - **THEN** the `@pierre/diffs` module is not loaded as a side effect of that render
 
-### Requirement: Diff view participates in Author auto-refresh and Review stale-content hints
+### Requirement: Diff view auto-refreshes when the active file changes on disk
 
-The Diff view SHALL be available in both **Author** and **Review** modes. In **Author** mode, when the active file changes on disk, the Diff view SHALL re-fetch the document-diff endpoint and re-render against the unchanged base — the auto-refresh behavior matches today's Rendered / Source views. In **Review** mode, when the active file changes on disk, the existing stale-content hint SHALL appear in the preview header strip as it does for Rendered / Source views; activating the refresh affordance MUST re-fetch the document-diff endpoint and re-render the Diff view, then clear the hint. The hint MUST NOT appear in **Author** mode. The base ref MUST NOT be re-resolved on a file-content change alone — base resolution happens at fetch time and is not invalidated by worktree changes.
+The Diff view SHALL re-fetch the document-diff endpoint and re-render against the unchanged base whenever the active file changes on disk. This behavior is uniform across the application — there is no Mode-dependent variant — and matches the auto-refresh behavior of the Rendered and Source views. The base ref MUST NOT be re-resolved on a file-content change alone — base resolution happens at fetch time and is not invalidated by worktree changes.
 
-#### Scenario: Author mode auto-refreshes Diff on file change
-- **WHEN** Mode is Author and the active Diff view's underlying file changes on disk
+#### Scenario: Diff view auto-refreshes on file change
+- **WHEN** the Diff view is active for a file
+- **AND** the underlying file changes on disk
 - **THEN** the Diff view re-fetches the document-diff endpoint and re-renders without user action
 
-#### Scenario: Review mode shows a stale-content hint on file change in Diff
-- **WHEN** Mode is Review and the active Diff view's underlying file changes on disk
-- **THEN** a stale-content hint appears in the preview header strip
-- **AND** the rendered Diff content stays at its pre-change state until the user acts
-
-#### Scenario: Refresh affordance re-fetches and re-renders the Diff
-- **WHEN** the stale-content hint is visible in Review for an active Diff view
-- **AND** the user activates the refresh affordance
-- **THEN** the Diff view re-fetches the document-diff endpoint and re-renders to current state
-- **AND** the hint is cleared
+#### Scenario: Base ref is not re-resolved on file-content changes
+- **WHEN** the Diff view is active for a file
+- **AND** the underlying file changes on disk
+- **THEN** the system does NOT re-run base-ref resolution
+- **AND** the re-rendered Diff continues to compare against the same base that was resolved at fetch time
 
 ### Requirement: Diff view selection is not captured by the Selection Inspector
 
 The Diff view SHALL NOT produce `@path#L<a>-<b>` references via the Selection Inspector pane. The whole-file source `<pre>` distinguishing class (used by single Source view and the Source pane of split layouts) MUST NOT appear on Diff-view DOM, so the existing Selection Inspector detection treats Diff selections as non-source. The Selection Inspector's existing hint ("Switch to Source view to capture a line range.") MAY appear when text is selected in Diff view; no Diff-specific hint is required.
 
 #### Scenario: Selecting text in Diff view does not produce a line-range reference
-- **WHEN** the user is in Review mode with the Diff view active for a file
+- **WHEN** the user has the Diff view active for a file
 - **AND** marks a contiguous run of text inside the rendered diff
 - **THEN** the Selection Inspector does not produce an `@path#L<a>-<b>` reference
 
