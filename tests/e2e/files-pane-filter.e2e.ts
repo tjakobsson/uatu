@@ -4,7 +4,7 @@
 
 import { expect, test, type Page } from "@playwright/test";
 
-import { treeRow } from "./tree-helpers";
+import { revealTreeRow, treeRow } from "./tree-helpers";
 
 test.afterEach(async ({ request }) => {
   await request.post("/__e2e/reset");
@@ -80,8 +80,11 @@ test("under filter Changed only change-set rows and their ancestors are present"
   await expect(page.locator("#files-pane-filter-changed")).toHaveAttribute("aria-checked", "true");
 
   // The two change-set leaves are present in the tree, plus the `guides/`
-  // ancestor (auto-expanded).
+  // ancestor (auto-expanded). Reveal each path so the virtualization window
+  // surfaces them in the DOM before asserting attachment.
+  await revealTreeRow(page, "a-untracked-scratch.md");
   await expect(treeRow(page, "a-untracked-scratch.md")).toBeAttached();
+  await revealTreeRow(page, "guides/setup.md");
   await expect(treeRow(page, "guides/setup.md")).toBeAttached();
   await expect(treeRow(page, "guides/")).toBeAttached();
   await expect(treeRow(page, "guides/")).toHaveAttribute("aria-expanded", "true");
@@ -144,7 +147,9 @@ test("an active document outside the change set is revealed with a visual cue un
   await page.locator("#files-pane-filter-all").click();
   const setupRow = treeRow(page, "guides/setup.md");
   // setup.md lives under guides/ — expand it first if needed (treeRow doesn't
-  // expand ancestors, that's clickTreeFile's job).
+  // expand ancestors, that's clickTreeFile's job). Reveal the folder row so
+  // virtualization surfaces it in the DOM.
+  await revealTreeRow(page, "guides/");
   const guidesFolder = treeRow(page, "guides/");
   await expect(guidesFolder).toBeVisible();
   if ((await guidesFolder.getAttribute("aria-expanded")) === "false") {
@@ -187,6 +192,7 @@ test("All → Changed → All restores manually-expanded directories", async ({ 
   });
 
   // User expands `guides/` while in All mode.
+  await revealTreeRow(page, "guides/");
   const guidesFolder = treeRow(page, "guides/");
   await expect(guidesFolder).toBeVisible();
   await expect(guidesFolder).toHaveAttribute("aria-expanded", "false");
@@ -240,6 +246,7 @@ test("under Changed filter gitignored files are not rendered", async ({ page, re
   });
   await expect(page.locator("#files-pane-filter-changed")).toHaveAttribute("aria-checked", "true");
 
+  await revealTreeRow(page, "feature.md");
   await expect(treeRow(page, "feature.md")).toBeAttached();
   await expect(treeRow(page, "ignored-by-git.md")).toHaveCount(0);
 });
