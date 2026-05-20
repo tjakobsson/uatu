@@ -65,12 +65,15 @@ export class TreeView {
   // selection changes leave it intact. Calling resetPaths is what wipes the
   // library's internal expansion state, so we want to do it only when needed.
   private lastPathsKey = "";
-  // While true, the library's onSelectionChange callback is treated as an
-  // echo of our own programmatic select/deselect calls and is NOT forwarded
-  // to the routing flow. Used to guard `revealAndSelect`, which performs
-  // multiple library operations in a row (deselect previous, expand
-  // ancestors, select leaf) — each of which can fire the callback.
-  private duringProgrammaticUpdate = false;
+  // Path-narrow guard for the library's `onSelectionChange` callback. While
+  // we're performing a programmatic update, this holds the path we just
+  // asked the library to select. A callback echoing that same path is
+  // suppressed (it's the library reporting our own work back to us). A
+  // callback for a DIFFERENT path is forwarded — that's a real user click
+  // that happened to land during the update window. The earlier coarse
+  // boolean would have silently dropped those clicks; the path-narrow
+  // version preserves them.
+  private expectedSelectedPath: string | null = null;
   // Tracks the active filter kind so we can detect All↔Changed transitions
   // and snapshot/restore the user's full-tree expansion state across them.
   private lastFilterKind: "all" | "changed" = "all";
@@ -203,7 +206,7 @@ export class TreeView {
       // would race the SPA's boot-time `followEnabled = true` assignment and
       // Rule A could fire as if the user had clicked. See follow-mode spec
       // ("Tree-mount user-click guard").
-      this.withProgrammaticUpdate(() => {
+      this.withProgrammaticUpdate(initialSelectedPath, () => {
         this.tree = new FileTree({
           paths: renderedPaths,
           initialExpansion: "closed",
@@ -243,7 +246,7 @@ export class TreeView {
     // onSelectionChange synchronously if the previously-selected path is no
     // longer in the new path set, and revealAndSelect deliberately drives
     // multiple selection mutations. Both must not be mistaken for user input.
-    this.withProgrammaticUpdate(() => {
+    this.withProgrammaticUpdate(initialSelectedPath, () => {
       const tree = this.tree;
       if (tree === null) return;
 
@@ -344,7 +347,7 @@ export class TreeView {
     if (this.tree === null) {
       return;
     }
-    this.withProgrammaticUpdate(() => {
+    this.withProgrammaticUpdate(path, () => {
       const tree = this.tree;
       if (tree === null) return;
       for (const ancestor of ancestorPaths(path)) {
@@ -367,26 +370,32 @@ export class TreeView {
     });
   }
 
-  // Re-entrant-safe guard. Calls to `fn` (and anything `fn` calls) that
-  // fire the library's `onSelectionChange` callback will be suppressed at
-  // `handleSelectionChange`'s early-return. Nested calls are safe because
-  // we save/restore the prior value rather than blindly clearing the flag.
-  private withProgrammaticUpdate(fn: () => void): void {
-    const previous = this.duringProgrammaticUpdate;
-    this.duringProgrammaticUpdate = true;
+  // Re-entrant-safe guard. While `fn` runs, library callbacks whose path
+  // matches `expectedPath` are treated as echoes of our own select call and
+  // suppressed; callbacks for a DIFFERENT path are forwarded — that's a
+  // real user click that landed during the update window. Save/restore
+  // makes nested calls safe.
+  private withProgrammaticUpdate(expectedPath: string | null, fn: () => void): void {
+    const previous = this.expectedSelectedPath;
+    this.expectedSelectedPath = expectedPath;
     try {
       fn();
     } finally {
-      this.duringProgrammaticUpdate = previous;
+      this.expectedSelectedPath = previous;
     }
   }
 
   private handleSelectionChange(selected: readonly string[]): void {
-    if (this.duringProgrammaticUpdate) {
-      return;
-    }
     const first = selected[0];
     if (!first) {
+      return;
+    }
+    // Suppress library echoes of our own programmatic select — the
+    // path matches what we just asked the library to do. Forward
+    // callbacks for any OTHER path, even during the update window:
+    // those are real user clicks, and dropping them would silently
+    // swallow user input under load.
+    if (first === this.expectedSelectedPath) {
       return;
     }
     const documentId = this.pathToDocumentId.get(first);
