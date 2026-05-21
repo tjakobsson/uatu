@@ -169,6 +169,12 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
         // momentarily shrink by one row to force the kernel to signal,
         // then restore. The replay above handles the common case; the
         // SIGWINCH covers TUIs that were mid-frame at disconnect.
+        //
+        // Edge case: rows === 1 means we can't shrink further (Math.max
+        // clamps both calls to the same value, so no kernel signal). A
+        // single-row terminal can't usefully run a TUI anyway, and the
+        // replay buffer alone is sufficient for whatever a shell would
+        // be doing at rows=1, so this is acceptable.
         try {
           existing.pty.resize(existing.cols, Math.max(1, existing.rows - 1));
           existing.pty.resize(existing.cols, existing.rows);

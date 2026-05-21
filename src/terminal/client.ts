@@ -97,7 +97,7 @@ export function buildTerminalWebSocketUrl(
   const params = new URLSearchParams();
   if (token) params.set("t", token);
   params.set("sessionId", sessionId);
-  wsUrl.search = `?${params.toString()}`;
+  wsUrl.search = params.toString();
   return wsUrl.toString();
 }
 
