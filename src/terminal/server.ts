@@ -14,6 +14,14 @@ type SocketData = { sessionId: string };
 const DEFAULT_RECONNECT_GRACE_MS = 5_000;
 // WebSocket.OPEN. Not exposed as a named constant on Bun's ServerWebSocket type.
 const WS_OPEN = 1;
+// Cap the per-session replay buffer. On reattach we resend recent PTY output
+// to the new socket so the new xterm canvas reconstructs the screen (the
+// previous canvas is gone — fresh `Terminal` instance after browser refresh).
+// TUIs (htop, vim, btop) use absolute cursor positioning, so replaying the
+// last few frames' worth of bytes lets xterm rebuild the visible screen.
+// 128KB ≈ several frames of a busy htop at full terminal width; comfortably
+// enough for the worst case while keeping per-session memory bounded.
+const REPLAY_BUFFER_CAP_BYTES = 128 * 1024;
 
 // Lower-cased UUID v1-v5 + the special nil UUID. Permissive enough to accept
 // whatever `crypto.randomUUID()` emits across browsers, strict enough that
@@ -32,6 +40,11 @@ type Session = {
   reapTimer: ReturnType<typeof setTimeout> | null;
   cols: number;
   rows: number;
+  // Replay buffer: recent PTY output captured in chunk-sized pieces. Used on
+  // reattach to seed the new client's xterm canvas with the bytes the
+  // previous client received. See REPLAY_BUFFER_CAP_BYTES comment.
+  replayChunks: Uint8Array[];
+  replayBytes: number;
 };
 
 export type TerminalServerOptions = {
@@ -125,10 +138,43 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
         // PTY keeps running. The reattaching client will send its own
         // `{ type: "resize", cols, rows }` from its WebSocket open handler,
         // so the PTY's pty-side dimensions get re-synced to whatever the
-        // new tab's xterm reports — no server-side dimension replay needed.
+        // new tab's xterm reports.
         if (existing.reapTimer) clearTimeout(existing.reapTimer);
         existing.reapTimer = null;
         existing.socket = socket;
+
+        // Replay the recent PTY output to the new client's blank xterm
+        // canvas. TUIs (htop, vim, btop) use absolute cursor positioning,
+        // so even though earlier frames in the buffer are now obsolete,
+        // each subsequent frame overwrites them and the final terminal
+        // state matches what the previous client was showing. Without
+        // this, the new canvas stays blank until the running program
+        // happens to emit new output — and for a SIGWINCH-driven redraw
+        // (see the resize toggle below) that can be over a second on a
+        // typical htop refresh cadence.
+        for (const chunk of existing.replayChunks) {
+          try {
+            socket.send(chunk);
+          } catch {
+            // Socket already closing; nothing useful to do.
+            break;
+          }
+        }
+
+        // Belt-and-suspenders: force a SIGWINCH so any running TUI also
+        // does a fresh redraw at its current dimensions. `ioctl(TIOCSWINSZ)`
+        // only signals when the dimensions actually CHANGE — and on a page
+        // refresh the new panel is typically the same size as before, so
+        // the client's own resize message arrives as a no-op. We
+        // momentarily shrink by one row to force the kernel to signal,
+        // then restore. The replay above handles the common case; the
+        // SIGWINCH covers TUIs that were mid-frame at disconnect.
+        try {
+          existing.pty.resize(existing.cols, Math.max(1, existing.rows - 1));
+          existing.pty.resize(existing.cols, existing.rows);
+        } catch {
+          // PTY may have just exited; benign.
+        }
         return;
       }
 
@@ -169,25 +215,39 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
         reapTimer: null,
         cols,
         rows,
+        replayChunks: [],
+        replayBytes: 0,
       };
       sessions.set(id, session);
       metrics?.inc("pty.spawned_total");
       updateActive();
 
       pty.onData(bytes => {
+        // Capture before forwarding so the replay buffer also records output
+        // produced while the socket is detached (during the grace window) —
+        // a TUI like htop refreshes every ~1.5s and we want the reattaching
+        // client to see the freshest frame, not a stale pre-disconnect one.
+        // Bun reuses the same backing storage for the PTY callback's
+        // Uint8Array, so we MUST copy before stashing into the replay
+        // ring. socket.send() handles its own copy; the buffer doesn't.
+        const copy = new Uint8Array(bytes);
+        session.replayChunks.push(copy);
+        session.replayBytes += copy.byteLength;
+        while (
+          session.replayBytes > REPLAY_BUFFER_CAP_BYTES
+          && session.replayChunks.length > 1
+        ) {
+          const dropped = session.replayChunks.shift();
+          if (dropped) session.replayBytes -= dropped.byteLength;
+        }
+
         if (session.socket && session.socket.readyState === WS_OPEN) {
           try {
-            // Bun's WebSocket.send consumes/copies the bytes before returning,
-            // so it is safe to forward the same Uint8Array Bun reuses across
-            // PTY data callbacks without copying first.
             session.socket.send(bytes);
           } catch {
             // Socket is closing/closed; the close handler will reap the PTY.
           }
         }
-        // Output produced while the socket is detached (between disconnect and
-        // either reattach or reap) is dropped on the floor. Shell-side
-        // scrollback can recover anything important on reattach.
       });
 
       pty.onExit(({ exitCode, signal }) => {

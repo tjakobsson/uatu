@@ -163,18 +163,33 @@ test("direct-link with a fragment scrolls the matching heading into view", async
   await expect(target).toBeInViewport();
 });
 
-test("direct link to an unknown path returns the static fallback 404", async ({ request }) => {
-  // Browser-style Accept header — must NOT receive the SPA shell for a path
-  // that does not resolve to any viewable doc (per design D4).
+test("direct link to an unknown path serves the SPA shell so the SPA can render its own empty state", async ({ request }) => {
+  // Browser-style Accept header. The server returns the SPA shell for any
+  // HTML-preferring navigation, including unknown paths — letting the SPA
+  // render its own "Document not found" empty state while keeping any
+  // SPA-owned WebSockets (notably the embedded terminal's) attached. The
+  // older static-fallback 404 behavior tore down the SPA on every typo or
+  // renamed-link click.
   const response = await request.get("/typo-not-a-real-doc.md", {
     headers: {
       accept:
         "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
     },
   });
+  expect(response.status()).toBe(200);
+  const body = await response.text();
+  expect(body).toContain('id="preview"');
+});
+
+test("direct link to an unknown path with Accept: */* still returns 404", async ({ request }) => {
+  // Non-HTML-preferring requests (curl, sub-resource fetches) still get a
+  // plain 404 so the SPA shell isn't accidentally returned to non-browser
+  // clients.
+  const response = await request.get("/typo-not-a-real-doc.md", {
+    headers: { accept: "*/*" },
+  });
   expect(response.status()).toBe(404);
   const body = await response.text();
-  // The SPA shell is NOT served — body should NOT look like the SPA HTML.
   expect(body).not.toContain('id="preview"');
 });
 

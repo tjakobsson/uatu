@@ -819,8 +819,9 @@ export function createNavigationFetchHandler(deps: {
 }): (request: Request) => Promise<Response> {
   return async request => {
     const requestUrl = new URL(request.url);
+    const htmlPreferring = prefersHtmlNavigation(request);
 
-    if (prefersHtmlNavigation(request)) {
+    if (htmlPreferring) {
       const doc = resolveViewableDocument(requestUrl.pathname, deps.getUnscopedRoots());
       if (doc) {
         return await spaShellResponse(deps.getServer());
@@ -832,6 +833,17 @@ export function createNavigationFetchHandler(deps: {
     });
     if (response) {
       return response;
+    }
+
+    // HTML-preferring navigation to an unknown path: serve the SPA shell so
+    // the SPA stays mounted and can render its own "Document not found"
+    // empty state. Without this, the browser navigates to a hard 404 and
+    // tears down everything the SPA owns — most notably the terminal
+    // WebSockets, which would be killed by a real navigation event.
+    // Non-HTML-preferring requests (curl, sub-resource fetches) keep
+    // receiving plain 404 so they aren't quietly served a stale HTML body.
+    if (htmlPreferring) {
+      return await spaShellResponse(deps.getServer());
     }
 
     return new Response("Not Found", { status: 404 });

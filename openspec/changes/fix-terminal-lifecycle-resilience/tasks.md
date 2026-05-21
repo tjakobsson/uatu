@@ -1,0 +1,41 @@
+## 1. WebSocket URL hash strip (bug #3)
+
+- [x] 1.1 In `src/terminal/client.ts`, extracted `buildTerminalWebSocketUrl(pageUrl, sessionId, token)` as an exported helper that sets `wsUrl.hash = ""` after parsing the page URL. `connect()` now calls the helper instead of building inline.
+- [x] 1.2 Added `src/terminal/client.test.ts` with 8 cases covering hash strip, protocol upgrade, pathname, sessionId, token presence/absence, and a smoke `new WebSocket(url)` that catches the regression directly.
+
+## 2. Server SPA-shell fallback for unknown HTML navigations (bug #1, server half)
+
+- [x] 2.1 Added the SPA-shell fallback branch in `createNavigationFetchHandler`. The handler now hoists `htmlPreferring` to a local and re-uses it after the static fallback returns null. Non-HTML-preferring requests still receive `Not Found`.
+- [x] 2.2 Updated the existing "unknown path" assertion (was expecting 404 for HTML-preferring) to assert 200 + SPA shell marker; added a new test asserting `Accept: */*` to an unknown path still returns 404 with `Not Found` body. Also refactored the test fixture's `withDispatchServer` to use the real `createNavigationFetchHandler` so the new tests exercise production code rather than inlined dispatch logic. 80/80 tests pass.
+
+## 3. Cross-doc anchor handler catches unknown same-origin paths (bug #1, client half)
+
+- [x] 3.1 Updated `initCrossDocAnchorHandler` in `src/preview/anchors.ts`. The "doc not found" branch now `preventDefault()`s, pushes `resolved.pathname` via `history.pushState`, clears `appState.selectedId`, sets `previewMode = "empty"`, disables follow, and renders the in-app "Document not found" empty state. Also added the `appState.scope.kind === "file"` branch so single-file CLI scope renders "Session pinned" consistently with the popstate handler at `history.ts:187-197`.
+- [x] 3.2 Reordered the checks: `if (doc && doc.kind === "binary") return;` runs before the `!doc` branch, so binary docs still fall through to the static-file fallback. PDFs and similar continue to work as before.
+- [x] 3.3 The new branch sets `followEnabled = false` — same as the existing same-origin click handler and the popstate handler. No new follow-mode write-site introduced. The empty-state render mirrors history.ts which is the spec-authoritative path.
+
+## 4. Disambiguate bug #2: xterm sizing race vs hash-leak (decision 4 in design)
+
+- [x] 4.1 Disambiguation decided by reasoning rather than a fresh manual repro. The user's original report said "when you resize the pane they get refreshed so everything is working but it's a small ui bug." If bug #2 were bug #3 in disguise the WebSocket would never open and resize would have nothing to redraw — but the user explicitly observed that data IS already there, just not visible. That signature matches xterm's first-paint cell-measurement race, not the hash-fragment WebSocket throw. The §7.3 manual verification step is the final cross-check.
+- [x] 4.2 Decision: proceed with §5 (deferred-fit + post-open refit). Treating it as defense-in-depth keyed on the user's own description rather than a synthetic repro.
+
+## 5. Terminal first paint without manual resize (bug #2, only if §4.2 selects this path)
+
+- [x] 5.1 First attempt used `requestAnimationFrame` to defer `term.open()` / `fit.fit()`. Passed e2e (which only checked DOM presence) but the user verified on real-browser refresh that the empty-until-resize symptom persisted. Replaced with a `ResizeObserver`-driven open: `connect()` builds the `Terminal` and `FitAddon` synchronously, the same `ResizeObserver` that handles ongoing refits also drives the initial `openXtermNow()` on first non-zero `contentRect`. Event-driven rather than timing-based — guaranteed to fire after layout settles regardless of CSS transition duration.
+- [x] 5.2 The socket `"open"` handler now sends the initial resize frame only when `openDone` is true; if the WebSocket opens before xterm does, `openXtermNow()` sends the resize the moment it runs. PTY data that arrives before `openXtermNow()` is buffered internally by xterm and renders on first paint after `term.open()`.
+- [x] 5.3 Strengthened the §6.3 e2e regression to actually catch the visual-rendering symptom (polls `.xterm-rows > div` text contents for non-whitespace characters) rather than just asserting DOM presence — the original assertion passed even when the canvas was blank.
+- [x] 5.4 Real-browser testing with htop running surfaced a deeper layer: even with §5.1-§5.3 the post-refresh canvas was blank or stale-frame-corrupted. Root cause was server-side, not client-side — `ioctl(TIOCSWINSZ)` only delivers `SIGWINCH` when dimensions actually *change*, so when the new tab's panel happened to be the same size as before the refresh, the client's resize message was a no-op and the running TUI never redrew into the (blank) reattached xterm canvas. Fixed in `src/terminal/server.ts` reattach branch: momentarily shrink the PTY rows by one then restore, forcing the kernel to deliver SIGWINCH. The TUI redraws fresh into the reattached canvas. User confirmed during testing that "when I do a pane resize, it gets fixed, it's like the pty/terminal get a whole redraw" — that's exactly the SIGWINCH that the reattach path was missing.
+- [x] 5.5 User-verified §5.4 STILL had the bug — the SIGWINCH-only approach depended on the TUI's refresh tick (htop refreshes every ~1.5s by default), and ncurses optimizes away "redraws" of cells it thinks are unchanged. The fix that actually works: add a per-session PTY-output replay buffer (128KB ring, `replayChunks` on `Session`) that captures all output continuously — even during the disconnect grace window. On reattach, drain the buffer to the new socket before any new bytes flow. The new xterm reconstructs the screen by replaying the absolute-positioned escape codes in those bytes; final terminal state matches what the previous client was showing. The SIGWINCH toggle remains as belt-and-suspenders for TUIs that were mid-frame at disconnect or for after-grace cases. Memory bound: 128KB × max 8 panes = ~1MB worst case.
+
+## 6. E2E regression coverage
+
+- [x] 6.1 Added `tests/e2e/terminal-lifecycle.e2e.ts` with the click-to-404 regression: seed a `linker.md` fixture via `/__e2e/reset`'s `extras`, open the terminal, click into the linker doc via the tree, capture the xterm element handle, click the missing-link anchor, assert "Document not found" empty state + URL update + SAME xterm element still in DOM.
+- [x] 6.2 Added the deep-link-refresh regression in the same file: open the terminal so visibility is genuinely persisted via the production write path, `history.replaceState` to `/README.md#user-content-some-fragment` (preserves the fragment-bearing URL across reload without doing a soft-navigation `page.goto`), `page.reload()`, assert no console-error or pageerror matching `/WebSocket|fragment/i` fires AND the terminal pane reaches the visible state.
+- [x] 6.3 Added the first-paint-after-refresh regression in the same file: open the terminal, type a marker, seed `uatu:terminal-visible="1"` in sessionStorage, `page.reload()`, assert the terminal panel + xterm + non-zero `.xterm-rows > div` count appear within 3s without any test-issued resize event. 3/3 new e2e tests pass on first full run.
+
+## 7. Verification
+
+- [x] 7.1 `bun test`: 543 pass, 2 skip, 0 fail. 8 new unit tests for `buildTerminalWebSocketUrl` and 2 updated/added cases in `session.test.ts`'s navigation-dispatch describe.
+- [x] 7.2 `bunx playwright test`: 144 passed on full re-run (initial run had 143/144 — the one flake was `document-tree.e2e.ts:115 follow-mode auto-switch`, a pre-existing parallel-worker flake noted in the prior simplify-modes-and-follow change). The 3 new `terminal-lifecycle.e2e.ts` tests pass consistently; the updated `url-routing.e2e.ts` tests for the SPA-shell fallback also pass.
+- [ ] 7.3 Manual dev-server walk-through deferred to the human reviewer. The three regressions are now covered by automated e2e tests (§6.1, §6.2, §6.3), so any breakage will surface in CI rather than only in manual repro. Recommended sanity check before merging: open `bun run dev` against `testdata/watch-docs`, deep-link to a doc with a `#section` hash, refresh, and confirm the terminal connects cleanly.
+- [x] 7.4 `openspec validate fix-terminal-lifecycle-resilience`: valid.
