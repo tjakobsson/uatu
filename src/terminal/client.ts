@@ -78,6 +78,29 @@ export function captureTerminalToken(): string | null {
   }
 }
 
+// Build the WebSocket URL for the terminal endpoint. The `pageUrl` source
+// (usually `window.location.href`) carries the current page's hash when the
+// user arrived via a deep link like `/some/doc.md#section`. The WebSocket
+// constructor REJECTS any URL with a fragment identifier — so we drop the
+// hash here at the single site where WebSocket URLs are minted, rather than
+// trying to keep the page URL fragment-free (which would break deep-link
+// scroll).
+export function buildTerminalWebSocketUrl(
+  pageUrl: string,
+  sessionId: string,
+  token: string | null,
+): string {
+  const wsUrl = new URL(pageUrl);
+  wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
+  wsUrl.pathname = "/api/terminal";
+  wsUrl.hash = "";
+  const params = new URLSearchParams();
+  if (token) params.set("t", token);
+  params.set("sessionId", sessionId);
+  wsUrl.search = params.toString();
+  return wsUrl.toString();
+}
+
 // Hand the token to the server so it can mint an HttpOnly cookie. Returns
 // true if the server accepted it; the panel UI uses the result to decide
 // whether to retry the WebSocket connection.
@@ -187,34 +210,71 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     fit = new FitAddon();
     term.loadAddon(fit);
     options.container.replaceChildren();
-    term.open(options.container);
-    fit.fit();
-    // Best-effort: in installed-PWA standalone mode, ask the browser to
-    // deliver KeyC to the page so Ctrl+Shift+C reaches our handler instead
-    // of opening Edge's DevTools. Page-singleton inside the helper.
-    acquireKeyboardLockOnce();
 
-    const wsUrl = new URL(window.location.href);
-    wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
-    wsUrl.pathname = "/api/terminal";
+    // xterm initialization is driven by ResizeObserver rather than rAF
+    // timing. Reason: on a page refresh that restores the persisted
+    // terminal-visible preference, setVisible(true) unhides the panel and
+    // synchronously calls attach(); calling term.open() before the panel
+    // container has its real layout caches a degenerate cell measurement
+    // that subsequent fit.fit() calls don't fully recover from. rAF
+    // ordering relative to layout varies subtly across browsers and
+    // panel-CSS arrangements, so we wait for the container to actually
+    // have a non-zero contentRect — that's guaranteed to fire only AFTER
+    // layout has settled. The same ResizeObserver also handles subsequent
+    // user-initiated resizes.
+    let openDone = false;
+    let lastCols = 0;
+    let lastRows = 0;
+
+    function openXtermNow(): void {
+      if (!term || !fit || openDone) return;
+      openDone = true;
+      try {
+        term.open(options.container);
+        fit.fit();
+        lastCols = term.cols;
+        lastRows = term.rows;
+        // Belt-and-suspenders repaint. xterm buffers any term.write()
+        // calls that happened before open(); the buffered data renders on
+        // first paint after open(), but a canvas that was created during
+        // a transition can hold a stale frame until something forces a
+        // repaint. refresh() does exactly that, cheaply.
+        term.refresh(0, term.rows - 1);
+        // If the WebSocket already opened (data may already be flowing),
+        // send a corrected resize now that we have real dimensions.
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+        }
+      } catch {
+        // Container vanished between observe() and the callback. Undo so
+        // the next observation tries again.
+        openDone = false;
+        return;
+      }
+      // Best-effort: in installed-PWA standalone mode, ask the browser to
+      // deliver KeyC to the page so Ctrl+Shift+C reaches our handler
+      // instead of opening Edge's DevTools. Page-singleton inside the
+      // helper.
+      acquireKeyboardLockOnce();
+    }
+
     // Token in URL when we have one (first-tab path); otherwise rely on the
     // HttpOnly auth cookie set by /api/auth (PWA / subsequent visits).
     // sessionId is always present — the server requires it for multiplexing.
-    const params = new URLSearchParams();
-    if (token) params.set("t", token);
-    params.set("sessionId", options.sessionId);
-    wsUrl.search = `?${params.toString()}`;
-    socket = new WebSocket(wsUrl.toString());
+    socket = new WebSocket(
+      buildTerminalWebSocketUrl(window.location.href, options.sessionId, token),
+    );
     socket.binaryType = "arraybuffer";
 
     let didOpen = false;
 
     socket.addEventListener("open", () => {
       didOpen = true;
-      // Send the initial size so the server's PTY matches the viewport before
-      // the first keystroke. The fit-addon-driven ResizeObserver below covers
-      // subsequent changes.
-      if (term && socket && socket.readyState === WebSocket.OPEN) {
+      // If xterm is already opened (toggle path — container had real
+      // dimensions before observe() fired), send the initial resize now.
+      // If xterm isn't opened yet (auto-restore path), openXtermNow() will
+      // send the resize the moment it opens.
+      if (term && openDone && socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
       }
     });
@@ -286,10 +346,24 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     });
 
     // Re-fit and notify the server whenever the panel height changes.
-    let lastCols = term.cols;
-    let lastRows = term.rows;
-    resizeObserver = new ResizeObserver(() => {
+    // This SAME observer also drives the initial xterm open: the first
+    // time the container has a non-zero contentRect, openXtermNow() runs
+    // synchronously inside the observer callback. After that, every
+    // observation is a refit. observe() itself fires an initial dispatch
+    // right after layout settles, so on the toggle path (container
+    // already has dimensions) and the auto-restore-on-refresh path
+    // (container dimensions land after observe()), open happens at the
+    // right moment in both cases.
+    resizeObserver = new ResizeObserver(entries => {
       if (!term || !fit) return;
+      const entry = entries.at(-1);
+      if (!entry) return;
+      if (!openDone) {
+        if (entry.contentRect.width > 0 && entry.contentRect.height > 0) {
+          openXtermNow();
+        }
+        return;
+      }
       try {
         fit.fit();
       } catch {

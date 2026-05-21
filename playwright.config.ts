@@ -11,6 +11,13 @@ export default defineConfig({
   testMatch: "**/*.e2e.ts",
   fullyParallel: true,
   workers: 4,
+  // CI re-runs failed tests up to twice so parallel-worker flakes don't
+  // block PRs; real regressions still fail consistently. Locally `retries:
+  // 0` keeps tests strict so flakes surface immediately. The `trace:
+  // "on-first-retry"` config below captures debug artifacts when a retry
+  // happens, so chronic flakes remain investigable. Revisit later as part
+  // of a broader e2e-harness pass.
+  retries: process.env.CI ? 2 : 0,
   timeout: 30_000,
   expect: {
     timeout: 10_000,

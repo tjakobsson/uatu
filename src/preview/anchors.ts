@@ -3,8 +3,9 @@
 // lives in one module. Both handlers are attached to `#preview` and decide
 // per-click whether to override the browser's default navigation.
 
-import { findDocumentByRelativePath } from "../shell/storage";
+import { findDocumentById, findDocumentByRelativePath } from "../shell/storage";
 import { loadDocument } from "./mount";
+import { renderEmptyPreview } from "./empty";
 import { renderSidebar } from "../sidebar/shell";
 import { syncFollowToggle } from "../shell/follow";
 import { pushSelection, scrollToFragment } from "../shell/history";
@@ -139,13 +140,42 @@ export function initCrossDocAnchorHandler() {
     }
 
     const doc = findDocumentByRelativePath(relativePath);
-    if (!doc) {
+
+    // Binary docs are non-clickable in the sidebar but a hand-authored link
+    // to one (e.g. a PDF) should still let the browser fetch it through the
+    // static-file fallback.
+    if (doc && doc.kind === "binary") {
       return;
     }
 
-    // Binary docs are non-clickable in the sidebar but a hand-authored link
-    // to one (e.g. a PDF) should still let the browser fetch it.
-    if (doc.kind === "binary") {
+    if (!doc) {
+      // Same-origin link the SPA can't map to a known viewable document
+      // (renamed file, typo, etc.). Letting this fall through would trigger
+      // a full browser navigation to the server's 404, tearing down every
+      // SPA-owned WebSocket (notably the embedded terminal's). Intercept,
+      // push the unresolved path so the back button returns to the current
+      // doc, and show the same in-app empty state the popstate handler
+      // renders for the equivalent case. Mirrors `history.ts:187-202`.
+      event.preventDefault();
+      if (appState.scope.kind === "file") {
+        const pinnedDoc = appState.selectedId ? findDocumentById(appState.selectedId) : null;
+        window.history.pushState(null, "", resolved.pathname);
+        renderSidebar();
+        renderEmptyPreview(
+          "Session pinned",
+          pinnedDoc
+            ? `Session pinned to ${pinnedDoc.relativePath}. Unpin to view other documents.`
+            : "Session pinned to another file. Unpin to view other documents.",
+        );
+        return;
+      }
+      appState.followEnabled = false;
+      appState.selectedId = null;
+      appState.previewMode = { kind: "empty" };
+      window.history.pushState(null, "", resolved.pathname);
+      syncFollowToggle();
+      renderSidebar();
+      renderEmptyPreview("Document not found", `Document not found at ${relativePath}.`);
       return;
     }
 

@@ -6,6 +6,7 @@ import path from "node:path";
 import {
   attachWatcherCrashGuard,
   buildWatcherIgnorePredicate,
+  createNavigationFetchHandler,
   createStatePayload,
   createWatchSession,
   canSetFileScope,
@@ -987,6 +988,13 @@ describe("Accept-based navigation dispatch", () => {
 
     let server: ReturnType<typeof Bun.serve> | null = null;
     try {
+      const entries = [{ kind: "dir", absolutePath: rootDirectory } as const];
+      const navigationHandler = createNavigationFetchHandler({
+        getUnscopedRoots: () => session.getUnscopedRoots(),
+        getEntries: () => entries,
+        getRespectGitignore: () => true,
+        getServer: () => server!,
+      });
       server = Bun.serve({
         hostname: "127.0.0.1",
         port: 0,
@@ -997,25 +1005,7 @@ describe("Accept-based navigation dispatch", () => {
               headers: { "content-type": "text/html; charset=utf-8" },
             }),
         },
-        fetch: async request => {
-          const requestUrl = new URL(request.url);
-          if (prefersHtmlNavigation(request)) {
-            const doc = resolveViewableDocument(
-              requestUrl.pathname,
-              session.getUnscopedRoots(),
-            );
-            if (doc) {
-              return await spaShellResponse(server!);
-            }
-          }
-          const response = await staticFileResponse(requestUrl.pathname, [
-            { kind: "dir", absolutePath: rootDirectory },
-          ]);
-          if (response) {
-            return response;
-          }
-          return new Response("Not Found", { status: 404 });
-        },
+        fetch: navigationHandler,
       });
 
       const origin = `http://${server.hostname}:${server.port}`;
@@ -1080,8 +1070,8 @@ describe("Accept-based navigation dispatch", () => {
     });
   });
 
-  test("HTML-preferring navigation to an unknown path returns the static fallback's 404", async () => {
-    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-dispatch-unknown-"));
+  test("HTML-preferring navigation to an unknown path serves the SPA shell so the SPA can render its own empty state", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-dispatch-unknown-html-"));
     tempDirectories.push(tempDirectory);
     await writeFile(path.join(tempDirectory, "README.md"), "# Hello\n");
 
@@ -1093,8 +1083,24 @@ describe("Accept-based navigation dispatch", () => {
         },
       });
       const body = await response.text();
+      expect(response.status).toBe(200);
+      expect(body).toContain(SHELL_MARKER);
+    });
+  });
+
+  test("Accept: */* request to an unknown path still returns 404", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-dispatch-unknown-curl-"));
+    tempDirectories.push(tempDirectory);
+    await writeFile(path.join(tempDirectory, "README.md"), "# Hello\n");
+
+    await withDispatchServer(tempDirectory, async origin => {
+      const response = await fetch(`${origin}/typo-not-a-real-doc`, {
+        headers: { accept: "*/*" },
+      });
+      const body = await response.text();
       expect(response.status).toBe(404);
       expect(body).not.toContain(SHELL_MARKER);
+      expect(body).toBe("Not Found");
     });
   });
 });
