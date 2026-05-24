@@ -24,6 +24,20 @@
   font-display: block;
 }
 
+/* Override github-markdown-css's hardcoded monospace stacks so rendered
+   Markdown code (and similar) picks up `--mono-font-family` like every
+   other surface. Specificity matches `.markdown-body pre code` (0,1,2),
+   so source order — we sit after the @import — wins. No !important
+   needed; users can override via `.uatu.json mono.fontFamily`. */
+.markdown-body pre,
+.markdown-body code,
+.markdown-body pre code,
+.markdown-body samp,
+.markdown-body tt,
+.markdown-body kbd {
+  font-family: var(--mono-font-family);
+}
+
 :root {
   color-scheme: light;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -41,27 +55,40 @@
   --teal: #1ca8a7;
   --surface-muted: #f3f5f7;
 
-  /* Embedded terminal palette. The light-on-dark scheme stays consistent
-     across uatu's overall light theme — terminals look wrong when bright. */
-  --terminal-bg: #0b1220;
-  --terminal-fg: #e6edf3;
-  --terminal-cursor: #e6edf3;
-  --terminal-selection-bg: rgba(28, 168, 167, 0.4);
-  /* Terminal default: the bundled Hack Nerd Font Mono (@font-face above)
-     resolves first — to a locally-installed copy where the browser allows,
-     to the vendored woff2 otherwise. So shell-prompt icon glyphs render
-     correctly out of the box in every browser, including Safari and the
-     PWA. Users who want a different face set `terminal.fontFamily` in
-     `.uatu.json`; that override fully replaces this stack at runtime. The
-     remaining entries are last-resort fallbacks if both the local install
-     and the woff2 fetch fail. */
-  --terminal-font-family:
+  /* Shared monospace face for every mono surface in the app — code blocks,
+     source view, diff view, file paths, build badge, burden meter, etc.
+     Default is the bundled Hack Nerd Font Mono (@font-face above): a
+     local install short-circuits the network where the browser allows
+     it, otherwise the vendored woff2 is fetched. Users override globally
+     via `.uatu.json mono.fontFamily`; the client writes that value here
+     at boot. */
+  --mono-font-family:
     "Hack Nerd Font Mono",
     ui-monospace,
     "SF Mono",
     Menlo,
     Consolas,
     monospace;
+
+  /* Plug `--mono-font-family` into @pierre/diffs's consumer-controlled
+     hook. The diff renderer lives in a Web Component (`<diffs-container>`)
+     with its own shadow DOM and an SF-Mono-style fallback baked in;
+     custom properties cascade through the shadow boundary, so setting
+     this here is enough to make the diff body track our shared mono face
+     (and any `.uatu.json mono.fontFamily` override). */
+  --diffs-font-family: var(--mono-font-family);
+
+  /* Embedded terminal palette. The light-on-dark scheme stays consistent
+     across uatu's overall light theme — terminals look wrong when bright. */
+  --terminal-bg: #0b1220;
+  --terminal-fg: #e6edf3;
+  --terminal-cursor: #e6edf3;
+  --terminal-selection-bg: rgba(28, 168, 167, 0.4);
+  /* Terminal font cascade: by default falls through to `--mono-font-family`,
+     so a global `mono.fontFamily` override propagates to the terminal too.
+     The client narrows this back down by writing `terminal.fontFamily` here
+     when set — that's the in-panel override that wins over mono. */
+  --terminal-font-family: var(--mono-font-family);
   --terminal-ansi-black: #1f2937;
   --terminal-ansi-red: #f87171;
   --terminal-ansi-green: #4ade80;
@@ -759,11 +786,10 @@ body.is-resizing-terminal .panel-resizer {
 .terminal-toggle-kbd {
   font: inherit;
   font-size: 0.72rem;
-  /* Plain OS monospace — this hint only renders "⌃`" and similar
-     keyboard glyphs that every system font handles. Inheriting
-     `--terminal-font-family` would inflict the bundled face's
-     `font-display: block` policy here and cause up-to-3-second FOIT
-     on first paint in Safari, which is wrong for a static label. */
+  /* Deliberately opts OUT of `--mono-font-family`. The bundled face's
+     `font-display: block` policy would cause up-to-3-second FOIT on
+     first paint in Safari, and this label only ever renders "⌃`" and
+     similar keyboard glyphs that any system mono handles. */
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   padding: 0.05rem 0.35rem;
   border-radius: 3px;
@@ -1393,7 +1419,7 @@ body.is-resizing-terminal .panel-resizer {
   border-radius: 0.3rem;
   background: #fbfcfd;
   color: var(--text-strong);
-  font-family: "SFMono-Regular", "Menlo", "Monaco", "Consolas", monospace;
+  font-family: var(--mono-font-family);
   font-size: 0.74rem;
   line-height: 1.4;
   text-align: left;
@@ -1462,7 +1488,7 @@ body.is-resizing-terminal .panel-resizer {
 
 .build-badge {
   display: inline-block;
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-family: var(--mono-font-family);
   font-size: 0.7rem;
   color: var(--text-subtle);
   letter-spacing: 0.02em;
@@ -1533,7 +1559,7 @@ body.is-resizing-terminal .panel-resizer {
 }
 
 .burden-meter strong {
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-family: var(--mono-font-family);
   font-size: 0.9rem;
 }
 
@@ -1818,7 +1844,7 @@ body.is-resizing-terminal .panel-resizer {
 }
 
 .metadata-card-row-extra .metadata-card-label {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--mono-font-family);
   font-size: 0.7rem;
   color: var(--text-subtle);
   text-transform: none;
@@ -1922,7 +1948,7 @@ body.is-resizing-terminal .panel-resizer {
 .score-preview h1 {
   margin: 0;
   color: var(--text-strong);
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-family: var(--mono-font-family);
   font-size: 2.4rem;
   line-height: 1;
 }
@@ -3131,7 +3157,7 @@ body.is-resizing-terminal .panel-resizer {
   background: #ffffff;
   border: 1px solid var(--border-soft);
   border-radius: 0.35rem;
-  font-family: var(--mono-font, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-family: var(--mono-font-family);
   font-size: 0.82rem;
   line-height: 1.45;
   overflow-x: auto;

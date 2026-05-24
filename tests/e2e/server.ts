@@ -33,6 +33,7 @@ import {
   type WatchEntry,
 } from "../../src/server/session";
 import { loadTerminalConfig } from "../../src/terminal/config";
+import { loadMonoConfig } from "../../src/mono/config";
 import { buildRoutes } from "../../src/server/routes";
 import {
   TERMINAL_COOKIE_NAME,
@@ -263,18 +264,21 @@ async function createSession(options: { resetWorkspace: boolean }) {
     : [activeWorkspaceRoot];
   const entries = await resolveWatchRoots(entryPaths, process.cwd());
   activeEntries = entries;
-  // Mirror cli.ts: a `.uatu.json terminal.fontFamily` override at the watch
-  // root flows through /api/state.terminalConfig into xterm. The reset
-  // handler may have just written one (see body.uatuConfig), so reload it
-  // every time the session is rebuilt.
+  // Mirror cli.ts: `.uatu.json terminal.fontFamily` and `.uatu.json
+  // mono.fontFamily` overrides at the watch root flow through
+  // /api/state.terminalConfig and .monoConfig into the client. The reset
+  // handler may have just written one (see body.uatuConfig), so reload
+  // them every time the session is rebuilt.
   const terminalConfigResult = terminalEnabled
     ? await loadTerminalConfig(activeWorkspaceRoot)
     : { config: {}, warnings: [] };
+  const monoConfigResult = await loadMonoConfig(activeWorkspaceRoot);
   const session = createWatchSession(entries, activeFollow, {
     usePolling: true,
     respectGitignore: activeRespectGitignore,
     terminalEnabled,
     terminalConfig: terminalConfigResult.config,
+    monoConfig: monoConfigResult.config,
   });
   await session.start();
   return session;

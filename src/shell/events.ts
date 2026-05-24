@@ -5,6 +5,7 @@
 
 import { chooseSelectionForFileEvent } from "./follow";
 import { findDocumentById, syncStateGeneration } from "./storage";
+import { applyMonoConfig } from "../mono/apply";
 import { forgetDocumentCache, loadDocument } from "../preview/mount";
 import { renderEmptyPreview } from "../preview/empty";
 import { renderReviewScoreDetails } from "../sidebar/review-score-mount";
@@ -38,6 +39,7 @@ export function connectEvents() {
     appState.roots = payload.roots;
     appState.repositories = payload.repositories ?? [];
     appState.scope = payload.scope;
+    applyMonoConfig(payload.monoConfig);
     syncStateGeneration(payload.generatedAt);
 
     if (appState.previewMode.kind === "review-score") {

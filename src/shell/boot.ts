@@ -10,6 +10,7 @@ import { renderEmptyPreview } from "../preview/empty";
 import { renderReviewScoreDetails } from "../sidebar/review-score-mount";
 import { renderSidebar } from "../sidebar/shell";
 import { setupTerminalPanel } from "../terminal/panel";
+import { applyMonoConfig } from "../mono/apply";
 import { syncFilesPaneFilterControl } from "../sidebar/files-filter";
 import { syncFollowToggle } from "./follow";
 import type { StatePayload } from "../shared/types";
@@ -55,6 +56,7 @@ export async function loadInitialState() {
   appState.scope = payload.scope;
   syncStateGeneration(payload.generatedAt);
   renderBuildBadge(payload.build);
+  applyMonoConfig(payload.monoConfig);
   setupTerminalPanel(payload.terminal === "enabled", payload.terminalConfig);
 
   appState.panes = readPaneState();
