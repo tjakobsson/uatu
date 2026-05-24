@@ -26,9 +26,11 @@
 
 /* Override github-markdown-css's hardcoded monospace stacks so rendered
    Markdown code (and similar) picks up `--mono-font-family` like every
-   other surface. Specificity matches `.markdown-body pre code` (0,1,2),
-   so source order — we sit after the @import — wins. No !important
-   needed; users can override via `.uatu.json mono.fontFamily`. */
+   other surface. Each selector below matches the specificity of the
+   corresponding rule in github-markdown-css (`.markdown-body code` is
+   0,1,1; `.markdown-body pre code` is 0,1,2; etc.), so source order —
+   we sit after the @import — wins each face-off. No !important needed;
+   users override via `.uatu.json mono.fontFamily`. */
 .markdown-body pre,
 .markdown-body code,
 .markdown-body pre code,
