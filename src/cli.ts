@@ -9,6 +9,10 @@ import icon192Asset from "./assets/icon-192.png" with { type: "file" };
 import icon512Asset from "./assets/icon-512.png" with { type: "file" };
 import manifestAsset from "./assets/manifest.webmanifest" with { type: "file" };
 import swAsset from "./assets/sw.js" with { type: "file" };
+import hackMonoFontAsset from "./assets/fonts/HackNerdFontMono-Regular.woff2" with { type: "file" };
+import hackLicenseAsset from "./assets/fonts/LICENSE-hack.md" with { type: "file" };
+import nerdFontsLicenseAsset from "./assets/fonts/LICENSE-nerdfonts.txt" with { type: "file" };
+import fontNoticesAsset from "./assets/fonts/NOTICES.md" with { type: "file" };
 import index from "./index.html";
 import {
   createNavigationFetchHandler,
@@ -274,6 +278,12 @@ async function runWatch(options: WatchOptions) {
             icon512: icon512Asset,
             manifest: manifestAsset,
             sw: swAsset,
+            fonts: {
+              hackMono: hackMonoFontAsset,
+              hackLicense: hackLicenseAsset,
+              nerdFontsLicense: nerdFontsLicenseAsset,
+              notices: fontNoticesAsset,
+            },
           },
           getSession: () => watchSession!,
           debug: options.debug,

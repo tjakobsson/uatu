@@ -17,7 +17,12 @@ src/
 ├── app.ts          SPA entry — DOM queries, init calls, event wiring
 ├── cli.ts          CLI entry — `uatu watch ...` + Bun.serve assembly
 ├── styles.d.ts     CSS module type declarations
-├── index.html, styles.css, assets/
+├── index.html, styles.css, assets/, assets/fonts/
+│                   (the bundled Hack Nerd Font Mono lives here — it's
+│                   the default terminal face served at
+│                   /assets/fonts/, with siblings for the upstream
+│                   license texts; .uatu.json terminal.fontFamily
+│                   overrides it)
 │
 ├── shell/          boot, events, history, url, connection, pwa, follow,
 │                   follow-rules, state, storage, stale-hint — the

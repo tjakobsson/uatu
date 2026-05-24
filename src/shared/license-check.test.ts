@@ -25,4 +25,14 @@ describe("validateLicenseRecords", () => {
   test("accepts permissive alternatives in OR expressions", () => {
     expect(isAllowedLicenseExpression("(MPL-2.0 OR Apache-2.0)")).toBe(true);
   });
+
+  test("accepts SIL OFL 1.1 in all its common spellings", () => {
+    expect(isAllowedLicenseExpression("OFL-1.1")).toBe(true);
+    expect(isAllowedLicenseExpression("SIL OFL 1.1")).toBe(true);
+    expect(isAllowedLicenseExpression("(MIT AND OFL-1.1)")).toBe(true);
+  });
+
+  test("still rejects GPL even alongside OFL", () => {
+    expect(isAllowedLicenseExpression("(GPL-3.0 AND OFL-1.1)")).toBe(false);
+  });
 });
