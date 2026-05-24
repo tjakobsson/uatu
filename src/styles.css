@@ -759,7 +759,12 @@ body.is-resizing-terminal .panel-resizer {
 .terminal-toggle-kbd {
   font: inherit;
   font-size: 0.72rem;
-  font-family: var(--terminal-font-family);
+  /* Plain OS monospace — this hint only renders "⌃`" and similar
+     keyboard glyphs that every system font handles. Inheriting
+     `--terminal-font-family` would inflict the bundled face's
+     `font-display: block` policy here and cause up-to-3-second FOIT
+     on first paint in Safari, which is wrong for a static label. */
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   padding: 0.05rem 0.35rem;
   border-radius: 3px;
   background: rgba(15, 23, 42, 0.06);
