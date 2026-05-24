@@ -822,7 +822,7 @@ export function createNavigationFetchHandler(deps: {
     const htmlPreferring = prefersHtmlNavigation(request);
 
     if (htmlPreferring) {
-      const doc = resolveViewableDocument(requestUrl.pathname, deps.getUnscopedRoots());
+      const doc = resolveKnownDocument(requestUrl.pathname, deps.getUnscopedRoots());
       if (doc) {
         return await spaShellResponse(deps.getServer());
       }
@@ -855,7 +855,7 @@ export function createNavigationFetchHandler(deps: {
 // malformed encoding, or paths outside any root. Mirrors the SPA's
 // path-to-doc lookup so server-side navigation dispatch stays consistent
 // with what the client would do once it boots.
-export function resolveViewableDocument(
+export function resolveKnownDocument(
   pathname: string,
   roots: RootGroup[],
 ): DocumentMeta | null {
