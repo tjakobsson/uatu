@@ -53,7 +53,7 @@ const documentCountElement: HTMLElement = documentCountElementMaybe;
 
 export const SIDEBAR_COLLAPSED_KEY = "uatu:sidebar-collapsed";
 export const SIDEBAR_WIDTH_KEY = "uatu:sidebar-width";
-export const SIDEBAR_MIN_WIDTH = 260;
+export const SIDEBAR_MIN_WIDTH = 320;
 export const SIDEBAR_MAX_WIDTH = 620;
 
 export function renderSidebar() {

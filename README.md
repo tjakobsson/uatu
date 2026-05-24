@@ -106,6 +106,13 @@ are surfaced in Change Overview rather than aborting the watch session.
 }
 ```
 
+The terminal defaults to the bundled **Hack Nerd Font Mono** so prompt
+icons (powerline, devicons, git status, FontAwesome, Material Design,
+etc.) render correctly out of the box in every browser — including
+Safari and the installed PWA, which hide locally-installed fonts from
+web pages. `terminal.fontFamily` overrides this default with any face
+the browser can resolve.
+
 The review base is resolved in order: configured `review.baseRef` →
 `origin/HEAD` → `origin/main` → `origin/master` → `main` → `master`, then
 falls back to staged + unstaged worktree changes against `HEAD`.

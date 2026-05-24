@@ -1,0 +1,34 @@
+Hack Nerd Font Mono — vendored source notes
+============================================
+
+Upstream project: ryanoasis/nerd-fonts
+Upstream release: v3.4.0
+Source URL:       https://github.com/ryanoasis/nerd-fonts/releases/download/v3.4.0/Hack.zip
+File extracted:   HackNerdFontMono-Regular.ttf (2,666,460 bytes)
+
+Conversion to WOFF2
+-------------------
+Tool: woff2_compress (google/woff2, installed via `brew install woff2` — version 1.0.2)
+Invocation:
+    woff2_compress HackNerdFontMono-Regular.ttf
+
+This produces HackNerdFontMono-Regular.woff2 (~1.18 MB) in the same directory.
+
+Why this font
+-------------
+- Hack is a readable, monospaced programming typeface (MIT, Source Foundry).
+- The Nerd Fonts patch overlays a full icon glyph set into the Private Use
+  Area: powerline, Devicons, file icons, weather, Material Design Icons,
+  FontAwesome, Octicons, Codicons, IEC power symbols, etc.
+- The "Mono" variant forces icon glyphs to single-cell width — required so
+  the terminal grid stays aligned in xterm.js.
+- WOFF2 is the smallest commonly-supported web font container.
+
+Bumping the font
+----------------
+When upgrading to a new Nerd Fonts release:
+1. Download the matching Hack.zip from the release page.
+2. Re-run `woff2_compress HackNerdFontMono-Regular.ttf`.
+3. Replace HackNerdFontMono-Regular.woff2 here.
+4. Update this file's "Upstream release" and "Source URL" lines.
+5. Re-check that the file remains under the 1.5 MB budget enforced by tests.

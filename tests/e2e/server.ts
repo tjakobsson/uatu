@@ -10,6 +10,10 @@ import icon192Asset from "../../src/assets/icon-192.png" with { type: "file" };
 import icon512Asset from "../../src/assets/icon-512.png" with { type: "file" };
 import manifestAsset from "../../src/assets/manifest.webmanifest" with { type: "file" };
 import swAsset from "../../src/assets/sw.js" with { type: "file" };
+import hackMonoFontAsset from "../../src/assets/fonts/HackNerdFontMono-Regular.woff2" with { type: "file" };
+import hackLicenseAsset from "../../src/assets/fonts/LICENSE-hack.md" with { type: "file" };
+import nerdFontsLicenseAsset from "../../src/assets/fonts/LICENSE-nerdfonts.txt" with { type: "file" };
+import fontNoticesAsset from "../../src/assets/fonts/NOTICES.md" with { type: "file" };
 
 import index from "../../src/index.html";
 import { e2ePort, resetE2EWorkspace, workspaceRoot } from "./config";
@@ -28,6 +32,7 @@ import {
   SERVE_IDLE_TIMEOUT_SECONDS,
   type WatchEntry,
 } from "../../src/server/session";
+import { loadTerminalConfig } from "../../src/terminal/config";
 import { buildRoutes } from "../../src/server/routes";
 import {
   TERMINAL_COOKIE_NAME,
@@ -134,6 +139,12 @@ server = Bun.serve({
         icon512: icon512Asset,
         manifest: manifestAsset,
         sw: swAsset,
+        fonts: {
+          hackMono: hackMonoFontAsset,
+          hackLicense: hackLicenseAsset,
+          nerdFontsLicense: nerdFontsLicenseAsset,
+          notices: fontNoticesAsset,
+        },
       },
       getSession: () => watchSession,
       handleE2EReset,
@@ -252,10 +263,18 @@ async function createSession(options: { resetWorkspace: boolean }) {
     : [activeWorkspaceRoot];
   const entries = await resolveWatchRoots(entryPaths, process.cwd());
   activeEntries = entries;
+  // Mirror cli.ts: a `.uatu.json terminal.fontFamily` override at the watch
+  // root flows through /api/state.terminalConfig into xterm. The reset
+  // handler may have just written one (see body.uatuConfig), so reload it
+  // every time the session is rebuilt.
+  const terminalConfigResult = terminalEnabled
+    ? await loadTerminalConfig(activeWorkspaceRoot)
+    : { config: {}, warnings: [] };
   const session = createWatchSession(entries, activeFollow, {
     usePolling: true,
     respectGitignore: activeRespectGitignore,
     terminalEnabled,
+    terminalConfig: terminalConfigResult.config,
   });
   await session.start();
   return session;

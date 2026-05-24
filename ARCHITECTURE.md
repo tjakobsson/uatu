@@ -47,6 +47,11 @@ src/
 ├── cli.ts                CLI entry — flag parsing, port probing, Bun.serve
 ├── styles.d.ts           CSS module type declarations
 ├── index.html, styles.css, assets/   HTML shell + CSS + bundled assets
+│                         (logo, PWA icons + manifest + sw.js,
+│                         and `assets/fonts/HackNerdFontMono-Regular.woff2`
+│                         — the default terminal face, served at
+│                         `/assets/fonts/...` and chunked into the
+│                         build via the @font-face url() in styles.css)
 │
 ├── shell/                App-wide chrome and the appState singleton: boot,
 │                         SSE event handling, URL/history, follow-mode

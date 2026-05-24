@@ -22,6 +22,11 @@ const permissiveLicensePatterns = [
   /^CC0-1\.0$/i,
   /^Unlicense$/i,
   /^Python-2\.0$/i,
+  // SIL Open Font License 1.1 — permissive for redistribution embedded in
+  // software. Required for some bundled-font glyph sources (FontAwesome,
+  // Weather Icons) baked into the Nerd Fonts icon patch.
+  /^OFL-1\.1$/i,
+  /^SIL[\s_-]?OFL[\s_-]?1\.1$/i,
 ];
 
 type LicenseRecord = {

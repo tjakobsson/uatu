@@ -35,6 +35,15 @@ export type RouteAssets = {
   icon512: string;
   manifest: string;
   sw: string;
+  // Bundled web fonts. Same `with { type: "file" }` mechanism — the
+  // strings here are file paths embedded in the compiled binary, served
+  // as woff2 (or plain text for the license/notice siblings).
+  fonts: {
+    hackMono: string;
+    hackLicense: string;
+    nerdFontsLicense: string;
+    notices: string;
+  };
 };
 
 type BaseDeps = {
@@ -111,6 +120,32 @@ export function buildRoutes(deps: BuildRoutesDeps) {
         // Allow the worker to control the entire site even though it's
         // served from /sw.js (no path-prefix nesting needed).
         "service-worker-allowed": "/",
+      },
+    }),
+    "/assets/fonts/HackNerdFontMono-Regular.woff2": new Response(Bun.file(assets.fonts.hackMono), {
+      headers: {
+        "content-type": "font/woff2",
+        // Immutable: the file is part of the compiled binary and only
+        // changes on a new uatu release.
+        "cache-control": "public, max-age=31536000, immutable",
+      },
+    }),
+    "/assets/fonts/LICENSE-hack.md": new Response(Bun.file(assets.fonts.hackLicense), {
+      headers: {
+        "content-type": "text/markdown; charset=utf-8",
+        "cache-control": "public, max-age=86400",
+      },
+    }),
+    "/assets/fonts/LICENSE-nerdfonts.txt": new Response(Bun.file(assets.fonts.nerdFontsLicense), {
+      headers: {
+        "content-type": "text/plain; charset=utf-8",
+        "cache-control": "public, max-age=86400",
+      },
+    }),
+    "/assets/fonts/NOTICES.md": new Response(Bun.file(assets.fonts.notices), {
+      headers: {
+        "content-type": "text/markdown; charset=utf-8",
+        "cache-control": "public, max-age=86400",
       },
     }),
     "/api/state": {
