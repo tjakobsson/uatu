@@ -922,7 +922,7 @@ describe("prefersHtmlNavigation", () => {
 });
 
 describe("resolveViewableDocument", () => {
-  test("returns the matching non-binary document for a known path", async () => {
+  test("returns the matching document for a known path", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-resolve-doc-"));
     tempDirectories.push(tempDirectory);
     await writeFile(path.join(tempDirectory, "README.md"), "# Hello\n");
@@ -933,13 +933,15 @@ describe("resolveViewableDocument", () => {
     expect(doc?.kind).toBe("markdown");
   });
 
-  test("returns null for a binary file even if it exists in the index", async () => {
+  test("returns a binary file when it exists in the index", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-resolve-binary-"));
     tempDirectories.push(tempDirectory);
     await writeFile(path.join(tempDirectory, "logo.png"), "not really png");
 
     const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
-    expect(resolveViewableDocument("/logo.png", roots)).toBeNull();
+    const doc = resolveViewableDocument("/logo.png", roots);
+    expect(doc?.relativePath).toBe("logo.png");
+    expect(doc?.kind).toBe("binary");
   });
 
   test("returns null for an unknown path", async () => {
@@ -1051,7 +1053,7 @@ describe("Accept-based navigation dispatch", () => {
     });
   });
 
-  test("HTML-preferring navigation to a binary file falls through to the static fallback", async () => {
+  test("HTML-preferring navigation to a binary file returns the SPA shell", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-dispatch-binary-"));
     tempDirectories.push(tempDirectory);
     await writeFile(path.join(tempDirectory, "logo.png"), "not really png");
@@ -1065,8 +1067,8 @@ describe("Accept-based navigation dispatch", () => {
       });
       const body = await response.text();
       expect(response.status).toBe(200);
-      expect(body).toBe("not really png");
-      expect(body).not.toContain(SHELL_MARKER);
+      expect(body).toContain(SHELL_MARKER);
+      expect(body).not.toContain("not really png");
     });
   });
 
@@ -1189,4 +1191,3 @@ describe("createWatchSession watcher resilience", () => {
     }
   });
 });
-

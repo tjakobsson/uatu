@@ -807,7 +807,7 @@ export async function spaShellResponse(server: {
 
 // The catch-all fetch handler is shared by `cli.ts` (production) and
 // `e2e-server.ts` (Playwright). Both need the same Accept-based dispatch
-// (HTML-preferring navigations to known viewable docs → SPA shell;
+// (HTML-preferring navigations to known docs → SPA shell;
 // everything else → static file fallback or 404), and the e2e server's
 // roots/entries mutate at runtime via the `/__e2e/reset` endpoint, so the
 // helper takes getters rather than captured snapshots.
@@ -850,8 +850,8 @@ export function createNavigationFetchHandler(deps: {
   };
 }
 
-// Resolves a request pathname to a known non-binary document under the
-// current root index. Returns `null` for unknown paths, binary files,
+// Resolves a request pathname to a known document under the current root
+// index. Returns `null` for unknown paths,
 // malformed encoding, or paths outside any root. Mirrors the SPA's
 // path-to-doc lookup so server-side navigation dispatch stays consistent
 // with what the client would do once it boots.
@@ -877,7 +877,7 @@ export function resolveViewableDocument(
 
   for (const root of roots) {
     const doc = root.docs.find(candidate => candidate.relativePath === relativePath);
-    if (doc && doc.kind !== "binary") {
+    if (doc) {
       return doc;
     }
   }
