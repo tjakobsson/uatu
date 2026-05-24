@@ -19,7 +19,7 @@ import {
   printStartupBanner,
   renderDocument,
   resolveStaticFileRequest,
-  resolveViewableDocument,
+  resolveKnownDocument,
   resolveWatchRoots,
   scanRoots,
   spaShellResponse,
@@ -954,25 +954,27 @@ describe("prefersHtmlNavigation", () => {
   });
 });
 
-describe("resolveViewableDocument", () => {
-  test("returns the matching non-binary document for a known path", async () => {
+describe("resolveKnownDocument", () => {
+  test("returns the matching document for a known path", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-resolve-doc-"));
     tempDirectories.push(tempDirectory);
     await writeFile(path.join(tempDirectory, "README.md"), "# Hello\n");
 
     const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
-    const doc = resolveViewableDocument("/README.md", roots);
+    const doc = resolveKnownDocument("/README.md", roots);
     expect(doc?.relativePath).toBe("README.md");
     expect(doc?.kind).toBe("markdown");
   });
 
-  test("returns null for a binary file even if it exists in the index", async () => {
+  test("returns a binary file when it exists in the index", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-resolve-binary-"));
     tempDirectories.push(tempDirectory);
     await writeFile(path.join(tempDirectory, "logo.png"), "not really png");
 
     const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
-    expect(resolveViewableDocument("/logo.png", roots)).toBeNull();
+    const doc = resolveKnownDocument("/logo.png", roots);
+    expect(doc?.relativePath).toBe("logo.png");
+    expect(doc?.kind).toBe("binary");
   });
 
   test("returns null for an unknown path", async () => {
@@ -981,7 +983,7 @@ describe("resolveViewableDocument", () => {
     await writeFile(path.join(tempDirectory, "README.md"), "# Hello\n");
 
     const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
-    expect(resolveViewableDocument("/missing.md", roots)).toBeNull();
+    expect(resolveKnownDocument("/missing.md", roots)).toBeNull();
   });
 
   test("returns null for malformed percent-encoding", async () => {
@@ -990,7 +992,7 @@ describe("resolveViewableDocument", () => {
     await writeFile(path.join(tempDirectory, "README.md"), "# Hello\n");
 
     const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
-    expect(resolveViewableDocument("/%GG", roots)).toBeNull();
+    expect(resolveKnownDocument("/%GG", roots)).toBeNull();
   });
 
   test("decodes percent-encoded path segments before lookup", async () => {
@@ -999,7 +1001,7 @@ describe("resolveViewableDocument", () => {
     await writeFile(path.join(tempDirectory, "hello world.md"), "# Hi\n");
 
     const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
-    const doc = resolveViewableDocument("/hello%20world.md", roots);
+    const doc = resolveKnownDocument("/hello%20world.md", roots);
     expect(doc?.relativePath).toBe("hello world.md");
   });
 });
@@ -1084,7 +1086,7 @@ describe("Accept-based navigation dispatch", () => {
     });
   });
 
-  test("HTML-preferring navigation to a binary file falls through to the static fallback", async () => {
+  test("HTML-preferring navigation to a binary file returns the SPA shell", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-dispatch-binary-"));
     tempDirectories.push(tempDirectory);
     await writeFile(path.join(tempDirectory, "logo.png"), "not really png");
@@ -1098,8 +1100,33 @@ describe("Accept-based navigation dispatch", () => {
       });
       const body = await response.text();
       expect(response.status).toBe(200);
-      expect(body).toBe("not really png");
-      expect(body).not.toContain(SHELL_MARKER);
+      expect(body).toContain(SHELL_MARKER);
+      expect(body).not.toContain("not really png");
+    });
+  });
+
+  // Regression guard for the exact attack vector this dispatch path was added
+  // for: an SVG with an inline <script> served as `image/svg+xml` from the
+  // app origin would execute at that origin on top-level navigation.
+  test("HTML-preferring navigation to an SVG with inline script returns the SPA shell, not the raw SVG", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-dispatch-svg-"));
+    tempDirectories.push(tempDirectory);
+    const maliciousSvg =
+      '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>';
+    await writeFile(path.join(tempDirectory, "logo.svg"), maliciousSvg);
+
+    await withDispatchServer(tempDirectory, async origin => {
+      const response = await fetch(`${origin}/logo.svg`, {
+        headers: {
+          accept:
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        },
+      });
+      const body = await response.text();
+      expect(response.status).toBe(200);
+      expect(body).toContain(SHELL_MARKER);
+      expect(body).not.toContain("<script>alert(1)</script>");
+      expect(response.headers.get("content-type") ?? "").not.toContain("image/svg+xml");
     });
   });
 
@@ -1222,4 +1249,3 @@ describe("createWatchSession watcher resilience", () => {
     }
   });
 });
-
