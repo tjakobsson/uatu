@@ -189,6 +189,39 @@ describe("createStatePayload", () => {
     expect(payload.initialFollow).toBe(true);
     expect(payload.scope).toEqual({ kind: "folder" });
   });
+
+  test("includes monoConfig when fontFamily is set", () => {
+    const payload = createStatePayload(
+      [],
+      true,
+      null,
+      { kind: "folder" },
+      [],
+      undefined,
+      undefined,
+      { fontFamily: "Berkeley Mono, monospace" },
+    );
+    expect(payload.monoConfig).toEqual({ fontFamily: "Berkeley Mono, monospace" });
+  });
+
+  test("omits monoConfig when fontFamily is unset", () => {
+    const payload = createStatePayload(
+      [],
+      true,
+      null,
+      { kind: "folder" },
+      [],
+      undefined,
+      undefined,
+      { fontFamily: undefined },
+    );
+    expect("monoConfig" in payload).toBe(false);
+  });
+
+  test("omits monoConfig when no monoConfig argument is passed", () => {
+    const payload = createStatePayload([], true, null, { kind: "folder" }, []);
+    expect("monoConfig" in payload).toBe(false);
+  });
 });
 
 describe("resolveWatchRoots", () => {

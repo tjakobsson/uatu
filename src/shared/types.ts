@@ -152,6 +152,10 @@ export type TerminalConfigPayload = {
   fontSize?: number;
 };
 
+export type MonoConfigPayload = {
+  fontFamily?: string;
+};
+
 export type StatePayload = {
   roots: RootGroup[];
   repositories: RepositoryReviewSnapshot[];
@@ -163,6 +167,7 @@ export type StatePayload = {
   scope: Scope;
   terminal?: TerminalAvailability;
   terminalConfig?: TerminalConfigPayload;
+  monoConfig?: MonoConfigPayload;
 };
 
 type ModeStorage = {

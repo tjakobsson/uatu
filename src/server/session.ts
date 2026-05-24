@@ -18,6 +18,7 @@ import {
   hasDocument,
   type BuildSummary,
   type DocumentMeta,
+  type MonoConfigPayload,
   type RepositoryReviewSnapshot,
   type RootGroup,
   type Scope,
@@ -892,6 +893,7 @@ export function createStatePayload(
   repositories: RepositoryReviewSnapshot[] = [],
   terminalEnabled?: boolean,
   terminalConfig?: TerminalConfigPayload,
+  monoConfig?: MonoConfigPayload,
 ): StatePayload {
   return {
     roots,
@@ -904,6 +906,7 @@ export function createStatePayload(
     scope,
     ...(terminalEnabled === undefined ? {} : { terminal: (terminalEnabled ? "enabled" : "disabled") as TerminalAvailability }),
     ...(terminalEnabled && terminalConfig && (terminalConfig.fontFamily || terminalConfig.fontSize) ? { terminalConfig } : {}),
+    ...(monoConfig && monoConfig.fontFamily ? { monoConfig } : {}),
   };
 }
 
@@ -940,6 +943,7 @@ export type WatchSessionOptions = {
   respectGitignore?: boolean;
   terminalEnabled?: boolean;
   terminalConfig?: TerminalConfigPayload;
+  monoConfig?: MonoConfigPayload;
   // Optional metrics registry. When provided, the watch session will
   // increment counters for watcher events and refresh lifecycle. Callers
   // construct the registry so it can be shared with the snapshot writer
@@ -1019,6 +1023,7 @@ export function createWatchSession(
   const respectGitignore = options.respectGitignore ?? DEFAULT_RESPECT_GITIGNORE;
   const terminalEnabled = options.terminalEnabled ?? false;
   const terminalConfig: TerminalConfigPayload | undefined = options.terminalConfig;
+  const monoConfig: MonoConfigPayload | undefined = options.monoConfig;
   const terminalToken = createTerminalToken();
   const metrics = options.metrics;
   let roots: RootGroup[] = [];
@@ -1094,7 +1099,7 @@ export function createWatchSession(
       stateFingerprint = nextFingerprint;
 
       if (shouldBroadcast) {
-        broadcast(createStatePayload(roots, initialFollow, changedDocumentId, scope, repositories, terminalEnabled, terminalConfig));
+        broadcast(createStatePayload(roots, initialFollow, changedDocumentId, scope, repositories, terminalEnabled, terminalConfig, monoConfig));
       }
       metrics?.inc("refresh.completed_total");
       metrics?.set("refresh.last_success_at", Date.now());
@@ -1277,7 +1282,7 @@ export function createWatchSession(
     },
     setScope,
     getStatePayload(changedId: string | null = null) {
-      return createStatePayload(roots, initialFollow, changedId, scope, repositories, terminalEnabled, terminalConfig);
+      return createStatePayload(roots, initialFollow, changedId, scope, repositories, terminalEnabled, terminalConfig, monoConfig);
     },
     eventsResponse() {
       let currentSubscriber: EventController | null = null;
@@ -1286,7 +1291,7 @@ export function createWatchSession(
         start(controller) {
           currentSubscriber = controller;
           subscribers.add(controller);
-          controller.enqueue(encoder.encode(`event: state\ndata: ${JSON.stringify(createStatePayload(roots, initialFollow, null, scope, repositories, terminalEnabled, terminalConfig))}\n\n`));
+          controller.enqueue(encoder.encode(`event: state\ndata: ${JSON.stringify(createStatePayload(roots, initialFollow, null, scope, repositories, terminalEnabled, terminalConfig, monoConfig))}\n\n`));
         },
         cancel() {
           if (currentSubscriber) {

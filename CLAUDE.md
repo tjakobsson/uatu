@@ -19,11 +19,13 @@ src/
 ├── styles.d.ts     CSS module type declarations
 ├── index.html, styles.css, assets/, assets/fonts/
 │                   (the bundled Hack Nerd Font Mono lives here — it's
-│                   the default terminal face served at
-│                   /assets/fonts/, with siblings for the upstream
-│                   license texts; .uatu.json terminal.fontFamily
-│                   overrides it)
+│                   the default for *every* monospace surface in the
+│                   app, served at /assets/fonts/, with siblings for
+│                   the upstream license texts)
 │
+├── mono/           bundled-font config and runtime application — the
+│                   `.uatu.json mono.fontFamily` loader plus the helper
+│                   that writes `--mono-font-family` on `<html>` at boot
 ├── shell/          boot, events, history, url, connection, pwa, follow,
 │                   follow-rules, state, storage, stale-hint — the
 │                   app-wide chrome and the appState singleton

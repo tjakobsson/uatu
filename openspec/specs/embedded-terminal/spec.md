@@ -40,7 +40,7 @@ When the panel attaches a PTY, the shell SHALL start with its working directory 
 - **THEN** the spawned PTY runs `/opt/homebrew/bin/fish`
 
 ### Requirement: Terminal honors `.uatu.json` font configuration
-The server SHALL read the optional `terminal` block from `.uatu.json` at the watch root and surface validated values via `/api/state.terminalConfig`. The browser SHALL apply `terminal.fontFamily` (string) and `terminal.fontSize` (number, 8–32) to the xterm instance when present. Invalid values SHALL be ignored with a warning printed to stderr; the rest of the block remains in effect. When no `terminal.fontFamily` override is configured, the terminal's default font SHALL be the bundled Hack Nerd Font Mono face served by uatu itself, so that both ASCII and Nerd Font icon glyphs render correctly out of the box in every browser — including those (e.g., Safari) that do not expose user-installed system fonts to web pages. A `terminal.fontFamily` value in `.uatu.json` SHALL fully override this default.
+The server SHALL read the optional `terminal` block from `.uatu.json` at the watch root and surface validated values via `/api/state.terminalConfig`. The browser SHALL apply `terminal.fontFamily` (string) and `terminal.fontSize` (number, 8–32) to the xterm instance when present. Invalid values SHALL be ignored with a warning printed to stderr; the rest of the block remains in effect. The terminal's default font SHALL be `var(--terminal-font-family)`, which falls through to `var(--mono-font-family)` and ultimately to the bundled Hack Nerd Font Mono face when no override is configured — so that both ASCII and Nerd Font icon glyphs render correctly out of the box in every browser (including Safari, which does not expose user-installed system fonts to web pages). A `terminal.fontFamily` value in `.uatu.json` SHALL fully override the terminal's default. When both `mono.fontFamily` and `terminal.fontFamily` are configured, `terminal.fontFamily` is the narrower override that wins inside the terminal panel; `mono.fontFamily` continues to apply to every other monospace surface.
 
 #### Scenario: Override beats the bundled default
 
@@ -58,8 +58,9 @@ The server SHALL read the optional `terminal` block from `.uatu.json` at the wat
 #### Scenario: Missing terminal block falls back to the bundled default
 
 - **WHEN** `.uatu.json` has no `terminal` block (or no `.uatu.json` exists)
+- **AND** no `mono.fontFamily` override is configured either
 - **THEN** `/api/state.terminalConfig` is absent
-- **AND** the browser renders the terminal using the bundled Hack Nerd Font Mono face from `--terminal-font-family`
+- **AND** the browser renders the terminal using the bundled Hack Nerd Font Mono face (via `--terminal-font-family` → `--mono-font-family`)
 
 #### Scenario: Bundled default renders in Safari with no local Nerd Font installed
 
@@ -75,6 +76,19 @@ The server SHALL read the optional `terminal` block from `.uatu.json` at the wat
 - **AND** no `.uatu.json terminal.fontFamily` override is set
 - **THEN** the terminal renders ASCII glyphs using the bundled Hack Nerd Font Mono face
 - **AND** the terminal renders Nerd Font icon codepoints using real glyphs (not TOFU)
+
+#### Scenario: terminal.fontFamily wins over mono.fontFamily inside the panel
+
+- **WHEN** `.uatu.json` contains `{"mono": {"fontFamily": "Berkeley Mono, monospace"}, "terminal": {"fontFamily": "JetBrains Mono, monospace"}}`
+- **AND** the user opens the terminal panel
+- **THEN** the xterm instance uses `"JetBrains Mono"` (the narrower override)
+- **AND** code blocks and other non-terminal monospace surfaces use `"Berkeley Mono"`
+
+#### Scenario: Only mono.fontFamily set — terminal inherits from mono
+
+- **WHEN** `.uatu.json` contains `{"mono": {"fontFamily": "Berkeley Mono, monospace"}}` and no `terminal.fontFamily`
+- **AND** the user opens the terminal panel
+- **THEN** the xterm instance uses `"Berkeley Mono"` (inherited via `--terminal-font-family` → `--mono-font-family`)
 
 ### Requirement: Terminal is themed with the uatu ANSI dark palette
 The terminal SHALL render text using a dark ANSI 16-color palette that matches the uatu UI theme out of the box, with no required configuration. The palette SHALL be driven by CSS variables so it can be overridden centrally.

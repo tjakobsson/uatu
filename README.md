@@ -92,6 +92,9 @@ are surfaced in Change Overview rather than aborting the watch session.
     "exclude": ["bun.lock", "*.log", "!debug.log"],
     "respectGitignore": true
   },
+  "mono": {
+    "fontFamily": "JetBrains Mono, monospace"
+  },
   "terminal": {
     "fontFamily": "Berkeley Mono, monospace",
     "fontSize": 14
@@ -106,12 +109,16 @@ are surfaced in Change Overview rather than aborting the watch session.
 }
 ```
 
-The terminal defaults to the bundled **Hack Nerd Font Mono** so prompt
-icons (powerline, devicons, git status, FontAwesome, Material Design,
-etc.) render correctly out of the box in every browser — including
-Safari and the installed PWA, which hide locally-installed fonts from
-web pages. `terminal.fontFamily` overrides this default with any face
-the browser can resolve.
+Every monospace surface in the app — rendered Markdown code blocks,
+AsciiDoc code blocks, the source view, the diff view, the terminal —
+defaults to the bundled **Hack Nerd Font Mono** so prompt icons
+(powerline, devicons, git status, FontAwesome, Material Design, etc.)
+render correctly out of the box in every browser, including Safari
+and the installed PWA, which hide locally-installed fonts from web
+pages. `mono.fontFamily` overrides the default everywhere at once;
+`terminal.fontFamily` further narrows the override to the terminal
+panel only (so you can keep the body of the app in one face and the
+terminal in another).
 
 The review base is resolved in order: configured `review.baseRef` →
 `origin/HEAD` → `origin/main` → `origin/master` → `main` → `master`, then

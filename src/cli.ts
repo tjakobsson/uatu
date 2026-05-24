@@ -41,6 +41,7 @@ import {
   readCookie,
 } from "./terminal/auth";
 import { loadTerminalConfig } from "./terminal/config";
+import { loadMonoConfig } from "./mono/config";
 import { createTerminalServer } from "./terminal/server";
 import {
   createCachePaths,
@@ -153,10 +154,19 @@ async function runWatch(options: WatchOptions) {
   // Probe the PTY backend up front so /api/state and the printed URL can both
   // tell the truth about whether the terminal feature is available.
   const terminalEnabled = await terminalBackendAvailable();
+  const watchRoot = rootEntries[0]?.absolutePath ?? process.cwd();
   const terminalConfigResult = terminalEnabled
-    ? await loadTerminalConfig(rootEntries[0]?.absolutePath ?? process.cwd())
+    ? await loadTerminalConfig(watchRoot)
     : { config: {}, warnings: [] };
   for (const warning of terminalConfigResult.warnings) {
+    console.error(`uatu: ${warning}`);
+  }
+  // Mono config is independent of terminal availability — it governs every
+  // monospace surface (code blocks, source view, diff view, etc.), not just
+  // the terminal. Always loaded; the override (when set) flows through
+  // /api/state.monoConfig and the client writes `--mono-font-family`.
+  const monoConfigResult = await loadMonoConfig(watchRoot);
+  for (const warning of monoConfigResult.warnings) {
     console.error(`uatu: ${warning}`);
   }
 
@@ -165,6 +175,7 @@ async function runWatch(options: WatchOptions) {
       respectGitignore: options.respectGitignore,
       terminalEnabled,
       terminalConfig: terminalConfigResult.config,
+      monoConfig: monoConfigResult.config,
       metrics,
     });
     await watchSession.start();
