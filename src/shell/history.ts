@@ -30,6 +30,7 @@ import {
 // non-null directly. The `!` matches the same precondition the shell's
 // other module-load throw-if-null guards enforce.
 const previewElement = document.querySelector<HTMLElement>("#preview")!;
+const previewShellElement = document.querySelector<HTMLElement>(".preview-shell")!;
 
 // Build a same-origin URL for a document. Per-segment percent-encoding mirrors
 // the cross-doc handler's decode: each path segment is encoded individually so
@@ -113,6 +114,23 @@ function cssEscape(value: string): string {
   return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
 }
 
+function isSameDocumentHashOnlyNavigation(): boolean {
+  if (!appState.selectedId) {
+    return false;
+  }
+  const activeDoc = findDocumentById(appState.selectedId);
+  if (!activeDoc) {
+    return false;
+  }
+  let pathname: string;
+  try {
+    pathname = decodeURIComponent(window.location.pathname).replace(/^\/+/, "");
+  } catch {
+    return false;
+  }
+  return pathname === activeDoc.relativePath;
+}
+
 // Handle browser back/forward navigation. The browser has already moved the
 // URL by the time this fires, so we re-resolve the new pathname against the
 // current root index and load that document — without ourselves pushing or
@@ -122,6 +140,21 @@ function cssEscape(value: string): string {
 // auto-switch.
 export function attachPopstateHandler() {
   window.addEventListener("popstate", () => {
+    // Same-document hash-only navigation: the user clicked an in-page anchor
+    // (e.g. a TOC entry) which pushed a `#fragment` history entry, then hit
+    // back. Pathname is unchanged so we MUST NOT reload the document, and we
+    // MUST NOT disable follow mode — TOC navigation is not a document switch.
+    if (isSameDocumentHashOnlyNavigation()) {
+      if (window.location.hash) {
+        scrollToFragment(window.location.hash.slice(1));
+      } else {
+        // `.preview-shell` is the actual scrollable viewport — `#preview` is
+        // its inner article. Scrolling the article would be a no-op.
+        previewShellElement.scrollTo({ top: 0, behavior: "smooth" });
+      }
+      return;
+    }
+
     if (appState.followEnabled) {
       appState.followEnabled = false;
       syncFollowToggle();

@@ -4,12 +4,15 @@
 // per-click whether to override the browser's default navigation.
 
 import { findDocumentById, findDocumentByRelativePath } from "../shell/storage";
+import { buildInPageAnchorUrl } from "./anchor-url";
 import { loadDocument } from "./mount";
 import { renderEmptyPreview } from "./empty";
 import { renderSidebar } from "../sidebar/shell";
 import { syncFollowToggle } from "../shell/follow";
 import { pushSelection, scrollToFragment } from "../shell/history";
 import { appState } from "../shell/state";
+
+export { buildInPageAnchorUrl } from "./anchor-url";
 
 const previewElementMaybe = document.querySelector<HTMLElement>("#preview");
 
@@ -61,8 +64,22 @@ export function initInPageAnchorHandler() {
     }
     event.preventDefault();
     element.scrollIntoView({ behavior: "smooth", block: "start" });
+
+    // Push a history entry so the browser back button returns the user to
+    // the previous scroll state of the *same* document (fragment-less URL
+    // or prior fragment) rather than to a previously selected document.
+    // The popstate handler in `src/shell/history.ts` recognizes the
+    // same-pathname-hash-changed case and treats it as a scroll-only event.
+    const targetUrl = buildInPageAnchorUrl(window.location, id);
+    const currentUrl = window.location.pathname
+      + window.location.search
+      + window.location.hash;
+    if (targetUrl !== currentUrl) {
+      window.history.pushState(null, "", targetUrl);
+    }
   });
 }
+
 
 export function cssEscape(value: string): string {
   // Conservative escape for use inside [id="..."] attribute selectors. Only

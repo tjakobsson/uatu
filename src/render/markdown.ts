@@ -12,6 +12,7 @@ import {
   parseSimpleToml,
   parseSimpleYaml,
 } from "../document/metadata";
+import { markExternalAnchors } from "./external-links";
 
 const CODE_BLOCK_PATTERN = /<pre><code(?:\s+class="language-([^"]+)")?>([\s\S]*?)<\/code><\/pre>/g;
 
@@ -40,6 +41,11 @@ const sanitizeSchema: Schema = {
       "align",
       "width",
       "height",
+    ],
+    a: [
+      ...(defaultSchema.attributes?.a ?? []),
+      "target",
+      "rel",
     ],
     table: [...(defaultSchema.attributes?.table ?? []), "align"],
     th: [...(defaultSchema.attributes?.th ?? []), "align"],
@@ -76,6 +82,7 @@ export function renderMarkdownToHtml(source: string): RenderedMarkdown {
 
   const tree = fromHtml(rawHtml, { fragment: true });
   const safe = sanitize(tree, sanitizeSchema);
+  markExternalAnchors(safe);
   return { html: highlightCodeBlocks(toHtml(safe)), metadata };
 }
 

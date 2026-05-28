@@ -20,7 +20,7 @@ Visit https://example.com and ~~remove~~ text.`);
     expect(html).toContain("<table>");
     expect(html).toContain('type="checkbox"');
     expect(html).toContain("<del>remove</del>");
-    expect(html).toContain('<a href="https://example.com">https://example.com</a>');
+    expect(html).toContain('<a href="https://example.com" target="_blank" rel="noopener noreferrer">https://example.com</a>');
   });
 
   test("preserves mermaid fenced blocks for client-side hydration", () => {
@@ -116,6 +116,56 @@ Visit https://example.com and ~~remove~~ text.`);
     expect(html).toContain('<a href="guides/setup.md">Setup</a>');
     expect(html).not.toContain("other.html");
     expect(html).not.toContain("guides/setup.html");
+  });
+
+  test("external https links are marked target=_blank with safe rel", () => {
+    const { html } = renderMarkdownToHtml(`Visit [example](https://example.com) today.`);
+    expect(html).toContain(
+      '<a href="https://example.com" target="_blank" rel="noopener noreferrer">example</a>',
+    );
+  });
+
+  test("external http links are marked target=_blank", () => {
+    const { html } = renderMarkdownToHtml(`[plain](http://example.com)`);
+    expect(html).toContain(
+      '<a href="http://example.com" target="_blank" rel="noopener noreferrer">plain</a>',
+    );
+  });
+
+  test("relative cross-document links are NOT marked external", () => {
+    const { html } = renderMarkdownToHtml(`[other](other.md) [setup](guides/setup.md)`);
+    expect(html).toContain('<a href="other.md">other</a>');
+    expect(html).toContain('<a href="guides/setup.md">setup</a>');
+    expect(html).not.toMatch(/href="(?:other|guides\/setup)\.md"[^>]*target=/);
+  });
+
+  test("fragment-only links are NOT marked external", () => {
+    const { html } = renderMarkdownToHtml(`[top](#top)`);
+    expect(html).toContain('<a href="#top">top</a>');
+    expect(html).not.toMatch(/href="#top"[^>]*target=/);
+  });
+
+  test("mailto links are NOT marked external (only http/https are)", () => {
+    const { html } = renderMarkdownToHtml(`[mail](mailto:foo@example.com)`);
+    expect(html).toContain('href="mailto:foo@example.com"');
+    expect(html).not.toMatch(/href="mailto:[^"]*"[^>]*target=/);
+  });
+
+  test("absolute-path links (no host) are NOT marked external", () => {
+    const { html } = renderMarkdownToHtml(`[abs](/abs/path)`);
+    expect(html).toContain('<a href="/abs/path">abs</a>');
+    expect(html).not.toMatch(/href="\/abs\/path"[^>]*target=/);
+  });
+
+  test("an author-supplied rel on an external link is unioned, not dropped", () => {
+    // Raw HTML in the source — sanitize lets `rel` through under the
+    // extended schema, and the external-link pass merges its tokens with
+    // ours without producing duplicates.
+    const { html } = renderMarkdownToHtml(
+      `<a href="https://example.com" rel="external nofollow">x</a>`,
+    );
+    expect(html).toMatch(/rel="external nofollow noopener noreferrer"/);
+    expect(html).toContain('target="_blank"');
   });
 
   test("sanitizer keeps the centered-hero README idiom intact", () => {
