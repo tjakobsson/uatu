@@ -1254,6 +1254,10 @@ body.is-resizing-terminal .panel-resizer {
 
 .pane-header h2 {
   min-width: 0;
+  flex-shrink: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--text-strong);
   font-size: 0.78rem;
   font-weight: 700;
@@ -2140,8 +2144,12 @@ body.is-resizing-terminal .panel-resizer {
 /* Headings reserve enough scroll-margin to clear the sticky preview header
    AND its 28px blur-fade falloff zone — otherwise scrolling to a TOC anchor
    lands the heading right at the edge of the fade, where it reads as
-   visually obscured. */
-.preview :is(h1, h2, h3, h4, h5, h6) {
+   visually obscured. The Asciidoctor `.sectN` wrappers get the same margin
+   because Asciidoctor places the id on the section *wrapper* for `==`-and-
+   deeper headings, and `scrollIntoView` aligns the wrapper (not the inner
+   heading) to the viewport. */
+.preview :is(h1, h2, h3, h4, h5, h6),
+.preview :is(.sect1, .sect2, .sect3, .sect4, .sect5)[id] {
   scroll-margin-top: 7.5rem;
 }
 

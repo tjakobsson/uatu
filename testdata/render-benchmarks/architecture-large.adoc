@@ -1,6 +1,6 @@
 = Large Architecture AsciiDoc Benchmark
 :toc:
-:toclevels: 2
+:toclevels: 5
 :sectnums:
 :description: Architecture-sized AsciiDoc render benchmark fixture
 :keywords: benchmark, architecture, asciidoc, traceability
@@ -649,6 +649,38 @@ Functional group 1 owns generated responsibilities, inferred runtime elements, e
 |Owns benchmark responsibility 10 for group 1, including authored intent, runtime evidence, and verification mapping.
 |CODE-1-10, TEST-1-10, REQ-1-10
 |===
+
+==== Authored Intent
+
+Authored-intent narrative captures the human-readable rationale behind each Functional Unit. The narrative MUST cite the upstream requirement and the verification evidence so reviewers can audit traceability without leaving the page.
+
+===== Intent Provenance
+
+Provenance lines bind each unit back to its requirement of record. They are the right place to confirm that clicking a depth-5 TOC link lands the heading clear of the sticky preview header rather than behind it.
+
+====== Provenance Record Format
+
+Provenance records use the canonical four-tuple `(requirement, source, witness, timestamp)`. `======` is the deepest heading AsciiDoc supports (section level 5, Asciidoctor's `.sect5` wrapper) — the right anchor to verify the scroll-margin fix at the format's maximum depth.
+
+====== Provenance Verification
+
+Verification cross-checks the four-tuple against the live requirement registry. Discrepancies surface as drift signals (see below) rather than as render-time errors.
+
+===== Intent Drift Signals
+
+Drift signals are emitted when an authored intent diverges from the runtime evidence — e.g. when a verification test ID is removed but the unit still claims the requirement is covered. The signals power the architecture review dashboard.
+
+====== Drift Signal Catalog
+
+The catalog enumerates each signal kind, its threshold, and the dashboard alert it raises. Reviewers click through to the matching `=====` ancestor section to see the originating intent.
+
+==== Runtime Evidence
+
+Runtime evidence is collected continuously from staging and production and surfaced inline with each Functional Unit so reviewers can compare authored intent to observed behavior in one place.
+
+===== Evidence Sources
+
+The benchmark fixture treats `CODE-N-M`, `TEST-N-M`, and `REQ-N-M` as the canonical three-source evidence triple. Production architecture documents usually carry one or two additional sources (incident reviews, runbooks); the benchmark stays minimal on purpose.
 
 === Dependency Diagram
 

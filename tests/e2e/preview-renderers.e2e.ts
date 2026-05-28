@@ -171,6 +171,44 @@ test("clicking a Markdown cross-document link switches the preview in-app", asyn
   ).toHaveAttribute("aria-selected", "true");
 });
 
+test("switching to a different document resets the preview scroll to the top", async ({ page, request }) => {
+  // Regression: `applyDocumentPayload` swapped `#preview` innerHTML but never
+  // touched `.preview-shell.scrollTop`. Switching from doc A (scrolled deep)
+  // to doc B left doc B at A's scroll offset — the user saw doc B's middle,
+  // not its title. `loadDocument` now resets when the documentId changes,
+  // while leaving in-place file-watcher reloads of the active doc alone.
+  //
+  // Seed both files via `/__e2e/reset` extras so the workspace and the doc
+  // tree are in sync before any tree click — bypasses the file-watcher
+  // settling latency that makes mid-test `fs.writeFile` flaky here.
+  const padding = Array.from({ length: 80 }, (_, index) => `Paragraph ${index + 1}.`).join("\n\n");
+  await request.post("/__e2e/reset", {
+    data: {
+      extras: {
+        "long-doc.md": `# Long Doc\n\n${padding}\n`,
+        "short-doc.md": `# Short Doc\n\nA quick note.\n`,
+      },
+    },
+  });
+  await page.goto("/");
+
+  // Open doc A and scroll it well past the top.
+  await treeRow(page, "long-doc.md").click();
+  await expect(page.locator("#preview-title")).toHaveText("Long Doc");
+  await expect(page.locator("#preview")).toContainText("Paragraph 80.");
+  await page.locator(".preview-shell").evaluate(element => {
+    element.scrollTop = 600;
+  });
+  await expect.poll(() => page.locator(".preview-shell").evaluate(el => el.scrollTop)).toBeGreaterThan(500);
+
+  // Switch to doc B — preview scroll must reset to the top.
+  await treeRow(page, "short-doc.md").click();
+  await expect(page.locator("#preview-title")).toHaveText("Short Doc");
+
+  const scrollTop = await page.locator(".preview-shell").evaluate(el => el.scrollTop);
+  expect(scrollTop).toBe(0);
+});
+
 test("preview header stays visible while scrolling and the sidebar scroll is independent", async ({ page }) => {
   const padding = Array.from({ length: 80 }, (_, index) => `Paragraph ${index + 1}.`).join("\n\n");
   await fs.writeFile(workspacePath("README.md"), `# Uatu\n\n${padding}\n`, "utf8");

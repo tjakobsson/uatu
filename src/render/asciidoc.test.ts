@@ -281,7 +281,30 @@ describe("renderAsciidocToHtml cross-document links", () => {
 
   test("external link is not affected by the .adoc preservation rule", () => {
     const { html } = renderAsciidocToHtml(`= T\n\nlink:https://example.com[Example]\n`);
-    expect(html).toContain('<a href="https://example.com">Example</a>');
+    expect(html).toContain('<a href="https://example.com" target="_blank" rel="noopener noreferrer">Example</a>');
+  });
+
+  test("bare https URL renders with target=_blank and safe rel", () => {
+    const { html } = renderAsciidocToHtml(`= T\n\nhttps://example.com[Example]\n`);
+    expect(html).toContain('target="_blank"');
+    expect(html).toMatch(/rel="noopener noreferrer"/);
+  });
+
+  test("http link is also marked external", () => {
+    const { html } = renderAsciidocToHtml(`= T\n\nlink:http://example.com[Example]\n`);
+    expect(html).toContain('<a href="http://example.com" target="_blank" rel="noopener noreferrer">Example</a>');
+  });
+
+  test("relative cross-document AsciiDoc links are NOT marked external", () => {
+    const { html } = renderAsciidocToHtml(`= T\n\nxref:other.adoc[Other]\n`);
+    expect(html).toContain('<a href="other.adoc">Other</a>');
+    expect(html).not.toMatch(/href="other\.adoc"[^>]*target=/);
+  });
+
+  test("mailto link is NOT marked external", () => {
+    const { html } = renderAsciidocToHtml(`= T\n\nmailto:foo@example.com[Mail me]\n`);
+    expect(html).toContain('href="mailto:foo@example.com"');
+    expect(html).not.toMatch(/href="mailto:[^"]*"[^>]*target=/);
   });
 });
 

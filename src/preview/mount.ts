@@ -58,12 +58,21 @@ export type RenderedDocument = {
 };
 
 const previewElementMaybe = document.querySelector<HTMLElement>("#preview");
+const previewShellElementMaybe = document.querySelector<HTMLElement>(".preview-shell");
 
-if (!previewElementMaybe) {
+if (!previewElementMaybe || !previewShellElementMaybe) {
   throw new Error("uatu UI failed to initialize (preview/mount)");
 }
 
 const previewElement: HTMLElement = previewElementMaybe;
+const previewShellElement: HTMLElement = previewShellElementMaybe;
+
+// Track which document is currently mounted so `loadDocument` can distinguish
+// a document switch (scroll the preview back to the top — the user is reading
+// new content from the beginning) from an in-place refresh of the same doc
+// (preserve scroll — the user is mid-read and a file-watcher reload must not
+// yank them back to the top).
+let lastLoadedDocumentId: string | null = null;
 
 // `DocumentDiffPayload` is imported from `./document-diff-view` (above) so
 // the client type stays in lockstep with the renderer's view of the
@@ -280,6 +289,22 @@ export async function renderSplitPayloads(
 }
 
 export async function loadDocument(documentId: string) {
+  // A document *switch* (different id than what's currently mounted) resets
+  // the preview scroll to the top so the user lands at the beginning of the
+  // new doc. An in-place *refresh* (same id, e.g. file-watcher reload of the
+  // active doc) leaves scroll alone so the user isn't yanked mid-read.
+  // Callers that need to scroll to a fragment after load (popstate with
+  // `#section`, cross-doc link with hash) run their own `scrollToFragment`
+  // afterwards — the reset happens first, then the fragment scroll wins.
+  const isDocumentSwitch = lastLoadedDocumentId !== documentId;
+  lastLoadedDocumentId = documentId;
+  if (isDocumentSwitch) {
+    // Reset synchronously *before* fetch + innerHTML swap so the new content
+    // paints at the top in a single layout pass. Doing it after the swap can
+    // briefly flash the new content at the previous doc's scroll offset.
+    previewShellElement.scrollTo({ top: 0 });
+  }
+
   // `loadDocument` always fetches fresh — callers that want the cached
   // payload for the active document should look it up themselves
   // (currently only `applyViewMode`, for instantaneous Source ↔ Rendered

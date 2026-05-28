@@ -77,3 +77,39 @@ test("sidebar panes can be hidden, restored, resized, and survive whole-sidebar 
   const sidebarReloaded = (await page.locator(".sidebar").boundingBox())?.width ?? 0;
   expect(sidebarReloaded).toBeGreaterThan(sidebarBefore + 50);
 });
+
+test("Files-pane header title does not visually overlap the file count", async ({ page }) => {
+  // Wait until the document-count text reflects real workspace contents so
+  // the assertion exercises a populated header (the "65 files · 5 binary"
+  // shape from the bug report) rather than the empty-tree shape.
+  const documentCount = page.locator("#document-count");
+  await expect(documentCount).not.toHaveText(/^0 files$/);
+
+  const filesPane = page.locator('[data-pane-id="files"]');
+  const title = filesPane.locator(".pane-header h2");
+  const count = filesPane.locator("#document-count");
+
+  // At the default sidebar width, the title's right edge must clear the
+  // count's left edge with at least a 4px gap (the CSS gap is 0.5rem ≈ 8px;
+  // 4px gives subpixel tolerance without admitting overlap).
+  const titleRectDefault = await title.boundingBox();
+  const countRectDefault = await count.boundingBox();
+  expect(titleRectDefault).not.toBeNull();
+  expect(countRectDefault).not.toBeNull();
+  expect(titleRectDefault!.x + titleRectDefault!.width + 4).toBeLessThanOrEqual(countRectDefault!.x);
+
+  // At the minimum supported sidebar width (320px) the title may have
+  // ellipsised — but the rects MUST NOT overlap.
+  await page.evaluate(() => {
+    document.documentElement.style.setProperty("--sidebar-width", "320px");
+  });
+  // Give layout one frame to settle after the custom-property write.
+  await page.waitForFunction(() => {
+    return getComputedStyle(document.documentElement).getPropertyValue("--sidebar-width").trim() === "320px";
+  });
+  const titleRectMin = await title.boundingBox();
+  const countRectMin = await count.boundingBox();
+  expect(titleRectMin).not.toBeNull();
+  expect(countRectMin).not.toBeNull();
+  expect(titleRectMin!.x + titleRectMin!.width + 4).toBeLessThanOrEqual(countRectMin!.x);
+});

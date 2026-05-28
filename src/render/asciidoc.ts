@@ -10,6 +10,7 @@ import {
   isAsciidocInternalAttribute,
   normalizeMetadata,
 } from "../document/metadata";
+import { markExternalAnchors } from "./external-links";
 import { escapeHtml, highlightCodeBlocks, SYNTAX_HIGHLIGHT_BYTES_LIMIT } from "./markdown";
 
 const asciidoctor = Asciidoctor();
@@ -148,7 +149,7 @@ const sanitizeSchema: Schema = (() => {
       dt: withClass(baseAttributes.dt),
       dd: withClass(baseAttributes.dd),
       section: withClass(baseAttributes.section),
-      a: withClass(baseAttributes.a),
+      a: [...withClass(baseAttributes.a), "rel"],
       img: [
         ...(baseAttributes.img ?? []),
         "alt",
@@ -197,7 +198,7 @@ export function renderAsciidocToHtml(source: string): RenderedAsciidoc {
   const doc = asciidoctor.load(source, {
     safe: "secure",
     standalone: false,
-    attributes: { showtitle: true, relfilesuffix: ".adoc" },
+    attributes: { showtitle: true, relfilesuffix: ".adoc", toclevels: 5 },
     extension_registry: mermaidExtensionRegistry,
   });
   const rawHtml = doc.convert();
@@ -206,6 +207,7 @@ export function renderAsciidocToHtml(source: string): RenderedAsciidoc {
   const normalized = normalizeAsciidoctorListings(html);
   const tree = fromHtml(normalized, { fragment: true });
   const safe = sanitize(tree, sanitizeSchema);
+  markExternalAnchors(safe);
   return {
     html: highlightCodeBlocks(rewriteInPageAnchors(toHtml(safe))),
     metadata: extractAsciidocMetadata(doc),

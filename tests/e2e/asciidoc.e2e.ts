@@ -36,6 +36,12 @@ test("renders the AsciiDoc cheat sheet with full heading depth, TOC, admonitions
   await expect(page.locator("#preview a[href='#user-content-_headings']")).toBeVisible();
   await expect(page.locator("#preview a[href='#user-content-_admonitions']")).toBeVisible();
 
+  // With the renderer's `:toclevels: 5` default, the TOC reaches into
+  // deeper sections — including the `=== Unordered`/`=== Ordered` lists
+  // nested under `== Lists`.
+  await expect(page.locator("#preview .toc a[href='#user-content-_unordered']")).toBeVisible();
+  await expect(page.locator("#preview .toc a[href='#user-content-_ordered']")).toBeVisible();
+
   // Two admonition kinds for spread.
   await expect(page.locator("#preview .admonitionblock.note")).toBeVisible();
   await expect(page.locator("#preview .admonitionblock.warning")).toBeVisible();
@@ -187,4 +193,70 @@ test("clicking an AsciiDoc cross-document link into a subdirectory switches the 
 
   await expect(page.locator("#preview-title")).toHaveText("Notes");
   await expect(page.locator("#preview-path")).toHaveText("guides/notes.adoc");
+});
+
+test("clicking a deep TOC entry positions the heading clear of the sticky preview header", async ({ page }) => {
+  // Regression: Asciidoctor places the id on the section *wrapper* (e.g.
+  // `<div class="sect2" id="_unordered">`) for `==`-and-deeper sections.
+  // `scrollIntoView` aligned the wrapper to the viewport top — the inner
+  // heading then sat *behind* the frosted-glass sticky header. Adding
+  // `scroll-margin-top` to the `.sectN[id]` selectors clears the header.
+  await treeRow(page, "asciidoc-cheatsheet.adoc").click();
+  await expect(page.locator("#preview-title")).toHaveText("AsciiDoc Cheat Sheet");
+
+  const tocLink = page.locator("#preview .toc a[href='#user-content-_unordered']");
+  await expect(tocLink).toBeVisible();
+  await tocLink.click();
+
+  // Resolve both rects after the scroll has had a chance to settle. The
+  // scroll uses `smooth`, so we poll until the heading lands its final
+  // position rather than reading mid-animation.
+  const wrapper = page.locator("#user-content-_unordered");
+  const previewHeader = page.locator(".preview-header");
+  await expect(wrapper).toBeInViewport();
+
+  await expect.poll(async () => {
+    const wrapperRect = await wrapper.boundingBox();
+    const headerRect = await previewHeader.boundingBox();
+    if (!wrapperRect || !headerRect) {
+      return false;
+    }
+    // The wrapper's top must be at or below the sticky header's bottom
+    // (with a 2px tolerance for sub-pixel rendering). If we land above the
+    // header bottom the inner h3 is hidden behind the frosted band.
+    return wrapperRect.y >= headerRect.y + headerRect.height - 2;
+  }, { timeout: 3000 }).toBe(true);
+});
+
+test("clicking a TOC entry pushes history; browser back returns to the same document at the top", async ({ page }) => {
+  // Regression: the in-page anchor handler used to scroll without pushing a
+  // history entry, so the user's previous navigation (probably a different
+  // document) stayed at the top of the back stack — pressing back jumped
+  // them out of the doc instead of returning to the top.
+  await treeRow(page, "asciidoc-cheatsheet.adoc").click();
+  await expect(page.locator("#preview-title")).toHaveText("AsciiDoc Cheat Sheet");
+  expect(new URL(page.url()).pathname).toBe("/asciidoc-cheatsheet.adoc");
+  expect(new URL(page.url()).hash).toBe("");
+
+  // Click a TOC entry. The URL must gain the corresponding `#fragment`
+  // AND the heading must scroll into view (the existing behavior preserved).
+  const tocLink = page.locator("#preview .toc a[href='#user-content-_admonitions']");
+  await expect(tocLink).toBeVisible();
+  await tocLink.click();
+
+  await expect.poll(() => new URL(page.url()).hash).toBe("#user-content-_admonitions");
+  await expect(page.locator("#user-content-_admonitions")).toBeInViewport();
+
+  // Browser back: the URL drops the fragment, the active document is STILL
+  // the cheat sheet (not the previously-selected document), and the preview
+  // body has scrolled back near the top.
+  await page.goBack();
+
+  await expect.poll(() => new URL(page.url()).hash).toBe("");
+  expect(new URL(page.url()).pathname).toBe("/asciidoc-cheatsheet.adoc");
+  await expect(page.locator("#preview-title")).toHaveText("AsciiDoc Cheat Sheet");
+
+  // The deep-admonitions section should no longer be in the viewport now
+  // that we're back at the top of the document.
+  await expect(page.locator("#user-content-_admonitions")).not.toBeInViewport();
 });
