@@ -80,7 +80,6 @@ export function initInPageAnchorHandler() {
   });
 }
 
-
 export function cssEscape(value: string): string {
   // Conservative escape for use inside [id="..."] attribute selectors. Only
   // backslashes and double quotes need escaping for that context.

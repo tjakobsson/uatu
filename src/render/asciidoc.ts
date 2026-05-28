@@ -149,7 +149,7 @@ const sanitizeSchema: Schema = (() => {
       dt: withClass(baseAttributes.dt),
       dd: withClass(baseAttributes.dd),
       section: withClass(baseAttributes.section),
-      a: [...withClass(baseAttributes.a), "target", "rel"],
+      a: [...withClass(baseAttributes.a), "rel"],
       img: [
         ...(baseAttributes.img ?? []),
         "alt",

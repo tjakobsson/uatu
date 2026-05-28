@@ -5,9 +5,15 @@
 // etc.) are left untouched — the existing in-app anchor handlers manage
 // the first group, and the user's intent for the second is platform-defined.
 //
-// Runs between `sanitize` and `toHtml`, so anything we add survives without
-// the sanitize allowlist needing to know about author-supplied `target`/`rel`
-// values: those get stripped by sanitize first, then we re-apply our own.
+// Runs between `sanitize` and `toHtml`. The `target` we set here doesn't
+// need the sanitize allowlist to permit `target` — we set the property
+// directly on the post-sanitize tree. We do not allow author-supplied
+// `target` to survive sanitize, because a `target="_parent"` on an
+// internal-link `<a href="other.md">` would cause the cross-doc handler
+// to bail and tear down the SPA. `rel` is allowlisted at the call sites
+// because author-supplied tokens like `nofollow` / `next` have legitimate
+// semantic uses; `mergeRel` deduplicates so our `noopener noreferrer`
+// stack regardless.
 
 import type { Element, ElementContent, Nodes, Parent, Root, RootContent } from "hast";
 

@@ -27,9 +27,10 @@ describe("buildInPageAnchorUrl", () => {
     expect(url).toBe("/doc.md#h%C3%A9llo%20w%C3%B6rld");
   });
 
-  test("does not double-encode an already-percent-encoded id", () => {
+  test("ASCII-safe ids pass through unencoded", () => {
     // The handler decodes the id via decodeURIComponent before calling us, so
-    // the input here is always the *decoded* form — verify we encode once.
+    // the input here is always the *decoded* form. Ids made of unreserved
+    // characters round-trip without picking up extra percent-escapes.
     const url = buildInPageAnchorUrl({ pathname: "/doc.md", search: "" }, "user-content-section_a");
     expect(url).toBe("/doc.md#user-content-section_a");
   });

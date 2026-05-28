@@ -44,7 +44,6 @@ const sanitizeSchema: Schema = {
     ],
     a: [
       ...(defaultSchema.attributes?.a ?? []),
-      "target",
       "rel",
     ],
     table: [...(defaultSchema.attributes?.table ?? []), "align"],
