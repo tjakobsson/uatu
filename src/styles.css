@@ -403,6 +403,17 @@ h2 {
   overflow: auto;
   min-height: 0;
   min-width: 0;
+  /* Reserve enough top inset on the scroll container to clear the sticky
+     preview header AND its 28px blur-fade falloff zone, plus a little
+     breathing room so the target doesn't land right where the frost fades
+     out. `scrollIntoView` honors the scroll container's `scroll-padding`, so
+     this applies uniformly to EVERY anchored target the container can reveal —
+     headings, Asciidoctor section wrappers, and non-heading block anchors
+     ([#id] on tables/listings, [[id]] on paragraphs) alike — across both
+     scroll paths (the in-page anchor click handler and the post-load scroll
+     after a cross-document reference). A per-element `scroll-margin-top`
+     cannot cover the non-heading cases. */
+  scroll-padding-top: 9rem;
 }
 
 /* Drag handle for the terminal panel. Orientation switches with the dock:
@@ -2139,18 +2150,6 @@ body.is-resizing-terminal .panel-resizer {
   color: var(--text-strong);
   font-size: 0.78rem;
   white-space: nowrap;
-}
-
-/* Headings reserve enough scroll-margin to clear the sticky preview header
-   AND its 28px blur-fade falloff zone — otherwise scrolling to a TOC anchor
-   lands the heading right at the edge of the fade, where it reads as
-   visually obscured. The Asciidoctor `.sectN` wrappers get the same margin
-   because Asciidoctor places the id on the section *wrapper* for `==`-and-
-   deeper headings, and `scrollIntoView` aligns the wrapper (not the inner
-   heading) to the viewport. */
-.preview :is(h1, h2, h3, h4, h5, h6),
-.preview :is(.sect1, .sect2, .sect3, .sect4, .sect5)[id] {
-  scroll-margin-top: 7.5rem;
 }
 
 .preview pre {

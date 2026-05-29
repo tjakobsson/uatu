@@ -299,5 +299,5 @@ test("sidebar counter shows the binary subcount when binary files are present", 
     data: { extras: { "logo.png": pngBytes } },
   });
   await page.goto("/");
-  await expect(page.locator("#document-count")).toHaveText("17 files · 1 binary");
+  await expect(page.locator("#document-count")).toHaveText("19 files · 1 binary");
 });

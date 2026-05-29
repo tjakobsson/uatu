@@ -1,0 +1,79 @@
+= Cross-Reference Demo
+
+This fixture exercises cross-reference scroll landing against the sticky preview
+header. Two kinds of cross-reference are covered:
+
+* an *intra-document* cross-reference to a non-heading block (a table) anchored
+  with `[#id]` — see <<metrics-table>>;
+* an *inter-document* cross-reference into a deep section of a sibling document
+  — see xref:xref-targets.adoc#deep-target[the deep target section].
+
+Both targets must land below the bottom edge of the sticky preview header, not
+behind it. A non-heading block is the interesting case: the offset that clears
+the header must not be scoped to heading elements only.
+
+== Metrics
+
+Some prose introducing the data table. The table is anchored with `[#id]`, so
+its id lands on a non-heading block — exactly the element type the header
+clearance offset must still cover.
+
+[#metrics-table]
+.Benchmark Metrics
+[cols="1,1",options="header"]
+|===
+|Key |Value
+|alpha |1
+|bravo |2
+|charlie |3
+|delta |4
+|echo |5
+|===
+
+== Trailing content
+
+The sections below exist solely to guarantee ample scrollable height beneath the
+table target, so that clicking the intra-document cross-reference scrolls the
+table all the way to the top of the viewport. Without enough trailing content
+the scroll container bottoms out and the target never reaches the region behind
+the sticky header — which would make the regression test pass trivially.
+
+=== Filler one
+
+Lorem ipsum dolor sit amet, consectetur adipiscing elit. The preview header is
+sticky and translucent. A scroll into a target near the document end can only
+clear the header if there is enough content beneath that target.
+
+This paragraph adds vertical height. So does the next one.
+
+=== Filler two
+
+Repeated prose to add height. The exact words do not matter; the vertical extent
+does. Each section pushes the bottom of the document further down.
+
+More repeated prose. More height. The scroll container needs roughly a viewport
+of content below the table for the table to reach the top edge.
+
+=== Filler three
+
+Still more prose. Still more height. Benchmarks, traceability, coverage, gaps,
+confidence — synthetic words to fill vertical space deterministically.
+
+Another paragraph of the same. And another, to be safe.
+
+=== Filler four
+
+Yet more prose so the table target can be positioned at the very top of the
+scroll container, which is the only position that exposes header overlap.
+
+A final filler paragraph in this section.
+
+=== Filler five
+
+The last filler section. By now there is well over a viewport of content beneath
+the table, so the intra-document cross-reference scroll lands the table at the
+top — clear of the header once the scroll-padding inset is in place.
+
+One more paragraph to round things out.
+
+Another closing paragraph of deterministic filler text.

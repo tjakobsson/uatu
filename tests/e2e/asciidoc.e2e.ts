@@ -260,3 +260,71 @@ test("clicking a TOC entry pushes history; browser back returns to the same docu
   // that we're back at the top of the document.
   await expect(page.locator("#user-content-_admonitions")).not.toBeInViewport();
 });
+
+test("an intra-document cross-reference to a non-heading block lands the block clear of the sticky header", async ({ page }) => {
+  // Regression: the header-clearance offset used to be a per-element
+  // `scroll-margin-top` scoped to headings + `.sectN[id]` wrappers only.
+  // An id on a non-heading block (here a `[#id]` table) matched neither
+  // selector, so `scrollIntoView` pinned the table's top to the viewport top,
+  // behind the frosted header. The fix moves the offset to `scroll-padding-top`
+  // on the scroll container, which covers every anchored target type. Drives
+  // the `testdata/watch-docs/xref-demo.adoc` fixture, whose `<<metrics-table>>`
+  // cross-reference targets a `[#metrics-table]` table anchor.
+  await treeRow(page, "xref-demo.adoc").click();
+  await expect(page.locator("#preview-title")).toHaveText("Cross-Reference Demo");
+
+  // The inline `<<metrics-table>>` xref renders as a same-document fragment
+  // link; the in-page anchor handler scrolls it into view directly.
+  const xref = page.locator("#preview a[href='#user-content-metrics-table']").first();
+  await expect(xref).toBeVisible();
+  await xref.click();
+
+  const block = page.locator("#user-content-metrics-table");
+  const previewHeader = page.locator(".preview-header");
+  await expect(block).toBeInViewport();
+
+  // The block's top must land at or below the sticky header's bottom (2px
+  // tolerance for sub-pixel rendering) — the trailing fixture content ensures
+  // the scroll container can position the table at the top of the viewport,
+  // which is the only position that would expose header overlap.
+  await expect.poll(async () => {
+    const blockRect = await block.boundingBox();
+    const headerRect = await previewHeader.boundingBox();
+    if (!blockRect || !headerRect) {
+      return false;
+    }
+    return blockRect.y >= headerRect.y + headerRect.height - 2;
+  }, { timeout: 3000 }).toBe(true);
+});
+
+test("an inter-document cross-reference to a non-heading block lands the block clear of the sticky header after load", async ({ page }) => {
+  // Exercises the *second* scroll path: a cross-document `xref:other.adoc#id`
+  // is handled by loading the target document and then calling
+  // `scrollToFragment` (src/shell/history.ts) — not the in-page click handler.
+  // The target id sits on a non-heading block (a `[#deep-target]` table) nested
+  // in a deep section of the sibling doc, so this covers the post-load scroll
+  // path against the element type the old heading-only offset failed to clear.
+  // Drives `xref-demo.adoc` → `xref-targets.adoc#deep-target`.
+  await treeRow(page, "xref-demo.adoc").click();
+  await expect(page.locator("#preview-title")).toHaveText("Cross-Reference Demo");
+
+  const xref = page.locator("#preview a[href='xref-targets.adoc#deep-target']").first();
+  await expect(xref).toBeVisible();
+  await xref.click();
+
+  // The cross-document handler swaps the preview to the target document.
+  await expect(page.locator("#preview-title")).toHaveText("Cross-Reference Targets");
+
+  const block = page.locator("#user-content-deep-target");
+  const previewHeader = page.locator(".preview-header");
+  await expect(block).toBeInViewport();
+
+  await expect.poll(async () => {
+    const blockRect = await block.boundingBox();
+    const headerRect = await previewHeader.boundingBox();
+    if (!blockRect || !headerRect) {
+      return false;
+    }
+    return blockRect.y >= headerRect.y + headerRect.height - 2;
+  }, { timeout: 3000 }).toBe(true);
+});

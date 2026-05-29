@@ -1,0 +1,74 @@
+= Cross-Reference Targets
+
+This document is the *target* end of an inter-document cross-reference. A sibling
+document cross-references into a non-heading block nested in a deep section here,
+and the preview must land that block clear of the sticky header — not behind it.
+The post-load scroll is a different code path from the in-page anchor click
+handler, exercised here against the element type (a non-heading block) that the
+old heading-only offset failed to cover.
+
+== Overview
+
+A short lead-in so the deep target is not the very first block in the document.
+
+=== Deep Section
+
+This nested section holds the cross-reference target. The target itself is the
+table below, anchored with `[#id]` — a non-heading block reached through the
+inter-document scroll path.
+
+[#deep-target]
+.Deep Target Table
+[cols="1,1",options="header"]
+|===
+|Key |Value
+|alpha |1
+|bravo |2
+|charlie |3
+|===
+
+Everything below exists to guarantee a viewport-plus of scrollable content
+beneath this table, so the scroll container can position it at the very top (the
+only position that exposes header overlap) rather than bottoming out at the end
+of the document.
+
+==== Sub-detail A
+
+Lorem ipsum filler prose adding vertical height beneath the deep target.
+
+Another paragraph of the same.
+
+==== Sub-detail B
+
+More filler prose. The words are irrelevant; the vertical extent is what lets
+the deep target reach the top of the viewport on load.
+
+Another paragraph.
+
+== Filler section one
+
+Repeated prose to add height. Synthetic, deterministic, and plentiful.
+
+A second paragraph of filler in this section.
+
+== Filler section two
+
+Still more prose so there is well over a viewport of content beneath the deep
+target table.
+
+Another paragraph here too.
+
+== Filler section three
+
+Yet more deterministic filler text to extend the scrollable height.
+
+And one more paragraph.
+
+== Filler section four
+
+The last filler section. By now the deep target can be scrolled to the top edge
+of the preview, clear of the sticky header once the scroll-padding inset applies.
+
+A closing paragraph of filler.
+
+Another closing paragraph, for good measure.
