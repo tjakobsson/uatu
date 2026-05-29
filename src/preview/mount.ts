@@ -20,7 +20,7 @@ import {
   setPreviewBase,
   setPreviewType,
 } from "./header";
-import { attachCopyButtons, attachLineNumbers } from "./code-block";
+import { applySourceWrap, attachCopyButtons, attachLineNumbers } from "./code-block";
 import {
   applyAutoStackIfNeeded,
   applySplitRatioToDom,
@@ -179,6 +179,7 @@ export async function renderSinglePayload(payload: RenderedDocument): Promise<vo
   // so the inspector pane can produce accurate `@path#L<a>-<b>` references.
   if (payload.view === "source") {
     attachLineNumbers(previewElement);
+    applySourceWrap(previewElement, appState.wrap);
   }
   attachCopyButtons(previewElement);
 }
@@ -277,6 +278,7 @@ export async function renderSplitPayloads(
   attachMetadataCardToggleListener(renderedPane);
   await renderMermaidDiagrams(renderedPane, currentMermaidThemeInputs());
   attachLineNumbers(sourcePane);
+  applySourceWrap(sourcePane, appState.wrap);
   attachCopyButtons(sourcePane);
   attachCopyButtons(renderedPane);
 

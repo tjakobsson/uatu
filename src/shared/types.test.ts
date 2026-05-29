@@ -2,10 +2,12 @@ import { describe, expect, test } from "bun:test";
 
 import {
   DEFAULT_DIFF_STYLE,
+  DEFAULT_PREVIEW_WRAP,
   DEFAULT_SPLIT_RATIO,
   DEFAULT_VIEW_LAYOUT,
   DEFAULT_VIEW_MODE,
   DIFF_STYLE_STORAGE_KEY,
+  PREVIEW_WRAP_STORAGE_KEY,
   VIEW_LAYOUT_STORAGE_KEY,
   VIEW_MODE_STORAGE_KEY,
   VIEW_SPLIT_RATIO_STORAGE_KEY,
@@ -15,11 +17,13 @@ import {
   isViewMode,
   nextSelectedDocumentId,
   readDiffStylePreference,
+  readPreviewWrapPreference,
   readSplitRatioPreference,
   readViewLayoutPreference,
   readViewModePreference,
   shouldRefreshPreview,
   writeDiffStylePreference,
+  writePreviewWrapPreference,
   writeSplitRatioPreference,
   writeViewLayoutPreference,
   writeViewModePreference,
@@ -458,5 +462,29 @@ describe("readDiffStylePreference", () => {
     const storage = new MemoryStorage();
     storage.setItem(DIFF_STYLE_STORAGE_KEY, "stacked");
     expect(readDiffStylePreference(storage)).toBe(DEFAULT_DIFF_STYLE);
+  });
+});
+
+describe("readPreviewWrapPreference", () => {
+  test("defaults to off (false)", () => {
+    expect(DEFAULT_PREVIEW_WRAP).toBe(false);
+    expect(readPreviewWrapPreference(null)).toBe(false);
+    expect(readPreviewWrapPreference(new MemoryStorage())).toBe(false);
+  });
+
+  test("round-trips on and off via the on/off encoding", () => {
+    const storage = new MemoryStorage();
+    writePreviewWrapPreference(storage, true);
+    expect(storage.getItem(PREVIEW_WRAP_STORAGE_KEY)).toBe("on");
+    expect(readPreviewWrapPreference(storage)).toBe(true);
+    writePreviewWrapPreference(storage, false);
+    expect(storage.getItem(PREVIEW_WRAP_STORAGE_KEY)).toBe("off");
+    expect(readPreviewWrapPreference(storage)).toBe(false);
+  });
+
+  test("falls back to off for an unrecognized stored value", () => {
+    const storage = new MemoryStorage();
+    storage.setItem(PREVIEW_WRAP_STORAGE_KEY, "true");
+    expect(readPreviewWrapPreference(storage)).toBe(false);
   });
 });

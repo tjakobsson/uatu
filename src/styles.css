@@ -2157,33 +2157,64 @@ body.is-resizing-terminal .panel-resizer {
   position: relative;
 }
 
+/* Per-line gutter. Each source line is a `.uatu-cl` block; its number is drawn
+   with a `::before` from `data-ln` (NOT a DOM node) so `code.textContent`
+   stays equal to the source. `--uatu-ln-width` is set inline per <pre> from
+   the line-count's digit width. */
 .preview pre.has-line-numbers {
-  display: flex;
-  align-items: stretch;
-  padding: 0;
-}
-
-.preview pre.has-line-numbers > .line-numbers {
-  flex-shrink: 0;
-  user-select: none;
-  text-align: right;
-  padding: 1rem 0.7rem 1rem 1rem;
-  margin: 0;
-  border-right: 1px solid var(--border-soft);
-  color: var(--text-subtle);
-  background: rgba(208, 215, 222, 0.18);
-  white-space: pre;
-  font-variant-numeric: tabular-nums;
-  font-size: inherit;
-  line-height: inherit;
+  padding: 1rem 1rem 1rem 0;
+  line-height: 1.5;
 }
 
 .preview pre.has-line-numbers > code {
-  flex: 1 1 auto;
-  min-width: 0;
-  padding: 1rem;
+  /* `normal` so the real `\n` separators between `.uatu-cl` blocks collapse;
+     each line restores `pre` for its own content below. */
+  white-space: normal;
   display: block;
-  overflow: visible;
+  padding: 0;
+}
+
+.preview pre.has-line-numbers .uatu-cl {
+  display: block;
+  position: relative;
+  white-space: pre;
+  padding-left: var(--uatu-ln-width, 3.5rem);
+  min-height: 1.5em;
+  /* Continuous gutter rail painted per line so it spans the full height of a
+     wrapped line, with a hairline divider at the gutter edge. */
+  background:
+    linear-gradient(
+      to right,
+      rgba(208, 215, 222, 0.18) 0,
+      rgba(208, 215, 222, 0.18) calc(var(--uatu-ln-width, 3.5rem) - 0.7rem),
+      var(--border-soft) calc(var(--uatu-ln-width, 3.5rem) - 0.7rem),
+      var(--border-soft) calc(var(--uatu-ln-width, 3.5rem) - 0.7rem + 1px),
+      transparent calc(var(--uatu-ln-width, 3.5rem) - 0.7rem + 1px)
+    );
+}
+
+.preview pre.has-line-numbers .uatu-cl::before {
+  content: attr(data-ln);
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: calc(var(--uatu-ln-width, 3.5rem) - 1.05rem);
+  text-align: right;
+  user-select: none;
+  color: var(--text-subtle);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Wrap mode: long source lines soft-wrap instead of scrolling. The number
+   stays pinned to the top of its (now multi-row) line — truthful to the
+   code, VSCode-style. */
+.preview pre.uatu-source-pre.is-wrapped {
+  overflow-x: hidden;
+}
+
+.preview pre.uatu-source-pre.is-wrapped .uatu-cl {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .code-copy {
@@ -2765,10 +2796,17 @@ body.is-resizing-terminal .panel-resizer {
   background: rgba(255, 255, 255, 0.6);
 }
 
-.view-segment.is-active {
+.view-segment.is-active,
+.wrap-control .view-segment[aria-pressed="true"] {
   background: #ffffff;
   color: var(--accent);
   box-shadow: 0 1px 2px rgba(36, 41, 47, 0.08);
+}
+
+/* The view chooser's active segment is non-interactive (it's already
+   selected), but the Wrap toggle stays clickable in its pressed state so
+   the user can turn wrap back off. */
+.view-segment.is-active {
   cursor: default;
 }
 

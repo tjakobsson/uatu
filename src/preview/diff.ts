@@ -96,6 +96,7 @@ export async function renderDiffIntoPreview(documentId: string, payload: Documen
   previewElement.appendChild(host);
   await renderDocumentDiff(host, payload, languageHint, {
     diffStyle: appState.diffStyle,
+    wrap: appState.wrap,
     onDiffStyleChange: next => {
       void applyDiffStyle(next);
     },
