@@ -24,8 +24,11 @@ export function splitHighlightedLines(html: string): string[] {
   const lines: string[] = [];
   const openTags: string[] = [];
   let current = "";
-  // Match either a tag (`<...>`) or a run of non-tag text. Highlight.js
-  // escapes `<` in content to `&lt;`, so a literal `<` only ever starts a tag.
+  // Match either a tag (`<...>`) or a run of non-tag text. This assumes
+  // highlight.js output: `<` in content is escaped to `&lt;` (so a literal
+  // `<` only ever starts a tag), and `>` never appears inside an attribute
+  // value (hljs only emits `class`/`style` on spans). Both hold for hljs but
+  // are load-bearing — this would misparse arbitrary HTML silently.
   const token = /(<[^>]+>)|([^<]+)/g;
   let match: RegExpExecArray | null;
   while ((match = token.exec(html)) !== null) {

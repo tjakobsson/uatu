@@ -197,9 +197,10 @@ export function applyWrap(next: boolean): void {
     void applyDiffForActiveDocument(appState.selectedId);
     return;
   }
-  // Source (single or split): wrap is pure CSS on the per-line gutter, so
-  // just flip the class on the already-rendered source block(s) — no
-  // re-render. Covers the Source pane of a split layout too.
+  // Otherwise (Source single/split — and harmlessly Rendered, where it's a
+  // no-op since no `pre.uatu-source-pre` is in the DOM): wrap is pure CSS on
+  // the per-line gutter, so just flip the class on any already-rendered
+  // source block(s). No re-render; covers the Source pane of a split layout.
   applySourceWrap(previewElement, next);
 }
 

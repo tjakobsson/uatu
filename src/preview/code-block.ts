@@ -57,8 +57,13 @@ export function attachLineNumbers(container: HTMLElement) {
     lines.forEach((lineHtml, index) => {
       const lineEl = document.createElement("span");
       lineEl.className = "uatu-cl";
+      // The line number is drawn from `data-ln` via CSS `::before`, not as a
+      // DOM node, so it stays out of `code.textContent` (copy / Selection
+      // Inspector). Known trade-off vs the old `aria-hidden` gutter span:
+      // some screen readers announce CSS-generated content, so the number
+      // may be read before each line. Accepted for a developer review tool;
+      // there is no portable way to `aria-hidden` a pseudo-element's content.
       lineEl.setAttribute("data-ln", String(index + 1));
-      lineEl.setAttribute("aria-hidden", "false");
       lineEl.innerHTML = lineHtml;
       fragment.appendChild(lineEl);
       // Separator newline after every line except the last, plus one extra
