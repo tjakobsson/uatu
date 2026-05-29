@@ -74,7 +74,7 @@ test("a non-Markdown text file appears in the tree and renders as syntax-highlig
     data: { extras: { "config.yaml": "key: value\nport: 4321\n" } },
   });
   await page.goto("/");
-  await expect(page.locator("#document-count")).toHaveText("17 files");
+  await expect(page.locator("#document-count")).toHaveText("19 files");
 
   const yamlButton = treeRow(page, "config.yaml");
   await expect(yamlButton).toBeVisible();
