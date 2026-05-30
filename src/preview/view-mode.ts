@@ -3,8 +3,9 @@
 // Extracted from `app.ts` so the preview/ feature folder owns the entire
 // view-mode flow alongside layout and mount.
 
-import { writeViewModePreference, type ViewMode } from "../shared/types";
+import { writePreviewWrapPreference, writeViewModePreference, type ViewMode } from "../shared/types";
 import { appState, safeLocalStorage } from "../shell/state";
+import { applySourceWrap } from "./code-block";
 import { applyDiffForActiveDocument } from "./diff";
 import { mountLayoutToolbar } from "./layout";
 import { applyDocumentPayload, documentViewCache, loadDocument } from "./mount";
@@ -13,6 +14,8 @@ const viewControlElementMaybe = document.querySelector<HTMLDivElement>("#view-co
 const viewRenderedButtonMaybe = document.querySelector<HTMLButtonElement>("#view-rendered");
 const viewSourceButtonMaybe = document.querySelector<HTMLButtonElement>("#view-source");
 const viewDiffButtonMaybe = document.querySelector<HTMLButtonElement>("#view-diff");
+const wrapControlElementMaybe = document.querySelector<HTMLDivElement>("#wrap-control");
+const wrapToggleButtonMaybe = document.querySelector<HTMLButtonElement>("#wrap-toggle");
 const previewElementMaybe = document.querySelector<HTMLElement>("#preview");
 
 if (
@@ -20,6 +23,8 @@ if (
   || !viewRenderedButtonMaybe
   || !viewSourceButtonMaybe
   || !viewDiffButtonMaybe
+  || !wrapControlElementMaybe
+  || !wrapToggleButtonMaybe
   || !previewElementMaybe
 ) {
   throw new Error("uatu UI failed to initialize (preview/view-mode)");
@@ -31,7 +36,15 @@ const viewControlElement: HTMLDivElement = viewControlElementMaybe;
 const viewRenderedButton: HTMLButtonElement = viewRenderedButtonMaybe;
 const viewSourceButton: HTMLButtonElement = viewSourceButtonMaybe;
 const viewDiffButton: HTMLButtonElement = viewDiffButtonMaybe;
+const wrapControlElement: HTMLDivElement = wrapControlElementMaybe;
+const wrapToggleButton: HTMLButtonElement = wrapToggleButtonMaybe;
 const previewElement: HTMLElement = previewElementMaybe;
+
+// Views for which the Wrap toggle is meaningful and wired. Diff honors wrap
+// via @pierre/diffs' `overflow` option; Source honors it via the per-line
+// gutter's `is-wrapped` CSS (the §3 spike selected the homegrown path).
+// Rendered (markdown/asciidoc body) has nothing to wrap and is excluded.
+const WRAP_SUPPORTING_VIEWS: ReadonlySet<ViewMode> = new Set<ViewMode>(["source", "diff"]);
 
 // Minimal payload shape consumed by the chooser. The chooser only reads
 // `kind`; importing the full `RenderedDocument` type from mount.ts would
@@ -82,6 +95,7 @@ export function syncViewToggle(payload: ViewChooserPayload): void {
   const showToggle = available.size > 0;
   viewControlElement.hidden = !showToggle;
   if (!showToggle) {
+    syncWrapToggle(null);
     return;
   }
 
@@ -108,6 +122,21 @@ export function syncViewToggle(payload: ViewChooserPayload): void {
     button.setAttribute("aria-checked", String(active));
     button.classList.toggle("is-active", active);
   }
+
+  syncWrapToggle(effectiveMode);
+}
+
+// Reflect the global wrap preference on the Wrap toggle, and show it only
+// when the effective view actually honors wrapping. `effectiveMode` is null
+// when there is no view chooser on screen (non-document preview or a
+// document with no available views), in which case the toggle is hidden.
+export function syncWrapToggle(effectiveMode: ViewMode | null): void {
+  const show = effectiveMode !== null && WRAP_SUPPORTING_VIEWS.has(effectiveMode);
+  wrapControlElement.hidden = !show;
+  if (!show) {
+    return;
+  }
+  wrapToggleButton.setAttribute("aria-pressed", String(appState.wrap));
 }
 
 // Hide the Source/Rendered toggle for non-document previews (commit,
@@ -116,6 +145,7 @@ export function syncViewToggle(payload: ViewChooserPayload): void {
 // non-document content, and tear down the inline layout toolbar.
 export function hideViewToggle(): void {
   viewControlElement.hidden = true;
+  syncWrapToggle(null);
   previewElement.classList.remove("is-split", "is-split-h", "is-split-v");
   previewElement.removeAttribute("data-auto-stack");
   mountLayoutToolbar(false);
@@ -145,6 +175,33 @@ export function applyViewMode(next: ViewMode): void {
     return;
   }
   void loadDocument(appState.selectedId);
+}
+
+// Toggle the global wrap preference and re-apply it to the active view in
+// place. Mirrors `applyDiffStyle`: persist immediately, then re-render the
+// current representation from cache — no network round-trip, no full reload.
+export function applyWrap(next: boolean): void {
+  if (appState.wrap === next) {
+    return;
+  }
+  appState.wrap = next;
+  writePreviewWrapPreference(safeLocalStorage(), next);
+  wrapToggleButton.setAttribute("aria-pressed", String(next));
+
+  if (appState.previewMode.kind !== "document" || !appState.selectedId) {
+    return;
+  }
+  if (appState.viewMode === "diff") {
+    // Diff re-renders from the cached payload (no refetch when present) so
+    // Pierre picks up the new `overflow` option.
+    void applyDiffForActiveDocument(appState.selectedId);
+    return;
+  }
+  // Otherwise (Source single/split — and harmlessly Rendered, where it's a
+  // no-op since no `pre.uatu-source-pre` is in the DOM): wrap is pure CSS on
+  // the per-line gutter, so just flip the class on any already-rendered
+  // source block(s). No re-render; covers the Source pane of a split layout.
+  applySourceWrap(previewElement, next);
 }
 
 // Tiny adapter that uses the existing source-view language map (highlight.js
@@ -178,4 +235,5 @@ export function initViewModeControls(): void {
   viewRenderedButton.addEventListener("click", () => applyViewMode("rendered"));
   viewSourceButton.addEventListener("click", () => applyViewMode("source"));
   viewDiffButton.addEventListener("click", () => applyViewMode("diff"));
+  wrapToggleButton.addEventListener("click", () => applyWrap(!appState.wrap));
 }

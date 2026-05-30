@@ -4,6 +4,8 @@
 // `app.ts` so the rendering-time DOM massaging lives with the rest of the
 // preview pipeline.
 
+import { splitHighlightedLines } from "./highlight-lines";
+
 const selectionInspectorStatusElementMaybe = document.querySelector<HTMLElement>(
   "[data-selection-inspector-status]",
 );
@@ -18,10 +20,18 @@ if (!selectionInspectorStatusElementMaybe) {
 // scope), so we re-alias to `T` here.
 const selectionInspectorStatusElement: HTMLElement = selectionInspectorStatusElementMaybe;
 
-// Attach a line-number gutter to each <pre><code> in the container. The gutter
-// is a sibling <span> of <code>, NOT a child — copy-to-clipboard reads
-// `code.textContent` so line numbers are excluded automatically. `user-select:
-// none` on the gutter also keeps mouse-selection of the code clean.
+// Restructure each <pre><code> in the container into one `.uatu-cl` block per
+// source line, carrying its line number in a `data-ln` attribute. The number
+// is rendered via CSS (`.uatu-cl::before { content: attr(data-ln) }`), NOT as
+// a DOM node, so `code.textContent` stays exactly equal to the source — which
+// keeps copy-to-clipboard and the Selection Inspector's offset→line mapping
+// working without changes. Real `\n` text nodes are reinserted between lines
+// so that text content is preserved; `<code>` is set to `white-space: normal`
+// in CSS so those separators collapse visually while each `.uatu-cl` keeps
+// `white-space: pre` (or `pre-wrap` when wrapped).
+//
+// Per-line blocks are what let the wrap mode keep line numbers truthful: a
+// wrapped line's number stays pinned to the top of its (multi-row) block.
 export function attachLineNumbers(container: HTMLElement) {
   const blocks = container.querySelectorAll<HTMLPreElement>("pre");
   blocks.forEach(pre => {
@@ -29,21 +39,58 @@ export function attachLineNumbers(container: HTMLElement) {
     if (!code) {
       return;
     }
-    if (pre.querySelector(".line-numbers")) {
+    if (code.querySelector(".uatu-cl")) {
       return;
     }
 
-    const text = code.textContent ?? "";
-    const lineCount = Math.max(1, text.replace(/\n$/, "").split("\n").length);
-    const numbers = Array.from({ length: lineCount }, (_, index) => String(index + 1)).join("\n");
+    const raw = code.textContent ?? "";
+    const hadTrailingNewline = raw.endsWith("\n");
+    const lines = splitHighlightedLines(code.innerHTML);
+    // A trailing newline yields a final empty fragment; drop it so the line
+    // count matches the source (mirrors the old `replace(/\n$/, "")`), but
+    // keep the newline itself in the text content (handled below).
+    if (hadTrailingNewline && lines.length > 1 && lines[lines.length - 1] === "") {
+      lines.pop();
+    }
 
-    const gutter = document.createElement("span");
-    gutter.className = "line-numbers";
-    gutter.setAttribute("aria-hidden", "true");
-    gutter.textContent = numbers;
+    const fragment = document.createDocumentFragment();
+    lines.forEach((lineHtml, index) => {
+      const lineEl = document.createElement("span");
+      lineEl.className = "uatu-cl";
+      // The line number is drawn from `data-ln` via CSS `::before`, not as a
+      // DOM node, so it stays out of `code.textContent` (copy / Selection
+      // Inspector). Known trade-off vs the old `aria-hidden` gutter span:
+      // some screen readers announce CSS-generated content, so the number
+      // may be read before each line. Accepted for a developer review tool;
+      // there is no portable way to `aria-hidden` a pseudo-element's content.
+      lineEl.setAttribute("data-ln", String(index + 1));
+      lineEl.innerHTML = lineHtml;
+      fragment.appendChild(lineEl);
+      // Separator newline after every line except the last, plus one extra
+      // after the last line when the source ended with a newline. Keeps
+      // `code.textContent === raw`.
+      if (index < lines.length - 1 || hadTrailingNewline) {
+        fragment.appendChild(document.createTextNode("\n"));
+      }
+    });
 
+    code.textContent = "";
+    code.appendChild(fragment);
+
+    // Reserve gutter width for the widest line number (in ch) plus padding.
+    const digits = String(lines.length).length;
+    pre.style.setProperty("--uatu-ln-width", `calc(${digits}ch + 1.4rem)`);
     pre.classList.add("has-line-numbers");
-    pre.insertBefore(gutter, code);
+  });
+}
+
+// Toggle soft word-wrap on every whole-file source block in the container.
+// Wrap is purely a CSS concern (`.uatu-source-pre.is-wrapped`), so this just
+// flips a class — no re-render, no structural change. Called on mount (to
+// reflect the persisted preference) and whenever the Wrap toggle changes.
+export function applySourceWrap(container: HTMLElement, wrap: boolean): void {
+  container.querySelectorAll<HTMLPreElement>("pre.uatu-source-pre").forEach(pre => {
+    pre.classList.toggle("is-wrapped", wrap);
   });
 }
 

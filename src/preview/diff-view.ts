@@ -90,6 +90,11 @@ export type RenderDiffOptions = {
   // Default "unified" (stacked, classic git-diff layout). "split" puts
   // deletions and additions side-by-side inside Pierre.
   diffStyle?: DiffStyle;
+  // Soft word-wrap for long diff lines. When true, Pierre wraps lines
+  // (overflow: "wrap"); when false/undefined it scrolls horizontally
+  // (overflow: "scroll", Pierre's default). The global preference lives in
+  // appState.wrap; this module just renders what it's told.
+  wrap?: boolean;
   // Fired when the user clicks a segment of the in-host style toggle.
   // The app owns persistence and re-render — this module just renders
   // what it's told.
@@ -133,7 +138,7 @@ export async function renderDocumentDiff(
   const body = document.createElement("div");
   body.className = "uatu-diff-body";
   host.appendChild(body);
-  await renderWithPierre(body, payload, languageHint, diffStyle);
+  await renderWithPierre(body, payload, languageHint, diffStyle, options.wrap ?? false);
 }
 
 async function renderWithPierre(
@@ -141,6 +146,7 @@ async function renderWithPierre(
   payload: Extract<DocumentDiffPayload, { kind: "text" }>,
   languageHint: string | null,
   diffStyle: DiffStyle,
+  wrap: boolean,
 ): Promise<void> {
   // Anything thrown by Pierre or its Shiki peer is caught here and surfaced
   // as a state card so the user sees an explanation instead of an empty
@@ -156,6 +162,10 @@ async function renderWithPierre(
     const diff = new pierre.FileDiff({
       theme: "github-light",
       diffStyle,
+      // "wrap" soft-wraps long lines; "scroll" (Pierre's default) keeps
+      // them on one row behind a horizontal scrollbar. Pierre keeps its own
+      // per-line line numbers correct in both modes.
+      overflow: wrap ? "wrap" : "scroll",
       lineDiffType: "word-alt",
       // Leave `expandUnchanged` unset (default false). The flag means
       // "show ALL unchanged regions pre-expanded", which would dump the

@@ -10,6 +10,7 @@
 
 import {
   readDiffStylePreference,
+  readPreviewWrapPreference,
   readSplitRatioPreference,
   readViewLayoutPreference,
   readViewModePreference,
@@ -195,6 +196,10 @@ export const appState = {
   // shape) or "split" (side-by-side inside the diff component). Distinct
   // from `viewLayout` — applies only when viewMode === "diff".
   diffStyle: readDiffStylePreference(safeLocalStorage()) as DiffStyle,
+  // Soft word-wrap for the preview. Single global preference applied to
+  // whichever view supports wrapping (Source and Diff); ignored in
+  // Rendered. Resolved on boot from localStorage; defaults to off.
+  wrap: readPreviewWrapPreference(safeLocalStorage()),
   // Per-active-file stale-content hint state. Cleared by manual navigation
   // or refresh action.
   staleHint: null as StaleHint | null,

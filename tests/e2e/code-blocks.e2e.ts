@@ -44,15 +44,19 @@ test("non-Markdown code views show line numbers; Markdown fenced blocks do not",
   });
   await page.goto("/");
 
-  // Code view: line numbers visible
+  // Code view: per-line gutter present — one `.uatu-cl` block per source
+  // line, each carrying its number in `data-ln` (rendered via CSS ::before,
+  // so the number is not DOM text).
   await treeRow(page, "config.yaml").click();
-  const codeViewGutter = page.locator("#preview pre.has-line-numbers .line-numbers");
-  await expect(codeViewGutter).toHaveCount(1);
-  await expect(codeViewGutter).toHaveText("1\n2\n3");
+  await expect(page.locator("#preview pre.has-line-numbers")).toHaveCount(1);
+  const codeLines = page.locator("#preview pre.has-line-numbers .uatu-cl");
+  await expect(codeLines).toHaveCount(3);
+  await expect(codeLines.nth(0)).toHaveAttribute("data-ln", "1");
+  await expect(codeLines.nth(2)).toHaveAttribute("data-ln", "3");
 
-  // Markdown view: fenced block has NO line numbers
+  // Markdown view: fenced block has NO per-line gutter
   await treeRow(page, "with-code.md").click();
   await expect(page.locator("#preview pre")).toHaveCount(1);
-  await expect(page.locator("#preview pre .line-numbers")).toHaveCount(0);
+  await expect(page.locator("#preview pre .uatu-cl")).toHaveCount(0);
   await expect(page.locator("#preview pre.has-line-numbers")).toHaveCount(0);
 });

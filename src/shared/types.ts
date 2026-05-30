@@ -255,6 +255,40 @@ export function writeDiffStylePreference(
   }
 }
 
+// Soft word-wrap preference for the preview. A single global on/off applied
+// to whichever view supports wrapping (Source and Diff); meaningless in
+// Rendered view. Persisted to localStorage, default off. Stored as the
+// literal strings "on"/"off" so a stray value never reads as truthy.
+export const PREVIEW_WRAP_STORAGE_KEY = "uatu:preview-wrap";
+
+export const DEFAULT_PREVIEW_WRAP = false;
+
+export function readPreviewWrapPreference(storage: ModeStorage | null | undefined): boolean {
+  if (!storage) {
+    return DEFAULT_PREVIEW_WRAP;
+  }
+  try {
+    const raw = storage.getItem(PREVIEW_WRAP_STORAGE_KEY);
+    if (raw === "on") return true;
+    if (raw === "off") return false;
+    return DEFAULT_PREVIEW_WRAP;
+  } catch {
+    return DEFAULT_PREVIEW_WRAP;
+  }
+}
+
+export function writePreviewWrapPreference(
+  storage: ModeStorage | null | undefined,
+  wrap: boolean,
+): void {
+  if (!storage) return;
+  try {
+    storage.setItem(PREVIEW_WRAP_STORAGE_KEY, wrap ? "on" : "off");
+  } catch {
+    // best-effort persistence
+  }
+}
+
 // View layout controls how the preview body arranges the active document's
 // representations. "single" shows one representation at a time (chosen by
 // ViewMode); "split-h" places Source on the left and Rendered on the right;
