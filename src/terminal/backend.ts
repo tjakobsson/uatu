@@ -47,8 +47,17 @@ async function detectBackend(): Promise<TerminalBackend> {
 // retry: any attempt that delivers a byte proves availability; only when
 // *every* attempt within the budget comes up empty do we conclude the runtime
 // ignores the `terminal` option (Bun < 1.3.5) and fail closed.
+//
+// On that unsupported path every probe exits immediately without data, so the
+// fast-exit shortcut below would let the loop respawn `/bin/echo` thousands of
+// times within the budget — a boot-time fork storm. PROBE_RETRY_DELAY_MS paces
+// the loop so the spawn rate stays bounded (~budget/delay attempts) while the
+// happy path still returns on its first successful probe.
 const PROBE_BUDGET_MS = 3000;
 const PROBE_ATTEMPT_MS = 750;
+const PROBE_RETRY_DELAY_MS = 100;
+
+const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
 async function probeBunTerminal(): Promise<TerminalBackend> {
   const deadline = performance.now() + PROBE_BUDGET_MS;
@@ -81,6 +90,8 @@ async function probeBunTerminal(): Promise<TerminalBackend> {
         void proc.exited.then(() => setTimeout(() => settle(false), 0));
       });
       if (sawData) return { available: true, spawn: spawnPty };
+      if (performance.now() + PROBE_RETRY_DELAY_MS >= deadline) break;
+      await delay(PROBE_RETRY_DELAY_MS);
     } while (performance.now() < deadline);
   } catch (error) {
     return {
