@@ -39,41 +39,57 @@ async function detectBackend(): Promise<TerminalBackend> {
   return await probeBunTerminal();
 }
 
+// One delivered PTY byte proves Bun's terminal backend works. But Bun
+// occasionally DROPS that byte when many children spawn at once: the child
+// runs to a clean exit yet the `data` callback never fires (observed ~50% of
+// the time when several servers boot together, e.g. the parallel e2e suite).
+// A single probe therefore reports a perfectly good PTY as unavailable. So we
+// retry: any attempt that delivers a byte proves availability; only when
+// *every* attempt within the budget comes up empty do we conclude the runtime
+// ignores the `terminal` option (Bun < 1.3.5) and fail closed.
+const PROBE_BUDGET_MS = 3000;
+const PROBE_ATTEMPT_MS = 750;
+
 async function probeBunTerminal(): Promise<TerminalBackend> {
+  const deadline = performance.now() + PROBE_BUDGET_MS;
+  let attempts = 0;
   try {
-    const probe = await new Promise<boolean>(resolve => {
-      let saw = false;
-      const watchdog = setTimeout(() => resolve(saw), 750);
-      try {
+    do {
+      attempts++;
+      const sawData = await new Promise<boolean>(resolve => {
+        let settled = false;
+        const settle = (value: boolean) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(watchdog);
+          resolve(value);
+        };
+        const watchdog = setTimeout(() => settle(false), PROBE_ATTEMPT_MS);
         const proc = Bun.spawn(["/bin/echo", "uatu-pty-probe"], {
           terminal: {
             cols: 80,
             rows: 24,
             data() {
-              saw = true;
+              settle(true);
             },
           },
         } as Parameters<typeof Bun.spawn>[1]);
-        void proc.exited.then(() => {
-          clearTimeout(watchdog);
-          resolve(saw);
-        });
-      } catch {
-        clearTimeout(watchdog);
-        resolve(false);
-      }
-    });
-    if (!probe) {
-      return {
-        available: false,
-        reason: "Bun.spawn { terminal } did not deliver data within probe deadline",
-      };
-    }
+        // If the child exits without delivering a byte, this attempt missed.
+        // Fail it fast — after a turn of the event loop so a trailing `data`
+        // event still counts — so the loop can retry instead of burning the
+        // full per-attempt deadline.
+        void proc.exited.then(() => setTimeout(() => settle(false), 0));
+      });
+      if (sawData) return { available: true, spawn: spawnPty };
+    } while (performance.now() < deadline);
   } catch (error) {
     return {
       available: false,
       reason: error instanceof Error ? error.message : String(error),
     };
   }
-  return { available: true, spawn: spawnPty };
+  return {
+    available: false,
+    reason: `Bun.spawn { terminal } delivered no data across ${attempts} probe(s)`,
+  };
 }
