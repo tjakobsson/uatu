@@ -22,7 +22,7 @@
     "smoke": "bun run scripts/smoke-binary.ts"
   },
   "dependencies": {
-    "@asciidoctor/core": "^3.0.4",
+    "@asciidoctor/core": "^4.0.0",
     "@pierre/diffs": "1.2.11",
     "@pierre/trees": "1.0.0-beta.4",
     "@xterm/addon-fit": "^0.11.0",
