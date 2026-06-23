@@ -1,4 +1,4 @@
-import Asciidoctor from "@asciidoctor/core";
+import { type Document, Extensions, load } from "@asciidoctor/core";
 import { fromHtml } from "hast-util-from-html";
 import { defaultSchema, sanitize, type Schema } from "hast-util-sanitize";
 import { toHtml } from "hast-util-to-html";
@@ -13,8 +13,6 @@ import {
 import { markExternalAnchors } from "./external-links";
 import { escapeHtml, highlightCodeBlocks, SYNTAX_HIGHLIGHT_BYTES_LIMIT } from "./markdown";
 
-const asciidoctor = Asciidoctor();
-
 // `[mermaid]` is the canonical Asciidoctor Diagram block style for declaring a
 // mermaid diagram. We don't bundle Asciidoctor Diagram's server-side rasterizer
 // — instead we intercept `[mermaid]` blocks at parse time and rewrite them into
@@ -24,7 +22,13 @@ const asciidoctor = Asciidoctor();
 //
 // The DSL callbacks below MUST be plain functions, not arrows: Asciidoctor.js
 // uses `this` to dispatch to the BlockProcessorDsl / BlockProcessorInstance.
-const mermaidExtensionRegistry = asciidoctor.Extensions.create(function () {
+//
+// The group name is REQUIRED in Asciidoctor v4: `Extensions.create(name, block)`
+// registers the block form whose registrations survive the registry's
+// per-conversion reset (so the registry is safe to reuse across renders). The
+// bare `Extensions.create(fn)` form treats `fn` as the group *name* and
+// silently registers nothing.
+const mermaidExtensionRegistry = Extensions.create("uatu-mermaid", function () {
   this.block(function () {
     this.named("mermaid");
     this.onContext(["listing", "literal", "open"]);
@@ -175,7 +179,7 @@ export type RenderedAsciidoc = {
   metadata: DocumentMetadata | undefined;
 };
 
-export function renderAsciidocToHtml(source: string): RenderedAsciidoc {
+export async function renderAsciidocToHtml(source: string): Promise<RenderedAsciidoc> {
   // Match the Markdown size threshold: above the limit, skip Asciidoctor
   // entirely and render as plain escaped text so the browser stays responsive.
   if (source.length >= SYNTAX_HIGHLIGHT_BYTES_LIMIT) {
@@ -195,13 +199,13 @@ export function renderAsciidocToHtml(source: string): RenderedAsciidoc {
   // Document model is available for metadata extraction. The two-step form
   // produces byte-identical body HTML — `convert()` is implemented as a
   // load+convert pair internally.
-  const doc = asciidoctor.load(source, {
+  const doc = await load(source, {
     safe: "secure",
     standalone: false,
     attributes: { showtitle: true, relfilesuffix: ".adoc", toclevels: 5 },
     extension_registry: mermaidExtensionRegistry,
   });
-  const rawHtml = doc.convert();
+  const rawHtml = await doc.convert();
 
   const html = typeof rawHtml === "string" ? rawHtml : "";
   const normalized = normalizeAsciidoctorListings(html);
@@ -218,9 +222,10 @@ export function renderAsciidocToHtml(source: string): RenderedAsciidoc {
 // header attribute via `getAttributes()`. Authors are surfaced as numbered
 // `author_N` / `email_N` keys on the attribute map (1-indexed, with
 // `authorcount` declaring how many were declared). We use the attribute map
-// directly rather than `getAuthors()` because the latter returns Opal-wrapped
-// objects whose property access is brittle across Asciidoctor versions.
-function extractAsciidocMetadata(doc: ReturnType<Asciidoctor["load"]>): DocumentMetadata | undefined {
+// directly rather than `getAuthors()` because the wrapped author objects the
+// latter returns have a property surface that's brittle across Asciidoctor
+// versions.
+function extractAsciidocMetadata(doc: Document): DocumentMetadata | undefined {
   const attrs = doc.getAttributes() as Record<string, unknown>;
   const raw: Record<string, RawMetadataValue> = {};
 
