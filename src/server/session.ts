@@ -572,7 +572,7 @@ export async function renderDocument(
     language = null;
     title = extractTitle(html, document.name);
   } else if (document.kind === "asciidoc") {
-    const rendered = renderAsciidocToHtml(source);
+    const rendered = await renderAsciidocToHtml(source);
     html = rendered.html;
     metadata = sanitizeMetadata(rendered.metadata);
     language = null;

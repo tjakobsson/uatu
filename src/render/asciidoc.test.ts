@@ -5,13 +5,13 @@ import { SYNTAX_HIGHLIGHT_BYTES_LIMIT } from "./markdown";
 import { replaceMermaidCodeBlocks } from "./preview";
 
 describe("renderAsciidocToHtml", () => {
-  test("renders the level-0 doctitle as <h1>", () => {
-    const { html } = renderAsciidocToHtml(`= Document Title\n\nBody.\n`);
+  test("renders the level-0 doctitle as <h1>", async () => {
+    const { html } = await renderAsciidocToHtml(`= Document Title\n\nBody.\n`);
     expect(html).toContain("<h1>Document Title</h1>");
   });
 
-  test("maps AsciiDoc heading depth to <h1>–<h6>", () => {
-    const { html } = renderAsciidocToHtml(`= L0
+  test("maps AsciiDoc heading depth to <h1>–<h6>", async () => {
+    const { html } = await renderAsciidocToHtml(`= L0
 
 == L1
 
@@ -32,8 +32,8 @@ describe("renderAsciidocToHtml", () => {
     expect(html).toMatch(/<h6[^>]*>L5<\/h6>/);
   });
 
-  test("renders a Table of Contents whose links resolve to (prefixed) heading ids", () => {
-    const { html } = renderAsciidocToHtml(`= Doc
+  test("renders a Table of Contents whose links resolve to (prefixed) heading ids", async () => {
+    const { html } = await renderAsciidocToHtml(`= Doc
 :toc:
 
 == Alpha
@@ -52,8 +52,8 @@ describe("renderAsciidocToHtml", () => {
     expect(html).toContain('id="user-content-_alpha"');
   });
 
-  test("cross-references via <<id>> render as anchor links that match their target id", () => {
-    const { html } = renderAsciidocToHtml(`[#target]
+  test("cross-references via <<id>> render as anchor links that match their target id", async () => {
+    const { html } = await renderAsciidocToHtml(`[#target]
 == Target Section
 
 See <<target>> for details.
@@ -62,8 +62,8 @@ See <<target>> for details.
     expect(html).toMatch(/id="user-content-target"/);
   });
 
-  test("renders sections, lists, and tables as formatted HTML", () => {
-    const { html } = renderAsciidocToHtml(`= Doc
+  test("renders sections, lists, and tables as formatted HTML", async () => {
+    const { html } = await renderAsciidocToHtml(`= Doc
 
 == Section A
 
@@ -81,14 +81,14 @@ See <<target>> for details.
     expect(html).toContain("item one");
   });
 
-  test("preserves the admonition kind class for styling", () => {
-    const { html } = renderAsciidocToHtml(`NOTE: be careful\n`);
+  test("preserves the admonition kind class for styling", async () => {
+    const { html } = await renderAsciidocToHtml(`NOTE: be careful\n`);
     expect(html).toContain("admonitionblock");
     expect(html).toContain("note");
   });
 
-  test("emits highlight.js token coloring for [source,LANG] listings", () => {
-    const { html } = renderAsciidocToHtml(`[source,javascript]
+  test("emits highlight.js token coloring for [source,LANG] listings", async () => {
+    const { html } = await renderAsciidocToHtml(`[source,javascript]
 ----
 const answer = 42;
 ----
@@ -98,8 +98,8 @@ const answer = 42;
     expect(html).toContain("hljs-number");
   });
 
-  test("[source,mermaid] survives as a language-mermaid code block (client-side hydration)", () => {
-    const { html } = renderAsciidocToHtml(`[source,mermaid]
+  test("[source,mermaid] survives as a language-mermaid code block (client-side hydration)", async () => {
+    const { html } = await renderAsciidocToHtml(`[source,mermaid]
 ----
 graph TD; A-->B
 ----
@@ -114,11 +114,11 @@ graph TD; A-->B
     expect(hydrated).toContain("graph TD");
   });
 
-  test("bare [mermaid] block on a ---- listing renders as a language-mermaid code block", () => {
+  test("bare [mermaid] block on a ---- listing renders as a language-mermaid code block", async () => {
     // `[mermaid]` is Asciidoctor Diagram's canonical block style. uatu's
     // block-processor extension rewrites it into the same shape `[source,mermaid]`
     // produces, so the client-side hydration path applies uniformly.
-    const { html } = renderAsciidocToHtml(`[mermaid]
+    const { html } = await renderAsciidocToHtml(`[mermaid]
 ----
 graph TD; A-->B
 ----
@@ -130,38 +130,38 @@ graph TD; A-->B
     expect(hydrated).toContain('<div class="mermaid">');
   });
 
-  test("bare [mermaid] block on a .... literal delimiter produces the same HTML as the ---- listing form", () => {
-    const dashes = renderAsciidocToHtml(`[mermaid]
+  test("bare [mermaid] block on a .... literal delimiter produces the same HTML as the ---- listing form", async () => {
+    const dashes = (await renderAsciidocToHtml(`[mermaid]
 ----
 graph TD; X-->Y
 ----
-`).html;
-    const dots = renderAsciidocToHtml(`[mermaid]
+`)).html;
+    const dots = (await renderAsciidocToHtml(`[mermaid]
 ....
 graph TD; X-->Y
 ....
-`).html;
+`)).html;
     expect(dots).toBe(dashes);
   });
 
-  test("[mermaid] and [source,mermaid] produce byte-identical HTML for the same body", () => {
-    const bare = renderAsciidocToHtml(`[mermaid]
+  test("[mermaid] and [source,mermaid] produce byte-identical HTML for the same body", async () => {
+    const bare = (await renderAsciidocToHtml(`[mermaid]
 ----
 graph TD; A-->B
 ----
-`).html;
-    const source = renderAsciidocToHtml(`[source,mermaid]
+`)).html;
+    const source = (await renderAsciidocToHtml(`[source,mermaid]
 ----
 graph TD; A-->B
 ----
-`).html;
+`)).html;
     expect(bare).toBe(source);
   });
 
-  test("a bare ---- listing without the [mermaid] style still renders as a plain literal block", () => {
+  test("a bare ---- listing without the [mermaid] style still renders as a plain literal block", async () => {
     // Regression guard: the extension MUST NOT swallow every delimited block —
     // only those declared with the `mermaid` block style above the delimiter.
-    const { html } = renderAsciidocToHtml(`----
+    const { html } = await renderAsciidocToHtml(`----
 not a diagram, just preformatted text
 ----
 `);
@@ -171,8 +171,8 @@ not a diagram, just preformatted text
     expect(hydrated).not.toContain('<div class="mermaid">');
   });
 
-  test("falls back gracefully for unknown source languages", () => {
-    const { html } = renderAsciidocToHtml(`[source,madeuplang]
+  test("falls back gracefully for unknown source languages", async () => {
+    const { html } = await renderAsciidocToHtml(`[source,madeuplang]
 ----
 not a real language
 ----
@@ -182,34 +182,40 @@ not a real language
     expect(html).not.toContain("hljs-keyword");
   });
 
-  test("include:: directives are not resolved under SECURE safe mode", () => {
-    const { html } = renderAsciidocToHtml(`include::secret-file.adoc[]\n`);
+  test("include:: directives are not resolved under SECURE safe mode", async () => {
+    const { html } = await renderAsciidocToHtml(`include::secret-file.adoc[]\n`);
     // Asciidoctor in secure mode renders the include as a clickable link; it
     // does NOT read or embed the referenced file's contents.
     expect(html).not.toContain("CONTENTS_OF_OTHER_FILE");
-    // The include marker becomes a bare link to the unresolved target.
-    expect(html.toLowerCase()).toContain("secret-file.adoc");
+    // The include marker becomes a bare link to the unresolved target, rather
+    // than the filename merely appearing somewhere in the output — assert the
+    // anchor shape so a future change in secure-mode include rendering is caught.
+    expect(html).toMatch(/<a[^>]*href="secret-file\.adoc"/i);
   });
 
-  test("strips <script> emitted via inline passthrough", () => {
-    const { html } = renderAsciidocToHtml(`pass:[<script>alert(1)</script>]\n`);
+  // `+++…+++` is the raw inline passthrough that emits HTML verbatim into the
+  // body (so the sanitize pass is what must neutralize it). Asciidoctor v4
+  // changed `pass:[…]` to escape its content, so `+++` is the vector that
+  // actually exercises the sanitizer these regression guards exist for.
+  test("strips <script> emitted via raw inline passthrough", async () => {
+    const { html } = await renderAsciidocToHtml(`+++<script>alert(1)</script>+++\n`);
     expect(html).not.toMatch(/<script\b/i);
   });
 
-  test("strips inline event handlers on passthrough HTML", () => {
-    const { html } = renderAsciidocToHtml(`pass:[<img src="x" alt="x" onerror="alert(1)">]\n`);
+  test("strips inline event handlers on raw passthrough HTML", async () => {
+    const { html } = await renderAsciidocToHtml(`+++<img src="x" alt="x" onerror="alert(1)">+++\n`);
     expect(html).toContain("<img");
     expect(html).not.toMatch(/onerror/i);
     expect(html).not.toContain("alert(1)");
   });
 
-  test("strips javascript: URLs on links", () => {
-    const { html } = renderAsciidocToHtml(`link:javascript:alert(1)[click]\n`);
+  test("strips javascript: URLs on links", async () => {
+    const { html } = await renderAsciidocToHtml(`link:javascript:alert(1)[click]\n`);
     expect(html).not.toContain("javascript:");
   });
 
-  test("source listings inside fenced delimiters keep raw HTML literal", () => {
-    const { html } = renderAsciidocToHtml(`[source,html]
+  test("source listings inside fenced delimiters keep raw HTML literal", async () => {
+    const { html } = await renderAsciidocToHtml(`[source,html]
 ----
 <script>alert(1)</script>
 ----
@@ -218,9 +224,9 @@ not a real language
     expect(html).toMatch(/&(lt;|#x3[Cc];)/);
   });
 
-  test("bypasses Asciidoctor and emits plain text above the size threshold", () => {
+  test("bypasses Asciidoctor and emits plain text above the size threshold", async () => {
     const big = "= title\n\n" + "x".repeat(SYNTAX_HIGHLIGHT_BYTES_LIMIT);
-    const { html } = renderAsciidocToHtml(big);
+    const { html } = await renderAsciidocToHtml(big);
     expect(html.startsWith('<pre><code class="hljs">')).toBe(true);
     expect(html).not.toContain("<h1>");
     expect(html).not.toContain("admonitionblock");
@@ -234,75 +240,75 @@ describe("renderAsciidocToHtml cross-document links", () => {
   // those URLs against the watched roots, where the actual file is `.adoc`.
   // Set `relfilesuffix=.adoc` so cross-doc xrefs keep their extension.
 
-  test("xref to a sibling .adoc file preserves the .adoc extension", () => {
-    const { html } = renderAsciidocToHtml(`= Index\n\nxref:other.adoc[Other doc]\n`);
+  test("xref to a sibling .adoc file preserves the .adoc extension", async () => {
+    const { html } = await renderAsciidocToHtml(`= Index\n\nxref:other.adoc[Other doc]\n`);
     expect(html).toContain('<a href="other.adoc">Other doc</a>');
     expect(html).not.toContain("other.html");
   });
 
-  test("xref into a subdirectory preserves the relative path", () => {
-    const { html } = renderAsciidocToHtml(`= Index\n\nxref:guides/setup.adoc[Setup]\n`);
+  test("xref into a subdirectory preserves the relative path", async () => {
+    const { html } = await renderAsciidocToHtml(`= Index\n\nxref:guides/setup.adoc[Setup]\n`);
     expect(html).toContain('<a href="guides/setup.adoc">Setup</a>');
     expect(html).not.toContain("guides/setup.html");
   });
 
-  test("xref with a fragment preserves the .adoc extension and the fragment", () => {
-    const { html } = renderAsciidocToHtml(`= Index\n\nxref:other.adoc#section[Other]\n`);
+  test("xref with a fragment preserves the .adoc extension and the fragment", async () => {
+    const { html } = await renderAsciidocToHtml(`= Index\n\nxref:other.adoc#section[Other]\n`);
     expect(html).toContain('<a href="other.adoc#section">Other</a>');
     expect(html).not.toContain("other.html");
   });
 
-  test("<<other.adoc#sec,Title>> shorthand preserves the .adoc extension", () => {
-    const { html } = renderAsciidocToHtml(`= Index\n\n<<other.adoc#section,Other>>\n`);
+  test("<<other.adoc#sec,Title>> shorthand preserves the .adoc extension", async () => {
+    const { html } = await renderAsciidocToHtml(`= Index\n\n<<other.adoc#section,Other>>\n`);
     expect(html).toContain('<a href="other.adoc#section">Other</a>');
     expect(html).not.toContain("other.html");
   });
 
-  test("link: macro to a sibling .adoc file preserves the extension", () => {
-    const { html } = renderAsciidocToHtml(`= Index\n\nlink:other.adoc[Other]\n`);
+  test("link: macro to a sibling .adoc file preserves the extension", async () => {
+    const { html } = await renderAsciidocToHtml(`= Index\n\nlink:other.adoc[Other]\n`);
     expect(html).toContain('<a href="other.adoc">Other</a>');
     expect(html).not.toContain("other.html");
   });
 
-  test("xref to a sibling .asciidoc file preserves the .asciidoc extension", () => {
-    const { html } = renderAsciidocToHtml(`= Index\n\nxref:other.asciidoc[Other]\n`);
+  test("xref to a sibling .asciidoc file preserves the .asciidoc extension", async () => {
+    const { html } = await renderAsciidocToHtml(`= Index\n\nxref:other.asciidoc[Other]\n`);
     expect(html).toContain('<a href="other.asciidoc">Other</a>');
     expect(html).not.toContain("other.html");
   });
 
-  test("bare xref:id[] still resolves as an in-page anchor (no extension to preserve)", () => {
+  test("bare xref:id[] still resolves as an in-page anchor (no extension to preserve)", async () => {
     // With no extension hint Asciidoctor treats the target as an in-document
     // anchor reference; rewriteInPageAnchors then prefixes it with
     // `user-content-` to mirror sanitize's id namespacing.
-    const { html } = renderAsciidocToHtml(`= Doc\n\nxref:target[Jump]\n\n[[target]]\n== Target\n`);
+    const { html } = await renderAsciidocToHtml(`= Doc\n\nxref:target[Jump]\n\n[[target]]\n== Target\n`);
     expect(html).toContain('href="#user-content-target"');
     expect(html).not.toContain("target.html");
   });
 
-  test("external link is not affected by the .adoc preservation rule", () => {
-    const { html } = renderAsciidocToHtml(`= T\n\nlink:https://example.com[Example]\n`);
+  test("external link is not affected by the .adoc preservation rule", async () => {
+    const { html } = await renderAsciidocToHtml(`= T\n\nlink:https://example.com[Example]\n`);
     expect(html).toContain('<a href="https://example.com" target="_blank" rel="noopener noreferrer">Example</a>');
   });
 
-  test("bare https URL renders with target=_blank and safe rel", () => {
-    const { html } = renderAsciidocToHtml(`= T\n\nhttps://example.com[Example]\n`);
+  test("bare https URL renders with target=_blank and safe rel", async () => {
+    const { html } = await renderAsciidocToHtml(`= T\n\nhttps://example.com[Example]\n`);
     expect(html).toContain('target="_blank"');
     expect(html).toMatch(/rel="noopener noreferrer"/);
   });
 
-  test("http link is also marked external", () => {
-    const { html } = renderAsciidocToHtml(`= T\n\nlink:http://example.com[Example]\n`);
+  test("http link is also marked external", async () => {
+    const { html } = await renderAsciidocToHtml(`= T\n\nlink:http://example.com[Example]\n`);
     expect(html).toContain('<a href="http://example.com" target="_blank" rel="noopener noreferrer">Example</a>');
   });
 
-  test("relative cross-document AsciiDoc links are NOT marked external", () => {
-    const { html } = renderAsciidocToHtml(`= T\n\nxref:other.adoc[Other]\n`);
+  test("relative cross-document AsciiDoc links are NOT marked external", async () => {
+    const { html } = await renderAsciidocToHtml(`= T\n\nxref:other.adoc[Other]\n`);
     expect(html).toContain('<a href="other.adoc">Other</a>');
     expect(html).not.toMatch(/href="other\.adoc"[^>]*target=/);
   });
 
-  test("mailto link is NOT marked external", () => {
-    const { html } = renderAsciidocToHtml(`= T\n\nmailto:foo@example.com[Mail me]\n`);
+  test("mailto link is NOT marked external", async () => {
+    const { html } = await renderAsciidocToHtml(`= T\n\nmailto:foo@example.com[Mail me]\n`);
     expect(html).toContain('href="mailto:foo@example.com"');
     expect(html).not.toMatch(/href="mailto:[^"]*"[^>]*target=/);
   });
@@ -346,8 +352,8 @@ describe("rewriteInPageAnchors", () => {
 });
 
 describe("renderAsciidocToHtml metadata", () => {
-  test("header attributes are surfaced as metadata", () => {
-    const { metadata } = renderAsciidocToHtml(`= Doc Title
+  test("header attributes are surfaced as metadata", async () => {
+    const { metadata } = await renderAsciidocToHtml(`= Doc Title
 :author: Tobias Jakobsson
 :revnumber: 1.2
 :revdate: 2026-05-04
@@ -369,8 +375,8 @@ Body.
     expect(metadata?.extras?.["custom-attr"]).toBe("hello");
   });
 
-  test("author and revision lines are parsed", () => {
-    const { metadata } = renderAsciidocToHtml(`= Doc Title
+  test("author and revision lines are parsed", async () => {
+    const { metadata } = await renderAsciidocToHtml(`= Doc Title
 Tobias Jakobsson <tobias@example.com>; Jane Doe
 v1.2, 2026-05-04: Initial release
 
@@ -384,19 +390,19 @@ Body.
     expect(metadata?.date).toBe("2026-05-04");
   });
 
-  test("a doctitle-only document yields no metadata card (only title is unsafe to surface alone)", () => {
+  test("a doctitle-only document yields no metadata card (only title is unsafe to surface alone)", async () => {
     // A bare `= Title` document is the most common case in our existing
     // fixtures. Surfacing a card with just a title would duplicate the
     // already-rendered <h1> for every doc — instead, omit the card.
     // The <h1> is still emitted because of `showtitle`.
-    const { html, metadata } = renderAsciidocToHtml(`= Just a Title\n\nBody.\n`);
+    const { html, metadata } = await renderAsciidocToHtml(`= Just a Title\n\nBody.\n`);
     expect(metadata).toBeUndefined();
     expect(html).toContain("<h1>Just a Title</h1>");
     expect(html).toContain("<p>Body.</p>");
   });
 
-  test("body substitution still works after metadata extraction", () => {
-    const { html, metadata } = renderAsciidocToHtml(`= Doc
+  test("body substitution still works after metadata extraction", async () => {
+    const { html, metadata } = await renderAsciidocToHtml(`= Doc
 :author: Tobias
 
 The author is {author}.
@@ -407,13 +413,13 @@ The author is {author}.
     expect(html).toContain("The author is Tobias.");
   });
 
-  test("an asciidoc file with no header attributes and no author/revision lines yields undefined metadata", () => {
-    const { metadata } = renderAsciidocToHtml(`= Doc\n\n== Section\n\nBody only.\n`);
+  test("an asciidoc file with no header attributes and no author/revision lines yields undefined metadata", async () => {
+    const { metadata } = await renderAsciidocToHtml(`= Doc\n\n== Section\n\nBody only.\n`);
     expect(metadata).toBeUndefined();
   });
 
-  test("internal Asciidoctor attributes do not leak into extras", () => {
-    const { metadata } = renderAsciidocToHtml(`= Doc
+  test("internal Asciidoctor attributes do not leak into extras", async () => {
+    const { metadata } = await renderAsciidocToHtml(`= Doc
 :author: Tobias
 :revdate: 2026-05-04
 
@@ -433,9 +439,9 @@ Body.
     expect(extraKeys).not.toContain("htmlsyntax");
   });
 
-  test("oversized AsciiDoc input bypasses metadata extraction along with the renderer", () => {
+  test("oversized AsciiDoc input bypasses metadata extraction along with the renderer", async () => {
     const big = "= title\n\n" + "x".repeat(SYNTAX_HIGHLIGHT_BYTES_LIMIT);
-    const { html, metadata } = renderAsciidocToHtml(big);
+    const { html, metadata } = await renderAsciidocToHtml(big);
     expect(metadata).toBeUndefined();
     expect(html.startsWith('<pre><code class="hljs">')).toBe(true);
   });
