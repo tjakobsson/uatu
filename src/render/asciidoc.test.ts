@@ -187,8 +187,10 @@ not a real language
     // Asciidoctor in secure mode renders the include as a clickable link; it
     // does NOT read or embed the referenced file's contents.
     expect(html).not.toContain("CONTENTS_OF_OTHER_FILE");
-    // The include marker becomes a bare link to the unresolved target.
-    expect(html.toLowerCase()).toContain("secret-file.adoc");
+    // The include marker becomes a bare link to the unresolved target, rather
+    // than the filename merely appearing somewhere in the output — assert the
+    // anchor shape so a future change in secure-mode include rendering is caught.
+    expect(html).toMatch(/<a[^>]*href="secret-file\.adoc"/i);
   });
 
   // `+++…+++` is the raw inline passthrough that emits HTML verbatim into the
