@@ -4,7 +4,7 @@ import { normalizeAsciidoctorListings, renderAsciidocToHtml, rewriteInPageAnchor
 import { SYNTAX_HIGHLIGHT_BYTES_LIMIT } from "./markdown";
 import { replaceMermaidCodeBlocks } from "./preview";
 
-describe("renderAsciidocToHtml", async () => {
+describe("renderAsciidocToHtml", () => {
   test("renders the level-0 doctitle as <h1>", async () => {
     const { html } = await renderAsciidocToHtml(`= Document Title\n\nBody.\n`);
     expect(html).toContain("<h1>Document Title</h1>");
@@ -231,7 +231,7 @@ not a real language
   });
 });
 
-describe("renderAsciidocToHtml cross-document links", async () => {
+describe("renderAsciidocToHtml cross-document links", () => {
   // Asciidoctor's default `xref:other.adoc[]` rewrites the extension to the
   // configured output suffix (`.html`). The preview spec requires preserving
   // the author's `href` verbatim — the in-app static-file fallback resolves
@@ -312,44 +312,44 @@ describe("renderAsciidocToHtml cross-document links", async () => {
   });
 });
 
-describe("normalizeAsciidoctorListings", async () => {
-  test("rewrites Asciidoctor's listing wrapper into the Markdown-shaped pre/code", async () => {
+describe("normalizeAsciidoctorListings", () => {
+  test("rewrites Asciidoctor's listing wrapper into the Markdown-shaped pre/code", () => {
     const input =
       '<pre class="highlight"><code class="language-yaml" data-lang="yaml">key: value</code></pre>';
     const output = normalizeAsciidoctorListings(input);
     expect(output).toBe('<pre><code class="language-yaml">key: value</code></pre>');
   });
 
-  test("leaves non-listing pre/code blocks alone (literal blocks, etc.)", async () => {
+  test("leaves non-listing pre/code blocks alone (literal blocks, etc.)", () => {
     const input = "<pre>plain</pre>";
     expect(normalizeAsciidoctorListings(input)).toBe(input);
   });
 });
 
-describe("rewriteInPageAnchors", async () => {
-  test("prefixes bare in-page hrefs to match sanitize's user-content- id prefix", async () => {
+describe("rewriteInPageAnchors", () => {
+  test("prefixes bare in-page hrefs to match sanitize's user-content- id prefix", () => {
     expect(rewriteInPageAnchors('<a href="#section">x</a>')).toBe(
       '<a href="#user-content-section">x</a>',
     );
   });
 
-  test("does not rewrite cross-document fragments (other.adoc#section)", async () => {
+  test("does not rewrite cross-document fragments (other.adoc#section)", () => {
     const input = '<a href="other.adoc#section">x</a>';
     expect(rewriteInPageAnchors(input)).toBe(input);
   });
 
-  test("does not double-prefix already-prefixed hrefs", async () => {
+  test("does not double-prefix already-prefixed hrefs", () => {
     const input = '<a href="#user-content-section">x</a>';
     expect(rewriteInPageAnchors(input)).toBe(input);
   });
 
-  test("does not touch external URLs", async () => {
+  test("does not touch external URLs", () => {
     const input = '<a href="https://example.com">x</a>';
     expect(rewriteInPageAnchors(input)).toBe(input);
   });
 });
 
-describe("renderAsciidocToHtml metadata", async () => {
+describe("renderAsciidocToHtml metadata", () => {
   test("header attributes are surfaced as metadata", async () => {
     const { metadata } = await renderAsciidocToHtml(`= Doc Title
 :author: Tobias Jakobsson
