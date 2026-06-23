@@ -56,7 +56,7 @@ let filterInput: HTMLInputElement | null = null;
 let open = false;
 let width = readWidthPreference() ?? DEFAULT_WIDTH;
 let currentHeadings: OutlineHeading[] = [];
-let currentDocPath: string | null = null;
+let currentDocId: string | null = null;
 // Scroll-spy state: the element that actually scrolls for the current layout,
 // its bound scroll listener, and a rAF handle so we recompute at most once per
 // frame while scrolling.
@@ -260,7 +260,7 @@ function teardownOutline(): void {
 // captured element reference into view, which works even when ids are missing
 // or duplicated.
 function buildList(headings: OutlineHeading[]): void {
-  const panelEl = ensurePanel();
+  ensurePanel();
   const list = listElement;
   if (!list) {
     return;
@@ -283,7 +283,6 @@ function buildList(headings: OutlineHeading[]): void {
     });
     list.appendChild(link);
   }
-  void panelEl;
 }
 
 function linkForElement(element: Element): HTMLElement | null {
@@ -420,6 +419,10 @@ function updateActiveHeading(): void {
   // Redistribute the unreachable tail (headings whose natural activation lies
   // beyond maxScroll) evenly across the remaining scroll distance, so each gets
   // its own slice of the final screenful instead of all snapping at the bottom.
+  // `tailStart < 0` → every heading is reachable, no redistribution needed.
+  // `tailStart === 0` → even the first heading never reaches the trigger line
+  // (e.g. a barely-scrollable document); we intentionally skip redistribution
+  // and fall through to highlighting the first heading.
   const tailStart = activations.findIndex(point => point > maxScroll);
   if (tailStart > 0) {
     const base = activations[tailStart - 1]!;
@@ -459,7 +462,7 @@ function resolveRoots(): { headingsRoot: HTMLElement; scrollRoot: HTMLElement } 
 }
 
 export type OutlineDocument = {
-  path: string;
+  id: string;
   kind: "markdown" | "asciidoc" | "text";
   view: ViewMode;
 };
@@ -479,7 +482,7 @@ export function refreshOutline(doc: OutlineDocument | null): void {
     return;
   }
 
-  currentDocPath = doc.path;
+  currentDocId = doc.id;
   copySourceButton.hidden = false;
 
   const roots = resolveRoots();
@@ -503,17 +506,26 @@ export function refreshOutline(doc: OutlineDocument | null): void {
 }
 
 async function handleCopySource(): Promise<void> {
-  if (!currentDocPath) {
+  if (!currentDocId) {
     return;
   }
   try {
+    // Fetch the raw source by document *id*, not by path. Id-scoped so it always
+    // resolves the selected document even when two watched roots share a
+    // relative path, and free of URL-delimiter pitfalls in file names (`#`,
+    // `?`, spaces) that a path-based URL would misparse. The source view returns
+    // the raw text escaped inside a `<pre>`; reading it back as textContent
+    // recovers the source verbatim.
     const response = await fetch(
-      new URL(currentDocPath.replace(/^\/+/, ""), `${window.location.origin}/`).toString(),
+      `/api/document?id=${encodeURIComponent(currentDocId)}&view=source`,
     );
     if (!response.ok) {
       throw new Error(`status ${response.status}`);
     }
-    const text = await response.text();
+    const payload = (await response.json()) as { html?: string };
+    const scratch = document.createElement("div");
+    scratch.innerHTML = payload.html ?? "";
+    const text = scratch.textContent ?? "";
     await copyToClipboard(text);
     flashActionIcon(copySourceButton, "is-copied");
   } catch {

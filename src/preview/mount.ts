@@ -186,7 +186,7 @@ export async function renderSinglePayload(payload: RenderedDocument): Promise<vo
   // Rebuild the outline + action bar from the freshly-mounted content. In
   // Source view this hides the outline (a `<pre>` has no heading elements);
   // in Rendered view it enumerates the headings under #preview.
-  refreshOutline({ path: payload.path, kind: payload.kind, view: payload.view });
+  refreshOutline({ id: payload.id, kind: payload.kind, view: payload.view });
 }
 
 // Ensure both Source and Rendered payloads are available for the active
@@ -296,7 +296,7 @@ export async function renderSplitPayloads(
   // The rendered pane is always present in split layout, so the outline
   // enumerates it (and scroll-spy roots on that pane, not the shell).
   refreshOutline({
-    path: renderedPayload.path,
+    id: renderedPayload.id,
     kind: renderedPayload.kind,
     view: "rendered",
   });
