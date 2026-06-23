@@ -30,6 +30,7 @@ import {
 } from "./layout";
 import { isViewableImageName, renderImagePreview } from "./image";
 import { currentMermaidThemeInputs } from "./mermaid";
+import { refreshOutline } from "./outline";
 import { attachMetadataCardToggleListener, renderMetadataCard } from "./metadata-card";
 import { syncViewToggle } from "./view-mode";
 
@@ -182,6 +183,10 @@ export async function renderSinglePayload(payload: RenderedDocument): Promise<vo
     applySourceWrap(previewElement, appState.wrap);
   }
   attachCopyButtons(previewElement);
+  // Rebuild the outline + action bar from the freshly-mounted content. In
+  // Source view this hides the outline (a `<pre>` has no heading elements);
+  // in Rendered view it enumerates the headings under #preview.
+  refreshOutline({ path: payload.path, kind: payload.kind, view: payload.view });
 }
 
 // Ensure both Source and Rendered payloads are available for the active
@@ -288,6 +293,13 @@ export async function renderSplitPayloads(
   applySplitRatioToDom();
   attachSplitResizer(resizer);
   applyAutoStackIfNeeded();
+  // The rendered pane is always present in split layout, so the outline
+  // enumerates it (and scroll-spy roots on that pane, not the shell).
+  refreshOutline({
+    path: renderedPayload.path,
+    kind: renderedPayload.kind,
+    view: "rendered",
+  });
 }
 
 export async function loadDocument(documentId: string) {

@@ -7,8 +7,17 @@ const previewTitleElementMaybe = document.querySelector<HTMLElement>("#preview-t
 const previewPathElementMaybe = document.querySelector<HTMLElement>("#preview-path");
 const previewTypeElementMaybe = document.querySelector<HTMLElement>("#preview-type");
 const previewBaseElementMaybe = document.querySelector<HTMLBaseElement>("#preview-base");
+const outlineToggleButtonMaybe = document.querySelector<HTMLButtonElement>("#outline-toggle");
+const copySourceButtonMaybe = document.querySelector<HTMLButtonElement>("#copy-source-action");
 
-if (!previewTitleElementMaybe || !previewPathElementMaybe || !previewTypeElementMaybe || !previewBaseElementMaybe) {
+if (
+  !previewTitleElementMaybe
+  || !previewPathElementMaybe
+  || !previewTypeElementMaybe
+  || !previewBaseElementMaybe
+  || !outlineToggleButtonMaybe
+  || !copySourceButtonMaybe
+) {
   throw new Error("uatu UI failed to initialize (preview/header)");
 }
 
@@ -20,10 +29,27 @@ const previewTitleElement: HTMLElement = previewTitleElementMaybe;
 const previewPathElement: HTMLElement = previewPathElementMaybe;
 const previewTypeElement: HTMLElement = previewTypeElementMaybe;
 const previewBaseElement: HTMLBaseElement = previewBaseElementMaybe;
+const outlineToggleButton: HTMLButtonElement = outlineToggleButtonMaybe;
+const copySourceButton: HTMLButtonElement = copySourceButtonMaybe;
 
 // Re-exports so other preview/ modules that already query `#preview-*` don't
 // have to redo the throw-if-null dance. Used by `preview/mount.ts` etc.
 export { previewTitleElement, previewPathElement, previewTypeElement, previewBaseElement };
+
+// The preview action-icon bar buttons. `outline.ts` owns their behaviour and
+// per-render visibility (it knows the rendered DOM's heading count); header
+// just owns the throw-if-null query so all `#preview-*` chrome lives here.
+export { outlineToggleButton, copySourceButton };
+
+// Hide the entire action-icon bar. Called when leaving document mode (commit /
+// review-score / empty previews) where neither copy-source nor an outline
+// makes sense. The Rendered-view + heading-count gating for the document case
+// lives in `outline.ts`'s refresh, which runs on every document render.
+export function hidePreviewActionBar(): void {
+  outlineToggleButton.hidden = true;
+  outlineToggleButton.setAttribute("aria-pressed", "false");
+  copySourceButton.hidden = true;
+}
 
 type PreviewTypePayload = {
   kind: "markdown" | "asciidoc" | "text";

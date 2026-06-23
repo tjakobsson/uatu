@@ -9,6 +9,7 @@ import { applySourceWrap } from "./code-block";
 import { applyDiffForActiveDocument } from "./diff";
 import { mountLayoutToolbar } from "./layout";
 import { applyDocumentPayload, documentViewCache, loadDocument } from "./mount";
+import { refreshOutline } from "./outline";
 
 const viewControlElementMaybe = document.querySelector<HTMLDivElement>("#view-control");
 const viewRenderedButtonMaybe = document.querySelector<HTMLButtonElement>("#view-rendered");
@@ -149,6 +150,9 @@ export function hideViewToggle(): void {
   previewElement.classList.remove("is-split", "is-split-h", "is-split-v");
   previewElement.removeAttribute("data-auto-stack");
   mountLayoutToolbar(false);
+  // Non-document previews (commit, review-score, empty, binary, image) have no
+  // outline and no source to copy — hide the action bar and tear down scroll-spy.
+  refreshOutline(null);
 }
 
 export function applyViewMode(next: ViewMode): void {

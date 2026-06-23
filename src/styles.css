@@ -2878,6 +2878,233 @@ body.is-resizing-terminal .panel-resizer {
   outline-offset: 1px;
 }
 
+/* Preview action-icon bar — the copy-source and outline-toggle icon buttons
+   that sit beside the view / layout choosers in the preview header. Standalone
+   icon buttons (no segmented-pill chrome), matching GitHub's document-header
+   action icons. Each button hides itself via the `hidden` attribute when it
+   does not apply to the current view / document. */
+.preview-action-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+/* Collapse the group entirely when both icons are hidden so it leaves no gap
+   in the toolbar (mirrors the .preview-toolbar empty-collapse rule). */
+.preview-action-bar:not(:has(> *:not([hidden]))) {
+  display: none;
+}
+
+.action-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.85rem;
+  height: 1.85rem;
+  padding: 0;
+  border: 1px solid var(--border-soft);
+  background: var(--surface-muted);
+  color: var(--text-subtle);
+  border-radius: 0.4rem;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.action-icon[hidden] {
+  display: none !important;
+}
+
+.action-icon:hover {
+  color: var(--text-strong);
+  background: #ffffff;
+  border-color: var(--border-medium);
+}
+
+.action-icon:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Outline toggle pressed (overlay open) — mirror the active-segment look. */
+.action-icon[aria-pressed="true"] {
+  background: #ffffff;
+  color: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 1px 2px rgba(36, 41, 47, 0.08);
+}
+
+/* Transient feedback for the copy-source action (success / failure flash). */
+.action-icon.is-copied {
+  color: #1a7f37;
+  border-color: #1a7f37;
+}
+
+.action-icon.is-failed {
+  color: #cf222e;
+  border-color: #cf222e;
+}
+
+/* Outline panel — a non-modal, full-height rail docked on the right of the
+   preview area. The document reflows beside it (see the gutter rule below) so
+   it never covers text, and it never traps focus. Closed by default via the
+   `hidden` attribute; the toggle flips it. Position, height and width are set
+   from JS (width persisted in localStorage); the values here are fallbacks. */
+.uatu-outline {
+  position: absolute;
+  top: 4.5rem;
+  right: 1.25rem;
+  z-index: 3;
+  width: 18rem;
+  display: flex;
+  flex-direction: column;
+  background: #ffffff;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.5rem;
+  box-shadow: 0 8px 24px rgba(31, 35, 40, 0.12);
+  overflow: hidden;
+}
+
+.uatu-outline[hidden] {
+  display: none;
+}
+
+/* Left-edge width resizer — mirrors the app's other side-panel resizers
+   (sidebar, right-docked terminal): a thin vertical bar, drag horizontally. */
+.uatu-outline-resizer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: ew-resize;
+  touch-action: none;
+  z-index: 1;
+}
+
+.uatu-outline-resizer:hover,
+.uatu-outline-resizer.is-dragging {
+  background: var(--accent-soft);
+}
+
+.uatu-outline-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.65rem 0.55rem 0.85rem;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.uatu-outline-title {
+  flex: 1 1 auto;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.uatu-outline-head button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-subtle);
+  border-radius: 0.3rem;
+  cursor: pointer;
+  font-size: 0.95rem;
+  line-height: 1;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.uatu-outline-head button:hover {
+  color: var(--text-strong);
+  background: var(--surface-muted);
+}
+
+.uatu-outline-head button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Docked: reserve a right-hand gutter on the document so its content reflows
+   beside the outline instead of being covered. The gutter width is set on
+   `.preview-shell` from JS (`--outline-gutter`, sized to the panel). Applies to
+   the single-layout body and the split panes container alike, since both live
+   inside #preview. */
+.preview-shell.is-outline-docked #preview {
+  padding-right: var(--outline-gutter, 21rem);
+}
+
+.uatu-outline-filter {
+  margin: 0.55rem 0.65rem 0.35rem;
+  padding: 0.35rem 0.55rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 0.35rem;
+  font-size: 0.78rem;
+  font-family: inherit;
+  color: var(--text-strong);
+  background: var(--surface-muted);
+}
+
+.uatu-outline-filter:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 0;
+  background: #ffffff;
+}
+
+.uatu-outline-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.25rem 0.35rem 0.5rem;
+}
+
+.uatu-outline-link {
+  display: block;
+  padding: 0.2rem 0.5rem;
+  border-radius: 0.3rem;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: var(--text-subtle);
+  text-decoration: none;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.uatu-outline-link[hidden] {
+  display: none;
+}
+
+.uatu-outline-link:hover {
+  color: var(--text-strong);
+  background: var(--surface-muted);
+}
+
+.uatu-outline-link.is-active {
+  color: var(--accent);
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+  font-weight: 500;
+}
+
+/* Per-level indentation. Level 1 sits flush; each deeper level steps in. */
+.uatu-outline-link[data-level="2"] { padding-left: 1.1rem; }
+.uatu-outline-link[data-level="3"] { padding-left: 1.7rem; }
+.uatu-outline-link[data-level="4"] { padding-left: 2.3rem; }
+.uatu-outline-link[data-level="5"] { padding-left: 2.9rem; }
+.uatu-outline-link[data-level="6"] { padding-left: 3.5rem; }
+
+.uatu-outline-empty {
+  padding: 0.4rem 0.6rem;
+  font-size: 0.76rem;
+  color: var(--text-subtle);
+}
+
 /* Split layout: when #preview carries .is-split, it switches from a body
    container to a flex container holding two .preview-pane children plus a
    draggable .preview-split-resizer between them. The default orientation
