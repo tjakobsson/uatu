@@ -18,6 +18,7 @@ import {
 } from "./header";
 import { mountLayoutToolbar, syncLayoutChooser } from "./layout";
 import { documentDiffCache, type RenderedDocument } from "./mount";
+import { refreshOutline } from "./outline";
 import { extensionToLanguage, syncViewToggle } from "./view-mode";
 
 const previewElementMaybe = document.querySelector<HTMLElement>("#preview");
@@ -86,6 +87,8 @@ export async function renderDiffIntoPreview(documentId: string, payload: Documen
   // document-diff-view module; the markdown/asciidoc layout toolbar must
   // not bleed across from a previous render of the same document.
   mountLayoutToolbar(false);
+  // The outline + copy-source are Rendered-view affordances; Diff has neither.
+  refreshOutline(null);
 
   const languageHint = doc ? extensionToLanguage(doc.name) : null;
   // Wrap the diff host so styles target `.uatu-diff-host` consistently

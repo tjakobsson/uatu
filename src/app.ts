@@ -5,6 +5,7 @@ import { loadInitialState } from "./shell/boot";
 import { installAnchorHandlers } from "./preview/anchors";
 import { installMermaidTriggerHandler } from "./preview/mermaid";
 import { initViewModeControls } from "./preview/view-mode";
+import { initOutline } from "./preview/outline";
 import { attachAutoStackObserver } from "./preview/layout";
 import { initSidebarCollapse, initSidebarWidth } from "./sidebar/shell";
 import { initSidebarPanes } from "./sidebar/panes";
@@ -110,6 +111,7 @@ initStaleHintActionHandler();
 installAnchorHandlers();
 installMermaidTriggerHandler();
 initViewModeControls();
+initOutline();
 attachAutoStackObserver();
 
 initSelectionInspectorControl(selectionInspector);
