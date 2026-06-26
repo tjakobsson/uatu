@@ -55,16 +55,24 @@ export async function loadInitialState() {
   appState.repositories = payload.repositories ?? [];
   appState.scope = payload.scope;
   // Reconcile the persisted compare-target preference (read into appState at
-  // module load) with the server session, which starts at the default. The
-  // recompute + SSE rebroadcast that follows delivers the matching snapshots.
+  // module load) with the server session, which starts at the default. This is
+  // AWAITED: the initial loadDocument() below may fetch /api/document/diff,
+  // which resolves against the server's current target. If we let the POST run
+  // fire-and-forget, that diff could be fetched against the stale default and
+  // cached — and the later SSE rebroadcast would NOT clear it, because
+  // appState.compareTarget already equals the persisted value (so the reducer
+  // sees no change). Awaiting flips the server target first; the recompute +
+  // SSE rebroadcast then delivers the matching snapshots.
   if (appState.compareTarget !== payload.compareTarget) {
-    void fetch("/api/compare-target", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ target: appState.compareTarget }),
-    }).catch(() => {
+    try {
+      await fetch("/api/compare-target", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ target: appState.compareTarget }),
+      });
+    } catch {
       // Best-effort; the server keeps the default and the toggle still works.
-    });
+    }
   }
   syncStateGeneration(payload.generatedAt);
   renderBuildBadge(payload.build);

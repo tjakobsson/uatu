@@ -80,3 +80,30 @@ test("Diff view follows the compare target coherently with the overview", async 
   await page.locator('#change-overview button[data-compare-target="last-commit"]').click();
   await expect(diffHost).toContainText("No changes against HEAD");
 });
+
+test("reloading with last-commit + Diff view persisted shows the last-commit diff, not base", async ({ page, request }) => {
+  await request.post("/__e2e/reset", { data: { git: true } });
+  await page.goto("/");
+
+  await revealTreeRow(page, "feature.md");
+  await treeRow(page, "feature.md").click();
+  await expect(page.locator("#preview-path")).toHaveText("feature.md");
+  await page.locator("#view-diff").click();
+  await expect(page.locator("#view-diff")).toHaveAttribute("aria-checked", "true");
+
+  // Persist last-commit (and the Diff view) for the reload.
+  await page.locator('#change-overview button[data-compare-target="last-commit"]').click();
+  await expect(page.locator(".uatu-diff-host")).toContainText("No changes against HEAD");
+
+  // Reload: the server session resets to the default `base`, so boot must flip
+  // the target back to last-commit BEFORE fetching the persisted Diff view —
+  // otherwise the base diff is fetched, cached, and never refreshed (the SSE
+  // rebroadcast is a no-op because the client already reads last-commit).
+  await page.reload();
+  await expect(
+    page.locator('#change-overview button[data-compare-target="last-commit"]'),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#preview-path")).toHaveText("feature.md");
+  await expect(page.locator("#view-diff")).toHaveAttribute("aria-checked", "true");
+  await expect(page.locator(".uatu-diff-host")).toContainText("No changes against HEAD");
+});
