@@ -1575,6 +1575,64 @@ body.is-resizing-terminal .panel-resizer {
   outline-offset: 2px;
 }
 
+/* Compare-target toggle — session-global control above the repo sections.
+   Plain-intent labels ("Since base" / "Since last commit"); the precise ref
+   lives in the burden anchor and the base evidence line, not here. */
+.compare-target-control {
+  display: flex;
+  gap: 2px;
+  margin: 0 0 0.5rem;
+  padding: 2px;
+  border: 1px solid var(--border-soft);
+  border-radius: 0.4rem;
+  background: #f6f8fa;
+}
+
+.compare-target-option {
+  flex: 1 1 0;
+  padding: 0.3rem 0.4rem;
+  border: 0;
+  border-radius: 0.3rem;
+  background: transparent;
+  color: var(--text-subtle);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.74rem;
+  white-space: nowrap;
+}
+
+.compare-target-option:hover {
+  color: var(--text-strong);
+}
+
+.compare-target-option.is-active {
+  background: var(--surface, #fff);
+  color: var(--text-strong);
+  box-shadow: 0 1px 2px rgba(36, 41, 47, 0.12);
+}
+
+.compare-target-option:focus-visible {
+  outline: 1px solid var(--border-medium);
+  outline-offset: 1px;
+}
+
+.compare-target-control[data-collapsed="true"] .compare-target-option:not(.is-active) {
+  opacity: 0.55;
+}
+
+.compare-target-note {
+  margin: -0.3rem 0 0.5rem;
+  font-size: 0.7rem;
+  color: var(--text-subtle);
+}
+
+.burden-anchor {
+  font-size: 0.7rem;
+  color: var(--text-subtle);
+  font-family: var(--mono-font-family);
+  white-space: nowrap;
+}
+
 .burden-meter strong {
   font-family: var(--mono-font-family);
   font-size: 0.9rem;

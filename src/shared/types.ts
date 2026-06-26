@@ -76,10 +76,33 @@ export type ReviewBaseMode =
   | "dirty-worktree-only"
   | "unavailable";
 
+// What the review burden / diff is measured against. `base` is the resolved
+// review base (merge-base..worktree — the reviewer's view, the default and the
+// product's hero). `last-commit` is plain git: staged + unstaged changes
+// against HEAD (the author's working view).
+export type ReviewCompareTarget = "base" | "last-commit";
+
+export const DEFAULT_COMPARE_TARGET: ReviewCompareTarget = "base";
+
+export function isReviewCompareTarget(value: unknown): value is ReviewCompareTarget {
+  return value === "base" || value === "last-commit";
+}
+
 export type ReviewBase = {
   mode: ReviewBaseMode;
   ref: string | null;
   mergeBase: string | null;
+  // Which compare target produced this result.
+  compareTarget: ReviewCompareTarget;
+  // Precise, portable ref the score was actually computed against — the
+  // resolved base ref (e.g. `origin/main`, a configured `origin/develop`) for
+  // the `base` target, or `HEAD` for `last-commit` and the dirty-worktree
+  // fallback. This is the *label* shown in the burden anchor, not the literal
+  // git arg (which is the merge-base SHA for `base`).
+  comparedAgainstRef: string;
+  // True when no base ref is resolvable, so `base` and `last-commit` describe
+  // the same diff and the choice is not meaningful.
+  targetsCollapsed: boolean;
 };
 
 export type ChangedFileSummary = {
@@ -159,6 +182,9 @@ export type MonoConfigPayload = {
 export type StatePayload = {
   roots: RootGroup[];
   repositories: RepositoryReviewSnapshot[];
+  // The server-session compare target the snapshots were computed for. The
+  // client reconciles its persisted preference against this on boot.
+  compareTarget: ReviewCompareTarget;
   initialFollow: boolean;
   defaultDocumentId: string | null;
   changedId: string | null;

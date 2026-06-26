@@ -393,6 +393,61 @@ describe("review settings and path matching", () => {
   });
 });
 
+describe("review-load compare target", () => {
+  test("base includes committed-since-base changes; last-commit measures only the worktree", async () => {
+    const repo = await createRepoWithBase();
+    const entries: WatchEntry[] = [{ kind: "dir", absolutePath: repo }];
+    const roots = [{ id: repo, label: "repo", path: repo, docs: [], hiddenCount: 0 }];
+
+    const baseSnap = await collectRepositorySnapshots(entries, roots, "base");
+    const basePaths = baseSnap[0]?.reviewLoad.changedFiles.map(file => file.path).sort();
+    expect(basePaths).toEqual(["README.md", "feature-committed.md"]);
+    expect(baseSnap[0]?.reviewLoad.base.compareTarget).toBe("base");
+    expect(baseSnap[0]?.reviewLoad.base.comparedAgainstRef).toBe("main");
+
+    const lastSnap = await collectRepositorySnapshots(entries, roots, "last-commit");
+    const lastPaths = lastSnap[0]?.reviewLoad.changedFiles.map(file => file.path).sort();
+    expect(lastPaths).toEqual(["README.md"]);
+    expect(lastPaths).not.toContain("feature-committed.md");
+    expect(lastSnap[0]?.reviewLoad.base.compareTarget).toBe("last-commit");
+    expect(lastSnap[0]?.reviewLoad.base.comparedAgainstRef).toBe("HEAD");
+
+    // Fewer files in last-commit means a lower (or equal) burden.
+    expect(baseSnap[0]!.reviewLoad.score).toBeGreaterThan(lastSnap[0]!.reviewLoad.score);
+  });
+
+  test("anchor surfaces a configured review.baseRef", async () => {
+    const repo = await createRepoWithBase();
+    await writeFile(path.join(repo, ".uatu.json"), JSON.stringify({ review: { baseRef: "main" } }));
+
+    const snaps = await collectRepositorySnapshots(
+      [{ kind: "dir", absolutePath: repo }],
+      [{ id: repo, label: "repo", path: repo, docs: [], hiddenCount: 0 }],
+      "base",
+    );
+
+    expect(snaps[0]?.reviewLoad.base.mode).toBe("configured");
+    expect(snaps[0]?.reviewLoad.base.comparedAgainstRef).toBe("main");
+  });
+
+  test("targets collapse to HEAD when no base resolves", async () => {
+    const repo = await createRepo();
+    await writeFile(path.join(repo, "README.md"), "# Changed\n");
+    const entries: WatchEntry[] = [{ kind: "dir", absolutePath: repo }];
+    const roots = [{ id: repo, label: "repo", path: repo, docs: [], hiddenCount: 0 }];
+
+    const baseSnap = await collectRepositorySnapshots(entries, roots, "base");
+    const lastSnap = await collectRepositorySnapshots(entries, roots, "last-commit");
+
+    expect(baseSnap[0]?.reviewLoad.base.targetsCollapsed).toBe(true);
+    expect(baseSnap[0]?.reviewLoad.base.comparedAgainstRef).toBe("HEAD");
+    // Collapsed: both targets describe the same diff.
+    expect(baseSnap[0]?.reviewLoad.changedFiles.map(file => file.path)).toEqual(
+      lastSnap[0]?.reviewLoad.changedFiles.map(file => file.path),
+    );
+  });
+});
+
 async function createRepo(): Promise<string> {
   const repo = await mkdtemp(path.join(os.tmpdir(), "uatu-review-repo-"));
   tempDirectories.push(repo);
@@ -402,5 +457,27 @@ async function createRepo(): Promise<string> {
   await writeFile(path.join(repo, "README.md"), "# Readme\n");
   await safeGit(repo, ["add", "."]);
   await safeGit(repo, ["-c", "commit.gpgsign=false", "commit", "-m", "initial"]);
+  return repo;
+}
+
+// A repo with a resolvable base (`main`), a feature branch carrying one
+// committed-since-base file, plus an uncommitted edit to README in the
+// worktree. Lets compare-target tests distinguish committed-since-base changes
+// (base only) from worktree changes (both targets).
+async function createRepoWithBase(): Promise<string> {
+  const repo = await mkdtemp(path.join(os.tmpdir(), "uatu-review-base-"));
+  tempDirectories.push(repo);
+  await safeGit(repo, ["init", "--initial-branch=main"]);
+  await safeGit(repo, ["config", "user.email", "uatu@example.test"]);
+  await safeGit(repo, ["config", "user.name", "Uatu Test"]);
+  await writeFile(path.join(repo, "README.md"), "# Readme\n");
+  await safeGit(repo, ["add", "."]);
+  await safeGit(repo, ["-c", "commit.gpgsign=false", "commit", "-m", "initial"]);
+  await safeGit(repo, ["checkout", "-b", "feature"]);
+  await writeFile(path.join(repo, "feature-committed.md"), "# Committed on feature\n");
+  await safeGit(repo, ["add", "."]);
+  await safeGit(repo, ["-c", "commit.gpgsign=false", "commit", "-m", "feature work"]);
+  // Uncommitted worktree edit.
+  await writeFile(path.join(repo, "README.md"), "# Readme edited\n");
   return repo;
 }

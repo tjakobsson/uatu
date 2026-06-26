@@ -147,7 +147,50 @@ describe("getDocumentDiff", () => {
 
     await expect(getDocumentDiff(roots, filePath)).rejects.toThrow(/document not found/);
   });
+
+  test("base spans committed-since-base + worktree; last-commit shows only the worktree", async () => {
+    const repo = await createBranchedRepo();
+    const filePath = path.join(repo, "README.md");
+    const roots = rootsFor(repo, "README.md", "markdown");
+
+    const base = await getDocumentDiff(roots, filePath, "base");
+    expect(base.kind).toBe("text");
+    if (base.kind !== "text") return;
+    expect(base.baseRef).toBe("main");
+    // Both edits are additions relative to the merge base.
+    expect(base.patch).toContain("+committed-line");
+    expect(base.patch).toContain("+worktree-line");
+
+    const last = await getDocumentDiff(roots, filePath, "last-commit");
+    expect(last.kind).toBe("text");
+    if (last.kind !== "text") return;
+    expect(last.baseRef).toBe("HEAD");
+    expect(last.patch).toContain("+worktree-line");
+    // The feature-branch commit is already in HEAD, so committed-line is only
+    // unchanged *context* here — never an addition. That is the whole point of
+    // the last-commit target.
+    expect(last.patch).not.toContain("+committed-line");
+  });
 });
+
+async function createBranchedRepo(): Promise<string> {
+  const repo = await mkdtemp(path.join(os.tmpdir(), "uatu-document-diff-branched-"));
+  tempDirectories.push(repo);
+  await safeGit(repo, ["init", "--initial-branch=main"]);
+  await safeGit(repo, ["config", "user.email", "uatu@example.test"]);
+  await safeGit(repo, ["config", "user.name", "Uatu Test"]);
+  await writeFile(path.join(repo, "README.md"), "# Readme\n");
+  await safeGit(repo, ["add", "."]);
+  await safeGit(repo, ["-c", "commit.gpgsign=false", "commit", "-m", "initial"]);
+  await safeGit(repo, ["checkout", "-b", "feature"]);
+  // Committed-since-base edit (visible to `base`, not to `last-commit`).
+  await writeFile(path.join(repo, "README.md"), "# Readme\n\ncommitted-line\n");
+  await safeGit(repo, ["add", "."]);
+  await safeGit(repo, ["-c", "commit.gpgsign=false", "commit", "-m", "feature work"]);
+  // Uncommitted worktree edit (visible to both targets).
+  await writeFile(path.join(repo, "README.md"), "# Readme\n\ncommitted-line\n\nworktree-line\n");
+  return repo;
+}
 
 async function createSeededRepo(): Promise<string> {
   const repo = await mkdtemp(path.join(os.tmpdir(), "uatu-document-diff-"));

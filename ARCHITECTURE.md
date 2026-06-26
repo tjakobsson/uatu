@@ -32,7 +32,8 @@ flowchart LR
 
 Four boundaries to keep in mind:
 
-- **HTTP/SSE between server and SPA.** `/api/state` (initial snapshot), `/api/document` (rendered HTML for a path), `/api/document/diff` (git diff), `/api/events` (SSE feed of state updates), `/api/scope` (POST to pin to a single file).
+- **HTTP/SSE between server and SPA.** `/api/state` (initial snapshot), `/api/document` (rendered HTML for a path), `/api/document/diff` (git diff), `/api/events` (SSE feed of state updates), `/api/scope` (POST to pin to a single file), `/api/compare-target` (POST to switch the review-burden lens between `base` and `last-commit`).
+- **Compare target.** The Change Overview measures review burden against the resolved review base by default (`base` — committed + worktree changes vs the merge base, the reviewer's view) but can switch to `last-commit` (staged + unstaged vs `HEAD`, plain-git's working view). Like `scope`, it is server-session state held in `session.ts` and shared across clients: a `POST /api/compare-target` recomputes `repositories` and rebroadcasts over SSE, and `/api/document/diff` resolves against the session's current target so per-file diffs stay coherent with the meter. `document/git-base-ref.ts` owns the single `applyCompareTarget` / `compareRefForTarget` mapping that both the meter and the diff consume; the burden readout is anchored with the precise resolved ref (`vs origin/main`, `vs HEAD`).
 - **Chokidar between server and the filesystem.** The `WatchSession` debounces, applies the ignore policy, rebuilds the document index, and emits SSE events.
 - **WebSocket between SPA and terminal subsystem.** Authenticated by a cookie set on `POST /api/auth`; multiplexed across multiple PTY panes by `terminal/server.ts`.
 - **A single Bun binary.** No node, no separate frontend bundler — `Bun.serve` serves both the SPA and the API.

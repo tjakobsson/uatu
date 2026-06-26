@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import type { ReviewBase } from "../shared/types";
+import type { ReviewBase, ReviewCompareTarget } from "../shared/types";
 
 const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT_MS = 2500;
@@ -67,7 +67,12 @@ export async function resolveReviewBase(
     }
   }
 
-  return { mode: "dirty-worktree-only", ref: "HEAD", mergeBase: null };
+  // No resolvable base: both compare targets describe the same diff (staged +
+  // unstaged vs HEAD), so the choice is collapsed.
+  return applyCompareTarget(
+    { mode: "dirty-worktree-only", ref: "HEAD", mergeBase: null, compareTarget: "base", comparedAgainstRef: "HEAD", targetsCollapsed: true },
+    "base",
+  );
 }
 
 export async function refExists(repoRoot: string, ref: string): Promise<boolean> {
@@ -81,9 +86,34 @@ async function mergeBase(
   mode: ReviewBase["mode"],
 ): Promise<ReviewBase> {
   const result = await safeGit(repoRoot, ["merge-base", "--", ref, "HEAD"]);
-  return {
-    mode,
-    ref,
-    mergeBase: result.ok ? result.stdout.trim() || null : null,
-  };
+  const mergeBaseSha = result.ok ? result.stdout.trim() || null : null;
+  return applyCompareTarget(
+    { mode, ref, mergeBase: mergeBaseSha, compareTarget: "base", comparedAgainstRef: ref, targetsCollapsed: mergeBaseSha === null },
+    "base",
+  );
+}
+
+// Single source of truth mapping a resolved base + a compare target onto the
+// fields the meter and the diff both consume. `last-commit` always measures
+// staged + unstaged changes against HEAD; `base` keeps the resolved-base
+// behavior (falling back to HEAD when no base merge-base exists). Returns a
+// fresh ReviewBase with `compareTarget` / `comparedAgainstRef` /
+// `targetsCollapsed` set for the requested target.
+export function applyCompareTarget(base: ReviewBase, target: ReviewCompareTarget): ReviewBase {
+  const targetsCollapsed = base.mergeBase === null;
+  // When collapsed, both targets are really "vs HEAD" regardless of request.
+  const effectiveTarget: ReviewCompareTarget = targetsCollapsed ? "last-commit" : target;
+  const comparedAgainstRef =
+    effectiveTarget === "last-commit" ? "HEAD" : base.ref ?? "HEAD";
+  return { ...base, compareTarget: target, comparedAgainstRef, targetsCollapsed };
+}
+
+// The literal git ref to diff a single file against for this target.
+// `base` uses the merge-base SHA (so the diff spans committed + worktree
+// changes); `last-commit` and the no-base fallback use HEAD.
+export function compareRefForTarget(base: ReviewBase, target: ReviewCompareTarget): string {
+  if (target === "last-commit") {
+    return "HEAD";
+  }
+  return base.mergeBase ?? "HEAD";
 }

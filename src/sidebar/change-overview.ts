@@ -4,16 +4,22 @@
 // folder owns the change-overview presentation in one place.
 
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
-import type { RepositoryReviewSnapshot } from "../shared/types";
+import type { RepositoryReviewSnapshot, ReviewCompareTarget } from "../shared/types";
 import { applyStaleHint } from "../shell/stale-hint-mount";
 import { renderSidebar } from "./shell";
 import { syncFollowToggle } from "../shell/follow";
 import { pushReviewScore } from "../shell/history";
 import { nextStaleHint } from "../shell/stale-hint";
-import { appState } from "../shell/state";
+import { appState, writeCompareTargetPreference } from "../shell/state";
+import { documentDiffCache, loadDocument } from "../preview/mount";
 import type { FilesPaneFilterMembership, GitStatusForView } from "./tree-view";
 import { baseModeLabel, capitalize } from "./git-log";
 import { renderReviewScoreDetails } from "./review-score-mount";
+
+const COMPARE_TARGET_OPTIONS: { target: ReviewCompareTarget; label: string }[] = [
+  { target: "base", label: "Since base" },
+  { target: "last-commit", label: "Since last commit" },
+];
 
 const changeOverviewElementMaybe = document.querySelector<HTMLDivElement>("#change-overview");
 
@@ -23,13 +29,48 @@ if (!changeOverviewElementMaybe) {
 
 const changeOverviewElement: HTMLDivElement = changeOverviewElementMaybe;
 
+// The compare-target toggle is session-global, so it renders once above the
+// per-repository sections. Returns "" when no repository can be compared
+// (non-git session) — there is nothing to switch between.
+function renderCompareTargetControl(): string {
+  const available = appState.repositories.filter(
+    repository => repository.reviewLoad.status === "available",
+  );
+  if (available.length === 0) {
+    return "";
+  }
+  // When no base is resolvable the two targets describe the same diff; surface
+  // that rather than implying a meaningful choice (collapsed state).
+  const collapsed = available.every(repository => repository.reviewLoad.base.targetsCollapsed);
+  const options = COMPARE_TARGET_OPTIONS.map(option => {
+    const active = appState.compareTarget === option.target;
+    return `
+      <button
+        type="button"
+        class="compare-target-option${active ? " is-active" : ""}"
+        data-compare-target="${escapeHtmlAttribute(option.target)}"
+        aria-pressed="${active ? "true" : "false"}"
+      >${escapeHtml(option.label)}</button>
+    `;
+  }).join("");
+  const note = collapsed
+    ? `<p class="compare-target-note">No base branch resolved — both show changes vs HEAD.</p>`
+    : "";
+  return `
+    <div class="compare-target-control" role="group" aria-label="Compare review burden against"${collapsed ? " data-collapsed=\"true\"" : ""}>
+      ${options}
+    </div>
+    ${note}
+  `;
+}
+
 export function renderChangeOverview() {
   if (appState.repositories.length === 0) {
     changeOverviewElement.innerHTML = `<div class="pane-empty">Repository data is unavailable.</div>`;
     return;
   }
 
-  changeOverviewElement.innerHTML = appState.repositories
+  const sections = appState.repositories
     .map(repository => {
       const meta = repository.metadata;
       if (meta.status !== "git" || repository.reviewLoad.status !== "available") {
@@ -42,10 +83,17 @@ export function renderChangeOverview() {
       }
 
       const load = repository.reviewLoad;
+      // Evidence layer: the resolved base ref + mode, plus the merge-base short
+      // SHA when present. `merge-base` is shown ONLY here, never on the toggle
+      // or the burden anchor.
       const baseLabel =
         load.base.ref && load.base.mode !== "dirty-worktree-only"
-          ? `${load.base.ref} (${baseModeLabel(load.base.mode)})`
+          ? `${load.base.ref} (${baseModeLabel(load.base.mode)})${load.base.mergeBase ? ` · ${load.base.mergeBase.slice(0, 7)}` : ""}`
           : baseModeLabel(load.base.mode);
+      // Readout anchor: the precise, portable ref the score was computed
+      // against (e.g. `vs origin/main`, `vs HEAD`) so the number carries its
+      // meaning when read away from the toggle.
+      const burdenAnchor = `vs ${load.base.comparedAgainstRef}`;
       const drivers = load.drivers.length > 0
         ? load.drivers.filter(driver => driver.kind !== "mechanical")
         : [];
@@ -86,6 +134,7 @@ export function renderChangeOverview() {
             <span class="burden-summary">
               <span class="burden-headline">Review burden</span>
               <span class="burden-level">${escapeHtml(capitalize(load.level))}</span>
+              <span class="burden-anchor">· ${escapeHtml(burdenAnchor)}</span>
             </span>
             <strong>${load.score}</strong>
           </button>
@@ -97,6 +146,8 @@ export function renderChangeOverview() {
       `;
     })
     .join("");
+
+  changeOverviewElement.innerHTML = renderCompareTargetControl() + sections;
 }
 
 export function renderDriver(driver: RepositoryReviewSnapshot["reviewLoad"]["drivers"][number]): string {
@@ -227,10 +278,55 @@ export function mapChangedFileStatus(raw: string): GitStatusForView["status"] | 
   }
 }
 
+// Apply a compare-target switch: persist it, drop now-stale cached diffs,
+// optimistically re-render the control, push the choice to the server (which
+// recomputes + rebroadcasts the burden over SSE), and refresh the active Diff
+// view against the new target. Mirrors the server-session model of `setScope`.
+export async function applyCompareTargetChange(target: ReviewCompareTarget): Promise<void> {
+  if (appState.compareTarget === target) {
+    return;
+  }
+  appState.compareTarget = target;
+  writeCompareTargetPreference(target);
+  // Cached diffs were computed against the previous target.
+  documentDiffCache.clear();
+  // Optimistic re-render so the toggle reflects the choice immediately; the
+  // burden numbers + anchor refresh when the server rebroadcasts snapshots.
+  renderSidebar();
+  try {
+    await fetch("/api/compare-target", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ target }),
+    });
+  } catch {
+    // Best-effort; the SSE broadcast or the next reload reconciles state.
+  }
+  // The server sets its target synchronously before responding, so by now the
+  // diff endpoint will resolve against the new target. Re-fetch the active
+  // document if it is currently in Diff view.
+  if (
+    appState.previewMode.kind === "document" &&
+    appState.selectedId &&
+    appState.viewMode === "diff"
+  ) {
+    await loadDocument(appState.selectedId);
+  }
+}
+
 export function initChangeOverviewClickHandler(): void {
   changeOverviewElement.addEventListener("click", event => {
     const target = event.target;
     if (!(target instanceof HTMLElement)) {
+      return;
+    }
+
+    const compareButton = target.closest<HTMLButtonElement>("button[data-compare-target]");
+    if (compareButton) {
+      const next = compareButton.dataset.compareTarget;
+      if (next === "base" || next === "last-commit") {
+        void applyCompareTargetChange(next);
+      }
       return;
     }
 

@@ -1,10 +1,10 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import { resolveReviewBase, safeGit } from "./git-base-ref";
+import { applyCompareTarget, compareRefForTarget, resolveReviewBase, safeGit } from "./git-base-ref";
 import { loadReviewSettings } from "../review/load";
-import { findDocument } from "../shared/types";
-import type { RootGroup } from "../shared/types";
+import { DEFAULT_COMPARE_TARGET, findDocument } from "../shared/types";
+import type { ReviewCompareTarget, RootGroup } from "../shared/types";
 
 const MAX_DIFF_BUFFER = 4 * 1024 * 1024;
 
@@ -39,6 +39,7 @@ export type DocumentDiffResponse =
 export async function getDocumentDiff(
   roots: RootGroup[],
   documentId: string,
+  compareTarget: ReviewCompareTarget = DEFAULT_COMPARE_TARGET,
 ): Promise<DocumentDiffResponse> {
   const document = findDocument(roots, documentId);
   if (!document) {
@@ -60,12 +61,13 @@ export async function getDocumentDiff(
   const relativePath = path.relative(repoRoot, realDocPath);
 
   const { settings } = await loadReviewSettings(repoRoot);
-  const base = await resolveReviewBase(repoRoot, settings.baseRef);
+  const base = applyCompareTarget(await resolveReviewBase(repoRoot, settings.baseRef), compareTarget);
 
-  // For a resolved base we compare against the merge-base tree so the diff
+  // For the `base` target we compare against the merge-base tree so the diff
   // includes everything between the base and the current worktree (committed
-  // + staged + unstaged). For dirty-worktree-only we compare against HEAD.
-  const compareRef = base.mergeBase ?? "HEAD";
+  // + staged + unstaged). For `last-commit` (and the dirty-worktree fallback)
+  // we compare against HEAD — staged + unstaged only.
+  const compareRef = compareRefForTarget(base, compareTarget);
 
   // `-M` can only detect a rename when the diff sees both old and new
   // paths. Filtering by `-- <newPath>` strips the old path, so we look up
@@ -85,7 +87,9 @@ export async function getDocumentDiff(
     return { kind: "unsupported-no-git" };
   }
 
-  const baseRef = base.ref ?? "HEAD";
+  // Report the precise, portable anchor (resolved base ref for `base`, `HEAD`
+  // for `last-commit`) so the Diff view labels what it compared against.
+  const baseRef = base.comparedAgainstRef;
   let patch = result.stdout;
 
   // `git diff <ref>` ignores untracked files. When the patch is empty but

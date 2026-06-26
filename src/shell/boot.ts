@@ -54,6 +54,18 @@ export async function loadInitialState() {
   appState.roots = payload.roots;
   appState.repositories = payload.repositories ?? [];
   appState.scope = payload.scope;
+  // Reconcile the persisted compare-target preference (read into appState at
+  // module load) with the server session, which starts at the default. The
+  // recompute + SSE rebroadcast that follows delivers the matching snapshots.
+  if (appState.compareTarget !== payload.compareTarget) {
+    void fetch("/api/compare-target", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ target: appState.compareTarget }),
+    }).catch(() => {
+      // Best-effort; the server keeps the default and the toggle still works.
+    });
+  }
   syncStateGeneration(payload.generatedAt);
   renderBuildBadge(payload.build);
   applyMonoConfig(payload.monoConfig);

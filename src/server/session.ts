@@ -13,6 +13,7 @@ import { warnAboutRetiredUatuignore } from "../ignore/warning";
 import { decodeHtmlEntities, renderCodeAsHtml, renderMarkdownToHtml } from "../render/markdown";
 import { collectRepositorySnapshots, safeGit } from "../review/load";
 import {
+  DEFAULT_COMPARE_TARGET,
   defaultDocumentId,
   findDocument,
   hasDocument,
@@ -20,6 +21,7 @@ import {
   type DocumentMeta,
   type MonoConfigPayload,
   type RepositoryReviewSnapshot,
+  type ReviewCompareTarget,
   type RootGroup,
   type Scope,
   type StatePayload,
@@ -894,10 +896,12 @@ export function createStatePayload(
   terminalEnabled?: boolean,
   terminalConfig?: TerminalConfigPayload,
   monoConfig?: MonoConfigPayload,
+  compareTarget: ReviewCompareTarget = DEFAULT_COMPARE_TARGET,
 ): StatePayload {
   return {
     roots,
     repositories,
+    compareTarget,
     initialFollow,
     defaultDocumentId: defaultDocumentId(roots),
     changedId: changedId && hasDocument(roots, changedId) ? changedId : null,
@@ -1036,6 +1040,9 @@ export function createWatchSession(
   let unscopedRoots: RootGroup[] = [];
   let stateFingerprint = "";
   let scope: Scope = { kind: "folder" };
+  // Server-session compare target shared across all connected clients, exactly
+  // like `scope`. Defaults to the reviewer's view; changed via setCompareTarget.
+  let compareTarget: ReviewCompareTarget = DEFAULT_COMPARE_TARGET;
   let reconcileTimer: ReturnType<typeof setInterval> | null = null;
   let refreshTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingChangedId: string | null = null;
@@ -1077,7 +1084,7 @@ export function createWatchSession(
     const startedAt = Date.now();
     try {
       const nextRoots = await scanRoots(entries, { respectGitignore, matcherCache });
-      const nextRepositories = await collectRepositorySnapshots(entries, nextRoots).catch(error => {
+      const nextRepositories = await collectRepositorySnapshots(entries, nextRoots, compareTarget).catch(error => {
         console.error(`uatu: failed to refresh git review data: ${error instanceof Error ? error.message : String(error)}`);
         return repositories;
       });
@@ -1087,7 +1094,7 @@ export function createWatchSession(
       }
 
       const visibleRoots = applyScope(nextRoots);
-      const nextFingerprint = createStateFingerprint(visibleRoots, nextRepositories);
+      const nextFingerprint = createStateFingerprint(visibleRoots, nextRepositories, compareTarget);
       const changedDoc = changedId ? findDocument(visibleRoots, changedId) : undefined;
       const changedDocumentId =
         changedDoc && changedDoc.kind !== "binary" ? changedId : null;
@@ -1099,7 +1106,7 @@ export function createWatchSession(
       stateFingerprint = nextFingerprint;
 
       if (shouldBroadcast) {
-        broadcast(createStatePayload(roots, initialFollow, changedDocumentId, scope, repositories, terminalEnabled, terminalConfig, monoConfig));
+        broadcast(createStatePayload(roots, initialFollow, changedDocumentId, scope, repositories, terminalEnabled, terminalConfig, monoConfig, compareTarget));
       }
       metrics?.inc("refresh.completed_total");
       metrics?.set("refresh.last_success_at", Date.now());
@@ -1180,6 +1187,19 @@ export function createWatchSession(
     return scope;
   };
 
+  // Mirrors setScope: server-session view state shared across clients. A change
+  // triggers a recompute + SSE rebroadcast (the compare target is folded into
+  // the state fingerprint, so the broadcast fires even when the two targets
+  // happen to produce identical scores).
+  const setCompareTarget = (next: ReviewCompareTarget): ReviewCompareTarget => {
+    if (compareTarget === next) {
+      return compareTarget;
+    }
+    compareTarget = next;
+    scheduleRefresh(null);
+    return compareTarget;
+  };
+
   return {
     async start() {
       // One-shot retirement notice for any .uatuignore files still on disk.
@@ -1219,13 +1239,13 @@ export function createWatchSession(
 
       await watcherReady;
       const scanned = await scanRoots(entries, { respectGitignore, matcherCache });
-      repositories = await collectRepositorySnapshots(entries, scanned).catch(error => {
+      repositories = await collectRepositorySnapshots(entries, scanned, compareTarget).catch(error => {
         console.error(`uatu: failed to initialize git review data: ${error instanceof Error ? error.message : String(error)}`);
         return [];
       });
       unscopedRoots = scanned;
       roots = applyScope(scanned);
-      stateFingerprint = createStateFingerprint(roots, repositories);
+      stateFingerprint = createStateFingerprint(roots, repositories, compareTarget);
       reconcileTimer = setInterval(() => {
         metrics?.inc("reconcile.ticks_total");
         void refresh(null).catch(error => {
@@ -1262,6 +1282,10 @@ export function createWatchSession(
     getScope() {
       return scope;
     },
+    getCompareTarget() {
+      return compareTarget;
+    },
+    setCompareTarget,
     getRepositories() {
       return repositories;
     },
@@ -1282,7 +1306,7 @@ export function createWatchSession(
     },
     setScope,
     getStatePayload(changedId: string | null = null) {
-      return createStatePayload(roots, initialFollow, changedId, scope, repositories, terminalEnabled, terminalConfig, monoConfig);
+      return createStatePayload(roots, initialFollow, changedId, scope, repositories, terminalEnabled, terminalConfig, monoConfig, compareTarget);
     },
     eventsResponse() {
       let currentSubscriber: EventController | null = null;
@@ -1291,7 +1315,7 @@ export function createWatchSession(
         start(controller) {
           currentSubscriber = controller;
           subscribers.add(controller);
-          controller.enqueue(encoder.encode(`event: state\ndata: ${JSON.stringify(createStatePayload(roots, initialFollow, null, scope, repositories, terminalEnabled, terminalConfig, monoConfig))}\n\n`));
+          controller.enqueue(encoder.encode(`event: state\ndata: ${JSON.stringify(createStatePayload(roots, initialFollow, null, scope, repositories, terminalEnabled, terminalConfig, monoConfig, compareTarget))}\n\n`));
         },
         cancel() {
           if (currentSubscriber) {
@@ -1450,8 +1474,12 @@ function fingerprintRoots(roots: RootGroup[]): string {
   );
 }
 
-function createStateFingerprint(roots: RootGroup[], repositories: RepositoryReviewSnapshot[]): string {
-  return `${fingerprintRoots(roots)}\n${fingerprintRepositories(repositories)}`;
+function createStateFingerprint(
+  roots: RootGroup[],
+  repositories: RepositoryReviewSnapshot[],
+  compareTarget: ReviewCompareTarget,
+): string {
+  return `${compareTarget}\n${fingerprintRoots(roots)}\n${fingerprintRepositories(repositories)}`;
 }
 
 function fingerprintRepositories(repositories: RepositoryReviewSnapshot[]): string {
