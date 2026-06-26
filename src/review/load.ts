@@ -208,15 +208,21 @@ async function collectMetadata(group: RepositoryGroup): Promise<RepositoryMetada
 
 async function collectChangedFiles(repoRoot: string, base: ReviewBase): Promise<ChangedFileSummary[]> {
   const specs: string[][] = [];
-  // The committed range belongs only to the `base` target (the reviewer's
-  // full view). For `last-commit` we measure just the worktree (staged +
-  // unstaged) against HEAD, so the committed merge-base..HEAD range is
-  // deliberately excluded.
-  if (base.mergeBase && base.compareTarget === "base") {
+  // When the effective comparison is "vs HEAD" — the `last-commit` target, or
+  // any target with no resolvable base (collapsed) — use a single `git diff
+  // HEAD` pass. This is exactly what `getDocumentDiff` runs, so the overview
+  // and the Diff view always agree: a `--cached` + unstaged union would double
+  // a path whose staged and unstaged edits cancel, reporting burden for a file
+  // the Diff view shows as unchanged.
+  if (base.compareTarget === "last-commit" || base.mergeBase === null) {
+    specs.push(["HEAD"]);
+  } else {
+    // `base` target with a resolved base: committed range + staged + unstaged,
+    // spanning merge-base..worktree (the reviewer's full view).
     specs.push([`${base.mergeBase}..HEAD`]);
+    specs.push(["--cached"]);
+    specs.push([]);
   }
-  specs.push(["--cached"]);
-  specs.push([]);
 
   const combined = new Map<string, ChangedFileSummary>();
   for (const spec of specs) {

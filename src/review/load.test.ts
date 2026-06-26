@@ -430,6 +430,28 @@ describe("review-load compare target", () => {
     expect(snaps[0]?.reviewLoad.base.comparedAgainstRef).toBe("main");
   });
 
+  test("last-commit matches `git diff HEAD` when staged and unstaged edits cancel", async () => {
+    // Stage an edit, then revert it in the worktree: net change vs HEAD is
+    // zero. A `--cached` + unstaged union would still report the file; a single
+    // `git diff HEAD` (what the Diff view uses) does not. The overview must
+    // agree with the Diff view.
+    const repo = await createRepoWithBase();
+    await writeFile(path.join(repo, "cancel.md"), "v1\n");
+    await safeGit(repo, ["add", "cancel.md"]);
+    await safeGit(repo, ["-c", "commit.gpgsign=false", "commit", "-m", "add cancel.md"]);
+    await writeFile(path.join(repo, "cancel.md"), "v2\n");
+    await safeGit(repo, ["add", "cancel.md"]); // staged: v1 -> v2
+    await writeFile(path.join(repo, "cancel.md"), "v1\n"); // unstaged: v2 -> v1 (cancels)
+
+    const lastSnap = await collectRepositorySnapshots(
+      [{ kind: "dir", absolutePath: repo }],
+      [{ id: repo, label: "repo", path: repo, docs: [], hiddenCount: 0 }],
+      "last-commit",
+    );
+
+    expect(lastSnap[0]?.reviewLoad.changedFiles.map(file => file.path)).not.toContain("cancel.md");
+  });
+
   test("targets collapse to HEAD when no base resolves", async () => {
     const repo = await createRepo();
     await writeFile(path.join(repo, "README.md"), "# Changed\n");

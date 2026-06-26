@@ -173,18 +173,16 @@ export function filterMembershipHasAnyPath(filter: FilesPaneFilterMembership): b
 // First repository with an available review-load wins; the chip is global
 // across multi-root sessions, so a single base label is sufficient (and
 // degrading to a generic label is fine when bases differ or aren't available).
+// Uses `comparedAgainstRef` (the ref the active compare target actually
+// measured against), not `base.ref` — otherwise the "No changes vs <X>" empty
+// state would say `origin/main` even in last-commit mode, where the file list
+// is measured against `HEAD`.
 export function primaryReviewBaseLabel(): string | null {
   for (const repo of appState.repositories) {
     if (repo.reviewLoad.status !== "available") {
       continue;
     }
-    const base = repo.reviewLoad.base;
-    if (base.ref) {
-      return base.ref;
-    }
-    if (base.mode === "dirty-worktree-only") {
-      return "dirty worktree";
-    }
+    return repo.reviewLoad.base.comparedAgainstRef;
   }
   return null;
 }
