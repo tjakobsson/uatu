@@ -6,7 +6,7 @@
 import { chooseSelectionForFileEvent } from "./follow";
 import { findDocumentById, syncStateGeneration } from "./storage";
 import { applyMonoConfig } from "../mono/apply";
-import { forgetDocumentCache, loadDocument } from "../preview/mount";
+import { documentDiffCache, forgetDocumentCache, loadDocument } from "../preview/mount";
 import { renderEmptyPreview } from "../preview/empty";
 import { renderReviewScoreDetails } from "../sidebar/review-score-mount";
 import { renderSidebar } from "../sidebar/shell";
@@ -17,7 +17,7 @@ import {
 } from "../shared/types";
 import { setConnectionState } from "./connection";
 import { replaceSelection } from "./history";
-import { appState } from "./state";
+import { appState, writeCompareTargetPreference } from "./state";
 import { renderCommitPreview } from "./url";
 
 export function connectEvents() {
@@ -39,6 +39,19 @@ export function connectEvents() {
     appState.roots = payload.roots;
     appState.repositories = payload.repositories ?? [];
     appState.scope = payload.scope;
+    // The compare target is server-session state shared across clients. If
+    // another tab switched it, adopt the broadcast value so this tab's toggle,
+    // persisted preference, and cached diffs all reflect the shared session —
+    // otherwise we'd show repositories computed for the new target under the
+    // old toggle, with a stale cached diff. (A switch initiated by this tab is
+    // already applied optimistically, so this is a no-op in that case.)
+    const compareTargetChanged =
+      typeof payload.compareTarget === "string" && payload.compareTarget !== appState.compareTarget;
+    if (compareTargetChanged) {
+      appState.compareTarget = payload.compareTarget;
+      writeCompareTargetPreference(payload.compareTarget);
+      documentDiffCache.clear();
+    }
     applyMonoConfig(payload.monoConfig);
     syncStateGeneration(payload.generatedAt);
 
@@ -83,7 +96,13 @@ export function connectEvents() {
 
     renderSidebar();
 
-    if (appState.selectedId && (shouldReload || appState.selectedId !== previousSelectedId)) {
+    // An externally-driven compare-target switch must refresh an open Diff
+    // view against the new target (its cached payload was cleared above).
+    const needsDiffReload = compareTargetChanged && appState.viewMode === "diff";
+    if (
+      appState.selectedId &&
+      (shouldReload || appState.selectedId !== previousSelectedId || needsDiffReload)
+    ) {
       if (shouldReload) {
         // The file changed on disk — any cached payload is now stale.
         forgetDocumentCache(appState.selectedId);

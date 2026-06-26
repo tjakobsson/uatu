@@ -10,7 +10,7 @@
 // in a route table.
 
 import { getDocumentDiff } from "../document/diff";
-import { isViewMode } from "../shared/types";
+import { isReviewCompareTarget, isViewMode } from "../shared/types";
 import {
   canSetFileScope,
   renderDocument,
@@ -183,7 +183,11 @@ export function buildRoutes(deps: BuildRoutesDeps) {
         }
 
         try {
-          const payload = await getDocumentDiff(getSession().getRoots(), documentId);
+          const payload = await getDocumentDiff(
+            getSession().getRoots(),
+            documentId,
+            getSession().getCompareTarget(),
+          );
           return Response.json(payload);
         } catch (error) {
           const message = error instanceof Error ? error.message : "";
@@ -196,6 +200,26 @@ export function buildRoutes(deps: BuildRoutesDeps) {
     },
     "/api/events": {
       GET: () => getSession().eventsResponse(),
+    },
+    "/api/compare-target": {
+      // Server-session view state shared across clients (mirrors /api/scope).
+      // Setting it recomputes review snapshots and rebroadcasts over SSE; the
+      // client receives the updated burden + anchor through the event stream.
+      POST: async (request: Request) => {
+        let body: unknown;
+        try {
+          body = await request.json();
+        } catch {
+          return Response.json({ error: "invalid JSON body" }, { status: 400 });
+        }
+
+        const target = (body as { target?: unknown } | null)?.target;
+        if (!isReviewCompareTarget(target)) {
+          return Response.json({ error: "invalid compare target" }, { status: 400 });
+        }
+
+        return Response.json({ compareTarget: getSession().setCompareTarget(target) });
+      },
     },
     "/api/scope": {
       POST: async (request: Request) => {

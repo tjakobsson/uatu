@@ -9,14 +9,16 @@ import type {
   ReviewAreaConfig,
   ReviewBase,
   ReviewConfiguredArea,
+  ReviewCompareTarget,
   ReviewLoadResult,
   ReviewScoreDriver,
   ReviewSettings,
   ReviewThresholds,
   RootGroup,
 } from "../shared/types";
+import { DEFAULT_COMPARE_TARGET } from "../shared/types";
 import type { WatchEntry } from "../server/session";
-import { resolveReviewBase, safeGit, setGitMetricsSink } from "../document/git-base-ref";
+import { applyCompareTarget, resolveReviewBase, safeGit, setGitMetricsSink } from "../document/git-base-ref";
 
 export { safeGit, setGitMetricsSink } from "../document/git-base-ref";
 
@@ -36,6 +38,7 @@ type RepositoryGroup = {
 export async function collectRepositorySnapshots(
   entries: WatchEntry[],
   roots: RootGroup[],
+  compareTarget: ReviewCompareTarget = DEFAULT_COMPARE_TARGET,
 ): Promise<RepositoryReviewSnapshot[]> {
   const groups = await detectRepositoryGroups(entries, roots);
   const rootsById = new Map(roots.map(root => [root.id, root]));
@@ -44,7 +47,7 @@ export async function collectRepositorySnapshots(
       const groupRoots = group.watchedRootIds
         .map(id => rootsById.get(id))
         .filter((root): root is RootGroup => Boolean(root));
-      return snapshotGroup(group, groupRoots);
+      return snapshotGroup(group, groupRoots, compareTarget);
     }),
   );
   return snapshots.sort((left, right) => left.rootPath.localeCompare(right.rootPath));
@@ -102,6 +105,7 @@ async function detectRepositoryGroups(
 async function snapshotGroup(
   group: RepositoryGroup,
   roots: readonly RootGroup[],
+  compareTarget: ReviewCompareTarget,
 ): Promise<RepositoryReviewSnapshot> {
   if (group.status !== "git") {
     const metadata = unavailableMetadata(group, "non-git", group.message);
@@ -130,7 +134,11 @@ async function snapshotGroup(
     };
   }
 
-  const base = await resolveReviewBase(group.rootPath, settingsResult.settings.baseRef);
+  const resolvedBase = await resolveReviewBase(group.rootPath, settingsResult.settings.baseRef);
+  // Augment the resolved base with the requested compare target so the result
+  // carries the precise anchor and so collectChangedFiles knows whether to
+  // include the committed merge-base..HEAD range.
+  const base = applyCompareTarget(resolvedBase, compareTarget);
   const knownTreePaths = await collectKnownTreePaths(group.rootPath, roots);
   const [changedFiles, commitLog, gitIgnoredFiles] = await Promise.all([
     collectChangedFiles(group.rootPath, base),
@@ -200,11 +208,21 @@ async function collectMetadata(group: RepositoryGroup): Promise<RepositoryMetada
 
 async function collectChangedFiles(repoRoot: string, base: ReviewBase): Promise<ChangedFileSummary[]> {
   const specs: string[][] = [];
-  if (base.mergeBase) {
+  // When the effective comparison is "vs HEAD" — the `last-commit` target, or
+  // any target with no resolvable base (collapsed) — use a single `git diff
+  // HEAD` pass. This is exactly what `getDocumentDiff` runs, so the overview
+  // and the Diff view always agree: a `--cached` + unstaged union would double
+  // a path whose staged and unstaged edits cancel, reporting burden for a file
+  // the Diff view shows as unchanged.
+  if (base.compareTarget === "last-commit" || base.mergeBase === null) {
+    specs.push(["HEAD"]);
+  } else {
+    // `base` target with a resolved base: committed range + staged + unstaged,
+    // spanning merge-base..worktree (the reviewer's full view).
     specs.push([`${base.mergeBase}..HEAD`]);
+    specs.push(["--cached"]);
+    specs.push([]);
   }
-  specs.push(["--cached"]);
-  specs.push([]);
 
   const combined = new Map<string, ChangedFileSummary>();
   for (const spec of specs) {
@@ -788,7 +806,14 @@ function unavailableReviewLoad(
     score: 0,
     level: "low",
     thresholds: DEFAULT_THRESHOLDS,
-    base: { mode: status === "non-git" ? "unavailable" : "dirty-worktree-only", ref: null, mergeBase: null },
+    base: {
+      mode: status === "non-git" ? "unavailable" : "dirty-worktree-only",
+      ref: null,
+      mergeBase: null,
+      compareTarget: DEFAULT_COMPARE_TARGET,
+      comparedAgainstRef: "HEAD",
+      targetsCollapsed: true,
+    },
     changedFiles: [],
     ignoredFiles: [],
     gitIgnoredFiles: [],

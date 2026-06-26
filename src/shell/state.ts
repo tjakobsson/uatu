@@ -9,6 +9,8 @@
 // larger change and explicitly out of scope here.
 
 import {
+  DEFAULT_COMPARE_TARGET,
+  isReviewCompareTarget,
   readDiffStylePreference,
   readPreviewWrapPreference,
   readSplitRatioPreference,
@@ -16,6 +18,7 @@ import {
   readViewModePreference,
   type DiffStyle,
   type RepositoryReviewSnapshot,
+  type ReviewCompareTarget,
   type RootGroup,
   type Scope,
   type SplitRatio,
@@ -42,6 +45,7 @@ export function safeLocalStorage(): Storage | null {
 export const SIDEBAR_PANES_KEY = "uatu:sidebar-panes";
 export const GIT_LOG_LIMIT_KEY = "uatu:git-log-limit";
 export const FILES_PANE_FILTER_KEY = "uatu.filesPaneFilter";
+export const COMPARE_TARGET_KEY = "uatu:compare-target";
 
 // Legacy per-Mode keys retained as constants so the boot-time migration can
 // find and remove them. Not used by any reader after the migration runs.
@@ -157,6 +161,27 @@ export function migrateLegacyModeStorage(): void {
   }
 }
 
+// Compare target — which lens the Change Overview measures against. The
+// server holds the authoritative session value; this persisted preference is
+// what the client reconciles the server to on boot. Defaults to the reviewer's
+// view (the product's hero).
+export function readCompareTargetPreference(): ReviewCompareTarget {
+  try {
+    const raw = window.localStorage.getItem(COMPARE_TARGET_KEY);
+    return isReviewCompareTarget(raw) ? raw : DEFAULT_COMPARE_TARGET;
+  } catch {
+    return DEFAULT_COMPARE_TARGET;
+  }
+}
+
+export function writeCompareTargetPreference(value: ReviewCompareTarget): void {
+  try {
+    window.localStorage.setItem(COMPARE_TARGET_KEY, value);
+  } catch {
+    // best-effort persistence; localStorage may be disabled
+  }
+}
+
 export function isGitLogLimit(value: number): value is 10 | 25 | 50 | 100 {
   return value === 10 || value === 25 || value === 50 || value === 100;
 }
@@ -207,6 +232,9 @@ export const appState = {
   panes: readPaneState(),
   filesPaneFilter: readFilesPaneFilterPreference() as FilesPaneFilter,
   gitLogLimit: readGitLogLimitPreference(),
+  // Which lens the Change Overview measures review burden against. Mirrors the
+  // server-session value; persisted and reconciled to the server on boot.
+  compareTarget: readCompareTargetPreference() as ReviewCompareTarget,
 };
 
 export type AppState = typeof appState;
