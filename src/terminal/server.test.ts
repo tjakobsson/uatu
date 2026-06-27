@@ -22,11 +22,22 @@ let ctx: Ctx | null = null;
 // are walked before any beforeEach runs.
 const backendOk = (await resolveTerminalBackend()).available;
 
+// The host's ambient `$SHELL`. The non-override test below needs it set and
+// distinct from `/bin/sh` to be meaningful (otherwise honoring vs. clobbering
+// look identical); it self-skips on a bare CI runner where SHELL is unset.
+const hostShell = process.env.SHELL;
+
 // Wire `terminal-server` into a Bun.serve that mirrors the production
 // upgrade gate: parse `sessionId` from the URL, call `prepareSession`, map
 // results to HTTP statuses, then upgrade. Tests that need a custom grace
 // window pass it through `options.reconnectGraceMs`.
-function startServer(options: { reconnectGraceMs?: number } = {}): Ctx {
+function startServer(
+  options: {
+    reconnectGraceMs?: number;
+    shell?: string;
+    env?: NodeJS.ProcessEnv;
+  } = {},
+): Ctx {
   const terminal = createTerminalServer({ cwd: process.cwd(), ...options });
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -284,6 +295,101 @@ describe.skipIf(!backendOk)("terminal-server PTY round-trip", () => {
     await closed;
     expect(ws.readyState).toBe(WebSocket.CLOSED);
   }, 6000);
+});
+
+// Separate suite: spins up its own terminal-server with an explicit `/bin/sh`
+// override (present on every POSIX system, so no fish/bash/zsh needed). The
+// child still inherits the host's ambient `$SHELL`; because that value differs
+// from the spawned `/bin/sh`, echoing it proves uatu runs the configured shell
+// WITHOUT clobbering the inherited `$SHELL`. Self-skips when the host has no
+// distinct ambient SHELL to observe.
+describe.skipIf(!backendOk)("terminal-server shell selection", () => {
+  it.skipIf(!hostShell || hostShell === "/bin/sh")(
+    "runs the configured shell and leaves the inherited $SHELL untouched",
+    async () => {
+      const local = startServer({ shell: "/bin/sh" });
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const ws = new WebSocket(`ws://127.0.0.1:${local.port}/?sessionId=${freshSessionId()}`);
+          ws.binaryType = "arraybuffer";
+          let received = "";
+          const done = (err?: Error) => {
+            try {
+              ws.close();
+            } catch {
+              // already closed
+            }
+            if (err) reject(err);
+            else resolve();
+          };
+          const timeout = setTimeout(() => done(new Error(`timeout — got: ${received}`)), 4000);
+          ws.addEventListener("open", () => {
+            // sh expands $SHELL from its inherited env. We expect the host's
+            // ambient value, NOT the spawned /bin/sh — proving non-override.
+            ws.send(new TextEncoder().encode('echo "SHELLIS:$SHELL:END"\r\n'));
+          });
+          ws.addEventListener("message", event => {
+            received += decode(event.data);
+            if (received.includes(`SHELLIS:${hostShell}:END`)) {
+              clearTimeout(timeout);
+              done();
+            }
+          });
+          ws.addEventListener("error", err => {
+            clearTimeout(timeout);
+            done(err as unknown as Error);
+          });
+        });
+      } finally {
+        local.terminal.disposeAll();
+        local.server.stop(true);
+      }
+    },
+    8000,
+  );
+});
+
+// Fallback path: with `$SHELL` absent from the injected env and no explicit
+// override, the terminal starts `/bin/sh` and writes the per-session notice
+// into the new session before the prompt. (The operator-facing stdout warning
+// is a startup concern owned by cli.ts, not the server — see
+// shell-warning.test.ts.) `env: {}` forces the fallback without touching the
+// real process environment, so the test is deterministic on any host.
+describe.skipIf(!backendOk)("terminal-server shell fallback notice", () => {
+  it("writes the fallback notice into the session when $SHELL is unset", async () => {
+    const local = startServer({ env: {} });
+    try {
+      const notice = await new Promise<string>((resolve, reject) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${local.port}/?sessionId=${freshSessionId()}`);
+        ws.binaryType = "arraybuffer";
+        let received = "";
+        const timeout = setTimeout(
+          () => reject(new Error(`timeout — got: ${received}`)),
+          4000,
+        );
+        ws.addEventListener("message", event => {
+          received += decode(event.data);
+          if (received.includes("$SHELL is not set")) {
+            clearTimeout(timeout);
+            try {
+              ws.close();
+            } catch {
+              // already closed
+            }
+            resolve(received);
+          }
+        });
+        ws.addEventListener("error", err => {
+          clearTimeout(timeout);
+          reject(err as unknown as Error);
+        });
+      });
+      expect(notice).toContain("/bin/sh instead of your login shell");
+    } finally {
+      local.terminal.disposeAll();
+      local.server.stop(true);
+    }
+  }, 8000);
 });
 
 // Separate suite for the disconnect-grace timer because it spins up its own

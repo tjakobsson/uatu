@@ -7,6 +7,7 @@
 import type { ServerWebSocket } from "bun";
 
 import { resolveTerminalBackend } from "./backend";
+import { SHELL_FALLBACK_NOTICE, shellIsUnset } from "./shell-warning";
 import type { PtyProcess } from "./pty";
 
 type SocketData = { sessionId: string };
@@ -22,6 +23,12 @@ const WS_OPEN = 1;
 // 128KB ≈ several frames of a busy htop at full terminal width; comfortably
 // enough for the worst case while keeping per-session memory bounded.
 const REPLAY_BUFFER_CAP_BYTES = 128 * 1024;
+
+// Final safe fallback when `$SHELL` is unset/empty. Present on every POSIX
+// system, so the terminal always starts even in a stripped sandbox. The
+// matching stdout warning is emitted once at startup from cli.ts; here we only
+// own the per-session in-terminal notice (see SHELL_FALLBACK_NOTICE).
+const DEFAULT_SHELL = "/bin/sh";
 
 // Lower-cased UUID v1-v5 + the special nil UUID. Permissive enough to accept
 // whatever `crypto.randomUUID()` emits across browsers, strict enough that
@@ -50,8 +57,15 @@ type Session = {
 export type TerminalServerOptions = {
   // Working directory for newly-spawned PTYs. Typically the first watch root.
   cwd: string;
-  // Shell to run. Defaults to `process.env.SHELL` falling back to `/bin/sh`.
+  // Explicit shell override (highest priority). When unset, the PTY uses
+  // `$SHELL`; if that is unset/empty it falls back to `/bin/sh` and uatu warns
+  // on both stdout and inside the terminal (see the fallback handling in
+  // `open()`). uatu deliberately does NOT reconstruct the login shell from the
+  // user database — an interactive emulator trusts `$SHELL`, like xterm/tmux.
   shell?: string;
+  // Environment `$SHELL` is read from. Defaults to `process.env`. Injected by
+  // tests so the fallback path can be exercised without mutating the real env.
+  env?: NodeJS.ProcessEnv;
   // Initial dimensions used when the client has not yet sent a resize frame.
   // The fit addon will send one within a frame or two so these are placeholders.
   initialCols?: number;
@@ -194,13 +208,24 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
 
       const cols = options.initialCols ?? 80;
       const rows = options.initialRows ?? 24;
-      const shell = options.shell ?? process.env.SHELL ?? "/bin/sh";
+      // Trust `$SHELL` like any interactive terminal emulator, falling back to
+      // `/bin/sh` only when it is unset/empty. We do not reconstruct the login
+      // shell from the user database; instead the fallback is made visible (see
+      // below) so a sandbox that omits SHELL is diagnosable and fixable.
+      const env = options.env ?? process.env;
+      const shell = options.shell ?? (shellIsUnset(env) ? DEFAULT_SHELL : env.SHELL!);
+      const shellFellBack = !options.shell && shellIsUnset(env);
 
       // Advertise truecolor to TUIs. Without this, nvim/btop/lazygit detect
       // 256-color (from $TERM) and quantize their gruvbox/dracula/etc. themes
       // to the nearest palette entry, which looks wrong (washed-out yellow
       // backgrounds, banding). xterm.js itself accepts 24-bit ANSI escapes;
       // we just have to tell the consumer it's safe to send them.
+      //
+      // SHELL is deliberately left exactly as inherited — we never synthesize
+      // it. If it is unset, that is the user's environment to own (they may
+      // have a reason); uatu warns about the consequence above but does not
+      // decide a shell on their behalf or hide the gap from child programs.
       const ptyEnv: Record<string, string> = {
         ...(process.env as Record<string, string>),
         COLORTERM: "truecolor",
@@ -227,6 +252,18 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
       sessions.set(id, session);
       metrics?.inc("pty.spawned_total");
       updateActive();
+
+      if (shellFellBack && socket.readyState === WS_OPEN) {
+        // Browser-user-facing: a dim line in the fresh session's scrollback,
+        // sent before the shell's first prompt. Per-open by design — each new
+        // terminal is its own context that hasn't seen the previous notice. The
+        // operator-facing stdout warning is emitted once at startup (cli.ts).
+        try {
+          socket.send(new TextEncoder().encode(SHELL_FALLBACK_NOTICE));
+        } catch {
+          // Socket closing/closed; the close handler reaps the PTY.
+        }
+      }
 
       pty.onData(bytes => {
         // Capture before forwarding so the replay buffer also records output
