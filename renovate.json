@@ -6,5 +6,7 @@
     ":semanticCommits"
   ],
   "enabledManagers": ["bun", "github-actions", "npm"],
-  "labels": ["dependencies"]
+  "labels": ["dependencies"],
+  "lockFileMaintenance": { "enabled": true },
+  "osvVulnerabilityAlerts": true
 }
