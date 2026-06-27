@@ -85,6 +85,9 @@ queries the OSV database directly and works regardless of repo settings.
 - *Alternative considered:* enabling Dependabot alerts in repo settings.
   Rejected — it is an out-of-band manual step not captured in the repo, exactly
   the kind of silent dependency this change is trying to remove.
+- *Limitation (surfaced in review):* `osvVulnerabilityAlerts` only alerts on
+  *direct* dependencies, so it does not cover the transitive dompurify/uuid
+  class on its own. The scheduled-audit decision below covers that gap.
 
 **Decision: Add a `bun audit` step to the CI `validate` job.**
 Defense in depth: even if update automation lags, a new advisory against the
@@ -93,6 +96,19 @@ installed tree fails the workflow on the PR that would introduce or carry it.
   after `bun install --frozen-lockfile`.
 - *Open sub-decision (see Open Questions):* whether the step is strict (fails on
   any advisory) or severity-thresholded.
+
+**Decision: Add a scheduled, PR-independent `bun audit` workflow (review
+follow-up).** Because `osvVulnerabilityAlerts` is direct-only (above) and the CI
+`validate` gate only runs on PRs, a transitive advisory published during a quiet
+period could go unsurfaced. A weekly `.github/workflows/dependency-audit.yml`
+(cron + `workflow_dispatch`) runs `bun audit --audit-level=moderate` against the
+full installed tree on a schedule, surfacing such advisories via GitHub-native
+workflow status within a week rather than waiting for the next PR.
+- *Alternative considered:* relying on `osvVulnerabilityAlerts` alone for
+  transitive coverage. Rejected — direct-only by design.
+- *Alternative considered:* having the scheduled job open an issue on failure.
+  Deferred — a failed scheduled run already emails maintainers and shows in the
+  Actions tab; issue-filing can be added later if it proves necessary.
 
 ## Risks / Trade-offs
 

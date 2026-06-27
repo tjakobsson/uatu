@@ -18,6 +18,7 @@
 
 - [x] 3.1 Add a `bun audit --audit-level=moderate` step to the `validate` job in `.github/workflows/ci.yml`, after `bun install --frozen-lockfile` and alongside the license audit
 - [x] 3.2 Confirm the step fails the workflow on a moderate+ advisory and passes when the tree is clean (`bun audit --audit-level=moderate` exits non-zero on moderate+, zero when clean)
+- [x] 3.3 Add a scheduled, PR-independent `.github/workflows/dependency-audit.yml` (weekly cron + `workflow_dispatch`) running `bun audit --audit-level=moderate` against the full tree — covers transitive advisories that `osvVulnerabilityAlerts` (direct-only) misses between PRs (review follow-up)
 
 ## 4. Verify
 
