@@ -43,6 +43,7 @@ import {
 import { loadTerminalConfig } from "./terminal/config";
 import { loadMonoConfig } from "./mono/config";
 import { createTerminalServer } from "./terminal/server";
+import { SHELL_UNSET_STARTUP_WARNING, shellIsUnset } from "./terminal/shell-warning";
 import {
   createCachePaths,
   ensureCacheDir,
@@ -363,6 +364,13 @@ async function runWatch(options: WatchOptions) {
   const url = terminalEnabled ? `${baseUrl}/?t=${encodeURIComponent(watchSession.getTerminalToken())}` : baseUrl;
   printStartupBanner(process.stdout);
   console.log(url);
+
+  // Printed after the URL, where the operator's eye lands. Tells them once that
+  // an unset $SHELL means terminals will run /bin/sh instead of their login
+  // shell — only when the terminal is available, else $SHELL is irrelevant.
+  if (terminalEnabled && shellIsUnset(process.env)) {
+    console.error(`uatu: ${SHELL_UNSET_STARTUP_WARNING}`);
+  }
 
   if (options.openBrowser) {
     const opened = await openBrowser(url);
