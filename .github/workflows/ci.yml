@@ -27,6 +27,14 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Audit dependencies for vulnerabilities
+        # Fails the build on a moderate-or-higher advisory against the
+        # installed tree, so new advisories surface on the PR rather than by
+        # manual `bun audit`. Low-severity advisories are reported but do not
+        # block. Renovate (lockFileMaintenance + osvVulnerabilityAlerts) is the
+        # primary remediation path; this is the backstop.
+        run: bun audit --audit-level=moderate
+
       - name: Install Playwright Chromium
         run: bunx playwright install --with-deps chromium
 
