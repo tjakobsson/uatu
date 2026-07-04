@@ -14,6 +14,13 @@ export const TERMINAL_VISIBLE_KEY = "uatu:terminal-visible";
 // Read once for migration into TERMINAL_STATE_KEY, then ignored on writes.
 export const TERMINAL_HEIGHT_KEY = "uatu:terminal-height";
 export const TERMINAL_STATE_KEY = "uatu:terminal-state";
+// Per-window pane records (`sessionStorage`). The `panes` list inside
+// TERMINAL_STATE_KEY (localStorage) doubles as the shared *restart hints*:
+// a window that has no records of its own (fresh window, browser restart)
+// adopts the hints; a window that lost a sessionId collision keeps its own
+// records here and never writes the hints, so it cannot clobber the
+// claimant window's ability to reattach.
+export const TERMINAL_PANES_KEY = "uatu:terminal-panes";
 
 export const TERMINAL_HEIGHT_MIN = 120;
 export const TERMINAL_HEIGHT_MAX_FRACTION = 0.7;
@@ -34,8 +41,8 @@ export type TerminalDock = "bottom" | "right";
 export type TerminalDisplayMode = "normal" | "minimized" | "fullscreen";
 
 export type TerminalPaneRecord = {
-  // Per-pane sessionId. UUID. Reused across reload to reattach to the
-  // same PTY within the server's reconnect grace window.
+  // Per-pane sessionId. UUID. Reused across reload — and across browser
+  // restarts — to reattach to the same still-running PTY.
   id: string;
   // Wall-clock millis when the pane was first opened in this tab; used
   // for stable ordering when restoring multiple panes.
@@ -223,4 +230,62 @@ export function writeTerminalPanelState(storage: StorageLike, state: TerminalPan
   } catch {
     // Ignore storage failures.
   }
+}
+
+// This window's own pane records plus its standing relative to the shared
+// restart hints. `hintOwner` is sticky across reloads (it persists with the
+// records): a window that adopted the hints — or created its panes when no
+// hints existed — keeps publishing its records as the hints; a window that
+// lost a sessionId collision is permanently a non-owner so its records can
+// never overwrite the claimant's.
+export type OwnPaneRecords = {
+  panes: TerminalPaneRecord[];
+  hintOwner: boolean;
+};
+
+export function readOwnPaneRecords(storage: StorageLike): OwnPaneRecords | null {
+  let raw: string | null = null;
+  try {
+    raw = storage.getItem(TERMINAL_PANES_KEY);
+  } catch {
+    return null;
+  }
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const panes = Array.isArray(parsed.panes)
+      ? parsed.panes.map(coercePane).filter((p): p is TerminalPaneRecord => p !== null)
+      : [];
+    if (panes.length === 0) return null;
+    return { panes, hintOwner: parsed.hintOwner === true };
+  } catch {
+    return null;
+  }
+}
+
+export function writeOwnPaneRecords(storage: StorageLike, records: OwnPaneRecords): void {
+  try {
+    if (records.panes.length === 0) {
+      storage.removeItem(TERMINAL_PANES_KEY);
+    } else {
+      storage.setItem(TERMINAL_PANES_KEY, JSON.stringify(records));
+    }
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+// Boot-time resolution of which pane records this window should try to
+// claim. Own records (this window reloaded) win; otherwise the shared hints
+// from the localStorage panel state are adopted — the server's duplicate-
+// sessionId rejection arbitrates whether the adoption sticks. A window that
+// boots from hints (or from nothing) starts as the prospective hint owner;
+// it is demoted on its first lost collision.
+export function resolveBootPaneRecords(
+  sessionStore: StorageLike,
+  localState: TerminalPanelState,
+): OwnPaneRecords {
+  const own = readOwnPaneRecords(sessionStore);
+  if (own) return own;
+  return { panes: localState.panes, hintOwner: true };
 }

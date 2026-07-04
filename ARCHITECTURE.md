@@ -192,6 +192,12 @@ flowchart LR
 
 The panel UI (~700 lines in `src/terminal/panel.ts`) handles dock position, split, fullscreen, focus, and message routing across multiple PTY panes. On Windows, `terminal/backend.ts` reports unavailable and the panel button is hidden — uatu doesn't degrade other features.
 
+PTY lifetime follows tmux-detach semantics: a WebSocket disconnect (reload, tab close, browser quit, system sleep) detaches the session while the shell keeps running, and reconnecting with the same persisted `sessionId` reattaches to it — a bounded replay buffer repaints the screen. Only the confirmed pane close (close code 4001), a kill via the session inventory, or server shutdown terminates a shell.
+
+Sessions are managed tmux-style: `GET /api/terminal/sessions` lists every live PTY (attached/detached, age, best-effort foreground-process label via a POSIX `ps` adapter), `DELETE /api/terminal/sessions/<id>` kills one, and the WS upgrade's `takeover=1` parameter moves an attached session between windows — the previous holder's pane parks with a "take back" action. The pane-spawn flow offers this inventory (attach / kill / new shell) whenever live sessions exist that the window isn't already showing.
+
+App-defined WebSocket close codes: `4001` user-terminate (client→server: kill the PTY), `4409` sessionId in use (server→client: upgrade race lost), `4410` session taken (server→client: another window took this session over).
+
 ## Follow mode
 
 uatu is a single-mode app. There is no Author vs. Review distinction; the only behavioral toggle is **Follow**, surfaced as a switch in the sidebar header. The full contract is specified in `openspec/specs/follow-mode/spec.md`; the four rules are summarized in the State lifecycle section above.

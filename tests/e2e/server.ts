@@ -37,6 +37,7 @@ import { loadMonoConfig } from "../../src/mono/config";
 import { buildRoutes } from "../../src/server/routes";
 import {
   TERMINAL_COOKIE_NAME,
+  authProbeResponse,
   constantTimeEqual,
   formatTerminalCookie,
   isAllowedOrigin,
@@ -44,6 +45,7 @@ import {
 } from "../../src/terminal/auth";
 import { terminalBackendAvailable } from "../../src/terminal/backend";
 import { createTerminalServer } from "../../src/terminal/server";
+import { handleTerminalSessionsRoute } from "../../src/terminal/sessions-route";
 
 let activeFilePath: string | null = null;
 let activeRespectGitignore = true;
@@ -74,6 +76,17 @@ async function handleE2EReset(request: Request): Promise<Response> {
     }
   } catch {
     body = {};
+  }
+
+  // Kill every PTY session so tests are hermetic: with persistent sessions
+  // and the session picker, a shell leaked from a previous test would
+  // otherwise surface in the next test's pane-spawn flow.
+  if (terminalServer) {
+    try {
+      terminalServer.disposeAll();
+    } catch {
+      // Best-effort — a dead backend must not fail the reset.
+    }
   }
 
   await watchSession.stop();
@@ -159,6 +172,18 @@ server = Bun.serve({
     if (requestUrl.pathname === "/api/auth" && request.method === "POST") {
       return handleAuth(request);
     }
+    if (requestUrl.pathname === "/api/auth" && request.method === "GET") {
+      return authProbeResponse(request, requestUrl, watchSession.getTerminalToken());
+    }
+    {
+      const sessionsResponse = handleTerminalSessionsRoute(
+        request,
+        requestUrl,
+        terminalServer,
+        () => watchSession.getTerminalToken(),
+      );
+      if (sessionsResponse) return sessionsResponse;
+    }
     return navigationFetch(request);
   },
   websocket: terminalServer
@@ -169,8 +194,8 @@ server = Bun.serve({
         message: (socket, msg) => {
           terminalServer.message(socket as never, msg as never);
         },
-        close: socket => {
-          terminalServer.close(socket as never);
+        close: (socket, code) => {
+          terminalServer.close(socket as never, code);
         },
       }
     : undefined,
@@ -225,7 +250,8 @@ function handleTerminalUpgrade(
     return new Response("forbidden origin", { status: 403 });
   }
   const sessionId = requestUrl.searchParams.get("sessionId") ?? "";
-  const result = terminalServer.prepareSession(sessionId);
+  const takeover = requestUrl.searchParams.get("takeover") === "1";
+  const result = terminalServer.prepareSession(sessionId, { takeover });
   if (result.kind === "invalid") {
     return new Response("invalid or missing sessionId", { status: 400 });
   }
@@ -233,7 +259,7 @@ function handleTerminalUpgrade(
     return new Response("sessionId in use", { status: 409 });
   }
   const ok = (srv.upgrade as (req: Request, opts: { data: unknown }) => boolean)(request, {
-    data: { sessionId },
+    data: { sessionId, takeover },
   });
   if (!ok) return new Response("upgrade failed", { status: 500 });
   return undefined;

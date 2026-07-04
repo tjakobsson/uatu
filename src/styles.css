@@ -688,7 +688,6 @@ body.is-resizing-terminal .panel-resizer {
   flex: 1 1 auto;
   min-height: 0;
   min-width: 0;
-  padding: 0.4rem 0.6rem;
   /* xterm renders its `.xterm-screen` with absolute positioning sized to
      its character grid; without an overflow clip on the host, the screen
      can spill beyond the pane and intercept pointer events on the
@@ -700,6 +699,12 @@ body.is-resizing-terminal .panel-resizer {
 
 .terminal-pane-host .xterm {
   height: 100%;
+  /* The visual inset MUST live on `.xterm`, not the host: FitAddon measures
+     the host's computed height (which, under border-box, includes any host
+     padding) and subtracts only the `.xterm` element's own padding. Padding
+     on the host inflates the proposed grid by its size — one extra row that
+     the host's overflow clip then cuts in half at the pane edge. */
+  padding: 0.4rem 0.6rem;
 }
 
 .terminal-pane-host .xterm-viewport {
@@ -908,6 +913,132 @@ body.is-resizing-terminal .panel-resizer {
   margin: 0 auto;
   padding: 1.5rem;
   color: var(--terminal-fg, #e6edf3);
+}
+
+/* Parked pane: its session was taken over by another window. Same visual
+   family as the auth form; the single action re-claims the session. */
+.terminal-taken {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 0.6rem;
+  max-width: 28rem;
+  margin: 0 auto;
+  padding: 1.5rem;
+  color: var(--terminal-fg, #e6edf3);
+}
+
+.terminal-taken-heading {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.terminal-taken-help {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: rgba(230, 237, 243, 0.65);
+}
+
+.terminal-taken-takeback {
+  appearance: none;
+  background: var(--accent, #0969da);
+  border: 0;
+  border-radius: 4px;
+  color: #ffffff;
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.45rem 0.9rem;
+  cursor: pointer;
+}
+
+/* Session picker: shown in place of a fresh pane when live sessions exist
+   that this window isn't displaying (orphans, other windows' shells). */
+.terminal-picker {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: stretch;
+  gap: 0.6rem;
+  max-width: 30rem;
+  margin: 0 auto;
+  padding: 1rem 1.5rem;
+  color: var(--terminal-fg, #e6edf3);
+}
+
+.terminal-picker-heading {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.terminal-picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  overflow-y: auto;
+  max-height: 60%;
+}
+
+.terminal-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+
+.terminal-picker-label {
+  font-family: var(--mono-font-family, monospace);
+  font-weight: 600;
+}
+
+.terminal-picker-meta {
+  flex: 1 1 auto;
+  color: rgba(230, 237, 243, 0.55);
+  font-size: 0.78rem;
+}
+
+.terminal-picker-attach,
+.terminal-picker-kill,
+.terminal-picker-fresh {
+  appearance: none;
+  border: 0;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 0.3rem 0.7rem;
+  cursor: pointer;
+}
+
+.terminal-picker-attach {
+  background: var(--accent, #0969da);
+  color: #ffffff;
+}
+
+.terminal-picker-kill {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(230, 237, 243, 0.8);
+}
+
+.terminal-picker-kill:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+
+.terminal-picker-fresh {
+  align-self: flex-start;
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--terminal-fg, #e6edf3);
+  padding: 0.45rem 0.9rem;
+  font-size: 0.85rem;
 }
 
 .terminal-auth-heading {

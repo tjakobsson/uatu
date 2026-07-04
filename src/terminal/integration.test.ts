@@ -14,6 +14,8 @@ import {
   isAllowedOrigin,
   readCookie,
 } from "./auth";
+import { handleTerminalSessionsRoute } from "./sessions-route";
+import type { TerminalServer } from "./server";
 
 type ServeContext = {
   server: ReturnType<typeof Bun.serve>;
@@ -256,5 +258,89 @@ describe("/api/terminal upgrade gates", () => {
         reject(err);
       });
     });
+  });
+});
+
+// Route-level tests for the session inventory endpoints. The handler is
+// exercised directly with a stub TerminalServer — the PTY-backed behavior
+// of listSessions/killSession is covered in server.test.ts.
+describe("handleTerminalSessionsRoute", () => {
+  const TOKEN = "sessions-route-token-0001";
+  const stubSessions = [
+    { id: "11111111-1111-4111-8111-111111111111", attached: true, createdAt: 1, cols: 80, rows: 24, label: "zsh" },
+  ];
+  function stubTerminal(killResult = true): TerminalServer {
+    return {
+      isAvailable: async () => true,
+      prepareSession: () => ({ kind: "fresh" as const }),
+      listSessions: async () => stubSessions,
+      killSession: () => killResult,
+      open: async () => undefined,
+      message: () => undefined,
+      close: () => undefined,
+      disposeAll: () => undefined,
+    };
+  }
+  function run(
+    path: string,
+    init: { method?: string; cookie?: boolean; query?: string } = {},
+    terminal: TerminalServer | null = stubTerminal(),
+  ): Response | Promise<Response> | null {
+    const url = new URL(`http://127.0.0.1:4711${path}${init.query ?? ""}`);
+    const headers = new Headers();
+    if (init.cookie) {
+      headers.set("Cookie", `${TERMINAL_COOKIE_NAME}=${encodeURIComponent(TOKEN)}`);
+    }
+    const request = new Request(url, { method: init.method ?? "GET", headers });
+    return handleTerminalSessionsRoute(request, url, terminal, () => TOKEN);
+  }
+
+  it("ignores unrelated paths", () => {
+    expect(run("/api/terminal")).toBeNull();
+    expect(run("/api/terminal/sessionsish")).toBeNull();
+  });
+
+  it("rejects unauthenticated requests with 401", async () => {
+    const response = await run("/api/terminal/sessions");
+    expect(response).not.toBeNull();
+    expect((response as Response).status).toBe(401);
+  });
+
+  it("lists sessions for an authenticated GET (cookie or query token)", async () => {
+    const viaCookie = (await run("/api/terminal/sessions", { cookie: true })) as Response;
+    expect(viaCookie.status).toBe(200);
+    expect(viaCookie.headers.get("cache-control")).toBe("no-store");
+    const body = await viaCookie.json();
+    expect(body.sessions).toEqual(stubSessions);
+
+    const viaQuery = (await run("/api/terminal/sessions", {
+      query: `?t=${encodeURIComponent(TOKEN)}`,
+    })) as Response;
+    expect(viaQuery.status).toBe(200);
+  });
+
+  it("DELETE kills a known session (204) and 404s an unknown one", async () => {
+    const ok = (await run(`/api/terminal/sessions/${stubSessions[0]!.id}`, {
+      method: "DELETE",
+      cookie: true,
+    })) as Response;
+    expect(ok.status).toBe(204);
+
+    const missing = (await run("/api/terminal/sessions/22222222-2222-4222-8222-222222222222", {
+      method: "DELETE",
+      cookie: true,
+    }, stubTerminal(false))) as Response;
+    expect(missing.status).toBe(404);
+  });
+
+  it("answers 405 for unsupported methods and 503 with no terminal server", async () => {
+    const wrongMethod = (await run("/api/terminal/sessions", {
+      method: "POST",
+      cookie: true,
+    })) as Response;
+    expect(wrongMethod.status).toBe(405);
+
+    const disabled = (await run("/api/terminal/sessions", { cookie: true }, null)) as Response;
+    expect(disabled.status).toBe(503);
   });
 });

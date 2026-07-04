@@ -35,6 +35,7 @@ import { findFreePort } from "./server/port-probe";
 import { terminalBackendAvailable } from "./terminal/backend";
 import {
   TERMINAL_COOKIE_NAME,
+  authProbeResponse,
   constantTimeEqual,
   formatTerminalCookie,
   isAllowedOrigin,
@@ -43,6 +44,7 @@ import {
 import { loadTerminalConfig } from "./terminal/config";
 import { loadMonoConfig } from "./mono/config";
 import { createTerminalServer } from "./terminal/server";
+import { handleTerminalSessionsRoute } from "./terminal/sessions-route";
 import { SHELL_UNSET_STARTUP_WARNING, shellIsUnset } from "./terminal/shell-warning";
 import {
   createCachePaths,
@@ -220,14 +222,15 @@ async function runWatch(options: WatchOptions) {
         return new Response("forbidden origin", { status: 403 });
       }
       const sessionId = requestUrl.searchParams.get("sessionId") ?? "";
-      const result = terminalServer.prepareSession(sessionId);
+      const takeover = requestUrl.searchParams.get("takeover") === "1";
+      const result = terminalServer.prepareSession(sessionId, { takeover });
       if (result.kind === "invalid") {
         return new Response("invalid or missing sessionId", { status: 400 });
       }
       if (result.kind === "collision") {
         return new Response("sessionId in use", { status: 409 });
       }
-      const upgraded = srv.upgrade(request, { data: { sessionId } });
+      const upgraded = srv.upgrade(request, { data: { sessionId, takeover } });
       if (!upgraded) {
         return new Response("upgrade failed", { status: 500 });
       }
@@ -310,6 +313,18 @@ async function runWatch(options: WatchOptions) {
         if (requestUrl.pathname === "/api/auth" && request.method === "POST") {
           return handleAuth(request);
         }
+        if (requestUrl.pathname === "/api/auth" && request.method === "GET") {
+          return authProbeResponse(request, requestUrl, watchSession!.getTerminalToken());
+        }
+        {
+          const sessionsResponse = handleTerminalSessionsRoute(
+            request,
+            requestUrl,
+            terminalServer,
+            () => watchSession!.getTerminalToken(),
+          );
+          if (sessionsResponse) return sessionsResponse;
+        }
         return navigationFetch(request);
       },
       websocket: terminalServer
@@ -323,8 +338,11 @@ async function runWatch(options: WatchOptions) {
                 data,
               );
             },
-            close: socket => {
-              terminalServer!.close(socket as unknown as Parameters<NonNullable<typeof terminalServer>["close"]>[0]);
+            close: (socket, code) => {
+              terminalServer!.close(
+                socket as unknown as Parameters<NonNullable<typeof terminalServer>["close"]>[0],
+                code,
+              );
             },
           }
         : undefined,

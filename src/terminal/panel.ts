@@ -5,6 +5,8 @@
 // through its named methods so persistence and refit happen consistently.
 
 import { mountTerminalPanel, type TerminalPanelHandle } from "./client";
+import { formatSessionAge, pickerCandidates } from "./picker";
+import type { TerminalSessionInfo } from "./server";
 import {
   TERMINAL_MAX_PANES,
   TERMINAL_RIGHT_DOCK_VIEWPORT_MIN,
@@ -12,6 +14,8 @@ import {
   clampTerminalWidth as clampTerminalWidthShared,
   readTerminalPanelState,
   readTerminalVisiblePreference as readTerminalVisiblePreferenceShared,
+  resolveBootPaneRecords,
+  writeOwnPaneRecords,
   writeTerminalPanelState,
   writeTerminalVisiblePreference as writeTerminalVisiblePreferenceShared,
   type StorageLike,
@@ -101,6 +105,15 @@ export function setupTerminalPanel(enabled: boolean, config?: { fontFamily?: str
   let activePaneId: string | null = null;
   let state: TerminalPanelState = readTerminalPanelState(localStorageRef);
 
+  // Pane records are per-window (sessionStorage); the localStorage state's
+  // `panes` doubles as shared restart hints. A reloading window reclaims its
+  // own sessions; a fresh window adopts the hints. `hintOwner` tracks whether
+  // this window may publish its records as the hints — demoted permanently
+  // on the first lost sessionId collision (see handlePaneCollision).
+  const bootRecords = resolveBootPaneRecords(sessionStorageRef, state);
+  let hintOwner = bootRecords.hintOwner;
+  state = { ...state, panes: bootRecords.panes };
+
   // Height/width restore: write the persisted value to the CSS var so the
   // first paint matches the user's last layout.
   document.documentElement.style.setProperty(
@@ -117,7 +130,19 @@ export function setupTerminalPanel(enabled: boolean, config?: { fontFamily?: str
       ...state,
       panes: Array.from(panes.values()).map(entry => entry.record),
     };
-    writeTerminalPanelState(localStorageRef, state);
+    // This window's records always go to its own store.
+    writeOwnPaneRecords(sessionStorageRef, { panes: state.panes, hintOwner });
+    if (hintOwner) {
+      writeTerminalPanelState(localStorageRef, state);
+    } else {
+      // Collision loser: publish layout preferences but preserve the
+      // claimant window's pane hints — overwriting them would orphan its
+      // still-running shells on its next reload.
+      const currentHints = readTerminalPanelState(localStorageRef, {
+        writeOnMigrate: false,
+      }).panes;
+      writeTerminalPanelState(localStorageRef, { ...state, panes: currentHints });
+    }
   }
 
   function getToken(): string | null {
@@ -230,7 +255,16 @@ export function setupTerminalPanel(enabled: boolean, config?: { fontFamily?: str
     }
   }
 
-  function buildPaneElement(record: TerminalPaneRecord): TerminalPaneEntry {
+  function buildPaneElement(
+    record: TerminalPaneRecord,
+    // `collisionRecovery: false` on replacement panes built by
+    // handlePaneCollision, so a server that keeps refusing upgrades for
+    // non-auth reasons (e.g. terminal disabled) cannot drive an endless
+    // rebuild loop: one recovery per pane. `takeover` when the pane binds
+    // to a session currently attached in another window (picker attach).
+    options: { collisionRecovery?: boolean; takeover?: boolean } = {},
+  ): TerminalPaneEntry {
+    const collisionRecovery = options.collisionRecovery !== false;
     const element = document.createElement("div");
     element.className = "terminal-pane";
     element.dataset.sessionId = record.id;
@@ -266,6 +300,11 @@ export function setupTerminalPanel(enabled: boolean, config?: { fontFamily?: str
       onClose: () => {
         if (panes.has(record.id)) removePane(record.id);
       },
+      // Pre-open failure with valid credentials = another window holds this
+      // persisted sessionId. Rebuild with a fresh id instead of showing the
+      // (wrong) paste-token form.
+      onCollision: collisionRecovery ? () => handlePaneCollision(record.id) : undefined,
+      takeover: options.takeover === true,
     });
 
     const entry: TerminalPaneEntry = { record, handle, element, hostElement: host, closeButton: close };
@@ -387,12 +426,15 @@ export function setupTerminalPanel(enabled: boolean, config?: { fontFamily?: str
     });
   }
 
-  function addPane(record?: Partial<TerminalPaneRecord>): TerminalPaneEntry | null {
+  function addPane(
+    record?: Partial<TerminalPaneRecord>,
+    options: { takeover?: boolean } = {},
+  ): TerminalPaneEntry | null {
     if (panes.size >= TERMINAL_MAX_PANES) return null;
     const id = record?.id ?? crypto.randomUUID();
     const createdAt = record?.createdAt ?? Date.now();
     const fullRecord: TerminalPaneRecord = { id, createdAt };
-    const entry = buildPaneElement(fullRecord);
+    const entry = buildPaneElement(fullRecord, { takeover: options.takeover });
     panes.set(id, entry);
     rebuildPanesContainer();
     entry.handle.attach();
@@ -400,6 +442,121 @@ export function setupTerminalPanel(enabled: boolean, config?: { fontFamily?: str
     persistState();
     requestAnimationFrame(() => fitAll());
     return entry;
+  }
+
+  async function fetchSessionInventory(): Promise<TerminalSessionInfo[]> {
+    try {
+      const token = getToken();
+      const url = token
+        ? `/api/terminal/sessions?t=${encodeURIComponent(token)}`
+        : "/api/terminal/sessions";
+      const response = await fetch(url, { method: "GET" });
+      if (!response.ok) return [];
+      const body = (await response.json()) as { sessions?: TerminalSessionInfo[] };
+      return Array.isArray(body.sessions) ? body.sessions : [];
+    } catch {
+      return [];
+    }
+  }
+
+  async function killSessionRemote(id: string): Promise<boolean> {
+    try {
+      const token = getToken();
+      const url = token
+        ? `/api/terminal/sessions/${encodeURIComponent(id)}?t=${encodeURIComponent(token)}`
+        : `/api/terminal/sessions/${encodeURIComponent(id)}`;
+      const response = await fetch(url, { method: "DELETE" });
+      return response.status === 204;
+    } catch {
+      return false;
+    }
+  }
+
+  // Pane-spawn with the session picker in front: when live sessions exist
+  // that this window isn't showing, offer attach / kill / new-shell instead
+  // of silently minting a fresh PTY — silent spawning is how orphaned
+  // sessions became invisible. Empty (filtered) inventory falls straight
+  // through to a fresh pane, keeping the zero-friction default.
+  async function addPaneInteractive(): Promise<void> {
+    if (panes.size >= TERMINAL_MAX_PANES) return;
+    const candidates = pickerCandidates(await fetchSessionInventory(), panes.keys());
+    // The await yields: bail if the panel closed or filled up meanwhile.
+    if (panel!.hasAttribute("hidden") || panes.size >= TERMINAL_MAX_PANES) return;
+    if (candidates.length === 0) {
+      addPane();
+      return;
+    }
+    renderSessionPicker(candidates);
+  }
+
+  function renderSessionPicker(candidates: TerminalSessionInfo[]) {
+    const wrap = document.createElement("div");
+    wrap.className = "terminal-pane terminal-picker";
+    const heading = document.createElement("p");
+    heading.className = "terminal-picker-heading";
+    heading.textContent = "Running sessions";
+    const list = document.createElement("div");
+    list.className = "terminal-picker-list";
+
+    const dismiss = () => wrap.remove();
+
+    for (const session of candidates) {
+      const row = document.createElement("div");
+      row.className = "terminal-picker-row";
+
+      const label = document.createElement("span");
+      label.className = "terminal-picker-label";
+      label.textContent = session.label;
+      const meta = document.createElement("span");
+      meta.className = "terminal-picker-meta";
+      meta.textContent = `${session.attached ? "attached elsewhere" : "detached"} · ${formatSessionAge(session.createdAt, Date.now())}`;
+
+      const attach = document.createElement("button");
+      attach.type = "button";
+      attach.className = "terminal-picker-attach";
+      attach.textContent = session.attached ? "Take over" : "Attach";
+      attach.addEventListener("click", () => {
+        dismiss();
+        addPane({ id: session.id, createdAt: Date.now() }, { takeover: session.attached });
+      });
+
+      const kill = document.createElement("button");
+      kill.type = "button";
+      kill.className = "terminal-picker-kill";
+      kill.textContent = "Kill";
+      kill.setAttribute("aria-label", `Kill session ${session.label}`);
+      kill.addEventListener("click", () => {
+        kill.disabled = true;
+        void killSessionRemote(session.id).then(ok => {
+          if (ok) {
+            row.remove();
+            if (list.childElementCount === 0) {
+              // Nothing left to offer — fall through to a fresh shell.
+              dismiss();
+              addPane();
+            }
+          } else {
+            kill.disabled = false;
+          }
+        });
+      });
+
+      row.append(label, meta, attach, kill);
+      list.append(row);
+    }
+
+    const fresh = document.createElement("button");
+    fresh.type = "button";
+    fresh.className = "terminal-picker-fresh";
+    fresh.textContent = "New shell";
+    fresh.addEventListener("click", () => {
+      dismiss();
+      addPane();
+    });
+
+    wrap.append(heading, list, fresh);
+    panesContainer!.appendChild(wrap);
+    requestAnimationFrame(() => fresh.focus());
   }
 
   function removePane(id: string) {
@@ -477,31 +634,73 @@ export function setupTerminalPanel(enabled: boolean, config?: { fontFamily?: str
     if (accepted && handler) handler();
   }
 
+  // A pane's WebSocket upgrade was refused while this window's credentials
+  // are valid: another window holds the pane's persisted sessionId. Swap in
+  // a rebuilt pane with a fresh id — the other window keeps the session, and
+  // this window stops publishing reattach hints so it can never clobber the
+  // claimant's.
+  function handlePaneCollision(id: string) {
+    const entry = panes.get(id);
+    if (!entry) return;
+    hintOwner = false;
+    try {
+      entry.handle.detach();
+    } catch {
+      // Mount already tore itself down.
+    }
+    panes.delete(id);
+    const fresh = buildPaneElement(
+      { id: crypto.randomUUID(), createdAt: entry.record.createdAt },
+      { collisionRecovery: false },
+    );
+    panes.set(fresh.record.id, fresh);
+    rebuildPanesContainer();
+    fresh.handle.attach();
+    if (activePaneId === id || activePaneId === null) {
+      setActivePane(fresh.record.id);
+    }
+    persistState();
+    requestAnimationFrame(() => fitAll());
+  }
+
   function requestClosePane(id: string) {
     const entry = panes.get(id);
     if (!entry) return;
     if (!entry.handle.isAttached()) {
-      // PTY has already been reaped (e.g. shell exited / disconnected). No
-      // session to lose, so close silently.
+      // The shell already exited (or the pane never attached). No session
+      // to lose, so close silently.
       removePane(id);
       return;
     }
-    openConfirmModal("pane", () => removePane(id));
+    openConfirmModal("pane", () => {
+      // The user accepted losing the session: terminate() closes with the
+      // user-terminate code so the server kills the PTY — a plain detach
+      // would leave the shell running forever with its pane record gone.
+      const current = panes.get(id);
+      try {
+        current?.handle.terminate();
+      } catch {
+        // Already torn down.
+      }
+      removePane(id);
+    });
   }
 
-  // Header × — destructive close: tears down every pane AND clears the
-  // persisted pane list so the next visibility toggle starts fresh. The
-  // keyboard toggle path (setVisible(false) without persist mutation) is
-  // intentionally non-destructive: it's symmetric with hide, and the user
-  // can re-toggle within the reaper grace to reattach.
+  // Header × — destructive close: terminates every session AND clears the
+  // persisted pane list so the next visibility toggle starts fresh. Must
+  // terminate (not detach): the pane records are wiped below, so a detached
+  // PTY would keep running with no way to ever reattach to it. The keyboard
+  // toggle path (setVisible(false) without persist mutation) is intentionally
+  // non-destructive: it's symmetric with hide, and the user can re-toggle to
+  // reattach to the still-live PTYs.
   function closeAllPanes() {
     for (const id of Array.from(panes.keys())) {
       const entry = panes.get(id);
       if (entry) {
         try {
-          entry.handle.detach();
+          entry.handle.terminate();
         } catch {
-          // Already detached.
+          // Already torn down.
         }
       }
       panes.delete(id);
@@ -523,15 +722,17 @@ export function setupTerminalPanel(enabled: boolean, config?: { fontFamily?: str
       applyDockToDom();
       applyDisplayModeToDom();
       // First show with no panes: spawn one. If the persisted pane list has
-      // entries (reload-restore path), reuse those sessionIds so the server
-      // can hand back live PTYs within the reconnect grace.
+      // entries (reload / browser-restart restore path), reuse those
+      // sessionIds so the server can hand back the still-live PTYs.
       if (panes.size === 0) {
         if (state.panes.length > 0) {
           for (const record of state.panes.slice(0, TERMINAL_MAX_PANES)) {
             addPane(record);
           }
         } else {
-          addPane();
+          // Nothing to restore: offer existing sessions (orphans, other
+          // windows' shells) before minting a fresh one.
+          void addPaneInteractive();
         }
       }
       requestAnimationFrame(() => fitAll());
@@ -539,8 +740,8 @@ export function setupTerminalPanel(enabled: boolean, config?: { fontFamily?: str
       panel!.setAttribute("hidden", "");
       resizer!.setAttribute("hidden", "");
       toggle!.setAttribute("aria-pressed", "false");
-      // Detach every pane on hide. The server's 5s grace window covers a
-      // re-show so this isn't destructive within the same tab.
+      // Detach every pane on hide. The PTYs keep running server-side, so a
+      // re-show reattaches to the same sessions — hiding is never destructive.
       for (const entry of panes.values()) {
         try {
           entry.handle.detach();
@@ -591,7 +792,9 @@ export function setupTerminalPanel(enabled: boolean, config?: { fontFamily?: str
 
   function splitActive() {
     if (panes.size >= TERMINAL_MAX_PANES) return;
-    addPane();
+    // Explicit new-pane action: same picker-first flow as the first open, so
+    // orphaned or other-window sessions are reachable from any window.
+    void addPaneInteractive();
   }
 
   // ------------- Wiring -------------
