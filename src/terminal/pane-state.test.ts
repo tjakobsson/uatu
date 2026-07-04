@@ -11,9 +11,13 @@ import {
   clampTerminalHeight,
   clampTerminalWidth,
   defaultTerminalPanelState,
+  TERMINAL_PANES_KEY,
+  readOwnPaneRecords,
   readTerminalHeightPreference,
   readTerminalPanelState,
   readTerminalVisiblePreference,
+  resolveBootPaneRecords,
+  writeOwnPaneRecords,
   writeTerminalHeightPreference,
   writeTerminalPanelState,
   writeTerminalVisiblePreference,
@@ -280,5 +284,60 @@ describe("defaultTerminalPanelState", () => {
     expect(state.bottomHeight).toBe(TERMINAL_DEFAULT_BOTTOM_HEIGHT);
     expect(state.rightWidth).toBe(TERMINAL_DEFAULT_RIGHT_WIDTH);
     expect(state.panes).toEqual([]);
+  });
+});
+
+describe("own pane records (sessionStorage) + restart hints", () => {
+  const paneA = { id: "11111111-1111-4111-8111-111111111111", createdAt: 1000 };
+  const paneB = { id: "22222222-2222-4222-8222-222222222222", createdAt: 2000 };
+
+  it("round-trips own records with the hintOwner flag", () => {
+    writeOwnPaneRecords(storage, { panes: [paneA, paneB], hintOwner: true });
+    expect(readOwnPaneRecords(storage)).toEqual({ panes: [paneA, paneB], hintOwner: true });
+    writeOwnPaneRecords(storage, { panes: [paneA], hintOwner: false });
+    expect(readOwnPaneRecords(storage)).toEqual({ panes: [paneA], hintOwner: false });
+  });
+
+  it("an empty pane list clears the store and reads as absent", () => {
+    writeOwnPaneRecords(storage, { panes: [paneA], hintOwner: true });
+    writeOwnPaneRecords(storage, { panes: [], hintOwner: true });
+    expect(readOwnPaneRecords(storage)).toBeNull();
+    expect(storage.dump()[TERMINAL_PANES_KEY]).toBeUndefined();
+  });
+
+  it("rejects malformed records the server would reject", () => {
+    storage.setItem(
+      TERMINAL_PANES_KEY,
+      JSON.stringify({ panes: [{ id: "not-a-uuid", createdAt: 1 }], hintOwner: true }),
+    );
+    expect(readOwnPaneRecords(storage)).toBeNull();
+    storage.setItem(TERMINAL_PANES_KEY, "{corrupt json");
+    expect(readOwnPaneRecords(storage)).toBeNull();
+  });
+
+  it("tolerates a throwing storage", () => {
+    const failing = createFailingStorage();
+    expect(readOwnPaneRecords(failing)).toBeNull();
+    expect(() => writeOwnPaneRecords(failing, { panes: [paneA], hintOwner: true })).not.toThrow();
+  });
+
+  it("boot resolution prefers this window's own records", () => {
+    const local = createMemoryStorage();
+    writeTerminalPanelState(local, { ...defaultTerminalPanelState(), panes: [paneA] });
+    writeOwnPaneRecords(storage, { panes: [paneB], hintOwner: false });
+    const resolved = resolveBootPaneRecords(storage, readTerminalPanelState(local));
+    expect(resolved).toEqual({ panes: [paneB], hintOwner: false });
+  });
+
+  it("boot resolution adopts the shared hints when no own records exist", () => {
+    const local = createMemoryStorage();
+    writeTerminalPanelState(local, { ...defaultTerminalPanelState(), panes: [paneA] });
+    const resolved = resolveBootPaneRecords(storage, readTerminalPanelState(local));
+    expect(resolved).toEqual({ panes: [paneA], hintOwner: true });
+  });
+
+  it("boot resolution with neither store yields fresh ownership and no panes", () => {
+    const resolved = resolveBootPaneRecords(storage, defaultTerminalPanelState());
+    expect(resolved).toEqual({ panes: [], hintOwner: true });
   });
 });

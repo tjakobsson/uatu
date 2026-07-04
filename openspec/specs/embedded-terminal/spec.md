@@ -1,9 +1,7 @@
 ## Purpose
 
 Define the embedded terminal capability: a dockable panel in the UatuCode UI that hosts one or more `xterm.js`-rendered terminals connected to real PTY shell processes running in the watched repository's working directory, complete with token-gated transport, per-session WebSockets, persistence, theming, dock/display modes, multi-pane splits, and `.uatu.json`-driven font configuration.
-
 ## Requirements
-
 ### Requirement: Bottom panel hosts an interactive terminal
 The UI SHALL provide a panel that, when visible, hosts one or more `xterm.js`-rendered terminals connected to real PTY shell processes running in the watched repository's working directory. The panel SHALL be hidden by default on first load and SHALL default its dock position to the bottom of the main content area.
 
@@ -173,22 +171,6 @@ The server SHALL expose a single WebSocket upgrade endpoint that proxies bytes b
 - **WHEN** the server is restarted
 - **THEN** the previous token no longer authenticates terminal upgrades
 
-### Requirement: Terminal lifecycle is bounded by the connection
-For each `sessionId`, the PTY SHALL be spawned on a successful WebSocket upgrade and terminated when its WebSocket closes. The server MAY hold the PTY for a reconnect grace window of up to 5 seconds, keyed by `sessionId`, before sending `SIGHUP`/`SIGTERM`, to absorb page reloads.
-
-#### Scenario: Disconnect kills the PTY
-- **WHEN** the browser closes a terminal WebSocket
-- **AND** no upgrade with the same `sessionId` arrives within 5 seconds
-- **THEN** that PTY process receives `SIGHUP` and is reaped
-
-#### Scenario: Reload reattaches to the same PTY within grace
-- **WHEN** the browser disconnects and within 5 seconds opens a new WebSocket with the same `sessionId` and a valid token
-- **THEN** the server reuses the existing PTY for that session and resumes I/O without spawning a new one
-
-#### Scenario: Server shutdown kills all PTYs
-- **WHEN** the uatu server is stopped (Ctrl+C or idle timeout)
-- **THEN** every live PTY is terminated as part of shutdown
-
 ### Requirement: Terminal WebSocket URL excludes fragment identifiers
 The browser-side terminal WebSocket URL builder SHALL strip the fragment identifier (`#…`) from the constructed URL before passing it to the `WebSocket` constructor. The fragment from `window.location` MUST NOT be propagated into the WebSocket URL. This applies to every connection attempt: initial attach, reconnect after disconnect, and reattach within the PTY grace window.
 
@@ -235,7 +217,7 @@ The control that toggles the terminal panel's visibility SHALL be located in the
 - **THEN** there is no terminal toggle button rendered inside the preview toolbar
 
 ### Requirement: Closing the terminal pane confirms loss of session
-When the user clicks the close (×) control on a pane that has at least one attached PTY, the UI SHALL display a confirmation modal warning that the shell session will be lost. The modal SHALL default focus to the cancel action and SHALL dismiss on `Esc`. The PTY SHALL only be torn down after the user explicitly confirms. Confirmation SHALL NOT be shown for the keyboard panel toggle, minimize, fullscreen toggle, or for closing a pane whose WebSocket is already detached.
+When the user clicks the close (×) control on a pane that has at least one attached PTY, the UI SHALL display a confirmation modal warning that the shell session will be lost. The modal SHALL default focus to the cancel action and SHALL dismiss on `Esc`. The PTY SHALL only be torn down after the user explicitly confirms, and teardown SHALL be effected by sending the explicit terminate signal to the server before closing the pane's WebSocket. Confirmation SHALL NOT be shown for the keyboard panel toggle, minimize, fullscreen toggle, or for closing a pane whose shell has already exited.
 
 #### Scenario: Close button on attached pane prompts confirmation
 - **WHEN** a pane has an attached PTY
@@ -253,16 +235,17 @@ When the user clicks the close (×) control on a pane that has at least one atta
 #### Scenario: Confirm tears down the pane
 - **WHEN** the confirmation modal is open
 - **AND** the user activates "Close terminal"
-- **THEN** the pane's WebSocket closes
-- **AND** the underlying PTY is reaped within the grace window
+- **THEN** the client sends the explicit terminate signal and the pane's WebSocket closes
+- **AND** the underlying PTY is killed by the server
 - **AND** the pane is removed from the panel; if it was the last pane, the panel hides
 
 #### Scenario: Keyboard toggle does not prompt
 - **WHEN** the user presses the panel toggle keyboard shortcut while the panel is visible
 - **THEN** the panel hides without showing a confirmation modal
+- **AND** no PTY is terminated
 
-#### Scenario: Detached pane closes without prompting
-- **WHEN** a pane's PTY has already been reaped (e.g., shell exited)
+#### Scenario: Exited pane closes without prompting
+- **WHEN** a pane's shell process has already exited
 - **AND** the user clicks the pane's close button
 - **THEN** the pane is removed immediately with no confirmation modal
 
@@ -462,3 +445,143 @@ When the page is running in `display-mode: standalone` AND `navigator.keyboard.l
 - **AND** the user splits the panel into multiple panes
 - **THEN** `navigator.keyboard.lock` is still called exactly once for the page lifetime
 - **AND** each pane's custom key handler is attached independently
+
+### Requirement: Detached PTY sessions persist until shell exit or server shutdown
+For each `sessionId`, the PTY SHALL be spawned on a successful WebSocket upgrade. When the WebSocket closes without an explicit terminate signal (tab close, browser quit, system sleep, network drop), the server SHALL detach the socket and keep the PTY running, keyed by `sessionId`, with no time limit. A detached session SHALL end only when its shell process exits, when the server shuts down, or when a client explicitly terminates it. A subsequent upgrade carrying the same `sessionId` SHALL reattach to the live PTY and SHALL replay recent output from the bounded replay buffer to seed the new client's canvas.
+
+#### Scenario: Browser close leaves the shell running
+- **WHEN** the browser closes a terminal WebSocket without sending the explicit terminate signal
+- **THEN** the PTY process keeps running
+- **AND** the session remains registered under its `sessionId` indefinitely
+
+#### Scenario: Reattach after an arbitrary detachment
+- **WHEN** a session is detached (e.g., the machine slept or the browser was closed)
+- **AND** a new WebSocket upgrade arrives later with the same `sessionId` and a valid token
+- **THEN** the server reuses the existing PTY without spawning a new one
+- **AND** recent output from the replay buffer is delivered to the new client
+
+#### Scenario: Explicit terminate kills the PTY
+- **WHEN** an attached client sends the explicit terminate signal for its session
+- **THEN** the PTY receives `SIGHUP`
+- **AND** the session is removed so a later upgrade with the same `sessionId` spawns a fresh PTY
+
+#### Scenario: Shell exit while detached removes the session
+- **WHEN** a detached session's shell process exits
+- **THEN** the session is removed from the registry
+- **AND** a later upgrade with the same `sessionId` spawns a fresh PTY
+
+#### Scenario: Server shutdown kills all PTYs
+- **WHEN** the uatu server is stopped
+- **THEN** every live PTY — attached or detached — is terminated as part of shutdown
+
+### Requirement: Terminal grid fits within the visible pane
+The terminal character grid SHALL always fit entirely within its pane host's content box: `rows × cellHeight` SHALL NOT exceed the vertical space available inside the pane's padding, and `cols × cellWidth` (plus the scrollbar allowance) SHALL NOT exceed the horizontal space. Grid-size measurements SHALL account for any padding applied around the terminal element so that no character row or column is ever clipped by the pane's overflow bounds. This SHALL hold at any pane size, including sizes produced by dragging the panel or inter-pane resizers to arbitrary pixel positions, in both docks, for single panes and splits.
+
+#### Scenario: Bottom row is fully visible at arbitrary pane heights
+- **WHEN** the terminal panel or an inter-pane resizer is dragged so a pane lands on an arbitrary pixel height
+- **THEN** the rendered grid's height (`rows × cellHeight`) is less than or equal to the pane host's content-box height
+- **AND** the last character row is fully visible, not partially clipped
+
+#### Scenario: Content at a split boundary is not swallowed
+- **WHEN** two panes are split and a shell prompt or TUI status line renders on the last row of the upper/left pane
+- **THEN** that row renders completely inside its own pane
+- **AND** no pixels of it are clipped by or bleed toward the neighboring pane
+
+#### Scenario: Padding is accounted for in fit measurement
+- **WHEN** visual padding is applied around the terminal rendering area
+- **THEN** the fit measurement subtracts that padding before computing rows and columns
+- **AND** the proposed grid changes accordingly rather than overflowing the clip bounds
+
+### Requirement: A sessionId collision resolves to a fresh session, not an auth prompt
+When a terminal WebSocket closes before opening, the client SHALL NOT assume an authentication failure. The client SHALL probe `GET /api/auth`; the server SHALL respond 204 when the request carries valid terminal credentials (auth cookie or `t` query token) and 401 otherwise. When the probe succeeds, the client SHALL treat the failed upgrade as a `sessionId` collision, mint a fresh `sessionId` for the pane, and reconnect. The paste-token form SHALL be shown only when the probe returns 401.
+
+#### Scenario: Second window gets its own shell without a token prompt
+- **WHEN** a second browser window of the same uatu instance opens the terminal while the first window holds the persisted `sessionId`
+- **THEN** the second window's pane connects with a freshly minted `sessionId` and reaches a working shell
+- **AND** no paste-token form is shown
+
+#### Scenario: First window is unaffected by the collision
+- **WHEN** the second window resolves its collision with a fresh session
+- **THEN** the first window's attached session continues uninterrupted
+
+#### Scenario: Genuine auth failure still shows the paste-token form
+- **WHEN** a terminal WebSocket closes before opening
+- **AND** `GET /api/auth` returns 401 (stale cookie after a uatu restart, or a fresh PWA window with no credentials)
+- **THEN** the paste-token form is shown
+
+#### Scenario: Probe endpoint gates on credentials
+- **WHEN** `GET /api/auth` is requested with a valid auth cookie or a valid `t` query token
+- **THEN** the server responds 204
+- **WHEN** it is requested with no or invalid credentials
+- **THEN** the server responds 401
+
+### Requirement: Pane reattach hints are single-claimant across windows
+Per-pane session records SHALL be owned by the window that created them (per-window storage that survives reload of that window). A shared copy of the records SHALL be kept as restart reattach hints. A window that has its own records SHALL use them. A window with no records SHALL attempt to adopt the shared hints; adoption is arbitrated by the server's duplicate-sessionId rejection — the first claimant adopts, and later windows SHALL fall back to fresh sessions WITHOUT overwriting the shared hints. Shared layout preferences (dock, sizes, display mode) remain shared across windows.
+
+#### Scenario: Reload reattaches a window's own sessions
+- **WHEN** a window with live terminal panes reloads
+- **THEN** it reattaches to the same sessions it held before the reload, regardless of what other windows are doing
+
+#### Scenario: First window after browser restart adopts the hinted sessions
+- **WHEN** the browser restarts and a window opens the terminal with no per-window records
+- **THEN** it adopts the shared hints and reattaches to the still-running PTYs
+
+#### Scenario: A collision loser does not clobber the hints
+- **WHEN** a second window fails to claim a hinted `sessionId` and falls back to a fresh session
+- **THEN** the shared hints still reference the first claimant's sessions
+- **AND** the first window can still reattach to them after its own reload or a browser restart
+
+### Requirement: Server exposes an authenticated session inventory
+The server SHALL expose `GET /api/terminal/sessions`, gated by the same credentials as the terminal upgrade (auth cookie or `t` query token), returning every live PTY session with: `sessionId`, attachment state (attached/detached), creation time, current dimensions, and a human label (at minimum the shell name; the foreground process name where cheaply obtainable on the platform). The server SHALL also expose `DELETE /api/terminal/sessions/<id>` with the same gate, which SHALL terminate the session's PTY and remove it from the registry. Both endpoints SHALL reject unauthenticated requests with 401 and unknown session ids with 404.
+
+#### Scenario: Inventory lists attached and detached sessions
+- **WHEN** one window holds an attached session and another session is detached (its window closed)
+- **AND** an authenticated client requests `GET /api/terminal/sessions`
+- **THEN** the response lists both sessions with their attachment states and labels
+
+#### Scenario: Kill removes a detached session
+- **WHEN** an authenticated client sends `DELETE /api/terminal/sessions/<id>` for a detached session
+- **THEN** the PTY receives `SIGHUP` and the session disappears from subsequent inventory responses
+
+#### Scenario: Unauthenticated access is refused
+- **WHEN** either endpoint is requested without valid credentials
+- **THEN** the server responds 401 and reveals nothing about sessions
+
+### Requirement: A client can attach to any session, taking over attached ones
+The WebSocket upgrade SHALL accept a `takeover=1` query parameter. For a detached session the upgrade behaves as a normal reattach. For an attached session with `takeover=1`, the server SHALL close the current holder's socket with app close code 4410 ("session taken"), attach the new socket, and replay the buffer to it. Without `takeover=1`, an attached session SHALL continue to be refused with 409. A pane whose socket is closed with 4410 SHALL display an "attached in another window" notice with an explicit take-back action; it SHALL NOT be torn down automatically and SHALL NOT re-claim the session without user action.
+
+#### Scenario: Takeover moves a live session between windows
+- **WHEN** window 2 attaches to window 1's attached session with `takeover=1`
+- **THEN** window 2's pane shows the session's screen and receives subsequent output
+- **AND** window 1's pane shows the "attached in another window" notice instead of a dead pane
+
+#### Scenario: Take-back reverses the takeover
+- **WHEN** the user activates the take-back action on a taken-over pane
+- **THEN** that pane reattaches with `takeover=1` and the other window's pane shows the notice
+
+#### Scenario: No silent ping-pong
+- **WHEN** a pane's session is taken over
+- **THEN** the losing pane makes no automatic reconnection attempt for that session
+
+#### Scenario: Takeover of a detached session is a plain reattach
+- **WHEN** a client attaches with `takeover=1` to a session with no current holder
+- **THEN** the behavior is identical to the existing reattach path
+
+### Requirement: New panes offer existing sessions instead of silently spawning
+When the terminal panel is about to create a pane (first open with no restorable records, or an explicit new-pane action) and the session inventory contains sessions not already shown in this window, the pane area SHALL offer a picker listing those sessions with their labels and attachment states, offering: attach (using takeover when the session is attached elsewhere), kill, and "new shell". Selecting "new shell" — or the inventory being empty — SHALL spawn a fresh PTY as today. The picker SHALL be skippable without a session choice becoming sticky state.
+
+#### Scenario: Orphaned session is recoverable from a new window
+- **WHEN** a window with a running program (e.g. htop) closes for good, orphaning its detached session
+- **AND** a new window opens the terminal panel
+- **THEN** the picker lists the orphaned session with its label
+- **AND** choosing it attaches the pane to the still-running program
+
+#### Scenario: Empty inventory spawns directly
+- **WHEN** the panel opens with no live sessions beyond this window's own
+- **THEN** a fresh shell spawns with no picker interposed
+
+#### Scenario: Kill from the picker
+- **WHEN** the user activates kill on a listed detached session
+- **THEN** the session is terminated via the DELETE endpoint and leaves the list
+- **AND** no pane attaches to it
+

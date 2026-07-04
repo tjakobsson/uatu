@@ -29,11 +29,9 @@ const hostShell = process.env.SHELL;
 
 // Wire `terminal-server` into a Bun.serve that mirrors the production
 // upgrade gate: parse `sessionId` from the URL, call `prepareSession`, map
-// results to HTTP statuses, then upgrade. Tests that need a custom grace
-// window pass it through `options.reconnectGraceMs`.
+// results to HTTP statuses, then upgrade.
 function startServer(
   options: {
-    reconnectGraceMs?: number;
     shell?: string;
     env?: NodeJS.ProcessEnv;
   } = {},
@@ -45,11 +43,12 @@ function startServer(
     fetch(request, srv) {
       const url = new URL(request.url);
       const sessionId = url.searchParams.get("sessionId") ?? "";
-      const result = terminal.prepareSession(sessionId);
+      const takeover = url.searchParams.get("takeover") === "1";
+      const result = terminal.prepareSession(sessionId, { takeover });
       if (result.kind === "invalid") return new Response("invalid sessionId", { status: 400 });
       if (result.kind === "collision") return new Response("sessionId in use", { status: 409 });
       const ok = (srv.upgrade as (req: Request, opts: { data: unknown }) => boolean)(request, {
-        data: { sessionId },
+        data: { sessionId, takeover },
       });
       if (!ok) return new Response("upgrade failed", { status: 500 });
       return undefined;
@@ -61,8 +60,8 @@ function startServer(
       message: (socket, msg) => {
         terminal.message(socket as never, msg as never);
       },
-      close: socket => {
-        terminal.close(socket as never);
+      close: (socket, code) => {
+        terminal.close(socket as never, code);
       },
     },
   });
@@ -392,15 +391,36 @@ describe.skipIf(!backendOk)("terminal-server shell fallback notice", () => {
   }, 8000);
 });
 
-// Separate suite for the disconnect-grace timer because it spins up its own
-// terminal-server with a tiny grace window; can't reuse the global beforeEach
-// fixture which fixes the production 5-second default.
-describe.skipIf(!backendOk)("terminal-server reconnect grace", () => {
-  it("reaps the PTY after the grace window when no reconnect arrives", async () => {
-    const grace = 60;
-    const local = startServer({ reconnectGraceMs: grace });
+// Poll `prepareSession` until it reports the expected lifecycle state. The
+// server's close callback runs asynchronously relative to the client's close
+// event, so a single immediate check would race it. prepareSession doubles as
+// external observability: "collision" = attached, "reattach" = detached with
+// a live PTY, "fresh" = session gone.
+async function waitForSessionKind(
+  terminal: TerminalServer,
+  sessionId: string,
+  expected: "fresh" | "reattach",
+  timeoutMs = 2000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const kind = terminal.prepareSession(sessionId).kind;
+    if (kind === expected) return;
+    if (Date.now() > deadline) {
+      throw new Error(`session '${sessionId}' never became '${expected}' (last: '${kind}')`);
+    }
+    await new Promise<void>(resolve => setTimeout(resolve, 25));
+  }
+}
+
+// Detach/persist lifecycle: a plain disconnect keeps the PTY; only the
+// app-defined user-terminate close code (4001) kills it.
+describe.skipIf(!backendOk)("terminal-server detached-session persistence", () => {
+  it("keeps the PTY alive after a plain disconnect", async () => {
+    const local = startServer();
+    const id = freshSessionId();
     try {
-      const ws = new WebSocket(`ws://127.0.0.1:${local.port}/?sessionId=${freshSessionId()}`);
+      const ws = new WebSocket(`ws://127.0.0.1:${local.port}/?sessionId=${id}`);
       await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => reject(new Error("open timeout")), 1500);
         ws.addEventListener("open", () => {
@@ -430,25 +450,107 @@ describe.skipIf(!backendOk)("terminal-server reconnect grace", () => {
         ),
       ]);
 
+      // Plain close (default code 1000/1005) — the session must detach, NOT
+      // die. Give it well over the old 5s-grace-era timings scaled down: any
+      // reap would land within milliseconds of a timer, so a generous settle
+      // window plus a stable "reattach" answer proves there is no timer.
       ws.close();
-
-      // Wait past the grace window. We can't introspect the internal sessions
-      // map, so we verify disposeAll() runs cleanly (idempotent over the
-      // already-reaped session).
-      await new Promise<void>(resolve => setTimeout(resolve, grace + 200));
-      expect(() => local.terminal.disposeAll()).not.toThrow();
+      await waitForSessionKind(local.terminal, id, "reattach");
+      await new Promise<void>(resolve => setTimeout(resolve, 300));
+      expect(local.terminal.prepareSession(id)).toEqual({ kind: "reattach" });
     } finally {
       local.terminal.disposeAll();
       local.server.stop(true);
     }
   }, 6000);
 
-  it("reattaches to the same PTY when an upgrade arrives within the grace window", async () => {
-    // Big grace so the test is timing-tolerant. The reattach path is
-    // synchronous on the server side; we just need the timer not to fire
-    // between disconnect and reconnect.
-    const grace = 5_000;
-    const local = startServer({ reconnectGraceMs: grace });
+  it("kills the PTY when the client closes with the user-terminate code", async () => {
+    const local = startServer();
+    const id = freshSessionId();
+    try {
+      const ws = new WebSocket(`ws://127.0.0.1:${local.port}/?sessionId=${id}`);
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("open timeout")), 1500);
+        ws.addEventListener("open", () => {
+          clearTimeout(timeout);
+          resolve();
+        });
+        ws.addEventListener("error", err => {
+          clearTimeout(timeout);
+          reject(err as unknown as Error);
+        });
+      });
+
+      // 4001 = CLOSE_CODE_USER_TERMINATE (confirmed pane close). The session
+      // must be removed entirely so the id can be claimed fresh.
+      ws.close(4001, "user-close");
+      await waitForSessionKind(local.terminal, id, "fresh");
+    } finally {
+      local.terminal.disposeAll();
+      local.server.stop(true);
+    }
+  }, 6000);
+
+  it("removes the session when the shell exits while detached", async () => {
+    const local = startServer();
+    const id = freshSessionId();
+    try {
+      const ws = new WebSocket(`ws://127.0.0.1:${local.port}/?sessionId=${id}`);
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("open timeout")), 1500);
+        ws.addEventListener("open", () => {
+          clearTimeout(timeout);
+          resolve();
+        });
+        ws.addEventListener("error", err => {
+          clearTimeout(timeout);
+          reject(err as unknown as Error);
+        });
+      });
+
+      // Replace the shell with a short-lived process, then detach. The PTY
+      // exits ~500ms later with nobody attached; the onExit handler must
+      // still free the session slot so the id can be claimed fresh.
+      ws.send(new TextEncoder().encode("exec sleep 0.5\r\n"));
+      ws.close();
+      await waitForSessionKind(local.terminal, id, "reattach");
+      await waitForSessionKind(local.terminal, id, "fresh", 4000);
+    } finally {
+      local.terminal.disposeAll();
+      local.server.stop(true);
+    }
+  }, 8000);
+
+  it("disposeAll kills detached sessions too", async () => {
+    const local = startServer();
+    const id = freshSessionId();
+    try {
+      const ws = new WebSocket(`ws://127.0.0.1:${local.port}/?sessionId=${id}`);
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("open timeout")), 1500);
+        ws.addEventListener("open", () => {
+          clearTimeout(timeout);
+          resolve();
+        });
+        ws.addEventListener("error", err => {
+          clearTimeout(timeout);
+          reject(err as unknown as Error);
+        });
+      });
+
+      ws.close();
+      await waitForSessionKind(local.terminal, id, "reattach");
+      // Server shutdown path: detached sessions must not outlive disposeAll.
+      local.terminal.disposeAll();
+      expect(local.terminal.prepareSession(id)).toEqual({ kind: "fresh" });
+    } finally {
+      local.terminal.disposeAll();
+      local.server.stop(true);
+    }
+  }, 6000);
+
+  it("reattaches to the same PTY when an upgrade arrives after a disconnect", async () => {
+    const local = startServer();
     const id = freshSessionId();
     try {
       // First connection: send a marker that the shell will print on exit
@@ -477,8 +579,9 @@ describe.skipIf(!backendOk)("terminal-server reconnect grace", () => {
       });
       ws1.close();
       await ws1Closed;
+      await waitForSessionKind(local.terminal, id, "reattach");
 
-      // Reattach within the grace window.
+      // Reattach to the detached session.
       const ws2 = new WebSocket(`ws://127.0.0.1:${local.port}/?sessionId=${id}`);
       await new Promise<void>((resolve, reject) => {
         const t = setTimeout(() => reject(new Error("ws2 open timeout")), 1500);
@@ -511,6 +614,158 @@ describe.skipIf(!backendOk)("terminal-server reconnect grace", () => {
       } finally {
         ws2.close();
       }
+    } finally {
+      local.terminal.disposeAll();
+      local.server.stop(true);
+    }
+  }, 8000);
+});
+
+// Session inventory + takeover semantics (add-terminal-session-manager).
+describe.skipIf(!backendOk)("terminal-server session manager", () => {
+  function openSocket(port: number, id: string, takeover = false): Promise<WebSocket> {
+    const params = takeover ? `sessionId=${id}&takeover=1` : `sessionId=${id}`;
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/?${params}`);
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("open timeout")), 1500);
+      ws.addEventListener("open", () => {
+        clearTimeout(timeout);
+        resolve(ws);
+      });
+      ws.addEventListener("error", err => {
+        clearTimeout(timeout);
+        reject(err as unknown as Error);
+      });
+    });
+  }
+
+  it("lists sessions with attachment state and kills detached ones", async () => {
+    const local = startServer();
+    const idA = freshSessionId();
+    const idB = freshSessionId();
+    try {
+      const wsA = await openSocket(local.port, idA);
+      const wsB = await openSocket(local.port, idB);
+      // Detach B, keep A attached.
+      wsB.close();
+      await waitForSessionKind(local.terminal, idB, "reattach");
+
+      const listed = await local.terminal.listSessions();
+      const a = listed.find(s => s.id === idA);
+      const b = listed.find(s => s.id === idB);
+      expect(a?.attached).toBe(true);
+      expect(b?.attached).toBe(false);
+      expect(typeof a?.createdAt).toBe("number");
+      expect((a?.label ?? "").length).toBeGreaterThan(0);
+
+      // Kill the detached session; it leaves the inventory and its id frees.
+      expect(local.terminal.killSession(idB)).toBe(true);
+      expect(local.terminal.killSession(idB)).toBe(false);
+      const after = await local.terminal.listSessions();
+      expect(after.some(s => s.id === idB)).toBe(false);
+      expect(local.terminal.prepareSession(idB)).toEqual({ kind: "fresh" });
+
+      wsA.close();
+    } finally {
+      local.terminal.disposeAll();
+      local.server.stop(true);
+    }
+  }, 8000);
+
+  it("prepareSession distinguishes takeover from collision", async () => {
+    const local = startServer();
+    const id = freshSessionId();
+    try {
+      const ws = await openSocket(local.port, id);
+      expect(local.terminal.prepareSession(id).kind).toBe("collision");
+      expect(local.terminal.prepareSession(id, { takeover: false }).kind).toBe("collision");
+      expect(local.terminal.prepareSession(id, { takeover: true }).kind).toBe("takeover");
+      ws.close();
+    } finally {
+      local.terminal.disposeAll();
+      local.server.stop(true);
+    }
+  }, 6000);
+
+  it("a reused sessionId survives the killed predecessor's late exit", async () => {
+    const local = startServer();
+    const id = freshSessionId();
+    try {
+      const ws1 = await openSocket(local.port, id);
+      // Kill eagerly (map entry removed immediately), then claim the same id
+      // for a fresh PTY before the old shell's exit event has fired. The old
+      // PTY's onExit must not delete the new session's registry entry.
+      expect(local.terminal.killSession(id)).toBe(true);
+      expect(local.terminal.prepareSession(id)).toEqual({ kind: "fresh" });
+      const ws2 = await openSocket(local.port, id);
+
+      // Give the killed shell ample time to exit and fire its handler.
+      await new Promise<void>(resolve => setTimeout(resolve, 500));
+      const listed = await local.terminal.listSessions();
+      expect(listed.find(s => s.id === id)?.attached).toBe(true);
+
+      ws1.close();
+      ws2.close();
+    } finally {
+      local.terminal.disposeAll();
+      local.server.stop(true);
+    }
+  }, 8000);
+
+  it("takeover moves the session: loser gets 4410, winner gets the replay and the PTY", async () => {
+    const local = startServer();
+    const id = freshSessionId();
+    try {
+      const ws1 = await openSocket(local.port, id);
+
+      // Put a marker into the replay buffer via a real echo round-trip.
+      const marked = new Promise<void>(resolve => {
+        ws1.addEventListener("message", function onMsg(event) {
+          if (decode(event.data).includes("takeover-marker")) {
+            ws1.removeEventListener("message", onMsg);
+            resolve();
+          }
+        });
+      });
+      ws1.send(new TextEncoder().encode("echo takeover-marker\r\n"));
+      await Promise.race([
+        marked,
+        new Promise<void>((_r, reject) =>
+          setTimeout(() => reject(new Error("never saw takeover-marker")), 2000),
+        ),
+      ]);
+
+      const ws1Taken = new Promise<number>(resolve => {
+        ws1.addEventListener("close", event => resolve(event.code));
+      });
+
+      // Second client claims with takeover.
+      const ws2 = await openSocket(local.port, id, true);
+      const replayed = new Promise<void>(resolve => {
+        ws2.addEventListener("message", function onMsg(event) {
+          if (decode(event.data).includes("takeover-marker")) {
+            ws2.removeEventListener("message", onMsg);
+            resolve();
+          }
+        });
+      });
+
+      // Loser is closed with the app-defined "session taken" code.
+      expect(await ws1Taken).toBe(4410);
+      // Winner received the replayed buffer (the marker) and owns the PTY.
+      await Promise.race([
+        replayed,
+        new Promise<void>((_r, reject) =>
+          setTimeout(() => reject(new Error("replay never reached the new holder")), 2000),
+        ),
+      ]);
+      const listed = await local.terminal.listSessions();
+      expect(listed.find(s => s.id === id)?.attached).toBe(true);
+
+      // The session survived the swap: still exactly one registry entry.
+      expect(listed.filter(s => s.id === id)).toHaveLength(1);
+      ws2.close();
+      await waitForSessionKind(local.terminal, id, "reattach");
     } finally {
       local.terminal.disposeAll();
       local.server.stop(true);

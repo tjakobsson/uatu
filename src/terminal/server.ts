@@ -1,18 +1,31 @@
 // Server-side companion to the browser terminal pane. Owns the PTY processes
-// spawned for connected clients, plus the short reconnect-grace window that
-// absorbs page reloads. The Bun WebSocket handler is split across two surfaces
-// (`upgrade` data + `websocket` callbacks) and we want all PTY state in one
-// place — hence this module rather than inline glue in `cli.ts`.
+// spawned for connected clients. PTY lifetime follows tmux-detach semantics:
+// a socket disconnect (tab close, browser quit, system sleep, network drop)
+// detaches the session and the PTY keeps running until its shell exits, the
+// client explicitly terminates it (close code 4001), or the server shuts
+// down. The Bun WebSocket handler is split across two surfaces (`upgrade`
+// data + `websocket` callbacks) and we want all PTY state in one place —
+// hence this module rather than inline glue in `cli.ts`.
 
 import type { ServerWebSocket } from "bun";
 
 import { resolveTerminalBackend } from "./backend";
+import { resolveForegroundLabels } from "./process-label";
 import { SHELL_FALLBACK_NOTICE, shellIsUnset } from "./shell-warning";
 import type { PtyProcess } from "./pty";
 
-type SocketData = { sessionId: string };
+type SocketData = { sessionId: string; takeover?: boolean };
 
-const DEFAULT_RECONNECT_GRACE_MS = 5_000;
+// App-defined close code the client sends from the confirmed pane-close path.
+// It is the ONLY close code that kills the PTY; everything else — 1001
+// (navigation), 1006 (abrupt drop, sleep) — detaches and persists, so the
+// failure mode of any dropped connection is always "session survives". 4001
+// avoids colliding with the other app codes below.
+export const CLOSE_CODE_USER_TERMINATE = 4001;
+// Server→client: this socket lost its session to a takeover claim from
+// another client. The receiving pane parks (notice + explicit take-back)
+// rather than tearing down — the session is alive, just elsewhere.
+export const CLOSE_CODE_SESSION_TAKEN = 4410;
 // WebSocket.OPEN. Not exposed as a named constant on Bun's ServerWebSocket type.
 const WS_OPEN = 1;
 // Cap the per-session replay buffer. On reattach we resend recent PTY output
@@ -43,8 +56,11 @@ type Session = {
   id: string;
   pty: PtyProcess;
   socket: ServerWebSocket<SocketData> | null;
-  // Grace timer: when fired, the PTY is killed and the session is removed.
-  reapTimer: ReturnType<typeof setTimeout> | null;
+  // Wall-clock millis at spawn; surfaces as age in the session inventory.
+  createdAt: number;
+  // Basename of the spawned shell — the inventory label fallback when no
+  // foreground process can be resolved.
+  shellName: string;
   cols: number;
   rows: number;
   // Replay buffer: recent PTY output captured in chunk-sized pieces. Used on
@@ -70,10 +86,6 @@ export type TerminalServerOptions = {
   // The fit addon will send one within a frame or two so these are placeholders.
   initialCols?: number;
   initialRows?: number;
-  // Override the disconnect grace window in milliseconds. Production keeps
-  // the 5s default; tests pass a small value (e.g. 50) so the SIGHUP path
-  // can be exercised without a real-time pause.
-  reconnectGraceMs?: number;
   // Optional metrics sink — wired by cli.ts so the diagnostics layer can
   // see PTY lifecycle without every caller threading the registry through.
   metrics?: { inc(name: string): void; set(name: string, value: number): void; get(name: string): number };
@@ -83,15 +95,30 @@ export type PrepareSessionResult =
   // The id is well-formed and free; the upgrade should proceed and `open()`
   // will spawn a fresh PTY.
   | { kind: "fresh" }
-  // The id is well-formed and matches a session whose socket has detached but
-  // whose PTY is still in the reconnect-grace window. The upgrade should
-  // proceed and `open()` will reattach to the existing PTY.
+  // The id is well-formed and matches a detached session whose PTY is still
+  // running. The upgrade should proceed and `open()` will reattach to the
+  // existing PTY, however long ago the previous socket went away.
   | { kind: "reattach" }
+  // The id matches an ATTACHED session and the caller requested takeover:
+  // the upgrade should proceed and `open()` will detach the current holder
+  // (close code 4410) before attaching the new socket.
+  | { kind: "takeover" }
   // Caller passed a malformed / missing id. cli.ts maps this to HTTP 400.
   | { kind: "invalid" }
-  // Caller's id matches an active session (socket still attached). cli.ts
-  // maps this to HTTP 409.
+  // Caller's id matches an active session (socket still attached) and no
+  // takeover was requested. cli.ts maps this to HTTP 409.
   | { kind: "collision" };
+
+// One row of the session inventory returned by `GET /api/terminal/sessions`.
+export type TerminalSessionInfo = {
+  id: string;
+  attached: boolean;
+  createdAt: number;
+  cols: number;
+  rows: number;
+  // Foreground process name when resolvable, else the shell basename.
+  label: string;
+};
 
 export type TerminalServer = {
   // Returns true if a PTY backend is loadable in this process. The CLI uses
@@ -99,20 +126,29 @@ export type TerminalServer = {
   isAvailable(): Promise<boolean>;
   // Pre-upgrade gate: validates the client-supplied `sessionId` and reports
   // whether the upgrade should produce a fresh PTY, reattach to an existing
-  // one, or be rejected. cli.ts uses the result to choose the HTTP status
-  // code and to populate `socket.data` for the websocket handler.
-  prepareSession(sessionId: unknown): PrepareSessionResult;
+  // one, take over an attached one, or be rejected. cli.ts uses the result
+  // to choose the HTTP status code and to populate `socket.data` for the
+  // websocket handler.
+  prepareSession(sessionId: unknown, options?: { takeover?: boolean }): PrepareSessionResult;
+  // Session inventory for GET /api/terminal/sessions. Async because labels
+  // are resolved from one best-effort `ps` snapshot.
+  listSessions(): Promise<TerminalSessionInfo[]>;
+  // Kill one session without attaching (DELETE /api/terminal/sessions/<id>).
+  // Returns false for an unknown id.
+  killSession(sessionId: string): boolean;
   // Wired into Bun.serve's `websocket` config.
   open(socket: ServerWebSocket<SocketData>): Promise<void>;
   message(socket: ServerWebSocket<SocketData>, data: string | Buffer): void;
-  close(socket: ServerWebSocket<SocketData>): void;
-  // Kill every PTY. Called on server shutdown.
+  // `code` is the WebSocket close code Bun hands the close callback. The
+  // explicit user-terminate code kills the PTY; any other close detaches the
+  // session and keeps the PTY running.
+  close(socket: ServerWebSocket<SocketData>, code?: number): void;
+  // Kill every PTY, attached or detached. Called on server shutdown.
   disposeAll(): void;
 };
 
 export function createTerminalServer(options: TerminalServerOptions): TerminalServer {
   const sessions = new Map<string, Session>();
-  const graceMs = options.reconnectGraceMs ?? DEFAULT_RECONNECT_GRACE_MS;
   const metrics = options.metrics;
   const updateActive = (): void => {
     metrics?.set("pty.sessions_active", sessions.size);
@@ -123,38 +159,87 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
       return (await resolveTerminalBackend()).available;
     },
 
-    prepareSession(sessionId) {
+    prepareSession(sessionId, options) {
       if (!isValidSessionId(sessionId)) return { kind: "invalid" };
       const existing = sessions.get(sessionId);
       if (!existing) return { kind: "fresh" };
-      // A live socket means the same id is still in use — reject so concurrent
-      // PTYs from one tab don't get cross-wired.
-      if (existing.socket !== null) return { kind: "collision" };
-      // Detached but in the grace window — the next upgrade reattaches.
+      if (existing.socket !== null) {
+        // Attached elsewhere. An explicit takeover claim moves the session;
+        // without it, reject so concurrent PTYs from one tab don't get
+        // cross-wired (and the collision-recovery path stays intact).
+        return options?.takeover ? { kind: "takeover" } : { kind: "collision" };
+      }
+      // Detached with a live PTY — the next upgrade reattaches.
       return { kind: "reattach" };
+    },
+
+    async listSessions() {
+      const entries = Array.from(sessions.values());
+      const labels = await resolveForegroundLabels(entries.map(s => s.pty.pid)).catch(
+        () => new Map<number, string>(),
+      );
+      return entries.map(s => ({
+        id: s.id,
+        attached: s.socket !== null,
+        createdAt: s.createdAt,
+        cols: s.cols,
+        rows: s.rows,
+        label: labels.get(s.pty.pid) ?? s.shellName,
+      }));
+    },
+
+    killSession(sessionId) {
+      const session = sessions.get(sessionId);
+      if (!session) return false;
+      // An attached holder learns its shell died the normal way: SIGHUP →
+      // pty.onExit → exit frame + close(1000) on its socket.
+      try {
+        session.pty.kill("SIGHUP");
+      } catch {
+        // Already dead.
+      }
+      // Remove immediately so the inventory reflects the kill on the next
+      // request; pty.onExit's own delete is an idempotent no-op. Metrics
+      // accounting stays with onExit to keep reaped_total single-counted.
+      sessions.delete(sessionId);
+      updateActive();
+      return true;
     },
 
     async open(socket) {
       const id = socket.data.sessionId;
       const existing = sessions.get(id);
       if (existing && existing.socket !== null) {
-        // Lost a race against another upgrade for the same id (the pre-upgrade
-        // gate is best-effort). Refuse the new socket so the older session
-        // keeps its PTY. Using a 4xxx app-defined close code so the client
-        // can distinguish "your session was hijacked" from a generic
-        // disconnect; 1008 (policy violation) is too generic.
-        socket.close(4409, "sessionId in use");
-        return;
+        if (socket.data.takeover) {
+          // Explicit takeover claim: detach the current holder with the
+          // "session taken" code so its pane parks (notice + take-back)
+          // instead of dying, then fall through to the reattach path with
+          // the new socket. Swap the reference BEFORE closing so the old
+          // socket's close callback fails the ownership guard in `close()`
+          // and cannot detach the new holder.
+          const previous = existing.socket;
+          existing.socket = null;
+          try {
+            previous.close(CLOSE_CODE_SESSION_TAKEN, "session taken");
+          } catch {
+            // Already closing.
+          }
+        } else {
+          // Lost a race against another upgrade for the same id (the
+          // pre-upgrade gate is best-effort). Refuse the new socket so the
+          // older session keeps its PTY. Using a 4xxx app-defined close code
+          // so the client can distinguish "your session was hijacked" from a
+          // generic disconnect; 1008 (policy violation) is too generic.
+          socket.close(4409, "sessionId in use");
+          return;
+        }
       }
 
       if (existing) {
-        // Reattach path: cancel the reaper and swap in the new socket. The
-        // PTY keeps running. The reattaching client will send its own
-        // `{ type: "resize", cols, rows }` from its WebSocket open handler,
-        // so the PTY's pty-side dimensions get re-synced to whatever the
-        // new tab's xterm reports.
-        if (existing.reapTimer) clearTimeout(existing.reapTimer);
-        existing.reapTimer = null;
+        // Reattach path: swap in the new socket. The PTY keeps running. The
+        // reattaching client will send its own `{ type: "resize", cols, rows }`
+        // from its WebSocket open handler, so the PTY's pty-side dimensions
+        // get re-synced to whatever the new tab's xterm reports.
         existing.socket = socket;
 
         // Replay the recent PTY output to the new client's blank xterm
@@ -243,7 +328,8 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
         id,
         pty,
         socket,
-        reapTimer: null,
+        createdAt: Date.now(),
+        shellName: shell.split("/").at(-1) ?? shell,
         cols,
         rows,
         replayChunks: [],
@@ -261,15 +347,15 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
         try {
           socket.send(new TextEncoder().encode(SHELL_FALLBACK_NOTICE));
         } catch {
-          // Socket closing/closed; the close handler reaps the PTY.
+          // Socket closing/closed; the close handler detaches the session.
         }
       }
 
       pty.onData(bytes => {
         // Capture before forwarding so the replay buffer also records output
-        // produced while the socket is detached (during the grace window) —
-        // a TUI like htop refreshes every ~1.5s and we want the reattaching
-        // client to see the freshest frame, not a stale pre-disconnect one.
+        // produced while the socket is detached — a TUI like htop refreshes
+        // every ~1.5s and we want the reattaching client to see the freshest
+        // frame, not a stale pre-disconnect one.
         // Bun reuses the same backing storage for the PTY callback's
         // Uint8Array, so we MUST copy before stashing into the replay
         // ring. socket.send() handles its own copy; the buffer doesn't.
@@ -288,7 +374,7 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
           try {
             session.socket.send(bytes);
           } catch {
-            // Socket is closing/closed; the close handler will reap the PTY.
+            // Socket is closing/closed; the close handler detaches the session.
           }
         }
       });
@@ -306,16 +392,29 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
             // No-op: just cleanup below.
           }
         }
-        if (session.reapTimer) clearTimeout(session.reapTimer);
-        sessions.delete(id);
+        // Runs for attached AND detached sessions alike — a shell exiting
+        // while nobody is connected still frees its session slot, so a later
+        // upgrade with the same sessionId spawns fresh. Identity-guarded:
+        // killSession() and the user-terminate close remove the entry
+        // eagerly, and the id may have been REUSED for a fresh PTY by the
+        // time this exit fires — deleting by id alone would drop that new
+        // session from routing and the inventory.
+        if (sessions.get(id) === session) {
+          sessions.delete(id);
+          updateActive();
+        }
         metrics?.inc("pty.reaped_total");
-        updateActive();
       });
     },
 
     message(socket, data) {
       const session = sessions.get(socket.data.sessionId);
       if (!session) return;
+      // Ownership guard: after a takeover the previous holder's close
+      // handshake is asynchronous, and its already-queued input/resize
+      // frames still arrive here. Only the session's current socket may
+      // write to or resize the PTY.
+      if (session.socket !== socket) return;
 
       if (typeof data === "string") {
         // Control frame (resize, ping, ...)
@@ -350,30 +449,39 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
       }
     },
 
-    close(socket) {
+    close(socket, code) {
       const session = sessions.get(socket.data.sessionId);
       if (!session) return;
-      // Detach the socket and start the reap timer. A subsequent upgrade
-      // reusing the same sessionId within the grace window will land in the
-      // reattach path in `open()`.
-      session.socket = null;
-      if (session.reapTimer) clearTimeout(session.reapTimer);
-      session.reapTimer = setTimeout(() => {
+      // Guard against the hijack-refusal path: `open()` closes a LOSING
+      // socket with 4409 while the session's winning socket stays attached.
+      // Only the socket that owns the session may detach or terminate it.
+      if (session.socket !== null && session.socket !== socket) return;
+
+      if (code === CLOSE_CODE_USER_TERMINATE) {
+        // The confirmed pane-close path: the user explicitly accepted losing
+        // the session, so kill the PTY and free the sessionId eagerly.
+        // Metrics accounting stays with pty.onExit (which fires on the
+        // SIGHUP) so reaped_total counts each PTY exactly once.
         try {
           session.pty.kill("SIGHUP");
         } catch {
           // Already dead.
         }
         sessions.delete(session.id);
-        metrics?.inc("pty.reaped_total");
         updateActive();
-      }, graceMs);
-      session.reapTimer.unref?.();
+        return;
+      }
+
+      // Every other close — navigation, tab/browser close, system sleep,
+      // network drop — detaches the socket and keeps the PTY running. A later
+      // upgrade with the same sessionId lands in the reattach path in
+      // `open()`; the session otherwise lives until its shell exits or the
+      // server shuts down.
+      session.socket = null;
     },
 
     disposeAll() {
       for (const session of sessions.values()) {
-        if (session.reapTimer) clearTimeout(session.reapTimer);
         try {
           session.pty.kill("SIGHUP");
         } catch {

@@ -89,6 +89,7 @@ export function buildTerminalWebSocketUrl(
   pageUrl: string,
   sessionId: string,
   token: string | null,
+  takeover = false,
 ): string {
   const wsUrl = new URL(pageUrl);
   wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
@@ -97,6 +98,10 @@ export function buildTerminalWebSocketUrl(
   const params = new URLSearchParams();
   if (token) params.set("t", token);
   params.set("sessionId", sessionId);
+  // Explicit claim on a session another client holds: the server detaches
+  // the current holder (close code 4410) instead of refusing with 409.
+  // Harmless on a detached session — it degrades to a plain reattach.
+  if (takeover) params.set("takeover", "1");
   wsUrl.search = params.toString();
   return wsUrl.toString();
 }
@@ -123,8 +128,13 @@ export type TerminalPanelHandle = {
   // second call when already connected is a no-op.
   attach(): void;
   // Tear down the WebSocket and free xterm. The container's contents are
-  // emptied; the panel can be re-attached later.
+  // emptied; the panel can be re-attached later. The server keeps the PTY
+  // running — reattaching with the same sessionId resumes the session.
   detach(): void;
+  // Like detach(), but closes the WebSocket with the app-defined
+  // user-terminate code so the server kills the PTY. The ONLY client path
+  // that ends a shell session; reserved for the confirmed pane/panel close.
+  terminate(): void;
   // Recompute character grid + send resize frame. Call after any panel-height
   // change. Cheap; safe to debounce or invoke from a ResizeObserver.
   fit(): void;
@@ -137,8 +147,9 @@ export type MountTerminalOptions = {
   container: HTMLElement;
   getToken: () => string | null;
   // Per-pane session id (UUID). The server multiplexes multiple PTYs per
-  // browser tab by this id. Reusing a pane's id across page reload lets the
-  // server hand back the SAME PTY within its 5-second reconnect grace.
+  // browser tab by this id. Reusing a pane's id across page reload — or a
+  // browser restart, or a laptop sleep — lets the server hand back the SAME
+  // live PTY however long the session was detached.
   sessionId: string;
   // Optional per-session overrides sourced from `.uatu.json` via /api/state.
   // Falls back to CSS variable / built-in defaults when omitted.
@@ -149,7 +160,24 @@ export type MountTerminalOptions = {
   // tear down the dead pane automatically. NOT called on auth failure
   // (close-before-open) — that path shows the paste-token form instead.
   onClose?: () => void;
+  // Fires when the WebSocket closed before opening but `GET /api/auth`
+  // confirms this window's credentials are valid — i.e. the upgrade was
+  // rejected for a non-auth reason, in practice a sessionId collision
+  // (HTTP 409, another window holds this pane's persisted id). The
+  // controller responds by minting a fresh sessionId and rebuilding the
+  // pane. When absent, the paste-token form is shown as a fallback.
+  onCollision?: () => void;
+  // Connect with an explicit takeover claim (session picker attaching to a
+  // session held by another window). The mount also re-arms takeover itself
+  // when the user activates "Take back" on a parked pane.
+  takeover?: boolean;
 };
+
+// Mirror of the server's CLOSE_CODE_USER_TERMINATE (terminal/server.ts).
+// Defined as a literal on each side — like the 4409 hijack code — because
+// importing across the client/server boundary would drag the other side's
+// dependencies (node-pty / xterm) into the wrong bundle.
+const CLOSE_CODE_USER_TERMINATE = 4001;
 
 // Per-pane terminal mount. The controller owns the panel-level concerns
 // (dock, display mode, split layout, visibility); this function owns the
@@ -165,6 +193,15 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
   // Only the latter triggers `onClose` — hiding the panel must be
   // reversible without auto-removing the pane.
   let detachInitiated = false;
+  // One-shot guard for the collision hand-off. The controller's replacement
+  // pane is a fresh mount (fresh guard), so this bounds recovery to one
+  // retry per mount rather than a reconnect loop against a broken server.
+  let collisionSignaled = false;
+  // Whether the next connect carries `takeover=1`. Seeded from the mount
+  // options (picker attach) and re-armed by the parked pane's "Take back"
+  // action. Never reset — takeover of a session this mount already owns
+  // degrades to a plain reattach, so over-claiming is harmless.
+  let takeoverArmed = options.takeover === true;
 
   function attach(): void {
     if (attached) return;
@@ -262,7 +299,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     // HttpOnly auth cookie set by /api/auth (PWA / subsequent visits).
     // sessionId is always present — the server requires it for multiplexing.
     socket = new WebSocket(
-      buildTerminalWebSocketUrl(window.location.href, options.sessionId, token),
+      buildTerminalWebSocketUrl(window.location.href, options.sessionId, token, takeoverArmed),
     );
     socket.binaryType = "arraybuffer";
 
@@ -302,22 +339,24 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     socket.addEventListener("close", event => {
       if (!didOpen) {
         // Connection failed BEFORE the WebSocket opened. The browser exposes
-        // no upgrade status code on the close event, but a close-without-
-        // open after an attempted upgrade is functionally equivalent to a
-        // 401 / 403 on /api/terminal. Show the paste-token UI so the user
-        // can re-authenticate (typical case: uatu was restarted and the
-        // cookie went stale, or this is a PWA's first launch with no
-        // cookie yet).
-        //
-        // Known false-positive: pre-upgrade HTTP 409 ("sessionId in use")
-        // also lands here because the WS never opens. The browser reports
-        // this as a generic close (code 1006) with no upstream-status
-        // detail, so we can't distinguish it from auth failure. In
-        // practice this only happens when two browser tabs share
-        // localStorage and try to claim the same persisted sessionId; the
-        // user pasting their token won't fix it. Acceptable trade-off in
-        // v1; a future fix could probe `/api/auth` to disambiguate.
-        showPasteTokenUI();
+        // no upgrade status code on the close event, so a close-without-open
+        // is ambiguous between an auth failure (401/403 — stale cookie after
+        // a uatu restart, fresh PWA window) and a sessionId collision (409 —
+        // another window already holds this pane's persisted id; common now
+        // that PTY sessions persist indefinitely). Probe `GET /api/auth` to
+        // disambiguate: valid credentials → collision → the controller
+        // rebuilds the pane with a fresh sessionId; invalid → paste-token
+        // form.
+        void classifyPreOpenFailure();
+        return;
+      }
+      // 4410 = "session taken": another window claimed this session with an
+      // explicit takeover. Park the pane — notice + take-back action — and
+      // never reconnect on our own; the session is alive, just elsewhere,
+      // and silent re-claims would ping-pong it between windows.
+      if (event.code === 4410) {
+        attached = false;
+        showTakenOverUI();
         return;
       }
       // 4409 = our app-defined "sessionId hijacked" code (see
@@ -327,9 +366,10 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
       if (isHijacked && term) {
         term.write("\r\n\x1b[2m[session claimed by another tab]\x1b[0m\r\n");
       }
-      // User toggled the panel hidden; detach is intentional and the
-      // pane should NOT be torn down — its sessionId is reused to
-      // reattach within the server's reconnect grace.
+      // User toggled the panel hidden (or confirmed a close); the teardown
+      // is intentional and the pane should NOT be auto-removed here — for a
+      // plain detach its sessionId is reused to reattach to the still-live
+      // PTY later.
       if (detachInitiated) return;
       // Server-initiated close (shell exited or connection dropped).
       // Surface a brief "[disconnected]" line for debug visibility, then
@@ -388,8 +428,10 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
   // fails before opening — typically because uatu was restarted (cookie now
   // stale) or this is a PWA's first launch with no auth cookie yet.
   function showPasteTokenUI(): void {
-    // Tear down any partial xterm state — the failed-upgrade socket cleanup
-    // doesn't go through detach() because attached was never set to true.
+    // Tear down any partial xterm state inline. `attached` is set at mount
+    // time (end of connect()), not at socket-open — so detach() WOULD work
+    // here, but this path also replaces the container with the form, so it
+    // owns its whole cleanup explicitly.
     try {
       socket?.close();
     } catch {
@@ -468,7 +510,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     });
   }
 
-  function detach(): void {
+  function teardown(closeCode: number, closeReason: string): void {
     if (!attached) return;
     attached = false;
     detachInitiated = true;
@@ -479,7 +521,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     }
     resizeObserver = null;
     try {
-      socket?.close(1000, "panel hidden");
+      socket?.close(closeCode, closeReason);
     } catch {
       // Already closing.
     }
@@ -492,6 +534,91 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     term = null;
     fit = null;
     options.container.replaceChildren();
+  }
+
+  // Park the pane after a takeover: the session is alive in another window.
+  // Same teardown shape as showPasteTokenUI, then a notice with an explicit
+  // "Take back" action — the ONLY path that re-claims the session, so two
+  // windows can never ping-pong it without a human in the loop.
+  function showTakenOverUI(): void {
+    try {
+      socket?.close();
+    } catch {
+      // Already closing.
+    }
+    socket = null;
+    try {
+      term?.dispose();
+    } catch {
+      // Already disposed.
+    }
+    term = null;
+    fit = null;
+    try {
+      resizeObserver?.disconnect();
+    } catch {
+      // Already disconnected.
+    }
+    resizeObserver = null;
+    attached = false;
+
+    const container = options.container;
+    container.replaceChildren();
+    const wrap = document.createElement("div");
+    wrap.className = "terminal-taken";
+    const heading = document.createElement("p");
+    heading.className = "terminal-taken-heading";
+    heading.textContent = "Attached in another window";
+    const help = document.createElement("p");
+    help.className = "terminal-taken-help";
+    help.textContent =
+      "Another uatu window took over this session. It keeps running there — take it back to continue here.";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "terminal-taken-takeback";
+    button.textContent = "Take back";
+    button.addEventListener("click", () => {
+      takeoverArmed = true;
+      attach();
+    });
+    wrap.append(heading, help, button);
+    container.append(wrap);
+  }
+
+  // Disambiguate a close-before-open failure. 204 from `GET /api/auth`
+  // means this window's credentials are valid, so the upgrade was refused
+  // for a non-auth reason — in practice the pre-upgrade 409 for a sessionId
+  // another window holds — and the controller should rebuild the pane with
+  // a fresh id. 401 (or a network error, where the form's copy is still the
+  // most useful guidance) falls back to the paste-token form.
+  async function classifyPreOpenFailure(): Promise<void> {
+    let authed = false;
+    try {
+      const token = options.getToken();
+      const url = token ? `/api/auth?t=${encodeURIComponent(token)}` : "/api/auth";
+      const response = await fetch(url, { method: "GET" });
+      authed = response.status === 204;
+    } catch {
+      authed = false;
+    }
+    if (authed && options.onCollision && !collisionSignaled) {
+      collisionSignaled = true;
+      options.onCollision();
+      return;
+    }
+    showPasteTokenUI();
+  }
+
+  function detach(): void {
+    // 1000 is a plain goodbye: the server detaches the session and the PTY
+    // keeps running for a later reattach.
+    teardown(1000, "panel hidden");
+  }
+
+  function terminate(): void {
+    // The user confirmed losing the session — tell the server to kill the
+    // PTY. Everything else about the teardown is identical to detach().
+    teardown(CLOSE_CODE_USER_TERMINATE, "user-close");
   }
 
   function fitNow(): void {
@@ -514,6 +641,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
   return {
     attach,
     detach,
+    terminate,
     fit: fitNow,
     focus: focusNow,
     isAttached: () => attached,

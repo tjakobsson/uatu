@@ -3,6 +3,7 @@ import { describe, expect, it } from "bun:test";
 import {
   TERMINAL_COOKIE_MAX_AGE,
   TERMINAL_COOKIE_NAME,
+  authProbeResponse,
   constantTimeEqual,
   formatTerminalCookie,
   isAllowedOrigin,
@@ -107,5 +108,40 @@ describe("isAllowedOrigin", () => {
   it("rejects non-http(s) schemes", () => {
     expect(isAllowedOrigin("file://127.0.0.1:4711", srv)).toBe(false);
     expect(isAllowedOrigin("ws://127.0.0.1:4711", srv)).toBe(false);
+  });
+});
+
+describe("authProbeResponse", () => {
+  const expected = "secret-token-value";
+  const probe = (init: { cookie?: string; query?: string }): Response => {
+    const url = new URL(`http://127.0.0.1:4711/api/auth${init.query ?? ""}`);
+    const headers = new Headers();
+    if (init.cookie !== undefined) headers.set("Cookie", init.cookie);
+    return authProbeResponse(new Request(url, { headers }), url, expected);
+  };
+
+  it("returns 204 for a valid auth cookie", () => {
+    const response = probe({
+      cookie: `${TERMINAL_COOKIE_NAME}=${encodeURIComponent(expected)}`,
+    });
+    expect(response.status).toBe(204);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("returns 204 for a valid ?t= query token", () => {
+    const response = probe({ query: `?t=${encodeURIComponent(expected)}` });
+    expect(response.status).toBe(204);
+  });
+
+  it("returns 401 with no credentials", () => {
+    expect(probe({}).status).toBe(401);
+  });
+
+  it("returns 401 for a wrong cookie and wrong query token", () => {
+    const wrongCookie = probe({ cookie: `${TERMINAL_COOKIE_NAME}=nope` });
+    expect(wrongCookie.status).toBe(401);
+    const wrongQuery = probe({ query: "?t=nope" });
+    expect(wrongQuery.status).toBe(401);
+    expect(wrongQuery.headers.get("cache-control")).toBe("no-store");
   });
 });

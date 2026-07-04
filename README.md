@@ -146,10 +146,13 @@ Edge / Brave or "Add to Dock" works around it.
 ## Watchdog and freeze recovery
 
 `uatu watch` runs a sibling watchdog subprocess by default. If the parent's
-1Hz heartbeat goes stale beyond `--watchdog-timeout=<ms>` (default 30 000) —
-for example because the JS event loop is wedged on a native fsevents
-deadlock — the watchdog captures a forensic dump and force-kills the parent
-(see [issue #40](https://github.com/tjakobsson/uatu/issues/40)).
+1Hz heartbeat stops advancing for `--watchdog-timeout=<ms>` (default 30 000)
+worth of consecutive watchdog checks — for example because the JS event loop
+is wedged on a native fsevents deadlock — the watchdog captures a forensic
+dump and force-kills the parent
+(see [issue #40](https://github.com/tjakobsson/uatu/issues/40)). Staleness is
+counted in watchdog checks rather than wall-clock time, so a laptop sleeping
+past the timeout does not trigger a false kill on wake.
 
 ```bash
 uatu watch --debug                  # also writes 1Hz NDJSON metrics

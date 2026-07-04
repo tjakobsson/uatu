@@ -55,6 +55,36 @@ export function readCookie(header: string | null, name: string): string {
   return "";
 }
 
+// GET /api/auth probe: answers only "does this request carry valid terminal
+// credentials" — 204 yes, 401 no. The browser exposes no HTTP status on a
+// failed WebSocket upgrade, so the client uses this after a close-before-open
+// to distinguish a real auth failure (show the paste-token form) from a
+// sessionId collision (mint a fresh id and reconnect). Deliberately ignores
+// Origin and sessionId — those are upgrade-gate concerns; a same-origin-only
+// answer here would break nothing but adds no security for a read that
+// reveals only "your own cookie is (in)valid". `no-store` because a cached
+// answer would defeat the disambiguation.
+export function authProbeResponse(request: Request, requestUrl: URL, expected: string): Response {
+  return new Response(null, {
+    status: hasValidTerminalCredentials(request, requestUrl, expected) ? 204 : 401,
+    headers: { "cache-control": "no-store" },
+  });
+}
+
+// Shared credential check for the terminal's REST surface (auth probe,
+// session inventory, session kill): auth cookie or `t` query token. The
+// WebSocket upgrade gate applies the same check plus Origin and sessionId
+// concerns.
+export function hasValidTerminalCredentials(
+  request: Request,
+  requestUrl: URL,
+  expected: string,
+): boolean {
+  const queryToken = requestUrl.searchParams.get("t") ?? "";
+  const cookieToken = readCookie(request.headers.get("Cookie"), TERMINAL_COOKIE_NAME);
+  return constantTimeEqual(queryToken, expected) || constantTimeEqual(cookieToken, expected);
+}
+
 export type ServerOriginRef = { hostname?: string; port?: number };
 
 export function isAllowedOrigin(origin: string | null, srv: ServerOriginRef): boolean {
