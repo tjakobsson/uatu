@@ -3,9 +3,7 @@
 ## Purpose
 
 Define how the uatu codebase is physically organized so that contributors — human and AI — can locate each subsystem without grepping, and so the structural decisions that keep `src/app.ts` from regrowing into a 4000-line monolith remain enforceable across future changes. This capability is structural rather than behavioral: it constrains *where* code lives, *how many places* declare a given thing, and *how* the source tree is documented. It does not pin any user-visible behavior.
-
 ## Requirements
-
 ### Requirement: src/ is organized into feature folders that mirror the running app
 
 The `src/` directory SHALL be organized into top-level folders named after regions of the running application or coherent domains, not after tech categories (`hooks/`, `services/`, `utils/`). The folders `shell/`, `preview/`, `sidebar/`, `terminal/`, and `server/` SHALL exist and own the code for their respective UI regions or subsystems. Cross-cutting domains (document data, rendering, review data, ignore policy, watchdog, debug instrumentation) SHALL each have their own folder.
@@ -35,13 +33,18 @@ The `src/app.ts` file SHALL function as a thin wire-up entrypoint that imports f
 
 ### Requirement: The HTTP route table is declared in exactly one place
 
-The set of HTTP routes served by uatu SHALL be declared in exactly one source file (`src/server/routes.ts`), through a single `buildRoutes` function. Production (`src/cli.ts`) and the E2E harness (`tests/e2e/server.ts`) SHALL both obtain their routes by calling `buildRoutes` and SHALL NOT redeclare individual route paths inline.
+The set of HTTP routes served by uatu SHALL be declared in exactly one source file (`src/server/routes.ts`), through a single `buildRoutes` function. Production (`src/cli.ts`) and the E2E harness (`tests/e2e/server.ts`) SHALL both obtain their routes by calling `buildRoutes` and SHALL NOT redeclare individual route paths inline. Request paths that cannot be served from Bun's static route table — the `/api/terminal` WebSocket upgrade, `/api/auth` (GET and POST), and the `/api/terminal/sessions` inventory — SHALL be handled by a single shared fetch-fallback builder (`buildFetchFallback(deps)`) declared alongside `buildRoutes` in `src/server/`. Production and the E2E harness SHALL both obtain their `fetch` handler from this builder and SHALL NOT reimplement the terminal-upgrade, auth, or sessions handling inline.
 
 #### Scenario: Route literals are not duplicated across server entry points
 - **WHEN** the codebase is searched for production API route literals such as `"/api/state"`, `"/api/document"`, `"/api/events"`, `"/api/scope"`, and `"/api/document/diff"`
 - **THEN** each route literal appears as a top-level route-table key in `src/server/routes.ts` only
 - **AND** `src/cli.ts` does not redeclare these route literals as `Bun.serve` route keys
 - **AND** `tests/e2e/server.ts` does not redeclare these route literals as `Bun.serve` route keys
+
+#### Scenario: Fetch-fallback handlers are not duplicated across server entry points
+- **WHEN** the codebase is searched for the fallback path literals `"/api/terminal"`, `"/api/auth"`, and `"/api/terminal/sessions"`
+- **THEN** the request-dispatch logic for these paths lives in `src/server/` only
+- **AND** `src/cli.ts` and `tests/e2e/server.ts` each obtain their `fetch` handler by calling the shared builder with mode-specific deps
 
 #### Scenario: Mode-specific routes are scoped by builder option
 - **WHEN** `buildRoutes` is called with `{ mode: "prod" }`
@@ -92,15 +95,32 @@ The score-explanation HTML builder (`buildScoreExplanationHTML`) SHALL live in `
 
 ### Requirement: appState is importable from a single module
 
-The application state singleton (`appState`) SHALL be defined and exported from `src/shell/state.ts`. Modules that need to read or write application state SHALL import from this module. The state singleton SHALL NOT be redefined elsewhere.
+The application state singleton (`appState`) SHALL be defined and exported from `src/shell/state.ts`. Modules that need to read application state SHALL import from this module. The state singleton SHALL NOT be redefined elsewhere.
+
+Every field of `appState` SHALL have exactly one owning module, documented in a field-ownership table in ARCHITECTURE.md. The owning module SHALL export named mutator functions for its fields, and any mutation of a field from outside its owning module MUST go through those mutators — direct assignment (`appState.<field> = …`) SHALL appear only inside the field's owning module. Mutators whose fields persist a preference SHALL own the corresponding localStorage write, so persistence and assignment cannot drift apart. `src/shell/state.ts` itself SHALL remain a container (initial values and types), not an owner of mutation logic. The follow-mode capability's four rules remain the exclusive authority for `followEnabled` and `selectedId` transitions; this requirement codifies the same single-writer shape for every other field.
 
 #### Scenario: appState has a single home
 - **WHEN** the codebase is searched for the top-level declaration `const appState = {`
 - **THEN** it appears only in `src/shell/state.ts`
 
 #### Scenario: Consumers import appState by path
-- **WHEN** a module reads or writes `appState`
+- **WHEN** a module reads `appState`
 - **THEN** it imports `appState` from the shell-state module rather than relying on closure access in `app.ts`
+
+#### Scenario: Direct assignment happens only in the owner module
+- **WHEN** the codebase is searched for direct assignments matching `appState.<field> =` for any field
+- **THEN** every match is inside that field's owning module (or its colocated test)
+- **AND** all other modules mutate the field by calling the owner's exported mutator
+
+#### Scenario: Persisting mutators own their storage write
+- **WHEN** a preference-backed field (e.g. `viewMode`, `viewLayout`, `filesPaneFilter`, `gitLogLimit`, `compareTarget`) is changed via its mutator
+- **THEN** the mutator performs the localStorage persistence itself
+- **AND** no call site persists the preference separately from the assignment
+
+#### Scenario: The ownership table is documented
+- **WHEN** ARCHITECTURE.md's state-lifecycle section is read
+- **THEN** it contains a table mapping every `appState` field to its owning module
+- **AND** every field of the `appState` declaration appears in the table
 
 ### Requirement: Terminal subsystem code lives in src/terminal/
 
@@ -162,3 +182,23 @@ An `ARCHITECTURE.md` file SHALL exist at the repository root describing the runt
 - **WHEN** `ARCHITECTURE.md` is read
 - **THEN** it does not paste in code listings, function bodies, or other content that lives canonically in source files
 - **AND** it references modules by path rather than by reproducing their content
+
+### Requirement: The server core is decomposed into cohesive modules
+
+The server-side building blocks SHALL be split into modules with one responsibility each; no single module under `src/server/` SHALL combine CLI parsing, filesystem scanning, render dispatch, static-file security, HTTP navigation, and the live-reload engine. Specifically: CLI argument parsing, usage/version text, and TTY startup output SHALL live in a `src/cli/` domain folder (the `src/cli.ts` entrypoint remains at the `src/` root and imports from it); the live-reload engine, root resolution/scanning, document render dispatch, static-file resolution, and SPA navigation handling SHALL each live in their own module under `src/server/`. The former god-file `src/server/session.ts` SHALL NOT exist. Unit tests SHALL move with their subjects as colocated siblings.
+
+#### Scenario: The god-file is gone
+- **WHEN** the repository is inspected after the change
+- **THEN** `src/server/session.ts` does not exist
+- **AND** no module under `src/server/` exceeds roughly one responsibility (live-reload engine, roots/scanning, render dispatch, static files, navigation are separate files)
+
+#### Scenario: CLI parsing lives in the CLI domain
+- **WHEN** the codebase is searched for the declarations of `parseCommand` and `usageText`
+- **THEN** they are found under `src/cli/`, not under `src/server/`
+- **AND** `src/cli.ts` imports them from `src/cli/`
+
+#### Scenario: The decomposition is behavior-neutral
+- **WHEN** the full unit and E2E suites are run after the split
+- **THEN** all tests pass without changes to their assertions (import paths aside)
+- **AND** `bun run build` produces a working binary whose `--help`, startup output, and routes are unchanged
+
