@@ -10,7 +10,7 @@ import { expect, test } from "./fixtures";
 //    inside.
 //
 // The unit suite covers the loader (src/mono/config.test.ts) and the
-// state-payload shape (src/server/session.test.ts). This file is the
+// state-payload shape (src/server/watch-session.test.ts). This file is the
 // end-to-end smoke test against a real browser.
 
 test.describe("--mono-font-family default (no override)", () => {

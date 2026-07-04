@@ -4,7 +4,8 @@ import path from "node:path";
 import { bench, run } from "mitata";
 import { parseHTML } from "linkedom";
 
-import { renderDocument, scanRoots, type WatchEntry } from "../src/server/session";
+import { renderDocument } from "../src/server/render-dispatch";
+import { scanRoots, type WatchEntry } from "../src/server/roots";
 import type { RootGroup, ViewMode } from "../src/shared/types";
 import { renderDocumentDiff, DIFF_MAX_BYTES } from "../src/preview/diff-view";
 

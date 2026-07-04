@@ -38,9 +38,12 @@ src/
 │                   selection-inspector
 ├── terminal/       the embedded xterm panel — client + server +
 │                   auth + pty + pane-state + panel UI
+├── cli/            CLI domain — parse (flags + usage text) and output
+│                   (TTY banner + indexing status); cli.ts imports these
 ├── server/         routes (single source of truth for the HTTP route
-│                   table), session (watch + render building blocks),
-│                   port-probe
+│                   table + the shared fetch fallback), watch-session
+│                   (live-reload engine), roots (resolution + scanning),
+│                   render-dispatch, static-files, navigation, port-probe
 ├── document/       per-document concerns — metadata, diff, classify,
 │                   git-base-ref, language detection
 ├── render/         source → HTML (markdown, asciidoc, mermaid sanitization)

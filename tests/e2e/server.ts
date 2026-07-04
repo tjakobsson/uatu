@@ -25,27 +25,18 @@ import { e2ePort, resetE2EWorkspace, workspaceRoot } from "./config";
 const E2E_WORKSPACE_ROOT = workspaceRoot();
 const E2E_PORT = e2ePort();
 import { safeGit } from "../../src/review/load";
-import {
-  createNavigationFetchHandler,
-  createWatchSession,
-  resolveWatchRoots,
-  SERVE_IDLE_TIMEOUT_SECONDS,
-  type WatchEntry,
-} from "../../src/server/session";
+import { createNavigationFetchHandler } from "../../src/server/navigation";
+import { resolveWatchRoots, type WatchEntry } from "../../src/server/roots";
+import { createWatchSession } from "../../src/server/watch-session";
 import { loadTerminalConfig } from "../../src/terminal/config";
 import { loadMonoConfig } from "../../src/mono/config";
-import { buildRoutes } from "../../src/server/routes";
 import {
-  TERMINAL_COOKIE_NAME,
-  authProbeResponse,
-  constantTimeEqual,
-  formatTerminalCookie,
-  isAllowedOrigin,
-  readCookie,
-} from "../../src/terminal/auth";
+  buildFetchFallback,
+  buildRoutes,
+  SERVE_IDLE_TIMEOUT_SECONDS,
+} from "../../src/server/routes";
 import { terminalBackendAvailable } from "../../src/terminal/backend";
 import { createTerminalServer } from "../../src/terminal/server";
-import { handleTerminalSessionsRoute } from "../../src/terminal/sessions-route";
 
 let activeFilePath: string | null = null;
 let activeRespectGitignore = true;
@@ -164,28 +155,7 @@ server = Bun.serve({
       handleE2EReset,
     }),
   },
-  fetch: (request, srv) => {
-    const requestUrl = new URL(request.url);
-    if (requestUrl.pathname === "/api/terminal") {
-      return handleTerminalUpgrade(request, requestUrl, srv);
-    }
-    if (requestUrl.pathname === "/api/auth" && request.method === "POST") {
-      return handleAuth(request);
-    }
-    if (requestUrl.pathname === "/api/auth" && request.method === "GET") {
-      return authProbeResponse(request, requestUrl, watchSession.getTerminalToken());
-    }
-    {
-      const sessionsResponse = handleTerminalSessionsRoute(
-        request,
-        requestUrl,
-        terminalServer,
-        () => watchSession.getTerminalToken(),
-      );
-      if (sessionsResponse) return sessionsResponse;
-    }
-    return navigationFetch(request);
-  },
+  fetch: (request, srv) => fetchFallback(request, srv),
   websocket: terminalServer
     ? {
         open: socket => {
@@ -208,62 +178,11 @@ const navigationFetch = createNavigationFetchHandler({
   getServer: () => server,
 });
 
-// Mirror cli.ts's auth handler. Tests POST a known token here to seed the
-// `uatu_term` cookie before navigating; subsequent WS upgrades authenticate
-// via the cookie alone.
-async function handleAuth(request: Request): Promise<Response> {
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return Response.json({ error: "invalid JSON body" }, { status: 400 });
-  }
-  const provided = (body as { token?: unknown } | null)?.token;
-  if (typeof provided !== "string" || provided.length === 0) {
-    return Response.json({ error: "missing token" }, { status: 400 });
-  }
-  if (!constantTimeEqual(provided, watchSession.getTerminalToken())) {
-    return Response.json({ error: "invalid token" }, { status: 401 });
-  }
-  return new Response(JSON.stringify({ ok: true }), {
-    status: 200,
-    headers: {
-      "content-type": "application/json",
-      "set-cookie": formatTerminalCookie(provided),
-    },
-  });
-}
-
-function handleTerminalUpgrade(
-  request: Request,
-  requestUrl: URL,
-  srv: typeof Bun extends { serve: (...args: never) => infer S } ? S : never,
-): Response | undefined {
-  if (!terminalServer) return new Response("terminal disabled", { status: 503 });
-  const expected = watchSession.getTerminalToken();
-  const queryToken = requestUrl.searchParams.get("t") ?? "";
-  const cookieToken = readCookie(request.headers.get("Cookie"), TERMINAL_COOKIE_NAME);
-  if (!constantTimeEqual(queryToken, expected) && !constantTimeEqual(cookieToken, expected)) {
-    return new Response("unauthorized", { status: 401 });
-  }
-  if (!isAllowedOrigin(request.headers.get("Origin"), srv)) {
-    return new Response("forbidden origin", { status: 403 });
-  }
-  const sessionId = requestUrl.searchParams.get("sessionId") ?? "";
-  const takeover = requestUrl.searchParams.get("takeover") === "1";
-  const result = terminalServer.prepareSession(sessionId, { takeover });
-  if (result.kind === "invalid") {
-    return new Response("invalid or missing sessionId", { status: 400 });
-  }
-  if (result.kind === "collision") {
-    return new Response("sessionId in use", { status: 409 });
-  }
-  const ok = (srv.upgrade as (req: Request, opts: { data: unknown }) => boolean)(request, {
-    data: { sessionId, takeover },
-  });
-  if (!ok) return new Response("upgrade failed", { status: 500 });
-  return undefined;
-}
+const fetchFallback = buildFetchFallback({
+  getTerminalServer: () => terminalServer,
+  getTerminalToken: () => watchSession.getTerminalToken(),
+  navigationFetch,
+});
 
 console.log(`http://127.0.0.1:${server.port}`);
 

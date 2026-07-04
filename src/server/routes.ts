@@ -3,19 +3,30 @@
 // of the fourteen routes are identical between the two; the rest are gated
 // on the `mode` discriminator below.
 //
-// This module is deliberately *just* a router factory. Authentication,
-// terminal WebSocket upgrade, and the navigation fallback continue to live
-// at the call sites because they need access to call-site-local state
-// (terminalServer instance, navigation handler, etc.) that doesn't belong
-// in a route table.
+// This module is the single home for the HTTP surface: the static route
+// table (`buildRoutes`) plus the catch-all fetch fallback
+// (`buildFetchFallback`) that handles the terminal WebSocket upgrade,
+// `/api/auth`, the terminal-sessions inventory, and navigation dispatch.
+// Both server entry points obtain both pieces here with mode-specific deps.
 
 import { getDocumentDiff } from "../document/diff";
-import { isReviewCompareTarget, isViewMode } from "../shared/types";
 import {
-  canSetFileScope,
-  renderDocument,
-  type WatchSession,
-} from "./session";
+  TERMINAL_COOKIE_NAME,
+  authProbeResponse,
+  constantTimeEqual,
+  formatTerminalCookie,
+  isAllowedOrigin,
+  readCookie,
+} from "../terminal/auth";
+import type { createTerminalServer } from "../terminal/server";
+import { handleTerminalSessionsRoute } from "../terminal/sessions-route";
+import { isReviewCompareTarget, isViewMode } from "../shared/types";
+import { renderDocument } from "./render-dispatch";
+import { canSetFileScope, type WatchSession } from "./watch-session";
+
+// Bun.serve's idleTimeout. 0 = disabled: SSE connections and long-lived
+// terminal WebSockets must never be reaped by an idle timer.
+export const SERVE_IDLE_TIMEOUT_SECONDS = 0;
 
 export type RouteAssets = {
   // The HTML entry (`import index from "./index.html"`) is intentionally
@@ -291,5 +302,127 @@ function buildE2ERoutes(deps: E2ERouteDeps) {
     "/__e2e/reset": {
       POST: (request: Request) => handleE2EReset(request),
     },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Catch-all fetch fallback — the request paths Bun's static route table can't
+// express: the WebSocket upgrade (needs the live server handle), /api/auth
+// (sets a cookie from the session's rotating token), and the terminal
+// sessions inventory. Previously duplicated near-verbatim between cli.ts and
+// tests/e2e/server.ts; this builder is the single source of truth.
+
+type TerminalServerInstance = ReturnType<typeof createTerminalServer>;
+
+// Structural subset of Bun.Server the fallback needs: `upgrade` for the
+// WebSocket handshake and hostname/port for the Origin allowlist.
+export type FetchFallbackServer = {
+  upgrade(request: Request, options?: { data?: unknown }): boolean;
+  hostname?: string | undefined;
+  port?: number | undefined;
+};
+
+export type FetchFallbackDeps = {
+  // Nullable: the PTY backend may be unavailable (old Bun, Windows).
+  getTerminalServer: () => TerminalServerInstance | null;
+  getTerminalToken: () => string;
+  navigationFetch: (request: Request) => Promise<Response>;
+};
+
+export function buildFetchFallback(deps: FetchFallbackDeps) {
+  const handleTerminalUpgrade = (
+    request: Request,
+    requestUrl: URL,
+    srv: FetchFallbackServer,
+  ): Response | undefined => {
+    const terminalServer = deps.getTerminalServer();
+    if (!terminalServer) {
+      return new Response("terminal disabled", { status: 503 });
+    }
+    const expected = deps.getTerminalToken();
+    // Accept either the URL token (first-visit path) or the auth cookie
+    // (PWA / subsequent visits). PWA installs share cookies with the
+    // browser session that minted them, so a user who visited /?t=<token>
+    // once before installing keeps working — no re-auth needed.
+    const queryToken = requestUrl.searchParams.get("t") ?? "";
+    const cookieToken = readCookie(request.headers.get("Cookie"), TERMINAL_COOKIE_NAME);
+    const tokenOk =
+      constantTimeEqual(queryToken, expected) || constantTimeEqual(cookieToken, expected);
+    if (!tokenOk) {
+      return new Response("unauthorized", { status: 401 });
+    }
+    const origin = request.headers.get("Origin");
+    if (!isAllowedOrigin(origin, srv)) {
+      return new Response("forbidden origin", { status: 403 });
+    }
+    const sessionId = requestUrl.searchParams.get("sessionId") ?? "";
+    const takeover = requestUrl.searchParams.get("takeover") === "1";
+    const result = terminalServer.prepareSession(sessionId, { takeover });
+    if (result.kind === "invalid") {
+      return new Response("invalid or missing sessionId", { status: 400 });
+    }
+    if (result.kind === "collision") {
+      return new Response("sessionId in use", { status: 409 });
+    }
+    const upgraded = srv.upgrade(request, { data: { sessionId, takeover } });
+    if (!upgraded) {
+      return new Response("upgrade failed", { status: 500 });
+    }
+    // Bun docs: when `upgrade()` succeeds, return `undefined` so the runtime
+    // doesn't race a stub response against the WebSocket handshake.
+    return undefined;
+  };
+
+  // POST /api/auth { token } — validate the token and set a same-origin
+  // HttpOnly cookie. The cookie is what makes the PWA install path work:
+  // `start_url` is "/" with no query, so without persisted credentials a
+  // freshly-launched PWA window has nothing to authenticate with. The
+  // cookie is HttpOnly (no JS access — token can't be exfiltrated by an
+  // XSS in any sibling document) and SameSite=Strict (no cross-site
+  // request can carry it).
+  const handleAuth = async (request: Request): Promise<Response> => {
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return Response.json({ error: "invalid JSON body" }, { status: 400 });
+    }
+    const provided = (body as { token?: unknown } | null)?.token;
+    if (typeof provided !== "string" || provided.length === 0) {
+      return Response.json({ error: "missing token" }, { status: 400 });
+    }
+    if (!constantTimeEqual(provided, deps.getTerminalToken())) {
+      return Response.json({ error: "invalid token" }, { status: 401 });
+    }
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        "set-cookie": formatTerminalCookie(provided),
+      },
+    });
+  };
+
+  return (request: Request, srv: FetchFallbackServer): Response | Promise<Response> | undefined => {
+    const requestUrl = new URL(request.url);
+    if (requestUrl.pathname === "/api/terminal") {
+      return handleTerminalUpgrade(request, requestUrl, srv);
+    }
+    if (requestUrl.pathname === "/api/auth" && request.method === "POST") {
+      return handleAuth(request);
+    }
+    if (requestUrl.pathname === "/api/auth" && request.method === "GET") {
+      return authProbeResponse(request, requestUrl, deps.getTerminalToken());
+    }
+    const sessionsResponse = handleTerminalSessionsRoute(
+      request,
+      requestUrl,
+      deps.getTerminalServer(),
+      deps.getTerminalToken,
+    );
+    if (sessionsResponse) {
+      return sessionsResponse;
+    }
+    return deps.navigationFetch(request);
   };
 }

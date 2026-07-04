@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { collectRepositorySnapshots, loadReviewSettings, matchPath, parseDiffPath, safeGit } from "./load";
-import type { WatchEntry } from "../server/session";
+import type { WatchEntry } from "../server/roots";
 
 const tempDirectories: string[] = [];
 
