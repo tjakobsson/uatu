@@ -687,6 +687,31 @@ describe.skipIf(!backendOk)("terminal-server session manager", () => {
     }
   }, 6000);
 
+  it("a reused sessionId survives the killed predecessor's late exit", async () => {
+    const local = startServer();
+    const id = freshSessionId();
+    try {
+      const ws1 = await openSocket(local.port, id);
+      // Kill eagerly (map entry removed immediately), then claim the same id
+      // for a fresh PTY before the old shell's exit event has fired. The old
+      // PTY's onExit must not delete the new session's registry entry.
+      expect(local.terminal.killSession(id)).toBe(true);
+      expect(local.terminal.prepareSession(id)).toEqual({ kind: "fresh" });
+      const ws2 = await openSocket(local.port, id);
+
+      // Give the killed shell ample time to exit and fire its handler.
+      await new Promise<void>(resolve => setTimeout(resolve, 500));
+      const listed = await local.terminal.listSessions();
+      expect(listed.find(s => s.id === id)?.attached).toBe(true);
+
+      ws1.close();
+      ws2.close();
+    } finally {
+      local.terminal.disposeAll();
+      local.server.stop(true);
+    }
+  }, 8000);
+
   it("takeover moves the session: loser gets 4410, winner gets the replay and the PTY", async () => {
     const local = startServer();
     const id = freshSessionId();

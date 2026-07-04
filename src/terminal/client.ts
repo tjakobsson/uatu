@@ -428,8 +428,10 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
   // fails before opening — typically because uatu was restarted (cookie now
   // stale) or this is a PWA's first launch with no auth cookie yet.
   function showPasteTokenUI(): void {
-    // Tear down any partial xterm state — the failed-upgrade socket cleanup
-    // doesn't go through detach() because attached was never set to true.
+    // Tear down any partial xterm state inline. `attached` is set at mount
+    // time (end of connect()), not at socket-open — so detach() WOULD work
+    // here, but this path also replaces the container with the form, so it
+    // owns its whole cleanup explicitly.
     try {
       socket?.close();
     } catch {

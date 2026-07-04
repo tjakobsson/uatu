@@ -394,16 +394,27 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
         }
         // Runs for attached AND detached sessions alike — a shell exiting
         // while nobody is connected still frees its session slot, so a later
-        // upgrade with the same sessionId spawns fresh.
-        sessions.delete(id);
+        // upgrade with the same sessionId spawns fresh. Identity-guarded:
+        // killSession() and the user-terminate close remove the entry
+        // eagerly, and the id may have been REUSED for a fresh PTY by the
+        // time this exit fires — deleting by id alone would drop that new
+        // session from routing and the inventory.
+        if (sessions.get(id) === session) {
+          sessions.delete(id);
+          updateActive();
+        }
         metrics?.inc("pty.reaped_total");
-        updateActive();
       });
     },
 
     message(socket, data) {
       const session = sessions.get(socket.data.sessionId);
       if (!session) return;
+      // Ownership guard: after a takeover the previous holder's close
+      // handshake is asynchronous, and its already-queued input/resize
+      // frames still arrive here. Only the session's current socket may
+      // write to or resize the PTY.
+      if (session.socket !== socket) return;
 
       if (typeof data === "string") {
         // Control frame (resize, ping, ...)
@@ -448,14 +459,15 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
 
       if (code === CLOSE_CODE_USER_TERMINATE) {
         // The confirmed pane-close path: the user explicitly accepted losing
-        // the session, so kill the PTY and free the sessionId.
+        // the session, so kill the PTY and free the sessionId eagerly.
+        // Metrics accounting stays with pty.onExit (which fires on the
+        // SIGHUP) so reaped_total counts each PTY exactly once.
         try {
           session.pty.kill("SIGHUP");
         } catch {
           // Already dead.
         }
         sessions.delete(session.id);
-        metrics?.inc("pty.reaped_total");
         updateActive();
         return;
       }
