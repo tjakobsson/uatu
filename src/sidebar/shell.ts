@@ -51,10 +51,10 @@ const treeElement: HTMLDivElement = treeElementMaybe;
 const treeEmptyMessageElement: HTMLElement = treeEmptyMessageElementMaybe;
 const documentCountElement: HTMLElement = documentCountElementMaybe;
 
-export const SIDEBAR_COLLAPSED_KEY = "uatu:sidebar-collapsed";
-export const SIDEBAR_WIDTH_KEY = "uatu:sidebar-width";
-export const SIDEBAR_MIN_WIDTH = 320;
-export const SIDEBAR_MAX_WIDTH = 620;
+const SIDEBAR_COLLAPSED_KEY = "uatu:sidebar-collapsed";
+const SIDEBAR_WIDTH_KEY = "uatu:sidebar-width";
+const SIDEBAR_MIN_WIDTH = 320;
+const SIDEBAR_MAX_WIDTH = 620;
 
 export function renderSidebar() {
   syncPaneDom();
@@ -161,7 +161,7 @@ export function initSidebarWidth() {
   });
 }
 
-export function readSidebarWidthPreference(): number {
+function readSidebarWidthPreference(): number {
   try {
     const value = Number(window.localStorage.getItem(SIDEBAR_WIDTH_KEY));
     if (Number.isFinite(value)) {
@@ -173,7 +173,7 @@ export function readSidebarWidthPreference(): number {
   return 300;
 }
 
-export function setSidebarWidth(width: number, options: { persist?: boolean } = {}) {
+function setSidebarWidth(width: number, options: { persist?: boolean } = {}) {
   const nextWidth = clampSidebarWidth(width);
   document.documentElement.style.setProperty("--sidebar-width", `${nextWidth}px`);
 
@@ -188,11 +188,11 @@ export function setSidebarWidth(width: number, options: { persist?: boolean } = 
   }
 }
 
-export function clampSidebarWidth(width: number): number {
+function clampSidebarWidth(width: number): number {
   return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, Math.round(width)));
 }
 
-export function readCollapsedPreference(): boolean {
+function readCollapsedPreference(): boolean {
   try {
     return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
   } catch {
@@ -200,7 +200,7 @@ export function readCollapsedPreference(): boolean {
   }
 }
 
-export function setSidebarCollapsed(collapsed: boolean, options: { persist?: boolean } = {}) {
+function setSidebarCollapsed(collapsed: boolean, options: { persist?: boolean } = {}) {
   appShellElement.classList.toggle("is-sidebar-collapsed", collapsed);
   sidebarCollapseElement.setAttribute("aria-expanded", String(!collapsed));
   sidebarExpandElement.setAttribute("aria-expanded", String(!collapsed));

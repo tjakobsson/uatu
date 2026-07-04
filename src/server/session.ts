@@ -9,7 +9,6 @@ import { type DocumentMetadata, sanitizeMetadata } from "../document/metadata";
 import { classifyFile } from "../document/classify";
 import { languageForName } from "../document/languages";
 import { loadIgnoreMatcher, type IgnoreMatcher } from "../ignore/engine";
-import { warnAboutRetiredUatuignore } from "../ignore/warning";
 import { decodeHtmlEntities, renderCodeAsHtml, renderMarkdownToHtml } from "../render/markdown";
 import { collectRepositorySnapshots, safeGit } from "../review/load";
 import {
@@ -169,7 +168,7 @@ export function usageText(build: BuildInfo = BUILD): string {
   return `uatu ${formatBuildIdentifier(build)}
 
 Usage:
-  uatu watch [PATH...] [--force] [--no-open] [--no-follow] [--no-gitignore] [--mode <MODE>] [--port <PORT>] [--debug]
+  uatu watch [PATH...] [--force] [--no-open] [--no-follow] [--no-gitignore] [--port <PORT>] [--debug]
   uatu --help
   uatu --version
 
@@ -178,7 +177,6 @@ Options:
   --no-follow             Start with follow mode disabled
   --no-gitignore          Do not honor .gitignore patterns when indexing files
   --force                 Watch non-git paths anyway; indexing may be slow
-  --mode <MODE>           Start in 'author' or 'review' mode (default: persisted browser preference, or 'author')
   -p, --port              Bind the local server to a specific port
   --debug                 Record verbose 1Hz counter history under \$XDG_CACHE_HOME/uatu (or ~/.cache/uatu)
   --no-watchdog           Suppress the companion watchdog subprocess (escape hatch — leaves no recovery on freeze)
@@ -333,21 +331,6 @@ export function parseCommand(argv: string[]): ParsedCommand {
         throw new Error(`invalid --watchdog-timeout value: '${value}'`);
       }
       watchdogTimeoutMs = parsed;
-      continue;
-    }
-
-    if (arg === "--mode" || arg.startsWith("--mode=")) {
-      // Deprecation pass: accept the flag, warn, and ignore. Skip the value
-      // arg too so we don't mistake it for a watched path.
-      if (arg === "--mode") {
-        if (!argv[index + 1]) {
-          throw new Error("missing value for --mode");
-        }
-        index += 1;
-      }
-      process.stderr.write(
-        "warning: --mode is deprecated and has no effect; uatu is now single-mode\n",
-      );
       continue;
     }
 
@@ -1202,10 +1185,6 @@ export function createWatchSession(
 
   return {
     async start() {
-      // One-shot retirement notice for any .uatuignore files still on disk.
-      // Fire-and-forget — the warning MUST NOT prevent the session from starting.
-      void warnAboutRetiredUatuignore(dirRoots);
-
       // Pre-load matchers so the chokidar `ignored` predicate has something to
       // consult during the watcher's very first stat sweep. The cache is also
       // threaded into every subsequent scanRoots call so we don't re-read

@@ -45,7 +45,7 @@ src/
 │                   git-base-ref, language detection
 ├── render/         source → HTML (markdown, asciidoc, mermaid sanitization)
 ├── review/         load — the review-burden score data layer
-├── ignore/         engine + warning (.uatu.json + --no-gitignore)
+├── ignore/         engine (.uatu.json + --no-gitignore)
 ├── watchdog/       main + capture — heartbeat-driven hang recovery
 ├── debug/          cache + metrics + the heartbeat integration test
 ├── pwa/            PWA install affordance (asset references only)

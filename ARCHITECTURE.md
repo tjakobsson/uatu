@@ -79,8 +79,7 @@ src/
 │                         (micromark + GFM + frontmatter), asciidoc
 │                         (@asciidoctor/core), sanitization + mermaid markers
 ├── review/               Review-burden score data layer
-├── ignore/               .gitignore + .uatu.json tree.exclude engine +
-│                         legacy .uatuignore deprecation warning
+├── ignore/               .gitignore + .uatu.json tree.exclude engine
 ├── watchdog/             Heartbeat-driven hang recovery — spawned sibling
 │                         subprocess + forensic dump bundle
 ├── debug/                Observability — XDG-cache path resolution +

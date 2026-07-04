@@ -150,7 +150,7 @@ export function renderChangeOverview() {
   changeOverviewElement.innerHTML = renderCompareTargetControl() + sections;
 }
 
-export function renderDriver(driver: RepositoryReviewSnapshot["reviewLoad"]["drivers"][number]): string {
+function renderDriver(driver: RepositoryReviewSnapshot["reviewLoad"]["drivers"][number]): string {
   const score = driver.score > 0 ? `+${driver.score}` : String(driver.score);
   const files = driver.files.length > 0
     ? `<span class="driver-files">${escapeHtml(driver.files.slice(0, 3).join(", "))}${driver.files.length > 3 ? "…" : ""}</span>`
@@ -255,7 +255,7 @@ export function collectGitStatusEntries(repos: readonly RepositoryReviewSnapshot
   return out;
 }
 
-export function mapChangedFileStatus(raw: string): GitStatusForView["status"] | null {
+function mapChangedFileStatus(raw: string): GitStatusForView["status"] | null {
   const head = (raw[0] ?? "").toUpperCase();
   switch (head) {
     case "A":
@@ -280,7 +280,7 @@ export function mapChangedFileStatus(raw: string): GitStatusForView["status"] | 
 // optimistically re-render the control, push the choice to the server (which
 // recomputes + rebroadcasts the burden over SSE), and refresh the active Diff
 // view against the new target. Mirrors the server-session model of `setScope`.
-export async function applyCompareTargetChange(target: ReviewCompareTarget): Promise<void> {
+async function applyCompareTargetChange(target: ReviewCompareTarget): Promise<void> {
   if (appState.compareTarget === target) {
     return;
   }

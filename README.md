@@ -61,7 +61,7 @@ everything else works.
 ## Usage
 
 ```bash
-uatu watch [PATH...] [--force] [--no-open] [--no-follow] [--no-gitignore] [--port <PORT>]
+uatu watch [PATH...] [--force] [--no-open] [--no-follow] [--no-gitignore] [--port <PORT>] [--debug]
 ```
 
 ```bash
@@ -155,7 +155,7 @@ counted in watchdog checks rather than wall-clock time, so a laptop sleeping
 past the timeout does not trigger a false kill on wake.
 
 ```bash
-uatu watch --debug                  # also writes 1Hz NDJSON metrics
+uatu watch --debug                  # also writes 1Hz NDJSON metrics (or UATU_DEBUG=1)
 uatu watch --watchdog-timeout=60000
 uatu watch --no-watchdog            # escape hatch
 ```

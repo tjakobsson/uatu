@@ -44,16 +44,8 @@ export function safeLocalStorage(): Storage | null {
 // hosted here.
 export const SIDEBAR_PANES_KEY = "uatu:sidebar-panes";
 export const GIT_LOG_LIMIT_KEY = "uatu:git-log-limit";
-export const FILES_PANE_FILTER_KEY = "uatu.filesPaneFilter";
-export const COMPARE_TARGET_KEY = "uatu:compare-target";
-
-// Legacy per-Mode keys retained as constants so the boot-time migration can
-// find and remove them. Not used by any reader after the migration runs.
-export const LEGACY_MODE_KEY = "uatu:mode";
-export const LEGACY_SIDEBAR_PANES_KEY_AUTHOR = "uatu:sidebar-panes:author";
-export const LEGACY_SIDEBAR_PANES_KEY_REVIEW = "uatu:sidebar-panes:review";
-export const LEGACY_FILES_PANE_FILTER_KEY_AUTHOR = "uatu.filesPaneFilter.author";
-export const LEGACY_FILES_PANE_FILTER_KEY_REVIEW = "uatu.filesPaneFilter.review";
+const FILES_PANE_FILTER_KEY = "uatu.filesPaneFilter";
+const COMPARE_TARGET_KEY = "uatu:compare-target";
 
 // Discriminated union describing what the preview pane is showing. Drives
 // the renderer dispatch in `connectEvents` / `loadInitialState`.
@@ -74,7 +66,7 @@ export type PaneId = (typeof ALL_PANE_DEFS)[number]["id"];
 export type PaneDef = (typeof ALL_PANE_DEFS)[number];
 export type PaneState = Record<PaneId, { visible: boolean; collapsed: boolean; height: number | null }>;
 
-export function defaultPaneState(): PaneState {
+function defaultPaneState(): PaneState {
   return {
     "change-overview": { visible: true, collapsed: false, height: 210 },
     files: { visible: true, collapsed: false, height: null },
@@ -112,7 +104,7 @@ export function readPaneState(): PaneState {
 // tree to `reviewLoad.changedFiles ∪ ignoredFiles` plus ancestor directories.
 export type FilesPaneFilter = "all" | "changed";
 
-export const DEFAULT_FILES_PANE_FILTER: FilesPaneFilter = "all";
+const DEFAULT_FILES_PANE_FILTER: FilesPaneFilter = "all";
 
 export function readFilesPaneFilterPreference(): FilesPaneFilter {
   try {
@@ -128,36 +120,6 @@ export function writeFilesPaneFilterPreference(value: FilesPaneFilter): void {
     window.localStorage.setItem(FILES_PANE_FILTER_KEY, value);
   } catch {
     // best-effort persistence; localStorage may be disabled
-  }
-}
-
-// One-time migration from per-Mode storage keys to the single keys above.
-// Reads the Author-mode pane layout if present (it's the historical default
-// most users sat in) and writes it to the new bare key. Removes all legacy
-// `:author` / `:review` variants and the discarded `uatu:mode` preference.
-export function migrateLegacyModeStorage(): void {
-  const storage = safeLocalStorage();
-  if (!storage) return;
-  try {
-    if (storage.getItem(SIDEBAR_PANES_KEY) === null) {
-      const author = storage.getItem(LEGACY_SIDEBAR_PANES_KEY_AUTHOR);
-      if (author !== null) {
-        storage.setItem(SIDEBAR_PANES_KEY, author);
-      }
-    }
-    if (storage.getItem(FILES_PANE_FILTER_KEY) === null) {
-      const author = storage.getItem(LEGACY_FILES_PANE_FILTER_KEY_AUTHOR);
-      if (author === "all" || author === "changed") {
-        storage.setItem(FILES_PANE_FILTER_KEY, author);
-      }
-    }
-    storage.removeItem(LEGACY_SIDEBAR_PANES_KEY_AUTHOR);
-    storage.removeItem(LEGACY_SIDEBAR_PANES_KEY_REVIEW);
-    storage.removeItem(LEGACY_FILES_PANE_FILTER_KEY_AUTHOR);
-    storage.removeItem(LEGACY_FILES_PANE_FILTER_KEY_REVIEW);
-    storage.removeItem(LEGACY_MODE_KEY);
-  } catch {
-    // best-effort; storage may be disabled or quota-bound
   }
 }
 

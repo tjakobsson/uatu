@@ -118,7 +118,7 @@ export function highlightCodeBlocks(html: string): string {
 
 export type HighlightResult = { value: string; language: string | undefined };
 
-export function highlightSource(source: string, language: string | undefined): HighlightResult {
+function highlightSource(source: string, language: string | undefined): HighlightResult {
   if (language && hljs.getLanguage(language)) {
     try {
       const result = hljs.highlight(source, { language, ignoreIllegals: true });

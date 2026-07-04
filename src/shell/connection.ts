@@ -37,7 +37,7 @@ export function setConnectionState(state: ConnectionRawState, _label: string) {
   syncConnectionDisplay();
 }
 
-export function syncConnectionDisplay() {
+function syncConnectionDisplay() {
   connectionStateElement.classList.remove("is-live", "is-reconnecting", "is-connecting");
   connectionStateElement.classList.add(`is-${connectionRawState}`);
   let label: string;

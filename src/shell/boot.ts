@@ -19,7 +19,6 @@ import { connectEvents } from "./events";
 import { replaceSelection, scrollToFragment } from "./history";
 import {
   appState,
-  migrateLegacyModeStorage,
   readFilesPaneFilterPreference,
   readPaneState,
 } from "./state";
@@ -30,10 +29,6 @@ import {
 } from "./url";
 
 export async function loadInitialState() {
-  // One-time migration from the legacy per-Mode storage keys. Runs before
-  // any read of the new keys so first paint reflects the migrated state.
-  migrateLegacyModeStorage();
-
   // Decode the requested URL path BEFORE fetching state so we can decide
   // whether to honor the server's defaultDocumentId or override with a
   // URL-derived doc selection (direct-link arrival, per design D3).

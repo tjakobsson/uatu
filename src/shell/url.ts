@@ -41,7 +41,7 @@ export function commitPreviewParamsFromUrl(): CommitPreviewParams | null {
   return { repositoryId, sha };
 }
 
-export function resolveCommitPreview(params: CommitPreviewParams): CommitPreviewResolution {
+function resolveCommitPreview(params: CommitPreviewParams): CommitPreviewResolution {
   const repository = appState.repositories.find(candidate => candidate.id === params.repositoryId);
   if (!repository) {
     return { repositoryId: params.repositoryId, sha: params.sha, kind: "missing-repository" };
@@ -77,7 +77,7 @@ export function renderCommitPreview(params: CommitPreviewParams) {
   renderCommitPreviewUnavailable(resolved);
 }
 
-export function renderCommitPreviewUnavailable(resolved: Exclude<CommitPreviewResolution, { kind: "found" }>) {
+function renderCommitPreviewUnavailable(resolved: Exclude<CommitPreviewResolution, { kind: "found" }>) {
   if (resolved.kind === "missing-repository") {
     renderEmptyPreview(
       "Commit preview unavailable",

@@ -23,9 +23,9 @@ export const TERMINAL_STATE_KEY = "uatu:terminal-state";
 export const TERMINAL_PANES_KEY = "uatu:terminal-panes";
 
 export const TERMINAL_HEIGHT_MIN = 120;
-export const TERMINAL_HEIGHT_MAX_FRACTION = 0.7;
+const TERMINAL_HEIGHT_MAX_FRACTION = 0.7;
 export const TERMINAL_WIDTH_MIN = 280;
-export const TERMINAL_WIDTH_MAX_FRACTION = 0.6;
+const TERMINAL_WIDTH_MAX_FRACTION = 0.6;
 // Below this viewport width, right-dock collapses back to bottom-dock so the
 // preview isn't squeezed unusable. Preference is preserved for restoration.
 export const TERMINAL_RIGHT_DOCK_VIEWPORT_MIN = 720;

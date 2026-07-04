@@ -25,7 +25,7 @@ export const CLOSE_CODE_USER_TERMINATE = 4001;
 // Server→client: this socket lost its session to a takeover claim from
 // another client. The receiving pane parks (notice + explicit take-back)
 // rather than tearing down — the session is alive, just elsewhere.
-export const CLOSE_CODE_SESSION_TAKEN = 4410;
+const CLOSE_CODE_SESSION_TAKEN = 4410;
 // WebSocket.OPEN. Not exposed as a named constant on Bun's ServerWebSocket type.
 const WS_OPEN = 1;
 // Cap the per-session replay buffer. On reattach we resend recent PTY output

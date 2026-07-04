@@ -98,23 +98,13 @@ describe("parseCommand", () => {
     expect(usageText()).toContain("--force");
   });
 
-  test("--mode is accepted but ignored during the deprecation window", () => {
-    // The flag emits a deprecation warning to stderr and is otherwise a no-op.
-    const parsed = parseCommand(["watch", "--mode=review"]);
-    if (parsed.kind !== "watch") throw new Error("expected watch");
-    // No startupMode field exists anymore — the option object simply doesn't
-    // carry one. Follow remains at the CLI default (true).
-    expect(parsed.options.follow).toBe(true);
+  test("--mode is rejected as an unknown flag after the deprecation window", () => {
+    expect(() => parseCommand(["watch", "--mode=review"])).toThrow(/unknown flag: --mode/);
+    expect(() => parseCommand(["watch", "--mode", "review"])).toThrow(/unknown flag: --mode/);
   });
 
-  test("--mode in the space form also accepted-and-ignored", () => {
-    const parsed = parseCommand(["watch", "--mode", "review"]);
-    if (parsed.kind !== "watch") throw new Error("expected watch");
-    expect(parsed.options.follow).toBe(true);
-  });
-
-  test("--mode in the space form requires a value", () => {
-    expect(() => parseCommand(["watch", "--mode"])).toThrow(/missing value for --mode/);
+  test("usage lists only flags the parser honors", () => {
+    expect(usageText()).not.toContain("--mode");
   });
 
   test("debug defaults to false; watchdog defaults to enabled", () => {
