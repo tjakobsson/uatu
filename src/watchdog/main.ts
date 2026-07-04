@@ -5,8 +5,20 @@
 //
 // Loop invariant: every second
 //   1. `kill(parentPid, 0)` — exit cleanly if parent is gone.
-//   2. `stat heartbeat` — compare mtime to `Date.now()`.
-//   3. If `now - mtime > timeout`, capture forensic dump and `SIGKILL` parent.
+//   2. `stat heartbeat` — compare mtime to the mtime seen on the previous tick.
+//   3. If the mtime has not advanced for `ceil(timeout / tick)` consecutive
+//      ticks, capture forensic dump and `SIGKILL` parent.
+//
+// Staleness is deliberately NOT derived from `Date.now() - mtime`: wall-clock
+// keeps advancing while the machine sleeps, so on wake the heartbeat looks
+// minutes stale even though the parent is healthy — whichever pending timer
+// fired first decided whether uatu survived the wake. Tick counting only
+// accumulates while the watchdog itself is running (a suspend contributes at
+// most one stale tick), and the parent's own 1 Hz heartbeat advances the mtime
+// within a tick of resuming, resetting the counter. A genuinely wedged parent
+// freezes the mtime while the watchdog ticks the full threshold awake — same
+// detection latency as before. This also makes detection immune to NTP steps
+// and manual clock changes.
 
 import { promises as fs } from "node:fs";
 
@@ -71,6 +83,14 @@ export async function runWatchdog(args: WatchdogArgs): Promise<number> {
   const paths = createCachePaths(cacheRoot);
   await ensureCacheDir(cacheRoot);
 
+  // The configured timeout keeps its wall-clock meaning while the system is
+  // awake: one stale tick ≈ one second of observed non-advancing heartbeat.
+  const requiredStaleTicks = Math.max(1, Math.ceil(timeoutMs / TICK_INTERVAL_MS));
+  // mtime observed on the previous tick; null until the first successful stat.
+  let lastMtimeMs: number | null = null;
+  // Consecutive ticks the mtime has been observed NOT to advance.
+  let staleTicks = 0;
+
   // eslint-disable-next-line no-constant-condition
   while (true) {
     if (!isProcessAlive(parentPid)) {
@@ -85,15 +105,23 @@ export async function runWatchdog(args: WatchdogArgs): Promise<number> {
       // Heartbeat file missing — treat as a hard signal that the parent has
       // failed to start up properly. Wait one more tick before declaring,
       // because there's a tiny window between watchdog spawn and the first
-      // heartbeat write.
+      // heartbeat write. Does not advance the stale counter: there is no
+      // mtime to compare against.
       await sleep(TICK_INTERVAL_MS);
       continue;
     }
 
-    const now = Date.now();
-    const ageMs = now - mtimeMs;
-    if (ageMs > timeoutMs) {
-      await captureAndKill(parentPid, paths, ageMs, now);
+    if (lastMtimeMs === null || mtimeMs !== lastMtimeMs) {
+      // First observation, or the heartbeat advanced — the parent is alive.
+      lastMtimeMs = mtimeMs;
+      staleTicks = 0;
+    } else {
+      staleTicks += 1;
+    }
+
+    if (staleTicks >= requiredStaleTicks) {
+      const now = Date.now();
+      await captureAndKill(parentPid, paths, now - mtimeMs, now, staleTicks);
       return 0;
     }
 
@@ -106,6 +134,7 @@ async function captureAndKill(
   paths: CachePaths,
   ageMs: number,
   detectedAtMs: number,
+  staleTicks: number,
 ): Promise<void> {
   const timestamp = formatDumpTimestamp();
   const stackPath = paths.dumpPath(parentPid, timestamp, "stack.txt");
@@ -126,6 +155,10 @@ async function captureAndKill(
     reason: "stale-heartbeat",
     pid: parentPid,
     ageMs,
+    // Consecutive watchdog ticks the mtime was observed frozen. A real hang
+    // has staleTicks ≈ ceil(timeout / tick) with ageMs to match; ageMs far
+    // exceeding staleTicks × tick means wall-clock jumped (sleep, clock step).
+    staleTicks,
     detectedAtMs,
     platform: process.platform,
     stackCaptured: !stack.partial,

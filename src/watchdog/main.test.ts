@@ -86,18 +86,20 @@ describe("runWatchdog (stale-heartbeat path)", () => {
     const pid = victim.pid;
     expect(typeof pid).toBe("number");
 
-    // Heartbeat pre-dates the timeout window.
+    // A heartbeat that is never refreshed. Its absolute age is irrelevant —
+    // staleness is "mtime did not advance across consecutive ticks", so a
+    // freshly-written-then-frozen file triggers exactly like an ancient one.
     const heartbeatPath = path.join(cacheRoot, `heartbeat-${pid}`);
     await fs.writeFile(heartbeatPath, "");
-    const longAgo = new Date(Date.now() - 60_000);
-    await fs.utimes(heartbeatPath, longAgo, longAgo);
 
     try {
       const code = await runWatchdog({
         parentPid: pid as number,
         heartbeatPath,
         cacheRoot,
-        timeoutMs: 100, // tiny so the first tick declares stale immediately
+        // Tiny timeout → 1 required stale tick: the first tick records the
+        // mtime, the second observes it frozen and declares the hang.
+        timeoutMs: 100,
       });
       expect(code).toBe(0);
 
@@ -113,6 +115,8 @@ describe("runWatchdog (stale-heartbeat path)", () => {
       expect(cause.reason).toBe("stale-heartbeat");
       expect(cause.pid).toBe(pid);
       expect(typeof cause.ageMs).toBe("number");
+      // timeoutMs=100 → ceil(100/1000) = 1 required consecutive stale tick.
+      expect(cause.staleTicks).toBe(1);
       expect(cause.platform).toBe(process.platform);
     } finally {
       try {
@@ -123,5 +127,78 @@ describe("runWatchdog (stale-heartbeat path)", () => {
     }
     },
     STALE_PATH_TIMEOUT_MS,
+  );
+});
+
+describe("runWatchdog (sleep-wake path)", () => {
+  // ~3.5s of watchdog ticks + spawn/teardown; generous headroom like the
+  // stale-path test above.
+  const WAKE_PATH_TIMEOUT_MS = 30_000;
+  let cacheRoot: string;
+  beforeEach(async () => {
+    cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), "uatu-wd-wake-"));
+  });
+  afterEach(async () => {
+    await fs.rm(cacheRoot, { recursive: true, force: true });
+  });
+
+  test(
+    "an ancient heartbeat that resumes advancing does not trigger a kill",
+    async () => {
+      // Simulates waking from system sleep: the heartbeat mtime is minutes in
+      // the past (wall-clock advanced while everything was suspended), but the
+      // parent is healthy and resumes touching it. Under the old wall-clock
+      // check (`now - mtime > timeout`) the watchdog would dump + SIGKILL on
+      // its first post-wake tick; under tick counting it must not.
+      const victim = Bun.spawn(["bun", "-e", "setInterval(() => {}, 1000)"], {
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      const pid = victim.pid;
+
+      const heartbeatPath = path.join(cacheRoot, `heartbeat-${pid}`);
+      await fs.writeFile(heartbeatPath, "");
+      const longAgo = new Date(Date.now() - 600_000); // "slept" for 10 minutes
+      await fs.utimes(heartbeatPath, longAgo, longAgo);
+
+      // Post-wake parent heartbeat: touch the mtime faster than the watchdog
+      // ticks so every tick observes an advance. Explicit forward-marching
+      // timestamps sidestep filesystem mtime granularity.
+      let fakeNow = Date.now();
+      const refresher = setInterval(() => {
+        fakeNow += 1_000;
+        const stamp = new Date(fakeNow);
+        void fs.utimes(heartbeatPath, stamp, stamp).catch(() => undefined);
+      }, 200);
+
+      try {
+        // timeoutMs=1000 → 1 required stale tick: the most trigger-happy
+        // configuration. Give the watchdog several ticks to (wrongly) declare
+        // a hang, then remove the victim so the watchdog exits via the
+        // parent-gone path.
+        const run = runWatchdog({
+          parentPid: pid,
+          heartbeatPath,
+          cacheRoot,
+          timeoutMs: 1_000,
+        });
+        await new Promise(resolve => setTimeout(resolve, 3_500));
+        victim.kill();
+        const code = await run;
+        expect(code).toBe(0);
+
+        const entries = await fs.readdir(cacheRoot);
+        const dumps = entries.filter(name => name.startsWith("dump-"));
+        expect(dumps).toHaveLength(0);
+      } finally {
+        clearInterval(refresher);
+        try {
+          victim.kill();
+        } catch {
+          // Already gone.
+        }
+      }
+    },
+    WAKE_PATH_TIMEOUT_MS,
   );
 });
