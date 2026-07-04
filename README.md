@@ -50,8 +50,8 @@ terminal feature gracefully).
 
 ```bash
 bun install
-bun run src/cli.ts watch testdata/watch-docs   # run from source
-bun run build && ./dist/uatu watch .            # standalone binary
+bun run src/cli.ts serve testdata/watch-docs   # run from source
+bun run build && ./dist/uatu serve .            # standalone binary
 bun link                                        # expose `uatu` on PATH
 ```
 
@@ -61,19 +61,23 @@ everything else works.
 ## Usage
 
 ```bash
-uatu watch [PATH...] [--force] [--no-open] [--no-follow] [--no-gitignore] [--port <PORT>] [--debug]
+uatu [serve] [PATH...] [--force] [--no-open] [--no-follow] [--no-gitignore] [--port <PORT>] [--debug]
 ```
 
+`serve` is the default command — `uatu docs` and `uatu serve docs` are
+equivalent, and a bare `uatu` serves the current directory. `uatu watch`
+remains as a deprecated alias for one release and prints a warning.
+
 ```bash
-uatu watch .
-uatu watch docs notes --no-open
-uatu watch . --no-follow
-uatu watch README.md                        # single-file scope
-uatu watch ~/Downloads/docs --force         # non-git, slow indexing
+uatu serve .
+uatu serve docs notes --no-open
+uatu serve . --no-follow
+uatu serve README.md                        # single-file scope
+uatu serve ~/Downloads/docs --force         # non-git, slow indexing
 ```
 
 To scope a session to a single file, pass that file's path directly:
-`uatu watch README.md`. The Follow switch is then disabled because there's
+`uatu serve README.md`. The Follow switch is then disabled because there's
 nothing else to follow.
 
 The server binds to `127.0.0.1:4711` by default and scans upward if the port
@@ -145,7 +149,7 @@ Edge / Brave or "Add to Dock" works around it.
 
 ## Watchdog and freeze recovery
 
-`uatu watch` runs a sibling watchdog subprocess by default. If the parent's
+`uatu serve` runs a sibling watchdog subprocess by default. If the parent's
 1Hz heartbeat stops advancing for `--watchdog-timeout=<ms>` (default 30 000)
 worth of consecutive watchdog checks — for example because the JS event loop
 is wedged on a native fsevents deadlock — the watchdog captures a forensic
@@ -155,9 +159,9 @@ counted in watchdog checks rather than wall-clock time, so a laptop sleeping
 past the timeout does not trigger a false kill on wake.
 
 ```bash
-uatu watch --debug                  # also writes 1Hz NDJSON metrics (or UATU_DEBUG=1)
-uatu watch --watchdog-timeout=60000
-uatu watch --no-watchdog            # escape hatch
+uatu serve --debug                  # also writes 1Hz NDJSON metrics (or UATU_DEBUG=1)
+uatu serve --watchdog-timeout=60000
+uatu serve --no-watchdog            # escape hatch
 ```
 
 Diagnostic files live under `$XDG_CACHE_HOME/uatu/` (or `~/.cache/uatu/`):

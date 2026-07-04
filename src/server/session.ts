@@ -168,15 +168,18 @@ export function usageText(build: BuildInfo = BUILD): string {
   return `uatu ${formatBuildIdentifier(build)}
 
 Usage:
-  uatu watch [PATH...] [--force] [--no-open] [--no-follow] [--no-gitignore] [--port <PORT>] [--debug]
+  uatu [serve] [PATH...] [--force] [--no-open] [--no-follow] [--no-gitignore] [--port <PORT>] [--debug]
   uatu --help
   uatu --version
+
+The 'serve' command is the default: 'uatu docs' and 'uatu serve docs' are
+equivalent. 'uatu watch' is a deprecated alias for 'uatu serve'.
 
 Options:
   --no-open               Do not open a browser automatically
   --no-follow             Start with follow mode disabled
   --no-gitignore          Do not honor .gitignore patterns when indexing files
-  --force                 Watch non-git paths anyway; indexing may be slow
+  --force                 Serve non-git paths anyway; indexing may be slow
   -p, --port              Bind the local server to a specific port
   --debug                 Record verbose 1Hz counter history under \$XDG_CACHE_HOME/uatu (or ~/.cache/uatu)
   --no-watchdog           Suppress the companion watchdog subprocess (escape hatch — leaves no recovery on freeze)
@@ -218,7 +221,7 @@ export function printIndexingStatus(
     return () => undefined;
   }
 
-  const label = entries.length === 1 ? entries[0]!.absolutePath : `${entries.length} watch roots`;
+  const label = entries.length === 1 ? entries[0]!.absolutePath : `${entries.length} roots`;
   const message = `Indexing ${label}...`;
   let cleared = false;
   stream.write(message);
@@ -232,8 +235,11 @@ export function printIndexingStatus(
   };
 }
 
-export function parseCommand(argv: string[]): ParsedCommand {
-  if (argv.length === 0 || argv[0] === "-h" || argv[0] === "--help") {
+export function parseCommand(
+  argv: string[],
+  warn: (message: string) => void = message => process.stderr.write(message),
+): ParsedCommand {
+  if (argv[0] === "-h" || argv[0] === "--help") {
     return { kind: "help" };
   }
 
@@ -241,8 +247,16 @@ export function parseCommand(argv: string[]): ParsedCommand {
     return { kind: "version" };
   }
 
-  if (argv[0] !== "watch") {
-    throw new Error(`unknown command: ${argv[0]}`);
+  // Command dispatch: `serve` is canonical. `watch` forwards with a one-line
+  // deprecation warning (stderr only, so piped-stdout consumers capturing the
+  // URL are unaffected). Anything else — flags, paths, or nothing at all — is
+  // the bare-invocation default and behaves exactly as `serve`.
+  let rest = argv;
+  if (argv[0] === "serve") {
+    rest = argv.slice(1);
+  } else if (argv[0] === "watch") {
+    warn("warning: 'uatu watch' is deprecated; use 'uatu serve'\n");
+    rest = argv.slice(1);
   }
 
   let openBrowser = true;
@@ -256,8 +270,8 @@ export function parseCommand(argv: string[]): ParsedCommand {
   let watchdogTimeoutMs: number | undefined;
   const rootPaths: string[] = [];
 
-  for (let index = 1; index < argv.length; index += 1) {
-    const arg = argv[index];
+  for (let index = 0; index < rest.length; index += 1) {
+    const arg = rest[index];
 
     if (arg === "--no-open") {
       openBrowser = false;
@@ -288,7 +302,7 @@ export function parseCommand(argv: string[]): ParsedCommand {
     }
 
     if (arg === "-p" || arg === "--port") {
-      const value = argv[index + 1];
+      const value = rest[index + 1];
       if (!value) {
         throw new Error("missing value for --port");
       }
@@ -318,7 +332,7 @@ export function parseCommand(argv: string[]): ParsedCommand {
     if (arg === "--watchdog-timeout" || arg.startsWith("--watchdog-timeout=")) {
       let value: string | undefined;
       if (arg === "--watchdog-timeout") {
-        value = argv[index + 1];
+        value = rest[index + 1];
         if (!value) {
           throw new Error("missing value for --watchdog-timeout");
         }
@@ -398,7 +412,7 @@ export async function resolveWatchRoots(inputPaths: string[], cwd: string): Prom
     try {
       stat = await fs.stat(absolutePath);
     } catch {
-      throw new Error(`watch root does not exist: ${inputPath}`);
+      throw new Error(`root does not exist: ${inputPath}`);
     }
 
     if (stat.isDirectory()) {
@@ -408,12 +422,12 @@ export async function resolveWatchRoots(inputPaths: string[], cwd: string): Prom
 
     if (stat.isFile()) {
       if (shouldDenyPath(path.basename(absolutePath))) {
-        throw new Error(`watch path is not viewable: ${inputPath}`);
+        throw new Error(`path is not viewable: ${inputPath}`);
       }
 
       const kind = await classifyFile(absolutePath, path.basename(absolutePath));
       if (kind === "binary") {
-        throw new Error(`watch path is a binary file: ${inputPath}`);
+        throw new Error(`path is a binary file: ${inputPath}`);
       }
       resolved.set(absolutePath, {
         kind: "file",
@@ -423,7 +437,7 @@ export async function resolveWatchRoots(inputPaths: string[], cwd: string): Prom
       continue;
     }
 
-    throw new Error(`watch path must be a directory or a non-binary file: ${inputPath}`);
+    throw new Error(`path must be a directory or a non-binary file: ${inputPath}`);
   }
 
   return Array.from(resolved.values()).sort((left, right) =>

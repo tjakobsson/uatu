@@ -132,9 +132,9 @@ async function runWatch(options: WatchOptions) {
     const paths = formatWatchEntryPaths(nonGitEntries.map(result => result.entry));
     const plural = nonGitEntries.length === 1 ? "path is" : "paths are";
     if (!options.force) {
-      throw new Error(`watch ${plural} not inside a git repository: ${paths}. Use --force to watch non-git paths anyway.`);
+      throw new Error(`${plural} not inside a git repository: ${paths}. Use --force to serve non-git paths anyway.`);
     }
-    console.error(`uatu: warning: watching non-git ${nonGitEntries.length === 1 ? "path" : "paths"} with --force; indexing may be slow: ${paths}`);
+    console.error(`uatu: warning: serving non-git ${nonGitEntries.length === 1 ? "path" : "paths"} with --force; indexing may be slow: ${paths}`);
   }
 
   const clearIndexingStatus = printIndexingStatus(rootEntries, process.stdout);

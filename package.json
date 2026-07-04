@@ -9,7 +9,7 @@
     "uatu": "./src/cli.ts"
   },
   "scripts": {
-    "dev": "bun run src/cli.ts watch",
+    "dev": "bun run src/cli.ts serve",
     "bench:render": "bun run scripts/bench-render.ts",
     "test": "bun test",
     "check:licenses": "bun run src/shared/license-check.ts",

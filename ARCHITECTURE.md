@@ -12,7 +12,7 @@ For the user-facing pitch (features, install, usage), see [README.md](./README.m
 
 ```mermaid
 flowchart LR
-  CLI["src/cli.ts<br/>(uatu watch ...)"]
+  CLI["src/cli.ts<br/>(uatu serve ...)"]
   WS["chokidar<br/>file watcher"]
   Server["Bun.serve<br/>(src/cli.ts + src/server/routes.ts)"]
   Session["WatchSession<br/>(src/server/session.ts)"]
@@ -209,7 +209,7 @@ uatu is a single-mode app. There is no Author vs. Review distinction; the only b
 | User clicks the Follow switch | flips state; turning on jumps to the newest-mtime file (Rule B) |
 | File changes on disk + follow on | selection moves to the changed file (Rule C) |
 | File changes on disk + follow off | current file reloads in place if it's what changed; otherwise tree refreshes silently (Rule D) |
-| Single-file CLI invocation (`uatu watch some-file.md`) | Follow switch disabled — nothing else to follow |
+| Single-file CLI invocation (`uatu serve some-file.md`) | Follow switch disabled — nothing else to follow |
 | Sidebar panes available | Change Overview, Files, Git Log, Selection Inspector — all always available; toggle via the per-pane visibility menu |
 
 The `withProgrammaticUpdate(fn)` helper in `src/sidebar/tree-view.ts` is what makes Rule A reliable: it suppresses the `@pierre/trees` library's `onSelectionChange` callback during initial mount and `resetPaths`-driven refreshes so library-fired selections aren't mistaken for user clicks. That single helper is the root fix for the historical flake on `tests/e2e/preview-renderers.e2e.ts` (issue #45) and the `follow-mode auto-switch` test.

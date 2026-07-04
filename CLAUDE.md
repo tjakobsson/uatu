@@ -15,7 +15,7 @@ after the running app's region or a coherent domain.
 ```
 src/
 ├── app.ts          SPA entry — DOM queries, init calls, event wiring
-├── cli.ts          CLI entry — `uatu watch ...` + Bun.serve assembly
+├── cli.ts          CLI entry — `uatu serve ...` + Bun.serve assembly
 ├── styles.d.ts     CSS module type declarations
 ├── index.html, styles.css, assets/, assets/fonts/
 │                   (the bundled Hack Nerd Font Mono lives here — it's
