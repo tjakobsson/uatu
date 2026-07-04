@@ -18,12 +18,18 @@ if (!filesPaneFilterAllButtonMaybe || !filesPaneFilterChangedButtonMaybe) {
 const filesPaneFilterAllButton: HTMLButtonElement = filesPaneFilterAllButtonMaybe;
 const filesPaneFilterChangedButton: HTMLButtonElement = filesPaneFilterChangedButtonMaybe;
 
+// Owner mutator for `appState.filesPaneFilter`: assign + persist. Boot-time
+// hydration and the chip handler both go through here.
+export function setFilesPaneFilter(next: FilesPaneFilter): void {
+  appState.filesPaneFilter = next;
+  writeFilesPaneFilterPreference(next);
+}
+
 export function applyFilesPaneFilter(next: FilesPaneFilter): void {
   if (appState.filesPaneFilter === next) {
     return;
   }
-  appState.filesPaneFilter = next;
-  writeFilesPaneFilterPreference(next);
+  setFilesPaneFilter(next);
   syncFilesPaneFilterControl();
   renderSidebar();
 }

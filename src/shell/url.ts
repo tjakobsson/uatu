@@ -10,6 +10,8 @@ import { syncFollowToggle } from "./follow";
 import type { RepositoryReviewSnapshot } from "../shared/types";
 import { pushCommitPreview } from "./history";
 import { appState } from "./state";
+import { setPreviewMode, setSelectedId } from "./selection";
+import { setFollowEnabled } from "./follow";
 
 export type CommitPreviewParams = { repositoryId: string; sha: string };
 export type CommitPreviewResolution =
@@ -56,9 +58,9 @@ function resolveCommitPreview(params: CommitPreviewParams): CommitPreviewResolut
 }
 
 export function activateCommitPreview(params: CommitPreviewParams, options: { pushHistory: boolean }) {
-  appState.followEnabled = false;
-  appState.selectedId = null;
-  appState.previewMode = { kind: "commit", ...params };
+  setFollowEnabled(false);
+  setSelectedId(null);
+  setPreviewMode({ kind: "commit", ...params });
   syncFollowToggle();
   if (options.pushHistory) {
     pushCommitPreview(params.repositoryId, params.sha);

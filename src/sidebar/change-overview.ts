@@ -15,6 +15,8 @@ import { documentDiffCache, loadDocument } from "../preview/mount";
 import type { FilesPaneFilterMembership, GitStatusForView } from "./tree-view";
 import { baseModeLabel, capitalize } from "./git-log";
 import { renderReviewScoreDetails } from "./review-score-mount";
+import { setPreviewMode, setSelectedId } from "../shell/selection";
+import { setFollowEnabled } from "../shell/follow";
 
 const COMPARE_TARGET_OPTIONS: { target: ReviewCompareTarget; label: string }[] = [
   { target: "base", label: "Since base" },
@@ -277,6 +279,17 @@ function mapChangedFileStatus(raw: string): GitStatusForView["status"] | null {
 }
 
 // Apply a compare-target switch: persist it, drop now-stale cached diffs,
+// Owner mutator for `appState.compareTarget`: assign, persist the preference,
+// and drop diffs cached against the previous target. Server POST and
+// re-render side effects stay with the callers (this pane's change handler
+// and the SSE reducer adopting another tab's switch).
+export function adoptCompareTarget(target: ReviewCompareTarget): void {
+  appState.compareTarget = target;
+  writeCompareTargetPreference(target);
+  // Cached diffs were computed against the previous target.
+  documentDiffCache.clear();
+}
+
 // optimistically re-render the control, push the choice to the server (which
 // recomputes + rebroadcasts the burden over SSE), and refresh the active Diff
 // view against the new target. Mirrors the server-session model of `setScope`.
@@ -284,10 +297,7 @@ async function applyCompareTargetChange(target: ReviewCompareTarget): Promise<vo
   if (appState.compareTarget === target) {
     return;
   }
-  appState.compareTarget = target;
-  writeCompareTargetPreference(target);
-  // Cached diffs were computed against the previous target.
-  documentDiffCache.clear();
+  adoptCompareTarget(target);
   // Optimistic re-render so the toggle reflects the choice immediately; the
   // burden numbers + anchor refresh when the server rebroadcasts snapshots.
   renderSidebar();
@@ -338,9 +348,9 @@ export function initChangeOverviewClickHandler(): void {
       return;
     }
 
-    appState.followEnabled = false;
-    appState.selectedId = null;
-    appState.previewMode = { kind: "review-score", repositoryId: repository.id };
+    setFollowEnabled(false);
+    setSelectedId(null);
+    setPreviewMode({ kind: "review-score", repositoryId: repository.id });
     applyStaleHint(nextStaleHint(appState.staleHint, { kind: "manual-navigation" }));
     syncFollowToggle();
     pushReviewScore(repository.id);

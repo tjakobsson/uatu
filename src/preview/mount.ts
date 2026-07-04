@@ -33,6 +33,7 @@ import { currentMermaidThemeInputs } from "./mermaid";
 import { refreshOutline } from "./outline";
 import { attachMetadataCardToggleListener, renderMetadataCard } from "./metadata-card";
 import { syncViewToggle } from "./view-mode";
+import { setPreviewMode } from "../shell/selection";
 
 export type RenderedDocumentAuthor = { name: string; email?: string };
 
@@ -105,7 +106,7 @@ export function forgetDocumentCache(documentId: string): void {
 export async function applyDocumentPayload(payload: RenderedDocument): Promise<void> {
   // Common header / title updates are payload-driven and identical across
   // single and split layouts.
-  appState.previewMode = { kind: "document" };
+  setPreviewMode({ kind: "document" });
   previewTitleElement.textContent = payload.title;
   previewPathElement.textContent = payload.path;
   setPreviewType(payload);
@@ -361,7 +362,7 @@ export async function loadDocument(documentId: string) {
   );
 
   if (!response.ok) {
-    appState.previewMode = { kind: "empty" };
+    setPreviewMode({ kind: "empty" });
     renderEmptyPreview("Document unavailable", "The selected file no longer exists.");
     return;
   }

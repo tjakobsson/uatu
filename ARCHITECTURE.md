@@ -144,6 +144,22 @@ The route table that wires both of these requests is declared exactly once, in `
 
 The SPA's source of truth is `appState`, a module-level mutable singleton in `src/shell/state.ts`. The SSE handler in `src/shell/events.ts` is the only path that mutates `appState` from external events.
 
+Every `appState` field has exactly one owning module: direct assignment (`appState.<field> = …`) is allowed only inside the owner, and every other module mutates through the owner's exported mutator (`setSelectedId()`, `setFilesPaneFilter()`, …). Mutators for persisted preferences own the localStorage write, so assignment and persistence can't drift apart. The contract is enforced by `src/shell/state-ownership.test.ts`, which scans `src/` for out-of-owner assignments.
+
+| Field | Owner |
+|---|---|
+| `selectedId`, `previewMode` | `shell/selection.ts` |
+| `followEnabled` | `shell/follow.ts` (the four follow-mode rules) |
+| `roots`, `repositories`, `scope` | `shell/events.ts` (`applyServerSnapshot`) |
+| `staleHint` | `shell/stale-hint-mount.ts` |
+| `viewMode`, `wrap` | `preview/view-mode.ts` |
+| `viewLayout`, `splitRatio` | `preview/layout.ts` |
+| `diffStyle` | `preview/diff.ts` |
+| `panes` | `sidebar/panes.ts` |
+| `filesPaneFilter` | `sidebar/files-filter.ts` |
+| `gitLogLimit` | `sidebar/git-log.ts` |
+| `compareTarget` | `sidebar/change-overview.ts` (`adoptCompareTarget`) |
+
 ```mermaid
 sequenceDiagram
   participant Watcher as chokidar (server)

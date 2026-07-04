@@ -11,6 +11,7 @@ import { renderSidebar } from "../sidebar/shell";
 import { renderEmptyPreview } from "../preview/empty";
 import { nextStaleHint, type StaleHint } from "./stale-hint";
 import { appState } from "./state";
+import { setPreviewMode, setSelectedId } from "./selection";
 
 const staleHintElementMaybe = document.querySelector<HTMLDivElement>("#stale-hint");
 const staleHintMessageElementMaybe = document.querySelector<HTMLElement>("#stale-hint-message");
@@ -62,8 +63,8 @@ export function initStaleHintActionHandler(): void {
       // Close: clear the preview and the hint. Switch to the empty state since
       // there's no on-disk content to render.
       applyStaleHint(nextStaleHint(hint, { kind: "refresh-action" }));
-      appState.selectedId = null;
-      appState.previewMode = { kind: "empty" };
+      setSelectedId(null);
+      setPreviewMode({ kind: "empty" });
       renderSidebar();
       renderEmptyPreview("File no longer on disk", "The file you were viewing has been deleted.");
       return;

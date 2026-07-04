@@ -24,6 +24,12 @@ if (!panelsToggleElementMaybe || !panelsMenuElementMaybe) {
 const panelsToggleElement: HTMLButtonElement = panelsToggleElementMaybe;
 const panelsMenuElement: HTMLDivElement = panelsMenuElementMaybe;
 
+// Owner mutator for `appState.panes` — the boot path hydrates the persisted
+// pane layout through this instead of assigning directly.
+export function setPaneState(next: PaneState): void {
+  appState.panes = next;
+}
+
 export function initSidebarPanes() {
   panelsToggleElement.addEventListener("click", () => {
     const expanded = panelsToggleElement.getAttribute("aria-expanded") === "true";

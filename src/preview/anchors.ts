@@ -11,6 +11,8 @@ import { renderSidebar } from "../sidebar/shell";
 import { syncFollowToggle } from "../shell/follow";
 import { pushSelection, scrollToFragment } from "../shell/history";
 import { appState } from "../shell/state";
+import { setPreviewMode, setSelectedId } from "../shell/selection";
+import { setFollowEnabled } from "../shell/follow";
 
 export { buildInPageAnchorUrl } from "./anchor-url";
 
@@ -185,9 +187,9 @@ export function initCrossDocAnchorHandler() {
         );
         return;
       }
-      appState.followEnabled = false;
-      appState.selectedId = null;
-      appState.previewMode = { kind: "empty" };
+      setFollowEnabled(false);
+      setSelectedId(null);
+      setPreviewMode({ kind: "empty" });
       window.history.pushState(null, "", resolved.pathname);
       syncFollowToggle();
       renderSidebar();
@@ -196,9 +198,9 @@ export function initCrossDocAnchorHandler() {
     }
 
     event.preventDefault();
-    appState.followEnabled = false;
-    appState.selectedId = doc.id;
-    appState.previewMode = { kind: "document" };
+    setFollowEnabled(false);
+    setSelectedId(doc.id);
+    setPreviewMode({ kind: "document" });
     pushSelection(doc.id, doc.relativePath);
     syncFollowToggle();
     renderSidebar();

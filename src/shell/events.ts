@@ -15,10 +15,21 @@ import {
   shouldRefreshPreview,
   type StatePayload,
 } from "../shared/types";
+import { adoptCompareTarget } from "../sidebar/change-overview";
 import { setConnectionState } from "./connection";
 import { replaceSelection } from "./history";
-import { appState, writeCompareTargetPreference } from "./state";
+import { setSelectedId } from "./selection";
+import { appState } from "./state";
 import { renderCommitPreview } from "./url";
+
+// Owner mutator for the server-snapshot triple (`roots`, `repositories`,
+// `scope`). The SSE reducer below is the ongoing writer; the boot path
+// (`shell/boot.ts`) applies its initial /api/state payload through this too.
+export function applyServerSnapshot(payload: StatePayload): void {
+  appState.roots = payload.roots;
+  appState.repositories = payload.repositories ?? [];
+  appState.scope = payload.scope;
+}
 
 export function connectEvents() {
   const events = new EventSource("/api/events");
@@ -36,9 +47,7 @@ export function connectEvents() {
     const previousSelectedId = appState.selectedId;
     const shouldReload = shouldRefreshPreview(previousSelectedId, payload.changedId);
 
-    appState.roots = payload.roots;
-    appState.repositories = payload.repositories ?? [];
-    appState.scope = payload.scope;
+    applyServerSnapshot(payload);
     // The compare target is server-session state shared across clients. If
     // another tab switched it, adopt the broadcast value so this tab's toggle,
     // persisted preference, and cached diffs all reflect the shared session —
@@ -48,9 +57,7 @@ export function connectEvents() {
     const compareTargetChanged =
       typeof payload.compareTarget === "string" && payload.compareTarget !== appState.compareTarget;
     if (compareTargetChanged) {
-      appState.compareTarget = payload.compareTarget;
-      writeCompareTargetPreference(payload.compareTarget);
-      documentDiffCache.clear();
+      adoptCompareTarget(payload.compareTarget);
     }
     applyMonoConfig(payload.monoConfig);
     syncStateGeneration(payload.generatedAt);
@@ -73,12 +80,12 @@ export function connectEvents() {
     }
 
     // Rule C/D selection decision (see follow-mode capability).
-    appState.selectedId = chooseSelectionForFileEvent(
+    setSelectedId(chooseSelectionForFileEvent(
       payload.roots,
       previousSelectedId,
       payload.changedId,
       appState.followEnabled,
-    );
+    ));
 
     // Reveal the newly-selected file only when selection actually changed —
     // so a user-closed ancestor isn't re-opened by unrelated state updates.
