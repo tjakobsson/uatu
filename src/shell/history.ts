@@ -13,10 +13,11 @@ import { loadDocument } from "../preview/mount";
 import { renderEmptyPreview } from "../preview/empty";
 import { renderReviewScoreDetails } from "../sidebar/review-score-mount";
 import { renderSidebar } from "../sidebar/shell";
-import { syncFollowToggle } from "./follow";
+import { setFollowEnabled, syncFollowToggle } from "./follow";
 import { defaultDocumentId } from "../shared/types";
 import { nextStaleHint } from "./stale-hint";
 import { appState } from "./state";
+import { setPreviewMode, setSelectedId } from "./selection";
 import {
   activateCommitPreview,
   commitPreviewParamsFromUrl,
@@ -156,7 +157,7 @@ export function attachPopstateHandler() {
     }
 
     if (appState.followEnabled) {
-      appState.followEnabled = false;
+      setFollowEnabled(false);
       syncFollowToggle();
     }
     applyStaleHint(nextStaleHint(appState.staleHint, { kind: "manual-navigation" }));
@@ -164,8 +165,8 @@ export function attachPopstateHandler() {
     const reviewScoreRepositoryId = reviewScoreRepositoryIdFromUrl();
     if (reviewScoreRepositoryId) {
       const repository = appState.repositories.find(candidate => candidate.id === reviewScoreRepositoryId);
-      appState.previewMode = { kind: "review-score", repositoryId: reviewScoreRepositoryId };
-      appState.selectedId = null;
+      setPreviewMode({ kind: "review-score", repositoryId: reviewScoreRepositoryId });
+      setSelectedId(null);
       renderSidebar();
       if (repository) {
         renderReviewScoreDetails(repository);
@@ -191,13 +192,13 @@ export function attachPopstateHandler() {
     if (!urlRelativePath) {
       const fallbackId = defaultDocumentId(appState.roots);
       if (fallbackId) {
-        appState.selectedId = fallbackId;
-        appState.previewMode = { kind: "document" };
+        setSelectedId(fallbackId);
+        setPreviewMode({ kind: "document" });
         renderSidebar();
         void loadDocument(fallbackId);
       } else {
-        appState.selectedId = null;
-        appState.previewMode = { kind: "empty" };
+        setSelectedId(null);
+        setPreviewMode({ kind: "empty" });
         renderSidebar();
         renderEmptyPreview("No document selected", "Waiting for viewable files");
       }
@@ -206,8 +207,8 @@ export function attachPopstateHandler() {
 
     const requestedDoc = findDocumentByRelativePath(urlRelativePath);
     if (requestedDoc && requestedDoc.kind !== "binary") {
-      appState.selectedId = requestedDoc.id;
-      appState.previewMode = { kind: "document" };
+      setSelectedId(requestedDoc.id);
+      setPreviewMode({ kind: "document" });
       renderSidebar();
       void loadDocument(requestedDoc.id).then(() => {
         if (window.location.hash) {
@@ -229,8 +230,8 @@ export function attachPopstateHandler() {
       return;
     }
 
-    appState.selectedId = null;
-    appState.previewMode = { kind: "empty" };
+    setSelectedId(null);
+    setPreviewMode({ kind: "empty" });
     renderSidebar();
     renderEmptyPreview("Document not found", `Document not found at ${urlRelativePath}.`);
   });

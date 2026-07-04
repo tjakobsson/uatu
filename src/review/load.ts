@@ -17,7 +17,7 @@ import type {
   RootGroup,
 } from "../shared/types";
 import { DEFAULT_COMPARE_TARGET } from "../shared/types";
-import type { WatchEntry } from "../server/session";
+import type { WatchEntry } from "../server/roots";
 import { applyCompareTarget, resolveReviewBase, safeGit, setGitMetricsSink } from "../document/git-base-ref";
 
 export { safeGit, setGitMetricsSink } from "../document/git-base-ref";

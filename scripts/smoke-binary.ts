@@ -40,7 +40,7 @@ const fail = (msg: string) => {
 //
 // `--no-open` is non-negotiable: the default behavior pops a browser tab
 // on the host, which is harmless in CI but obnoxious during local runs.
-const proc = spawn(BINARY, ["watch", WORKSPACE, "--port", String(PORT), "--no-open"], {
+const proc = spawn(BINARY, ["serve", WORKSPACE, "--port", String(PORT), "--no-open"], {
   stdio: ["ignore", "pipe", "pipe"],
 });
 

@@ -12,10 +12,10 @@ For the user-facing pitch (features, install, usage), see [README.md](./README.m
 
 ```mermaid
 flowchart LR
-  CLI["src/cli.ts<br/>(uatu watch ...)"]
+  CLI["src/cli.ts<br/>(uatu serve ...)"]
   WS["chokidar<br/>file watcher"]
   Server["Bun.serve<br/>(src/cli.ts + src/server/routes.ts)"]
-  Session["WatchSession<br/>(src/server/session.ts)"]
+  Session["WatchSession<br/>(src/server/watch-session.ts)"]
   SPA["browser SPA<br/>(src/app.ts → shell/preview/sidebar)"]
   Term["terminal<br/>(xterm.js ↔ WebSocket ↔ PTY)"]
   FS[("docs tree<br/>on disk")]
@@ -33,7 +33,7 @@ flowchart LR
 Four boundaries to keep in mind:
 
 - **HTTP/SSE between server and SPA.** `/api/state` (initial snapshot), `/api/document` (rendered HTML for a path), `/api/document/diff` (git diff), `/api/events` (SSE feed of state updates), `/api/scope` (POST to pin to a single file), `/api/compare-target` (POST to switch the review-burden lens between `base` and `last-commit`).
-- **Compare target.** The Change Overview measures review burden against the resolved review base by default (`base` — committed + worktree changes vs the merge base, the reviewer's view) but can switch to `last-commit` (staged + unstaged vs `HEAD`, plain-git's working view). Like `scope`, it is server-session state held in `session.ts` and shared across clients: a `POST /api/compare-target` recomputes `repositories` and rebroadcasts over SSE, and `/api/document/diff` resolves against the session's current target so per-file diffs stay coherent with the meter. `document/git-base-ref.ts` owns the single `applyCompareTarget` / `compareRefForTarget` mapping that both the meter and the diff consume; the burden readout is anchored with the precise resolved ref (`vs origin/main`, `vs HEAD`).
+- **Compare target.** The Change Overview measures review burden against the resolved review base by default (`base` — committed + worktree changes vs the merge base, the reviewer's view) but can switch to `last-commit` (staged + unstaged vs `HEAD`, plain-git's working view). Like `scope`, it is server-session state held in `server/watch-session.ts` and shared across clients: a `POST /api/compare-target` recomputes `repositories` and rebroadcasts over SSE, and `/api/document/diff` resolves against the session's current target so per-file diffs stay coherent with the meter. `document/git-base-ref.ts` owns the single `applyCompareTarget` / `compareRefForTarget` mapping that both the meter and the diff consume; the burden readout is anchored with the precise resolved ref (`vs origin/main`, `vs HEAD`).
 - **Chokidar between server and the filesystem.** The `WatchSession` debounces, applies the ignore policy, rebuilds the document index, and emits SSE events.
 - **WebSocket between SPA and terminal subsystem.** Authenticated by a cookie set on `POST /api/auth`; multiplexed across multiple PTY panes by `terminal/server.ts`.
 - **A single Bun binary.** No node, no separate frontend bundler — `Bun.serve` serves both the SPA and the API.
@@ -45,7 +45,8 @@ Four boundaries to keep in mind:
 ```
 src/
 ├── app.ts                SPA entry — DOM queries, init calls, top-level boot
-├── cli.ts                CLI entry — flag parsing, port probing, Bun.serve
+├── cli.ts                CLI entry — process wiring: port probing, Bun.serve
+│                         assembly, watchdog spawn, signal handling
 ├── styles.d.ts           CSS module type declarations
 ├── index.html, styles.css, assets/   HTML shell + CSS + bundled assets
 │                         (logo, PWA icons + manifest + sw.js,
@@ -54,6 +55,9 @@ src/
 │                         in the app, surfaced via the shared
 │                         `--mono-font-family` CSS variable on `:root`)
 │
+├── cli/                  CLI domain — argument parsing + usage text
+│                         (parse.ts) and TTY startup output (output.ts);
+│                         side-effect-free so the unit suite can import them
 ├── shell/                App-wide chrome and the appState singleton: boot,
 │                         SSE event handling, URL/history, follow-mode
 │                         capability, connection chip, PWA registration
@@ -69,9 +73,11 @@ src/
 │                         xterm client, WebSocket server, PTY backend,
 │                         cookie/origin auth, persisted pane state
 ├── server/               HTTP server building blocks (Bun.serve itself is
-│                         in cli.ts): the single-source-of-truth route
-│                         table, the WatchSession + render dispatch, the
-│                         port-probe helper
+│                         in cli.ts): routes.ts (single-source-of-truth
+│                         route table + shared fetch fallback),
+│                         watch-session.ts (live-reload engine), roots.ts
+│                         (root resolution + scanning), render-dispatch.ts,
+│                         static-files.ts, navigation.ts, port-probe.ts
 ├── document/             Per-document data (not rendering): metadata
 │                         parsing, diff fetcher, text/binary classifier,
 │                         language detection, review-base resolver
@@ -79,8 +85,7 @@ src/
 │                         (micromark + GFM + frontmatter), asciidoc
 │                         (@asciidoctor/core), sanitization + mermaid markers
 ├── review/               Review-burden score data layer
-├── ignore/               .gitignore + .uatu.json tree.exclude engine +
-│                         legacy .uatuignore deprecation warning
+├── ignore/               .gitignore + .uatu.json tree.exclude engine
 ├── watchdog/             Heartbeat-driven hang recovery — spawned sibling
 │                         subprocess + forensic dump bundle
 ├── debug/                Observability — XDG-cache path resolution +
@@ -100,14 +105,14 @@ A representative path: the SPA needs the rendered HTML for `guides/setup.md`.
 sequenceDiagram
   participant Browser
   participant Routes as server/routes.ts
-  participant Session as server/session.ts
+  participant Dispatch as server/render-dispatch.ts
   participant Render as render/markdown.ts
   Browser->>Routes: GET /api/document?id=guides/setup.md&view=rendered
-  Routes->>Session: renderDocument(roots, id, { view })
-  Session->>Session: locate file in document index
-  Session->>Render: micromark + GFM + frontmatter + Mermaid markers
-  Render-->>Session: sanitized HTML string
-  Session-->>Routes: { id, title, html, kind: "markdown", ... }
+  Routes->>Dispatch: renderDocument(roots, id, { view })
+  Dispatch->>Dispatch: locate file in document index
+  Dispatch->>Render: micromark + GFM + frontmatter + Mermaid markers
+  Render-->>Dispatch: sanitized HTML string
+  Dispatch-->>Routes: { id, title, html, kind: "markdown", ... }
   Routes-->>Browser: 200 JSON
   Note over Browser: preview/mount.ts<br/>writes html to #preview
 ```
@@ -123,7 +128,7 @@ The companion SSE stream:
 sequenceDiagram
   participant Browser
   participant Routes as server/routes.ts
-  participant Session as server/session.ts
+  participant Session as server/watch-session.ts
   participant Watcher as chokidar
   Browser->>Routes: GET /api/events (EventSource)
   Routes->>Session: eventsResponse()
@@ -138,6 +143,22 @@ The route table that wires both of these requests is declared exactly once, in `
 ## State lifecycle
 
 The SPA's source of truth is `appState`, a module-level mutable singleton in `src/shell/state.ts`. The SSE handler in `src/shell/events.ts` is the only path that mutates `appState` from external events.
+
+Every `appState` field has exactly one owning module: direct assignment (`appState.<field> = …`) is allowed only inside the owner, and every other module mutates through the owner's exported mutator (`setSelectedId()`, `setFilesPaneFilter()`, …). Mutators for persisted preferences own the localStorage write, so assignment and persistence can't drift apart. The contract is enforced by `src/shell/state-ownership.test.ts`, which scans `src/` for out-of-owner assignments.
+
+| Field | Owner |
+|---|---|
+| `selectedId`, `previewMode` | `shell/selection.ts` |
+| `followEnabled` | `shell/follow.ts` (the four follow-mode rules) |
+| `roots`, `repositories`, `scope` | `shell/events.ts` (`applyServerSnapshot`) |
+| `staleHint` | `shell/stale-hint-mount.ts` |
+| `viewMode`, `wrap` | `preview/view-mode.ts` |
+| `viewLayout`, `splitRatio` | `preview/layout.ts` |
+| `diffStyle` | `preview/diff.ts` |
+| `panes` | `sidebar/panes.ts` |
+| `filesPaneFilter` | `sidebar/files-filter.ts` |
+| `gitLogLimit` | `sidebar/git-log.ts` |
+| `compareTarget` | `sidebar/change-overview.ts` (`adoptCompareTarget`) |
 
 ```mermaid
 sequenceDiagram
@@ -210,7 +231,7 @@ uatu is a single-mode app. There is no Author vs. Review distinction; the only b
 | User clicks the Follow switch | flips state; turning on jumps to the newest-mtime file (Rule B) |
 | File changes on disk + follow on | selection moves to the changed file (Rule C) |
 | File changes on disk + follow off | current file reloads in place if it's what changed; otherwise tree refreshes silently (Rule D) |
-| Single-file CLI invocation (`uatu watch some-file.md`) | Follow switch disabled — nothing else to follow |
+| Single-file CLI invocation (`uatu serve some-file.md`) | Follow switch disabled — nothing else to follow |
 | Sidebar panes available | Change Overview, Files, Git Log, Selection Inspector — all always available; toggle via the per-pane visibility menu |
 
 The `withProgrammaticUpdate(fn)` helper in `src/sidebar/tree-view.ts` is what makes Rule A reliable: it suppresses the `@pierre/trees` library's `onSelectionChange` callback during initial mount and `resetPaths`-driven refreshes so library-fired selections aren't mistaken for user clicks. That single helper is the root fix for the historical flake on `tests/e2e/preview-renderers.e2e.ts` (issue #45) and the `follow-mode auto-switch` test.
@@ -228,7 +249,7 @@ The `withProgrammaticUpdate(fn)` helper in `src/sidebar/tree-view.ts` is what ma
 
 1. Update `src/document/classify.ts` to recognize the extension or content signature.
 2. If the file type renders to HTML, add a renderer in `src/render/` (mirror the shape of `markdown.ts` or `asciidoc.ts`).
-3. Update `src/server/session.ts`'s `renderDocument` to dispatch to your renderer.
+3. Update `src/server/render-dispatch.ts`'s `renderDocument` to dispatch to your renderer.
 4. If the file type has a custom preview shape (image, binary, etc.), add it under `src/preview/` and route it from `src/preview/mount.ts`'s `loadDocument`.
 5. Cover the new path in `tests/e2e/preview-renderers.e2e.ts`.
 

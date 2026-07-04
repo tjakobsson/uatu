@@ -16,6 +16,7 @@ import { nextStaleHint } from "./stale-hint";
 import { renderSidebar } from "../sidebar/shell";
 import { pushSelection } from "./history";
 import { appState } from "./state";
+import { setPreviewMode, setSelectedId } from "./selection";
 
 export { chooseSelectionForFileEvent };
 
@@ -33,6 +34,13 @@ export function initFollowToggle(): void {
   });
 }
 
+// Owner mutator for `appState.followEnabled`. The four follow-mode rules in
+// this module flip it; boot / URL routing / navigation call sites use this
+// instead of assigning directly (module-structure appState field ownership).
+export function setFollowEnabled(next: boolean): void {
+  appState.followEnabled = next;
+}
+
 // Rule B: user clicks the Follow chip. Flip `followEnabled`. When flipping
 // false → true, "catch up" to the latest changed file so the user sees
 // something happen immediately instead of waiting for the next watcher event.
@@ -41,14 +49,14 @@ export function applyChipClick(): void {
     return;
   }
   const wasEnabled = appState.followEnabled;
-  appState.followEnabled = !wasEnabled;
+  setFollowEnabled(!wasEnabled);
   syncFollowToggle();
 
   if (!wasEnabled && appState.followEnabled) {
     const jumpTo = selectionForChipTurnOn(appState.roots, appState.selectedId);
     if (jumpTo) {
-      appState.selectedId = jumpTo;
-      appState.previewMode = { kind: "document" };
+      setSelectedId(jumpTo);
+      setPreviewMode({ kind: "document" });
       const latestDoc = findDocumentById(jumpTo);
       if (latestDoc) {
         pushSelection(jumpTo, latestDoc.relativePath);
@@ -64,9 +72,9 @@ export function applyChipClick(): void {
 // suppressed at the TreeView's `duringProgrammaticUpdate` guard, so this
 // function does NOT need to re-check origin.
 export function applyUserRowClick(documentId: string): void {
-  appState.followEnabled = false;
-  appState.selectedId = documentId;
-  appState.previewMode = { kind: "document" };
+  setFollowEnabled(false);
+  setSelectedId(documentId);
+  setPreviewMode({ kind: "document" });
   applyStaleHint(nextStaleHint(appState.staleHint, { kind: "manual-navigation" }));
   const doc = findDocumentById(documentId);
   if (doc) {

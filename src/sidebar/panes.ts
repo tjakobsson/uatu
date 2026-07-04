@@ -24,6 +24,12 @@ if (!panelsToggleElementMaybe || !panelsMenuElementMaybe) {
 const panelsToggleElement: HTMLButtonElement = panelsToggleElementMaybe;
 const panelsMenuElement: HTMLDivElement = panelsMenuElementMaybe;
 
+// Owner mutator for `appState.panes` — the boot path hydrates the persisted
+// pane layout through this instead of assigning directly.
+export function setPaneState(next: PaneState): void {
+  appState.panes = next;
+}
+
 export function initSidebarPanes() {
   panelsToggleElement.addEventListener("click", () => {
     const expanded = panelsToggleElement.getAttribute("aria-expanded") === "true";
@@ -118,7 +124,7 @@ export function initSidebarPanes() {
   renderPanelsMenu();
 }
 
-export function nextVisiblePane(paneId: PaneId): HTMLElement | null {
+function nextVisiblePane(paneId: PaneId): HTMLElement | null {
   const index = ALL_PANE_DEFS.findIndex(pane => pane.id === paneId);
   for (const candidate of ALL_PANE_DEFS.slice(index + 1)) {
     const state = appState.panes[candidate.id];
@@ -130,7 +136,7 @@ export function nextVisiblePane(paneId: PaneId): HTMLElement | null {
   return null;
 }
 
-export function persistPaneState(): void {
+function persistPaneState(): void {
   try {
     window.localStorage.setItem(SIDEBAR_PANES_KEY, JSON.stringify(appState.panes));
   } catch {
@@ -161,7 +167,7 @@ export function syncPaneDom() {
   }
 }
 
-export function paneIdToGrow(): PaneId | null {
+function paneIdToGrow(): PaneId | null {
   const filesState = appState.panes.files;
   if (filesState.visible && !filesState.collapsed) {
     return "files";
@@ -185,7 +191,7 @@ export function schedulePaneHeightNormalization() {
   });
 }
 
-export function normalizePaneHeightsToStack() {
+function normalizePaneHeightsToStack() {
   const stack = document.querySelector<HTMLElement>(".pane-stack");
   if (!stack) {
     return;

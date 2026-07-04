@@ -109,7 +109,7 @@ export function buildTerminalWebSocketUrl(
 // Hand the token to the server so it can mint an HttpOnly cookie. Returns
 // true if the server accepted it; the panel UI uses the result to decide
 // whether to retry the WebSocket connection.
-export async function persistTerminalToken(token: string): Promise<boolean> {
+async function persistTerminalToken(token: string): Promise<boolean> {
   try {
     const response = await fetch("/api/auth", {
       method: "POST",

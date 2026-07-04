@@ -20,6 +20,7 @@ import { mountLayoutToolbar, syncLayoutChooser } from "./layout";
 import { documentDiffCache, type RenderedDocument } from "./mount";
 import { refreshOutline } from "./outline";
 import { extensionToLanguage, syncViewToggle } from "./view-mode";
+import { setPreviewMode } from "../shell/selection";
 
 const previewElementMaybe = document.querySelector<HTMLElement>("#preview");
 
@@ -71,7 +72,7 @@ export async function fetchDocumentDiff(documentId: string): Promise<DocumentDif
 export async function renderDiffIntoPreview(documentId: string, payload: DocumentDiffPayload): Promise<void> {
   // Pin previewMode to document so the header chrome (path, title, pin/follow
   // controls) keeps treating this as a document preview.
-  appState.previewMode = { kind: "document" };
+  setPreviewMode({ kind: "document" });
 
   const doc = findDocumentById(documentId);
   if (doc) {

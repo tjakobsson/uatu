@@ -15,7 +15,7 @@ after the running app's region or a coherent domain.
 ```
 src/
 ├── app.ts          SPA entry — DOM queries, init calls, event wiring
-├── cli.ts          CLI entry — `uatu watch ...` + Bun.serve assembly
+├── cli.ts          CLI entry — `uatu serve ...` + Bun.serve assembly
 ├── styles.d.ts     CSS module type declarations
 ├── index.html, styles.css, assets/, assets/fonts/
 │                   (the bundled Hack Nerd Font Mono lives here — it's
@@ -38,14 +38,17 @@ src/
 │                   selection-inspector
 ├── terminal/       the embedded xterm panel — client + server +
 │                   auth + pty + pane-state + panel UI
+├── cli/            CLI domain — parse (flags + usage text) and output
+│                   (TTY banner + indexing status); cli.ts imports these
 ├── server/         routes (single source of truth for the HTTP route
-│                   table), session (watch + render building blocks),
-│                   port-probe
+│                   table + the shared fetch fallback), watch-session
+│                   (live-reload engine), roots (resolution + scanning),
+│                   render-dispatch, static-files, navigation, port-probe
 ├── document/       per-document concerns — metadata, diff, classify,
 │                   git-base-ref, language detection
 ├── render/         source → HTML (markdown, asciidoc, mermaid sanitization)
 ├── review/         load — the review-burden score data layer
-├── ignore/         engine + warning (.uatu.json + --no-gitignore)
+├── ignore/         engine (.uatu.json + --no-gitignore)
 ├── watchdog/       main + capture — heartbeat-driven hang recovery
 ├── debug/          cache + metrics + the heartbeat integration test
 ├── pwa/            PWA install affordance (asset references only)

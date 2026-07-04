@@ -10,6 +10,8 @@ import { syncFollowToggle } from "./follow";
 import type { RepositoryReviewSnapshot } from "../shared/types";
 import { pushCommitPreview } from "./history";
 import { appState } from "./state";
+import { setPreviewMode, setSelectedId } from "./selection";
+import { setFollowEnabled } from "./follow";
 
 export type CommitPreviewParams = { repositoryId: string; sha: string };
 export type CommitPreviewResolution =
@@ -41,7 +43,7 @@ export function commitPreviewParamsFromUrl(): CommitPreviewParams | null {
   return { repositoryId, sha };
 }
 
-export function resolveCommitPreview(params: CommitPreviewParams): CommitPreviewResolution {
+function resolveCommitPreview(params: CommitPreviewParams): CommitPreviewResolution {
   const repository = appState.repositories.find(candidate => candidate.id === params.repositoryId);
   if (!repository) {
     return { repositoryId: params.repositoryId, sha: params.sha, kind: "missing-repository" };
@@ -56,9 +58,9 @@ export function resolveCommitPreview(params: CommitPreviewParams): CommitPreview
 }
 
 export function activateCommitPreview(params: CommitPreviewParams, options: { pushHistory: boolean }) {
-  appState.followEnabled = false;
-  appState.selectedId = null;
-  appState.previewMode = { kind: "commit", ...params };
+  setFollowEnabled(false);
+  setSelectedId(null);
+  setPreviewMode({ kind: "commit", ...params });
   syncFollowToggle();
   if (options.pushHistory) {
     pushCommitPreview(params.repositoryId, params.sha);
@@ -77,7 +79,7 @@ export function renderCommitPreview(params: CommitPreviewParams) {
   renderCommitPreviewUnavailable(resolved);
 }
 
-export function renderCommitPreviewUnavailable(resolved: Exclude<CommitPreviewResolution, { kind: "found" }>) {
+function renderCommitPreviewUnavailable(resolved: Exclude<CommitPreviewResolution, { kind: "found" }>) {
   if (resolved.kind === "missing-repository") {
     renderEmptyPreview(
       "Commit preview unavailable",

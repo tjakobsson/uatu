@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { createWatchSession } from "../server/session";
+import { createWatchSession } from "../server/watch-session";
 
 // Tests the per-session token minted in `createWatchSession`. The token
 // gates `/api/terminal` upgrades; uniqueness, length, and stability across
