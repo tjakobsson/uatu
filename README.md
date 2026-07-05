@@ -16,6 +16,10 @@
   <a href="https://playwright.dev"><img src="https://img.shields.io/badge/e2e-Playwright-2EAD33?logo=playwright&logoColor=white" alt="Tested with Playwright" /></a>
 </p>
 
+<p align="center">
+  <img src="./uatu-screenshot.png" alt="uatu previewing its own ARCHITECTURE.md — Change Overview and file tree in the sidebar, rendered Markdown with a Mermaid diagram and outline in the preview pane, and Claude Code running in the embedded terminal" />
+</p>
+
 ---
 
 `uatu` is a local watch UI for following what an AI coding agent is doing in
