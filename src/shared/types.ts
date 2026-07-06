@@ -170,9 +170,17 @@ export type RepositoryReviewSnapshot = {
 
 export type TerminalAvailability = "enabled" | "disabled";
 
+// Policy for bridging application-initiated OSC 52 copy sequences to the
+// host clipboard. `notify` writes and shows a toast, `confirm` requires a
+// click on the toast's Copy button, `silent` writes without feedback, `off`
+// leaves OSC 52 unhandled. The bridge is write-only in every mode — clipboard
+// read queries are never answered.
+export type TerminalClipboardPolicy = "notify" | "confirm" | "silent" | "off";
+
 export type TerminalConfigPayload = {
   fontFamily?: string;
   fontSize?: number;
+  clipboard?: TerminalClipboardPolicy;
 };
 
 export type MonoConfigPayload = {

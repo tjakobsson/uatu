@@ -105,7 +105,8 @@ are surfaced in Change Overview rather than aborting the watch session.
   },
   "terminal": {
     "fontFamily": "Berkeley Mono, monospace",
-    "fontSize": 14
+    "fontSize": 14,
+    "clipboard": "notify"
   },
   "review": {
     "baseRef": "origin/main",
@@ -146,6 +147,7 @@ envelope than the rest of uatu:
 - **Per-server token** — 32-byte token minted at startup, required for the WS upgrade. Restarting rotates it; the URL with the token lands in stdout and may persist in logs — treat as a short-lived credential
 - **Origin allowlist** — rejects upgrade for any `Origin` other than `127.0.0.1:<port>`, `localhost:<port>`, or the PWA origin
 - **HttpOnly cookie** — `?t=<token>` mints a `uatu_term` HttpOnly + SameSite=Strict cookie so PWA launches re-auth without pasting; rotates with the in-memory token
+- **Write-only OSC 52 clipboard bridge** — TUIs that own the mouse (Claude Code, opencode) copy selections by emitting OSC 52 up the PTY; uatu bridges the sequence to the browser's clipboard, which is the *host* clipboard even when the uatu server runs in a container. Read queries (`ESC ] 52 ; c ; ?`) are never answered, so nothing in the terminal can read your clipboard; decoded payloads are capped at 100 KB. `terminal.clipboard` in `.uatu.json` picks the policy: `notify` (default — write + a "Copied N characters" toast, so a hostile escape sequence can't poison your clipboard silently), `confirm` (a toast with a Copy button; nothing is written without a click), `silent`, or `off`. On browsers that require a user gesture for clipboard writes (Firefox, Safari), a blocked write degrades to the Copy-button toast instead of being lost
 
 **Safari 17+** blocks page-accessible Nerd Fonts (anti-fingerprinting), so
 terminal prompts using Powerline glyphs show TOFU squares there. Chrome /

@@ -81,6 +81,37 @@ describe("loadTerminalConfig", () => {
     expect(result.warnings).toEqual([]);
   });
 
+  it("reads each valid clipboard policy", async () => {
+    for (const policy of ["notify", "confirm", "silent", "off"]) {
+      await writeConfig({ terminal: { clipboard: policy } });
+      const result = await loadTerminalConfig(workspace);
+      expect(result.config.clipboard).toBe(policy as never);
+      expect(result.warnings).toEqual([]);
+    }
+  });
+
+  it("trims whitespace on clipboard", async () => {
+    await writeConfig({ terminal: { clipboard: "  confirm  " } });
+    const result = await loadTerminalConfig(workspace);
+    expect(result.config.clipboard).toBe("confirm");
+  });
+
+  it("rejects an unknown clipboard policy and warns", async () => {
+    await writeConfig({ terminal: { clipboard: "always" } });
+    const result = await loadTerminalConfig(workspace);
+    expect(result.config.clipboard).toBeUndefined();
+    expect(result.warnings).toContain(
+      'Ignored terminal.clipboard because it must be "notify", "confirm", "silent", or "off".',
+    );
+  });
+
+  it("rejects a non-string clipboard policy and warns", async () => {
+    await writeConfig({ terminal: { clipboard: true } });
+    const result = await loadTerminalConfig(workspace);
+    expect(result.config.clipboard).toBeUndefined();
+    expect(result.warnings.length).toBe(1);
+  });
+
   it("does not throw on malformed JSON", async () => {
     await fs.writeFile(path.join(workspace, ".uatu.json"), "{ not-json", "utf8");
     const result = await loadTerminalConfig(workspace);

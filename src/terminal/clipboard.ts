@@ -129,6 +129,126 @@ export function handleClipboardKeyEvent(
   return false;
 }
 
+// ─── OSC 52 bridge ──────────────────────────────────────────────────────────
+//
+// TUIs that own the mouse (Claude Code, opencode, anything in mouse-tracking
+// mode) copy selections by emitting OSC 52 up the PTY instead of letting
+// xterm.js select. The browser runs on the host, so bridging the sequence to
+// `navigator.clipboard` is what makes select-to-copy work when the uatu
+// server (and the TUI) run in a container. The bridge is write-only: the
+// read/query form (`?` data) is never answered, which removes the
+// clipboard-exfiltration attack class entirely rather than mitigating it.
+
+// Conventional terminal OSC 52 payload ceiling, applied to the DECODED text.
+const OSC52_MAX_DECODED_BYTES = 100 * 1024;
+
+// What a single OSC 52 sequence asks for, after validation. `oversized` is
+// distinct from `invalid` because the UI reports it — a truncated copy must
+// never be mistaken for a successful one.
+export type Osc52ParseResult =
+  | { kind: "copy"; text: string }
+  | { kind: "query" }
+  | { kind: "invalid" }
+  | { kind: "oversized" };
+
+// Parse the payload xterm.js hands an OSC 52 handler: everything after
+// `52;`, i.e. `<selection>;<data>`. Only the clipboard-ish selections `c`,
+// `p`, and `s` are honored (they all map to the one browser clipboard); an
+// empty selection is the conventional shorthand for the default clipboard.
+export function parseOsc52Payload(payload: string): Osc52ParseResult {
+  const separator = payload.indexOf(";");
+  if (separator === -1) return { kind: "invalid" };
+  const selection = payload.slice(0, separator);
+  const data = payload.slice(separator + 1);
+
+  if (!/^[cps]*$/.test(selection)) return { kind: "invalid" };
+  if (data === "?") return { kind: "query" };
+
+  // Estimate before decoding so a hostile multi-megabyte payload is rejected
+  // without materializing it.
+  if (data.length * 0.75 > OSC52_MAX_DECODED_BYTES + 3) return { kind: "oversized" };
+
+  let bytes: Uint8Array;
+  try {
+    const binary = atob(data);
+    bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
+  } catch {
+    return { kind: "invalid" };
+  }
+  if (bytes.byteLength > OSC52_MAX_DECODED_BYTES) return { kind: "oversized" };
+
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return { kind: "invalid" };
+  }
+  if (text.length === 0) return { kind: "invalid" };
+  return { kind: "copy", text };
+}
+
+// UI-facing events emitted by the bridge. The panel renders these as the
+// pane-scoped toast; `pending` carries the text so the toast's Copy button
+// can perform the write inside its click gesture (which is also the only
+// path that works on browsers requiring user activation for writeText).
+export type Osc52Notice =
+  | { kind: "copied"; chars: number }
+  | { kind: "pending"; text: string }
+  | { kind: "oversized" };
+
+export type Osc52Policy = "notify" | "confirm" | "silent";
+
+// Build the function to register via `term.parser.registerOscHandler(52, …)`.
+// Always returns `true` (sequence consumed) synchronously; clipboard work is
+// fire-and-forget like the shortcut handlers above. There is deliberately no
+// code path here that reads the clipboard or writes a response to the PTY.
+export function createOsc52Handler(options: {
+  policy: Osc52Policy;
+  notify: (notice: Osc52Notice) => void;
+  // Injectable for tests; defaults to navigator.clipboard.
+  writeText?: (text: string) => Promise<void>;
+}): (payload: string) => boolean {
+  const { policy, notify } = options;
+  const writeText = options.writeText ?? defaultWriteText;
+
+  return payload => {
+    const parsed = parseOsc52Payload(payload);
+    switch (parsed.kind) {
+      case "query":
+      case "invalid":
+        return true;
+      case "oversized":
+        // `silent` opted out of feedback entirely; the others must surface
+        // the rejection so the user knows their copy did NOT happen.
+        if (policy !== "silent") notify({ kind: "oversized" });
+        return true;
+      case "copy":
+        if (policy === "confirm") {
+          notify({ kind: "pending", text: parsed.text });
+          return true;
+        }
+        writeText(parsed.text)
+          .then(() => {
+            if (policy === "notify") notify({ kind: "copied", chars: parsed.text.length });
+          })
+          .catch(() => {
+            // Gestureless writeText is rejected on Firefox/Safari (and on a
+            // blurred document anywhere). Degrade to the confirm-style toast
+            // instead of dropping the copy — even under `silent`.
+            notify({ kind: "pending", text: parsed.text });
+          });
+        return true;
+    }
+  };
+}
+
+function defaultWriteText(text: string): Promise<void> {
+  if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) {
+    return Promise.reject(new Error("clipboard unavailable"));
+  }
+  return navigator.clipboard.writeText(text);
+}
+
 function writeClipboardText(text: string): void {
   if (typeof navigator === "undefined") return;
   const clip = navigator.clipboard;

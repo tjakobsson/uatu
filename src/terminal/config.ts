@@ -6,10 +6,15 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
+import type { TerminalClipboardPolicy } from "../shared/types";
+
 export type TerminalConfig = {
   fontFamily?: string;
   fontSize?: number;
+  clipboard?: TerminalClipboardPolicy;
 };
+
+const CLIPBOARD_POLICIES: readonly TerminalClipboardPolicy[] = ["notify", "confirm", "silent", "off"];
 
 export type TerminalConfigResult = {
   config: TerminalConfig;
@@ -63,6 +68,17 @@ export async function loadTerminalConfig(rootPath: string): Promise<TerminalConf
       warnings.push(
         `Ignored terminal.fontSize because it must be a number between ${TERMINAL_FONT_SIZE_MIN} and ${TERMINAL_FONT_SIZE_MAX}.`,
       );
+    }
+  }
+
+  if (terminal.clipboard !== undefined) {
+    const policy = typeof terminal.clipboard === "string" ? terminal.clipboard.trim() : terminal.clipboard;
+    if (typeof policy === "string" && (CLIPBOARD_POLICIES as readonly string[]).includes(policy)) {
+      config.clipboard = policy as TerminalClipboardPolicy;
+    } else {
+      // Omitting the key (rather than forcing a value) lets the client apply
+      // its own `notify` default — same effective fallback, one owner.
+      warnings.push('Ignored terminal.clipboard because it must be "notify", "confirm", "silent", or "off".');
     }
   }
 

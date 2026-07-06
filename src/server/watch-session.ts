@@ -66,7 +66,9 @@ export function createStatePayload(
     build: BUILD_SUMMARY,
     scope,
     ...(terminalEnabled === undefined ? {} : { terminal: (terminalEnabled ? "enabled" : "disabled") as TerminalAvailability }),
-    ...(terminalEnabled && terminalConfig && (terminalConfig.fontFamily || terminalConfig.fontSize) ? { terminalConfig } : {}),
+    ...(terminalEnabled && terminalConfig && (terminalConfig.fontFamily || terminalConfig.fontSize || terminalConfig.clipboard)
+      ? { terminalConfig }
+      : {}),
     ...(monoConfig && monoConfig.fontFamily ? { monoConfig } : {}),
   };
 }

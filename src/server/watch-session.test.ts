@@ -60,6 +60,26 @@ describe("createStatePayload", () => {
     const payload = createStatePayload([], true, null, { kind: "folder" }, []);
     expect("monoConfig" in payload).toBe(false);
   });
+
+  test("includes terminalConfig when only clipboard is set", () => {
+    // Regression: the payload gate used to check fontFamily/fontSize only,
+    // silently dropping a `.uatu.json` that sets just `terminal.clipboard`.
+    const payload = createStatePayload(
+      [],
+      true,
+      null,
+      { kind: "folder" },
+      [],
+      true,
+      { clipboard: "confirm" },
+    );
+    expect(payload.terminalConfig).toEqual({ clipboard: "confirm" });
+  });
+
+  test("omits terminalConfig when every field is unset", () => {
+    const payload = createStatePayload([], true, null, { kind: "folder" }, [], true, {});
+    expect("terminalConfig" in payload).toBe(false);
+  });
 });
 
 async function waitUntil(predicate: () => boolean, timeoutMs = 2000): Promise<void> {

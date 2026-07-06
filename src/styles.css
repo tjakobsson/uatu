@@ -738,6 +738,59 @@ body.is-resizing-terminal .panel-resizer {
   color: #ffffff;
 }
 
+/* OSC 52 copy toast: one per pane, bottom-right so it stays clear of the
+   close button and the prompt line. Content is plain text nodes only. */
+.terminal-copy-toast {
+  position: absolute;
+  bottom: 0.6rem;
+  right: 0.75rem;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: min(80%, 26rem);
+  padding: 0.35rem 0.6rem;
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: rgba(230, 237, 243, 0.9);
+  font-size: 0.78rem;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+}
+
+.terminal-copy-toast-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-copy-toast-copy {
+  appearance: none;
+  background: var(--accent, #0969da);
+  border: 0;
+  border-radius: 4px;
+  color: #ffffff;
+  font: inherit;
+  font-size: 0.78rem;
+  padding: 0.15rem 0.6rem;
+  cursor: pointer;
+}
+
+.terminal-copy-toast-dismiss {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: rgba(230, 237, 243, 0.55);
+  font-size: 0.9rem;
+  line-height: 1;
+  padding: 0.1rem 0.2rem;
+  cursor: pointer;
+}
+
+.terminal-copy-toast-dismiss:hover {
+  color: #ffffff;
+}
+
 /* Resizer between two split panes. Orientation matches the panes container. */
 .terminal-pane-resizer {
   flex: 0 0 auto;
