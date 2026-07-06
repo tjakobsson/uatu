@@ -11,12 +11,11 @@
 
 import { getDocumentDiff } from "../document/diff";
 import {
-  TERMINAL_COOKIE_NAME,
   authProbeResponse,
   constantTimeEqual,
   formatTerminalCookie,
+  hasValidTerminalCredentials,
   isAllowedOrigin,
-  readCookie,
 } from "../terminal/auth";
 import type { createTerminalServer } from "../terminal/server";
 import { handleTerminalSessionsRoute } from "../terminal/sessions-route";
@@ -314,12 +313,12 @@ function buildE2ERoutes(deps: E2ERouteDeps) {
 
 type TerminalServerInstance = ReturnType<typeof createTerminalServer>;
 
-// Structural subset of Bun.Server the fallback needs: `upgrade` for the
-// WebSocket handshake and hostname/port for the Origin allowlist.
+// Structural subset of Bun.Server the fallback needs: just `upgrade` for
+// the WebSocket handshake. The Origin allowlist deliberately does NOT see
+// the server handle — it compares against the request's Host header, so it
+// keeps working when the browser reaches uatu through a mapped port.
 export type FetchFallbackServer = {
   upgrade(request: Request, options?: { data?: unknown }): boolean;
-  hostname?: string | undefined;
-  port?: number | undefined;
 };
 
 export type FetchFallbackDeps = {
@@ -339,20 +338,15 @@ export function buildFetchFallback(deps: FetchFallbackDeps) {
     if (!terminalServer) {
       return new Response("terminal disabled", { status: 503 });
     }
-    const expected = deps.getTerminalToken();
-    // Accept either the URL token (first-visit path) or the auth cookie
-    // (PWA / subsequent visits). PWA installs share cookies with the
-    // browser session that minted them, so a user who visited /?t=<token>
+    // Accept either the URL token (first-visit path) or the Host-port-scoped
+    // auth cookie (PWA / subsequent visits). PWA installs share cookies with
+    // the browser session that minted them, so a user who visited /?t=<token>
     // once before installing keeps working — no re-auth needed.
-    const queryToken = requestUrl.searchParams.get("t") ?? "";
-    const cookieToken = readCookie(request.headers.get("Cookie"), TERMINAL_COOKIE_NAME);
-    const tokenOk =
-      constantTimeEqual(queryToken, expected) || constantTimeEqual(cookieToken, expected);
-    if (!tokenOk) {
+    if (!hasValidTerminalCredentials(request, requestUrl, deps.getTerminalToken())) {
       return new Response("unauthorized", { status: 401 });
     }
     const origin = request.headers.get("Origin");
-    if (!isAllowedOrigin(origin, srv)) {
+    if (!isAllowedOrigin(origin, requestUrl)) {
       return new Response("forbidden origin", { status: 403 });
     }
     const sessionId = requestUrl.searchParams.get("sessionId") ?? "";
@@ -380,7 +374,7 @@ export function buildFetchFallback(deps: FetchFallbackDeps) {
   // cookie is HttpOnly (no JS access — token can't be exfiltrated by an
   // XSS in any sibling document) and SameSite=Strict (no cross-site
   // request can carry it).
-  const handleAuth = async (request: Request): Promise<Response> => {
+  const handleAuth = async (request: Request, requestUrl: URL): Promise<Response> => {
     let body: unknown;
     try {
       body = await request.json();
@@ -398,7 +392,9 @@ export function buildFetchFallback(deps: FetchFallbackDeps) {
       status: 200,
       headers: {
         "content-type": "application/json",
-        "set-cookie": formatTerminalCookie(provided),
+        // Named for the request's Host port so instances on different host
+        // ports keep independent credentials (see terminalCookieName).
+        "set-cookie": formatTerminalCookie(provided, requestUrl),
       },
     });
   };
@@ -409,7 +405,7 @@ export function buildFetchFallback(deps: FetchFallbackDeps) {
       return handleTerminalUpgrade(request, requestUrl, srv);
     }
     if (requestUrl.pathname === "/api/auth" && request.method === "POST") {
-      return handleAuth(request);
+      return handleAuth(request, requestUrl);
     }
     if (requestUrl.pathname === "/api/auth" && request.method === "GET") {
       return authProbeResponse(request, requestUrl, deps.getTerminalToken());

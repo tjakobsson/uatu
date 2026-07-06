@@ -213,6 +213,8 @@ flowchart LR
 
 The panel UI (~700 lines in `src/terminal/panel.ts`) handles dock position, split, fullscreen, focus, and message routing across multiple PTY panes. On Windows, `terminal/backend.ts` reports unavailable and the panel button is hidden — uatu doesn't degrade other features.
 
+Auth is deliberately Host-relative: the origin gate compares the `Origin` header against the request's `Host` (hostname pinned to loopback names), and the auth cookie is named `uatu_term_<host-port>`, so port-mapped access (container publishes, SSH forwards) and multi-instance fleets work with zero configuration. The rationale — including which parts of this design would survive a hosted multi-tenant deployment and which are deliberate localhost scaffolding — is recorded in the `fix-terminal-auth-port-mapping` change's `design.md` (decision D4).
+
 PTY lifetime follows tmux-detach semantics: a WebSocket disconnect (reload, tab close, browser quit, system sleep) detaches the session while the shell keeps running, and reconnecting with the same persisted `sessionId` reattaches to it — a bounded replay buffer repaints the screen. Only the confirmed pane close (close code 4001), a kill via the session inventory, or server shutdown terminates a shell.
 
 Sessions are managed tmux-style: `GET /api/terminal/sessions` lists every live PTY (attached/detached, age, best-effort foreground-process label via a POSIX `ps` adapter), `DELETE /api/terminal/sessions/<id>` kills one, and the WS upgrade's `takeover=1` parameter moves an attached session between windows — the previous holder's pane parks with a "take back" action. The pane-spawn flow offers this inventory (attach / kill / new shell) whenever live sessions exist that the window isn't already showing.

@@ -997,6 +997,37 @@ body.is-resizing-terminal .panel-resizer {
   color: rgba(230, 237, 243, 0.65);
 }
 
+/* Parked pane: valid credentials but the origin gate refused this page's
+   address (auth probe answered 403). Same visual family as the auth form
+   and the taken-over notice; deliberately action-less — a token input or a
+   reconnect can never fix an origin rejection. */
+.terminal-origin-rejected {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 0.6rem;
+  max-width: 28rem;
+  margin: 0 auto;
+  padding: 1.5rem;
+  color: var(--terminal-fg, #e6edf3);
+}
+
+.terminal-origin-rejected-heading {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.terminal-origin-rejected-help {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: rgba(230, 237, 243, 0.65);
+}
+
 .terminal-taken-takeback {
   appearance: none;
   background: var(--accent, #0969da);

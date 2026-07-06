@@ -5,12 +5,30 @@
 
 import crypto from "node:crypto";
 
-export const TERMINAL_COOKIE_NAME = "uatu_term";
+export const TERMINAL_COOKIE_PREFIX = "uatu_term";
 // One-year Max-Age. The cookie expires earlier in practice — every uatu
 // restart rotates the in-memory token, leaving the cookie stale until the
 // user re-auths via /api/auth. Long Max-Age just means we don't *also* lose
 // it to session-cookie behavior in PWA windows.
 export const TERMINAL_COOKIE_MAX_AGE = 60 * 60 * 24 * 365;
+
+// The WHATWG URL parser reports `""` for a scheme-default port (and
+// normalizes an explicit `:80`/`:443` away), so Origin-vs-Host comparisons
+// need both sides resolved to a concrete port number first.
+export function normalizedPort(url: URL): string {
+  if (url.port !== "") return url.port;
+  return url.protocol === "https:" || url.protocol === "wss:" ? "443" : "80";
+}
+
+// Cookies are scoped per-host, NOT per-port — every uatu instance on
+// `localhost:<port>` shares one jar. Deriving the cookie name from the
+// port of the request's Host header keeps N instances' credentials
+// independent, and using the *Host* port (not the listen port) keeps the
+// name consistent with the address the browser actually stores cookies
+// under when the server sits behind a port mapping.
+export function terminalCookieName(requestUrl: URL): string {
+  return `${TERMINAL_COOKIE_PREFIX}_${normalizedPort(requestUrl)}`;
+}
 
 // Constant-time string comparison. `crypto.timingSafeEqual` requires equal
 // lengths, so we early-out on length-mismatch before the byte compare; that
@@ -27,12 +45,12 @@ export function constantTimeEqual(a: string, b: string): boolean {
   }
 }
 
-export function formatTerminalCookie(token: string): string {
+export function formatTerminalCookie(token: string, requestUrl: URL): string {
   // Localhost over HTTP — `Secure` would actually break things here. The
   // SameSite=Strict + Origin allowlist + HttpOnly together still close the
   // realistic attack surface for a localhost-bound dev tool.
   return [
-    `${TERMINAL_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    `${terminalCookieName(requestUrl)}=${encodeURIComponent(token)}`,
     "Path=/",
     `Max-Age=${TERMINAL_COOKIE_MAX_AGE}`,
     "HttpOnly",
@@ -55,18 +73,43 @@ export function readCookie(header: string | null, name: string): string {
   return "";
 }
 
-// GET /api/auth probe: answers only "does this request carry valid terminal
-// credentials" — 204 yes, 401 no. The browser exposes no HTTP status on a
-// failed WebSocket upgrade, so the client uses this after a close-before-open
-// to distinguish a real auth failure (show the paste-token form) from a
-// sessionId collision (mint a fresh id and reconnect). Deliberately ignores
-// Origin and sessionId — those are upgrade-gate concerns; a same-origin-only
-// answer here would break nothing but adds no security for a read that
-// reveals only "your own cookie is (in)valid". `no-store` because a cached
-// answer would defeat the disambiguation.
+// Same-origin GETs never carry an Origin header (browsers only attach it to
+// WebSocket upgrades, POSTs, and cross-origin requests), so the terminal
+// client ships the page's origin in this custom header when probing — the
+// only way the probe can see the address the browser is REALLY on when an
+// intermediary rewrites Host. Client-asserted, but the probe is diagnostic
+// only: lying buys a wrong diagnosis of your own connection, nothing more.
+export const PAGE_ORIGIN_HEADER = "X-Uatu-Page-Origin";
+
+// GET /api/auth probe: three verdicts, mirroring the WebSocket upgrade gate
+// so the client can classify a close-before-open failure (the browser
+// exposes no HTTP status on a failed upgrade):
+//   204 — credentials valid AND the requester's origin passes the gate
+//         (upgrade failure was a sessionId collision → reconnect fresh)
+//   403 — credentials valid, origin rejected (show the origin diagnostic,
+//         NOT the paste-token form)
+//   401 — credentials invalid (paste-token form)
+// The effective origin is resolved in trust order: the browser-set Origin
+// header when present, else the client-supplied page-origin header (see
+// PAGE_ORIGIN_HEADER — required for the 403 verdict to be reachable at all,
+// since same-origin GETs omit Origin and a Host-synthesized origin matches
+// Host by construction), else scheme+Host as the exact same-origin
+// fallback. Deliberately ignores sessionId — a collision is the 204 case
+// by definition. `no-store` because a cached answer would defeat the
+// disambiguation.
 export function authProbeResponse(request: Request, requestUrl: URL, expected: string): Response {
+  let status: number;
+  if (!hasValidTerminalCredentials(request, requestUrl, expected)) {
+    status = 401;
+  } else {
+    const effectiveOrigin =
+      request.headers.get("Origin") ??
+      request.headers.get(PAGE_ORIGIN_HEADER) ??
+      requestUrl.origin;
+    status = isAllowedOrigin(effectiveOrigin, requestUrl) ? 204 : 403;
+  }
   return new Response(null, {
-    status: hasValidTerminalCredentials(request, requestUrl, expected) ? 204 : 401,
+    status,
     headers: { "cache-control": "no-store" },
   });
 }
@@ -81,13 +124,23 @@ export function hasValidTerminalCredentials(
   expected: string,
 ): boolean {
   const queryToken = requestUrl.searchParams.get("t") ?? "";
-  const cookieToken = readCookie(request.headers.get("Cookie"), TERMINAL_COOKIE_NAME);
+  const cookieToken = readCookie(request.headers.get("Cookie"), terminalCookieName(requestUrl));
   return constantTimeEqual(queryToken, expected) || constantTimeEqual(cookieToken, expected);
 }
 
-export type ServerOriginRef = { hostname?: string; port?: number };
-
-export function isAllowedOrigin(origin: string | null, srv: ServerOriginRef): boolean {
+// Origin gate for the terminal surface. The real question is "was this page
+// served by me?", and the request's Host header answers it directly: the
+// browser sets Host from the address it used to reach the server, so
+// comparing the Origin's port against the HOST port (never the listen port)
+// keeps the gate correct behind port mappings (container publishes
+// 4711→4712) with zero configuration. The hostname stays pinned to loopback
+// names: SameSite treats different localhost ports as same-site, so this
+// check is the only thing stopping a page served from any other localhost
+// port from riding the auth cookie into a shell — and the pin also defeats
+// DNS-rebinding origins that would otherwise match Host exactly. Non-browser
+// clients can forge both headers but still need the token; Origin checks
+// defend against browsers, which forge neither.
+export function isAllowedOrigin(origin: string | null, requestUrl: URL): boolean {
   if (!origin) return false;
   let parsed: URL;
   try {
@@ -96,7 +149,6 @@ export function isAllowedOrigin(origin: string | null, srv: ServerOriginRef): bo
     return false;
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
-  const port = String(srv.port ?? "");
-  if (parsed.port !== port) return false;
+  if (normalizedPort(parsed) !== normalizedPort(requestUrl)) return false;
   return parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost";
 }
