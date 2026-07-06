@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
 import {
+  PAGE_ORIGIN_HEADER,
   TERMINAL_COOKIE_MAX_AGE,
   TERMINAL_COOKIE_PREFIX,
   authProbeResponse,
@@ -187,11 +188,17 @@ describe("isAllowedOrigin", () => {
 
 describe("authProbeResponse", () => {
   const expected = "secret-token-value";
-  const probe = (init: { cookie?: string; query?: string; origin?: string }): Response => {
+  const probe = (init: {
+    cookie?: string;
+    query?: string;
+    origin?: string;
+    pageOrigin?: string;
+  }): Response => {
     const url = new URL(`http://127.0.0.1:4711/api/auth${init.query ?? ""}`);
     const headers = new Headers();
     if (init.cookie !== undefined) headers.set("Cookie", init.cookie);
     if (init.origin !== undefined) headers.set("Origin", init.origin);
+    if (init.pageOrigin !== undefined) headers.set(PAGE_ORIGIN_HEADER, init.pageOrigin);
     return authProbeResponse(new Request(url, { headers }), url, expected);
   };
 
@@ -237,10 +244,36 @@ describe("authProbeResponse", () => {
     expect(response.status).toBe(204);
   });
 
-  it("synthesizes the origin from Host when the header is absent (same-origin GET)", () => {
-    // A same-origin fetch omits Origin; scheme+Host describes the page's
-    // origin exactly, so the probe must answer 204, not 403.
+  it("synthesizes the origin from Host when no origin headers are present", () => {
+    // A bare same-origin fetch omits Origin; scheme+Host describes the
+    // page's origin exactly, so the probe must answer 204, not 403.
     const response = probe({ query: `?t=${encodeURIComponent(expected)}` });
+    expect(response.status).toBe(204);
+  });
+
+  it("uses the client-supplied page-origin header when Origin is absent", () => {
+    // The reverse-proxy-rewrites-Host case: the page really lives on a port
+    // the gate would reject, and only the client can say so on a GET. This
+    // is what makes the 403 verdict reachable from the real browser client.
+    const rejected = probe({
+      query: `?t=${encodeURIComponent(expected)}`,
+      pageOrigin: "http://localhost:9999",
+    });
+    expect(rejected.status).toBe(403);
+
+    const accepted = probe({
+      query: `?t=${encodeURIComponent(expected)}`,
+      pageOrigin: "http://127.0.0.1:4711",
+    });
+    expect(accepted.status).toBe(204);
+  });
+
+  it("prefers the browser-set Origin header over the page-origin header", () => {
+    const response = probe({
+      query: `?t=${encodeURIComponent(expected)}`,
+      origin: "http://127.0.0.1:4711",
+      pageOrigin: "http://localhost:9999",
+    });
     expect(response.status).toBe(204);
   });
 

@@ -63,7 +63,7 @@ Note the deliberate choice of *Host* port over listen port here too: the browser
 - **403** — credentials valid, origin would be rejected.
 - **401** — credentials invalid (unchanged).
 
-Wrinkle: browsers do **not** send an `Origin` header on same-origin GET fetches (they always send it on WebSocket upgrades). The probe therefore evaluates the `Origin` header when present, and otherwise synthesizes the effective origin from the request's `Host` — exact for the client's same-origin fetch, since the page's origin *is* scheme+Host. Either path funnels into the same `isAllowedOrigin` predicate as the upgrade gate, so probe and gate can't drift.
+Wrinkle: browsers do **not** send an `Origin` header on same-origin GET fetches (they always send it on WebSocket upgrades) — and a probe that merely synthesizes the origin from `Host` answers 204 *by construction*, because scheme+Host trivially matches itself. That would make the 403 verdict unreachable from the real client (caught in review, PR #105). The client therefore ships its page origin explicitly in an `X-Uatu-Page-Origin` header, and the probe resolves the effective origin in trust order: `Origin` header → `X-Uatu-Page-Origin` → scheme+Host synthesis (last-resort fallback for probes not sent by our client). The page-origin header is client-asserted, which is fine for a diagnostic-only endpoint: lying yields a wrong diagnosis of your own connection, nothing more. Every path funnels into the same `isAllowedOrigin` predicate as the upgrade gate, so probe and gate can't drift.
 
 `classifyPreOpenFailure` in the client maps the three verdicts to three outcomes:
 

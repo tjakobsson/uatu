@@ -73,6 +73,14 @@ export function readCookie(header: string | null, name: string): string {
   return "";
 }
 
+// Same-origin GETs never carry an Origin header (browsers only attach it to
+// WebSocket upgrades, POSTs, and cross-origin requests), so the terminal
+// client ships the page's origin in this custom header when probing — the
+// only way the probe can see the address the browser is REALLY on when an
+// intermediary rewrites Host. Client-asserted, but the probe is diagnostic
+// only: lying buys a wrong diagnosis of your own connection, nothing more.
+export const PAGE_ORIGIN_HEADER = "X-Uatu-Page-Origin";
+
 // GET /api/auth probe: three verdicts, mirroring the WebSocket upgrade gate
 // so the client can classify a close-before-open failure (the browser
 // exposes no HTTP status on a failed upgrade):
@@ -81,18 +89,23 @@ export function readCookie(header: string | null, name: string): string {
 //   403 — credentials valid, origin rejected (show the origin diagnostic,
 //         NOT the paste-token form)
 //   401 — credentials invalid (paste-token form)
-// Browsers omit the Origin header on same-origin GETs (they always send it
-// on WebSocket upgrades), so an absent Origin is synthesized from the
-// request's own scheme+Host — exact for the client's same-origin fetch.
-// Deliberately ignores sessionId — a collision is the 204 case by
-// definition. `no-store` because a cached answer would defeat the
+// The effective origin is resolved in trust order: the browser-set Origin
+// header when present, else the client-supplied page-origin header (see
+// PAGE_ORIGIN_HEADER — required for the 403 verdict to be reachable at all,
+// since same-origin GETs omit Origin and a Host-synthesized origin matches
+// Host by construction), else scheme+Host as the exact same-origin
+// fallback. Deliberately ignores sessionId — a collision is the 204 case
+// by definition. `no-store` because a cached answer would defeat the
 // disambiguation.
 export function authProbeResponse(request: Request, requestUrl: URL, expected: string): Response {
   let status: number;
   if (!hasValidTerminalCredentials(request, requestUrl, expected)) {
     status = 401;
   } else {
-    const effectiveOrigin = request.headers.get("Origin") ?? requestUrl.origin;
+    const effectiveOrigin =
+      request.headers.get("Origin") ??
+      request.headers.get(PAGE_ORIGIN_HEADER) ??
+      requestUrl.origin;
     status = isAllowedOrigin(effectiveOrigin, requestUrl) ? 204 : 403;
   }
   return new Response(null, {

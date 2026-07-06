@@ -688,7 +688,14 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     try {
       const token = options.getToken();
       const url = token ? `/api/auth?t=${encodeURIComponent(token)}` : "/api/auth";
-      const response = await fetch(url, { method: "GET" });
+      // Same-origin GETs carry no Origin header, so ship the page origin
+      // explicitly — without it the server synthesizes the origin from
+      // Host, which matches by construction, and the origin-rejected
+      // verdict (403) could never fire for a Host-rewriting proxy.
+      const response = await fetch(url, {
+        method: "GET",
+        headers: { "X-Uatu-Page-Origin": window.location.origin },
+      });
       verdict = classifyAuthProbeStatus(response.status);
     } catch {
       verdict = "auth-required";

@@ -293,25 +293,51 @@ describe("auth probe agrees with the upgrade gate", () => {
         "Sec-WebSocket-Version": "13",
         Origin: origin,
       };
-      const upgrade = await fetch(ctx!.url(`/api/terminal?t=${token}`), { headers });
       const probe = await fetch(ctx!.url(`/api/auth?t=${token}`), {
         headers: { Origin: origin },
       });
 
       if (!shape.validToken) {
+        const upgrade = await fetch(ctx!.url(`/api/terminal?t=${token}`), { headers });
         expect(upgrade.status).toBe(401);
         expect(probe.status).toBe(401);
       } else if (!shape.allowedOrigin) {
+        const upgrade = await fetch(ctx!.url(`/api/terminal?t=${token}`), { headers });
         expect(upgrade.status).toBe(403);
         expect(probe.status).toBe(403);
       } else {
-        // Both gates passed. The plain-fetch upgrade then dies at
-        // srv.upgrade() (500, no real WebSocket handshake behind fetch) —
-        // the point is that neither side answered 401/403 when the probe
-        // said 204.
+        // Both gates pass, so the upgrade succeeds — which a plain fetch
+        // cannot represent (a 101 has no fetch Response). Assert agreement
+        // with a real WebSocket client instead: the probe says 204 and the
+        // socket actually opens.
         expect(probe.status).toBe(204);
-        expect(upgrade.status).not.toBe(401);
-        expect(upgrade.status).not.toBe(403);
+        const opened = await new Promise<boolean>(resolve => {
+          const WS = WebSocket as unknown as new (
+            url: string,
+            opts: { headers: Record<string, string> },
+          ) => WebSocket;
+          const ws = new WS(`ws://127.0.0.1:${ctx!.port}/api/terminal?t=${token}`, {
+            headers: { Origin: origin },
+          });
+          const t = setTimeout(() => {
+            ws.close();
+            resolve(false);
+          }, 1500);
+          // open/error listeners only — attaching a "close" listener at
+          // construction time keeps Bun's WS client from ever firing "open"
+          // (observed on Bun 1.3.14); the sibling upgrade tests above use
+          // the same pattern for the same reason.
+          ws.addEventListener("open", () => {
+            clearTimeout(t);
+            ws.close();
+            resolve(true);
+          });
+          ws.addEventListener("error", () => {
+            clearTimeout(t);
+            resolve(false);
+          });
+        });
+        expect(opened).toBe(true);
       }
     });
   }
