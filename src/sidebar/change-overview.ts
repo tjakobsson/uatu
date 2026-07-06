@@ -5,6 +5,7 @@
 
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
 import type { RepositoryReviewSnapshot, ReviewCompareTarget } from "../shared/types";
+import { identityColor, identityHue } from "../shell/identity";
 import { applyStaleHint } from "../shell/stale-hint-mount";
 import { renderSidebar } from "./shell";
 import { syncFollowToggle } from "../shell/follow";
@@ -66,6 +67,25 @@ function renderCompareTargetControl(): string {
   `;
 }
 
+// The repository name doubles as the project identity marker (issues
+// #101/#102): a badge tinted with the same hue as the tab favicon, so the
+// color learned in the tab strip is the color seen in the pane. The hue
+// hashes the repository's watched roots' paths — the same inputs the
+// favicon uses — so single-repo sessions match exactly. The "+N"-style
+// shorthand elsewhere hides paths; here the tooltip carries them all.
+function renderRepositoryName(repository: RepositoryReviewSnapshot): string {
+  const roots = appState.roots.filter(root => repository.watchedRootIds.includes(root.id));
+  const hue = identityHue(roots);
+  // `id` is the watched entry's absolute path — the file itself for
+  // file-scoped sessions, where `path` degrades to the parent directory.
+  const tooltip = roots.length > 0 ? roots.map(root => root.id).join("\n") : repository.rootPath;
+  return `
+    <h3 class="review-repo-name">
+      <span class="project-marker" style="background-color: ${escapeHtmlAttribute(identityColor(hue))}" title="${escapeHtmlAttribute(tooltip)}">${escapeHtml(repository.label)}</span>
+    </h3>
+  `;
+}
+
 export function renderChangeOverview() {
   if (appState.repositories.length === 0) {
     changeOverviewElement.innerHTML = `<div class="pane-empty">Repository data is unavailable.</div>`;
@@ -78,7 +98,7 @@ export function renderChangeOverview() {
       if (meta.status !== "git" || repository.reviewLoad.status !== "available") {
         return `
           <section class="review-repo">
-            <h3>${escapeHtml(repository.label)}</h3>
+            ${renderRepositoryName(repository)}
             <p class="pane-empty">${escapeHtml(meta.message ?? repository.reviewLoad.message ?? "No git repository is available.")}</p>
           </section>
         `;
@@ -119,7 +139,7 @@ export function renderChangeOverview() {
 
       return `
         <section class="review-repo">
-          <h3>${escapeHtml(repository.label)}</h3>
+          ${renderRepositoryName(repository)}
           <dl class="repo-facts">
             <div><dt>Branch</dt><dd>${escapeHtml(meta.branch ?? `detached ${meta.commitShort ?? ""}`.trim())}</dd></div>
             <div><dt>Commit</dt><dd>${escapeHtml(meta.commitShort ?? "unknown")}</dd></div>

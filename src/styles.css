@@ -1733,6 +1733,25 @@ body.is-resizing-terminal .panel-resizer {
   border-top: 1px solid var(--border-soft);
 }
 
+/* Project identity marker (issues #101/#102): the repository name in the
+   Change Overview pane rendered as a badge with the same identity hue as
+   the tab favicon, so the color learned in the tab strip is the color seen
+   in the pane. Background is set inline per repository — only the hue
+   varies. */
+.review-repo-name .project-marker {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0.14rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #ffffff;
+}
+
 .review-repo h3,
 .git-log-group h3 {
   margin: 0 0 0.45rem;
