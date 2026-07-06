@@ -8,11 +8,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 
 import {
-  TERMINAL_COOKIE_NAME,
+  authProbeResponse,
   constantTimeEqual,
   formatTerminalCookie,
+  hasValidTerminalCredentials,
   isAllowedOrigin,
-  readCookie,
+  terminalCookieName,
 } from "./auth";
 import { handleTerminalSessionsRoute } from "./sessions-route";
 import type { TerminalServer } from "./server";
@@ -37,12 +38,10 @@ function startTestServer(token: string): ServeContext {
     fetch(request, srv) {
       const url = new URL(request.url);
       if (url.pathname === "/api/terminal") {
-        const queryToken = url.searchParams.get("t") ?? "";
-        const cookieToken = readCookie(request.headers.get("Cookie"), TERMINAL_COOKIE_NAME);
-        const tokenOk =
-          constantTimeEqual(queryToken, token) || constantTimeEqual(cookieToken, token);
-        if (!tokenOk) return new Response("unauthorized", { status: 401 });
-        if (!isAllowedOrigin(request.headers.get("Origin"), srv)) {
+        if (!hasValidTerminalCredentials(request, url, token)) {
+          return new Response("unauthorized", { status: 401 });
+        }
+        if (!isAllowedOrigin(request.headers.get("Origin"), url)) {
           return new Response("forbidden origin", { status: 403 });
         }
         upgradesAttempted += 1;
@@ -54,7 +53,10 @@ function startTestServer(token: string): ServeContext {
         return undefined;
       }
       if (url.pathname === "/api/auth" && request.method === "POST") {
-        return handleAuth(request, token);
+        return handleAuth(request, url, token);
+      }
+      if (url.pathname === "/api/auth" && request.method === "GET") {
+        return authProbeResponse(request, url, token);
       }
       return new Response("not found", { status: 404 });
     },
@@ -85,7 +87,7 @@ function startTestServer(token: string): ServeContext {
   return ctx as ServeContext;
 }
 
-async function handleAuth(request: Request, expected: string): Promise<Response> {
+async function handleAuth(request: Request, requestUrl: URL, expected: string): Promise<Response> {
   let body: unknown;
   try {
     body = await request.json();
@@ -103,12 +105,18 @@ async function handleAuth(request: Request, expected: string): Promise<Response>
     status: 200,
     headers: {
       "content-type": "application/json",
-      "set-cookie": formatTerminalCookie(provided),
+      "set-cookie": formatTerminalCookie(provided, requestUrl),
     },
   });
 }
 
 let ctx: ServeContext | null = null;
+
+// The Host-port-scoped cookie name for the live test server (its port is
+// picked by the OS at bind time).
+function cookieName(): string {
+  return terminalCookieName(new URL(ctx!.url("/")));
+}
 
 beforeEach(() => {
   ctx = startTestServer("test-token-1234567890abcdef");
@@ -166,7 +174,7 @@ describe("/api/auth", () => {
     expect(res.status).toBe(200);
     const setCookie = res.headers.get("set-cookie");
     expect(setCookie).not.toBeNull();
-    expect(setCookie!).toContain(`${TERMINAL_COOKIE_NAME}=`);
+    expect(setCookie!).toContain(`${cookieName()}=`);
     expect(setCookie!).toContain("HttpOnly");
     expect(setCookie!).toContain("SameSite=Strict");
     expect(setCookie!).toContain("Path=/");
@@ -209,7 +217,7 @@ describe("/api/terminal upgrade gates", () => {
     const res = await fetch(ctx!.url("/api/terminal"), {
       headers: wsHeaders({
         Origin: ctx!.url(""),
-        Cookie: `${TERMINAL_COOKIE_NAME}=bad`,
+        Cookie: `${cookieName()}=bad`,
       }),
     });
     expect(res.status).toBe(401);
@@ -244,7 +252,7 @@ describe("/api/terminal upgrade gates", () => {
       const ws = new WS(`ws://127.0.0.1:${ctx!.port}/api/terminal`, {
         headers: {
           Origin: ctx!.url(""),
-          Cookie: `${TERMINAL_COOKIE_NAME}=${ctx!.token}`,
+          Cookie: `${cookieName()}=${ctx!.token}`,
         },
       });
       const t = setTimeout(() => reject(new Error("timeout waiting for ws open")), 1500);
@@ -259,6 +267,54 @@ describe("/api/terminal upgrade gates", () => {
       });
     });
   });
+});
+
+// The client classifies a close-before-open WebSocket failure by probing
+// `GET /api/auth`, so the probe's verdict must agree with the upgrade
+// gate's verdict for the same credentials × origin shape — a divergence
+// would make the client show the wrong recovery UI. Exercised over the
+// wire against the same live server that gates the upgrade.
+describe("auth probe agrees with the upgrade gate", () => {
+  const cases: Array<{ name: string; validToken: boolean; allowedOrigin: boolean }> = [
+    { name: "valid credentials, allowed origin", validToken: true, allowedOrigin: true },
+    { name: "valid credentials, rejected origin", validToken: true, allowedOrigin: false },
+    { name: "invalid credentials, allowed origin", validToken: false, allowedOrigin: true },
+    { name: "invalid credentials, rejected origin", validToken: false, allowedOrigin: false },
+  ];
+
+  for (const shape of cases) {
+    it(shape.name, async () => {
+      const token = shape.validToken ? ctx!.token : "garbage";
+      const origin = shape.allowedOrigin ? ctx!.url("") : "http://localhost:9";
+      const headers = {
+        Connection: "Upgrade",
+        Upgrade: "websocket",
+        "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+        "Sec-WebSocket-Version": "13",
+        Origin: origin,
+      };
+      const upgrade = await fetch(ctx!.url(`/api/terminal?t=${token}`), { headers });
+      const probe = await fetch(ctx!.url(`/api/auth?t=${token}`), {
+        headers: { Origin: origin },
+      });
+
+      if (!shape.validToken) {
+        expect(upgrade.status).toBe(401);
+        expect(probe.status).toBe(401);
+      } else if (!shape.allowedOrigin) {
+        expect(upgrade.status).toBe(403);
+        expect(probe.status).toBe(403);
+      } else {
+        // Both gates passed. The plain-fetch upgrade then dies at
+        // srv.upgrade() (500, no real WebSocket handshake behind fetch) —
+        // the point is that neither side answered 401/403 when the probe
+        // said 204.
+        expect(probe.status).toBe(204);
+        expect(upgrade.status).not.toBe(401);
+        expect(upgrade.status).not.toBe(403);
+      }
+    });
+  }
 });
 
 // Route-level tests for the session inventory endpoints. The handler is
@@ -289,7 +345,7 @@ describe("handleTerminalSessionsRoute", () => {
     const url = new URL(`http://127.0.0.1:4711${path}${init.query ?? ""}`);
     const headers = new Headers();
     if (init.cookie) {
-      headers.set("Cookie", `${TERMINAL_COOKIE_NAME}=${encodeURIComponent(TOKEN)}`);
+      headers.set("Cookie", `${terminalCookieName(url)}=${encodeURIComponent(TOKEN)}`);
     }
     const request = new Request(url, { method: init.method ?? "GET", headers });
     return handleTerminalSessionsRoute(request, url, terminal, () => TOKEN);

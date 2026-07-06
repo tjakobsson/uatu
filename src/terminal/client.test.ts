@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { buildTerminalWebSocketUrl } from "./client";
+import { buildTerminalWebSocketUrl, classifyAuthProbeStatus } from "./client";
 
 describe("buildTerminalWebSocketUrl", () => {
   it("strips a fragment identifier from the page URL", () => {
@@ -77,5 +77,27 @@ describe("buildTerminalWebSocketUrl", () => {
     // but the URL-validation portion of the constructor runs before any
     // network I/O, so this is a sufficient guard against the regression.
     expect(() => new WebSocket(url)).not.toThrow();
+  });
+});
+
+describe("classifyAuthProbeStatus", () => {
+  it("maps 204 to a sessionId collision (credentials and origin both fine)", () => {
+    expect(classifyAuthProbeStatus(204)).toBe("collision");
+  });
+
+  it("maps 403 to origin-rejected (valid credentials, refused address)", () => {
+    expect(classifyAuthProbeStatus(403)).toBe("origin-rejected");
+  });
+
+  it("maps 401 to auth-required (paste-token form)", () => {
+    expect(classifyAuthProbeStatus(401)).toBe("auth-required");
+  });
+
+  it("maps anything unexpected to auth-required, never to a reconnect", () => {
+    // The form is the safe default: it can't loop, and its copy tells the
+    // user where to find a fresh token.
+    expect(classifyAuthProbeStatus(0)).toBe("auth-required");
+    expect(classifyAuthProbeStatus(500)).toBe("auth-required");
+    expect(classifyAuthProbeStatus(200)).toBe("auth-required");
   });
 });

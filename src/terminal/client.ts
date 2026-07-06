@@ -109,6 +109,20 @@ export function buildTerminalWebSocketUrl(
   return wsUrl.toString();
 }
 
+// Map a `GET /api/auth` probe status to what a close-before-open WebSocket
+// failure actually was. 204: credentials AND origin fine — the refusal was a
+// sessionId collision. 403: credentials fine, origin gate refused this
+// page's address — unrecoverable by reconnecting or re-pasting a token.
+// Anything else (401, network error mapped to 0 by the caller): credentials
+// are the problem — paste-token form.
+export type PreOpenFailureKind = "collision" | "origin-rejected" | "auth-required";
+
+export function classifyAuthProbeStatus(status: number): PreOpenFailureKind {
+  if (status === 204) return "collision";
+  if (status === 403) return "origin-rejected";
+  return "auth-required";
+}
+
 // Hand the token to the server so it can mint an HttpOnly cookie. Returns
 // true if the server accepted it; the panel UI uses the result to decide
 // whether to retry the WebSocket connection.
@@ -533,6 +547,58 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     });
   }
 
+  // Park the pane when credentials are valid but the origin gate refused
+  // this page's address (probe verdict 403). Deliberately a dead end: no
+  // token input (the token is fine), no reconnect (the next attempt fails
+  // identically), no claim that uatu restarted (it didn't). Reached only
+  // when the browser's address genuinely fails the gate — e.g. a reverse
+  // proxy rewriting the Host header.
+  function showOriginRejectedUI(): void {
+    try {
+      socket?.close();
+    } catch {
+      // Already closing.
+    }
+    socket = null;
+    try {
+      term?.dispose();
+    } catch {
+      // Already disposed.
+    }
+    term = null;
+    fit = null;
+    try {
+      resizeObserver?.disconnect();
+    } catch {
+      // Already disconnected.
+    }
+    resizeObserver = null;
+    attached = false;
+
+    const container = options.container;
+    container.replaceChildren();
+    const wrap = document.createElement("div");
+    wrap.className = "terminal-origin-rejected";
+    const heading = document.createElement("p");
+    heading.className = "terminal-origin-rejected-heading";
+    heading.textContent = "Terminal blocked for this address";
+    const help = document.createElement("p");
+    help.className = "terminal-origin-rejected-help";
+    const address = (() => {
+      try {
+        return window.location.host;
+      } catch {
+        return "this page's address";
+      }
+    })();
+    help.textContent =
+      `Your credentials are valid, but the terminal refused the connection because the address this page uses (${address}) ` +
+      "did not pass its origin check. uatu allows localhost and 127.0.0.1 on the same port the browser is connected to. " +
+      "This can happen when a proxy in front of uatu rewrites the Host header.";
+    wrap.append(heading, help);
+    container.append(wrap);
+  }
+
   function teardown(closeCode: number, closeReason: string): void {
     if (!attached) return;
     attached = false;
@@ -608,25 +674,32 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     container.append(wrap);
   }
 
-  // Disambiguate a close-before-open failure. 204 from `GET /api/auth`
-  // means this window's credentials are valid, so the upgrade was refused
-  // for a non-auth reason — in practice the pre-upgrade 409 for a sessionId
-  // another window holds — and the controller should rebuild the pane with
-  // a fresh id. 401 (or a network error, where the form's copy is still the
-  // most useful guidance) falls back to the paste-token form.
+  // Disambiguate a close-before-open failure via the three-verdict
+  // `GET /api/auth` probe. 204: credentials and origin are both fine, so the
+  // upgrade was refused for the remaining pre-upgrade reason — the 409 for a
+  // sessionId another window holds — and the controller should rebuild the
+  // pane with a fresh id. 403: credentials are valid but the origin gate
+  // refused this page's address — reconnecting or re-pasting a token can
+  // never fix that, so park the pane with the origin diagnostic instead of
+  // a form that blames a restart. 401 (or a network error, where the form's
+  // copy is still the most useful guidance): the paste-token form.
   async function classifyPreOpenFailure(): Promise<void> {
-    let authed = false;
+    let verdict: PreOpenFailureKind = "auth-required";
     try {
       const token = options.getToken();
       const url = token ? `/api/auth?t=${encodeURIComponent(token)}` : "/api/auth";
       const response = await fetch(url, { method: "GET" });
-      authed = response.status === 204;
+      verdict = classifyAuthProbeStatus(response.status);
     } catch {
-      authed = false;
+      verdict = "auth-required";
     }
-    if (authed && options.onCollision && !collisionSignaled) {
+    if (verdict === "collision" && options.onCollision && !collisionSignaled) {
       collisionSignaled = true;
       options.onCollision();
+      return;
+    }
+    if (verdict === "origin-rejected") {
+      showOriginRejectedUI();
       return;
     }
     showPasteTokenUI();
