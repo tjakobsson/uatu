@@ -2,10 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 
 import {
   acquireKeyboardLockOnce,
+  createOsc52Handler,
   detectIsMac,
   handleClipboardKeyEvent,
+  parseOsc52Payload,
   resetKeyboardLockForTests,
   type ClipboardTerminal,
+  type Osc52Notice,
 } from "./clipboard";
 
 // --- helpers ----------------------------------------------------------------
@@ -452,5 +455,176 @@ describe("acquireKeyboardLockOnce", () => {
     const second = installNavigatorKeyboard({ lock: async () => undefined });
     acquireKeyboardLockOnce();
     expect(second.lock).not.toHaveBeenCalled();
+  });
+});
+
+// --- OSC 52 bridge -----------------------------------------------------------
+
+function b64(text: string): string {
+  return Buffer.from(text, "utf8").toString("base64");
+}
+
+describe("parseOsc52Payload", () => {
+  it("parses a clipboard copy", () => {
+    expect(parseOsc52Payload(`c;${b64("hello")}`)).toEqual({ kind: "copy", text: "hello" });
+  });
+
+  it("accepts primary and select selections (they map to the one clipboard)", () => {
+    expect(parseOsc52Payload(`p;${b64("x")}`)).toEqual({ kind: "copy", text: "x" });
+    expect(parseOsc52Payload(`s;${b64("x")}`)).toEqual({ kind: "copy", text: "x" });
+    expect(parseOsc52Payload(`cps;${b64("x")}`)).toEqual({ kind: "copy", text: "x" });
+  });
+
+  it("accepts the empty-selection shorthand", () => {
+    expect(parseOsc52Payload(`;${b64("x")}`)).toEqual({ kind: "copy", text: "x" });
+  });
+
+  it("decodes multi-byte UTF-8", () => {
+    expect(parseOsc52Payload(`c;${b64("héllo ✓")}`)).toEqual({ kind: "copy", text: "héllo ✓" });
+  });
+
+  it("classifies the read query", () => {
+    expect(parseOsc52Payload("c;?")).toEqual({ kind: "query" });
+  });
+
+  it("rejects unknown selection parameters", () => {
+    expect(parseOsc52Payload(`q;${b64("x")}`)).toEqual({ kind: "invalid" });
+    expect(parseOsc52Payload(`c7;${b64("x")}`)).toEqual({ kind: "invalid" });
+  });
+
+  it("rejects a payload without a separator", () => {
+    expect(parseOsc52Payload(b64("x"))).toEqual({ kind: "invalid" });
+  });
+
+  it("rejects invalid base64", () => {
+    expect(parseOsc52Payload("c;***not-base64***")).toEqual({ kind: "invalid" });
+  });
+
+  it("rejects an empty copy", () => {
+    expect(parseOsc52Payload("c;")).toEqual({ kind: "invalid" });
+  });
+
+  it("accepts a payload exactly at the 100 KB cap", () => {
+    const text = "a".repeat(100 * 1024);
+    expect(parseOsc52Payload(`c;${b64(text)}`)).toEqual({ kind: "copy", text });
+  });
+
+  it("rejects a payload over the 100 KB cap as oversized", () => {
+    const text = "a".repeat(100 * 1024 + 1);
+    expect(parseOsc52Payload(`c;${b64(text)}`)).toEqual({ kind: "oversized" });
+  });
+
+  it("rejects a multi-megabyte payload without decoding (estimate path)", () => {
+    // 8 MB of base64-looking data; must classify as oversized, not invalid.
+    const junk = "A".repeat(8 * 1024 * 1024);
+    expect(parseOsc52Payload(`c;${junk}`)).toEqual({ kind: "oversized" });
+  });
+});
+
+describe("createOsc52Handler", () => {
+  function collect() {
+    const notices: Osc52Notice[] = [];
+    return { notices, notify: (n: Osc52Notice) => notices.push(n) };
+  }
+
+  async function settle(): Promise<void> {
+    await Promise.resolve();
+    await Promise.resolve();
+  }
+
+  it("notify: writes and reports the copied length", async () => {
+    const { notices, notify } = collect();
+    const written: string[] = [];
+    const handler = createOsc52Handler({
+      policy: "notify",
+      notify,
+      writeText: async text => { written.push(text); },
+    });
+
+    expect(handler(`c;${b64("hello")}`)).toBe(true);
+    await settle();
+    expect(written).toEqual(["hello"]);
+    expect(notices).toEqual([{ kind: "copied", chars: 5 }]);
+  });
+
+  it("silent: writes without a notice", async () => {
+    const { notices, notify } = collect();
+    const written: string[] = [];
+    const handler = createOsc52Handler({
+      policy: "silent",
+      notify,
+      writeText: async text => { written.push(text); },
+    });
+
+    handler(`c;${b64("quiet")}`);
+    await settle();
+    expect(written).toEqual(["quiet"]);
+    expect(notices).toEqual([]);
+  });
+
+  it("confirm: never writes, emits pending with the text", async () => {
+    const { notices, notify } = collect();
+    const writeText = mock(async (_: string) => {});
+    const handler = createOsc52Handler({ policy: "confirm", notify, writeText });
+
+    handler(`c;${b64("check me")}`);
+    await settle();
+    expect(writeText).not.toHaveBeenCalled();
+    expect(notices).toEqual([{ kind: "pending", text: "check me" }]);
+  });
+
+  it("promotes a rejected write to pending (notify and silent)", async () => {
+    for (const policy of ["notify", "silent"] as const) {
+      const { notices, notify } = collect();
+      const handler = createOsc52Handler({
+        policy,
+        notify,
+        writeText: async () => { throw new Error("needs user activation"); },
+      });
+
+      handler(`c;${b64("held")}`);
+      await settle();
+      expect(notices).toEqual([{ kind: "pending", text: "held" }]);
+    }
+  });
+
+  it("never answers a query and never touches the clipboard for it", async () => {
+    const { notices, notify } = collect();
+    const writeText = mock(async (_: string) => {});
+    const handler = createOsc52Handler({ policy: "notify", notify, writeText });
+
+    expect(handler("c;?")).toBe(true);
+    await settle();
+    expect(writeText).not.toHaveBeenCalled();
+    expect(notices).toEqual([]);
+  });
+
+  it("drops invalid payloads silently", async () => {
+    const { notices, notify } = collect();
+    const writeText = mock(async (_: string) => {});
+    const handler = createOsc52Handler({ policy: "notify", notify, writeText });
+
+    handler("c;***");
+    await settle();
+    expect(writeText).not.toHaveBeenCalled();
+    expect(notices).toEqual([]);
+  });
+
+  it("reports oversized under notify and confirm, stays quiet under silent", async () => {
+    const oversized = `c;${b64("a".repeat(100 * 1024 + 1))}`;
+    for (const [policy, expected] of [
+      ["notify", [{ kind: "oversized" }]],
+      ["confirm", [{ kind: "oversized" }]],
+      ["silent", []],
+    ] as const) {
+      const { notices, notify } = collect();
+      const writeText = mock(async (_: string) => {});
+      const handler = createOsc52Handler({ policy, notify, writeText });
+
+      handler(oversized);
+      await settle();
+      expect(writeText).not.toHaveBeenCalled();
+      expect(notices).toEqual(expected as never);
+    }
   });
 });

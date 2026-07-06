@@ -5,9 +5,12 @@ import "@xterm/xterm/css/xterm.css";
 
 import {
   acquireKeyboardLockOnce,
+  createOsc52Handler,
   detectIsMac,
   handleClipboardKeyEvent,
+  type Osc52Notice,
 } from "./clipboard";
+import type { TerminalClipboardPolicy } from "../shared/types";
 
 const TERMINAL_TOKEN_KEY = "uatu:terminal-token";
 
@@ -155,6 +158,13 @@ export type MountTerminalOptions = {
   // Falls back to CSS variable / built-in defaults when omitted.
   fontFamily?: string;
   fontSize?: number;
+  // OSC 52 bridge policy (`terminal.clipboard` in `.uatu.json`). Defaults to
+  // "notify". Under "off" no OSC 52 handler is registered at all.
+  clipboardPolicy?: TerminalClipboardPolicy;
+  // Receives the bridge's UI events (copied / pending / oversized); the panel
+  // renders them as the pane-scoped toast. Required for "confirm" to be
+  // usable — without it pending copies have no surface to land on.
+  onOsc52Notice?: (notice: Osc52Notice) => void;
   // Fires when the WebSocket closes for a reason OTHER than `detach()`
   // (shell exited, server gone, connection dropped). Lets the controller
   // tear down the dead pane automatically. NOT called on auth failure
@@ -244,6 +254,19 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     // inside the handler so Cmd+C / Cmd+V keep using xterm's defaults.
     const isMac = detectIsMac();
     term.attachCustomKeyEventHandler(event => handleClipboardKeyEvent(event, term!, isMac));
+    // OSC 52 bridge: application-initiated copies (mouse-mode TUIs) reach the
+    // host clipboard. `registerOscHandler` is stable public API — no
+    // allowProposedApi needed. Write-only by construction; see clipboard.ts.
+    const clipboardPolicy = options.clipboardPolicy ?? "notify";
+    if (clipboardPolicy !== "off") {
+      term.parser.registerOscHandler(
+        52,
+        createOsc52Handler({
+          policy: clipboardPolicy,
+          notify: notice => options.onOsc52Notice?.(notice),
+        }),
+      );
+    }
     fit = new FitAddon();
     term.loadAddon(fit);
     options.container.replaceChildren();

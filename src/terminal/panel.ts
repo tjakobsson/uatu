@@ -5,6 +5,8 @@
 // through its named methods so persistence and refit happen consistently.
 
 import { mountTerminalPanel, type TerminalPanelHandle } from "./client";
+import type { Osc52Notice } from "./clipboard";
+import type { TerminalClipboardPolicy } from "../shared/types";
 import { formatSessionAge, pickerCandidates } from "./picker";
 import type { TerminalSessionInfo } from "./server";
 import {
@@ -48,6 +50,84 @@ function clampTerminalWidth(value: number): number {
   return clampTerminalWidthShared(value, window.innerWidth);
 }
 
+// Pane-scoped toast for OSC 52 bridge events. One toast element per pane;
+// each `show` replaces the previous content (rapid copies coalesce instead of
+// stacking) and re-arms the auto-dismiss timer. All content is set through
+// textContent — terminal output is attacker-controlled and must never be
+// interpreted as HTML.
+type CopyToast = { show(notice: Osc52Notice): void };
+
+const COPY_TOAST_DISMISS_MS = 2500;
+const COPY_TOAST_ERROR_DISMISS_MS = 5000;
+
+function createCopyToast(pane: HTMLElement): CopyToast {
+  let toast: HTMLDivElement | null = null;
+  let dismissTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function clear(): void {
+    if (dismissTimer !== null) clearTimeout(dismissTimer);
+    dismissTimer = null;
+    toast?.remove();
+    toast = null;
+  }
+
+  function render(text: string, options: { copyText?: string; dismissAfter?: number }): void {
+    clear();
+    toast = document.createElement("div");
+    toast.className = "terminal-copy-toast";
+    toast.setAttribute("role", "status");
+
+    const label = document.createElement("span");
+    label.className = "terminal-copy-toast-text";
+    label.textContent = text;
+    toast.append(label);
+
+    if (options.copyText !== undefined) {
+      const pending = options.copyText;
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.className = "terminal-copy-toast-copy";
+      copy.textContent = "Copy";
+      copy.addEventListener("click", () => {
+        // Inside a click gesture, so this works on browsers that refuse the
+        // bridge's gestureless writeText (Firefox/Safari) too.
+        navigator.clipboard.writeText(pending).then(
+          () => render(`Copied ${pending.length} characters from terminal`, { dismissAfter: COPY_TOAST_DISMISS_MS }),
+          () => render("Copy failed — clipboard unavailable", { dismissAfter: COPY_TOAST_ERROR_DISMISS_MS }),
+        );
+      });
+      const dismiss = document.createElement("button");
+      dismiss.type = "button";
+      dismiss.className = "terminal-copy-toast-dismiss";
+      dismiss.setAttribute("aria-label", "Dismiss");
+      dismiss.textContent = "×";
+      dismiss.addEventListener("click", clear);
+      toast.append(copy, dismiss);
+    }
+
+    pane.append(toast);
+    if (options.dismissAfter !== undefined) {
+      dismissTimer = setTimeout(clear, options.dismissAfter);
+    }
+  }
+
+  return {
+    show(notice) {
+      switch (notice.kind) {
+        case "copied":
+          render(`Copied ${notice.chars} characters from terminal`, { dismissAfter: COPY_TOAST_DISMISS_MS });
+          return;
+        case "pending":
+          render(`Terminal wants to copy ${notice.text.length} characters`, { copyText: notice.text });
+          return;
+        case "oversized":
+          render("Terminal copy rejected: larger than 100 KB", { dismissAfter: COPY_TOAST_ERROR_DISMISS_MS });
+          return;
+      }
+    },
+  };
+}
+
 type TerminalPaneEntry = {
   record: TerminalPaneRecord;
   handle: TerminalPanelHandle;
@@ -61,7 +141,10 @@ type TerminalPaneEntry = {
 // toggle + keyboard shortcuts + the close-confirmation modal. The controller
 // is the only thing that mutates panel state; UI handlers all funnel through
 // its named methods so persistence and refit happen consistently.
-export function setupTerminalPanel(enabled: boolean, config?: { fontFamily?: string; fontSize?: number }) {
+export function setupTerminalPanel(
+  enabled: boolean,
+  config?: { fontFamily?: string; fontSize?: number; clipboard?: TerminalClipboardPolicy },
+) {
   if (terminalSetupRan) return;
   terminalSetupRan = true;
 
@@ -288,12 +371,16 @@ export function setupTerminalPanel(enabled: boolean, config?: { fontFamily?: str
       setActivePane(record.id);
     });
 
+    const copyToast = createCopyToast(element);
+
     const handle = mountTerminalPanel({
       container: host,
       getToken,
       sessionId: record.id,
       fontFamily: config?.fontFamily,
       fontSize: config?.fontSize,
+      clipboardPolicy: config?.clipboard,
+      onOsc52Notice: notice => copyToast.show(notice),
       // Server-initiated disconnect (shell exited via `exit`, server
       // gone, network drop) → tear the dead pane down automatically.
       // No confirmation modal — there's nothing left to confirm losing.
