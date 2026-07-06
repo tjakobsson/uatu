@@ -29,11 +29,11 @@ Alternative rejected: joining all labels (`docs · api · web`) — unreadable a
 
 ### D2: Hue from a stable hash of root paths, applied to favicon and marker
 
-`hue = fnv1a(sortedRootPaths.join("\n")) % 360`. Paths, not labels: two projects named `docs` must not collide, and `RootGroup.path` is already in the payload. Sorted so root order on the CLI doesn't change the color. FNV-1a because it's a five-line pure function — no dependency.
+`hue = fnv1a(sortedWatchedEntryPaths.join("\n")) % 360`, where the watched-entry path is `RootGroup.id` — the watched file or directory's absolute path. Paths, not labels: two projects named `docs` must not collide. `id` rather than `RootGroup.path` because the server sets `path` to the PARENT directory for file-scoped roots (caught in review, PR #106): hashing `path` would give `uatu README.md` and `uatu CHANGELOG.md` in one directory the same color. For directory roots `id` and `path` are identical. Sorted so root order on the CLI doesn't change the color. FNV-1a because it's a five-line pure function — no dependency.
 
 The same hue drives both the favicon tint and the sidebar marker badge, so the color the user learns in the tab strip is the color they see in the app. Fixed saturation/lightness (`hsl(hue, 60%, 45%)` with white text) keeps every hue legible on both light and dark tab strips; only the hue varies.
 
-Alternative rejected: hashing `rootId` — it's stable per session but derived server-side; paths are the user-meaningful identity and survive any future id-scheme change.
+Note: `RootGroup.id` IS an absolute path today (the watched entry), so this is not "hashing an opaque server id" — it is the most precise path the payload carries. If the id scheme ever stops being a path, this derivation must move to an explicit watched-entry-path field.
 
 ### D3: Favicon as a dynamic SVG data-URL link element
 

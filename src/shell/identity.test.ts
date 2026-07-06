@@ -46,6 +46,20 @@ describe("identityHue", () => {
     expect(hue).toBeGreaterThanOrEqual(0);
     expect(hue).toBeLessThan(360);
   });
+
+  it("distinguishes file-scoped sessions sharing a parent directory", () => {
+    // For `uatu serve <file>` the server sets RootGroup.path to the PARENT
+    // directory and RootGroup.id to the file itself — hashing must use the
+    // id, or two file sessions in one directory share a color.
+    const fileRoot = (file: string): RootGroup => ({
+      id: `/repo/${file}`,
+      label: file,
+      path: "/repo",
+      docs: [],
+      hiddenCount: 0,
+    });
+    expect(identityHue([fileRoot("README.md")])).not.toBe(identityHue([fileRoot("CHANGELOG.md")]));
+  });
 });
 
 describe("pageTitle", () => {

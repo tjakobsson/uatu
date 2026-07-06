@@ -76,7 +76,9 @@ function renderCompareTargetControl(): string {
 function renderRepositoryName(repository: RepositoryReviewSnapshot): string {
   const roots = appState.roots.filter(root => repository.watchedRootIds.includes(root.id));
   const hue = identityHue(roots);
-  const tooltip = roots.length > 0 ? roots.map(root => root.path).join("\n") : repository.rootPath;
+  // `id` is the watched entry's absolute path — the file itself for
+  // file-scoped sessions, where `path` degrades to the parent directory.
+  const tooltip = roots.length > 0 ? roots.map(root => root.id).join("\n") : repository.rootPath;
   return `
     <h3 class="review-repo-name">
       <span class="project-marker" style="background-color: ${escapeHtmlAttribute(identityColor(hue))}" title="${escapeHtmlAttribute(tooltip)}">${escapeHtml(repository.label)}</span>

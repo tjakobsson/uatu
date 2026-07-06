@@ -20,7 +20,7 @@ The client SHALL derive a project label from the state payload's roots: the firs
 - **THEN** the tab title is `uatu` and no project marker is shown
 
 ### Requirement: Session derives a stable identity hue from root paths
-The client SHALL derive an identity hue (0–359) from a hash of the session's root paths, sorted so CLI argument order does not affect the result. The same set of root paths SHALL always produce the same hue, and the hue SHALL be derived from paths — not labels — so identically named projects in different locations get different hues.
+The client SHALL derive an identity hue (0–359) from a hash of the session's watched-entry paths (each root's `id`, which is the watched file or directory's absolute path — NOT `RootGroup.path`, which degrades to the parent directory for file-scoped roots), sorted so CLI argument order does not affect the result. The same set of watched entries SHALL always produce the same hue, and the hue SHALL be derived from paths — not labels — so identically named projects in different locations get different hues.
 
 #### Scenario: Hue is stable across sessions
 - **WHEN** the identity hue is derived twice for the same set of root paths
@@ -33,6 +33,10 @@ The client SHALL derive an identity hue (0–359) from a hash of the session's r
 #### Scenario: Same-named projects in different paths differ
 - **WHEN** two sessions watch `/a/docs` and `/b/docs` respectively
 - **THEN** their identity hues are derived from the differing paths and are independent of the shared `docs` label
+
+#### Scenario: File-scoped sessions in one directory differ
+- **WHEN** two sessions watch `/repo/README.md` and `/repo/CHANGELOG.md` respectively
+- **THEN** their identity hues derive from the file paths themselves, not the shared parent directory, and are independent of each other
 
 ### Requirement: Tab title carries the project label
 The client SHALL set `document.title` to `<project-label> — uatu` whenever a state payload is applied (initial boot and live refreshes), so re-derivation is idempotent and reflects root changes without a reload.

@@ -30,10 +30,15 @@ function fnv1a(input: string): number {
   return hash >>> 0;
 }
 
-// Paths are sorted so CLI argument order doesn't change a project's color.
+// Hashes `root.id` — the watched entry's absolute path — NOT `root.path`:
+// for single-file sessions (`uatu serve README.md`) the server sets `path`
+// to the parent directory, so two file sessions in the same directory would
+// collide on `path` while their `id`s (the files themselves) differ. For
+// directory roots the two are identical. Sorted so CLI argument order
+// doesn't change a project's color.
 export function identityHue(roots: RootGroup[]): number {
   const key = roots
-    .map(root => root.path)
+    .map(root => root.id)
     .sort()
     .join("\n");
   return fnv1a(key) % 360;
