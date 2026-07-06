@@ -4,6 +4,7 @@
 // lives in here, intentionally close to its trigger (the SSE message).
 
 import { chooseSelectionForFileEvent } from "./follow";
+import { applyProjectIdentity } from "./identity";
 import { findDocumentById, syncStateGeneration } from "./storage";
 import { applyMonoConfig } from "../mono/apply";
 import { documentDiffCache, forgetDocumentCache, loadDocument } from "../preview/mount";
@@ -29,6 +30,9 @@ export function applyServerSnapshot(payload: StatePayload): void {
   appState.roots = payload.roots;
   appState.repositories = payload.repositories ?? [];
   appState.scope = payload.scope;
+  // Title, favicon tint, and sidebar marker all derive from roots;
+  // re-applying on every payload keeps them honest if roots change.
+  applyProjectIdentity(payload.roots);
 }
 
 export function connectEvents() {
