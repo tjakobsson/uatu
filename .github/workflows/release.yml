@@ -1,0 +1,141 @@
+name: Release
+
+# Cut a release by pushing a version tag:
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# All four platform binaries are cross-compiled on this one Linux runner
+# via `bun build --compile --target=...` (uatu has no native modules, so
+# this is safe). Asset names and archive layout are a public contract —
+# the Homebrew formula and any future installers depend on them.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  # Create the GitHub Release and upload assets.
+  contents: write
+  # Sigstore keyless signing for build-provenance attestations.
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      - name: Verify tag matches package.json version
+        # Fails fast before anything is built: the tag is the single
+        # source of truth for what gets released, and it must agree with
+        # the version compiled into the binaries.
+        run: |
+          expected="v$(jq -r .version package.json)"
+          if [ "$GITHUB_REF_NAME" != "$expected" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version ($expected)" >&2
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Cross-compile all targets
+        run: |
+          for target in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
+            bun run scripts/build.ts --target="bun-$target" --outfile="dist/$target/uatu"
+          done
+
+      - name: Install Playwright Chromium
+        run: bunx playwright install --with-deps chromium
+
+      - name: Smoke-test the linux-x64 binary
+        # The runner is linux-x64, so this artifact — the exact binary
+        # being released — can be executed here. A failure stops the
+        # release before anything is published.
+        run: bun run smoke
+        env:
+          UATU_SMOKE_BINARY: dist/linux-x64/uatu
+
+      - name: Package release assets
+        # Contract: zip for darwin, tar.gz for linux, each archive holding
+        # a single `uatu` binary at its root (no wrapping directory).
+        run: |
+          mkdir -p dist/release
+          for target in darwin-arm64 darwin-x64; do
+            zip -j "dist/release/uatu-$target.zip" "dist/$target/uatu"
+          done
+          for target in linux-x64 linux-arm64; do
+            tar -czf "dist/release/uatu-$target.tar.gz" -C "dist/$target" uatu
+          done
+          cd dist/release
+          sha256sum uatu-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: dist/release/uatu-*
+
+      - name: Create GitHub Release
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --generate-notes \
+            dist/release/uatu-* dist/release/SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  update-tap:
+    # Regenerates Formula/uatu.rb in tjakobsson/homebrew-tap from the
+    # published release's SHA256SUMS. Reads the sums back from the release
+    # (not the build directory) so a failed run can be re-run later and
+    # still produce the correct formula. A failure here never affects the
+    # already-published release.
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      - name: Download SHA256SUMS from the release
+        run: gh release download "$GITHUB_REF_NAME" --pattern SHA256SUMS --output SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Update Homebrew formula
+        # HOMEBREW_TAP_TOKEN is a fine-grained PAT with contents:write on
+        # tjakobsson/homebrew-tap only.
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/tjakobsson/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          bun run scripts/generate-formula.ts --version "$version" --sums SHA256SUMS --out tap/Formula/uatu.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/uatu.rb
+          if git diff --cached --quiet; then
+            echo "Formula already up to date for uatu $version"
+          else
+            git commit -m "uatu $version"
+            git push origin HEAD
+          fi
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
