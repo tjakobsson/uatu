@@ -65,13 +65,20 @@ export async function renderMermaidDiagrams(
     // Generous ahead-of-viewport margin: diagrams normally finish rendering
     // before they scroll into actual view, so pop-in and placeholder-height
     // layout shift stay off-screen.
+    //
+    // The root MUST be the nearest scrollable ancestor (`.preview-shell`
+    // in single view, the rendered pane in split view), not the default
+    // viewport: with an implicit root, ancestor clipping by the nested
+    // scroller still applies and rootMargin would expand only the viewport
+    // rect — leaving the margin inert and diagrams un-queued until they
+    // are already visible.
     const observer = new Observer(entries => {
       for (const entry of entries) {
         if (!entry.isIntersecting) continue;
         observer.unobserve(entry.target);
         enqueueDiagram({ node: entry.target as HTMLElement, generation, themeInputs });
       }
-    }, { rootMargin: OBSERVER_ROOT_MARGIN });
+    }, { root: nearestScrollRoot(container), rootMargin: OBSERVER_ROOT_MARGIN });
     activeObserver = observer;
     for (const node of nodes) {
       observer.observe(node);
@@ -84,6 +91,34 @@ export async function renderMermaidDiagrams(
       enqueueDiagram({ node, generation, themeInputs });
     }
   }
+}
+
+// Walk up from the container to the nearest overflow-scrolling ancestor —
+// the element whose scrollport actually clips the diagrams. Returns null
+// (the viewport) when none exists or when getComputedStyle is unavailable
+// (non-browser DOM), which degrades to the pre-fix behavior: rendering on
+// visibility rather than ahead of it.
+function nearestScrollRoot(container: ParentNode): Element | null {
+  const getStyle = (globalThis as { getComputedStyle?: (el: Element) => CSSStyleDeclaration }).getComputedStyle;
+  if (typeof getStyle !== "function") {
+    return null;
+  }
+  // `instanceof Element` needs the Element global, which non-browser DOM
+  // environments may not install — duck-type on nodeType instead.
+  let element: Element | null =
+    (container as { nodeType?: number }).nodeType === 1 ? (container as Element) : null;
+  while (element) {
+    try {
+      const style = getStyle(element);
+      if (/(auto|scroll|overlay)/.test(`${style.overflowY} ${style.overflow}`)) {
+        return element;
+      }
+    } catch {
+      return null;
+    }
+    element = element.parentElement;
+  }
+  return null;
 }
 
 function enqueueDiagram(entry: QueueEntry): void {

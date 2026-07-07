@@ -288,6 +288,39 @@ describe("lazy mermaid render queue", () => {
     expect(run.mock.calls.length).toBe(2);
   });
 
+  test("the observer roots at the nearest scrollable ancestor, not the viewport", async () => {
+    (globalThis as { mermaid?: unknown }).mermaid = { initialize: mock(() => undefined), run: okRun() };
+
+    let observedRoot: Element | null | undefined;
+    class FakeObserver {
+      constructor(_cb: unknown, options?: { root?: Element | null }) {
+        observedRoot = options?.root;
+      }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    }
+    (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver = FakeObserver;
+    // linkedom has no getComputedStyle; provide one that marks the shell
+    // as the overflow-scrolling ancestor, mirroring `.preview-shell`.
+    const previousGetComputedStyle = (globalThis as { getComputedStyle?: unknown }).getComputedStyle;
+    (globalThis as { getComputedStyle?: unknown }).getComputedStyle = (el: Element) =>
+      ({ overflow: "", overflowY: el.classList.contains("preview-shell") ? "auto" : "visible" }) as CSSStyleDeclaration;
+
+    try {
+      const shell = doc.createElement("main");
+      shell.className = "preview-shell";
+      const container = containerWith("graph ROOTED");
+      shell.appendChild(container as unknown as Node);
+
+      await renderMermaidDiagrams(container as unknown as ParentNode);
+
+      expect(observedRoot).toBe(shell as unknown as Element);
+    } finally {
+      (globalThis as { getComputedStyle?: unknown }).getComputedStyle = previousGetComputedStyle;
+    }
+  });
+
   test("with an IntersectionObserver, nodes render only when they intersect", async () => {
     const run = okRun();
     (globalThis as { mermaid?: unknown }).mermaid = { initialize: mock(() => undefined), run };
