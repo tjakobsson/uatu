@@ -26,7 +26,7 @@ Tasks marked **[MANUAL — Tobias]** need a human (GitHub UI access, PAT minting
 
 ## 4. Documentation
 
-- [ ] 4.1 Add an Install section to `README.md`: Homebrew first (`brew install tjakobsson/tap/uatu`, `brew upgrade uatu`), manual download from Releases second — including the macOS quarantine note (`xattr -d com.apple.quarantine ./uatu` or System Settings → Privacy & Security) and a pointer to `gh attestation verify <asset> --repo tjakobsson/uatu`
+- [x] 4.1 Add an Install section to `README.md`: Homebrew first (`brew install tjakobsson/tap/uatu`, `brew upgrade uatu`), manual download from Releases second — including the macOS quarantine note (`xattr -d com.apple.quarantine ./uatu` or System Settings → Privacy & Security) and a pointer to `gh attestation verify <asset> --repo tjakobsson/uatu`
 - [ ] 4.2 Land everything on `main` via PR; CI green
 
 ## 5. Cut v0.1.0 and verify
