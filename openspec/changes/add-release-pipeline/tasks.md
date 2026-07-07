@@ -19,7 +19,7 @@ Tasks marked **[MANUAL — Tobias]** need a human (GitHub UI access, PAT minting
 
 ## 3. Homebrew tap
 
-- [ ] 3.1 **[MANUAL — Tobias]** Create the public GitHub repo `tjakobsson/homebrew-tap`, initialized with a README so the default branch (`main`) exists — the first release run populates `Formula/uatu.rb` automatically
+- [x] 3.1 **[MANUAL — Tobias]** Create the public GitHub repo `tjakobsson/homebrew-tap`, initialized with a README so the default branch (`main`) exists — the first release run populates `Formula/uatu.rb` automatically
 - [ ] 3.2 **[MANUAL — Tobias]** Mint a fine-grained PAT scoped to `tjakobsson/homebrew-tap` only, permission contents: read+write; add it to the `uatu` repo as actions secret `HOMEBREW_TAP_TOKEN`
 - [x] 3.3 Add `scripts/generate-formula.ts` emitting the complete `Formula/uatu.rb` from a version + `SHA256SUMS`: `on_macos`/`on_linux` × `on_arm`/`on_intel` blocks with release-asset URLs + sha256 pins, `bin.install "uatu"`, `test do` asserting `uatu --version` (design D8 refined: the formula is always generated, never hand-written)
 - [x] 3.4 Add the tap-bump job to `release.yml`: after the release publishes, regenerate `Formula/uatu.rb` from the published release's `SHA256SUMS`, commit and push to the tap repo using `HOMEBREW_TAP_TOKEN`; job is re-runnable and cannot affect the already-published release on failure
