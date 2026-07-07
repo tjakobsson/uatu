@@ -20,19 +20,23 @@ Tasks marked **[MANUAL — Tobias]** need a human (GitHub UI access, PAT minting
 ## 3. Homebrew tap
 
 - [x] 3.1 **[MANUAL — Tobias]** Create the public GitHub repo `tjakobsson/homebrew-tap`, initialized with a README so the default branch (`main`) exists — the first release run populates `Formula/uatu.rb` automatically
-- [ ] 3.2 **[MANUAL — Tobias]** Mint a fine-grained PAT scoped to `tjakobsson/homebrew-tap` only, permission contents: read+write; add it to the `uatu` repo as actions secret `HOMEBREW_TAP_TOKEN`
+- [x] 3.2 **[MANUAL — Tobias]** Mint a fine-grained PAT scoped to `tjakobsson/homebrew-tap` only, permission contents: read+write; add it to the `uatu` repo as actions secret `HOMEBREW_TAP_TOKEN`
 - [x] 3.3 Add `scripts/generate-formula.ts` emitting the complete `Formula/uatu.rb` from a version + `SHA256SUMS`: `on_macos`/`on_linux` × `on_arm`/`on_intel` blocks with release-asset URLs + sha256 pins, `bin.install "uatu"`, `test do` asserting `uatu --version` (design D8 refined: the formula is always generated, never hand-written)
 - [x] 3.4 Add the tap-bump job to `release.yml`: after the release publishes, regenerate `Formula/uatu.rb` from the published release's `SHA256SUMS`, commit and push to the tap repo using `HOMEBREW_TAP_TOKEN`; job is re-runnable and cannot affect the already-published release on failure
 
 ## 4. Documentation
 
 - [x] 4.1 Add an Install section to `README.md`: Homebrew first (`brew install tjakobsson/tap/uatu`, `brew upgrade uatu`), manual download from Releases second — including the macOS quarantine note (`xattr -d com.apple.quarantine ./uatu` or System Settings → Privacy & Security) and a pointer to `gh attestation verify <asset> --repo tjakobsson/uatu`
-- [ ] 4.2 Land everything on `main` via PR; CI green
 
-## 5. Cut v0.1.0 and verify
+## 5. Release runbook — cut v0.1.0 and verify (post-merge, deliberately not checkboxes)
 
-- [ ] 5.1 **[MANUAL — Tobias]** Push the release tag: `git tag v0.1.0 && git push origin v0.1.0`; watch the release workflow through to green (release published, tap formula updated with real hashes)
-- [ ] 5.2 **[MANUAL — Tobias]** On the Mac: `curl -LO` the `uatu-darwin-arm64.zip` asset, unzip, run `./uatu --version`; confirm it executes and `codesign -dv ./uatu` shows `Signature=adhoc`
-- [ ] 5.3 **[MANUAL — Tobias]** Verify provenance: `gh attestation verify uatu-darwin-arm64.zip --repo tjakobsson/uatu` succeeds; spot-check one hash against `SHA256SUMS`
-- [ ] 5.4 **[MANUAL — Tobias]** End-to-end Homebrew check: `brew install tjakobsson/tap/uatu`, run `uatu --version`, then `brew test uatu`
-- [ ] 5.5 If any verification fails: delete the release and tag, fix, re-tag v0.1.0
+Everything below happens after this branch lands on `main` (PR #110, CI
+green), so none of it is tracked as checkboxes — ticking them would mean
+commits to `main` whose only content is bookkeeping. Outcomes are verified
+by the release itself, not by this file.
+
+1. **[MANUAL — Tobias]** Push the release tag: `git tag v0.1.0 && git push origin v0.1.0`; watch the release workflow through to green (release published, tap formula updated with real hashes)
+2. **[MANUAL — Tobias]** On the Mac: `curl -LO` the `uatu-darwin-arm64.zip` asset, unzip, run `./uatu --version`; confirm it executes and `codesign -dv ./uatu` shows `Signature=adhoc`
+3. **[MANUAL — Tobias]** Verify provenance: `gh attestation verify uatu-darwin-arm64.zip --repo tjakobsson/uatu` succeeds; spot-check one hash against `SHA256SUMS`
+4. **[MANUAL — Tobias]** End-to-end Homebrew check: `brew install tjakobsson/tap/uatu`, run `uatu --version`, then `brew test uatu`
+5. If any verification fails: delete the release and tag, fix, re-tag v0.1.0
