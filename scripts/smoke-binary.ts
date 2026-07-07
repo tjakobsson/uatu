@@ -24,7 +24,9 @@ import path from "node:path";
 
 const PORT = 4889;
 const ROOT = path.resolve(import.meta.dir, "..");
-const BINARY = path.join(ROOT, "dist", "uatu");
+// UATU_SMOKE_BINARY lets the release workflow smoke the cross-compiled
+// linux-x64 artifact instead of the default host build.
+const BINARY = path.resolve(ROOT, process.env.UATU_SMOKE_BINARY ?? path.join("dist", "uatu"));
 const WORKSPACE = path.join(ROOT, "testdata", "watch-docs");
 
 let exitCode = 0;

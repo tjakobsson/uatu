@@ -49,6 +49,42 @@ cognitive debt.
 
 ## Install
 
+### Homebrew (macOS and Linux)
+
+```bash
+brew install tjakobsson/tap/uatu
+brew upgrade uatu        # stay current
+```
+
+### Manual download
+
+Grab the archive for your platform from the
+[latest release](https://github.com/tjakobsson/uatu/releases/latest) —
+`uatu-darwin-arm64.zip`, `uatu-darwin-x64.zip`, `uatu-linux-x64.tar.gz`,
+or `uatu-linux-arm64.tar.gz` — extract the single `uatu` binary, and put
+it on your `PATH`.
+
+**macOS note:** binaries downloaded through a browser are quarantined and
+Gatekeeper will refuse to run them (the binaries are not notarized). Either
+approve the binary under System Settings → Privacy & Security, or clear the
+quarantine flag:
+
+```bash
+xattr -d com.apple.quarantine ./uatu
+```
+
+Downloads via `curl` or Homebrew never set the quarantine flag and run
+as-is.
+
+Every release ships a `SHA256SUMS` file, and all archives carry GitHub
+build-provenance attestations:
+
+```bash
+gh attestation verify uatu-darwin-arm64.zip --repo tjakobsson/uatu
+```
+
+### From source
+
 Requires **Bun ≥ 1.3.5** (for the built-in PTY API; older Bun degrades the
 terminal feature gracefully).
 
@@ -60,7 +96,7 @@ bun link                                        # expose `uatu` on PATH
 ```
 
 Windows is pending Bun's upstream PTY work — the terminal stays hidden there;
-everything else works.
+everything else works. Release binaries are darwin/linux only for now.
 
 ## Usage
 
