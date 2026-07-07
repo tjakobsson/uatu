@@ -50,9 +50,22 @@ test("renders the AsciiDoc cheat sheet with full heading depth, TOC, admonitions
   await expect(page.locator("#preview pre code.hljs.language-javascript").first()).toBeVisible();
 
   // Both AsciiDoc mermaid forms — `[source,mermaid]` and the bare `[mermaid]`
-  // block style — hydrate client-side into rendered SVGs.
+  // block style — hydrate client-side into rendered SVGs. Rendering is
+  // viewport-lazy, so sweep the preview shell one viewport per poll pass
+  // until both diagrams have rendered.
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const shell = document.querySelector<HTMLElement>(".preview-shell");
+        if (shell) {
+          const atBottom = shell.scrollTop + shell.clientHeight >= shell.scrollHeight - 4;
+          shell.scrollTop = atBottom ? 0 : shell.scrollTop + shell.clientHeight;
+        }
+        return document.querySelectorAll("#preview .mermaid svg").length;
+      }),
+    )
+    .toBe(2);
   const diagrams = page.locator("#preview .mermaid svg");
-  await expect(diagrams).toHaveCount(2);
   await expect(diagrams.first()).toBeVisible();
   await expect(diagrams.nth(1)).toBeVisible();
 
