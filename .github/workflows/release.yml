@@ -66,6 +66,22 @@ jobs:
         env:
           UATU_SMOKE_BINARY: dist/linux-x64/uatu
 
+      - name: Verify the compiled binary reports the released version
+        # Belt and braces on top of the tag guard: asserts the version
+        # actually embedded in the artifact (which the Homebrew formula's
+        # `test do` block later checks) matches the tag being released.
+        run: |
+          expected="${GITHUB_REF_NAME#v}"
+          reported="$(./dist/linux-x64/uatu --version)"
+          echo "binary reports: $reported"
+          case "$reported" in
+            "v$expected ·"*) ;;
+            *)
+              echo "::error::Binary reports \"$reported\", expected \"v$expected · <commit>\"" >&2
+              exit 1
+              ;;
+          esac
+
       - name: Package release assets
         # Contract: zip for darwin, tar.gz for linux, each archive holding
         # a single `uatu` binary at its root (no wrapping directory).

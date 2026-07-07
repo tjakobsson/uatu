@@ -1,3 +1,5 @@
+import { version as packageJsonVersion } from "../../package.json";
+
 export type BuildInfo = {
   version: string;
   branch: string;
@@ -12,7 +14,10 @@ declare const __UATU_BUILD__: BuildInfo | undefined;
 const INJECTED_BUILD: BuildInfo | undefined =
   typeof __UATU_BUILD__ === "undefined" ? undefined : __UATU_BUILD__;
 
-export const PACKAGE_VERSION = "0.1.0";
+// Single source of truth for the version is package.json — the release
+// workflow's tag guard checks package.json, so deriving from it here keeps
+// the embedded version incapable of drifting from the released tag.
+export const PACKAGE_VERSION: string = packageJsonVersion;
 
 function runGit(args: string[]): string | null {
   try {
