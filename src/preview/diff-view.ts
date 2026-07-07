@@ -3,6 +3,9 @@
 // its Shiki highlighter are lazy-loaded on the first Pierre-path render so the
 // initial bundle stays small for users who never open the Diff view.
 
+// Type-only import — erased at compile time, so the runtime module still
+// loads exclusively through the dynamic import below.
+import type { SupportedLanguages } from "@pierre/diffs";
 import type { DiffStyle } from "../shared/types";
 
 export type DocumentDiffPayload =
@@ -30,6 +33,18 @@ export type DocumentDiffPayload =
 // lightweight escaped-HTML diff. Both are exported so tests can override.
 export const DIFF_MAX_BYTES = 256 * 1024;
 export const DIFF_MAX_LINES = 5000;
+
+// Below the Pierre cutoffs but above this threshold, Pierre still renders
+// (structure, word-diffs, chevrons, unified/split) but with the plaintext
+// language, skipping grammar tokenization — Shiki highlighting is the
+// dominant main-thread cost on large inputs and the least valuable part
+// of a diff. Measured against patch bytes plus both blob sizes.
+export const DIFF_MAX_HIGHLIGHT_BYTES = 128 * 1024;
+
+// Chunk size for the lightweight fallback: line spans are grouped into
+// `content-visibility: auto` blocks so the browser skips layout and paint
+// for offscreen chunks of very large patches.
+const FALLBACK_CHUNK_LINES = 500;
 
 // Languages pre-loaded into Pierre's shared Shiki highlighter on first init.
 // Mirrors the file-extension language map used by the source view; unknown
@@ -86,6 +101,65 @@ async function loadLanguage(lang: string): Promise<void> {
   });
 }
 
+// Total decoded size of a text payload: patch bytes plus both blobs when
+// present. Drives the plaintext-highlighting tier decision.
+function textPayloadSizeBytes(payload: Extract<DocumentDiffPayload, { kind: "text" }>): number {
+  const encoder = new TextEncoder();
+  const oldBytes = payload.oldContents ? encoder.encode(payload.oldContents).length : 0;
+  const newBytes = payload.newContents ? encoder.encode(payload.newContents).length : 0;
+  return payload.bytes + oldBytes + newBytes;
+}
+
+function exceedsPierreCutoffs(payload: Extract<DocumentDiffPayload, { kind: "text" }>): {
+  exceedsBytes: boolean;
+  exceedsLines: boolean;
+} {
+  return {
+    exceedsBytes: payload.bytes >= DIFF_MAX_BYTES,
+    exceedsLines: payload.addedLines + payload.deletedLines >= DIFF_MAX_LINES,
+  };
+}
+
+// The three size bands a text diff can render in, decided purely from the
+// payload: full Pierre with grammar highlighting, Pierre with the
+// plaintext language (structure and word-diffs but no tokenizing), or the
+// escaped-HTML lightweight fallback. Exported for tests.
+export type DiffRenderTier = "pierre" | "pierre-plaintext" | "lightweight";
+
+export function diffRenderTier(payload: Extract<DocumentDiffPayload, { kind: "text" }>): DiffRenderTier {
+  const { exceedsBytes, exceedsLines } = exceedsPierreCutoffs(payload);
+  if (exceedsBytes || exceedsLines) return "lightweight";
+  return textPayloadSizeBytes(payload) >= DIFF_MAX_HIGHLIGHT_BYTES ? "pierre-plaintext" : "pierre";
+}
+
+// Kick the Pierre + Shiki load ahead of any render. Used by the idle/hover
+// prewarm triggers so the first Diff open doesn't pay the module import
+// and the 15-grammar highlighter preload on the critical path. Callers
+// must only invoke this when Diff rendering is plausibly imminent (git
+// workspace at idle, or pointer/focus on the Diff segment) — the fallback
+// render paths still never import Pierre themselves.
+export function prewarmDiffView(): Promise<void> {
+  return ensureHighlighter();
+}
+
+// Await everything a Pierre-path render needs (module, highlighter, the
+// file's grammar) WITHOUT touching the DOM. The caller keeps the previous
+// view on screen until this resolves, then clears and renders — so the
+// pane is never blanked while the library loads. No-op on the state-card
+// and lightweight-fallback paths, which must not trigger the import.
+export async function prepareDiffRender(
+  payload: DocumentDiffPayload,
+  languageHint: string | null,
+): Promise<void> {
+  if (payload.kind !== "text") return;
+  const tier = diffRenderTier(payload);
+  if (tier === "lightweight") return;
+  await ensureHighlighter();
+  if (languageHint && tier === "pierre") {
+    await loadLanguage(languageHint);
+  }
+}
+
 export type RenderDiffOptions = {
   // Default "unified" (stacked, classic git-diff layout). "split" puts
   // deletions and additions side-by-side inside Pierre.
@@ -121,14 +195,24 @@ export async function renderDocumentDiff(
       return;
   }
 
-  const exceedsBytes = payload.bytes >= DIFF_MAX_BYTES;
-  const exceedsLines = payload.addedLines + payload.deletedLines >= DIFF_MAX_LINES;
-  if (exceedsBytes || exceedsLines) {
+  const tier = diffRenderTier(payload);
+  if (tier === "lightweight") {
     // Lightweight fallback renders a plain `<pre>` and has no notion of
     // a unified/split layout — the toolbar would do nothing here, so we
     // skip it. The state cards above are similarly toolbar-less.
-    host.appendChild(renderLightweightFallback(payload.patch, exceedsBytes));
+    host.appendChild(renderLightweightFallback(payload.patch, payload.bytes >= DIFF_MAX_BYTES));
     return;
+  }
+
+  // Plaintext tier: Pierre renders with the `text` language so no grammar
+  // tokenization runs — multi-second synchronous Shiki passes on large
+  // blob pairs were the main "frozen tab" cost this tier removes.
+  const plainText = tier === "pierre-plaintext";
+  if (plainText) {
+    const notice = document.createElement("div");
+    notice.className = "uatu-diff-fallback-notice";
+    notice.textContent = "Large diff — syntax highlighting disabled for size.";
+    host.appendChild(notice);
   }
 
   const diffStyle: DiffStyle = options.diffStyle ?? "unified";
@@ -138,7 +222,7 @@ export async function renderDocumentDiff(
   const body = document.createElement("div");
   body.className = "uatu-diff-body";
   host.appendChild(body);
-  await renderWithPierre(body, payload, languageHint, diffStyle, options.wrap ?? false);
+  await renderWithPierre(body, payload, plainText ? null : languageHint, diffStyle, options.wrap ?? false, plainText);
 }
 
 async function renderWithPierre(
@@ -147,6 +231,7 @@ async function renderWithPierre(
   languageHint: string | null,
   diffStyle: DiffStyle,
   wrap: boolean,
+  plainText = false,
 ): Promise<void> {
   // Anything thrown by Pierre or its Shiki peer is caught here and surfaced
   // as a state card so the user sees an explanation instead of an empty
@@ -189,12 +274,17 @@ async function renderWithPierre(
     // CSS lives in a `<diffs-container>` custom element that adopts the
     // stylesheet on construction; handing it our own `<div>` as
     // `fileContainer` skips that path and the diff renders unstyled.
+    // In plaintext mode, force Pierre's `text` language on the inputs so
+    // Shiki's tokenizer never runs over the contents.
+    const forcedLang: SupportedLanguages | undefined = plainText
+      ? ("text" as SupportedLanguages)
+      : undefined;
     if (payload.oldContents !== undefined && payload.newContents !== undefined) {
       const newName = filenameFromPatch(payload.patch, "+++") ?? "file";
       const oldName = payload.oldPath ?? filenameFromPatch(payload.patch, "---") ?? newName;
       diff.render({
-        oldFile: { name: oldName, contents: payload.oldContents },
-        newFile: { name: newName, contents: payload.newContents },
+        oldFile: { name: oldName, contents: payload.oldContents, ...(forcedLang ? { lang: forcedLang } : {}) },
+        newFile: { name: newName, contents: payload.newContents, ...(forcedLang ? { lang: forcedLang } : {}) },
         containerWrapper: host,
       });
     } else {
@@ -203,6 +293,9 @@ async function renderWithPierre(
       if (!fileDiff) {
         host.appendChild(stateCard("Diff could not be parsed."));
         return;
+      }
+      if (forcedLang) {
+        fileDiff.lang = forcedLang;
       }
       diff.render({ fileDiff, containerWrapper: host });
     }
@@ -282,12 +375,25 @@ function renderLightweightFallback(patch: string, exceedsBytes: boolean): HTMLEl
   const pre = document.createElement("pre");
   pre.className = "uatu-diff-fallback-pre";
   const lines = patch.split("\n");
+  // Group line spans into fixed-size chunks styled `content-visibility:
+  // auto`, so the browser skips layout and paint for offscreen chunks of
+  // very large patches. Line classification is unchanged.
+  let chunk: HTMLElement | null = null;
   for (let i = 0; i < lines.length; i++) {
+    if (chunk === null || i % FALLBACK_CHUNK_LINES === 0) {
+      chunk = document.createElement("div");
+      chunk.className = "uatu-diff-fallback-chunk";
+      pre.appendChild(chunk);
+    }
     const line = lines[i] ?? "";
     const span = document.createElement("span");
     span.className = classForDiffLine(line);
-    span.textContent = i === lines.length - 1 ? line : line + "\n";
-    pre.appendChild(span);
+    // No trailing newline on a chunk's last line — the chunk div is a
+    // block box, so its boundary already breaks the line; keeping the
+    // "\n" would render a doubled blank line every chunk.
+    const lastOfChunk = i === lines.length - 1 || i % FALLBACK_CHUNK_LINES === FALLBACK_CHUNK_LINES - 1;
+    span.textContent = lastOfChunk ? line : line + "\n";
+    chunk.appendChild(span);
   }
   wrap.appendChild(pre);
 

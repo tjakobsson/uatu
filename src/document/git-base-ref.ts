@@ -11,11 +11,18 @@ export type GitResult =
   | { ok: true; stdout: string; stderr: string }
   | { ok: false; stdout: string; stderr: string; message: string };
 
-type GitMetricsSink = { inc(name: string): void };
+type GitMetricsSink = { inc(name: string, delta?: number): void };
 let gitMetricsSink: GitMetricsSink | null = null;
 
 export function setGitMetricsSink(sink: GitMetricsSink | null): void {
   gitMetricsSink = sink;
+}
+
+// Shared metrics entry point for git-adjacent modules (document/diff phase
+// timings live next to the exec counters recorded here). Cumulative-ms
+// counters pair with a *_total count so consumers can derive averages.
+export function recordGitMetric(name: string, delta = 1): void {
+  gitMetricsSink?.inc(name, delta);
 }
 
 export async function safeGit(

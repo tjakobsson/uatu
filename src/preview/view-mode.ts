@@ -7,6 +7,7 @@ import { writePreviewWrapPreference, writeViewModePreference, type ViewMode } fr
 import { appState, safeLocalStorage } from "../shell/state";
 import { applySourceWrap } from "./code-block";
 import { applyDiffForActiveDocument } from "./diff";
+import { prewarmDiffView } from "./diff-view";
 import { mountLayoutToolbar } from "./layout";
 import { applyDocumentPayload, documentViewCache, loadDocument } from "./mount";
 import { refreshOutline } from "./outline";
@@ -240,4 +241,26 @@ export function initViewModeControls(): void {
   viewSourceButton.addEventListener("click", () => applyViewMode("source"));
   viewDiffButton.addEventListener("click", () => applyViewMode("diff"));
   wrapToggleButton.addEventListener("click", () => applyWrap(!appState.wrap));
+  // Hover/focus on the Diff segment is a free head start on the Pierre +
+  // Shiki load — by the time the click lands, most (often all) of the
+  // first-open cost has already been paid off the critical path.
+  viewDiffButton.addEventListener("mouseenter", () => void prewarmDiffView());
+  viewDiffButton.addEventListener("focus", () => void prewarmDiffView());
+}
+
+// Idle-time prewarm, called by app.ts after the initial state load. Gated
+// on a git-backed workspace: sessions where the Diff view can never render
+// Pierre output (uatu on a plain directory) skip the download entirely.
+// `requestIdleCallback` is absent in some engines; a generous timeout
+// fallback keeps the behavior without blocking anything.
+export function scheduleDiffPrewarmWhenIdle(): void {
+  if (!appState.repositories.some(repository => repository.reviewLoad.status === "available")) {
+    return;
+  }
+  const idle = (globalThis as { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => void }).requestIdleCallback;
+  if (typeof idle === "function") {
+    idle(() => void prewarmDiffView(), { timeout: 10_000 });
+  } else {
+    setTimeout(() => void prewarmDiffView(), 3_000);
+  }
 }
