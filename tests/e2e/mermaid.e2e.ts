@@ -1,4 +1,5 @@
 import { expect, test } from "./fixtures";
+import type { Page } from "@playwright/test";
 import { promises as fs } from "node:fs";
 
 import { workspacePath } from "./config";
@@ -11,6 +12,64 @@ test.beforeEach(async ({ page, request }) => {
 
 test.afterEach(async ({ request }) => {
   await request.post("/__e2e/reset");
+});
+
+// Lazy mermaid rendering only draws diagrams near the viewport, and an
+// instant jump to the bottom can skip PAST middle diagrams without the
+// IntersectionObserver ever seeing them intersect. Sweep the preview shell
+// one viewport per poll pass (wrapping back to the top) so every diagram
+// gets a frame within the observation margin, and wait until all rendered.
+async function expectAllDiagramsRendered(page: Page, count: number): Promise<void> {
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const shell = document.querySelector<HTMLElement>(".preview-shell");
+        if (shell) {
+          const atBottom = shell.scrollTop + shell.clientHeight >= shell.scrollHeight - 4;
+          shell.scrollTop = atBottom ? 0 : shell.scrollTop + shell.clientHeight;
+        }
+        return document.querySelectorAll("#preview .mermaid svg").length;
+      }),
+    )
+    .toBe(count);
+}
+
+test("off-screen diagrams stay pending until scrolled toward, then render", async ({ page, request }) => {
+  // A diagram at the top, a long text run, and a diagram far below the
+  // fold — well past the observer's ahead-of-viewport margin.
+  const filler = Array.from({ length: 220 }, (_, i) => `Filler paragraph ${i} keeps the second diagram far below the fold.`).join("\n\n");
+  await request.post("/__e2e/reset", {
+    data: {
+      dirty: {
+        "lazy-diagrams.md": [
+          "# Lazy Diagrams",
+          "```mermaid",
+          "graph TD; Top-->Rendered;",
+          "```",
+          filler,
+          "```mermaid",
+          "graph TD; Bottom-->Lazy;",
+          "```",
+          "",
+        ].join("\n\n"),
+      },
+    },
+  });
+  await page.reload();
+  await treeRow(page, "lazy-diagrams.md").click();
+  await expect(page.locator("#preview-title")).toHaveText("Lazy Diagrams");
+
+  // The top diagram renders; the bottom one stays a pending placeholder.
+  await expect(page.locator("#preview .mermaid").first().locator("svg")).toBeVisible();
+  const bottom = page.locator("#preview .mermaid").last();
+  await expect(bottom).toHaveClass(/mermaid-pending/);
+  expect(await bottom.locator("svg").count()).toBe(0);
+
+  // Scrolling the placeholder toward the viewport renders it.
+  await bottom.scrollIntoViewIfNeeded();
+  await expect(bottom.locator("svg")).toBeVisible();
+  await expect(bottom).not.toHaveClass(/mermaid-pending/);
+  await expect(bottom.locator("button.mermaid-trigger")).toBeVisible();
 });
 
 test("renders GFM content and Mermaid diagrams", async ({ page }) => {
@@ -157,7 +216,7 @@ test("each Mermaid shape (flowchart, sequence, C4, wide, component-interaction) 
   await expect(page.locator("#preview-title")).toHaveText("Mermaid Shapes");
 
   // Wait until all five diagrams have rendered (Mermaid hydration is async).
-  await expect.poll(async () => page.locator("#preview .mermaid svg").count()).toBe(5);
+  await expectAllDiagramsRendered(page, 5);
 
   // Each diagram must end up wrapped in a trigger button, so all five are openable.
   await expect(page.locator("#preview .mermaid-trigger")).toHaveCount(5);
@@ -179,7 +238,7 @@ test("inline diagrams render at Mermaid's intended size and never overflow the p
   // happily at any non-zero width — this one fails fast if rendered width
   // doesn't match the library's intent.
   await treeRow(page, "mermaid-shapes.md").click();
-  await expect.poll(async () => page.locator("#preview .mermaid svg").count()).toBe(5);
+  await expectAllDiagramsRendered(page, 5);
 
   const sizes = await page.evaluate(() => {
     const previewEl = document.querySelector<HTMLElement>("#preview");
@@ -226,7 +285,7 @@ test("the diagram viewer preserves Mermaid's internal id references after clonin
   // arrowhead markers, and clipPaths. The clone must keep references intact
   // by remapping ids, not removing them.
   await treeRow(page, "mermaid-shapes.md").click();
-  await expect.poll(async () => page.locator("#preview .mermaid svg").count()).toBe(5);
+  await expectAllDiagramsRendered(page, 5);
 
   // Use the C4 diagram (third) since it relies most heavily on internal
   // references (markers, gradients, arrowheads).
@@ -272,7 +331,7 @@ test("the diagram viewer's cloned SVG keeps Mermaid's themed fills (not all blac
   // exercises every shape in the fixture so flowchart, sequence, C4, wide,
   // and component-interaction are all covered.
   await treeRow(page, "mermaid-shapes.md").click();
-  await expect.poll(async () => page.locator("#preview .mermaid svg").count()).toBe(5);
+  await expectAllDiagramsRendered(page, 5);
 
   const triggers = page.locator("#preview .mermaid-trigger");
   for (let i = 0; i < 5; i += 1) {
@@ -315,7 +374,7 @@ test("the diagram viewer centers the diagram inside the modal viewport", async (
   // The two composed and pushed non-square shapes off-screen. Exercises every
   // shape in the fixture (flowchart, sequence, C4, wide, component-interaction).
   await treeRow(page, "mermaid-shapes.md").click();
-  await expect.poll(async () => page.locator("#preview .mermaid svg").count()).toBe(5);
+  await expectAllDiagramsRendered(page, 5);
 
   const triggers = page.locator("#preview .mermaid-trigger");
   for (let i = 0; i < 5; i += 1) {
@@ -364,7 +423,7 @@ test("the diagram viewer scales the diagram to a meaningful fraction of the moda
   // and centering after fit() must produce a stage box that fills most of
   // the modal viewport.
   await treeRow(page, "mermaid-shapes.md").click();
-  await expect.poll(async () => page.locator("#preview .mermaid svg").count()).toBe(5);
+  await expectAllDiagramsRendered(page, 5);
 
   await page.locator("#preview .mermaid-trigger").first().click();
   await expect(page.locator("dialog.mermaid-viewer")).toHaveAttribute("open", "");

@@ -2565,6 +2565,36 @@ body.is-resizing-terminal .panel-resizer {
   padding: 1rem 0;
 }
 
+/* Un-rendered (lazily deferred) diagram slot. Reserves a minimum height so
+   render-on-reveal doesn't destabilize scroll position, hides the raw
+   diagram source, and shows a pending affordance so the slot reads as a
+   diagram-to-come rather than broken content. Cleared the moment the
+   diagram (or a cached SVG) renders. */
+.preview .mermaid.mermaid-pending {
+  position: relative;
+  min-height: 140px;
+  font-size: 0;
+  line-height: 0;
+  color: transparent;
+  background: var(--surface-muted);
+  border: 1px dashed var(--border-soft);
+  border-radius: 0.5rem;
+  user-select: none;
+}
+
+.preview .mermaid.mermaid-pending::before {
+  content: "Diagram";
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--text-subtle);
+}
+
 /* Honor Mermaid's intended display size. The trigger shrink-wraps the SVG
    so each diagram renders at the size the library chose — small flowcharts
    stay compact, complex diagrams grow, wide flowcharts span the column. The

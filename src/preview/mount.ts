@@ -175,6 +175,8 @@ export async function renderSinglePayload(payload: RenderedDocument): Promise<vo
   // Unified / Split.
   mountLayoutToolbar(documentSupportsSplit(payload));
   attachMetadataCardToggleListener(previewElement);
+  // Installs lazy rendering and resolves on setup — diagrams stream in as
+  // they approach the viewport rather than blocking the mount as one batch.
   await renderMermaidDiagrams(previewElement, currentMermaidThemeInputs());
   // Source rendering — for text/source files always, and for markdown /
   // asciidoc when the user is in Source view — needs the line-number gutter
@@ -282,6 +284,8 @@ export async function renderSplitPayloads(
   previewElement.replaceChildren(sourcePane, resizer, renderedPane);
 
   attachMetadataCardToggleListener(renderedPane);
+  // Lazy install (resolves on setup, diagrams stream in) — see the
+  // single-pane call above.
   await renderMermaidDiagrams(renderedPane, currentMermaidThemeInputs());
   attachLineNumbers(sourcePane);
   applySourceWrap(sourcePane, appState.wrap);
