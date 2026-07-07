@@ -4,7 +4,7 @@ import { attachPopstateHandler } from "./shell/history";
 import { loadInitialState } from "./shell/boot";
 import { installAnchorHandlers } from "./preview/anchors";
 import { installMermaidTriggerHandler } from "./preview/mermaid";
-import { initViewModeControls } from "./preview/view-mode";
+import { initViewModeControls, scheduleDiffPrewarmWhenIdle } from "./preview/view-mode";
 import { initOutline } from "./preview/outline";
 import { attachAutoStackObserver } from "./preview/layout";
 import { initSidebarCollapse, initSidebarWidth } from "./sidebar/shell";
@@ -124,4 +124,9 @@ injectPwaLinks();
 registerServiceWorker();
 attachPopstateHandler();
 
-void loadInitialState();
+void loadInitialState().then(() => {
+  // Prewarm the diff renderer at idle once we know whether this is a
+  // git-backed session — off the critical path, so the first Diff open
+  // skips the library + highlighter stall.
+  scheduleDiffPrewarmWhenIdle();
+});

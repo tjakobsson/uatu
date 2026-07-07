@@ -45,6 +45,103 @@ test("Diff view renders the active file's git diff against the review base", asy
   await expect(page.locator("#view-diff")).toHaveAttribute("aria-checked", "true");
 });
 
+test.describe("slow diff fetch", () => {
+  // The pass-through PWA service worker proxies every page fetch, and
+  // Playwright's page.route cannot intercept SW-mediated requests — block
+  // the worker for this test so the endpoint throttle actually applies.
+  test.use({ serviceWorkers: "block" });
+
+  test("shows the delay-gated loading signal and clears it after render", async ({ page, request }) => {
+    await request.post("/__e2e/reset", {
+      data: {
+        git: true,
+        dirty: {
+          "feature.md": "# Feature\n\nCommitted branch change.\n\nAdded review-time edit.\n",
+        },
+      },
+    });
+    await page.reload();
+    await revealTreeRow(page, "feature.md");
+    await treeRow(page, "feature.md").click();
+    await expect(page.locator("#preview-path")).toHaveText("feature.md");
+    const previousContent = page.locator("#preview");
+    await expect(previousContent).not.toBeEmpty();
+
+    // Throttle the diff endpoint well past the ~200 ms show delay so the
+    // delay-gated indicator is guaranteed to appear.
+    await page.route("**/api/document/diff*", async route => {
+      await new Promise(resolve => setTimeout(resolve, 800));
+      await route.continue();
+    });
+
+    await page.locator("#view-diff").click();
+
+    // Layer 1: the segment goes busy immediately on click.
+    await expect(page.locator("#view-diff")).toHaveAttribute("aria-busy", "true");
+    // Layer 2: the pane-level indeterminate bar appears after the delay,
+    // while the previous view's content stays visible underneath. The bar
+    // wrapper is a zero-height sticky element (so it never shifts layout),
+    // which Playwright's visibility check rejects — assert on the fill.
+    await expect(page.locator(".uatu-loading-bar-fill")).toBeVisible();
+    await expect(previousContent).not.toBeEmpty();
+
+    // Once the delayed payload lands and renders, both layers clear.
+    await expect(page.locator(".uatu-diff-host")).toBeVisible();
+    await expect(page.locator("#view-diff")).not.toHaveAttribute("aria-busy", "true");
+    await expect(page.locator(".uatu-loading-bar")).toHaveCount(0);
+  });
+});
+
+test("A large diff renders via Pierre's plaintext tier with the size notice", async ({ page, request }) => {
+  // ~150 KB of changed content: past DIFF_MAX_HIGHLIGHT_BYTES (128 KB)
+  // but under DIFF_MAX_BYTES / DIFF_MAX_LINES, so Pierre renders with the
+  // plaintext language and the size notice instead of the lightweight
+  // fallback.
+  const bigBody = Array.from({ length: 3000 }, (_, i) => `Changed line ${i} — representative sentence content for a large document.`).join("\n");
+  await request.post("/__e2e/reset", {
+    data: {
+      git: true,
+      dirty: {
+        "feature.md": `# Feature\n\n${bigBody}\n`,
+      },
+    },
+  });
+  await page.reload();
+  await revealTreeRow(page, "feature.md");
+  await treeRow(page, "feature.md").click();
+  await expect(page.locator("#preview-path")).toHaveText("feature.md");
+
+  await page.locator("#view-diff").click();
+
+  await expect(page.locator(".uatu-diff-host")).toBeVisible();
+  await expect(page.locator(".uatu-diff-host .uatu-diff-fallback-notice")).toContainText("syntax highlighting disabled");
+  // Pierre path, not the lightweight fallback: the diff body mounts and
+  // no fallback <pre> is present.
+  await expect(page.locator(".uatu-diff-host .uatu-diff-body")).toBeVisible();
+  await expect(page.locator(".uatu-diff-fallback-pre")).toHaveCount(0);
+});
+
+test("A fast diff render leaves no loading bar behind", async ({ page, request }) => {
+  await request.post("/__e2e/reset", {
+    data: {
+      git: true,
+      dirty: {
+        "feature.md": "# Feature\n\nCommitted branch change.\n\nAdded review-time edit.\n",
+      },
+    },
+  });
+  await page.reload();
+  await revealTreeRow(page, "feature.md");
+  await treeRow(page, "feature.md").click();
+  await expect(page.locator("#preview-path")).toHaveText("feature.md");
+
+  await page.locator("#view-diff").click();
+
+  await expect(page.locator(".uatu-diff-host")).toBeVisible();
+  await expect(page.locator("#view-diff")).not.toHaveAttribute("aria-busy", "true");
+  await expect(page.locator(".uatu-loading-bar")).toHaveCount(0);
+});
+
 test("Diff view shows the 'no git history' card in a non-git workspace", async ({ page, request }) => {
   await request.post("/__e2e/reset", { data: { nonGit: true } });
   await page.reload();

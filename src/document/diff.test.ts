@@ -1,15 +1,26 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { getDocumentDiff } from "./diff";
-import { safeGit } from "./git-base-ref";
+import { __resetDocumentDiffCachesForTests, __setBaseCacheTtlForTests, getDocumentDiff } from "./diff";
+import { safeGit, setGitMetricsSink } from "./git-base-ref";
 import type { DocumentMeta, RootGroup } from "../shared/types";
 
 const tempDirectories: string[] = [];
 
+// Counter-capturing metrics sink so tests can assert which pipeline phases
+// ran (rename scans, cache hits/misses, git exec counts).
+let counters: Record<string, number>;
+
+beforeEach(() => {
+  __resetDocumentDiffCachesForTests();
+  counters = {};
+  setGitMetricsSink({ inc: (name, delta = 1) => { counters[name] = (counters[name] ?? 0) + delta; } });
+});
+
 afterEach(async () => {
+  setGitMetricsSink(null);
   await Promise.all(tempDirectories.splice(0).map(directory => rm(directory, { recursive: true, force: true })));
 });
 
@@ -136,6 +147,101 @@ describe("getDocumentDiff", () => {
     if (result.kind !== "text") return;
     expect(result.patch).toMatch(/rename from README\.md/);
     expect(result.patch).toMatch(/rename to GUIDE\.md/);
+    expect(result.oldPath).toBe("README.md");
+    // The rename path is exactly the case that pays for the repo-wide scan.
+    expect(counters["diff.rename_scans_total"]).toBe(1);
+  });
+
+  test("modified files never trigger the repo-wide rename scan", async () => {
+    const repo = await createSeededRepo();
+    const filePath = path.join(repo, "README.md");
+    await writeFile(filePath, "# Readme\n\nedited\n");
+    const roots = rootsFor(repo, "README.md", "markdown");
+
+    const result = await getDocumentDiff(roots, filePath);
+
+    expect(result.kind).toBe("text");
+    expect(counters["diff.rename_scans_total"]).toBeUndefined();
+  });
+
+  test("untracked files surfaced via --no-index skip the rename scan", async () => {
+    const repo = await createSeededRepo();
+    const filePath = path.join(repo, "NEW.md");
+    await writeFile(filePath, "# New file\n");
+    const roots = rootsFor(repo, "NEW.md", "markdown");
+
+    const result = await getDocumentDiff(roots, filePath);
+
+    expect(result.kind).toBe("text");
+    // Untracked files are invisible to `git diff <ref>`, so a repo-wide
+    // scan can never attribute a rename to them — it must not run.
+    expect(counters["diff.rename_scans_total"]).toBeUndefined();
+  });
+
+  test("warm requests reuse the cached base resolution with one validation probe", async () => {
+    const repo = await createSeededRepo();
+    const filePath = path.join(repo, "README.md");
+    await writeFile(filePath, "# Readme\n\nedited\n");
+    const roots = rootsFor(repo, "README.md", "markdown");
+
+    await getDocumentDiff(roots, filePath);
+    expect(counters["diff.base_cache_misses_total"]).toBe(1);
+
+    const coldExecs = counters["git.execs_total"] ?? 0;
+    await getDocumentDiff(roots, filePath);
+
+    expect(counters["diff.base_cache_hits_total"]).toBe(1);
+    // Warm pipeline: one HEAD validation probe + the file-scoped diff +
+    // the old-blob `git show` — never the full resolution chain.
+    expect((counters["git.execs_total"] ?? 0) - coldExecs).toBeLessThanOrEqual(3);
+  });
+
+  test("a HEAD move invalidates the cached base resolution", async () => {
+    const repo = await createSeededRepo();
+    const filePath = path.join(repo, "README.md");
+    await writeFile(filePath, "# Readme\n\nedited\n");
+    const roots = rootsFor(repo, "README.md", "markdown");
+
+    await getDocumentDiff(roots, filePath);
+    await safeGit(repo, ["add", "."]);
+    await safeGit(repo, ["-c", "commit.gpgsign=false", "commit", "-m", "move HEAD"]);
+    await writeFile(filePath, "# Readme\n\nedited again\n");
+    await getDocumentDiff(roots, filePath);
+
+    expect(counters["diff.base_cache_misses_total"]).toBe(2);
+    expect(counters["diff.base_cache_hits_total"]).toBeUndefined();
+  });
+
+  test("TTL expiry re-resolves even when HEAD is unchanged", async () => {
+    __setBaseCacheTtlForTests(0);
+    const repo = await createSeededRepo();
+    const filePath = path.join(repo, "README.md");
+    await writeFile(filePath, "# Readme\n\nedited\n");
+    const roots = rootsFor(repo, "README.md", "markdown");
+
+    await getDocumentDiff(roots, filePath);
+    await getDocumentDiff(roots, filePath);
+
+    expect(counters["diff.base_cache_misses_total"]).toBe(2);
+  });
+
+  test("skips blobs when the old blob exceeds the cap even if the worktree is small", async () => {
+    const repo = await createSeededRepo();
+    const filePath = path.join(repo, "huge.txt");
+    // Commit a >200 KB baseline, then shrink the worktree copy: the old
+    // blob overflows `git show`'s buffer cap and blobs must be omitted —
+    // shipping oldContents="" would misrender the diff as a pure addition.
+    await writeFile(filePath, "y".repeat(250 * 1024));
+    await safeGit(repo, ["add", "huge.txt"]);
+    await safeGit(repo, ["-c", "commit.gpgsign=false", "commit", "-m", "seed big baseline"]);
+    await writeFile(filePath, "tiny now\n");
+    const roots = rootsFor(repo, "huge.txt", "text");
+
+    const result = await getDocumentDiff(roots, filePath);
+
+    if (result.kind !== "text") throw new Error("expected text payload");
+    expect(result.oldContents).toBeUndefined();
+    expect(result.newContents).toBeUndefined();
   });
 
   test("rejects a documentId not in the watched roots", async () => {

@@ -5,7 +5,8 @@
 // view pipeline (single, split, diff) in one place.
 
 import { findDocumentById } from "../shell/storage";
-import { renderDocumentDiff, type DocumentDiffPayload } from "./diff-view";
+import { prepareDiffRender, renderDocumentDiff, type DocumentDiffPayload } from "./diff-view";
+import { createLoadingSignal, type LoadingSignal } from "./loading-signal";
 import { closeMermaidViewer } from "./mermaid-viewer";
 import { recomputeSelectionInspector } from "../shell/inspector-instance";
 import { writeDiffStylePreference, type DiffStyle, type DocumentMeta } from "../shared/types";
@@ -30,31 +31,69 @@ if (!previewElementMaybe) {
 
 const previewElement: HTMLElement = previewElementMaybe;
 
+// Loading feedback for slow diff preparation (issue #104), shared by all
+// three triggers that land here: the Diff segment click, a compare-target
+// switch, and selecting another file while Diff is active. Lazily built
+// so module load order doesn't matter.
+let diffLoadingSignal: LoadingSignal | null = null;
+
+function loadingSignal(): LoadingSignal {
+  return (diffLoadingSignal ??= createLoadingSignal({
+    segment: document.querySelector<HTMLElement>("#view-diff"),
+    // The bar overlays the scrolling preview shell; fall back to the
+    // preview element itself if the expected wrapper is missing.
+    barHost: previewElement.parentElement ?? previewElement,
+  }));
+}
+
+// Generation counter guarding the shared loading signal against overlapping
+// invocations. Every applyDiffForActiveDocument call bumps it; only the
+// newest invocation may settle the signal, so a superseded fetch finishing
+// first (rapid file switching while Diff is active) cannot clear the busy
+// state out from under the request the user is actually waiting on.
+let diffLoadGeneration = 0;
+
 export async function applyDiffForActiveDocument(documentId: string): Promise<void> {
-  const cached = documentDiffCache.get(documentId);
-  if (cached) {
-    await renderDiffIntoPreview(documentId, cached);
-    return;
+  const generation = ++diffLoadGeneration;
+  // The signal starts on every invocation — even with a cached payload the
+  // first Pierre-path render still waits on the library + highlighter load.
+  // We do NOT clear #preview before content is in hand: the previous view
+  // stays visible until we have something to swap in, matching the "no
+  // empty-state flash" rule established for Source ↔ Rendered toggles. The
+  // signal covers the wait instead: the Diff segment goes busy immediately,
+  // and an indeterminate bar overlays the pane if fetch + library load +
+  // render exceed the show delay.
+  const signal = loadingSignal();
+  signal.start();
+  try {
+    let payload = documentDiffCache.get(documentId);
+    if (!payload) {
+      const fetched = await fetchDocumentDiff(documentId);
+      if (!fetched) {
+        return;
+      }
+      documentDiffCache.set(documentId, fetched);
+      // The user may have switched away while the fetch was in flight; only
+      // apply if the active selection AND view mode are still consistent.
+      if (
+        appState.previewMode.kind !== "document" ||
+        appState.selectedId !== documentId ||
+        appState.viewMode !== "diff"
+      ) {
+        return;
+      }
+      payload = fetched;
+    }
+    await renderDiffIntoPreview(documentId, payload);
+  } finally {
+    // Generation-gated: only the newest invocation may settle, so a
+    // superseded fetch finishing late (rapid file switching while Diff is
+    // active) cannot clear the busy state for the request the user is
+    // actually waiting on.
+    if (generation === diffLoadGeneration) {
+      signal.settle();
+    }
   }
-  // No cache: do NOT clear #preview before the response is in hand. The
-  // previous view's content stays visible until we have something to swap
-  // in, matching the "no empty-state flash" rule established for Source ↔
-  // Rendered toggles.
-  const payload = await fetchDocumentDiff(documentId);
-  if (!payload) {
-    return;
-  }
-  documentDiffCache.set(documentId, payload);
-  // The user may have switched away while the fetch was in flight; only
-  // apply if the active selection AND view mode are still consistent.
-  if (
-    appState.previewMode.kind !== "document" ||
-    appState.selectedId !== documentId ||
-    appState.viewMode !== "diff"
-  ) {
-    return;
-  }
-  await renderDiffIntoPreview(documentId, payload);
 }
 
 export async function fetchDocumentDiff(documentId: string): Promise<DocumentDiffPayload | null> {
@@ -70,11 +109,33 @@ export async function fetchDocumentDiff(documentId: string): Promise<DocumentDif
 }
 
 export async function renderDiffIntoPreview(documentId: string, payload: DocumentDiffPayload): Promise<void> {
+  const doc = findDocumentById(documentId);
+  const languageHint = doc ? extensionToLanguage(doc.name) : null;
+
+  // Await render readiness (Pierre module + highlighter + grammar) BEFORE
+  // touching any DOM — header chrome included — so the previous view stays
+  // fully intact while the library loads instead of a blank or half-swapped
+  // pane. Then yield a frame so any visible loading indication actually
+  // paints before Pierre's synchronous render blocks the main thread.
+  await prepareDiffRender(payload, languageHint);
+  await nextFrame();
+
+  // Those awaits opened an async gap (the first Pierre + Shiki load can be
+  // slow): the user may have selected another file or left the Diff view
+  // meanwhile. Re-check before mutating the DOM so a stale invocation
+  // cannot wipe the pane and render an outdated diff over the navigation.
+  if (
+    appState.previewMode.kind !== "document" ||
+    appState.selectedId !== documentId ||
+    appState.viewMode !== "diff"
+  ) {
+    return;
+  }
+
   // Pin previewMode to document so the header chrome (path, title, pin/follow
   // controls) keeps treating this as a document preview.
   setPreviewMode({ kind: "document" });
 
-  const doc = findDocumentById(documentId);
   if (doc) {
     previewTitleElement.textContent = doc.name;
     previewPathElement.textContent = doc.relativePath;
@@ -91,7 +152,6 @@ export async function renderDiffIntoPreview(documentId: string, payload: Documen
   // The outline + copy-source are Rendered-view affordances; Diff has neither.
   refreshOutline(null);
 
-  const languageHint = doc ? extensionToLanguage(doc.name) : null;
   // Wrap the diff host so styles target `.uatu-diff-host` consistently
   // whether or not Pierre's Shadow DOM is in play.
   previewElement.innerHTML = "";
@@ -115,6 +175,16 @@ export async function renderDiffIntoPreview(documentId: string, payload: Documen
   syncViewToggle(choicePayload);
   syncLayoutChooser(choicePayload);
   recomputeSelectionInspector();
+}
+
+// One paint-cycle yield. Guarded for non-browser (unit test) environments
+// where requestAnimationFrame is absent.
+function nextFrame(): Promise<void> {
+  const raf = globalThis.requestAnimationFrame;
+  if (typeof raf !== "function") {
+    return new Promise(resolve => setTimeout(resolve, 0));
+  }
+  return new Promise(resolve => raf(() => resolve()));
 }
 
 // Minimal RenderedDocument-shape view chooser / layout chooser only consult
