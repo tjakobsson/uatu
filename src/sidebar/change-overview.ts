@@ -156,9 +156,9 @@ export function renderChangeOverview() {
             <span class="burden-summary">
               <span class="burden-headline">Review burden</span>
               <span class="burden-level">${escapeHtml(capitalize(load.level))}</span>
-              <span class="burden-anchor">· ${escapeHtml(burdenAnchor)}</span>
             </span>
             <strong>${load.score}</strong>
+            <span class="burden-anchor">${escapeHtml(burdenAnchor)}</span>
           </button>
           ${untrackedIndicator}
           ${warnings}

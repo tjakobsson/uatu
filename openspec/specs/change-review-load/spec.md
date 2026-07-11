@@ -78,6 +78,23 @@ The system SHALL report, alongside the review-burden score, a precise anchor ide
 - **THEN** its options read as plain intent ("Since base" / "Since last commit")
 - **AND** the options do not display raw ref names
 
+### Requirement: Render precise review-burden anchors within the available meter width
+
+The Change Overview SHALL render the complete precise compare-target anchor within the review-burden meter without horizontal overflow. When the resolved ref is too long for the available width, the anchor MUST wrap while the review-burden headline, classified level, and numeric score remain visible and readable.
+
+#### Scenario: Long configured base ref in a narrow sidebar
+
+- **WHEN** the review burden is measured against a configured base ref whose anchor does not fit on one line in the Change Overview sidebar
+- **THEN** the complete anchor wraps within the review-burden meter
+- **AND** the meter does not overflow horizontally
+- **AND** the review-burden headline, classified level, and numeric score remain visible
+
+#### Scenario: Short compare-target anchor
+
+- **WHEN** the precise compare-target anchor fits within the available review-burden meter width
+- **THEN** the meter displays the complete anchor without unnecessary truncation
+- **AND** the review-burden headline, classified level, and numeric score remain visible
+
 ### Requirement: Compute deterministic review burden for git changes
 The system SHALL compute a cognitive-load score that estimates review burden from deterministic git and file-shape signals, measured against the user-selected compare target. The score MUST be based on mechanical cost plus configured scoring modifiers and MUST NOT rely on AI or semantic code interpretation. Mechanical cost SHALL include changed-file count, diff hunks, touched lines, directory spread, renames or moves, and dependency/config file changes. Commit-log length or recent repository history MUST NOT contribute to the review-burden score. Unconfigured changed paths MUST remain risk-neutral but MUST still contribute to mechanical review cost. The score MUST always mean "review burden of the diff currently shown for the selected compare target", and the result MUST identify the compare target and the ref it was computed against.
 
