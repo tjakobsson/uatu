@@ -94,6 +94,43 @@ test("Change Overview and Git Log render git-backed review load with configured 
   await expect(page.locator("#preview")).toContainText("Full commit message body for review-load hover.");
 });
 
+test("long configured base refs wrap inside the review-burden meter", async ({ page, request }) => {
+  const baseRef = "refs/heads/feature/review-load~12^{commit}^{commit}^{commit}";
+  await request.post("/__e2e/reset", {
+    data: {
+      git: true,
+      uatuConfig: { review: { baseRef } },
+    },
+  });
+  await page.goto("/");
+  await page.evaluate(() => {
+    document.documentElement.style.setProperty("--sidebar-width", "320px");
+  });
+
+  const meter = page.locator("#change-overview .burden-meter").first();
+  const anchor = meter.locator(".burden-anchor");
+  await expect(meter.locator(".burden-headline")).toBeVisible();
+  await expect(meter.locator(".burden-level")).toBeVisible();
+  await expect(meter.locator("strong")).toBeVisible();
+  await expect(anchor).toHaveText(`vs ${baseRef}`);
+
+  const layout = await meter.evaluate(element => {
+    const meterRect = element.getBoundingClientRect();
+    const anchor = element.querySelector<HTMLElement>(".burden-anchor")!;
+    const anchorRect = anchor.getBoundingClientRect();
+    const fontSize = Number.parseFloat(getComputedStyle(anchor).fontSize);
+    const contained = [".burden-headline", ".burden-level", "strong", ".burden-anchor"]
+      .map(selector => element.querySelector<HTMLElement>(selector)!.getBoundingClientRect())
+      .every(rect => rect.left >= meterRect.left && rect.right <= meterRect.right);
+    return {
+      contained,
+      noHorizontalOverflow: element.scrollWidth <= element.clientWidth,
+      anchorWrapped: anchorRect.height > fontSize * 1.5,
+    };
+  });
+  expect(layout).toEqual({ contained: true, noHorizontalOverflow: true, anchorWrapped: true });
+});
+
 test("tree distinguishes untracked rows from added rows via git-status annotations", async ({ page, request }) => {
   await request.post("/__e2e/reset", {
     data: {
