@@ -16,8 +16,8 @@ describe("Release Please configuration", () => {
     const pkg = JSON.parse(await read("package.json"));
     const component = config.packages["."];
 
-    expect(manifest["."]).toBe("0.1.1");
     expect(manifest["."]).toBe(pkg.version);
+    expect(manifest["."]).toMatch(/^\d+\.\d+\.\d+$/);
     expect(component["release-type"]).toBe("node");
     expect(component.draft).toBe(true);
     expect(component["force-tag-creation"]).toBe(true);
@@ -68,13 +68,13 @@ describe("artifact publication workflow", () => {
     const steps = workflow.jobs.release.steps as Array<{ name: string; run?: string }>;
     const names = steps.map(step => step.name);
     const tagGuard = steps.find(step => step.name === "Verify tag matches package.json version")!;
-    const draftProbe = steps.find(step => step.name === "Verify Release Please created the GitHub Release")!;
+    const releaseProbe = steps.find(step => step.name === "Verify GitHub Release exists")!;
     const upload = steps.find(step => step.name === "Upload release assets")!;
     const publish = steps.find(step => step.name === "Publish GitHub Release")!;
 
     expect(workflow.on.push.tags).toContain("v*");
     expect(tagGuard.run).toContain('expected="v$(jq -r .version package.json)"');
-    expect(draftProbe.run).toContain("gh release view");
+    expect(releaseProbe.run).toContain("gh release view");
     expect(upload.run).toContain("gh release upload");
     expect(upload.run).toContain("--clobber");
     expect(publish.run).toContain("--draft=false");

@@ -46,8 +46,10 @@ jobs:
             exit 1
           fi
 
-      - name: Verify Release Please created the GitHub Release
-        run: gh release view "$GITHUB_REF_NAME" --json isDraft,url
+      - name: Verify GitHub Release exists
+        # It is a draft on the first run and may already be published on a
+        # full workflow rerun; either state is safe because assets are replaced.
+        run: gh release view "$GITHUB_REF_NAME" --json url
         env:
           GH_TOKEN: ${{ github.token }}
 
