@@ -213,31 +213,9 @@ freeze. With `--debug`, `GET /debug/metrics` returns the live counters.
 > **Privacy note:** forensic dumps include absolute repo paths from `lsof`
 > (macOS) or `/proc/<pid>/fd/` (Linux). Review before sharing.
 
-## Validation
-
-```bash
-bun test                # unit + integration
-bun run check:licenses  # license audit
-bun run build           # standalone build
-bun run test:e2e        # Playwright
-bun run bench:render    # informational render baseline
-```
-
 ## For contributors
 
-A folder-by-folder tour of the codebase, request and state lifecycles, the
-terminal subsystem diagram, and "how to extend X" recipes live in
-[ARCHITECTURE.md](./ARCHITECTURE.md). [CLAUDE.md](./CLAUDE.md) is the terse
-quick-reference for Claude Code sessions.
-
-## Repository workflow
-
-This repo uses [OpenSpec](./openspec) for change-driven work: branch, create
-a change under `openspec/changes/<name>/` (proposal, design, spec, tasks),
-implement, merge, archive under `openspec/changes/archive/`. Current product
-behavior lives in `openspec/specs/`.
-
-GitHub Actions runs `bun test`, license audit, build, and Playwright on
-every PR. Renovate keeps npm packages and GitHub Actions versions current.
-Claude Code reviews every non-draft pull request and responds to `@claude`
-mentions.
+Development setup, validation, pull-request conventions, and the OpenSpec
+workflow are documented in [CONTRIBUTING.md](./CONTRIBUTING.md). A
+folder-by-folder tour of the runtime and its extension points lives in
+[ARCHITECTURE.md](./ARCHITECTURE.md).
