@@ -1,8 +1,9 @@
 name: Release
 
-# Cut a release by pushing a version tag:
-#
-#   git tag v0.1.0 && git push origin v0.1.0
+# Release Please creates the version tag and a draft GitHub Release when its
+# release PR merges. The dedicated Release Please token allows that tag event
+# to trigger this artifact-publication workflow. A rerun rebuilds and replaces
+# assets safely; the draft is made public only after every release check passes.
 #
 # All four platform binaries are cross-compiled on this one Linux runner
 # via `bun build --compile --target=...` (uatu has no native modules, so
@@ -14,17 +15,16 @@ on:
     tags:
       - "v*"
 
-permissions:
-  # Create the GitHub Release and upload assets.
-  contents: write
-  # Sigstore keyless signing for build-provenance attestations.
-  id-token: write
-  attestations: write
+permissions: {}
 
 jobs:
   release:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
 
     steps:
       - name: Check out repository
@@ -45,6 +45,11 @@ jobs:
             echo "::error::Tag $GITHUB_REF_NAME does not match package.json version ($expected)" >&2
             exit 1
           fi
+
+      - name: Verify Release Please created the GitHub Release
+        run: gh release view "$GITHUB_REF_NAME" --json isDraft,url
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -102,12 +107,16 @@ jobs:
         with:
           subject-path: dist/release/uatu-*
 
-      - name: Create GitHub Release
+      - name: Upload release assets
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --verify-tag \
-            --generate-notes \
+          gh release upload "$GITHUB_REF_NAME" \
+            --clobber \
             dist/release/uatu-* dist/release/SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Publish GitHub Release
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -120,6 +129,8 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
 
     steps:
       - name: Check out repository
