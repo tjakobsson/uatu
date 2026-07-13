@@ -17,6 +17,7 @@ import {
   previewTitleElement,
   setPreviewBase,
 } from "./header";
+import { syncFileFactsStrip } from "./file-facts-strip";
 import { mountLayoutToolbar, syncLayoutChooser } from "./layout";
 import { documentDiffCache, type RenderedDocument } from "./mount";
 import { refreshOutline } from "./outline";
@@ -142,6 +143,13 @@ export async function renderDiffIntoPreview(documentId: string, payload: Documen
     setPreviewBase(doc.relativePath);
   }
   clearPreviewType();
+  syncFileFactsStrip({
+    kind: "diff",
+    facts: payload.fileFacts,
+    baseRef: payload.kind === "unsupported-no-git" ? null : payload.baseRef,
+    added: payload.kind === "text" ? payload.addedLines : payload.kind === "unchanged" ? 0 : null,
+    deleted: payload.kind === "text" ? payload.deletedLines : payload.kind === "unchanged" ? 0 : null,
+  });
   previewElement.classList.remove("empty", "is-split", "is-split-h", "is-split-v");
   previewElement.removeAttribute("data-auto-stack");
   closeMermaidViewer();

@@ -7,6 +7,7 @@ import { writePreviewWrapPreference, writeViewModePreference, type ViewMode } fr
 import { appState, safeLocalStorage } from "../shell/state";
 import { applySourceWrap } from "./code-block";
 import { applyDiffForActiveDocument } from "./diff";
+import { hideFileFactsStrip } from "./file-facts-strip";
 import { prewarmDiffView } from "./diff-view";
 import { mountLayoutToolbar } from "./layout";
 import { applyDocumentPayload, documentViewCache, loadDocument } from "./mount";
@@ -148,6 +149,8 @@ export function syncWrapToggle(effectiveMode: ViewMode | null): void {
 export function hideViewToggle(): void {
   viewControlElement.hidden = true;
   syncWrapToggle(null);
+  // Non-document previews have no file behind them — no facts, no signal.
+  hideFileFactsStrip();
   previewElement.classList.remove("is-split", "is-split-h", "is-split-v");
   previewElement.removeAttribute("data-auto-stack");
   mountLayoutToolbar(false);

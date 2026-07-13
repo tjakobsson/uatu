@@ -10,6 +10,7 @@
 // Both server entry points obtain both pieces here with mode-specific deps.
 
 import { getDocumentDiff } from "../document/diff";
+import { collectFileFacts } from "../document/file-facts";
 import {
   authProbeResponse,
   constantTimeEqual,
@@ -19,7 +20,7 @@ import {
 } from "../terminal/auth";
 import type { createTerminalServer } from "../terminal/server";
 import { handleTerminalSessionsRoute } from "../terminal/sessions-route";
-import { isReviewCompareTarget, isViewMode } from "../shared/types";
+import { findDocument, isReviewCompareTarget, isViewMode } from "../shared/types";
 import { renderDocument } from "./render-dispatch";
 import { canSetFileScope, type WatchSession } from "./watch-session";
 
@@ -193,12 +194,21 @@ export function buildRoutes(deps: BuildRoutesDeps) {
         }
 
         try {
+          const roots = getSession().getRoots();
           const payload = await getDocumentDiff(
-            getSession().getRoots(),
+            roots,
             documentId,
             getSession().getCompareTarget(),
           );
-          return Response.json(payload);
+          // Attach file facts so a diff-first load (the /api/document payload
+          // was never fetched) can still populate the facts strip's
+          // author/sha segments.
+          const doc = findDocument(roots, documentId);
+          const rootPath = doc ? roots.find(root => root.id === doc.rootId)?.path : undefined;
+          const fileFacts = doc && rootPath
+            ? await collectFileFacts({ absolutePath: doc.id, rootPath })
+            : undefined;
+          return Response.json({ ...payload, ...(fileFacts ? { fileFacts } : {}) });
         } catch (error) {
           const message = error instanceof Error ? error.message : "";
           if (message === "document not found") {

@@ -8,7 +8,7 @@ import type { DocumentDiffPayload } from "./diff-view";
 import { findDocumentById } from "../shell/storage";
 import { closeMermaidViewer } from "./mermaid-viewer";
 import { renderMermaidDiagrams, replaceMermaidCodeBlocks } from "../render/preview";
-import type { ViewMode } from "../shared/types";
+import type { FileFacts, ViewMode } from "../shared/types";
 import { appState } from "../shell/state";
 import { renderBinaryUnavailable } from "./binary";
 import { applyDiffForActiveDocument } from "./diff";
@@ -31,6 +31,7 @@ import {
 import { isViewableImageName, renderImagePreview } from "./image";
 import { currentMermaidThemeInputs } from "./mermaid";
 import { refreshOutline } from "./outline";
+import { clearUpdateSignal, syncFileFactsStrip } from "./file-facts-strip";
 import { attachMetadataCardToggleListener, renderMetadataCard } from "./metadata-card";
 import { syncViewToggle } from "./view-mode";
 import { setPreviewMode } from "../shell/selection";
@@ -57,6 +58,7 @@ export type RenderedDocument = {
   view: ViewMode;
   language: string | null;
   metadata?: RenderedDocumentMetadata;
+  fileFacts?: FileFacts;
 };
 
 const previewElementMaybe = document.querySelector<HTMLElement>("#preview");
@@ -113,6 +115,15 @@ export async function applyDocumentPayload(payload: RenderedDocument): Promise<v
   previewElement.classList.remove("empty");
   setPreviewBase(payload.path);
   closeMermaidViewer();
+
+  // The facts strip frames Source view only (Diff wires its own variant in
+  // diff.ts; Rendered keeps the frontmatter metadata card as its sole
+  // metadata surface).
+  syncFileFactsStrip(
+    payload.view === "source"
+      ? { kind: "source", facts: payload.fileFacts }
+      : { kind: "hidden" },
+  );
 
   if (appState.viewLayout === "single" || !documentSupportsSplit(payload)) {
     await renderSinglePayload(payload);
@@ -318,6 +329,9 @@ export async function loadDocument(documentId: string) {
   const isDocumentSwitch = lastLoadedDocumentId !== documentId;
   lastLoadedDocumentId = documentId;
   if (isDocumentSwitch) {
+    // The update signal marks "the doc you are viewing changed on disk" —
+    // it must not survive into a different document.
+    clearUpdateSignal();
     // Reset synchronously *before* fetch + innerHTML swap so the new content
     // paints at the top in a single layout pass. Doing it after the swap can
     // briefly flash the new content at the previous doc's scroll offset.

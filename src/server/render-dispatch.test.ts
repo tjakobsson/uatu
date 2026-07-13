@@ -188,4 +188,22 @@ describe("renderDocument", () => {
     expect(rendered.view).toBe("source");
     expect(rendered.html).toContain('<pre class="uatu-source-pre">');
   });
+
+  test("payloads carry fileFacts for both rendered and source views", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-render-facts-"));
+    tempDirectories.push(tempDirectory);
+    const filePath = path.join(tempDirectory, "README.md");
+    await writeFile(filePath, "# Hello\n\nworld\n");
+
+    const roots = await scanRoots([{ kind: "dir", absolutePath: tempDirectory }]);
+    const rendered = await renderDocument(roots, filePath, { view: "rendered" });
+    const source = await renderDocument(roots, filePath, { view: "source" });
+
+    for (const payload of [rendered, source]) {
+      expect(payload.fileFacts).toBeDefined();
+      expect(payload.fileFacts?.lines).toBe(3);
+      expect(payload.fileFacts?.bytes).toBeGreaterThan(0);
+      expect(Date.parse(payload.fileFacts?.mtime ?? "")).not.toBeNaN();
+    }
+  });
 });

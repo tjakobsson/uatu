@@ -7,6 +7,7 @@ import { chooseSelectionForFileEvent } from "./follow";
 import { applyProjectIdentity } from "./identity";
 import { findDocumentById, syncStateGeneration } from "./storage";
 import { applyMonoConfig } from "../mono/apply";
+import { signalActiveDocumentUpdated } from "../preview/file-facts-strip";
 import { documentDiffCache, forgetDocumentCache, loadDocument } from "../preview/mount";
 import { renderEmptyPreview } from "../preview/empty";
 import { renderReviewScoreDetails } from "../sidebar/review-score-mount";
@@ -119,6 +120,12 @@ export function connectEvents() {
         forgetDocumentCache(appState.selectedId);
       }
       await loadDocument(appState.selectedId);
+      if (shouldReload && appState.selectedId === previousSelectedId) {
+        // In-place reload of the document being viewed (Rule D): surface the
+        // otherwise-silent swap. A selection switch is a new document, not an
+        // update of what the user was reading — no signal there.
+        signalActiveDocumentUpdated();
+      }
       return;
     }
 
