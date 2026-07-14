@@ -15,16 +15,18 @@ test.afterEach(async ({ request }) => {
 
 const strip = (page: import("@playwright/test").Page) => page.locator("#file-facts-strip");
 
-test("facts strip is hidden in Rendered view and appears with git facts in Source view", async ({ page, request }) => {
+test("facts strip remains visible across Rendered, Source, and split layouts", async ({ page, request }) => {
   await request.post("/__e2e/reset", { data: { git: true } });
   await page.reload();
   await expect(page.locator("#preview-path")).toHaveText("README.md");
 
-  // Rendered view (markdown default): no strip.
+  // Rendered view (markdown default): repository facts frame the reading view.
   await expect(page.locator("#view-rendered")).toHaveAttribute("aria-checked", "true");
-  await expect(strip(page)).toBeHidden();
+  await expect(strip(page)).toBeVisible();
+  await expect(strip(page)).toContainText("Uatu Test");
+  await expect(strip(page).locator(".file-facts-sha")).toHaveText(/^[0-9a-f]{7,}$/);
 
-  // Source view: author, commit sha, line count, byte size.
+  // Source uses the same document facts presentation.
   await page.locator("#view-source").click();
   await expect(strip(page)).toBeVisible();
   await expect(strip(page)).toContainText("Uatu Test");
@@ -33,9 +35,16 @@ test("facts strip is hidden in Rendered view and appears with git facts in Sourc
   // Clean committed file — no uncommitted marker.
   await expect(strip(page)).not.toContainText("uncommitted");
 
-  // Back to Rendered: the strip collapses again.
+  // Back to Rendered: the strip remains in shared preview chrome.
   await page.locator("#view-rendered").click();
-  await expect(strip(page)).toBeHidden();
+  await expect(strip(page)).toBeVisible();
+
+  // Split layout still has one shared strip, never one copy per pane.
+  await page.locator(".uatu-layout-toolbar [data-layout-value='split-h']").click();
+  await expect(page.locator("#preview.is-split.is-split-h")).toBeVisible();
+  await expect(strip(page)).toBeVisible();
+  await expect(page.locator("#file-facts-strip")).toHaveCount(1);
+  await expect(page.locator("#preview .file-facts-strip")).toHaveCount(0);
 });
 
 test("Diff view strip shows the compare base and addition/deletion counts", async ({ page, request }) => {
@@ -105,16 +114,21 @@ test("source-forced text files pulse the strip, not the Rendered chip, on file e
   await expect(strip(page)).not.toHaveClass(/is-updated/, { timeout: 10_000 });
 });
 
-test("Rendered view shows a transient Updated chip when the active file changes on disk", async ({ page }) => {
+test("Rendered view refreshes and pulses its facts strip when the active file changes", async ({ page, request }) => {
+  await request.post("/__e2e/reset", { data: { git: true } });
+  await page.reload();
   await expect(page.locator("#preview-path")).toHaveText("README.md");
   await expect(page.locator("#view-rendered")).toHaveAttribute("aria-checked", "true");
   const chip = page.locator("#preview-updated");
+  await expect(strip(page)).toBeVisible();
+  await expect(strip(page)).not.toContainText("uncommitted");
   await expect(chip).toBeHidden();
 
   await fs.writeFile(workspacePath("README.md"), "# Uatu\n\nRendered-view edit marker.\n", "utf8");
 
-  await expect(chip).toBeVisible();
-  await expect(chip).toHaveText("Updated");
-  // ...and it clears itself once the write burst is over.
-  await expect(chip).toBeHidden({ timeout: 10_000 });
+  await expect(strip(page)).toContainText("modified just now");
+  await expect(strip(page)).toContainText("uncommitted");
+  await expect(strip(page)).toHaveClass(/is-updated/);
+  await expect(chip).toBeHidden();
+  await expect(strip(page)).not.toHaveClass(/is-updated/, { timeout: 10_000 });
 });

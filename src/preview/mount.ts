@@ -116,14 +116,10 @@ export async function applyDocumentPayload(payload: RenderedDocument): Promise<v
   setPreviewBase(payload.path);
   closeMermaidViewer();
 
-  // The facts strip frames Source view only (Diff wires its own variant in
-  // diff.ts; Rendered keeps the frontmatter metadata card as its sole
-  // metadata surface).
-  syncFileFactsStrip(
-    payload.view === "source"
-      ? { kind: "source", facts: payload.fileFacts }
-      : { kind: "hidden" },
-  );
+  // Rendered and Source share the repository/filesystem facts presentation;
+  // Diff wires its comparison-specific variant in diff.ts. In split layouts
+  // this shared chrome slot still renders exactly once above both panes.
+  syncFileFactsStrip({ kind: "document", facts: payload.fileFacts });
 
   if (appState.viewLayout === "single" || !documentSupportsSplit(payload)) {
     await renderSinglePayload(payload);

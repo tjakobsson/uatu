@@ -1,10 +1,14 @@
 import { describe, expect, test } from "bun:test";
+import { parseHTML } from "linkedom";
 
 import {
+  clearUpdateSignal,
   createTrailingSignal,
   formatByteSize,
   formatRelativeTime,
   renderFileFactsStripHtml,
+  signalActiveDocumentUpdated,
+  syncFileFactsStrip,
 } from "./file-facts-strip";
 import type { FileFacts } from "../shared/types";
 
@@ -60,9 +64,9 @@ describe("formatRelativeTime", () => {
   });
 });
 
-describe("renderFileFactsStripHtml — source variant", () => {
+describe("renderFileFactsStripHtml — document variant", () => {
   test("clean committed file shows author, commit date, sha, lines, size", () => {
-    const html = renderFileFactsStripHtml({ kind: "source", facts: gitFacts() }, NOW);
+    const html = renderFileFactsStripHtml({ kind: "document", facts: gitFacts() }, NOW);
     expect(html).toContain("Tobias Jakobsson");
     expect(html).toContain("dfe9088a");
     expect(html).toContain("214 lines");
@@ -74,7 +78,7 @@ describe("renderFileFactsStripHtml — source variant", () => {
 
   test("dirty file shows modified-relative time with uncommitted marker", () => {
     const html = renderFileFactsStripHtml(
-      { kind: "source", facts: gitFacts({ dirty: true }) },
+      { kind: "document", facts: gitFacts({ dirty: true }) },
       NOW,
     );
     expect(html).toContain("modified 2m ago");
@@ -90,7 +94,7 @@ describe("renderFileFactsStripHtml — source variant", () => {
       mtime: "2026-07-13T11:58:00Z",
       git: { author: null, authoredAt: null, shortSha: null, subject: null, dirty: true },
     };
-    const html = renderFileFactsStripHtml({ kind: "source", facts }, NOW);
+    const html = renderFileFactsStripHtml({ kind: "document", facts }, NOW);
     expect(html).toContain("uncommitted");
     expect(html).toContain("3 lines");
     expect(html).not.toContain("file-facts-author");
@@ -99,7 +103,7 @@ describe("renderFileFactsStripHtml — source variant", () => {
 
   test("non-git root degrades to lines, size, and mtime without the uncommitted marker", () => {
     const facts: FileFacts = { lines: 1, bytes: 6, mtime: "2026-07-13T11:58:00Z" };
-    const html = renderFileFactsStripHtml({ kind: "source", facts }, NOW);
+    const html = renderFileFactsStripHtml({ kind: "document", facts }, NOW);
     expect(html).toContain("1 line");
     expect(html).toContain("6 B");
     expect(html).toContain("modified 2m ago");
@@ -107,12 +111,12 @@ describe("renderFileFactsStripHtml — source variant", () => {
   });
 
   test("missing facts render nothing", () => {
-    expect(renderFileFactsStripHtml({ kind: "source", facts: undefined }, NOW)).toBe("");
+    expect(renderFileFactsStripHtml({ kind: "document", facts: undefined }, NOW)).toBe("");
   });
 
   test("null line count omits the lines segment but keeps the rest", () => {
     const facts: FileFacts = { ...gitFacts(), lines: null };
-    const html = renderFileFactsStripHtml({ kind: "source", facts }, NOW);
+    const html = renderFileFactsStripHtml({ kind: "document", facts }, NOW);
     expect(html).not.toContain("lines");
     expect(html).toContain("8.2 KB");
   });
@@ -169,6 +173,48 @@ describe("renderFileFactsStripHtml — diff variant", () => {
 describe("renderFileFactsStripHtml — hidden", () => {
   test("hidden state renders nothing", () => {
     expect(renderFileFactsStripHtml({ kind: "hidden" }, NOW)).toBe("");
+  });
+});
+
+describe("file facts update signal presentation", () => {
+  function withPreviewChrome(run: (document: Document) => void): void {
+    const { document } = parseHTML(
+      "<!doctype html><html><body><div id='file-facts-strip' hidden></div><span id='preview-updated' hidden>Updated</span></body></html>",
+    );
+    const previousDocument = (globalThis as { document?: unknown }).document;
+    (globalThis as unknown as { document: Document }).document = document as unknown as Document;
+    try {
+      run(document as unknown as Document);
+    } finally {
+      clearUpdateSignal();
+      (globalThis as unknown as { document?: unknown }).document = previousDocument;
+    }
+  }
+
+  test("a visible document strip receives the signal while the fallback chip stays hidden", () => {
+    withPreviewChrome(document => {
+      syncFileFactsStrip({ kind: "document", facts: gitFacts() });
+      signalActiveDocumentUpdated();
+
+      const strip = document.querySelector<HTMLElement>("#file-facts-strip");
+      const chip = document.querySelector<HTMLElement>("#preview-updated");
+      expect(strip?.hidden).toBe(false);
+      expect(strip?.classList.contains("is-updated")).toBe(true);
+      expect(chip?.hidden).toBe(true);
+    });
+  });
+
+  test("missing facts keep the strip hidden and route the signal to the fallback chip", () => {
+    withPreviewChrome(document => {
+      syncFileFactsStrip({ kind: "document", facts: undefined });
+      signalActiveDocumentUpdated();
+
+      const strip = document.querySelector<HTMLElement>("#file-facts-strip");
+      const chip = document.querySelector<HTMLElement>("#preview-updated");
+      expect(strip?.hidden).toBe(true);
+      expect(strip?.classList.contains("is-updated")).toBe(false);
+      expect(chip?.hidden).toBe(false);
+    });
   });
 });
 

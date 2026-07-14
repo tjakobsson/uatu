@@ -1,8 +1,7 @@
-// File facts strip — the one-line repo-derived summary framing Source and
-// Diff views (never Rendered, where the frontmatter metadata card serves the
-// reading posture). Also owns the on-disk-change signal: a pulse on the
-// strip's freshness segment in Source/Diff, a transient "Updated" chip in
-// the preview header in Rendered.
+// File facts strip — the one-line repo-derived summary framing all document
+// views. Rendered and Source share the document variant; Diff adds comparison
+// facts. Also owns the on-disk-change signal: a pulse on the strip's freshness
+// segment, with a transient "Updated" chip as a no-facts fallback.
 //
 // Pure HTML builders and formatters are exported for unit tests; DOM lookups
 // happen lazily inside the sync functions so importing this module doesn't
@@ -13,8 +12,8 @@ import type { FileFacts } from "../shared/types";
 
 export type FactsStripState =
   | { kind: "hidden" }
-  // Source view — facts may be missing if server-side collection failed.
-  | { kind: "source"; facts: FileFacts | undefined }
+  // Rendered / Source — facts may be missing if server-side collection failed.
+  | { kind: "document"; facts: FileFacts | undefined }
   // Diff view — counts are null for unchanged/binary/no-git diff payloads.
   | {
       kind: "diff";
@@ -118,7 +117,7 @@ export function renderFileFactsStripHtml(state: FactsStripState, nowMs: number):
     return "";
   }
 
-  if (state.kind === "source") {
+  if (state.kind === "document") {
     const facts = state.facts;
     if (!facts) {
       return "";
@@ -253,9 +252,8 @@ export function createTrailingSignal(
 
 // Whether the strip currently has visible content — maintained by the sync
 // functions above. This, not `appState.viewMode`, decides where the update
-// signal shows: text/code files are source-FORCED while the persisted
-// viewMode can still say "rendered", so keying the chip off viewMode would
-// light both indicators at once.
+// signal shows. Deriving this from rendered content also covers no-facts
+// payloads and avoids coupling signal presentation to persisted view state.
 let stripVisible = false;
 let signalActive = false;
 
@@ -266,9 +264,8 @@ function refreshSignalPresentation(): void {
   }
   const chip = updatedChipElement();
   if (chip) {
-    // The chip covers whatever has no strip (Rendered view, and degenerate
-    // strip-less states); when the strip is on screen its pulse is the
-    // signal instead.
+    // The chip covers no-facts / strip-less states; when the strip is on
+    // screen its pulse is the signal instead.
     chip.hidden = !(signalActive && !stripVisible);
   }
 }
