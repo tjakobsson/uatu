@@ -125,13 +125,14 @@ export function renderFileFactsStripHtml(state: FactsStripState, nowMs: number):
       return "";
     }
     const git = facts.git;
-    const lines = `${facts.lines} ${facts.lines === 1 ? "line" : "lines"}`;
+    const lines =
+      facts.lines !== null ? `${facts.lines} ${facts.lines === 1 ? "line" : "lines"}` : "";
     const size = formatByteSize(facts.bytes);
     return joinSegments([
       git?.author ? segment(git.author, "file-facts-author") : "",
       freshnessSegment(facts, nowMs),
       git?.shortSha ? segment(git.shortSha, "file-facts-sha") : "",
-      segment(lines),
+      lines ? segment(lines) : "",
       segment(size),
     ]);
   }
@@ -141,9 +142,15 @@ export function renderFileFactsStripHtml(state: FactsStripState, nowMs: number):
     state.added !== null && state.deleted !== null
       ? `<span class="file-facts-added">+${state.added}</span> <span class="file-facts-removed">−${state.deleted}</span>`
       : "";
+  // The update signal's CSS targets `.file-facts-freshness`. In the diff
+  // variant that class lands on the +/− counts (the numbers a live reload
+  // just changed), falling back to the base segment for count-less payloads
+  // (binary / no-git) so a Diff-view reload always has a visible pulse target.
   return joinSegments([
-    state.baseRef ? segment(`vs ${escapeHtml(state.baseRef)}`) : "",
-    counts ? segment(counts) : "",
+    state.baseRef
+      ? segment(`vs ${escapeHtml(state.baseRef)}`, counts ? "" : "file-facts-freshness")
+      : "",
+    counts ? segment(counts, "file-facts-freshness") : "",
     facts?.git?.author ? segment(facts.git.author, "file-facts-author") : "",
     facts?.git?.shortSha ? segment(facts.git.shortSha, "file-facts-sha") : "",
   ]);

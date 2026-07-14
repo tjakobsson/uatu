@@ -38,7 +38,10 @@ export type FileFactsGit = {
 };
 
 export type FileFacts = {
-  lines: number;
+  // null when the collector was invoked without the file source (the diff
+  // endpoint) — computing it there would mean an unbounded file read for a
+  // value the Diff strip never renders.
+  lines: number | null;
   bytes: number;
   mtime: string; // ISO 8601
   git?: FileFactsGit;

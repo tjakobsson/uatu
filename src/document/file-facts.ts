@@ -22,27 +22,27 @@ export type CollectFileFactsOptions = {
   rootPath: string;
   // The already-read file source; line count comes from here so facts add no
   // extra read on the render path. Callers without the source in hand (the
-  // diff endpoint) omit it and pay one extra read.
+  // diff endpoint, whose strip variant never shows a line count) omit it and
+  // get `lines: null` — facts collection must never read whole files itself,
+  // or a diff-first load of a large file would bypass the diff endpoint's
+  // blob-size caps.
   source?: string;
 };
 
 export async function collectFileFacts(
   options: CollectFileFactsOptions,
 ): Promise<FileFacts | undefined> {
-  const [stat, source, git] = await Promise.all([
+  const [stat, git] = await Promise.all([
     fs.stat(options.absolutePath).catch(() => null),
-    options.source !== undefined
-      ? Promise.resolve(options.source)
-      : fs.readFile(options.absolutePath, "utf8").catch(() => null),
     collectGitFacts(options.rootPath, options.absolutePath),
   ]);
 
-  if (!stat || source === null) {
+  if (!stat) {
     return undefined;
   }
 
   return {
-    lines: countLines(source),
+    lines: options.source !== undefined ? countLines(options.source) : null,
     bytes: stat.size,
     mtime: stat.mtime.toISOString(),
     ...(git ? { git } : {}),
@@ -81,18 +81,22 @@ async function collectGitFacts(
     safeGit(rootPath, ["status", "--porcelain", "--", absolutePath]),
   ]);
 
-  // A failing `log` means "not a git repo" (or git itself is unavailable) —
-  // degrade to the filesystem-only shape. A succeeding `log` with empty
-  // output means "repo, but no commit touches this path": never committed.
-  if (!logResult.ok || !statusResult.ok) {
+  // A failing `status` means "not a git repo" (or git itself is unavailable)
+  // — degrade to the filesystem-only shape. A succeeding `status` proves we
+  // are inside a repo, so a failing `log` there means the repo has no
+  // commits yet (git log exits 128 on an unborn HEAD): never committed. A
+  // succeeding `log` with empty output means "repo, but no commit touches
+  // this path": also never committed.
+  if (!statusResult.ok) {
     return undefined;
   }
 
-  const dirty = statusResult.stdout.trim().length > 0;
-  const logLine = logResult.stdout.trim();
+  const logLine = logResult.ok ? logResult.stdout.trim() : "";
   if (!logLine) {
     return { author: null, authoredAt: null, shortSha: null, subject: null, dirty: true };
   }
+
+  const dirty = statusResult.stdout.trim().length > 0;
 
   const [author = "", authoredAt = "", shortSha = "", ...subjectParts] = logLine.split("\t");
   const subject = subjectParts.join("\t");

@@ -106,6 +106,41 @@ describe("collectFileFacts", () => {
     });
   });
 
+  test("unborn repository (git init, zero commits) still reports never-committed", async () => {
+    // `git log` exits 128 on an unborn HEAD while `git status` works — this
+    // must read as "in a repo, never committed", not as a non-git root.
+    const repo = await createRepo();
+    await writeFile(path.join(repo, "fresh.md"), "new\n");
+
+    const facts = await collectFileFacts({
+      absolutePath: path.join(repo, "fresh.md"),
+      rootPath: repo,
+      source: "new\n",
+    });
+
+    expect(facts?.git).toEqual({
+      author: null,
+      authoredAt: null,
+      shortSha: null,
+      subject: null,
+      dirty: true,
+    });
+  });
+
+  test("omitting the source skips the line count instead of reading the file", async () => {
+    const repo = await createRepo();
+    await commitFile(repo, "doc.md", "a\nb\n");
+
+    const facts = await collectFileFacts({
+      absolutePath: path.join(repo, "doc.md"),
+      rootPath: repo,
+    });
+
+    expect(facts?.lines).toBeNull();
+    expect(facts?.bytes).toBeGreaterThan(0);
+    expect(facts?.git?.shortSha).toMatch(/^[0-9a-f]{7,}$/);
+  });
+
   test("non-git root degrades to filesystem facts only", async () => {
     const dir = await createDir();
     await writeFile(path.join(dir, "notes.md"), "hello\n");

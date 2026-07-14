@@ -109,6 +109,13 @@ describe("renderFileFactsStripHtml — source variant", () => {
   test("missing facts render nothing", () => {
     expect(renderFileFactsStripHtml({ kind: "source", facts: undefined }, NOW)).toBe("");
   });
+
+  test("null line count omits the lines segment but keeps the rest", () => {
+    const facts: FileFacts = { ...gitFacts(), lines: null };
+    const html = renderFileFactsStripHtml({ kind: "source", facts }, NOW);
+    expect(html).not.toContain("lines");
+    expect(html).toContain("8.2 KB");
+  });
 });
 
 describe("renderFileFactsStripHtml — diff variant", () => {
@@ -123,6 +130,22 @@ describe("renderFileFactsStripHtml — diff variant", () => {
     expect(html).toContain("Tobias Jakobsson");
     expect(html).toContain("dfe9088a");
     expect(html).not.toContain("lines");
+  });
+
+  test("the +/− counts carry the freshness class so the update pulse has a target", () => {
+    const withCounts = renderFileFactsStripHtml(
+      { kind: "diff", facts: gitFacts(), baseRef: "origin/main", added: 12, deleted: 4 },
+      NOW,
+    );
+    expect(withCounts).toContain("file-facts-freshness");
+    expect(withCounts).toMatch(/file-facts-freshness[^>]*>.*\+12/);
+
+    // Count-less payloads (binary / unsupported) fall back to the base segment.
+    const withoutCounts = renderFileFactsStripHtml(
+      { kind: "diff", facts: gitFacts(), baseRef: "origin/main", added: null, deleted: null },
+      NOW,
+    );
+    expect(withoutCounts).toMatch(/file-facts-freshness[^>]*>vs origin\/main/);
   });
 
   test("escapes the base ref", () => {
