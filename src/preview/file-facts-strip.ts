@@ -10,7 +10,6 @@
 
 import { escapeHtml } from "../shared/html";
 import type { FileFacts } from "../shared/types";
-import { appState } from "../shell/state";
 
 export type FactsStripState =
   | { kind: "hidden" }
@@ -175,10 +174,15 @@ export function syncFileFactsStrip(state: FactsStripState): void {
   if (!html) {
     strip.hidden = true;
     strip.innerHTML = "";
-    return;
+    stripVisible = false;
+  } else {
+    strip.innerHTML = html;
+    strip.hidden = false;
+    stripVisible = true;
   }
-  strip.innerHTML = html;
-  strip.hidden = false;
+  // A view flip can move the signal's home mid-burst (strip pulse ↔ header
+  // chip); re-derive the presentation from the new strip visibility.
+  refreshSignalPresentation();
 }
 
 export function hideFileFactsStrip(): void {
@@ -187,6 +191,7 @@ export function hideFileFactsStrip(): void {
     strip.hidden = true;
     strip.innerHTML = "";
   }
+  stripVisible = false;
   clearUpdateSignal();
 }
 
@@ -246,18 +251,31 @@ export function createTrailingSignal(
   };
 }
 
-const updateSignal = createTrailingSignal(UPDATE_SIGNAL_MS, active => {
+// Whether the strip currently has visible content — maintained by the sync
+// functions above. This, not `appState.viewMode`, decides where the update
+// signal shows: text/code files are source-FORCED while the persisted
+// viewMode can still say "rendered", so keying the chip off viewMode would
+// light both indicators at once.
+let stripVisible = false;
+let signalActive = false;
+
+function refreshSignalPresentation(): void {
   const strip = stripElement();
   if (strip) {
-    strip.classList.toggle("is-updated", active);
+    strip.classList.toggle("is-updated", signalActive && stripVisible);
   }
   const chip = updatedChipElement();
   if (chip) {
-    // The chip is a Rendered-view affordance; Source/Diff get the strip
-    // pulse instead. Evaluated per transition so a view flip mid-burst
-    // doesn't leave the wrong indicator lit.
-    chip.hidden = !(active && appState.viewMode === "rendered");
+    // The chip covers whatever has no strip (Rendered view, and degenerate
+    // strip-less states); when the strip is on screen its pulse is the
+    // signal instead.
+    chip.hidden = !(signalActive && !stripVisible);
   }
+}
+
+const updateSignal = createTrailingSignal(UPDATE_SIGNAL_MS, active => {
+  signalActive = active;
+  refreshSignalPresentation();
 });
 
 // Called from the SSE file-event path after the active document reloaded in

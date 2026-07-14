@@ -81,6 +81,30 @@ test("an on-disk edit flips the freshness segment to uncommitted and pulses the 
   await expect(strip(page)).not.toHaveClass(/is-updated/, { timeout: 10_000 });
 });
 
+test("source-forced text files pulse the strip, not the Rendered chip, on file events", async ({ page, request }) => {
+  // `extras` land before git init, so config.yaml is part of the initial
+  // commit — the strip starts clean and the file event below dirties it.
+  await request.post("/__e2e/reset", {
+    data: { git: true, extras: { "config.yaml": "key: value\nport: 8080\n" } },
+  });
+  await page.reload();
+  await expect(page.locator("#preview-path")).toHaveText("README.md");
+
+  // Select a text file while the persisted viewMode is still "rendered":
+  // the server forces Source rendering, so the strip is the visible signal
+  // surface even though appState.viewMode never changed.
+  await revealTreeRow(page, "config.yaml");
+  await treeRow(page, "config.yaml").click();
+  await expect(page.locator("#preview-path")).toHaveText("config.yaml");
+  await expect(strip(page)).toBeVisible();
+
+  await fs.writeFile(workspacePath("config.yaml"), "key: edited\nport: 4242\n", "utf8");
+
+  await expect(strip(page)).toHaveClass(/is-updated/);
+  await expect(page.locator("#preview-updated")).toBeHidden();
+  await expect(strip(page)).not.toHaveClass(/is-updated/, { timeout: 10_000 });
+});
+
 test("Rendered view shows a transient Updated chip when the active file changes on disk", async ({ page }) => {
   await expect(page.locator("#preview-path")).toHaveText("README.md");
   await expect(page.locator("#view-rendered")).toHaveAttribute("aria-checked", "true");
