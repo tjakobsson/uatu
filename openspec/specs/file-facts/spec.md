@@ -46,11 +46,11 @@ The preview SHALL render a file facts strip when the active document is displaye
 - **WHEN** a document is displayed with Source and Rendered panes side by side or stacked
 - **THEN** one file facts strip is shown in shared preview chrome without duplication in either pane
 
-### Requirement: Source-view strip content
-In Source view, the strip SHALL show, in order: last-commit author, a freshness segment (see freshness requirement), short SHA, line count, and human-readable byte size. In a non-git root the strip SHALL show only line count, byte size, and the file modification time. All values SHALL be HTML-escaped before reaching the DOM.
+### Requirement: Document-view strip content
+In Rendered and Source views, the strip SHALL show, in order: last-commit author, a freshness segment (see freshness requirement), short SHA, line count, and human-readable byte size. In a non-git root the strip SHALL show only line count, byte size, and the file modification time. All values SHALL be HTML-escaped before reaching the DOM.
 
-#### Scenario: Committed file in Source view
-- **WHEN** a committed, unmodified file is shown in Source view
+#### Scenario: Committed file in a document view
+- **WHEN** a committed, unmodified file is shown in Rendered or Source view
 - **THEN** the strip reads like `Tobias Jakobsson · Nov 4, 2025 · dfe9088a · 214 lines · 8.2 KB`
 
 #### Scenario: Author name contains markup

@@ -2,6 +2,8 @@
 
 - FROM: `### Requirement: Facts strip is shown only in Source and Diff views`
 - TO: `### Requirement: Facts strip is shown in all document views`
+- FROM: `### Requirement: Source-view strip content`
+- TO: `### Requirement: Document-view strip content`
 
 ## MODIFIED Requirements
 
@@ -24,6 +26,17 @@ The preview SHALL render a file facts strip when the active document is displaye
 #### Scenario: Split layout selected
 - **WHEN** a document is displayed with Source and Rendered panes side by side or stacked
 - **THEN** one file facts strip is shown in shared preview chrome without duplication in either pane
+
+### Requirement: Document-view strip content
+In Rendered and Source views, the strip SHALL show, in order: last-commit author, a freshness segment (see freshness requirement), short SHA, line count, and human-readable byte size. In a non-git root the strip SHALL show only line count, byte size, and the file modification time. All values SHALL be HTML-escaped before reaching the DOM.
+
+#### Scenario: Committed file in a document view
+- **WHEN** a committed, unmodified file is shown in Rendered or Source view
+- **THEN** the strip reads like `Tobias Jakobsson · Nov 4, 2025 · dfe9088a · 214 lines · 8.2 KB`
+
+#### Scenario: Author name contains markup
+- **WHEN** the last-commit author name contains HTML-special characters
+- **THEN** the strip renders them as escaped text, never as live markup
 
 ### Requirement: On-disk change signal
 When the actively viewed document changes on disk and the preview live-reloads in place, the UI SHALL signal the update. In Rendered, Source, and Diff views with a visible facts strip, the signal SHALL highlight the strip's freshness segment. If file facts are unavailable and no strip can be shown, the signal SHALL fall back to a transient indicator in the preview header. The signal SHALL disappear after a short interval and SHALL respect `prefers-reduced-motion` by substituting a non-animated presentation.
