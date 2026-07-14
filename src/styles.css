@@ -1296,6 +1296,91 @@ body.is-resizing-terminal .panel-resizer {
   flex-shrink: 0;
 }
 
+/* File facts strip — the one-line repo-derived summary (author · date ·
+   sha · lines · size) framing Source and Diff views. Hidden entirely in
+   Rendered view (the [hidden] attribute collapses it, no reserved space). */
+.file-facts-strip {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  font-size: 0.72rem;
+  color: var(--text-subtle);
+  line-height: 1.4;
+}
+
+.file-facts-strip[hidden] {
+  display: none;
+}
+
+.file-facts-sep {
+  opacity: 0.55;
+  user-select: none;
+}
+
+.file-facts-sha {
+  font-family: var(--mono-font-family, monospace);
+  font-size: 0.7rem;
+}
+
+.file-facts-added {
+  color: #2da44e;
+  font-weight: 600;
+}
+
+.file-facts-removed {
+  color: #cf222e;
+  font-weight: 600;
+}
+
+.file-facts-uncommitted {
+  color: var(--text-strong);
+}
+
+/* On-disk-change signal. `.is-updated` lands on the strip container (so the
+   innerHTML rebuild that accompanies a reload can't wipe it) and highlights
+   the freshness segment. A transition rather than a keyframe animation:
+   repeated class adds during a write burst are visual no-ops, so the signal
+   stays lit without strobing and fades once events stop. */
+.file-facts-freshness {
+  border-radius: 4px;
+  padding: 0 0.25rem;
+  margin: 0 -0.25rem;
+  transition: color 0.5s ease, background-color 0.5s ease;
+}
+
+.file-facts-strip.is-updated .file-facts-freshness {
+  color: #1a7f37;
+  background-color: var(--diff-added-bg, #e6ffec);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .file-facts-freshness {
+    /* Static highlight instead of a fading pulse. */
+    transition: none;
+  }
+}
+
+/* Transient "Updated" chip shown in Rendered view when the active file
+   live-reloads. Same pill shape as .preview-type; green to read as "fresh". */
+.preview-updated[hidden] {
+  display: none;
+}
+
+.preview-updated {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.7rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: #2da44e;
+  border: 1px solid #2da44e;
+  background: var(--diff-added-bg, #e6ffec);
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
 /* Toolbar in the preview header. View chooser and Layout chooser live
    here as separate pills (they each carry their own background and
    border via .view-control / .layout-chooser), so the toolbar itself is

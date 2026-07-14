@@ -21,6 +21,32 @@ export type RootGroup = {
   hiddenCount: number;
 };
 
+// Repo-derived facts about the on-disk file behind a rendered document,
+// computed fresh on every /api/document render (live reload keeps them
+// current). `git` is absent for non-git roots and whenever the git lookup
+// fails — the render itself must never fail because facts collection did.
+// String fields are HTML-escaped server-side before serialization, matching
+// the sanitizeMetadata posture.
+export type FileFactsGit = {
+  // null when the file has never been committed (dirty is then true).
+  author: string | null;
+  authoredAt: string | null; // ISO 8601
+  shortSha: string | null;
+  subject: string | null;
+  // Working tree differs from HEAD for this path.
+  dirty: boolean;
+};
+
+export type FileFacts = {
+  // null when the collector was invoked without the file source (the diff
+  // endpoint) — computing it there would mean an unbounded file read for a
+  // value the Diff strip never renders.
+  lines: number | null;
+  bytes: number;
+  mtime: string; // ISO 8601
+  git?: FileFactsGit;
+};
+
 export type BuildSummary = {
   version: string;
   branch: string;

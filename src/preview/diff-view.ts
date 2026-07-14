@@ -6,9 +6,14 @@
 // Type-only import — erased at compile time, so the runtime module still
 // loads exclusively through the dynamic import below.
 import type { SupportedLanguages } from "@pierre/diffs";
-import type { DiffStyle } from "../shared/types";
+import type { DiffStyle, FileFacts } from "../shared/types";
 
-export type DocumentDiffPayload =
+// The server's diff route attaches `fileFacts` on top of the diff variants
+// so a diff-first load can populate the facts strip without a separate
+// /api/document fetch.
+export type DocumentDiffPayload = DocumentDiffVariant & { fileFacts?: FileFacts };
+
+type DocumentDiffVariant =
   | {
       kind: "text";
       baseRef: string;

@@ -4,12 +4,14 @@
 // from the rendered output.
 
 import { promises as fs } from "node:fs";
+import path from "node:path";
 
+import { collectFileFacts } from "../document/file-facts";
 import { type DocumentMetadata, sanitizeMetadata } from "../document/metadata";
 import { languageForName } from "../document/languages";
 import { renderAsciidocToHtml } from "../render/asciidoc";
 import { decodeHtmlEntities, renderCodeAsHtml, renderMarkdownToHtml } from "../render/markdown";
-import { findDocument, type RootGroup, type ViewMode } from "../shared/types";
+import { findDocument, type FileFacts, type RootGroup, type ViewMode } from "../shared/types";
 
 export type RenderedDocument = {
   id: string;
@@ -25,6 +27,11 @@ export type RenderedDocument = {
   view: ViewMode;
   language: string | null;
   metadata?: DocumentMetadata;
+  // Repo-derived facts (lines, bytes, mtime, last-commit) — attached to every
+  // payload regardless of view so the per-view client cache keeps one shape;
+  // the client gates display on view mode. Absent only if collection failed
+  // outright (stat error).
+  fileFacts?: FileFacts;
 };
 
 export type RenderDocumentOptions = {
@@ -46,6 +53,16 @@ export async function renderDocument(
   }
 
   const source = await fs.readFile(document.id, "utf8");
+  // Facts collection (stat + two git subprocesses) overlaps the render work
+  // below; awaited just before assembling the payload.
+  // The root group always exists for a found document; the dirname fallback
+  // is a type-level guard only.
+  const rootPath = roots.find(root => root.id === document.rootId)?.path ?? path.dirname(document.id);
+  const fileFactsPromise = collectFileFacts({
+    absolutePath: document.id,
+    rootPath,
+    source,
+  });
   const requestedView: ViewMode = options.view ?? "rendered";
   // Text / source files have no separate rendered representation, so a
   // request for "rendered" still produces source rendering. Markdown and
@@ -90,6 +107,8 @@ export async function renderDocument(
     title = document.name;
   }
 
+  const fileFacts = await fileFactsPromise;
+
   return {
     id: document.id,
     path: document.relativePath,
@@ -99,6 +118,7 @@ export async function renderDocument(
     view: effectiveView,
     language,
     ...(metadata ? { metadata } : {}),
+    ...(fileFacts ? { fileFacts } : {}),
   };
 }
 
