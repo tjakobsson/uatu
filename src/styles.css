@@ -1296,9 +1296,9 @@ body.is-resizing-terminal .panel-resizer {
   flex-shrink: 0;
 }
 
-/* File facts strip — the one-line repo-derived summary (author · date ·
-   sha · lines · size) framing Source and Diff views. Hidden entirely in
-   Rendered view (the [hidden] attribute collapses it, no reserved space). */
+/* File facts strip — the one-line repo-derived summary framing Rendered,
+   Source, and Diff views. The [hidden] state is retained for non-document
+   previews and the rare case where facts collection fails entirely. */
 .file-facts-strip {
   display: flex;
   align-items: center;
@@ -1361,8 +1361,8 @@ body.is-resizing-terminal .panel-resizer {
   }
 }
 
-/* Transient "Updated" chip shown in Rendered view when the active file
-   live-reloads. Same pill shape as .preview-type; green to read as "fresh". */
+/* Transient fallback when the active file live-reloads but no facts strip can
+   render. Same pill shape as .preview-type; green to read as "fresh". */
 .preview-updated[hidden] {
   display: none;
 }
