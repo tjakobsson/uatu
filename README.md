@@ -63,7 +63,7 @@ one) and it runs its own bundled `uatu serve` per window, showing the
 usual browser UI in place. Requires macOS 26 or later.
 
 ```bash
-brew install --cask tjakobsson/tap/uatu-desktop
+brew install tjakobsson/tap/uatu-desktop
 ```
 
 The app is a companion, not a replacement — the CLI and browser workflow

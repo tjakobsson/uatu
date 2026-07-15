@@ -67,7 +67,7 @@ that release, while formula generation proceeds unchanged.
 #### Scenario: Signed release updates the cask
 - **WHEN** a release containing signed app archives is published
 - **THEN** the tap gains/updates `Casks/uatu-desktop.rb` referencing that version's archives and checksums
-- **AND** `brew install --cask tjakobsson/tap/uatu-desktop` installs the app
+- **AND** `brew install tjakobsson/tap/uatu-desktop` installs the app
 
 #### Scenario: Unsigned release leaves the cask untouched
 - **WHEN** a release without signed app archives is published
