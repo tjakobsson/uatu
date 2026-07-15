@@ -162,8 +162,11 @@ jobs:
           fi
 
       - name: Download darwin binaries from the release
+        # unzip -d creates only the last path component; dist/ is gitignored
+        # and absent on a fresh checkout, so the parents must exist first.
         run: |
           gh release download "$GITHUB_REF_NAME" --pattern "uatu-darwin-*.zip"
+          mkdir -p dist/darwin-arm64 dist/darwin-x64
           unzip -o uatu-darwin-arm64.zip -d dist/darwin-arm64
           unzip -o uatu-darwin-x64.zip -d dist/darwin-x64
         env:
