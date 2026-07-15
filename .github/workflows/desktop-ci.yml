@@ -1,0 +1,55 @@
+# PR validation for the UatuCode Desktop macOS app. Kept out of ci.yml so
+# macOS-runner minutes are only spent when the desktop tree actually changes.
+# Builds ad-hoc signed (no Developer ID involved) — this also keeps the
+# release pipeline's secrets-absent path exercised between releases.
+name: Desktop CI
+
+on:
+  pull_request:
+    paths:
+      - "desktop/macos/**"
+      - ".github/workflows/desktop-ci.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "desktop/macos/**"
+      - ".github/workflows/desktop-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # The app's deployment target is macOS 26; the SwiftUI WebPage/WebView
+    # API needs the macOS 26 SDK, so this must be a macos-26 image.
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build the uatu binary for embedding
+        run: bun run build
+
+      - name: Build UatuCode Desktop (ad-hoc signed)
+        run: |
+          xcodebuild \
+            -project desktop/macos/UatuCodeDesktop.xcodeproj \
+            -scheme UatuCodeDesktop \
+            -configuration Release \
+            -derivedDataPath desktop/macos/build \
+            build
+
+      - name: Verify the embedded binary runs
+        run: '"desktop/macos/build/Build/Products/Release/UatuCode Desktop.app/Contents/Resources/uatu" --version'

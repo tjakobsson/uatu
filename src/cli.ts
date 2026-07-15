@@ -437,6 +437,17 @@ async function runWatch(options: WatchOptions) {
   process.on("SIGTERM", shutdown);
   process.on("SIGHUP", shutdown);
 
+  // --exit-on-stdin-close: a supervising wrapper (e.g. the desktop app) holds
+  // our stdin pipe for its whole lifetime. EOF means the supervisor is gone —
+  // including by crash, where no signal is ever sent — so shut down instead of
+  // running orphaned. Without the flag stdin's lifetime is deliberately
+  // ignored (piped invocations like `uatu serve | tee` must not couple).
+  if (options.exitOnStdinClose && !process.stdin.isTTY) {
+    process.stdin.resume();
+    process.stdin.on("end", shutdown);
+    process.stdin.on("close", shutdown);
+  }
+
   // Some terminals don't reliably deliver SIGINT to Bun-compiled binaries when
   // the user presses Ctrl+C. Put stdin into raw mode and catch the Ctrl+C byte
   // (0x03) directly, plus 'q' and Ctrl+D as convenience quit keys. Signal

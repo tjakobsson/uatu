@@ -113,6 +113,24 @@ describe("parseCommand", () => {
     );
   });
 
+  test("exit-on-stdin-close defaults to off", () => {
+    const parsed = parseCommand(["serve"]);
+    if (parsed.kind !== "watch") throw new Error("expected watch");
+    expect(parsed.options.exitOnStdinClose).toBe(false);
+  });
+
+  test("--exit-on-stdin-close enables supervised shutdown", () => {
+    const parsed = parseCommand(["serve", "--exit-on-stdin-close"]);
+    if (parsed.kind !== "watch") throw new Error("expected watch");
+    expect(parsed.options.exitOnStdinClose).toBe(true);
+  });
+
+  test("usage documents --exit-on-stdin-close for supervising wrappers", () => {
+    const text = usageText();
+    expect(text).toContain("--exit-on-stdin-close");
+    expect(text).toContain("supervising wrappers");
+  });
+
   test("UATU_DEBUG env var enables debug mode when --debug is absent", () => {
     const previous = process.env.UATU_DEBUG;
     process.env.UATU_DEBUG = "1";

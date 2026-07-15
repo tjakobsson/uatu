@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- Entitlements for the EMBEDDED uatu binary (Contents/Resources/uatu),
+     not the app. Bun binaries run JavaScriptCore, which needs MAP_JIT under
+     the hardened runtime; without this JSC silently falls back to non-JIT
+     execution (verified — see design.md D6), so allow-jit is a performance
+     entitlement, not a correctness one. -->
+<dict>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+</dict>
+</plist>

@@ -56,6 +56,20 @@ brew install tjakobsson/tap/uatu
 brew upgrade uatu        # stay current
 ```
 
+### UatuCode Desktop (macOS)
+
+A native macOS app that wraps the CLI: pick a folder (or reopen a recent
+one) and it runs its own bundled `uatu serve` per window, showing the
+usual browser UI in place. Requires macOS 26 or later.
+
+```bash
+brew install --cask tjakobsson/tap/uatu-desktop
+```
+
+The app is a companion, not a replacement — the CLI and browser workflow
+above works exactly the same with or without it. Desktop source lives in
+[`desktop/macos/`](desktop/macos/).
+
 ### Manual download
 
 Grab the archive for your platform from the

@@ -70,18 +70,56 @@ describe("artifact publication workflow", () => {
     const tagGuard = steps.find(step => step.name === "Verify tag matches package.json version")!;
     const releaseProbe = steps.find(step => step.name === "Verify GitHub Release exists")!;
     const upload = steps.find(step => step.name === "Upload release assets")!;
-    const publish = steps.find(step => step.name === "Publish GitHub Release")!;
+    const publish = workflow.jobs.publish.steps.find(
+      (step: { name: string }) => step.name === "Publish GitHub Release",
+    )!;
 
     expect(workflow.on.push.tags).toContain("v*");
     expect(tagGuard.run).toContain('expected="v$(jq -r .version package.json)"');
     expect(releaseProbe.run).toContain("gh release view");
     expect(upload.run).toContain("gh release upload");
     expect(upload.run).toContain("--clobber");
-    expect(publish.run).toContain("--draft=false");
     expect(names.indexOf("Smoke-test the linux-x64 binary")).toBeLessThan(names.indexOf("Upload release assets"));
     expect(names.indexOf("Attest build provenance")).toBeLessThan(names.indexOf("Upload release assets"));
-    expect(names.indexOf("Upload release assets")).toBeLessThan(names.indexOf("Publish GitHub Release"));
-    expect(workflow.jobs["update-tap"].needs).toBe("release");
+
+    // Publication is its own job downstream of both asset producers, so the
+    // draft never goes public before the desktop apps had their chance.
+    expect(publish.run).toContain("--draft=false");
+    expect(workflow.jobs.publish.needs).toEqual(["release", "desktop-macos"]);
+    expect(workflow.jobs["update-tap"].needs).toBe("publish");
     expect(workflow.jobs["update-tap"].permissions.contents).toBe("read");
+  });
+
+  test("desktop job gates release attachment on signing and never ships unsigned apps", async () => {
+    const workflow = parseYaml(await read(".github/workflows/release.yml"));
+    const desktop = workflow.jobs["desktop-macos"];
+    const steps = desktop.steps as Array<{ name: string; run?: string; if?: string }>;
+
+    expect(desktop.needs).toBe("release");
+    const signedSteps = steps.filter(step => step.if === "steps.gate.outputs.signing == 'true'");
+    const unsignedSteps = steps.filter(step => step.if === "steps.gate.outputs.signing == 'false'");
+
+    // Everything that touches the GitHub release or notarization is behind
+    // the signing gate; the unsigned path only produces workflow artifacts.
+    for (const step of steps) {
+      const touchesRelease = step.run?.includes("gh release upload") ?? false;
+      if (touchesRelease) {
+        expect(step.if).toBe("steps.gate.outputs.signing == 'true'");
+      }
+    }
+    expect(signedSteps.some(step => step.run?.includes("notarytool submit"))).toBe(true);
+    expect(signedSteps.some(step => step.run?.includes("stapler staple"))).toBe(true);
+    expect(unsignedSteps.some(step => step.name === "Upload unsigned apps as workflow artifacts")).toBe(true);
+    expect(unsignedSteps.every(step => !(step.run ?? "").includes("gh release upload"))).toBe(true);
+  });
+
+  test("tap update regenerates the formula and tolerates cask-less (unsigned) releases", async () => {
+    const workflow = parseYaml(await read(".github/workflows/release.yml"));
+    const tap = workflow.jobs["update-tap"].steps.find(
+      (step: { name: string }) => step.name === "Update Homebrew formula and cask",
+    )!;
+    expect(tap.run).toContain("generate-formula.ts");
+    expect(tap.run).toContain("generate-cask.ts");
+    expect(tap.run).toContain('[ "$cask_status" -ne 2 ]');
   });
 });
