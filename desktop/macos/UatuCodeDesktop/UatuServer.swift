@@ -41,14 +41,19 @@ final class UatuServer {
                 UatuServer.terminateAll()
             }
         }
-        Self.instances.append(self)
+        Self.instances.append(WeakRef(server: self))
+        Self.instances.removeAll { $0.server == nil }
     }
 
-    private static var instances: [UatuServer] = []
+    // Weak registry: windows come and go, and a closed window's UatuServer
+    // must be collectable — a strong array would retain every server (and its
+    // Process/Pipe handles) for the app's lifetime.
+    private struct WeakRef { weak var server: UatuServer? }
+    private static var instances: [WeakRef] = []
 
     private static func terminateAll() {
-        for server in instances {
-            server.process?.terminate()
+        for ref in instances {
+            ref.server?.process?.terminate()
         }
     }
 

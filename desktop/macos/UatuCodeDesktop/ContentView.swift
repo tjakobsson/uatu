@@ -64,6 +64,11 @@ struct ContentView: View {
                 page.load(URLRequest(url: url))
             }
         }
+        .onDisappear {
+            // Closing the window must stop ITS server — quitting the app is
+            // handled separately (willTerminateNotification in UatuServer).
+            server.stop()
+        }
     }
 
     private var launcher: some View {

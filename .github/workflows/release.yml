@@ -140,14 +140,25 @@ jobs:
 
       - name: Determine signing availability
         id: gate
+        # Signing is available only when EVERY secret the signed path needs is
+        # present — a partial set (e.g. a rotated notary key) must fall back to
+        # the unsigned-artifact path, not fail mid-notarization.
         env:
           CERT: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
         run: |
-          if [ -n "$CERT" ]; then
+          if [ -n "$CERT" ] && [ -n "$CERT_PASSWORD" ] && [ -n "$NOTARY_KEY" ] && [ -n "$NOTARY_KEY_ID" ] && [ -n "$NOTARY_ISSUER" ]; then
             echo "signing=true" >> "$GITHUB_OUTPUT"
           else
             echo "signing=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::Developer ID secrets not configured — building ad-hoc signed apps as workflow artifacts; nothing will be attached to the release"
+            if [ -n "$CERT$CERT_PASSWORD$NOTARY_KEY$NOTARY_KEY_ID$NOTARY_ISSUER" ]; then
+              echo "::warning::Developer ID signing secrets are only PARTIALLY configured — falling back to ad-hoc workflow artifacts; nothing will be attached to the release"
+            else
+              echo "::warning::Developer ID secrets not configured — building ad-hoc signed apps as workflow artifacts; nothing will be attached to the release"
+            fi
           fi
 
       - name: Download darwin binaries from the release

@@ -99,6 +99,13 @@ describe("artifact publication workflow", () => {
     const signedSteps = steps.filter(step => step.if === "steps.gate.outputs.signing == 'true'");
     const unsignedSteps = steps.filter(step => step.if === "steps.gate.outputs.signing == 'false'");
 
+    // The gate must see every secret the signed path needs — a partial set
+    // (e.g. rotated notary key) has to fall back to the unsigned path.
+    const gate = steps.find(step => (step as { id?: string }).id === "gate")! as { env?: Record<string, string> };
+    for (const secret of ["MACOS_CERT_P12", "MACOS_CERT_PASSWORD", "NOTARY_KEY", "NOTARY_KEY_ID", "NOTARY_ISSUER"]) {
+      expect(Object.values(gate.env ?? {})).toContain(`\${{ secrets.${secret} }}`);
+    }
+
     // Everything that touches the GitHub release or notarization is behind
     // the signing gate; the unsigned path only produces workflow artifacts.
     for (const step of steps) {

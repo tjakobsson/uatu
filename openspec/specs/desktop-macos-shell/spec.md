@@ -13,7 +13,8 @@ intermediate shell) with the arguments `serve <folder> --no-open
 --exit-on-stdin-close`. Each window SHALL own exactly one server process. The
 app MUST read the child's standard output and treat the first line matching
 `http://…` as the session URL, including its auth token. The app MUST terminate
-its child server processes when the app quits.
+a window's server process when that window closes, and MUST terminate every
+remaining child server process when the app quits.
 
 Because GUI apps inherit launchd's minimal environment while uatu's embedded
 terminal spawns a non-login shell that inherits uatu's, the app MUST resolve
@@ -37,6 +38,11 @@ user binary directories (`/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`).
 - **WHEN** the user opens folder A in one window and folder B in another
 - **THEN** each window supervises its own server process
 - **AND** closing one window's server does not affect the other
+
+#### Scenario: Closing a window stops its server
+- **WHEN** the user closes a window whose server is running
+- **THEN** that window's server process is terminated
+- **AND** servers owned by other windows keep running
 
 #### Scenario: Quitting the app leaves no server behind
 - **WHEN** the user quits the app while servers are running
