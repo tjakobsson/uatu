@@ -61,7 +61,7 @@ cask "uatu-desktop" do
   desc "Desktop app for uatu, the docs-tree watcher with Markdown/AsciiDoc preview"
   homepage "https://github.com/tjakobsson/uatu"
 
-  depends_on macos: ">= :tahoe"
+  depends_on macos: :tahoe
 
   app "UatuCode Desktop.app"
 

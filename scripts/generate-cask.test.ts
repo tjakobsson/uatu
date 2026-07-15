@@ -30,6 +30,12 @@ describe("generate-cask", () => {
     expect(cask).toContain(`sha256 "${ARM_SHA}"`);
     expect(cask).toContain(`sha256 "${X64_SHA}"`);
     expect(cask).toContain('app "UatuCode Desktop.app"');
+    // Symbol form is required: the string comparison form (">= :tahoe") is
+    // deprecated and breaks loading of third-party taps entirely
+    // (https://github.com/Homebrew/brew/issues/22600). The bare symbol
+    // already means "this version or newer".
+    expect(cask).toContain("depends_on macos: :tahoe");
+    expect(cask).not.toContain('">=');
   });
 
   test("refuses to generate from an unsigned release's sums", () => {
