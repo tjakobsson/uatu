@@ -4,6 +4,15 @@ Notable user-facing changes to uatu are documented here. Versions follow
 [Semantic Versioning](https://semver.org/) and are generated from Conventional
 Commits by [Release Please](https://github.com/googleapis/release-please).
 
+## [0.2.0](https://github.com/tjakobsson/uatu/compare/v0.1.1...v0.2.0) (2026-07-15)
+
+
+### Features
+
+* **desktop:** add UatuCode Desktop macOS wrapper and release pipeline ([#123](https://github.com/tjakobsson/uatu/issues/123)) ([7a81b9b](https://github.com/tjakobsson/uatu/commit/7a81b9b4ba2743c4b10cbc92505b706091adac8e))
+* **preview:** add file facts strip to Source and Diff views ([#117](https://github.com/tjakobsson/uatu/issues/117)) ([f92aa32](https://github.com/tjakobsson/uatu/commit/f92aa32bf3759aa1f6f40f32be8e250b7f336f98))
+* **preview:** show file facts in rendered view ([#121](https://github.com/tjakobsson/uatu/issues/121)) ([1a8ea85](https://github.com/tjakobsson/uatu/commit/1a8ea8518805efb750c342fbbf39a6091bb3b264))
+
 ## [0.1.1](https://github.com/tjakobsson/uatu/compare/v0.1.0...v0.1.1) (2026-07-11)
 
 ### Bug Fixes
