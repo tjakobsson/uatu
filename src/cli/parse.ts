@@ -30,6 +30,11 @@ export type WatchOptions = {
   // UATU_HEARTBEAT_TIMEOUT_MS is set to in the env"; a number forces that
   // value over the env.
   watchdogTimeoutMs?: number;
+  // Exit cleanly when stdin reaches EOF. For supervising wrapper processes
+  // (e.g. the desktop app) holding our stdin pipe: if the supervisor dies —
+  // even by crash — the pipe closes and the server shuts itself down instead
+  // of running orphaned.
+  exitOnStdinClose: boolean;
 };
 
 export type ParsedCommand =
@@ -55,6 +60,7 @@ Options:
   --force                 Serve non-git paths anyway; indexing may be slow
   -p, --port              Bind the local server to a specific port
   --debug                 Record verbose 1Hz counter history under \$XDG_CACHE_HOME/uatu (or ~/.cache/uatu)
+  --exit-on-stdin-close   Shut down when stdin reaches EOF (for supervising wrappers, so a crashed supervisor cannot orphan the server)
   --no-watchdog           Suppress the companion watchdog subprocess (escape hatch — leaves no recovery on freeze)
   --watchdog-timeout <ms> Override the heartbeat staleness threshold (default: 30000)
   -h, --help              Show help
@@ -99,6 +105,7 @@ export function parseCommand(
   let debug = false;
   let watchdogEnabled = true;
   let watchdogTimeoutMs: number | undefined;
+  let exitOnStdinClose = false;
   const rootPaths: string[] = [];
 
   for (let index = 0; index < rest.length; index += 1) {
@@ -160,6 +167,11 @@ export function parseCommand(
       continue;
     }
 
+    if (arg === "--exit-on-stdin-close") {
+      exitOnStdinClose = true;
+      continue;
+    }
+
     if (arg === "--watchdog-timeout" || arg.startsWith("--watchdog-timeout=")) {
       let value: string | undefined;
       if (arg === "--watchdog-timeout") {
@@ -209,6 +221,7 @@ export function parseCommand(
       debug,
       watchdogEnabled,
       watchdogTimeoutMs,
+      exitOnStdinClose,
     },
   };
 }

@@ -97,6 +97,24 @@ src/
 
 Unit tests are colocated with their subjects (`foo.ts` and `foo.test.ts` sit in the same folder). E2E tests live in `tests/e2e/` under feature-named files (`mermaid.e2e.ts`, `sidebar.e2e.ts`, `document-tree.e2e.ts`, etc.); the Playwright `webServer` is `tests/e2e/server.ts`, not in `src/`.
 
+### Outside `src/`: the desktop wrapper
+
+`desktop/macos/` holds **UatuCode Desktop**, a SwiftUI app that supervises a
+bundled copy of the compiled `uatu` binary — one `uatu serve <folder> --no-open
+--exit-on-stdin-close` child per window, its tokened URL loaded in a WebView.
+The wrapper↔CLI contract is deliberately thin:
+
+- **URL on stdout** — with a piped (non-TTY) stdout the CLI prints exactly one
+  line, the tokened session URL; the app parses that.
+- **SIGTERM** — clean quit path; the CLI shuts down gracefully.
+- **`--exit-on-stdin-close`** — crash backstop; the app holds the child's stdin
+  pipe for its whole life, so if the app dies without running handlers the
+  server sees EOF and exits itself instead of running orphaned.
+
+Nothing else crosses the boundary — the browser remains a first-class client,
+and the desktop app rides the same release train (see
+`.github/workflows/release.yml`, jobs `desktop-macos`/`update-tap`).
+
 ## Request lifecycle
 
 A representative path: the SPA needs the rendered HTML for `guides/setup.md`.

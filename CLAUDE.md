@@ -55,6 +55,14 @@ src/
 └── shared/         html, types, license-check, version
 ```
 
+Outside `src/`: `desktop/macos/` is **UatuCode Desktop**, the SwiftUI macOS
+wrapper (Xcode project `UatuCodeDesktop`). It spawns the bundled `uatu serve
+<folder> --no-open --exit-on-stdin-close` per window and loads the tokened
+URL from stdout in a WebView; the wrapper↔CLI contract (URL on stdout,
+SIGTERM, stdin-EOF backstop) is documented in `ARCHITECTURE.md`. Its CI is
+path-filtered (`.github/workflows/desktop-ci.yml`); local builds need
+`bun run build` first (the app embeds `dist/uatu`, no PATH fallback).
+
 ## Conventions
 
 - **`src/` is product code only.** Test harnesses live in `tests/`. The

@@ -117,18 +117,189 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
+  desktop-macos:
+    # Builds UatuCode Desktop for both architectures, embedding the darwin
+    # binaries the release job just uploaded. Signing and notarization are
+    # gated on the Developer ID secrets: with them, signed+stapled app
+    # archives join the release and SHA256SUMS; without them (pre-Apple-
+    # enrollment) ad-hoc builds land as workflow artifacts only — an
+    # unsigned quarantined .app is a support trap, so it never reaches
+    # the release itself.
+    needs: release
+    # The app's deployment target is macOS 26 (SwiftUI WebPage/WebView).
+    runs-on: macos-26
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Determine signing availability
+        id: gate
+        # Signing is available only when EVERY secret the signed path needs is
+        # present — a partial set (e.g. a rotated notary key) must fall back to
+        # the unsigned-artifact path, not fail mid-notarization.
+        env:
+          CERT: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
+        run: |
+          if [ -n "$CERT" ] && [ -n "$CERT_PASSWORD" ] && [ -n "$NOTARY_KEY" ] && [ -n "$NOTARY_KEY_ID" ] && [ -n "$NOTARY_ISSUER" ]; then
+            echo "signing=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "signing=false" >> "$GITHUB_OUTPUT"
+            if [ -n "$CERT$CERT_PASSWORD$NOTARY_KEY$NOTARY_KEY_ID$NOTARY_ISSUER" ]; then
+              echo "::warning::Developer ID signing secrets are only PARTIALLY configured — falling back to ad-hoc workflow artifacts; nothing will be attached to the release"
+            else
+              echo "::warning::Developer ID secrets not configured — building ad-hoc signed apps as workflow artifacts; nothing will be attached to the release"
+            fi
+          fi
+
+      - name: Download darwin binaries from the release
+        run: |
+          gh release download "$GITHUB_REF_NAME" --pattern "uatu-darwin-*.zip"
+          unzip -o uatu-darwin-arm64.zip -d dist/darwin-arm64
+          unzip -o uatu-darwin-x64.zip -d dist/darwin-x64
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Build UatuCode Desktop for both architectures
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          for arch in arm64 x64; do
+            xcode_arch="$arch"; [ "$arch" = "x64" ] && xcode_arch="x86_64"
+            xcodebuild \
+              -project desktop/macos/UatuCodeDesktop.xcodeproj \
+              -scheme UatuCodeDesktop \
+              -configuration Release \
+              -derivedDataPath "desktop/macos/build-$arch" \
+              ARCHS="$xcode_arch" ONLY_ACTIVE_ARCH=NO \
+              UATU_BINARY="$PWD/dist/darwin-$arch/uatu" \
+              MARKETING_VERSION="$version" \
+              build
+          done
+
+      - name: Import Developer ID certificate
+        if: steps.gate.outputs.signing == 'true'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/build.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" login.keychain
+          identity="$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(Developer ID Application[^"]*\)".*/\1/p' | head -1)"
+          if [ -z "$identity" ]; then
+            echo "::error::No Developer ID Application identity found in the imported certificate" >&2
+            exit 1
+          fi
+          echo "SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
+
+      - name: Sign, notarize, and staple
+        if: steps.gate.outputs.signing == 'true'
+        env:
+          NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
+        run: |
+          echo "$NOTARY_KEY" > "$RUNNER_TEMP/notary-key.p8"
+          mkdir -p dist/release
+          for arch in arm64 x64; do
+            app="desktop/macos/build-$arch/Build/Products/Release/UatuCode Desktop.app"
+            # The embedded Bun binary carries the JIT entitlement; the app
+            # itself needs none. Nested-first signing order is required.
+            codesign --force --options runtime --timestamp \
+              --entitlements desktop/macos/uatu-jit.entitlements \
+              --sign "$SIGNING_IDENTITY" "$app/Contents/Resources/uatu"
+            codesign --force --options runtime --timestamp \
+              --sign "$SIGNING_IDENTITY" "$app"
+            ditto -c -k --keepParent "$app" "$RUNNER_TEMP/notarize-$arch.zip"
+            xcrun notarytool submit "$RUNNER_TEMP/notarize-$arch.zip" \
+              --key "$RUNNER_TEMP/notary-key.p8" \
+              --key-id "$NOTARY_KEY_ID" \
+              --issuer "$NOTARY_ISSUER" \
+              --wait
+            xcrun stapler staple "$app"
+            ditto -c -k --keepParent "$app" "dist/release/UatuCode-Desktop-$arch.zip"
+          done
+          rm "$RUNNER_TEMP/notary-key.p8"
+
+      - name: Attest build provenance
+        if: steps.gate.outputs.signing == 'true'
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: dist/release/UatuCode-Desktop-*
+
+      - name: Upload app archives and updated checksums to the release
+        if: steps.gate.outputs.signing == 'true'
+        run: |
+          gh release download "$GITHUB_REF_NAME" --pattern SHA256SUMS --output dist/release/SHA256SUMS.orig
+          # Drop stale app entries (rerun safety), then append this build's.
+          grep -v "UatuCode-Desktop-" dist/release/SHA256SUMS.orig > dist/release/SHA256SUMS || true
+          (cd dist/release && shasum -a 256 UatuCode-Desktop-*.zip >> SHA256SUMS && cat SHA256SUMS)
+          gh release upload "$GITHUB_REF_NAME" --clobber \
+            dist/release/UatuCode-Desktop-*.zip dist/release/SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Package ad-hoc builds as workflow artifacts
+        if: steps.gate.outputs.signing == 'false'
+        run: |
+          mkdir -p dist/unsigned
+          for arch in arm64 x64; do
+            ditto -c -k --keepParent \
+              "desktop/macos/build-$arch/Build/Products/Release/UatuCode Desktop.app" \
+              "dist/unsigned/UatuCode-Desktop-$arch-unsigned.zip"
+          done
+          echo "### UatuCode Desktop: unsigned build" >> "$GITHUB_STEP_SUMMARY"
+          echo "Developer ID secrets are not configured; ad-hoc signed apps were uploaded as workflow artifacts and NOT attached to the release." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload unsigned apps as workflow artifacts
+        if: steps.gate.outputs.signing == 'false'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: uatucode-desktop-unsigned
+          path: dist/unsigned/UatuCode-Desktop-*.zip
+          retention-days: 14
+
+  publish:
+    # The draft release goes public only after every asset that belongs on
+    # it — including the desktop apps, when signing is configured — is in
+    # place. The desktop job succeeds (without attaching anything) when
+    # secrets are absent, so publication is never blocked pre-enrollment.
+    needs: [release, desktop-macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
       - name: Publish GitHub Release
-        run: gh release edit "$GITHUB_REF_NAME" --draft=false
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --repo "$GITHUB_REPOSITORY"
         env:
           GH_TOKEN: ${{ github.token }}
 
   update-tap:
-    # Regenerates Formula/uatu.rb in tjakobsson/homebrew-tap from the
-    # published release's SHA256SUMS. Reads the sums back from the release
-    # (not the build directory) so a failed run can be re-run later and
-    # still produce the correct formula. A failure here never affects the
+    # Regenerates Formula/uatu.rb — and, when the release carries signed
+    # desktop app archives, Casks/uatu-desktop.rb — in tjakobsson/homebrew-tap
+    # from the published release's SHA256SUMS. Reads the sums back from the
+    # release (not the build directory) so a failed run can be re-run later
+    # and still produce the correct output. A failure here never affects the
     # already-published release.
-    needs: release
+    needs: publish
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -148,20 +319,29 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
-      - name: Update Homebrew formula
+      - name: Update Homebrew formula and cask
         # HOMEBREW_TAP_TOKEN is a fine-grained PAT with contents:write on
-        # tjakobsson/homebrew-tap only.
+        # tjakobsson/homebrew-tap only. The cask generator exits 2 when the
+        # release has no signed app archives (pre-Apple-enrollment releases);
+        # the cask is simply left at its previous version then.
         run: |
           version="${GITHUB_REF_NAME#v}"
           git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/tjakobsson/homebrew-tap.git" tap
-          mkdir -p tap/Formula
+          mkdir -p tap/Formula tap/Casks
           bun run scripts/generate-formula.ts --version "$version" --sums SHA256SUMS --out tap/Formula/uatu.rb
+          set +e
+          bun run scripts/generate-cask.ts --version "$version" --sums SHA256SUMS --out tap/Casks/uatu-desktop.rb
+          cask_status=$?
+          set -e
+          if [ "$cask_status" -ne 0 ] && [ "$cask_status" -ne 2 ]; then
+            exit "$cask_status"
+          fi
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/uatu.rb
+          git add Formula/uatu.rb Casks/uatu-desktop.rb 2>/dev/null || git add Formula/uatu.rb
           if git diff --cached --quiet; then
-            echo "Formula already up to date for uatu $version"
+            echo "Tap already up to date for uatu $version"
           else
             git commit -m "uatu $version"
             git push origin HEAD

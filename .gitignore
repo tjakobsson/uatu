@@ -4,3 +4,13 @@ dist/
 playwright-report/
 test-results/
 *.bun-build
+
+# macOS Finder metadata
+.DS_Store
+
+# Claude Code per-user settings (skills in .claude/skills/ are committed)
+.claude/settings.local.json
+
+# Xcode build output (local `build/`, CI `build-<arch>/`) and per-user state
+desktop/macos/build*/
+xcuserdata/
