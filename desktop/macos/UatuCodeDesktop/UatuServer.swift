@@ -28,19 +28,11 @@ final class UatuServer {
     private var process: Process?
     private var stdinPipe: Pipe?
     private var outputBuffer = ""
+    private weak var owningWindow: NSWindow?
+    private var windowCloseObserver: NSObjectProtocol?
 
     init() {
-        NotificationCenter.default.addObserver(
-            forName: NSApplication.willTerminateNotification,
-            object: nil,
-            queue: .main
-        ) { _ in
-            // uatu handles SIGTERM and shuts down cleanly, so don't leave
-            // an orphaned server behind when the app quits.
-            MainActor.assumeIsolated {
-                UatuServer.terminateAll()
-            }
-        }
+        Self.installTerminationObserver()
         Self.instances.append(WeakRef(server: self))
         Self.instances.removeAll { $0.server == nil }
     }
@@ -50,11 +42,53 @@ final class UatuServer {
     // Process/Pipe handles) for the app's lifetime.
     private struct WeakRef { weak var server: UatuServer? }
     private static var instances: [WeakRef] = []
+    private static var terminationObserver: NSObjectProtocol?
+
+    private static func installTerminationObserver() {
+        guard terminationObserver == nil else { return }
+        terminationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            // uatu handles SIGTERM and shuts down cleanly, so don't leave
+            // an orphaned server behind when the app quits.
+            MainActor.assumeIsolated {
+                terminateAll()
+            }
+        }
+    }
 
     private static func terminateAll() {
         for ref in instances {
             ref.server?.process?.terminate()
         }
+    }
+
+    func bind(to window: NSWindow) {
+        guard owningWindow !== window else { return }
+        if let windowCloseObserver {
+            NotificationCenter.default.removeObserver(windowCloseObserver)
+        }
+        owningWindow = window
+        windowCloseObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.owningWindowDidClose()
+            }
+        }
+    }
+
+    private func owningWindowDidClose() {
+        stop()
+        if let windowCloseObserver {
+            NotificationCenter.default.removeObserver(windowCloseObserver)
+            self.windowCloseObserver = nil
+        }
+        owningWindow = nil
     }
 
     func start(folder: URL) {
