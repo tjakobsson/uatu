@@ -39,11 +39,11 @@
 
 ## 4. Verify and wrap up
 
-- [ ] 4.1 Manually verify each spec scenario: first-link opens split,
+- [x] 4.1 Manually verify each spec scenario: first-link opens split,
       dedup focuses tab, ⌘-click escapes, opt-out restores system
       behavior, terminal OSC 8 links route to the split, mailto goes to
       system, login survives relaunch, tabs do not
-- [ ] 4.2 Confirm no regressions in native window tabs (`⌘1`–`⌘9`,
+- [x] 4.2 Confirm no regressions in native window tabs (`⌘1`–`⌘9`,
       Control-Tab, Window menu) with the split open
 - [x] 4.3 Build desktop app locally (`bun run build` + Xcode build) and
       update `ARCHITECTURE.md`'s wrapper section with the split-browser
