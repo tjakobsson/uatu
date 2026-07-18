@@ -70,6 +70,19 @@ The app is a companion, not a replacement — the CLI and browser workflow
 above works exactly the same with or without it. Desktop source lives in
 [`desktop/macos/`](desktop/macos/).
 
+Want the bleeding edge instead? A signed build of `main` is published
+nightly (when `main` has changed) to the rolling
+[`edge` prerelease](https://github.com/tjakobsson/uatu/releases/tag/edge):
+
+```bash
+brew install --cask tjakobsson/tap/uatu-desktop@edge
+brew upgrade              # follows the nightly channel
+```
+
+Edge is exactly what's merged — expect occasional rough edges. Switch
+back with `brew uninstall --cask uatu-desktop@edge && brew install --cask
+tjakobsson/tap/uatu-desktop`.
+
 ### Manual download
 
 Grab the archive for your platform from the
