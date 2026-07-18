@@ -5,7 +5,8 @@ name: Desktop Edge
 # rolling `edge` prerelease that Casks/uatu-desktop@edge.rb follows.
 # Skips when main hasn't moved since the last edge build, and never
 # publishes unsigned builds — with signing secrets unavailable the run
-# warns and stops instead of shipping a quarantined app.
+# FAILS (red nightly) so a bad secret rotation can't silently stop the
+# channel.
 
 on:
   schedule:
@@ -48,12 +49,14 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Determine signing availability
+      - name: Require signing secrets
         id: gate
         if: steps.guard.outputs.changed == 'true'
         # Unlike releases there is no unsigned-artifact fallback: edge
         # exists to be installed, and an unsigned quarantined app is a
-        # support trap — so missing secrets stop the run entirely.
+        # support trap. Missing secrets FAIL the run (red nightly) rather
+        # than skipping green, so a bad secret rotation surfaces instead
+        # of silently stopping the channel.
         env:
           CERT: ${{ secrets.MACOS_CERT_P12 }}
           CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
@@ -61,25 +64,23 @@ jobs:
           NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
           NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
         run: |
-          if [ -n "$CERT" ] && [ -n "$CERT_PASSWORD" ] && [ -n "$NOTARY_KEY" ] && [ -n "$NOTARY_KEY_ID" ] && [ -n "$NOTARY_ISSUER" ]; then
-            echo "signing=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "signing=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::Developer ID signing secrets unavailable — edge builds are only distributed signed; skipping this run"
+          if [ -z "$CERT" ] || [ -z "$CERT_PASSWORD" ] || [ -z "$NOTARY_KEY" ] || [ -z "$NOTARY_KEY_ID" ] || [ -z "$NOTARY_ISSUER" ]; then
+            echo "::error::Developer ID signing secrets unavailable — edge builds are only distributed signed" >&2
+            exit 1
           fi
 
       - name: Set up Bun
-        if: steps.guard.outputs.changed == 'true' && steps.gate.outputs.signing == 'true'
+        if: steps.guard.outputs.changed == 'true'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.3.14
 
       - name: Install dependencies
-        if: steps.guard.outputs.changed == 'true' && steps.gate.outputs.signing == 'true'
+        if: steps.guard.outputs.changed == 'true'
         run: bun install --frozen-lockfile
 
       - name: Compile darwin binaries
-        if: steps.guard.outputs.changed == 'true' && steps.gate.outputs.signing == 'true'
+        if: steps.guard.outputs.changed == 'true'
         run: |
           for target in darwin-arm64 darwin-x64; do
             bun run scripts/build.ts --target="bun-$target" --outfile="dist/$target/uatu"
@@ -87,18 +88,19 @@ jobs:
 
       - name: Compute edge version
         id: version
-        if: steps.guard.outputs.changed == 'true' && steps.gate.outputs.signing == 'true'
-        # <base>-edge.<date>.<sha> sorts between the previous release and
-        # the next one, so brew upgrade always moves forward — including
-        # from edge to the next stable.
+        if: steps.guard.outputs.changed == 'true'
+        # <base>-edge.<utc-timestamp>.<sha> sorts between the previous
+        # release and the next one, and the full timestamp keeps same-day
+        # builds ordered too (short SHAs don't sort by commit order), so
+        # brew upgrade always moves forward — including edge → next stable.
         run: |
           base="$(bun -e 'console.log(require("./package.json").version)')"
-          version="$base-edge.$(date -u +%Y%m%d).$(git rev-parse --short HEAD)"
+          version="$base-edge.$(date -u +%Y%m%d%H%M%S).$(git rev-parse --short HEAD)"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "edge version: $version"
 
       - name: Build UatuCode Desktop for both architectures
-        if: steps.guard.outputs.changed == 'true' && steps.gate.outputs.signing == 'true'
+        if: steps.guard.outputs.changed == 'true'
         run: |
           for arch in arm64 x64; do
             xcode_arch="$arch"; [ "$arch" = "x64" ] && xcode_arch="x86_64"
@@ -114,7 +116,7 @@ jobs:
           done
 
       - name: Sign, notarize, and staple
-        if: steps.guard.outputs.changed == 'true' && steps.gate.outputs.signing == 'true'
+        if: steps.guard.outputs.changed == 'true'
         uses: ./.github/actions/sign-notarize-app
         with:
           cert-p12: ${{ secrets.MACOS_CERT_P12 }}
@@ -127,14 +129,14 @@ jobs:
           output-dir: dist/release
 
       - name: Attest build provenance
-        if: steps.guard.outputs.changed == 'true' && steps.gate.outputs.signing == 'true'
+        if: steps.guard.outputs.changed == 'true'
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: dist/release/UatuCode-Desktop-*
 
       - name: Publish rolling edge prerelease
         id: publish
-        if: steps.guard.outputs.changed == 'true' && steps.gate.outputs.signing == 'true'
+        if: steps.guard.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}

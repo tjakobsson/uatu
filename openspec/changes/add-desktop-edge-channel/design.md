@@ -22,9 +22,10 @@ publishes to a rolling prerelease instead of a versioned one.
 **Non-Goals:**
 - No `@edge` CLI formula; no Linux/Windows edge artifacts.
 - No Sparkle/in-app auto-update.
-- No unsigned edge distribution — if signing secrets are missing, edge
-  publishing is skipped (unlike releases, there is no artifact fallback:
-  nobody should dogfood a quarantined app).
+- No unsigned edge distribution — if signing secrets are missing, the run
+  fails loudly (unlike releases, there is no artifact fallback: nobody
+  should dogfood a quarantined app, and a silent green skip would let a
+  bad secret rotation stop the channel unnoticed).
 
 ## Decisions
 
@@ -47,11 +48,13 @@ nightly releases to garbage-collect, and the tag always answers "which
 commit is edge?". Alternative considered — dated releases (`edge-20260718`)
 — rejected: unbounded clutter and the cask would need URL rewrites anyway.
 
-### D3: Version scheme `<base>-edge.<YYYYMMDD>.<shortsha>`
+### D3: Version scheme `<base>-edge.<utc-timestamp>.<shortsha>`
 
 `base` is the version in `package.json` (what the next release will be
-based on). Date makes the version monotonic so Homebrew upgrade logic
-always moves forward; the sha ties the build to its commit. Stamped into
+based on). A second-precision UTC timestamp makes the version monotonic —
+including multiple builds on one day, where a date alone would leave
+ordering to the unordered short sha — so Homebrew upgrade logic always
+moves forward; the sha ties the build to its commit. Stamped into
 `MARKETING_VERSION` and the cask `version`. Edge sorts as a prerelease of
 `base`, so moving from edge to the next stable release also upgrades
 cleanly.

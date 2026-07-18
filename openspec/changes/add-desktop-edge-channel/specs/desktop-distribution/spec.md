@@ -3,7 +3,7 @@
 ## ADDED Requirements
 
 ### Requirement: A nightly edge workflow builds signed desktop apps from main
-A scheduled workflow (nightly cron plus manual `workflow_dispatch`) SHALL build UatuCode Desktop from `main` for both architectures using the same embed/sign/notarize/staple pipeline as releases, and SHALL exit early without building when `main` has not moved since the last published edge build. When Developer ID signing secrets are unavailable the workflow MUST skip publishing entirely — unsigned edge builds are never distributed.
+A scheduled workflow (nightly cron plus manual `workflow_dispatch`) SHALL build UatuCode Desktop from `main` for both architectures using the same embed/sign/notarize/staple pipeline as releases, and SHALL exit early without building when `main` has not moved since the last published edge build. When Developer ID signing secrets are unavailable the workflow MUST fail without publishing anything — unsigned edge builds are never distributed, and the failure is loud so a bad secret rotation cannot silently stop the channel.
 
 #### Scenario: main moved overnight
 
@@ -18,10 +18,10 @@ A scheduled workflow (nightly cron plus manual `workflow_dispatch`) SHALL build 
 #### Scenario: signing secrets missing
 
 - **WHEN** any Developer ID or notary secret is absent
-- **THEN** the workflow publishes nothing and surfaces a warning
+- **THEN** the run fails with an error and publishes nothing
 
 ### Requirement: Edge builds publish to a rolling prerelease with monotonic versions
-Edge builds SHALL publish to a single GitHub prerelease with the fixed tag `edge`: the tag moves to the built commit, assets (`UatuCode-Desktop-arm64.zip`, `UatuCode-Desktop-x64.zip`, `SHA256SUMS`) are replaced in place, and the release records the source commit. The stamped version SHALL be `<base>-edge.<YYYYMMDD>.<shortsha>` (base from `package.json`) so successive edge builds compare as increasing versions and the next stable release compares higher than any of its edge builds.
+Edge builds SHALL publish to a single GitHub prerelease with the fixed tag `edge`: the tag moves to the built commit, assets (`UatuCode-Desktop-arm64.zip`, `UatuCode-Desktop-x64.zip`, `SHA256SUMS`) are replaced in place, and the release records the source commit. The stamped version SHALL be `<base>-edge.<utc-timestamp>.<shortsha>` (base from `package.json`, timestamp with second precision) so successive edge builds — including several on the same day — compare as increasing versions and the next stable release compares higher than any of its edge builds.
 
 #### Scenario: Assets replaced in place
 

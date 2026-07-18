@@ -16,10 +16,11 @@ without cloning the repo.
   moved since the last edge build.
 - Builds are **signed, notarized, and stapled** with the existing
   Developer ID pipeline; when signing secrets are absent the workflow
-  skips publishing entirely (no unsigned edge builds ever ship).
+  fails loudly without publishing (no unsigned edge builds ever ship,
+  and a bad secret rotation can't silently stop the channel).
 - Artifacts land on a **rolling `edge` prerelease** (fixed tag, assets
   replaced each run, marked prerelease so it never shadows real releases).
-- Version stamped as `<base>-edge.<YYYYMMDD>.<shortsha>` so Homebrew sees
+- Version stamped as `<base>-edge.<utc-timestamp>.<shortsha>` so Homebrew sees
   a monotonically increasing version and `brew upgrade` always moves
   forward.
 - The tap gains an opt-in **`uatu-desktop@edge` cask**;

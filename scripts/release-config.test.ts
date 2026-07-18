@@ -114,10 +114,41 @@ describe("artifact publication workflow", () => {
         expect(step.if).toBe("steps.gate.outputs.signing == 'true'");
       }
     }
-    expect(signedSteps.some(step => step.run?.includes("notarytool submit"))).toBe(true);
-    expect(signedSteps.some(step => step.run?.includes("stapler staple"))).toBe(true);
+    // The notarize/staple shell lives in the composite action shared with
+    // the desktop-edge workflow; the gated step must call it, and the
+    // action itself must still notarize and staple.
+    expect(
+      signedSteps.some(step => (step as { uses?: string }).uses === "./.github/actions/sign-notarize-app"),
+    ).toBe(true);
+    const action = parseYaml(await read(".github/actions/sign-notarize-app/action.yml"));
+    const actionShell = (action.runs.steps as Array<{ run?: string }>).map(step => step.run ?? "").join("\n");
+    expect(actionShell).toContain("notarytool submit");
+    expect(actionShell).toContain("stapler staple");
     expect(unsignedSteps.some(step => step.name === "Upload unsigned apps as workflow artifacts")).toBe(true);
     expect(unsignedSteps.every(step => !(step.run ?? "").includes("gh release upload"))).toBe(true);
+  });
+
+  test("edge workflow fails without secrets, orders versions by timestamp, and gates the tap on publishing", async () => {
+    const workflow = parseYaml(await read(".github/workflows/desktop-edge.yml"));
+    const steps = workflow.jobs.build.steps as Array<{ id?: string; run?: string; env?: Record<string, string> }>;
+
+    // No unsigned fallback: missing secrets must fail the run loudly, not
+    // skip green, so a bad secret rotation surfaces.
+    const gate = steps.find(step => step.id === "gate")!;
+    for (const secret of ["MACOS_CERT_P12", "MACOS_CERT_PASSWORD", "NOTARY_KEY", "NOTARY_KEY_ID", "NOTARY_ISSUER"]) {
+      expect(Object.values(gate.env ?? {})).toContain(`\${{ secrets.${secret} }}`);
+    }
+    expect(gate.run).toContain("exit 1");
+
+    // Second-precision timestamp keeps same-day builds monotonic; short
+    // SHAs alone don't sort by commit order.
+    const version = steps.find(step => step.id === "version")!;
+    expect(version.run).toContain("%Y%m%d%H%M%S");
+
+    // The tap only updates after a successful publish.
+    expect(workflow.jobs["update-tap"].needs).toBe("build");
+    expect(workflow.jobs["update-tap"].if).toBe("needs.build.outputs.published == 'true'");
+    expect(workflow.jobs["update-tap"].permissions.contents).toBe("read");
   });
 
   test("tap update regenerates the formula and tolerates cask-less (unsigned) releases", async () => {

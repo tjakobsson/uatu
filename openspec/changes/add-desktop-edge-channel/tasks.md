@@ -16,8 +16,8 @@
       `main` HEAD to the commit recorded on the `edge` release
 - [x] 2.2 Build darwin binaries from source (`bun run build` per arch),
       build both app archs with `MARKETING_VERSION`
-      `<base>-edge.<YYYYMMDD>.<shortsha>`, sign via the composite action;
-      gate on secret availability (skip publishing, warn, when absent)
+      `<base>-edge.<utc-timestamp>.<shortsha>`, sign via the composite action;
+      gate on secret availability (fail the run when absent)
 - [x] 2.3 Publish: move the `edge` tag to the built commit, upsert the
       prerelease with `--clobber`ed assets + SHA256SUMS, record commit and
       date in the release body
