@@ -84,6 +84,18 @@ extension WebViewHost: WKNavigationDelegate {
             decisionHandler(.cancel)
             return
         }
+        // Non-web schemes (mailto:, editor schemes) aren't _blank-marked, so
+        // they arrive as main-frame link clicks. Allowing one starts a
+        // provisional navigation WebKit can never commit, which aborts the
+        // SPA's live-reload stream — cancel and route to the system instead.
+        if navigationAction.navigationType == .linkActivated,
+           let url = navigationAction.request.url,
+           let scheme = url.scheme?.lowercased(),
+           scheme != "http", scheme != "https" {
+            ExternalLinkRouter.open(url)
+            decisionHandler(.cancel)
+            return
+        }
         decisionHandler(.allow)
     }
 }

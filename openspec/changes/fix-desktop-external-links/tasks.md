@@ -26,12 +26,12 @@
 - [x] 3.2 Add Back (`⌘[`) and Forward (`⌘]`) menu commands in
       `UatuCodeDesktopCommands`, disabled when unavailable or no server runs
 - [x] 3.3 Add back/forward toolbar buttons to the window
-- [ ] 3.4 Manually verify: selecting doc A then doc B then Back restores A
+- [x] 3.4 Manually verify: selecting doc A then doc B then Back restores A
       (SPA `popstate` path), Forward restores B, controls disable at edges
 
 ## 4. Wrap up
 
-- [ ] 4.1 Run desktop CI checks locally (build via `bun run build` +
+- [x] 4.1 Run desktop CI checks locally (build via `bun run build` +
       Xcode build) and confirm no regressions in tab/window behavior
 - [x] 4.2 Update `ARCHITECTURE.md` wrapper section if the hosting view
       changed (WebPage → WKWebView representable)
