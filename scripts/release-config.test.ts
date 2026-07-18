@@ -114,10 +114,60 @@ describe("artifact publication workflow", () => {
         expect(step.if).toBe("steps.gate.outputs.signing == 'true'");
       }
     }
-    expect(signedSteps.some(step => step.run?.includes("notarytool submit"))).toBe(true);
-    expect(signedSteps.some(step => step.run?.includes("stapler staple"))).toBe(true);
+    // The notarize/staple shell lives in the composite action shared with
+    // the desktop-edge workflow; the gated step must call it, and the
+    // action itself must still notarize and staple.
+    expect(
+      signedSteps.some(step => (step as { uses?: string }).uses === "./.github/actions/sign-notarize-app"),
+    ).toBe(true);
+    const action = parseYaml(await read(".github/actions/sign-notarize-app/action.yml"));
+    const actionShell = (action.runs.steps as Array<{ run?: string }>).map(step => step.run ?? "").join("\n");
+    expect(actionShell).toContain("notarytool submit");
+    expect(actionShell).toContain("stapler staple");
     expect(unsignedSteps.some(step => step.name === "Upload unsigned apps as workflow artifacts")).toBe(true);
     expect(unsignedSteps.every(step => !(step.run ?? "").includes("gh release upload"))).toBe(true);
+  });
+
+  test("edge workflow fails without secrets, orders versions by timestamp, and gates the tap on publishing", async () => {
+    const workflow = parseYaml(await read(".github/workflows/desktop-edge.yml"));
+    const steps = workflow.jobs.build.steps as Array<{ id?: string; run?: string; env?: Record<string, string> }>;
+
+    // No unsigned fallback: missing secrets must fail the run loudly, not
+    // skip green, so a bad secret rotation surfaces.
+    const gate = steps.find(step => step.id === "gate")!;
+    for (const secret of ["MACOS_CERT_P12", "MACOS_CERT_PASSWORD", "NOTARY_KEY", "NOTARY_KEY_ID", "NOTARY_ISSUER"]) {
+      expect(Object.values(gate.env ?? {})).toContain(`\${{ secrets.${secret} }}`);
+    }
+    expect(gate.run).toContain("exit 1");
+
+    // Second-precision timestamp keeps same-day builds monotonic; short
+    // SHAs alone don't sort by commit order.
+    const version = steps.find(step => step.id === "version")!;
+    expect(version.run).toContain("%Y%m%d%H%M%S");
+
+    // The guard must verify assets, not just the tag: gh release create
+    // makes the tag itself on first publication, so a tag-only check
+    // would let a failed inaugural upload block every retry.
+    const guard = steps.find(step => step.id === "guard")!;
+    expect(guard.run).toContain("--json assets");
+
+    // Assets before tag: the skip guard keys on the tag, so a failed
+    // upload must leave the old tag for the next run to retry.
+    const publish = steps.find(step => step.id === "publish")!;
+    expect(publish.run!.indexOf("gh release upload")).toBeGreaterThan(-1);
+    expect(publish.run!.indexOf("git push -f origin edge")).toBeGreaterThan(
+      publish.run!.indexOf("gh release upload"),
+    );
+
+    // The tap job reconciles on EVERY successful run (no publish gate) so
+    // a transiently failed tap push self-heals without a rebuild; it
+    // reads the version from the release's own VERSION asset.
+    expect(workflow.jobs["update-tap"].needs).toBe("build");
+    expect(workflow.jobs["update-tap"].if).toBeUndefined();
+    expect(workflow.jobs["update-tap"].permissions.contents).toBe("read");
+    const tapSteps = workflow.jobs["update-tap"].steps as Array<{ run?: string }>;
+    expect(tapSteps.some(step => step.run?.includes("--pattern VERSION"))).toBe(true);
+    expect(guard.run).toContain("VERSION");
   });
 
   test("tap update regenerates the formula and tolerates cask-less (unsigned) releases", async () => {

@@ -1,0 +1,230 @@
+name: Desktop Edge
+
+# Nightly bleeding-edge channel for UatuCode Desktop: builds main with the
+# same embed/sign/notarize pipeline as releases and publishes to the
+# rolling `edge` prerelease that Casks/uatu-desktop@edge.rb follows.
+# Skips when main hasn't moved since the last edge build, and never
+# publishes unsigned builds — with signing secrets unavailable the run
+# FAILS (red nightly) so a bad secret rotation can't silently stop the
+# channel.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: desktop-edge
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out main
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: main
+
+      - name: Skip when the current main is already fully published
+        id: guard
+        # "Published" means the edge tag points at HEAD AND all assets are
+        # on the release — not just the tag. gh release create makes the
+        # tag itself on the first publication, so a tag-only check would
+        # let a failed inaugural (or partial) upload block every retry
+        # until main moves again.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          current="$(git rev-parse HEAD)"
+          published="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/edge" --jq .object.sha 2>/dev/null || echo none)"
+          assets="$(gh release view edge --json assets --jq '.assets[].name' 2>/dev/null || true)"
+          complete=true
+          for asset in UatuCode-Desktop-arm64.zip UatuCode-Desktop-x64.zip SHA256SUMS VERSION; do
+            echo "$assets" | grep -qx "$asset" || complete=false
+          done
+          if [ "$current" = "$published" ] && [ "$complete" = true ]; then
+            echo "edge already fully published for $current; nothing to do"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Require signing secrets
+        id: gate
+        if: steps.guard.outputs.changed == 'true'
+        # Unlike releases there is no unsigned-artifact fallback: edge
+        # exists to be installed, and an unsigned quarantined app is a
+        # support trap. Missing secrets FAIL the run (red nightly) rather
+        # than skipping green, so a bad secret rotation surfaces instead
+        # of silently stopping the channel.
+        env:
+          CERT: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
+        run: |
+          if [ -z "$CERT" ] || [ -z "$CERT_PASSWORD" ] || [ -z "$NOTARY_KEY" ] || [ -z "$NOTARY_KEY_ID" ] || [ -z "$NOTARY_ISSUER" ]; then
+            echo "::error::Developer ID signing secrets unavailable — edge builds are only distributed signed" >&2
+            exit 1
+          fi
+
+      - name: Set up Bun
+        if: steps.guard.outputs.changed == 'true'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      - name: Install dependencies
+        if: steps.guard.outputs.changed == 'true'
+        run: bun install --frozen-lockfile
+
+      - name: Compile darwin binaries
+        if: steps.guard.outputs.changed == 'true'
+        run: |
+          for target in darwin-arm64 darwin-x64; do
+            bun run scripts/build.ts --target="bun-$target" --outfile="dist/$target/uatu"
+          done
+
+      - name: Compute edge version
+        id: version
+        if: steps.guard.outputs.changed == 'true'
+        # <base>-edge.<utc-timestamp>.<sha> sorts between the previous
+        # release and the next one, and the full timestamp keeps same-day
+        # builds ordered too (short SHAs don't sort by commit order), so
+        # brew upgrade always moves forward — including edge → next stable.
+        run: |
+          base="$(bun -e 'console.log(require("./package.json").version)')"
+          version="$base-edge.$(date -u +%Y%m%d%H%M%S).$(git rev-parse --short HEAD)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "edge version: $version"
+
+      - name: Build UatuCode Desktop for both architectures
+        if: steps.guard.outputs.changed == 'true'
+        run: |
+          for arch in arm64 x64; do
+            xcode_arch="$arch"; [ "$arch" = "x64" ] && xcode_arch="x86_64"
+            xcodebuild \
+              -project desktop/macos/UatuCodeDesktop.xcodeproj \
+              -scheme UatuCodeDesktop \
+              -configuration Release \
+              -derivedDataPath "desktop/macos/build-$arch" \
+              ARCHS="$xcode_arch" ONLY_ACTIVE_ARCH=NO \
+              UATU_BINARY="$PWD/dist/darwin-$arch/uatu" \
+              MARKETING_VERSION="${{ steps.version.outputs.version }}" \
+              build
+          done
+
+      - name: Sign, notarize, and staple
+        if: steps.guard.outputs.changed == 'true'
+        uses: ./.github/actions/sign-notarize-app
+        with:
+          cert-p12: ${{ secrets.MACOS_CERT_P12 }}
+          cert-password: ${{ secrets.MACOS_CERT_PASSWORD }}
+          notary-key: ${{ secrets.NOTARY_KEY }}
+          notary-key-id: ${{ secrets.NOTARY_KEY_ID }}
+          notary-issuer: ${{ secrets.NOTARY_ISSUER }}
+          arm64-app: desktop/macos/build-arm64/Build/Products/Release/UatuCode Desktop.app
+          x64-app: desktop/macos/build-x64/Build/Products/Release/UatuCode Desktop.app
+          output-dir: dist/release
+
+      - name: Attest build provenance
+        if: steps.guard.outputs.changed == 'true'
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: dist/release/UatuCode-Desktop-*
+
+      - name: Publish rolling edge prerelease
+        id: publish
+        if: steps.guard.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          (cd dist/release && shasum -a 256 UatuCode-Desktop-*.zip > SHA256SUMS && cat SHA256SUMS)
+          printf '%s\n' "$VERSION" > dist/release/VERSION
+          commit="$(git rev-parse HEAD)"
+          notes="Bleeding-edge build of UatuCode Desktop from \`main\`.
+
+          - commit: $commit
+          - version: $VERSION
+          - built: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          Install: \`brew install --cask tjakobsson/tap/uatu-desktop@edge\`
+          Stable channel: \`brew install --cask tjakobsson/tap/uatu-desktop\`"
+          # Assets first, tag last: the skip guard keys on the tag, so a
+          # failed upload must leave the old tag in place — otherwise the
+          # next nightly would see "unchanged" and never retry, leaving
+          # stale assets behind a moved tag.
+          if ! gh release view edge > /dev/null 2>&1; then
+            gh release create edge --prerelease --target "$commit" \
+              --title "UatuCode Desktop edge" --notes "$notes"
+          fi
+          gh release upload edge --clobber dist/release/UatuCode-Desktop-*.zip dist/release/SHA256SUMS dist/release/VERSION
+          gh release edit edge --prerelease --title "UatuCode Desktop edge" --notes "$notes"
+          git tag -f edge "$commit"
+          git push -f origin edge
+
+  update-tap:
+    # Runs on every successful nightly — including skipped-build runs —
+    # and reconciles the cask with whatever the edge release currently
+    # holds, so a transiently failed tap push self-heals the next night
+    # without rebuilding.
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      - name: Download release metadata
+        id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view edge > /dev/null 2>&1; then
+            echo "no edge release yet; nothing to reconcile"
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh release download edge --pattern SHA256SUMS --output SHA256SUMS
+          gh release download edge --pattern VERSION --output VERSION
+          echo "exists=true" >> "$GITHUB_OUTPUT"
+          echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Update the uatu-desktop@edge cask
+        if: steps.meta.outputs.exists == 'true'
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/tjakobsson/homebrew-tap.git" tap
+          mkdir -p tap/Casks
+          bun run scripts/generate-cask.ts \
+            --version "$VERSION" --sums SHA256SUMS \
+            --name uatu-desktop@edge --tag edge \
+            --out "tap/Casks/uatu-desktop@edge.rb"
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "Casks/uatu-desktop@edge.rb"
+          if git diff --cached --quiet; then
+            echo "Tap already up to date for uatu-desktop@edge $VERSION"
+          else
+            git commit -m "uatu-desktop@edge $VERSION"
+            git push origin HEAD
+          fi

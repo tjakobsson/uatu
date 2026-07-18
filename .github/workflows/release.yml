@@ -188,57 +188,18 @@ jobs:
               build
           done
 
-      - name: Import Developer ID certificate
-        if: steps.gate.outputs.signing == 'true'
-        env:
-          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
-          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
-        run: |
-          keychain="$RUNNER_TEMP/build.keychain-db"
-          keychain_password="$(openssl rand -hex 24)"
-          security create-keychain -p "$keychain_password" "$keychain"
-          security set-keychain-settings -lut 3600 "$keychain"
-          security unlock-keychain -p "$keychain_password" "$keychain"
-          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
-          rm "$RUNNER_TEMP/cert.p12"
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" > /dev/null
-          security list-keychains -d user -s "$keychain" login.keychain
-          identity="$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(Developer ID Application[^"]*\)".*/\1/p' | head -1)"
-          if [ -z "$identity" ]; then
-            echo "::error::No Developer ID Application identity found in the imported certificate" >&2
-            exit 1
-          fi
-          echo "SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
-
       - name: Sign, notarize, and staple
         if: steps.gate.outputs.signing == 'true'
-        env:
-          NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
-          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
-          NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
-        run: |
-          echo "$NOTARY_KEY" > "$RUNNER_TEMP/notary-key.p8"
-          mkdir -p dist/release
-          for arch in arm64 x64; do
-            app="desktop/macos/build-$arch/Build/Products/Release/UatuCode Desktop.app"
-            # The embedded Bun binary carries the JIT entitlement; the app
-            # itself needs none. Nested-first signing order is required.
-            codesign --force --options runtime --timestamp \
-              --entitlements desktop/macos/uatu-jit.entitlements \
-              --sign "$SIGNING_IDENTITY" "$app/Contents/Resources/uatu"
-            codesign --force --options runtime --timestamp \
-              --sign "$SIGNING_IDENTITY" "$app"
-            ditto -c -k --keepParent "$app" "$RUNNER_TEMP/notarize-$arch.zip"
-            xcrun notarytool submit "$RUNNER_TEMP/notarize-$arch.zip" \
-              --key "$RUNNER_TEMP/notary-key.p8" \
-              --key-id "$NOTARY_KEY_ID" \
-              --issuer "$NOTARY_ISSUER" \
-              --wait
-            xcrun stapler staple "$app"
-            ditto -c -k --keepParent "$app" "dist/release/UatuCode-Desktop-$arch.zip"
-          done
-          rm "$RUNNER_TEMP/notary-key.p8"
+        uses: ./.github/actions/sign-notarize-app
+        with:
+          cert-p12: ${{ secrets.MACOS_CERT_P12 }}
+          cert-password: ${{ secrets.MACOS_CERT_PASSWORD }}
+          notary-key: ${{ secrets.NOTARY_KEY }}
+          notary-key-id: ${{ secrets.NOTARY_KEY_ID }}
+          notary-issuer: ${{ secrets.NOTARY_ISSUER }}
+          arm64-app: desktop/macos/build-arm64/Build/Products/Release/UatuCode Desktop.app
+          x64-app: desktop/macos/build-x64/Build/Products/Release/UatuCode Desktop.app
+          output-dir: dist/release
 
       - name: Attest build provenance
         if: steps.gate.outputs.signing == 'true'

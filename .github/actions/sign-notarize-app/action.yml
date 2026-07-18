@@ -1,0 +1,98 @@
+name: Sign, notarize, and staple UatuCode Desktop
+description: >
+  Imports the Developer ID certificate into a throwaway keychain, signs the
+  embedded uatu binary (hardened runtime + JIT entitlement) and the app,
+  notarizes and staples both architectures, and zips each app into the
+  output directory. Extracted from the release workflow so the release and
+  edge channels share one signing pipeline and cannot drift.
+
+inputs:
+  cert-p12:
+    description: Base64-encoded Developer ID Application certificate (.p12)
+    required: true
+  cert-password:
+    description: Password for the certificate
+    required: true
+  notary-key:
+    description: App Store Connect API private key (.p8 contents)
+    required: true
+  notary-key-id:
+    description: App Store Connect API key id
+    required: true
+  notary-issuer:
+    description: App Store Connect issuer id
+    required: true
+  arm64-app:
+    description: Path to the arm64 .app bundle
+    required: true
+  x64-app:
+    description: Path to the x64 .app bundle
+    required: true
+  entitlements:
+    description: Entitlements file for the embedded uatu binary
+    required: false
+    default: desktop/macos/uatu-jit.entitlements
+  output-dir:
+    description: Directory receiving UatuCode-Desktop-<arch>.zip
+    required: false
+    default: dist/release
+
+runs:
+  using: composite
+  steps:
+    - name: Import Developer ID certificate
+      shell: bash
+      env:
+        MACOS_CERT_P12: ${{ inputs.cert-p12 }}
+        MACOS_CERT_PASSWORD: ${{ inputs.cert-password }}
+      run: |
+        keychain="$RUNNER_TEMP/build.keychain-db"
+        keychain_password="$(openssl rand -hex 24)"
+        security create-keychain -p "$keychain_password" "$keychain"
+        security set-keychain-settings -lut 3600 "$keychain"
+        security unlock-keychain -p "$keychain_password" "$keychain"
+        echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+        security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+        rm "$RUNNER_TEMP/cert.p12"
+        security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" > /dev/null
+        security list-keychains -d user -s "$keychain" login.keychain
+        identity="$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(Developer ID Application[^"]*\)".*/\1/p' | head -1)"
+        if [ -z "$identity" ]; then
+          echo "::error::No Developer ID Application identity found in the imported certificate" >&2
+          exit 1
+        fi
+        echo "SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
+
+    - name: Sign, notarize, and staple
+      shell: bash
+      env:
+        NOTARY_KEY: ${{ inputs.notary-key }}
+        NOTARY_KEY_ID: ${{ inputs.notary-key-id }}
+        NOTARY_ISSUER: ${{ inputs.notary-issuer }}
+        ARM64_APP: ${{ inputs.arm64-app }}
+        X64_APP: ${{ inputs.x64-app }}
+        ENTITLEMENTS: ${{ inputs.entitlements }}
+        OUTPUT_DIR: ${{ inputs.output-dir }}
+      run: |
+        echo "$NOTARY_KEY" > "$RUNNER_TEMP/notary-key.p8"
+        mkdir -p "$OUTPUT_DIR"
+        for arch in arm64 x64; do
+          app="$ARM64_APP"
+          [ "$arch" = "x64" ] && app="$X64_APP"
+          # The embedded Bun binary carries the JIT entitlement; the app
+          # itself needs none. Nested-first signing order is required.
+          codesign --force --options runtime --timestamp \
+            --entitlements "$ENTITLEMENTS" \
+            --sign "$SIGNING_IDENTITY" "$app/Contents/Resources/uatu"
+          codesign --force --options runtime --timestamp \
+            --sign "$SIGNING_IDENTITY" "$app"
+          ditto -c -k --keepParent "$app" "$RUNNER_TEMP/notarize-$arch.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize-$arch.zip" \
+            --key "$RUNNER_TEMP/notary-key.p8" \
+            --key-id "$NOTARY_KEY_ID" \
+            --issuer "$NOTARY_ISSUER" \
+            --wait
+          xcrun stapler staple "$app"
+          ditto -c -k --keepParent "$app" "$OUTPUT_DIR/UatuCode-Desktop-$arch.zip"
+        done
+        rm "$RUNNER_TEMP/notary-key.p8"

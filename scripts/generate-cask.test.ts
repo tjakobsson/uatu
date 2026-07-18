@@ -38,6 +38,28 @@ describe("generate-cask", () => {
     expect(cask).not.toContain('">=');
   });
 
+  test("stable cask declares a conflict with the edge cask", () => {
+    const cask = generateCask("0.2.0", parseSums(SUMS));
+    expect(cask).toContain('conflicts_with cask: "uatu-desktop@edge"');
+  });
+
+  test("edge options emit the @edge token, edge-tag urls, and the inverse conflict", () => {
+    const cask = generateCask("0.2.0-edge.20260718.abc1234", parseSums(SUMS), {
+      name: "uatu-desktop@edge",
+      tag: "edge",
+    });
+    expect(cask).toContain('cask "uatu-desktop@edge" do');
+    expect(cask).toContain('version "0.2.0-edge.20260718.abc1234"');
+    expect(cask).toContain(
+      "https://github.com/tjakobsson/uatu/releases/download/edge/UatuCode-Desktop-arm64.zip",
+    );
+    expect(cask).toContain(
+      "https://github.com/tjakobsson/uatu/releases/download/edge/UatuCode-Desktop-x64.zip",
+    );
+    expect(cask).toContain('conflicts_with cask: "uatu-desktop"');
+    expect(cask).not.toContain('conflicts_with cask: "uatu-desktop@edge"');
+  });
+
   test("refuses to generate from an unsigned release's sums", () => {
     for (const missing of CASK_ASSETS) {
       const partial = parseSums(SUMS);
