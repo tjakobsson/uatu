@@ -25,10 +25,6 @@ jobs:
       contents: write
       id-token: write
       attestations: write
-    outputs:
-      published: ${{ steps.publish.outputs.published }}
-      version: ${{ steps.version.outputs.version }}
-
     steps:
       - name: Check out main
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -49,7 +45,7 @@ jobs:
           published="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/edge" --jq .object.sha 2>/dev/null || echo none)"
           assets="$(gh release view edge --json assets --jq '.assets[].name' 2>/dev/null || true)"
           complete=true
-          for asset in UatuCode-Desktop-arm64.zip UatuCode-Desktop-x64.zip SHA256SUMS; do
+          for asset in UatuCode-Desktop-arm64.zip UatuCode-Desktop-x64.zip SHA256SUMS VERSION; do
             echo "$assets" | grep -qx "$asset" || complete=false
           done
           if [ "$current" = "$published" ] && [ "$complete" = true ]; then
@@ -152,6 +148,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           (cd dist/release && shasum -a 256 UatuCode-Desktop-*.zip > SHA256SUMS && cat SHA256SUMS)
+          printf '%s\n' "$VERSION" > dist/release/VERSION
           commit="$(git rev-parse HEAD)"
           notes="Bleeding-edge build of UatuCode Desktop from \`main\`.
 
@@ -169,17 +166,17 @@ jobs:
             gh release create edge --prerelease --target "$commit" \
               --title "UatuCode Desktop edge" --notes "$notes"
           fi
-          gh release upload edge --clobber dist/release/UatuCode-Desktop-*.zip dist/release/SHA256SUMS
+          gh release upload edge --clobber dist/release/UatuCode-Desktop-*.zip dist/release/SHA256SUMS dist/release/VERSION
           gh release edit edge --prerelease --title "UatuCode Desktop edge" --notes "$notes"
           git tag -f edge "$commit"
           git push -f origin edge
-          echo "published=true" >> "$GITHUB_OUTPUT"
 
   update-tap:
-    # Mirrors the release update-tap job for the edge cask; reads the sums
-    # back from the edge release so a failed run can be re-run later.
+    # Runs on every successful nightly — including skipped-build runs —
+    # and reconciles the cask with whatever the edge release currently
+    # holds, so a transiently failed tap push self-heals the next night
+    # without rebuilding.
     needs: build
-    if: needs.build.outputs.published == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -194,15 +191,26 @@ jobs:
         with:
           bun-version: 1.3.14
 
-      - name: Download SHA256SUMS from the edge release
-        run: gh release download edge --pattern SHA256SUMS --output SHA256SUMS
+      - name: Download release metadata
+        id: meta
         env:
           GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view edge > /dev/null 2>&1; then
+            echo "no edge release yet; nothing to reconcile"
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh release download edge --pattern SHA256SUMS --output SHA256SUMS
+          gh release download edge --pattern VERSION --output VERSION
+          echo "exists=true" >> "$GITHUB_OUTPUT"
+          echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
 
       - name: Update the uatu-desktop@edge cask
+        if: steps.meta.outputs.exists == 'true'
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          VERSION: ${{ needs.build.outputs.version }}
+          VERSION: ${{ steps.meta.outputs.version }}
         run: |
           git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/tjakobsson/homebrew-tap.git" tap
           mkdir -p tap/Casks

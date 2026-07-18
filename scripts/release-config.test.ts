@@ -159,10 +159,15 @@ describe("artifact publication workflow", () => {
       publish.run!.indexOf("gh release upload"),
     );
 
-    // The tap only updates after a successful publish.
+    // The tap job reconciles on EVERY successful run (no publish gate) so
+    // a transiently failed tap push self-heals without a rebuild; it
+    // reads the version from the release's own VERSION asset.
     expect(workflow.jobs["update-tap"].needs).toBe("build");
-    expect(workflow.jobs["update-tap"].if).toBe("needs.build.outputs.published == 'true'");
+    expect(workflow.jobs["update-tap"].if).toBeUndefined();
     expect(workflow.jobs["update-tap"].permissions.contents).toBe("read");
+    const tapSteps = workflow.jobs["update-tap"].steps as Array<{ run?: string }>;
+    expect(tapSteps.some(step => step.run?.includes("--pattern VERSION"))).toBe(true);
+    expect(guard.run).toContain("VERSION");
   });
 
   test("tap update regenerates the formula and tolerates cask-less (unsigned) releases", async () => {

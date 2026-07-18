@@ -66,6 +66,10 @@ behavior) so one generator emits both casks; the edge workflow's tap step
 mirrors the release one but writes `Casks/uatu-desktop@edge.rb` pointing
 at the `edge` tag's assets. Stable and edge casks conflict on install
 (same app bundle); the cask declares `conflicts_with cask:` accordingly.
+The tap job runs on every successful nightly — the release carries a
+`VERSION` asset alongside SHA256SUMS, so the job reconciles the cask from
+published state alone and a transiently failed tap push self-heals the
+next night without rebuilding.
 
 ### D5: Reuse by extraction, not duplication
 
