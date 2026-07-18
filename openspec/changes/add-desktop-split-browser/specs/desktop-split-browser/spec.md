@@ -21,6 +21,12 @@ Each UatuCode Desktop window SHALL offer a right-hand, resizable split pane host
 - **WHEN** the user closes the split's only tab
 - **THEN** the split closes
 
+#### Scenario: Reordering tabs by drag
+
+- **WHEN** the user drags a tab along the tab strip
+- **THEN** the tab moves to the hovered position and the new order persists
+  for the session
+
 ### Requirement: External links route into the split by default
 With the in-app default active, activating an external `http(s)` link in the uatu UI SHALL open it in the split: if a tab already shows that exact URL, that tab is focused; otherwise a new focused tab opens; if the split is closed, it opens first. `⌘`-click SHALL always open in the system browser instead. Non-`http(s)` schemes SHALL always go to the system handler.
 

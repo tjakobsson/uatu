@@ -158,6 +158,16 @@ final class BrowserSplit {
         newTab(url: url)
     }
 
+    /// Live reorder while dragging: the dragged tab takes the slot of the
+    /// tab it is currently hovering over.
+    func move(_ draggedID: BrowserTab.ID, to targetID: BrowserTab.ID) {
+        guard draggedID != targetID,
+              let from = tabs.firstIndex(where: { $0.id == draggedID }),
+              let to = tabs.firstIndex(where: { $0.id == targetID }) else { return }
+        let tab = tabs.remove(at: from)
+        tabs.insert(tab, at: to)
+    }
+
     func close(_ tab: BrowserTab) {
         guard let index = tabs.firstIndex(where: { $0.id == tab.id }) else { return }
         tabs.remove(at: index)

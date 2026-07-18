@@ -4,6 +4,7 @@
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
 import WebKit
 
 /// The split browser pane: a custom tab strip (native macOS tabs are
@@ -12,6 +13,7 @@ import WebKit
 struct BrowserSplitView: View {
     let split: BrowserSplit
     @State private var addressText = ""
+    @State private var draggedTabID: BrowserTab.ID?
     @FocusState private var addressFocused: Bool
 
     var body: some View {
@@ -83,6 +85,15 @@ struct BrowserSplitView: View {
         .onTapGesture {
             split.selectedID = tab.id
         }
+        .onDrag {
+            draggedTabID = tab.id
+            return NSItemProvider(object: tab.id.uuidString as NSString)
+        }
+        .onDrop(of: [.text], delegate: TabReorderDropDelegate(
+            target: tab,
+            split: split,
+            draggedTabID: $draggedTabID
+        ))
     }
 
     private func chromeRow(for tab: BrowserTab) -> some View {
@@ -152,6 +163,28 @@ struct BrowserSplitView: View {
         var search = URLComponents(string: "https://duckduckgo.com/")!
         search.queryItems = [URLQueryItem(name: "q", value: input)]
         return search.url!
+    }
+}
+
+/// Reorders live while dragging: entering another tab's frame moves the
+/// dragged tab into its slot.
+private struct TabReorderDropDelegate: DropDelegate {
+    let target: BrowserTab
+    let split: BrowserSplit
+    @Binding var draggedTabID: BrowserTab.ID?
+
+    func dropEntered(info: DropInfo) {
+        guard let draggedTabID else { return }
+        split.move(draggedTabID, to: target.id)
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggedTabID = nil
+        return true
     }
 }
 

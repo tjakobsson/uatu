@@ -16,6 +16,7 @@ struct ContentView: View {
     /// split open is session state on `split`.
     @AppStorage("browserSplitWidth") private var splitWidth = 480.0
     @State private var splitDragBaseWidth: Double?
+    @State private var closeTabKeyMonitor: Any?
     @State private var isPickingFolder = false
     @State private var nativeWindow: NSWindow?
     /// The folder served by THIS window. Each window has its own.
@@ -62,7 +63,6 @@ struct ContentView: View {
             nativeWindow: nativeWindow,
             canGoBack: web.canGoBack || (split.selectedTab?.canGoBack ?? false),
             canGoForward: web.canGoForward || (split.selectedTab?.canGoForward ?? false),
-            isSplitOpen: split.isOpen,
             chooseFolder: { isPickingFolder = true },
             openFolder: { open($0) },
             reload: { web.reload() },
@@ -81,13 +81,6 @@ struct ContentView: View {
                 }
             },
             toggleSplitBrowser: { split.toggle() },
-            closeBrowserTabIfFocused: {
-                guard split.hasFocus(in: nativeWindow), let tab = split.selectedTab else {
-                    return false
-                }
-                split.close(tab)
-                return true
-            },
             openInBrowser: {
                 if case .running(let url) = server.status {
                     NSWorkspace.shared.open(url)
@@ -108,6 +101,15 @@ struct ContentView: View {
                     Label("Forward", systemImage: "chevron.forward")
                 }
                 .disabled(!isRunning || !web.canGoForward)
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    split.toggle()
+                } label: {
+                    Label("Toggle Split Browser", systemImage: "sidebar.trailing")
+                }
+                .disabled(!isRunning)
+                .help("Toggle Split Browser (⇧⌘B)")
             }
         }
         .fileImporter(isPresented: $isPickingFolder, allowedContentTypes: [.folder]) { result in
@@ -130,6 +132,22 @@ struct ContentView: View {
             }
         }
         .onAppear {
+            // ⌘W belongs to the browser tab only while the split has
+            // keyboard focus. A menu item can't express that: NSMenu stops
+            // at the FIRST ⌘W item even when disabled, which kills File >
+            // Close. A key monitor intercepts ahead of the menu and passes
+            // the event through whenever the browser isn't focused.
+            if closeTabKeyMonitor == nil {
+                closeTabKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [split] event in
+                    guard event.modifierFlags.intersection([.command, .shift, .option, .control]) == .command,
+                          event.charactersIgnoringModifiers == "w",
+                          split.hasFocus(in: event.window),
+                          let tab = split.selectedTab
+                    else { return event }
+                    split.close(tab)
+                    return nil
+                }
+            }
             // In-app is the default; ⌘-click and the opt-out setting fall
             // back to the change's original system-browser behavior.
             web.routeExternal = { [split] url, commandClick in
@@ -144,35 +162,43 @@ struct ContentView: View {
                 }
             }
         }
+        .onDisappear {
+            if let closeTabKeyMonitor {
+                NSEvent.removeMonitor(closeTabKeyMonitor)
+                self.closeTabKeyMonitor = nil
+            }
+        }
     }
 
     private var splitDivider: some View {
-        Rectangle()
-            .fill(Color(nsColor: .separatorColor))
-            .frame(width: 1)
-            .overlay {
-                Color.clear
-                    .frame(width: 9)
-                    .contentShape(.rect)
-                    .gesture(
-                        DragGesture(coordinateSpace: .global)
-                            .onChanged { value in
-                                let base = splitDragBaseWidth ?? splitWidth
-                                splitDragBaseWidth = base
-                                splitWidth = min(max(300, base - value.translation.width), 1200)
-                            }
-                            .onEnded { _ in
-                                splitDragBaseWidth = nil
-                            }
-                    )
-                    .onHover { hovering in
-                        if hovering {
-                            NSCursor.resizeLeftRight.push()
-                        } else {
-                            NSCursor.pop()
-                        }
-                    }
+        // The visible hairline sits centered in a 9pt-wide grab zone; the
+        // whole zone is the drag target so the divider is easy to hit.
+        ZStack {
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor))
+                .frame(width: 1)
+        }
+        .frame(width: 9)
+        .frame(maxHeight: .infinity)
+        .contentShape(.rect)
+        .gesture(
+            DragGesture(coordinateSpace: .global)
+                .onChanged { value in
+                    let base = splitDragBaseWidth ?? splitWidth
+                    splitDragBaseWidth = base
+                    splitWidth = min(max(300, base - value.translation.width), 1200)
+                }
+                .onEnded { _ in
+                    splitDragBaseWidth = nil
+                }
+        )
+        .onHover { hovering in
+            if hovering {
+                NSCursor.resizeLeftRight.push()
+            } else {
+                NSCursor.pop()
             }
+        }
     }
 
     private var launcher: some View {
@@ -295,16 +321,12 @@ struct WindowCommands: Equatable {
     var nativeWindow: NSWindow?
     var canGoBack: Bool
     var canGoForward: Bool
-    var isSplitOpen: Bool
     var chooseFolder: () -> Void
     var openFolder: (URL) -> Void
     var reload: () -> Void
     var goBack: () -> Void
     var goForward: () -> Void
     var toggleSplitBrowser: () -> Void
-    /// Closes the split's selected tab when the split has keyboard focus;
-    /// returns false so the caller can fall back to closing the window.
-    var closeBrowserTabIfFocused: () -> Bool
     var openInBrowser: () -> Void
 
     static func == (lhs: Self, rhs: Self) -> Bool {
@@ -313,7 +335,6 @@ struct WindowCommands: Equatable {
             && lhs.nativeWindow === rhs.nativeWindow
             && lhs.canGoBack == rhs.canGoBack
             && lhs.canGoForward == rhs.canGoForward
-            && lhs.isSplitOpen == rhs.isSplitOpen
     }
 }
 
@@ -351,18 +372,6 @@ struct UatuCodeDesktopCommands: Commands {
                 }
             }
             .disabled(window == nil || recentFolders.isEmpty)
-            // ⌘W: when the split browser has keyboard focus this closes its
-            // selected tab; otherwise it falls through to closing the
-            // window. Disabled (→ native File > Close wins the shortcut)
-            // whenever the split is closed.
-            Button("Close Tab") {
-                guard let window else { return }
-                if !window.closeBrowserTabIfFocused() {
-                    window.nativeWindow?.performClose(nil)
-                }
-            }
-            .keyboardShortcut("w")
-            .disabled(window?.isSplitOpen != true)
         }
         CommandGroup(after: .toolbar) {
             Button("Back") { window?.goBack() }
