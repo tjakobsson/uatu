@@ -420,16 +420,17 @@ struct UatuCodeDesktopCommands: Commands {
             }
             .keyboardShortcut("0")
             .disabled(window == nil)
-            // Actions read the live defaults value, not the wrapper: the
-            // wrapper's cache can lag behind writes made since the menu
-            // was last rebuilt, which would make repeated Zoom In recompute
-            // the same step.
+            // Actions and enablement read the live defaults value, not the
+            // wrapper: the wrapper's cache can lag behind writes made since
+            // the menu was last rebuilt, which would make repeated Zoom In
+            // recompute the same step. The wrapper stays as the write path
+            // so changes still invalidate the menu.
             Button("Zoom In") { pageZoom = PageZoom.zoomedIn(from: PageZoom.storedLevel) }
                 .keyboardShortcut("+")
-                .disabled(window == nil || !PageZoom.canZoomIn(from: pageZoom))
+                .disabled(window == nil || !PageZoom.canZoomIn(from: PageZoom.storedLevel))
             Button("Zoom Out") { pageZoom = PageZoom.zoomedOut(from: PageZoom.storedLevel) }
                 .keyboardShortcut("-")
-                .disabled(window == nil || !PageZoom.canZoomOut(from: pageZoom))
+                .disabled(window == nil || !PageZoom.canZoomOut(from: PageZoom.storedLevel))
             Divider()
             Button("Toggle Split Browser") { window?.toggleSplitBrowser() }
                 .keyboardShortcut("b", modifiers: [.command, .shift])
