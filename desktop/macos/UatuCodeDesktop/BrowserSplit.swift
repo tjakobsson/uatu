@@ -61,6 +61,19 @@ final class BrowserTab: NSObject, Identifiable {
     func goForward() {
         webView.goForward()
     }
+
+    /// D3 routing for URLs leaving this page: http(s) stays in the split,
+    /// anything else goes to its system handler (a tab.load of e.g.
+    /// mailto: would leave a permanently blank tab).
+    fileprivate func routeIncoming(_ url: URL?) {
+        guard let url else { return }
+        let scheme = url.scheme?.lowercased()
+        if scheme == "http" || scheme == "https" {
+            split?.open(url)
+        } else {
+            ExternalLinkRouter.open(url)
+        }
+    }
 }
 
 extension BrowserTab: WKUIDelegate {
@@ -71,9 +84,7 @@ extension BrowserTab: WKUIDelegate {
         windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
         // target="_blank" / window.open inside a browser page: another tab.
-        if let url = navigationAction.request.url {
-            split?.open(url)
-        }
+        routeIncoming(navigationAction.request.url)
         return nil
     }
 }
@@ -84,8 +95,8 @@ extension BrowserTab: WKNavigationDelegate {
         decidePolicyFor navigationAction: WKNavigationAction,
         decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
     ) {
-        if navigationAction.targetFrame == nil, let url = navigationAction.request.url {
-            split?.open(url)
+        if navigationAction.targetFrame == nil {
+            routeIncoming(navigationAction.request.url)
             decisionHandler(.cancel)
             return
         }

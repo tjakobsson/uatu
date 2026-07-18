@@ -34,6 +34,11 @@ Each UatuCode Desktop window SHALL offer a right-hand, resizable split pane host
 ### Requirement: External links route into the split by default
 With the in-app default active, activating an external `http(s)` link in the uatu UI SHALL open it in the split: if a tab already shows that exact URL, that tab is focused; otherwise a new focused tab opens; if the split is closed, it opens first. `⌘`-click SHALL always open in the system browser instead. Non-`http(s)` schemes SHALL always go to the system handler.
 
+#### Scenario: Non-web popup link inside a browser page
+
+- **WHEN** a page open in the split contains a `target="_blank"` `mailto:` link and the user clicks it
+- **THEN** the system mail handler opens and no new tab is created
+
 #### Scenario: First link opens the split
 
 - **WHEN** the split is closed and the user clicks an external link in a
@@ -52,7 +57,12 @@ With the in-app default active, activating an external `http(s)` link in the uat
 - **THEN** the URL opens in the default browser and the split is unchanged
 
 ### Requirement: Tabs carry browser chrome with an editable address bar
-Each tab SHALL expose back/forward/reload controls, an editable address bar, and an eject control. Committing address-bar input that parses as a URL (or as a bare host, which gets `https://` prefixed) SHALL load it; other input SHALL run a web search with a default engine. Eject SHALL open the tab's current URL in the system browser and close the tab.
+Each tab SHALL expose back/forward/reload controls, an editable address bar, and an eject control. Committing address-bar input that parses as a URL (or as a bare host or host:port, which gets `https://` prefixed) SHALL load it when the scheme is `http(s)`; input with a non-web scheme (`mailto:`, …) SHALL be handed to its system handler without navigating the tab; other input SHALL run a web search with a default engine. Eject SHALL open the tab's current URL in the system browser and close the tab.
+
+#### Scenario: Non-web scheme in the address bar
+
+- **WHEN** the user types `mailto:user@example.com` and commits
+- **THEN** the system mail handler opens and the tab does not navigate
 
 #### Scenario: Navigating by URL
 

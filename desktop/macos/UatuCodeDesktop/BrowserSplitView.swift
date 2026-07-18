@@ -147,14 +147,34 @@ struct BrowserSplitView: View {
     private func commitAddress(_ tab: BrowserTab) {
         let input = addressText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !input.isEmpty else { return }
-        tab.load(Self.destination(for: input))
+        let url = Self.destination(for: input)
+        let scheme = url.scheme?.lowercased()
+        if scheme == "http" || scheme == "https" {
+            tab.load(url)
+        } else {
+            // Same D3 rule as clicked links: WebKit can't commit e.g.
+            // mailto:, so hand it to the system instead of blanking the tab.
+            ExternalLinkRouter.open(url)
+            syncAddress()
+        }
     }
 
     /// Address-bar semantics: something with a scheme loads as-is, a bare
-    /// host gets https:// prefixed, anything else becomes a web search.
+    /// host (or host:port) gets https:// prefixed, anything else becomes a
+    /// web search.
     static func destination(for input: String) -> URL {
-        if input.contains("://"), let url = URL(string: input), url.scheme != nil {
-            return url
+        if !input.contains(" "), let colon = input.firstIndex(of: ":") {
+            // "localhost:3000/x" parses as scheme "localhost", so digits
+            // up to the first slash mean a port, not a scheme.
+            let afterColon = input[input.index(after: colon)...]
+            let portLike = !afterColon.isEmpty
+                && afterColon.prefix(while: { $0 != "/" }).allSatisfy(\.isNumber)
+            if portLike, let url = URL(string: "https://\(input)") {
+                return url
+            }
+            if !portLike, let url = URL(string: input), url.scheme != nil {
+                return url
+            }
         }
         if !input.contains(" "), input.contains("."),
            let url = URL(string: "https://\(input)"), url.host() != nil {

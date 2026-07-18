@@ -181,7 +181,12 @@ The app SHALL route link activations that target a new browsing context (`target
 - **THEN** the system's registered mail handler opens
 
 ### Requirement: Window chrome exposes Back and Forward for the embedded SPA
-The app SHALL provide Back and Forward controls — menu commands with `⌘[` and `⌘]` shortcuts and window-toolbar buttons — that navigate the embedded page's back-forward history. Controls MUST be disabled when the corresponding direction has no history entry or no server is running.
+The app SHALL provide Back and Forward controls — menu commands with `⌘[` and `⌘]` shortcuts and window-toolbar buttons — that navigate the embedded page's back-forward history. Controls MUST be disabled when the corresponding direction has no history entry or no server is running. While the split browser pane has keyboard focus, the `⌘[`/`⌘]` shortcuts SHALL act on the focused browser tab's history instead (see `desktop-split-browser`); the menu items and toolbar buttons continue to reflect the embedded page's history.
+
+#### Scenario: Shortcuts follow the focused browser tab
+
+- **WHEN** the split browser pane has keyboard focus and the user presses `⌘[`
+- **THEN** the focused browser tab navigates back and the uatu pane's history is untouched
 
 #### Scenario: Back returns to the previously selected document
 

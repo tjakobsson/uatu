@@ -16,7 +16,7 @@ struct ContentView: View {
     /// split open is session state on `split`.
     @AppStorage("browserSplitWidth") private var splitWidth = 480.0
     @State private var splitDragBaseWidth: Double?
-    @State private var closeTabKeyMonitor: Any?
+    @State private var browserKeyMonitor: Any?
     @State private var isPickingFolder = false
     @State private var nativeWindow: NSWindow?
     /// The folder served by THIS window. Each window has its own.
@@ -61,25 +61,13 @@ struct ContentView: View {
             isRunning: isRunning,
             folderPath: folder?.path,
             nativeWindow: nativeWindow,
-            canGoBack: web.canGoBack || (split.selectedTab?.canGoBack ?? false),
-            canGoForward: web.canGoForward || (split.selectedTab?.canGoForward ?? false),
+            canGoBack: web.canGoBack,
+            canGoForward: web.canGoForward,
             chooseFolder: { isPickingFolder = true },
             openFolder: { open($0) },
             reload: { web.reload() },
-            goBack: {
-                if split.hasFocus(in: nativeWindow), let tab = split.selectedTab {
-                    tab.goBack()
-                } else {
-                    web.goBack()
-                }
-            },
-            goForward: {
-                if split.hasFocus(in: nativeWindow), let tab = split.selectedTab {
-                    tab.goForward()
-                } else {
-                    web.goForward()
-                }
-            },
+            goBack: { web.goBack() },
+            goForward: { web.goForward() },
             toggleSplitBrowser: { split.toggle() },
             openInBrowser: {
                 if case .running(let url) = server.status {
@@ -132,19 +120,27 @@ struct ContentView: View {
             }
         }
         .onAppear {
-            // ⌘W belongs to the browser tab only while the split has
-            // keyboard focus. A menu item can't express that: NSMenu stops
-            // at the FIRST ⌘W item even when disabled, which kills File >
-            // Close. A key monitor intercepts ahead of the menu and passes
-            // the event through whenever the browser isn't focused.
-            if closeTabKeyMonitor == nil {
-                closeTabKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [split] event in
+            // ⌘W / ⌘[ / ⌘] belong to the browser tab only while the split
+            // has keyboard focus. Menu items can't express that: NSMenu
+            // stops at the FIRST matching key equivalent even when
+            // disabled (killing File > Close), and menu enablement goes
+            // stale on focus changes. A key monitor checks focus at press
+            // time and passes the event through to the menu (SPA
+            // Back/Forward, window Close) whenever the browser isn't
+            // focused.
+            if browserKeyMonitor == nil {
+                browserKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [split] event in
                     guard event.modifierFlags.intersection([.command, .shift, .option, .control]) == .command,
-                          event.charactersIgnoringModifiers == "w",
+                          let key = event.charactersIgnoringModifiers,
+                          key == "w" || key == "[" || key == "]",
                           split.hasFocus(in: event.window),
                           let tab = split.selectedTab
                     else { return event }
-                    split.close(tab)
+                    switch key {
+                    case "w": split.close(tab)
+                    case "[": tab.goBack()
+                    default: tab.goForward()
+                    }
                     return nil
                 }
             }
@@ -163,9 +159,9 @@ struct ContentView: View {
             }
         }
         .onDisappear {
-            if let closeTabKeyMonitor {
-                NSEvent.removeMonitor(closeTabKeyMonitor)
-                self.closeTabKeyMonitor = nil
+            if let browserKeyMonitor {
+                NSEvent.removeMonitor(browserKeyMonitor)
+                self.browserKeyMonitor = nil
             }
         }
     }
