@@ -6,12 +6,11 @@
 import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
-import WebKit
 
 struct ContentView: View {
     let windowID: UUID
     @State private var server = UatuServer()
-    @State private var page = WebPage()
+    @State private var web = WebViewHost()
     @State private var isPickingFolder = false
     @State private var nativeWindow: NSWindow?
     /// The folder served by THIS window. Each window has its own.
@@ -28,7 +27,7 @@ struct ContentView: View {
             case .starting:
                 ProgressView("Starting uatu…")
             case .running:
-                WebView(page)
+                HostedWebView(host: web)
             case .failed(let message):
                 ContentUnavailableView {
                     Label("uatu Failed", systemImage: "exclamationmark.triangle")
@@ -49,15 +48,35 @@ struct ContentView: View {
             isRunning: isRunning,
             folderPath: folder?.path,
             nativeWindow: nativeWindow,
+            canGoBack: web.canGoBack,
+            canGoForward: web.canGoForward,
             chooseFolder: { isPickingFolder = true },
             openFolder: { open($0) },
-            reload: { page.reload() },
+            reload: { web.reload() },
+            goBack: { web.goBack() },
+            goForward: { web.goForward() },
             openInBrowser: {
                 if case .running(let url) = server.status {
                     NSWorkspace.shared.open(url)
                 }
             }
         ))
+        .toolbar {
+            ToolbarItemGroup(placement: .navigation) {
+                Button {
+                    web.goBack()
+                } label: {
+                    Label("Back", systemImage: "chevron.backward")
+                }
+                .disabled(!isRunning || !web.canGoBack)
+                Button {
+                    web.goForward()
+                } label: {
+                    Label("Forward", systemImage: "chevron.forward")
+                }
+                .disabled(!isRunning || !web.canGoForward)
+            }
+        }
         .fileImporter(isPresented: $isPickingFolder, allowedContentTypes: [.folder]) { result in
             if case .success(let url) = result {
                 open(url)
@@ -74,7 +93,7 @@ struct ContentView: View {
         })
         .onChange(of: server.status) { _, newStatus in
             if case .running(let url) = newStatus {
-                page.load(URLRequest(url: url))
+                web.load(url)
             }
         }
     }
@@ -197,15 +216,21 @@ struct WindowCommands: Equatable {
     var isRunning: Bool
     var folderPath: String?
     var nativeWindow: NSWindow?
+    var canGoBack: Bool
+    var canGoForward: Bool
     var chooseFolder: () -> Void
     var openFolder: (URL) -> Void
     var reload: () -> Void
+    var goBack: () -> Void
+    var goForward: () -> Void
     var openInBrowser: () -> Void
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.isRunning == rhs.isRunning
             && lhs.folderPath == rhs.folderPath
             && lhs.nativeWindow === rhs.nativeWindow
+            && lhs.canGoBack == rhs.canGoBack
+            && lhs.canGoForward == rhs.canGoForward
     }
 }
 
@@ -244,6 +269,13 @@ struct UatuCodeDesktopCommands: Commands {
             .disabled(window == nil || recentFolders.isEmpty)
         }
         CommandGroup(after: .toolbar) {
+            Button("Back") { window?.goBack() }
+                .keyboardShortcut("[")
+                .disabled(window?.isRunning != true || window?.canGoBack != true)
+            Button("Forward") { window?.goForward() }
+                .keyboardShortcut("]")
+                .disabled(window?.isRunning != true || window?.canGoForward != true)
+            Divider()
             Button("Reload Page") { window?.reload() }
                 .keyboardShortcut("r")
                 .disabled(window?.isRunning != true)

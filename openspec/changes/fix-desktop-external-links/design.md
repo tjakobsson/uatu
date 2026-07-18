@@ -52,6 +52,18 @@ surfaces an equivalent hook.
 The spike resolves D1 before any other task; whichever hosting approach wins
 becomes the routing point the split-browser change builds on.
 
+**Spike outcome (resolved 2026-07-18):** the fallback wins. Inspection of the
+macOS 26 SDK's WebKit swiftinterface shows `WebPage.NavigationDeciding`
+receives `NavigationAction.target: FrameInfo?` (nil = new window), so it
+could intercept `target="_blank"` anchors — but the API has no equivalent of
+`WKUIDelegate.createWebViewWith` and `DialogPresenting` covers only JS
+dialogs/file pickers, so `window.open()` is dropped before any hook fires.
+xterm.js activates OSC 8 links via `window.open(url, "_blank", "noopener")`,
+so terminal links cannot work on `WebPage`. The wrapper therefore hosts the
+SPA in a `WKWebView` via `NSViewRepresentable`: `createWebViewWith` routes
+the URL and returns nil (catches both `window.open` and `target="_blank"`),
+with a navigation-delegate `targetFrame == nil` check as belt and braces.
+
 ### D2: Scheme routing
 
 All intercepted URLs go through one function: `http`/`https` →

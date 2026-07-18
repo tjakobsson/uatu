@@ -111,6 +111,14 @@ The wrapper↔CLI contract is deliberately thin:
   pipe for its whole life, so if the app dies without running handlers the
   server sees EOF and exits itself instead of running orphaned.
 
+The WebView is a `WKWebView` (`WebViewHost.swift`), not SwiftUI's `WebPage`:
+`WebPage` has no `createWebViewWith` equivalent, so `window.open()` — how
+xterm.js activates OSC 8 terminal hyperlinks — and `target="_blank"` anchors
+would be silently dropped. The host's `WKUIDelegate` catches them and hands
+the URL to `ExternalLinkRouter` (default browser / system handler), and the
+window exposes Back/Forward (`⌘[`/`⌘]`, toolbar) over the SPA's pushState
+history.
+
 Nothing else crosses the boundary — the browser remains a first-class client,
 and the desktop app rides the same release train (see
 `.github/workflows/release.yml`, jobs `desktop-macos`/`update-tap`).
