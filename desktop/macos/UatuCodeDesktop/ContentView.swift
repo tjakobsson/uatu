@@ -11,6 +11,11 @@ struct ContentView: View {
     let windowID: UUID
     @State private var server = UatuServer()
     @State private var web = WebViewHost()
+    @State private var split = BrowserSplit()
+    /// Split width is an app-level preference; which windows have the
+    /// split open is session state on `split`.
+    @AppStorage("browserSplitWidth") private var splitWidth = 480.0
+    @State private var splitDragBaseWidth: Double?
     @State private var isPickingFolder = false
     @State private var nativeWindow: NSWindow?
     /// The folder served by THIS window. Each window has its own.
@@ -27,7 +32,14 @@ struct ContentView: View {
             case .starting:
                 ProgressView("Starting uatu…")
             case .running:
-                HostedWebView(host: web)
+                HStack(spacing: 0) {
+                    HostedWebView(host: web)
+                    if split.isOpen {
+                        splitDivider
+                        BrowserSplitView(split: split)
+                            .frame(width: splitWidth)
+                    }
+                }
             case .failed(let message):
                 ContentUnavailableView {
                     Label("uatu Failed", systemImage: "exclamationmark.triangle")
@@ -48,13 +60,34 @@ struct ContentView: View {
             isRunning: isRunning,
             folderPath: folder?.path,
             nativeWindow: nativeWindow,
-            canGoBack: web.canGoBack,
-            canGoForward: web.canGoForward,
+            canGoBack: web.canGoBack || (split.selectedTab?.canGoBack ?? false),
+            canGoForward: web.canGoForward || (split.selectedTab?.canGoForward ?? false),
+            isSplitOpen: split.isOpen,
             chooseFolder: { isPickingFolder = true },
             openFolder: { open($0) },
             reload: { web.reload() },
-            goBack: { web.goBack() },
-            goForward: { web.goForward() },
+            goBack: {
+                if split.hasFocus(in: nativeWindow), let tab = split.selectedTab {
+                    tab.goBack()
+                } else {
+                    web.goBack()
+                }
+            },
+            goForward: {
+                if split.hasFocus(in: nativeWindow), let tab = split.selectedTab {
+                    tab.goForward()
+                } else {
+                    web.goForward()
+                }
+            },
+            toggleSplitBrowser: { split.toggle() },
+            closeBrowserTabIfFocused: {
+                guard split.hasFocus(in: nativeWindow), let tab = split.selectedTab else {
+                    return false
+                }
+                split.close(tab)
+                return true
+            },
             openInBrowser: {
                 if case .running(let url) = server.status {
                     NSWorkspace.shared.open(url)
@@ -96,6 +129,50 @@ struct ContentView: View {
                 web.load(url)
             }
         }
+        .onAppear {
+            // In-app is the default; ⌘-click and the opt-out setting fall
+            // back to the change's original system-browser behavior.
+            web.routeExternal = { [split] url, commandClick in
+                let scheme = url.scheme?.lowercased()
+                let toSystem = commandClick
+                    || (scheme != "http" && scheme != "https")
+                    || UserDefaults.standard.bool(forKey: ExternalLinkRouter.systemBrowserDefaultsKey)
+                if toSystem {
+                    ExternalLinkRouter.open(url)
+                } else {
+                    split.open(url)
+                }
+            }
+        }
+    }
+
+    private var splitDivider: some View {
+        Rectangle()
+            .fill(Color(nsColor: .separatorColor))
+            .frame(width: 1)
+            .overlay {
+                Color.clear
+                    .frame(width: 9)
+                    .contentShape(.rect)
+                    .gesture(
+                        DragGesture(coordinateSpace: .global)
+                            .onChanged { value in
+                                let base = splitDragBaseWidth ?? splitWidth
+                                splitDragBaseWidth = base
+                                splitWidth = min(max(300, base - value.translation.width), 1200)
+                            }
+                            .onEnded { _ in
+                                splitDragBaseWidth = nil
+                            }
+                    )
+                    .onHover { hovering in
+                        if hovering {
+                            NSCursor.resizeLeftRight.push()
+                        } else {
+                            NSCursor.pop()
+                        }
+                    }
+            }
     }
 
     private var launcher: some View {
@@ -218,11 +295,16 @@ struct WindowCommands: Equatable {
     var nativeWindow: NSWindow?
     var canGoBack: Bool
     var canGoForward: Bool
+    var isSplitOpen: Bool
     var chooseFolder: () -> Void
     var openFolder: (URL) -> Void
     var reload: () -> Void
     var goBack: () -> Void
     var goForward: () -> Void
+    var toggleSplitBrowser: () -> Void
+    /// Closes the split's selected tab when the split has keyboard focus;
+    /// returns false so the caller can fall back to closing the window.
+    var closeBrowserTabIfFocused: () -> Bool
     var openInBrowser: () -> Void
 
     static func == (lhs: Self, rhs: Self) -> Bool {
@@ -231,6 +313,7 @@ struct WindowCommands: Equatable {
             && lhs.nativeWindow === rhs.nativeWindow
             && lhs.canGoBack == rhs.canGoBack
             && lhs.canGoForward == rhs.canGoForward
+            && lhs.isSplitOpen == rhs.isSplitOpen
     }
 }
 
@@ -242,6 +325,7 @@ struct UatuCodeDesktopCommands: Commands {
     @FocusedValue(\.windowCommands) private var window
     @Environment(\.openWindow) private var openWindow
     @AppStorage("recentFolders") private var recentFoldersStorage = ""
+    @AppStorage(ExternalLinkRouter.systemBrowserDefaultsKey) private var openLinksInSystemBrowser = false
 
     private var recentFolders: [URL] {
         recentFoldersStorage
@@ -267,6 +351,18 @@ struct UatuCodeDesktopCommands: Commands {
                 }
             }
             .disabled(window == nil || recentFolders.isEmpty)
+            // ⌘W: when the split browser has keyboard focus this closes its
+            // selected tab; otherwise it falls through to closing the
+            // window. Disabled (→ native File > Close wins the shortcut)
+            // whenever the split is closed.
+            Button("Close Tab") {
+                guard let window else { return }
+                if !window.closeBrowserTabIfFocused() {
+                    window.nativeWindow?.performClose(nil)
+                }
+            }
+            .keyboardShortcut("w")
+            .disabled(window?.isSplitOpen != true)
         }
         CommandGroup(after: .toolbar) {
             Button("Back") { window?.goBack() }
@@ -282,6 +378,11 @@ struct UatuCodeDesktopCommands: Commands {
             Button("Open in Browser") { window?.openInBrowser() }
                 .keyboardShortcut("o", modifiers: [.command, .shift])
                 .disabled(window?.isRunning != true)
+            Divider()
+            Button("Toggle Split Browser") { window?.toggleSplitBrowser() }
+                .keyboardShortcut("b", modifiers: [.command, .shift])
+                .disabled(window?.isRunning != true)
+            Toggle("Open External Links in System Browser", isOn: $openLinksInSystemBrowser)
             Divider()
         }
         CommandGroup(before: .windowList) {

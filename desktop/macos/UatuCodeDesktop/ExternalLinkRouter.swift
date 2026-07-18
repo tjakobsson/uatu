@@ -12,6 +12,10 @@ import AppKit
 /// branch in-app.
 @MainActor
 enum ExternalLinkRouter {
+    /// UserDefaults key for the opt-out: when true, external http(s) links
+    /// bypass the split browser and open in the default browser.
+    static let systemBrowserDefaultsKey = "openExternalLinksInSystemBrowser"
+
     static func open(_ url: URL) {
         NSWorkspace.shared.open(url)
     }

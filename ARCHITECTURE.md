@@ -114,10 +114,20 @@ The wrapper↔CLI contract is deliberately thin:
 The WebView is a `WKWebView` (`WebViewHost.swift`), not SwiftUI's `WebPage`:
 `WebPage` has no `createWebViewWith` equivalent, so `window.open()` — how
 xterm.js activates OSC 8 terminal hyperlinks — and `target="_blank"` anchors
-would be silently dropped. The host's `WKUIDelegate` catches them and hands
-the URL to `ExternalLinkRouter` (default browser / system handler), and the
-window exposes Back/Forward (`⌘[`/`⌘]`, toolbar) over the SPA's pushState
-history.
+would be silently dropped. The host's `WKUIDelegate` catches them and routes
+the URL, and the window exposes Back/Forward (`⌘[`/`⌘]`, toolbar) over the
+SPA's pushState history.
+
+External `http(s)` links open by default in the **split browser**
+(`BrowserSplit.swift` + `BrowserSplitView.swift`): a per-window resizable
+right-hand pane with its own custom tab strip (native macOS tabs are
+window-level and can't nest in a pane), per-tab back/forward/reload, an
+editable address bar (URL or DuckDuckGo search), and an eject-to-browser
+button. Tabs share a persistent `WKWebsiteDataStore` (logins survive
+relaunch; open tabs don't). `⌘`-click, non-`http(s)` schemes, or the
+"Open External Links in System Browser" menu toggle route to the system
+instead (`ExternalLinkRouter`). Toggle the pane with `⌘⇧B`; `⌘W` closes the
+focused browser tab, falling back to the window when the split lacks focus.
 
 Nothing else crosses the boundary — the browser remains a first-class client,
 and the desktop app rides the same release train (see

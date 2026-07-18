@@ -20,6 +20,11 @@ final class WebViewHost: NSObject {
     private(set) var canGoBack = false
     private(set) var canGoForward = false
 
+    /// Where external link activations go. The Bool is "⌘ was held".
+    /// Unset, everything routes straight to the system via
+    /// ExternalLinkRouter; ContentView installs the split-browser routing.
+    var routeExternal: ((URL, Bool) -> Void)?
+
     let webView: WKWebView
     private var observations: [NSKeyValueObservation] = []
 
@@ -54,6 +59,16 @@ final class WebViewHost: NSObject {
     func goForward() {
         webView.goForward()
     }
+
+    fileprivate func routeOut(_ navigationAction: WKNavigationAction) {
+        guard let url = navigationAction.request.url else { return }
+        let commandClick = navigationAction.modifierFlags.contains(.command)
+        if let routeExternal {
+            routeExternal(url, commandClick)
+        } else {
+            ExternalLinkRouter.open(url)
+        }
+    }
 }
 
 extension WebViewHost: WKUIDelegate {
@@ -65,9 +80,7 @@ extension WebViewHost: WKUIDelegate {
     ) -> WKWebView? {
         // window.open() and target="_blank" land here; route the URL out
         // of the app instead of spawning a web view.
-        if let url = navigationAction.request.url {
-            ExternalLinkRouter.open(url)
-        }
+        routeOut(navigationAction)
         return nil
     }
 }
@@ -79,8 +92,8 @@ extension WebViewHost: WKNavigationDelegate {
         decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
     ) {
         // Belt and braces for new-window actions that skip the UI delegate.
-        if navigationAction.targetFrame == nil, let url = navigationAction.request.url {
-            ExternalLinkRouter.open(url)
+        if navigationAction.targetFrame == nil {
+            routeOut(navigationAction)
             decisionHandler(.cancel)
             return
         }

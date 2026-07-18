@@ -121,9 +121,9 @@ a setting, not a code path.
 
 ## Open Questions
 
-- Default search engine for address-bar search fallback (D4) — pick at
-  implementation time (candidate: DuckDuckGo, no API key or tracking
-  params needed).
-- Whether the split's width/open-state should persist per window tab or
-  per app — decide during implementation, mirroring whatever the terminal
-  panel convention feels like from the desktop side.
+_None — both resolved during implementation (2026-07-18):_
+
+- Address-bar search fallback uses DuckDuckGo (`https://duckduckgo.com/?q=`);
+  no API key or tracking params needed.
+- Split width persists app-wide (`AppStorage "browserSplitWidth"`);
+  open/closed state and tabs are per-window session state.
