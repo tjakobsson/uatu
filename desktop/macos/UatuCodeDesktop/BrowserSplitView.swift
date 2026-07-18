@@ -165,10 +165,13 @@ struct BrowserSplitView: View {
     static func destination(for input: String) -> URL {
         if !input.contains(" "), let colon = input.firstIndex(of: ":") {
             // "localhost:3000/x" parses as scheme "localhost", so digits
-            // up to the first slash mean a port, not a scheme.
+            // up to the first slash mean a port, not a scheme. The digit
+            // run must be non-empty: for "https://example.com" the first
+            // colon is followed by "//", leaving an empty prefix, and
+            // allSatisfy on an empty sequence is vacuously true.
             let afterColon = input[input.index(after: colon)...]
-            let portLike = !afterColon.isEmpty
-                && afterColon.prefix(while: { $0 != "/" }).allSatisfy(\.isNumber)
+            let firstSegment = afterColon.prefix(while: { $0 != "/" })
+            let portLike = !firstSegment.isEmpty && firstSegment.allSatisfy(\.isNumber)
             if portLike, let url = URL(string: "https://\(input)") {
                 return url
             }
