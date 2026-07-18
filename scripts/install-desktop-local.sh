@@ -30,6 +30,13 @@ xcodebuild \
 
 app="desktop/macos/build-local/Build/Products/Release/UatuCode Desktop.app"
 
+# Recheck right before deleting: the build takes minutes, plenty of time
+# for the app to have been launched since the check at the top.
+if pgrep -f "/Applications/UatuCode Desktop.app/Contents/MacOS/" > /dev/null; then
+  echo "UatuCode Desktop was started while building — quit it, then re-run this script." >&2
+  exit 1
+fi
+
 echo "==> Installing into /Applications"
 rm -rf "/Applications/UatuCode Desktop.app"
 ditto "$app" "/Applications/UatuCode Desktop.app"

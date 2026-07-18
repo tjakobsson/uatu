@@ -145,6 +145,14 @@ describe("artifact publication workflow", () => {
     const version = steps.find(step => step.id === "version")!;
     expect(version.run).toContain("%Y%m%d%H%M%S");
 
+    // Assets before tag: the skip guard keys on the tag, so a failed
+    // upload must leave the old tag for the next run to retry.
+    const publish = steps.find(step => step.id === "publish")!;
+    expect(publish.run!.indexOf("gh release upload")).toBeGreaterThan(-1);
+    expect(publish.run!.indexOf("git push -f origin edge")).toBeGreaterThan(
+      publish.run!.indexOf("gh release upload"),
+    );
+
     // The tap only updates after a successful publish.
     expect(workflow.jobs["update-tap"].needs).toBe("build");
     expect(workflow.jobs["update-tap"].if).toBe("needs.build.outputs.published == 'true'");

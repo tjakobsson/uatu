@@ -151,14 +151,18 @@ jobs:
 
           Install: \`brew install --cask tjakobsson/tap/uatu-desktop@edge\`
           Stable channel: \`brew install --cask tjakobsson/tap/uatu-desktop\`"
-          git tag -f edge "$commit"
-          git push -f origin edge
-          if gh release view edge > /dev/null 2>&1; then
-            gh release edit edge --prerelease --title "UatuCode Desktop edge" --notes "$notes"
-          else
-            gh release create edge --prerelease --title "UatuCode Desktop edge" --notes "$notes"
+          # Assets first, tag last: the skip guard keys on the tag, so a
+          # failed upload must leave the old tag in place — otherwise the
+          # next nightly would see "unchanged" and never retry, leaving
+          # stale assets behind a moved tag.
+          if ! gh release view edge > /dev/null 2>&1; then
+            gh release create edge --prerelease --target "$commit" \
+              --title "UatuCode Desktop edge" --notes "$notes"
           fi
           gh release upload edge --clobber dist/release/UatuCode-Desktop-*.zip dist/release/SHA256SUMS
+          gh release edit edge --prerelease --title "UatuCode Desktop edge" --notes "$notes"
+          git tag -f edge "$commit"
+          git push -f origin edge
           echo "published=true" >> "$GITHUB_OUTPUT"
 
   update-tap:
