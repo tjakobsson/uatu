@@ -179,7 +179,10 @@ struct BrowserSplitView: View {
                 return url
             }
         }
-        if !input.contains(" "), input.contains("."),
+        // Bare hosts need a dot to be distinguishable from search terms —
+        // except localhost, the one dotless host people actually visit.
+        let host = input.prefix(while: { $0 != "/" }).lowercased()
+        if !input.contains(" "), input.contains(".") || host == "localhost",
            let url = URL(string: "https://\(input)"), url.host() != nil {
             return url
         }
