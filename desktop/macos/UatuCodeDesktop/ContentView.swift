@@ -6,6 +6,7 @@
 import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
+import WebKit
 
 struct ContentView: View {
     let windowID: UUID
@@ -15,6 +16,9 @@ struct ContentView: View {
     /// Split width is an app-level preference; which windows have the
     /// split open is session state on `split`.
     @AppStorage("browserSplitWidth") private var splitWidth = 480.0
+    /// The shared page-zoom level: one value for the SPA pane and every
+    /// browser tab, in every window. Web views also read it at creation.
+    @AppStorage(PageZoom.defaultsKey) private var pageZoom = 1.0
     @State private var splitDragBaseWidth: Double?
     @State private var browserKeyMonitor: Any?
     @State private var isPickingFolder = false
@@ -69,6 +73,12 @@ struct ContentView: View {
             goBack: { web.goBack() },
             goForward: { web.goForward() },
             toggleSplitBrowser: { split.toggle() },
+            resetMagnification: {
+                web.webView.magnification = 1.0
+                for tab in split.tabs {
+                    tab.webView.magnification = 1.0
+                }
+            },
             openInBrowser: {
                 if case .running(let url) = server.status {
                     NSWorkspace.shared.open(url)
@@ -120,6 +130,12 @@ struct ContentView: View {
                 web.load(url)
             }
         }
+        .onChange(of: pageZoom) {
+            web.webView.pageZoom = pageZoom
+            for tab in split.tabs {
+                tab.webView.pageZoom = pageZoom
+            }
+        }
         .onAppear {
             // ⌘W / ⌘[ / ⌘] belong to the browser tab only while the split
             // has keyboard focus. Menu items can't express that: NSMenu
@@ -132,8 +148,19 @@ struct ContentView: View {
             if browserKeyMonitor == nil {
                 browserKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [split] event in
                     guard event.modifierFlags.intersection([.command, .shift, .option, .control]) == .command,
-                          let key = event.charactersIgnoringModifiers,
-                          key == "w" || key == "[" || key == "]",
+                          let key = event.charactersIgnoringModifiers
+                    else { return event }
+                    // ⌘= is the standard alias for Zoom In on layouts
+                    // where + is shifted (e.g. US); a menu item can only
+                    // carry one key equivalent, so the monitor claims it.
+                    if key == "=" {
+                        UserDefaults.standard.set(
+                            PageZoom.zoomedIn(from: PageZoom.storedLevel),
+                            forKey: PageZoom.defaultsKey
+                        )
+                        return nil
+                    }
+                    guard key == "w" || key == "[" || key == "]",
                           split.hasFocus(in: event.window),
                           let tab = split.selectedTab
                     else { return event }
@@ -324,6 +351,7 @@ struct WindowCommands: Equatable {
     var goBack: () -> Void
     var goForward: () -> Void
     var toggleSplitBrowser: () -> Void
+    var resetMagnification: () -> Void
     var openInBrowser: () -> Void
 
     static func == (lhs: Self, rhs: Self) -> Bool {
@@ -344,6 +372,7 @@ struct UatuCodeDesktopCommands: Commands {
     @Environment(\.openWindow) private var openWindow
     @AppStorage("recentFolders") private var recentFoldersStorage = ""
     @AppStorage(ExternalLinkRouter.systemBrowserDefaultsKey) private var openLinksInSystemBrowser = false
+    @AppStorage(PageZoom.defaultsKey) private var pageZoom = 1.0
 
     private var recentFolders: [URL] {
         recentFoldersStorage
@@ -384,6 +413,24 @@ struct UatuCodeDesktopCommands: Commands {
             Button("Open in Browser") { window?.openInBrowser() }
                 .keyboardShortcut("o", modifiers: [.command, .shift])
                 .disabled(window?.isRunning != true)
+            Divider()
+            Button("Actual Size") {
+                pageZoom = 1.0
+                window?.resetMagnification()
+            }
+            .keyboardShortcut("0")
+            .disabled(window == nil)
+            // Actions and enablement read the live defaults value, not the
+            // wrapper: the wrapper's cache can lag behind writes made since
+            // the menu was last rebuilt, which would make repeated Zoom In
+            // recompute the same step. The wrapper stays as the write path
+            // so changes still invalidate the menu.
+            Button("Zoom In") { pageZoom = PageZoom.zoomedIn(from: PageZoom.storedLevel) }
+                .keyboardShortcut("+")
+                .disabled(window == nil || !PageZoom.canZoomIn(from: PageZoom.storedLevel))
+            Button("Zoom Out") { pageZoom = PageZoom.zoomedOut(from: PageZoom.storedLevel) }
+                .keyboardShortcut("-")
+                .disabled(window == nil || !PageZoom.canZoomOut(from: PageZoom.storedLevel))
             Divider()
             Button("Toggle Split Browser") { window?.toggleSplitBrowser() }
                 .keyboardShortcut("b", modifiers: [.command, .shift])
