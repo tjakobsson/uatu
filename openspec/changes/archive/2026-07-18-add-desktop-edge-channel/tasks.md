@@ -41,11 +41,11 @@
 
 ## 5. Verify
 
-- [ ] 5.1 Trigger `desktop-edge.yml` via `workflow_dispatch`; verify
+- [x] 5.1 Trigger `desktop-edge.yml` via `workflow_dispatch`; verify
       signed, stapled archives on the `edge` prerelease and a correct
       `uatu-desktop@edge` cask in the tap
-- [ ] 5.2 `brew install --cask tjakobsson/tap/uatu-desktop@edge` on the
+- [x] 5.2 `brew install --cask tjakobsson/tap/uatu-desktop@edge` on the
       dev machine; verify launch, then re-run after the next edge build
       and verify `brew upgrade` moves forward
-- [ ] 5.3 Re-run the workflow with `main` unchanged; verify the early
+- [x] 5.3 Re-run the workflow with `main` unchanged; verify the early
       exit path
