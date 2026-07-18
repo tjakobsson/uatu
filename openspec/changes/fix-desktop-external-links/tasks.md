@@ -15,7 +15,7 @@
 - [x] 2.1 Add a single `openExternally(_ url: URL)` routing function
       (`NSWorkspace.shared.open`) and call it from the interception point
       for all new-window navigations
-- [ ] 2.2 Manually verify: rendered-doc external link, terminal OSC 8 link,
+- [x] 2.2 Manually verify: rendered-doc external link, terminal OSC 8 link,
       and a `mailto:` link each reach the correct system handler; uatu
       window state is untouched
 
