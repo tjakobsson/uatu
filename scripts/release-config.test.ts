@@ -145,6 +145,12 @@ describe("artifact publication workflow", () => {
     const version = steps.find(step => step.id === "version")!;
     expect(version.run).toContain("%Y%m%d%H%M%S");
 
+    // The guard must verify assets, not just the tag: gh release create
+    // makes the tag itself on first publication, so a tag-only check
+    // would let a failed inaugural upload block every retry.
+    const guard = steps.find(step => step.id === "guard")!;
+    expect(guard.run).toContain("--json assets");
+
     // Assets before tag: the skip guard keys on the tag, so a failed
     // upload must leave the old tag for the next run to retry.
     const publish = steps.find(step => step.id === "publish")!;

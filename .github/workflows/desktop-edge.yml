@@ -35,15 +35,25 @@ jobs:
         with:
           ref: main
 
-      - name: Skip when main has not moved since the last edge build
+      - name: Skip when the current main is already fully published
         id: guard
+        # "Published" means the edge tag points at HEAD AND all assets are
+        # on the release — not just the tag. gh release create makes the
+        # tag itself on the first publication, so a tag-only check would
+        # let a failed inaugural (or partial) upload block every retry
+        # until main moves again.
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           current="$(git rev-parse HEAD)"
           published="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/edge" --jq .object.sha 2>/dev/null || echo none)"
-          if [ "$current" = "$published" ]; then
-            echo "main unchanged since the last edge build ($current); nothing to do"
+          assets="$(gh release view edge --json assets --jq '.assets[].name' 2>/dev/null || true)"
+          complete=true
+          for asset in UatuCode-Desktop-arm64.zip UatuCode-Desktop-x64.zip SHA256SUMS; do
+            echo "$assets" | grep -qx "$asset" || complete=false
+          done
+          if [ "$current" = "$published" ] && [ "$complete" = true ]; then
+            echo "edge already fully published for $current; nothing to do"
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
