@@ -30,6 +30,8 @@ final class BrowserTab: NSObject, Identifiable {
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.allowsBackForwardNavigationGestures = true
+        webView.allowsMagnification = true
+        webView.pageZoom = PageZoom.storedLevel
         observations = [
             webView.observe(\.title, options: [.initial, .new]) { [weak self] view, _ in
                 MainActor.assumeIsolated { self?.title = view.title ?? "" }
