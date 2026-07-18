@@ -108,6 +108,7 @@ struct ContentView: View {
         .background(WindowResolver { window in
             window.tabbingIdentifier = "se.coll8.uatucode.desktop.main"
             server.bind(to: window)
+            split.hostWindow = window
             NativeTabCoordinator.shared.resolve(windowID: windowID, window: window)
             NativeWindowMenuCoordinator.shared.refresh()
             DispatchQueue.main.async {

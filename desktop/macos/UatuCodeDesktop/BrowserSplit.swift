@@ -122,10 +122,19 @@ extension BrowserTab: WKNavigationDelegate {
 final class BrowserSplit {
     private(set) var tabs: [BrowserTab] = []
     var selectedID: BrowserTab.ID?
-    private(set) var isOpen = false
+    private(set) var isOpen = false {
+        // The address-bar focus flag can outlive the pane (the field
+        // unmounts before its focus change fires); a stale true would make
+        // the key monitor steal ⌘W/⌘[/⌘] after reopening.
+        didSet { if !isOpen { addressBarFocused = false } }
+    }
     /// Mirrored from the address bar's SwiftUI focus so shortcut routing
     /// counts "typing in the address bar" as browser focus.
     var addressBarFocused = false
+    /// The window this split lives in. Key events are claimed only for
+    /// this window — every window installs an app-wide monitor, so
+    /// without the check one window's split could swallow another's ⌘W.
+    weak var hostWindow: NSWindow?
 
     /// Shared persistent store, distinct from the SPA WebView's default
     /// store. The identifier is fixed so every launch reopens it.
@@ -193,9 +202,9 @@ final class BrowserSplit {
     /// Whether keyboard shortcuts should act on the browser rather than
     /// the uatu pane, judged by the window's first responder at press time.
     func hasFocus(in window: NSWindow?) -> Bool {
-        guard isOpen else { return false }
+        guard isOpen, let window, window === hostWindow else { return false }
         if addressBarFocused { return true }
-        guard let view = window?.firstResponder as? NSView else { return false }
+        guard let view = window.firstResponder as? NSView else { return false }
         return tabs.contains { view === $0.webView || view.isDescendant(of: $0.webView) }
     }
 }
