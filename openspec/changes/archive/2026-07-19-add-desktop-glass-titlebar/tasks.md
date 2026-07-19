@@ -7,7 +7,7 @@
       `titleVisibility = .hidden`; confirm idempotence on re-resolution
 - [x] 1.2 Make the hosted web view span the full frame (ignore the top safe
       area) so page content reaches the top window edge
-- [ ] 1.3 Verify dragging by the titlebar region, toolbar buttons, and
+- [x] 1.3 Verify dragging by the titlebar region, toolbar buttons, and
       traffic lights all still work over web content
 
 ## 2. Inset contract (Swift)

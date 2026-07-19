@@ -46,7 +46,7 @@
       `uatu-desktop@edge` cask in the tap
 - [x] 5.2 `brew install --cask tjakobsson/tap/uatu-desktop@edge` on a
       dev machine; verify launch (done on the test Mac, 2026-07-18)
-- [ ] 5.4 After the first nightly following the next merge to main,
+- [x] 5.4 After the first nightly following the next merge to main,
       run `brew upgrade` on the edge-installed machine and verify it
       moves to the new edge version (deferred: needs a newer edge build
       to exist; version monotonicity is already test-asserted in
