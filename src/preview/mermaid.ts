@@ -21,7 +21,7 @@ const previewElement: HTMLElement = previewElementMaybe;
 const DARK_THEME_INPUTS: MermaidThemeInputs = {
   theme: "base",
   themeVariables: {
-    darkMode: "true",
+    darkMode: true,
     background: "#0d1117",
     textColor: "#e6edf3",
     lineColor: "#8b949e",
