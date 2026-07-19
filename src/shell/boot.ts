@@ -11,6 +11,7 @@ import { renderReviewScoreDetails } from "../sidebar/review-score-mount";
 import { renderSidebar } from "../sidebar/shell";
 import { setupTerminalPanel } from "../terminal/panel";
 import { applyMonoConfig } from "../mono/apply";
+import { initColorSchemeTracking } from "./theme";
 import { setFilesPaneFilter, syncFilesPaneFilterControl } from "../sidebar/files-filter";
 import { setPaneState } from "../sidebar/panes";
 import { setFollowEnabled, syncFollowToggle } from "./follow";
@@ -44,6 +45,11 @@ export async function loadInitialState() {
   // the URL with a hashless version — otherwise the post-load fragment
   // scroll has nothing to scroll to.
   const initialHash = window.location.hash;
+
+  // Before any rendering: the tracker sets the theme-color meta for the
+  // resolved scheme and starts listening for OS scheme flips (mermaid and
+  // the tree view subscribe on their own).
+  initColorSchemeTracking();
 
   const response = await fetch("/api/state");
   const payload = (await response.json()) as StatePayload;

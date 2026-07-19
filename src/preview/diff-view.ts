@@ -89,7 +89,7 @@ async function ensureHighlighter(): Promise<void> {
     // Cast: Pierre types `langs` as a tightened BundledLanguage union;
     // our allowlist matches at runtime but uses plain string literals.
     await pierre.preloadHighlighter({
-      themes: ["github-light"],
+      themes: ["github-light", "github-dark"],
       langs: PRELOADED_LANGS as unknown as Parameters<typeof pierre.preloadHighlighter>[0]["langs"],
     });
   })();
@@ -101,7 +101,7 @@ async function loadLanguage(lang: string): Promise<void> {
   loadedLangs.add(lang);
   const pierre = await getPierre();
   await pierre.preloadHighlighter({
-    themes: ["github-light"],
+    themes: ["github-light", "github-dark"],
     langs: [lang] as unknown as Parameters<typeof pierre.preloadHighlighter>[0]["langs"],
   });
 }
@@ -250,7 +250,11 @@ async function renderWithPierre(
     }
 
     const diff = new pierre.FileDiff({
-      theme: "github-light",
+      // Dual theme + system themeType: Pierre emits both palettes and
+      // switches on `prefers-color-scheme` itself, so an OS scheme flip
+      // restyles an already-rendered diff without a re-render.
+      theme: { light: "github-light", dark: "github-dark" },
+      themeType: "system",
       diffStyle,
       // "wrap" soft-wraps long lines; "scroll" (Pierre's default) keeps
       // them on one row behind a horizontal scrollbar. Pierre keeps its own

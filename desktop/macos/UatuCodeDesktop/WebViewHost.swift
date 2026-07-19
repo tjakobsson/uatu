@@ -27,6 +27,14 @@ final class WebViewHost: NSObject {
 
     let webView: WKWebView
     private var observations: [NSKeyValueObservation] = []
+    private var insetObservation: NSKeyValueObservation?
+    private weak var insetWindow: NSWindow?
+    private var lastInsetPoints: CGFloat = -1
+    /// The current covered-chrome height, for native views that need the
+    /// same offset the page gets (the split pane pads its chrome with it).
+    /// SwiftUI's safeAreaInsets can't be read reliably once a view ignores
+    /// the safe area, so the KVO-tracked window value is the one source.
+    private(set) var titlebarInset: CGFloat = 0
 
     override init() {
         webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
@@ -44,6 +52,48 @@ final class WebViewHost: NSObject {
                 MainActor.assumeIsolated { self?.canGoForward = view.canGoForward }
             },
         ]
+    }
+
+    /// The titlebar-inset contract with the SPA. With `.fullSizeContentView`
+    /// the page spans the whole window frame, but macOS WKWebView never
+    /// populates `env(safe-area-inset-top)` — the page cannot discover the
+    /// strip covered by the floating titlebar/toolbar on its own. The wrapper
+    /// announces it instead: a `uatu-desktop-host` class plus a
+    /// `--titlebar-inset` custom property on `<html>`. The height comes from
+    /// `contentLayoutRect` (ground truth — includes the native tab bar when
+    /// present) and is observed so tab-bar appearance updates the live page.
+    func bindTitlebarInset(to window: NSWindow) {
+        guard insetWindow !== window else { return }
+        insetWindow = window
+        insetObservation = window.observe(\.contentLayoutRect, options: [.initial, .new]) { [weak self] window, _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let contentHeight = window.contentView?.frame.height ?? window.frame.height
+                self.applyTitlebarInset(max(0, contentHeight - window.contentLayoutRect.height))
+            }
+        }
+    }
+
+    private func applyTitlebarInset(_ points: CGFloat) {
+        // Half-point granularity: enough for any Retina scale, and it keeps
+        // resize-driven KVO storms from re-injecting identical scripts.
+        let rounded = (points * 2).rounded() / 2
+        guard rounded != lastInsetPoints else { return }
+        lastInsetPoints = rounded
+        titlebarInset = rounded
+        let js = """
+        document.documentElement.classList.add("uatu-desktop-host");
+        document.documentElement.style.setProperty("--titlebar-inset", "\(rounded)px");
+        """
+        // Document-start injection is what makes the contract survive the
+        // SPA's live-reload (and any reload) with no flash of un-inset
+        // layout. This controller carries ONLY the inset script, so a full
+        // replace is safe; revisit if other user scripts are ever added.
+        let controller = webView.configuration.userContentController
+        controller.removeAllUserScripts()
+        controller.addUserScript(WKUserScript(source: js, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        // And the same mutation immediately, for the already-loaded page.
+        webView.evaluateJavaScript(js)
     }
 
     func load(_ url: URL) {

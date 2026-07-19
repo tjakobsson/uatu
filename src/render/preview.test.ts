@@ -8,6 +8,7 @@ import {
   normalizeRenderedDiagram,
   renderMermaidDiagrams,
   replaceMermaidCodeBlocks,
+  rerenderMermaidDiagrams,
 } from "./preview";
 
 // renderMermaidDiagrams resolves when lazy rendering is INSTALLED, not when
@@ -136,6 +137,48 @@ describe("renderMermaidDiagrams theme inputs", () => {
     });
     expect(initialize.mock.calls.length).toBe(3);
     expect(initialize.mock.calls[2][0].themeVariables).toEqual({ primaryColor: "#fff" });
+  });
+
+  test("a render superseded mid-run is undone so the re-render is not skipped", async () => {
+    // Regression: a theme flip while `mermaid.run` was in flight let the
+    // stale render stamp `data-processed` + the old-theme SVG onto a node
+    // the new install had already reset — and mermaid silently skips
+    // processed nodes, so the new-theme render became a no-op and the
+    // diagram stayed in the prior scheme.
+    let runCount = 0;
+    let releaseFirstRun!: () => void;
+    const firstRunGate = new Promise<void>(resolve => {
+      releaseFirstRun = resolve;
+    });
+    const run = mock(async (options: { nodes: HTMLElement[] }) => {
+      const call = ++runCount;
+      if (call === 1) {
+        await firstRunGate;
+      }
+      for (const node of options.nodes) {
+        // Emulate mermaid's real behavior: processed nodes are skipped.
+        if (node.hasAttribute("data-processed")) continue;
+        node.innerHTML = `<svg data-run="${call}"></svg>`;
+        node.setAttribute("data-processed", "true");
+      }
+    });
+    (globalThis as { mermaid?: unknown }).mermaid = { initialize: mock(() => undefined), run };
+
+    const container = doc.createElement("div");
+    container.innerHTML = '<div class="mermaid">graph TD; A-->B;</div>';
+
+    await renderMermaidDiagrams(container as unknown as ParentNode, { theme: "default" });
+    // Let the drain reach the gated first run...
+    await new Promise(resolve => setTimeout(resolve, 0));
+    // ...then supersede it with a theme flip while it is in flight.
+    const rerender = rerenderMermaidDiagrams({ theme: "dark" });
+    releaseFirstRun();
+    await rerender;
+    await __drainMermaidQueueForTests();
+
+    const node = container.querySelector(".mermaid")!;
+    expect(run.mock.calls.length).toBe(2);
+    expect(node.querySelector("svg")?.getAttribute("data-run")).toBe("2");
   });
 
   test("a bad diagram does not reject the batch and other diagrams still render", async () => {

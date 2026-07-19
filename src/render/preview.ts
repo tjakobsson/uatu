@@ -1,11 +1,13 @@
 type MermaidRuntime = {
-  initialize: (options: { startOnLoad: boolean; securityLevel: string; theme: string; themeVariables?: Record<string, string> }) => void;
+  initialize: (options: { startOnLoad: boolean; securityLevel: string; theme: string; themeVariables?: Record<string, string | boolean> }) => void;
   run: (options: { nodes: HTMLElement[]; suppressErrors?: boolean }) => Promise<void>;
 };
 
 export type MermaidThemeInputs = {
   theme: "default" | "dark" | "neutral" | "forest" | "base";
-  themeVariables?: Record<string, string>;
+  // Booleans allowed so flags like `darkMode` reach mermaid as real
+  // booleans — a string "true" only works while mermaid checks truthiness.
+  themeVariables?: Record<string, string | boolean>;
 };
 
 const DEFAULT_THEME_INPUTS: MermaidThemeInputs = { theme: "default" };
@@ -30,6 +32,10 @@ let mermaidLoadPromise: Promise<MermaidRuntime | null> | null = null;
 let renderGeneration = 0;
 let activeObserver: IntersectionObserver | null = null;
 let draining = false;
+// The container of the most recent install — the active preview. A theme
+// re-render targets this rather than threading the container through the
+// theme subscription (mounts always reinstall, so "last" is "current").
+let lastInstallContainer: ParentNode | null = null;
 
 type QueueEntry = { node: HTMLElement; generation: number; themeInputs: MermaidThemeInputs };
 const renderQueue: QueueEntry[] = [];
@@ -51,12 +57,18 @@ export async function renderMermaidDiagrams(
   const generation = ++renderGeneration;
   activeObserver?.disconnect();
   activeObserver = null;
+  lastInstallContainer = container;
 
   const nodes = Array.from(container.querySelectorAll<HTMLElement>(".mermaid"));
   if (nodes.length === 0) {
     return;
   }
   for (const node of nodes) {
+    // Rendering replaces the node's content with the SVG, destroying the
+    // source — stash it so a theme re-render can restore and re-run.
+    if (node.dataset.mermaidSource === undefined) {
+      node.dataset.mermaidSource = (node.textContent ?? "").trim();
+    }
     node.classList.add(PENDING_CLASS);
   }
 
@@ -135,7 +147,7 @@ async function drainRenderQueue(): Promise<void> {
       if (!entry || entry.generation !== renderGeneration) {
         continue;
       }
-      await renderSingleDiagram(entry.node, entry.themeInputs);
+      await renderSingleDiagram(entry.node, entry.themeInputs, entry.generation);
       // One diagram per pass: yield to the paint cycle so the page stays
       // responsive while a long run of diagrams renders.
       await nextAnimationFrame();
@@ -145,8 +157,12 @@ async function drainRenderQueue(): Promise<void> {
   }
 }
 
-async function renderSingleDiagram(node: HTMLElement, themeInputs: MermaidThemeInputs): Promise<void> {
-  const source = (node.textContent ?? "").trim();
+async function renderSingleDiagram(
+  node: HTMLElement,
+  themeInputs: MermaidThemeInputs,
+  generation: number,
+): Promise<void> {
+  const source = (node.dataset.mermaidSource ?? node.textContent ?? "").trim();
   const cacheKey = `${serializeThemeInputs(themeInputs)}\u0000${source}`;
 
   const cachedSvg = renderedSvgCache.get(cacheKey);
@@ -160,6 +176,12 @@ async function renderSingleDiagram(node: HTMLElement, themeInputs: MermaidThemeI
   }
 
   const mermaid = await getMermaidRuntime();
+  // A theme flip / new install may have superseded this render while the
+  // runtime loaded. The node has been reset and re-queued by the new
+  // install — leave it untouched for the new-generation entry.
+  if (generation !== renderGeneration) {
+    return;
+  }
   if (!mermaid) {
     node.classList.remove(PENDING_CLASS);
     return;
@@ -188,12 +210,28 @@ async function renderSingleDiagram(node: HTMLElement, themeInputs: MermaidThemeI
   const svg = node.querySelector<SVGElement>("svg");
   normalizeRenderedDiagram(node);
   if (svg && !isErrorDiagramSvg(svg)) {
+    // Still cached even when superseded below — the SVG is valid for its
+    // own theme inputs, so flipping back becomes a cache hit.
     renderedSvgCache.set(cacheKey, svg.outerHTML);
     if (renderedSvgCache.size > SVG_CACHE_MAX_ENTRIES) {
       const oldest = renderedSvgCache.keys().next().value;
       if (oldest !== undefined) {
         renderedSvgCache.delete(oldest);
       }
+    }
+  }
+
+  // mermaid.run() cannot be cancelled: if a theme flip superseded this
+  // render mid-run, the stale mutation just landed on a node the new
+  // install already reset — and its data-processed stamp would make the
+  // new-generation run a silent no-op, leaving the old theme on screen.
+  // Undo the stale mutation so the queued re-render starts clean.
+  if (generation !== renderGeneration) {
+    const stashedSource = node.dataset.mermaidSource;
+    if (stashedSource !== undefined) {
+      node.textContent = stashedSource;
+      node.removeAttribute("data-processed");
+      node.classList.add(PENDING_CLASS);
     }
   }
 }
@@ -322,6 +360,29 @@ export function __resetMermaidStateForTests(): void {
   renderedSvgCache.clear();
   activeObserver?.disconnect();
   activeObserver = null;
+  lastInstallContainer = null;
+}
+
+// Re-render the active preview's diagrams with new theme inputs (the
+// mermaid-rendering spec's theme-change requirement). Restores each
+// diagram's stashed source — rendering destroyed the node content — then
+// reinstalls lazy rendering over the same container, so off-screen
+// diagrams stay lazy and theme-keyed cache hits skip the renderer.
+export async function rerenderMermaidDiagrams(themeInputs: MermaidThemeInputs): Promise<void> {
+  const container = lastInstallContainer;
+  if (!container) {
+    return;
+  }
+  for (const node of Array.from(container.querySelectorAll<HTMLElement>(".mermaid"))) {
+    const source = node.dataset.mermaidSource;
+    if (source !== undefined) {
+      node.textContent = source;
+      // Mermaid stamps rendered nodes as processed and mermaid.run()
+      // silently skips them — clear the stamp or the re-render is a no-op.
+      node.removeAttribute("data-processed");
+    }
+  }
+  await renderMermaidDiagrams(container, themeInputs);
 }
 
 async function getMermaidRuntime(): Promise<MermaidRuntime | null> {

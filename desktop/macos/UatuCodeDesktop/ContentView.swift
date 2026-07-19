@@ -38,10 +38,28 @@ struct ContentView: View {
                 ProgressView("Starting uatu…")
             case .running:
                 HStack(spacing: 0) {
+                    // The web view spans the full window frame — the page is
+                    // visible beneath the transparent titlebar and the glass
+                    // toolbar (set up in the WindowResolver below). The split
+                    // pane and divider stay inside the safe area, so their
+                    // chrome starts below the toolbar without extra padding.
                     HostedWebView(host: web)
+                        .ignoresSafeArea(edges: .top)
                     if split.isOpen {
                         splitDivider
+                            .ignoresSafeArea(edges: .top)
+                        // The split pane also spans the full window height so
+                        // no dead band appears under the transparent titlebar;
+                        // its own chrome (tab strip, address bar) is padded
+                        // down by the covered height. The value comes from the
+                        // web host's contentLayoutRect observation — reading
+                        // safeAreaInsets via GeometryReader reports 0 once the
+                        // view ignores the safe area, so it can't be used.
                         BrowserSplitView(split: split)
+                            .padding(.top, web.titlebarInset)
+                            .frame(maxHeight: .infinity)
+                            .background(.background)
+                            .ignoresSafeArea(edges: .top)
                             .frame(width: splitWidth)
                     }
                 }
@@ -100,6 +118,10 @@ struct ContentView: View {
                 }
                 .disabled(!isRunning || !web.canGoForward)
             }
+            // With the window title hidden there is no title area to push
+            // trailing items right — without an explicit flexible spacer the
+            // primary action packs in next to the navigation buttons.
+            ToolbarSpacer(.flexible)
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     split.toggle()
@@ -117,7 +139,15 @@ struct ContentView: View {
         }
         .background(WindowResolver { window in
             window.tabbingIdentifier = "se.coll8.uatucode.desktop.main"
+            // Safari-style full-height content: the content view spans the
+            // whole frame, the titlebar is transparent with no title text,
+            // and the toolbar floats over the page as system glass. All
+            // idempotent — the resolver re-runs on window re-resolution.
+            window.styleMask.insert(.fullSizeContentView)
+            window.titlebarAppearsTransparent = true
+            window.titleVisibility = .hidden
             server.bind(to: window)
+            web.bindTitlebarInset(to: window)
             split.hostWindow = window
             NativeTabCoordinator.shared.resolve(windowID: windowID, window: window)
             NativeWindowMenuCoordinator.shared.refresh()

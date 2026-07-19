@@ -1,5 +1,13 @@
 @import "github-markdown-css/github-markdown-light.css";
 @import "highlight.js/styles/github.css";
+/* Dark siblings of the two vendored themes above, scoped to the system
+   dark scheme via media-qualified imports. This is deliberately the ONE
+   place that hard-codes `prefers-color-scheme` as the switching
+   mechanism — everything app-owned switches through `light-dark()`
+   tokens instead. A future manual theme switch only has to rework these
+   two lines (e.g. attribute-scoped copies); see the system-theme spec. */
+@import "github-markdown-css/github-markdown-dark.css" (prefers-color-scheme: dark);
+@import "highlight.js/styles/github-dark.css" (prefers-color-scheme: dark);
 
 /* Bundled Hack Nerd Font Mono. `local()` first so a user-installed copy
    short-circuits the network round-trip where the browser allows it
@@ -41,21 +49,54 @@
 }
 
 :root {
-  color-scheme: light;
+  /* Follow the system light/dark preference. Every app-owned themed color
+     is a `light-dark(<light>, <dark>)` token below, so this declaration —
+     not scattered media queries — is what resolves the scheme. Dark
+     values track GitHub's dark palette to stay coherent with the vendored
+     github-markdown-dark / hljs github-dark imports. */
+  color-scheme: light dark;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  background: #ffffff;
-  color: #24292f;
+  /* Chrome background/foreground. When these change, keep the theme-color
+     meta values in src/shell/theme.ts in sync. */
+  background: light-dark(#ffffff, #0d1117);
+  color: light-dark(#24292f, #e6edf3);
   --sidebar-width: 360px;
   --sidebar-rail-width: 36px;
-  --border-soft: #e6eaef;
-  --border-medium: #d0d7de;
-  --text-subtle: #57606a;
-  --text-strong: #1f2328;
-  --accent: #0969da;
-  --accent-soft: #ddf4ff;
+  --border-soft: light-dark(#e6eaef, #21262d);
+  --border-medium: light-dark(#d0d7de, #30363d);
+  --text-subtle: light-dark(#57606a, #8b949e);
+  --text-strong: light-dark(#1f2328, #e6edf3);
+  --accent: light-dark(#0969da, #4493f8);
+  --accent-soft: light-dark(#ddf4ff, #121d2f);
   --navy: #0a1c38;
   --teal: #1ca8a7;
-  --surface-muted: #f3f5f7;
+  --surface-muted: light-dark(#f3f5f7, #161b22);
+  --scrollbar-thumb: light-dark(#cdd5df, #30363d);
+  /* Surface tiers: --surface is pane/page background, --surface-raised is
+     anything that floats (menus, cards, tooltips, active segments),
+     --surface-subtle is muted fills and hovers. Dark values follow
+     GitHub's dark palette like the vendored markdown/hljs imports. */
+  --surface: light-dark(#ffffff, #0d1117);
+  --surface-raised: light-dark(#ffffff, #161b22);
+  --surface-subtle: light-dark(#f6f8fa, #161b22);
+  /* Semantic state colors (GitHub light/dark pairs). */
+  --success: light-dark(#2da44e, #3fb950);
+  --success-strong: light-dark(#1a7f37, #3fb950);
+  --danger: light-dark(#cf222e, #f85149);
+  --attention: light-dark(#bf8700, #d29922);
+  /* Review-load / score chip families (low = green, medium = yellow,
+     high = red), shared by the burden meter, score preview, and hints. */
+  --score-low-border: light-dark(#b7e4c7, #2ea043);
+  --score-low-bg: light-dark(#effaf2, #0f2417);
+  --score-medium-border: light-dark(#f0cf7a, #9e6a03);
+  --score-medium-bg: light-dark(#fff8dc, #271d05);
+  --score-high-border: light-dark(#ffb3ad, #da3633);
+  --score-high-bg: light-dark(#fff1f0, #2d1214);
+  /* Diff colors. These were previously only var() fallbacks at the usage
+     sites; defining them here makes every usage scheme-aware at once. */
+  --diff-added-bg: light-dark(#e6ffec, #12261e);
+  --diff-deleted-bg: light-dark(#ffebe9, #2d1214);
+  --hunk-header-fg: light-dark(#57606a, #8b949e);
 
   /* Shared monospace face for every mono surface in the app — code blocks,
      source view, diff view, file paths, build badge, burden meter, etc.
@@ -112,7 +153,7 @@
 * {
   box-sizing: border-box;
   scrollbar-width: thin;
-  scrollbar-color: #cdd5df transparent;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
 }
 
 *::-webkit-scrollbar {
@@ -126,11 +167,11 @@
 
 *::-webkit-scrollbar-thumb {
   border-radius: 999px;
-  background: #cdd5df;
+  background: var(--scrollbar-thumb);
 }
 
 *::-webkit-scrollbar-thumb:hover {
-  background: #b9c3cf;
+  background: light-dark(#b9c3cf, #3a434e);
 }
 
 html,
@@ -140,7 +181,7 @@ body {
 }
 
 body {
-  background: #fbfcfd;
+  background: light-dark(#fbfcfd, #0d1117);
   overflow: hidden;
 }
 
@@ -162,7 +203,7 @@ body {
   flex-direction: column;
   padding: 1.5rem 1.25rem 0;
   border-right: 0;
-  background: #ffffff;
+  background: var(--surface);
   overflow: hidden;
   min-height: 0;
 }
@@ -175,7 +216,7 @@ body {
   grid-area: resize;
   width: 6px;
   cursor: col-resize;
-  background: #ffffff;
+  background: var(--surface);
   border-right: 1px solid var(--border-soft);
   position: relative;
 }
@@ -210,7 +251,7 @@ body.is-resizing-sidebar {
   width: var(--sidebar-rail-width);
   border: 0;
   border-right: 1px solid var(--border-soft);
-  background: #ffffff;
+  background: var(--surface);
   color: var(--text-subtle);
   cursor: pointer;
   padding: 0;
@@ -218,11 +259,99 @@ body.is-resizing-sidebar {
 
 .sidebar-rail:hover {
   color: var(--accent);
-  background: #f6f8fa;
+  background: var(--surface-subtle);
 }
 
 .app-shell.is-sidebar-collapsed .sidebar-rail {
   display: flex;
+}
+
+/* Titlebar-inset contract with UatuCode Desktop (desktop-titlebar-inset
+   spec). The wrapper's full-height window floats the native titlebar and
+   glass toolbar OVER the page and announces the covered height by stamping
+   `uatu-desktop-host` + `--titlebar-inset` on <html> (a document-start user
+   script, so it survives live-reloads; the value tracks native chrome
+   height, e.g. the tab bar appearing). These rules push the app's own
+   chrome below the covered strip while letting backgrounds and scrolled
+   content flow beneath the glass. Without the marker class the variable
+   never applies, so browser/PWA layout is untouched. */
+/* Progressive frost under the native chrome. WKWebView cannot render the
+   system scroll-edge effect for an overlay it doesn't know about, so
+   scrolled content would otherwise show RAW in the transparent titlebar
+   strip, half-ghosted behind the tab bar's material, and frosted only
+   below — three different treatments stacked. The page frosts its own
+   covered strip instead (same recipe as .preview-header): solid blur
+   through the inset, dissolving over a falloff zone below it. Sits above
+   all page chrome (max otherwise is the tooltip at 30) but below the
+   modal layer (100). */
+html.uatu-desktop-host body::before {
+  content: "";
+  position: fixed;
+  top: 0;
+  /* The strip starts after the sidebar column: the sidebar is inset-padded
+     solid surface that never scrolls under the chrome, so frosting it does
+     nothing over the background but washes the brand logo where the
+     falloff overlaps the header. Keeping the left column out keeps the
+     logo sharp. The resizer/preview columns stay covered; the sidebar
+     width var tracks live resizing. */
+  left: var(--sidebar-width);
+  right: 0;
+  height: calc(var(--titlebar-inset, 0px) + 64px);
+  pointer-events: none;
+  z-index: 90;
+  /* Blur-forward, veil-light: a heavier white/dark wash turns dark
+     content under the strip into a flat gray smear. Keep the tint low so
+     the effect reads as "blurred content", and dissolve over an eased
+     64px ramp — a short linear cut leaves a visible band edge against
+     saturated content. */
+  background: light-dark(rgba(255, 255, 255, 0.3), rgba(13, 17, 23, 0.35));
+  -webkit-backdrop-filter: blur(22px) saturate(170%);
+  backdrop-filter: blur(22px) saturate(170%);
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 1) 0%,
+    rgba(0, 0, 0, 1) var(--titlebar-inset, 0px),
+    rgba(0, 0, 0, 0.6) calc(var(--titlebar-inset, 0px) + 20px),
+    rgba(0, 0, 0, 0.25) calc(var(--titlebar-inset, 0px) + 40px),
+    rgba(0, 0, 0, 0.08) calc(var(--titlebar-inset, 0px) + 54px),
+    rgba(0, 0, 0, 0) 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 1) 0%,
+    rgba(0, 0, 0, 1) var(--titlebar-inset, 0px),
+    rgba(0, 0, 0, 0.6) calc(var(--titlebar-inset, 0px) + 20px),
+    rgba(0, 0, 0, 0.25) calc(var(--titlebar-inset, 0px) + 40px),
+    rgba(0, 0, 0, 0.08) calc(var(--titlebar-inset, 0px) + 54px),
+    rgba(0, 0, 0, 0) 100%
+  );
+}
+
+html.uatu-desktop-host body:has(.app-shell.is-sidebar-collapsed)::before {
+  left: var(--sidebar-rail-width);
+}
+
+html.uatu-desktop-host .sidebar {
+  padding-top: calc(1.5rem + var(--titlebar-inset, 0px));
+}
+
+html.uatu-desktop-host .sidebar-rail {
+  padding-top: var(--titlebar-inset, 0px);
+}
+
+/* The scroller's top padding alone positions AND pins the sticky header
+   at the inset: both Chromium and WebKit anchor a sticky child's `top`
+   constraint at the scroller's content edge (verified empirically in
+   both), so adding the inset to `.preview-header { top }` as well would
+   double the offset. Scrolled content still flows above the pinned
+   header into the covered strip, under the native glass. */
+html.uatu-desktop-host .preview-shell {
+  padding-top: var(--titlebar-inset, 0px);
+  scroll-padding-top: calc(9rem + var(--titlebar-inset, 0px));
+}
+
+html.uatu-desktop-host .terminal-panel[data-dock="right"] {
+  padding-top: var(--titlebar-inset, 0px);
 }
 
 .sidebar-header {
@@ -246,6 +375,14 @@ body.is-resizing-sidebar {
   width: 56px;
   height: 56px;
   flex-shrink: 0;
+}
+
+/* The logo is inline SVG with the brand navy baked into fill attributes.
+   Presentation attributes lose to any CSS rule, so this retints the navy
+   paths for dark without touching the markup; the teal accent works on
+   both schemes and stays as-is. */
+.brand-logo path[fill="#0a1c38"] {
+  fill: light-dark(#0a1c38, #dbe4f0);
 }
 
 .brand-logo #eye {
@@ -311,7 +448,7 @@ body.is-resizing-sidebar {
   padding: 0.35rem;
   border: 1px solid var(--border-soft);
   border-radius: 0.45rem;
-  background: #ffffff;
+  background: var(--surface-raised);
   box-shadow: 0 8px 24px rgba(31, 35, 40, 0.12);
 }
 
@@ -326,7 +463,7 @@ body.is-resizing-sidebar {
 }
 
 .panel-option:hover {
-  background: #f6f8fa;
+  background: var(--surface-subtle);
 }
 
 .connection-state {
@@ -352,17 +489,17 @@ body.is-resizing-sidebar {
   width: 0.55rem;
   height: 0.55rem;
   border-radius: 999px;
-  background: #d0d7de;
+  background: var(--border-medium);
   flex-shrink: 0;
 }
 
 .connection-state.is-live .indicator-dot {
-  background: #2da44e;
+  background: var(--success);
   animation: uatu-pulse 1.8s ease-in-out infinite;
 }
 
 .connection-state.is-reconnecting .indicator-dot {
-  background: #d4a72c;
+  background: light-dark(#d4a72c, #d29922);
 }
 
 @keyframes uatu-pulse {
@@ -864,7 +1001,7 @@ body.is-resizing-terminal .panel-resizer {
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   padding: 0.05rem 0.35rem;
   border-radius: 3px;
-  background: rgba(15, 23, 42, 0.06);
+  background: light-dark(rgba(15, 23, 42, 0.06), rgba(230, 237, 243, 0.08));
   color: var(--text-subtle);
   border: 1px solid var(--border-soft);
   letter-spacing: 0;
@@ -879,7 +1016,7 @@ body.is-resizing-terminal .panel-resizer {
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(15, 23, 42, 0.45);
+  background: light-dark(rgba(15, 23, 42, 0.45), rgba(0, 0, 0, 0.6));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -891,7 +1028,7 @@ body.is-resizing-terminal .panel-resizer {
 }
 
 .modal-card {
-  background: #ffffff;
+  background: var(--surface-raised);
   border-radius: 8px;
   box-shadow: 0 20px 40px -10px rgba(15, 23, 42, 0.35);
   padding: 1.25rem;
@@ -925,7 +1062,7 @@ body.is-resizing-terminal .panel-resizer {
   padding: 0.45rem 0.85rem;
   border-radius: 5px;
   border: 1px solid var(--border-medium);
-  background: #ffffff;
+  background: var(--surface-raised);
   color: var(--text-strong);
   cursor: pointer;
 }
@@ -939,13 +1076,13 @@ body.is-resizing-terminal .panel-resizer {
 }
 
 .modal-button-danger {
-  background: #d1242f;
-  border-color: #d1242f;
+  background: light-dark(#d1242f, #da3633);
+  border-color: light-dark(#d1242f, #da3633);
   color: #ffffff;
 }
 
 .modal-button-danger:hover {
-  background: #b91c25;
+  background: light-dark(#b91c25, #b62324);
 }
 
 .modal-button:focus-visible {
@@ -1215,7 +1352,7 @@ body.is-resizing-terminal .panel-resizer {
   bottom: -28px;
   z-index: -1;
   pointer-events: none;
-  background: rgba(255, 255, 255, 0.68);
+  background: light-dark(rgba(255, 255, 255, 0.68), rgba(13, 17, 23, 0.72));
   -webkit-backdrop-filter: blur(18px) saturate(180%);
   backdrop-filter: blur(18px) saturate(180%);
   -webkit-mask-image: linear-gradient(
@@ -1234,7 +1371,7 @@ body.is-resizing-terminal .panel-resizer {
 
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .preview-header::before {
-    background: #ffffff;
+    background: var(--surface);
     -webkit-mask-image: none;
     mask-image: none;
     bottom: 0;
@@ -1324,12 +1461,12 @@ body.is-resizing-terminal .panel-resizer {
 }
 
 .file-facts-added {
-  color: #2da44e;
+  color: var(--success);
   font-weight: 600;
 }
 
 .file-facts-removed {
-  color: #cf222e;
+  color: var(--danger);
   font-weight: 600;
 }
 
@@ -1350,7 +1487,7 @@ body.is-resizing-terminal .panel-resizer {
 }
 
 .file-facts-strip.is-updated .file-facts-freshness {
-  color: #1a7f37;
+  color: var(--success-strong);
   background-color: var(--diff-added-bg, #e6ffec);
 }
 
@@ -1373,8 +1510,8 @@ body.is-resizing-terminal .panel-resizer {
   font-size: 0.7rem;
   font-weight: 500;
   letter-spacing: 0.04em;
-  color: #2da44e;
-  border: 1px solid #2da44e;
+  color: var(--success);
+  border: 1px solid var(--success);
   background: var(--diff-added-bg, #e6ffec);
   padding: 0.1rem 0.5rem;
   border-radius: 999px;
@@ -1464,7 +1601,7 @@ body.is-resizing-terminal .panel-resizer {
   width: 2.1rem;
   height: 1.15rem;
   border-radius: 999px;
-  background: #cfd5db;
+  background: light-dark(#cfd5db, #30363d);
   transition: background-color 0.15s ease;
 }
 
@@ -1473,7 +1610,7 @@ body.is-resizing-terminal .panel-resizer {
 }
 
 .follow-switch:disabled .follow-switch-track {
-  background: #cfd5db;
+  background: light-dark(#cfd5db, #30363d);
 }
 
 .follow-switch-thumb {
@@ -1536,7 +1673,7 @@ body.is-resizing-terminal .panel-resizer {
   border: 0;
   border-top: 1px solid var(--border-soft);
   border-radius: 0;
-  background: #ffffff;
+  background: var(--surface);
   overflow: hidden;
 }
 
@@ -1560,7 +1697,7 @@ body.is-resizing-terminal .panel-resizer {
   gap: 0.5rem;
   padding: 0.5rem 1.25rem;
   border-bottom: 1px solid var(--border-soft);
-  background: #fbfcfd;
+  background: light-dark(#fbfcfd, #161b22);
 }
 
 .pane-header h2 {
@@ -1626,11 +1763,11 @@ body.is-resizing-terminal .panel-resizer {
 
 .files-pane-filter-segment:hover:not(.is-active) {
   color: var(--text-strong);
-  background: rgba(255, 255, 255, 0.6);
+  background: light-dark(rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0.06));
 }
 
 .files-pane-filter-segment.is-active {
-  background: #ffffff;
+  background: var(--surface-raised);
   color: var(--accent);
   box-shadow: 0 1px 2px rgba(36, 41, 47, 0.08);
   cursor: default;
@@ -1654,7 +1791,7 @@ body.is-resizing-terminal .panel-resizer {
   height: 1.45rem;
   border: 1px solid var(--border-soft);
   border-radius: 0.3rem;
-  background: #ffffff;
+  background: var(--surface-raised);
   color: var(--text-strong);
   font: inherit;
   font-size: 0.72rem;
@@ -1676,7 +1813,7 @@ body.is-resizing-terminal .panel-resizer {
 
 .pane-action:hover {
   color: var(--text-strong);
-  background: #eef2f5;
+  background: light-dark(#eef2f5, #21262d);
 }
 
 .pane-body {
@@ -1696,7 +1833,7 @@ body.is-resizing-terminal .panel-resizer {
   flex: 0 0 auto;
   cursor: row-resize;
   border-top: 1px solid var(--border-soft);
-  background: #ffffff;
+  background: var(--surface);
   position: relative;
 }
 
@@ -1734,7 +1871,7 @@ body.is-resizing-terminal .panel-resizer {
   padding: 0.45rem 0.6rem;
   border: 1px solid var(--border-soft);
   border-radius: 0.3rem;
-  background: #fbfcfd;
+  background: light-dark(#fbfcfd, #161b22);
   color: var(--text-strong);
   font-family: var(--mono-font-family);
   font-size: 0.74rem;
@@ -1753,7 +1890,7 @@ body.is-resizing-terminal .panel-resizer {
 }
 
 .selection-inspector-control:hover {
-  background: #f3f5f7;
+  background: var(--surface-muted);
   border-color: var(--accent);
 }
 
@@ -1881,7 +2018,7 @@ body.is-resizing-terminal .panel-resizer {
   padding: 0.45rem 0.55rem;
   border-radius: 0.4rem;
   border: 1px solid var(--border-soft);
-  background: #f6f8fa;
+  background: var(--surface-subtle);
   color: var(--text-strong);
   cursor: pointer;
   font: inherit;
@@ -1905,7 +2042,7 @@ body.is-resizing-terminal .panel-resizer {
   padding: 2px;
   border: 1px solid var(--border-soft);
   border-radius: 0.4rem;
-  background: #f6f8fa;
+  background: var(--surface-subtle);
 }
 
 .compare-target-option {
@@ -1961,26 +2098,26 @@ body.is-resizing-terminal .panel-resizer {
 }
 
 .burden-meter.is-low {
-  border-color: #b7e4c7;
-  background: #effaf2;
+  border-color: var(--score-low-border);
+  background: var(--score-low-bg);
 }
 
 .burden-meter.is-medium {
-  border-color: #f0cf7a;
-  background: #fff8dc;
+  border-color: var(--score-medium-border);
+  background: var(--score-medium-bg);
 }
 
 .burden-meter.is-high {
-  border-color: #ffb3ad;
-  background: #fff1f0;
+  border-color: var(--score-high-border);
+  background: var(--score-high-bg);
 }
 
 .config-warning {
   margin: 0.4rem 0;
   padding: 0.4rem 0.5rem;
-  border-left: 3px solid #bf8700;
-  background: #fff8dc;
-  color: #6f4e00;
+  border-left: 3px solid var(--attention);
+  background: var(--score-medium-bg);
+  color: light-dark(#6f4e00, #eac54f);
   font-size: 0.74rem;
   line-height: 1.4;
 }
@@ -1994,9 +2131,9 @@ body.is-resizing-terminal .panel-resizer {
 .untracked-indicator {
   margin: 0.35rem 0;
   padding: 0.25rem 0.5rem;
-  border-left: 3px solid #6b7280;
-  background: #f3f4f6;
-  color: #374151;
+  border-left: 3px solid light-dark(#6b7280, #6e7681);
+  background: light-dark(#f3f4f6, #21262d);
+  color: light-dark(#374151, #adbac7);
   font-size: 0.74rem;
   line-height: 1.4;
 }
@@ -2048,12 +2185,12 @@ body.is-resizing-terminal .panel-resizer {
 }
 
 .score-driver.is-support code {
-  color: #1a7f37;
+  color: var(--success-strong);
 }
 
 .score-driver.is-risk code,
 .score-driver.is-warning code {
-  color: #cf222e;
+  color: var(--danger);
 }
 
 .commit-log {
@@ -2091,7 +2228,7 @@ body.is-resizing-terminal .panel-resizer {
 
 .commit-log a:hover,
 .commit-log a:focus-visible {
-  background: #f6f8fa;
+  background: var(--surface-subtle);
   outline: 1px solid var(--border-soft);
 }
 
@@ -2121,7 +2258,7 @@ body.is-resizing-terminal .panel-resizer {
   margin-top: 1.4rem;
   padding: 45px;
   border-radius: 1rem;
-  background: #ffffff;
+  background: var(--surface);
   border: 1px solid var(--border-soft);
   max-width: none;
 }
@@ -2146,12 +2283,12 @@ body.is-resizing-terminal .panel-resizer {
   max-width: 100%;
   max-height: 75vh;
   object-fit: contain;
-  background-color: #ffffff;
+  background-color: light-dark(#ffffff, #161b22);
   background-image:
-    linear-gradient(45deg, #f0f2f5 25%, transparent 25%),
-    linear-gradient(-45deg, #f0f2f5 25%, transparent 25%),
-    linear-gradient(45deg, transparent 75%, #f0f2f5 75%),
-    linear-gradient(-45deg, transparent 75%, #f0f2f5 75%);
+    linear-gradient(45deg, light-dark(#f0f2f5, #21262d) 25%, transparent 25%),
+    linear-gradient(-45deg, light-dark(#f0f2f5, #21262d) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, light-dark(#f0f2f5, #21262d) 75%),
+    linear-gradient(-45deg, transparent 75%, light-dark(#f0f2f5, #21262d) 75%);
   background-size: 16px 16px;
   background-position: 0 0, 0 8px, 8px -8px, -8px 0;
   border: 1px solid var(--border-soft);
@@ -2162,7 +2299,7 @@ body.is-resizing-terminal .panel-resizer {
   margin: 0 0 1rem;
   border: 1px solid var(--border-soft);
   border-radius: 0.375rem;
-  background: #f9fafb;
+  background: light-dark(#f9fafb, #161b22);
   font-size: 0.8125rem;
   color: var(--text-subtle);
 }
@@ -2195,7 +2332,7 @@ body.is-resizing-terminal .panel-resizer {
 }
 
 .metadata-card-summary-teaser {
-  color: #1f2328;
+  color: var(--text-strong);
   margin-right: 0.6rem;
 }
 
@@ -2232,7 +2369,7 @@ body.is-resizing-terminal .panel-resizer {
 }
 
 .metadata-card-value {
-  color: #1f2328;
+  color: var(--text-strong);
   word-break: break-word;
 }
 
@@ -2263,7 +2400,7 @@ body.is-resizing-terminal .panel-resizer {
   padding: 0.05rem 0.45rem;
   border: 1px solid var(--border-soft);
   border-radius: 0.75rem;
-  background: #ffffff;
+  background: var(--surface-raised);
   font-size: 0.7rem;
   color: var(--text-subtle);
 }
@@ -2317,22 +2454,22 @@ body.is-resizing-terminal .panel-resizer {
   padding: 0.75rem 0.9rem;
   border: 1px solid var(--border-soft);
   border-radius: 0.5rem;
-  background: #f6f8fa;
+  background: var(--surface-subtle);
 }
 
 .score-preview.is-low .score-preview-total {
-  border-color: #b7e4c7;
-  background: #effaf2;
+  border-color: var(--score-low-border);
+  background: var(--score-low-bg);
 }
 
 .score-preview.is-medium .score-preview-total {
-  border-color: #f0cf7a;
-  background: #fff8dc;
+  border-color: var(--score-medium-border);
+  background: var(--score-medium-bg);
 }
 
 .score-preview.is-high .score-preview-total {
-  border-color: #ffb3ad;
-  background: #fff1f0;
+  border-color: var(--score-high-border);
+  background: var(--score-high-bg);
 }
 
 .score-preview-kicker {
@@ -2374,22 +2511,22 @@ body.is-resizing-terminal .panel-resizer {
   padding: 0.5rem 0.65rem;
   border: 1px solid var(--border-soft);
   border-radius: 0.4rem;
-  background: #f6f8fa;
+  background: var(--surface-subtle);
 }
 
 .score-preview dl div.is-low {
-  border-color: #b7e4c7;
-  background: #effaf2;
+  border-color: var(--score-low-border);
+  background: var(--score-low-bg);
 }
 
 .score-preview dl div.is-medium {
-  border-color: #f0cf7a;
-  background: #fff8dc;
+  border-color: var(--score-medium-border);
+  background: var(--score-medium-bg);
 }
 
 .score-preview dl div.is-high {
-  border-color: #ffb3ad;
-  background: #fff1f0;
+  border-color: var(--score-high-border);
+  background: var(--score-high-bg);
 }
 
 .score-preview dt {
@@ -2466,7 +2603,7 @@ body.is-resizing-terminal .panel-resizer {
 .score-term-help:hover,
 .score-term-help:focus-visible {
   color: var(--text-strong);
-  background: #eef2f5;
+  background: light-dark(#eef2f5, #21262d);
   outline: 1px solid var(--border-medium);
   outline-offset: 2px;
 }
@@ -2479,9 +2616,9 @@ body.is-resizing-terminal .panel-resizer {
   width: max-content;
   max-width: min(22rem, 70vw);
   padding: 0.55rem 0.65rem;
-  border: 1px solid rgba(208, 215, 222, 0.85);
+  border: 1px solid light-dark(rgba(208, 215, 222, 0.85), rgba(48, 54, 61, 0.9));
   border-radius: 0.45rem;
-  background: rgba(255, 255, 255, 0.82);
+  background: light-dark(rgba(255, 255, 255, 0.82), rgba(22, 27, 34, 0.92));
   box-shadow: 0 12px 30px rgba(31, 35, 40, 0.14);
   backdrop-filter: blur(18px) saturate(1.2);
   -webkit-backdrop-filter: blur(18px) saturate(1.2);
@@ -2505,9 +2642,9 @@ body.is-resizing-terminal .panel-resizer {
   top: 100%;
   width: 0.6rem;
   height: 0.6rem;
-  border-right: 1px solid rgba(208, 215, 222, 0.85);
-  border-bottom: 1px solid rgba(208, 215, 222, 0.85);
-  background: rgba(255, 255, 255, 0.82);
+  border-right: 1px solid light-dark(rgba(208, 215, 222, 0.85), rgba(48, 54, 61, 0.9));
+  border-bottom: 1px solid light-dark(rgba(208, 215, 222, 0.85), rgba(48, 54, 61, 0.9));
+  background: light-dark(rgba(255, 255, 255, 0.82), rgba(22, 27, 34, 0.92));
   transform: translate(-50%, -50%) rotate(45deg);
 }
 
@@ -2565,8 +2702,8 @@ body.is-resizing-terminal .panel-resizer {
   background:
     linear-gradient(
       to right,
-      rgba(208, 215, 222, 0.18) 0,
-      rgba(208, 215, 222, 0.18) calc(var(--uatu-ln-width, 3.5rem) - 0.7rem),
+      light-dark(rgba(208, 215, 222, 0.18), rgba(110, 118, 129, 0.18)) 0,
+      light-dark(rgba(208, 215, 222, 0.18), rgba(110, 118, 129, 0.18)) calc(var(--uatu-ln-width, 3.5rem) - 0.7rem),
       var(--border-soft) calc(var(--uatu-ln-width, 3.5rem) - 0.7rem),
       var(--border-soft) calc(var(--uatu-ln-width, 3.5rem) - 0.7rem + 1px),
       transparent calc(var(--uatu-ln-width, 3.5rem) - 0.7rem + 1px)
@@ -2605,7 +2742,7 @@ body.is-resizing-terminal .panel-resizer {
   font-size: 0.7rem;
   font-weight: 500;
   font-family: inherit;
-  background: #ffffff;
+  background: var(--surface-raised);
   border: 1px solid var(--border-soft);
   border-radius: 0.3rem;
   color: var(--text-subtle);
@@ -2624,17 +2761,17 @@ body.is-resizing-terminal .panel-resizer {
 
 .code-copy:hover {
   color: var(--text-strong);
-  background: #f6f8fa;
+  background: var(--surface-subtle);
 }
 
 .code-copy.is-copied {
-  color: #2da44e;
-  border-color: #2da44e;
+  color: var(--success);
+  border-color: var(--success);
 }
 
 .code-copy.is-failed {
-  color: #cf222e;
-  border-color: #cf222e;
+  color: var(--danger);
+  border-color: var(--danger);
 }
 
 @media (hover: none) {
@@ -2766,13 +2903,13 @@ body.is-resizing-terminal .panel-resizer {
   padding: 0;
   border: 0;
   border-radius: 0;
-  background: #ffffff;
+  background: var(--surface);
   color: var(--text-strong);
   overflow: hidden;
 }
 
 .mermaid-viewer::backdrop {
-  background: rgba(15, 23, 42, 0.55);
+  background: light-dark(rgba(15, 23, 42, 0.55), rgba(0, 0, 0, 0.65));
 }
 
 .mermaid-viewer-viewport {
@@ -2818,7 +2955,7 @@ body.is-resizing-terminal .panel-resizer {
   display: inline-flex;
   gap: 0.25rem;
   padding: 0.3rem;
-  background: #ffffff;
+  background: var(--surface-raised);
   border: 1px solid var(--border-soft);
   border-radius: 999px;
   box-shadow: 0 4px 16px rgba(15, 23, 42, 0.18);
@@ -2915,43 +3052,43 @@ body.is-resizing-terminal .panel-resizer {
 }
 
 .preview .admonitionblock.note {
-  border-left-color: #0969da;
+  border-left-color: var(--accent);
 }
 
 .preview .admonitionblock.note .icon .title {
-  color: #0969da;
+  color: var(--accent);
 }
 
 .preview .admonitionblock.tip {
-  border-left-color: #1a7f37;
+  border-left-color: var(--success-strong);
 }
 
 .preview .admonitionblock.tip .icon .title {
-  color: #1a7f37;
+  color: var(--success-strong);
 }
 
 .preview .admonitionblock.important {
-  border-left-color: #8250df;
+  border-left-color: light-dark(#8250df, #a371f7);
 }
 
 .preview .admonitionblock.important .icon .title {
-  color: #8250df;
+  color: light-dark(#8250df, #a371f7);
 }
 
 .preview .admonitionblock.caution {
-  border-left-color: #bf8700;
+  border-left-color: var(--attention);
 }
 
 .preview .admonitionblock.caution .icon .title {
-  color: #bf8700;
+  color: var(--attention);
 }
 
 .preview .admonitionblock.warning {
-  border-left-color: #cf222e;
+  border-left-color: var(--danger);
 }
 
 .preview .admonitionblock.warning .icon .title {
-  color: #cf222e;
+  color: var(--danger);
 }
 
 /* Listing block titles — Asciidoctor wraps them in <div class="title"> right
@@ -2975,7 +3112,7 @@ body.is-resizing-terminal .panel-resizer {
   padding: 0.85rem 1rem 0.85rem 1.1rem;
   border: 1px solid var(--border-soft);
   border-radius: 0.5rem;
-  background: #fbfcfd;
+  background: light-dark(#fbfcfd, #161b22);
   font-size: 0.92em;
 }
 
@@ -3203,12 +3340,12 @@ body.is-resizing-terminal .panel-resizer {
 
 .view-segment:hover:not(.is-active) {
   color: var(--text-strong);
-  background: rgba(255, 255, 255, 0.6);
+  background: light-dark(rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0.06));
 }
 
 .view-segment.is-active,
 .wrap-control .view-segment[aria-pressed="true"] {
-  background: #ffffff;
+  background: var(--surface-raised);
   color: var(--accent);
   box-shadow: 0 1px 2px rgba(36, 41, 47, 0.08);
 }
@@ -3273,11 +3410,11 @@ body.is-resizing-terminal .panel-resizer {
 
 .layout-segment:hover:not(.is-active) {
   color: var(--text-strong);
-  background: rgba(255, 255, 255, 0.6);
+  background: light-dark(rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0.06));
 }
 
 .layout-segment.is-active {
-  background: #ffffff;
+  background: var(--surface-raised);
   color: var(--accent);
   box-shadow: 0 1px 2px rgba(36, 41, 47, 0.08);
   cursor: default;
@@ -3326,7 +3463,7 @@ body.is-resizing-terminal .panel-resizer {
 
 .action-icon:hover {
   color: var(--text-strong);
-  background: #ffffff;
+  background: var(--surface-raised);
   border-color: var(--border-medium);
 }
 
@@ -3337,7 +3474,7 @@ body.is-resizing-terminal .panel-resizer {
 
 /* Outline toggle pressed (overlay open) — mirror the active-segment look. */
 .action-icon[aria-pressed="true"] {
-  background: #ffffff;
+  background: var(--surface-raised);
   color: var(--accent);
   border-color: var(--accent);
   box-shadow: 0 1px 2px rgba(36, 41, 47, 0.08);
@@ -3345,13 +3482,13 @@ body.is-resizing-terminal .panel-resizer {
 
 /* Transient feedback for the copy-source action (success / failure flash). */
 .action-icon.is-copied {
-  color: #1a7f37;
-  border-color: #1a7f37;
+  color: var(--success-strong);
+  border-color: var(--success-strong);
 }
 
 .action-icon.is-failed {
-  color: #cf222e;
-  border-color: #cf222e;
+  color: var(--danger);
+  border-color: var(--danger);
 }
 
 /* Outline panel — a non-modal, full-height rail docked on the right of the
@@ -3367,7 +3504,7 @@ body.is-resizing-terminal .panel-resizer {
   width: 18rem;
   display: flex;
   flex-direction: column;
-  background: #ffffff;
+  background: var(--surface-raised);
   border: 1px solid var(--border-medium);
   border-radius: 0.5rem;
   box-shadow: 0 8px 24px rgba(31, 35, 40, 0.12);
@@ -3461,7 +3598,7 @@ body.is-resizing-terminal .panel-resizer {
 .uatu-outline-filter:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 0;
-  background: #ffffff;
+  background: var(--surface-raised);
 }
 
 .uatu-outline-list {
@@ -3648,23 +3785,23 @@ body.is-resizing-terminal .panel-resizer {
   letter-spacing: 0.04em;
   text-transform: uppercase;
   border-radius: 0.3rem;
-  background: rgba(36, 41, 47, 0.08);
+  background: light-dark(rgba(36, 41, 47, 0.08), rgba(230, 237, 243, 0.1));
   color: var(--text-subtle);
 }
 
 .burden-meter.is-low .burden-level {
-  background: #c8eed5;
-  color: #1a5d34;
+  background: light-dark(#c8eed5, #1a4028);
+  color: light-dark(#1a5d34, #8fe3ad);
 }
 
 .burden-meter.is-medium .burden-level {
-  background: #f4d99a;
-  color: #6b4900;
+  background: light-dark(#f4d99a, #4d3a09);
+  color: light-dark(#6b4900, #eac54f);
 }
 
 .burden-meter.is-high .burden-level {
-  background: #ffc8c4;
-  color: #8b1f1a;
+  background: light-dark(#ffc8c4, #55201e);
+  color: light-dark(#8b1f1a, #ffa8a3);
 }
 
 /* Stale-content hint strip — shown above the preview header in Review */
@@ -3674,9 +3811,9 @@ body.is-resizing-terminal .panel-resizer {
   justify-content: space-between;
   gap: 0.75rem;
   padding: 0.45rem 1.5rem;
-  background: #fff8dc;
-  border-bottom: 1px solid #f0cf7a;
-  color: #6f4e00;
+  background: var(--score-medium-bg);
+  border-bottom: 1px solid var(--score-medium-border);
+  color: light-dark(#6f4e00, #eac54f);
   font-size: 0.82rem;
 }
 
@@ -3685,9 +3822,9 @@ body.is-resizing-terminal .panel-resizer {
 }
 
 .stale-hint.is-deleted {
-  background: #fff1f0;
-  border-bottom-color: #ffb3ad;
-  color: #8b1f1a;
+  background: var(--score-high-bg);
+  border-bottom-color: var(--score-high-border);
+  color: light-dark(#8b1f1a, #ffa8a3);
 }
 
 .stale-hint-message {
@@ -3709,7 +3846,7 @@ body.is-resizing-terminal .panel-resizer {
 }
 
 .stale-hint-action:hover {
-  background: rgba(36, 41, 47, 0.05);
+  background: light-dark(rgba(36, 41, 47, 0.05), rgba(230, 237, 243, 0.06));
 }
 
 .stale-hint-action:focus-visible {
@@ -3770,12 +3907,12 @@ body.is-resizing-terminal .panel-resizer {
 .uatu-diff-toolbar-segment:hover:not(.is-active),
 .uatu-layout-toolbar-segment:hover:not(.is-active) {
   color: var(--text-strong);
-  background: rgba(255, 255, 255, 0.6);
+  background: light-dark(rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0.06));
 }
 
 .uatu-diff-toolbar-segment.is-active,
 .uatu-layout-toolbar-segment.is-active {
-  background: #ffffff;
+  background: var(--surface-raised);
   color: var(--accent);
   box-shadow: 0 1px 2px rgba(36, 41, 47, 0.08);
   cursor: default;
@@ -3839,7 +3976,7 @@ body.is-resizing-terminal .panel-resizer {
 .uatu-diff-fallback-pre {
   margin: 0;
   padding: 0.5rem 0.75rem;
-  background: #ffffff;
+  background: var(--surface);
   border: 1px solid var(--border-soft);
   border-radius: 0.35rem;
   font-family: var(--mono-font-family);
@@ -3851,13 +3988,13 @@ body.is-resizing-terminal .panel-resizer {
 
 .uatu-diff-fallback-pre .uatu-diff-line-added {
   background: var(--diff-added-bg, #e6ffec);
-  color: #1f6f3a;
+  color: light-dark(#1f6f3a, #56d364);
   display: inline;
 }
 
 .uatu-diff-fallback-pre .uatu-diff-line-deleted {
   background: var(--diff-deleted-bg, #ffebe9);
-  color: #82071e;
+  color: light-dark(#82071e, #ffa198);
   display: inline;
 }
 
