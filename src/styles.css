@@ -289,6 +289,14 @@ body.is-resizing-sidebar {
   flex-shrink: 0;
 }
 
+/* The logo is inline SVG with the brand navy baked into fill attributes.
+   Presentation attributes lose to any CSS rule, so this retints the navy
+   paths for dark without touching the markup; the teal accent works on
+   both schemes and stays as-is. */
+.brand-logo path[fill="#0a1c38"] {
+  fill: light-dark(#0a1c38, #dbe4f0);
+}
+
 .brand-logo #eye {
   transform-box: view-box;
   transform-origin: 404px 415px;

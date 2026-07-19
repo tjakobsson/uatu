@@ -14,8 +14,30 @@ if (!previewElementMaybe) {
 
 const previewElement: HTMLElement = previewElementMaybe;
 
+// Mermaid's stock "dark" theme is nearly grayscale. The "base" theme with
+// explicit variables echoes the light default's lavender/amber hues on
+// GitHub-dark surfaces, so diagrams keep their color identity in dark
+// (the rest of the palette is derived by mermaid from these seeds).
+const DARK_THEME_INPUTS: MermaidThemeInputs = {
+  theme: "base",
+  themeVariables: {
+    darkMode: "true",
+    background: "#0d1117",
+    textColor: "#e6edf3",
+    lineColor: "#8b949e",
+    primaryColor: "#2a3457",
+    primaryTextColor: "#e6edf3",
+    primaryBorderColor: "#8b95e0",
+    secondaryColor: "#3b3325",
+    tertiaryColor: "#161b22",
+    clusterBkg: "#161b22",
+    clusterBorder: "#30363d",
+    edgeLabelBackground: "#161b22",
+  },
+};
+
 export function currentMermaidThemeInputs(): MermaidThemeInputs {
-  return { theme: activeColorScheme() === "dark" ? "dark" : "default" };
+  return activeColorScheme() === "dark" ? DARK_THEME_INPUTS : { theme: "default" };
 }
 
 // An OS scheme flip mid-session re-renders the visible preview's diagrams
