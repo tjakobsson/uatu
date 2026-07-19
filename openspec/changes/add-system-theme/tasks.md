@@ -55,7 +55,7 @@
 - [x] 5.2 Add e2e coverage for a live scheme flip: page restyles without
       reload, visible mermaid diagram re-renders with dark inputs,
       `theme-color` meta updates
-- [ ] 5.3 Manual sweep of every major surface in both schemes via
+- [x] 5.3 Manual sweep of every major surface in both schemes via
       `bun run dev` (launcher, tree, preview, diff, source view, metadata,
       terminal, filters), plus a check in the desktop wrapper with the OS
       appearance toggled

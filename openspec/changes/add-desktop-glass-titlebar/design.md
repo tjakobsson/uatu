@@ -88,15 +88,27 @@ below the toolbar and scrolled content passes beneath the native glass.
 
 ### 4. Split pane inset in SwiftUI
 
-The split-browser pane is native SwiftUI beside the web view; its tab strip
-gets top padding from the same resolved inset value rather than a hardcoded
-constant, so it also tracks the tab-bar case.
+The split-browser pane also extends under the titlebar (no dead band above
+it) and pads its tab strip/address bar by the resolved inset. The value
+comes from `WebViewHost`'s `contentLayoutRect` observation exposed as
+observable state — NOT from `GeometryReader.safeAreaInsets`, which reports
+0 for titlebar-derived insets once the view ignores the safe area.
 
 ### 5. Non-running states: keep layouts clear of the bar
 
-Launcher/starting/failure views are centered layouts; they gain top padding
-equal to the inset so nothing collides with traffic lights or the nav pill.
-Cheap and robust rather than clever.
+Launcher/starting/failure views stay inside the SwiftUI safe area, which
+already starts below the transparent titlebar — no padding code needed.
+With the window title hidden, an explicit flexible `ToolbarSpacer` keeps
+the primary-action toolbar item on the trailing edge (the title area that
+used to separate leading from trailing items is gone).
+
+### 6. The page frosts the covered strip
+
+WKWebView cannot render the system scroll-edge effect for an overlay it
+doesn't know about, so scrolled content would show raw in the transparent
+titlebar strip. A fixed, pointer-transparent, blur-forward frost covers
+the strip on the page side (eased 64px dissolve below the inset), skipping
+the sidebar column so the brand logo stays sharp.
 
 ## Risks / Trade-offs
 

@@ -80,9 +80,12 @@ convention: app-wide concern → `shell/`.
 
 ### 4. Mermaid: fill in the anticipated stub
 
-`themeInputsForActiveTheme()` in `src/preview/mermaid.ts` returns
-`{ theme: "dark" }` under the dark scheme, `{ theme: "default" }` under
-light. The re-render-on-change path and theme-keyed SVG cache are already
+`currentMermaidThemeInputs()` in `src/preview/mermaid.ts` returns dark
+theme inputs under the dark scheme, `{ theme: "default" }` under light.
+Mermaid's stock `dark` theme proved nearly grayscale in practice, so the
+dark inputs use the `base` theme seeded with explicit indigo/lavender
+variables on GitHub-dark surfaces — diagrams keep a color identity that
+echoes the light default. The re-render-on-change path and theme-keyed SVG cache are already
 required by the mermaid-rendering spec; the tracker's notification triggers
 the existing re-render mechanism. No spec delta needed — this supplies what
 that spec anticipated.

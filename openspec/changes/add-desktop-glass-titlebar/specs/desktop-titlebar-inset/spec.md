@@ -44,6 +44,26 @@ marker is absent (plain browser or PWA), layout MUST be unchanged.
 - **WHEN** the SPA loads in a plain browser or as a PWA
 - **THEN** no top padding is added and layout matches pre-change behavior
 
+### Requirement: The page frosts the covered strip
+When the inset marker is present, the SPA SHALL render a non-interactive
+progressive frost over the covered strip — blur-forward with a light tint,
+dissolving over an eased ramp below the inset — so content beneath the
+native chrome reads as blurred glass rather than raw content (the web view
+cannot render the system scroll-edge effect for chrome it does not know
+about). The frost SHALL NOT cover the sidebar column: the sidebar is
+inset-padded solid surface that never scrolls under the chrome, and
+frosting it only washes the brand mark.
+
+#### Scenario: Scrolled content under the titlebar reads as glass
+- **WHEN** dark or saturated document content scrolls into the covered strip
+- **THEN** it appears as recognizable blurred content, not a flat wash,
+  fading smoothly into sharp content below the inset
+
+#### Scenario: The sidebar stays crisp
+- **WHEN** the frost strip is active
+- **THEN** the sidebar column, including the brand logo, renders without any
+  frost overlay
+
 ### Requirement: The split-browser pane honors the inset
 The in-app split browser pane SHALL position its tab strip below the covered
 titlebar region so its tabs and controls remain visible and clickable.

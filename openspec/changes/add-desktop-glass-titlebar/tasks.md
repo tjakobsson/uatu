@@ -37,7 +37,7 @@
 - [x] 4.1 E2E test for the SPA contract: inject the marker class + variable,
       assert chrome offsets apply and that no interactive control lies in
       the covered strip; assert no layout change without the marker
-- [ ] 4.2 Build the desktop app (`bun run build` then Xcode build) and
+- [x] 4.2 Build the desktop app (`bun run build` then Xcode build) and
       manually verify: glass toolbar over content in light and dark, frost
       flowing to the top edge, native tab bar case updating the inset live,
       launcher and failure states, split pane tabs reachable
