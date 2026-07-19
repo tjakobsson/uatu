@@ -9,14 +9,18 @@
 // model). Selection events are translated from the prefixed canonical path
 // back to the document ID expected by the existing routing flow.
 
-import { FileTree, themeToTreeStyles, type GitStatusEntry } from "@pierre/trees";
+import { FileTree, themeToTreeStyles, type GitStatusEntry, type TreeThemeStyles } from "@pierre/trees";
 
 import type { DocumentMeta, RepositoryReviewSnapshot, RootGroup } from "../shared/types";
+import { activeColorScheme, onColorSchemeChange, type ColorScheme } from "../shell/theme";
 
-// uatu is light-only at the moment. Forcing `type: "light"` here pins the
-// library's color-scheme so it doesn't auto-flip on `prefers-color-scheme`
-// dark. Re-revisit if/when uatu adds a dark-mode toggle.
-const LIGHT_TREE_THEME = themeToTreeStyles({ type: "light" });
+// The library's palette is handed over as inline styles generated for the
+// active scheme; the shell/theme tracker re-applies them on OS scheme
+// flips so the tree follows the rest of the app (system-theme spec).
+const TREE_THEMES: Record<ColorScheme, TreeThemeStyles> = {
+  light: themeToTreeStyles({ type: "light" }),
+  dark: themeToTreeStyles({ type: "dark" }),
+};
 
 export type TreeViewSelectionHandler = (documentId: string) => void;
 
@@ -97,10 +101,21 @@ export class TreeView {
   // renders — document-level stylesheets cannot pierce the library's open
   // shadow boundary, so a global rule in styles.css would be silently dead.
   private revealCueStyleElement: HTMLStyleElement | null = null;
+  private unsubscribeColorScheme: (() => void) | null = null;
 
   constructor(options: TreeViewOptions) {
     this.container = options.container;
     this.onSelectDocument = options.onSelectDocument;
+    this.unsubscribeColorScheme = onColorSchemeChange(scheme => {
+      this.applyTreeTheme(scheme);
+    });
+  }
+
+  // Swap the inline theme styles on the host container. Both schemes come
+  // from the same generator with an identical key set, so assignment
+  // overwrites every prior declaration — no removal pass needed.
+  private applyTreeTheme(scheme: ColorScheme): void {
+    Object.assign(this.container.style, TREE_THEMES[scheme]);
   }
 
   // Replace the visible tree with the given roots. Safe to call repeatedly;
@@ -221,7 +236,7 @@ export class TreeView {
         // directly means its height = our container's height, which is what
         // the library's virtualization needs to know how many rows to render.
         this.container.innerHTML = "";
-        Object.assign(this.container.style, LIGHT_TREE_THEME);
+        this.applyTreeTheme(activeColorScheme());
         this.tree.render({ fileTreeContainer: this.container });
         // Pin the library instance to the host element so e2e tests can call
         // `scrollToPath` to reveal virtualized rows for assertion.
@@ -316,6 +331,10 @@ export class TreeView {
   }
 
   dispose(): void {
+    if (this.unsubscribeColorScheme !== null) {
+      this.unsubscribeColorScheme();
+      this.unsubscribeColorScheme = null;
+    }
     if (this.followOverrideObserver !== null) {
       this.followOverrideObserver.disconnect();
       this.followOverrideObserver = null;

@@ -60,11 +60,14 @@ palette tokens SHALL NOT flip with the active scheme.
 - **THEN** the terminal panel renders with its existing dark palette
 
 ### Requirement: The page advertises its scheme via theme-color
-The app SHALL maintain a `theme-color` meta value matching the active
-scheme's chrome background, updating it on scheme change, so browser, PWA,
-and desktop host chrome can match the page.
+The app SHALL maintain a `theme-color` meta value per active scheme,
+updating it on scheme change, so browser, PWA, and desktop host chrome can
+match the page. The light value SHALL remain the pre-existing brand navy
+(light appearance must not change with this capability); the dark value
+SHALL be the dark chrome background.
 
 #### Scenario: theme-color follows a scheme change
 - **WHEN** the active scheme changes from light to dark
 - **THEN** the document's effective `theme-color` changes to the dark chrome
   background value
+- **AND** changing back restores the brand navy light value

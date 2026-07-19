@@ -3,7 +3,8 @@
 // the rest of the preview/ rendering pipeline.
 
 import { ensureMermaidViewer } from "./mermaid-viewer";
-import type { MermaidThemeInputs } from "../render/preview";
+import { rerenderMermaidDiagrams, type MermaidThemeInputs } from "../render/preview";
+import { activeColorScheme, onColorSchemeChange } from "../shell/theme";
 
 const previewElementMaybe = document.querySelector<HTMLElement>("#preview");
 
@@ -14,10 +15,16 @@ if (!previewElementMaybe) {
 const previewElement: HTMLElement = previewElementMaybe;
 
 export function currentMermaidThemeInputs(): MermaidThemeInputs {
-  // The active UI theme is light today. When the theme system lands, this
-  // returns the inputs that match the active theme so diagrams stay coherent.
-  return { theme: "default" };
+  return { theme: activeColorScheme() === "dark" ? "dark" : "default" };
 }
+
+// An OS scheme flip mid-session re-renders the visible preview's diagrams
+// so they match the restyled page (system-theme spec, "Scheme changes
+// apply live"). The render-side cache is keyed by theme inputs, so
+// flipping back reuses earlier SVGs.
+onColorSchemeChange(() => {
+  void rerenderMermaidDiagrams(currentMermaidThemeInputs());
+});
 
 export function handleMermaidTriggerClick(event: MouseEvent): void {
   const target = event.target;

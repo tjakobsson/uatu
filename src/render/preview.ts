@@ -30,6 +30,10 @@ let mermaidLoadPromise: Promise<MermaidRuntime | null> | null = null;
 let renderGeneration = 0;
 let activeObserver: IntersectionObserver | null = null;
 let draining = false;
+// The container of the most recent install — the active preview. A theme
+// re-render targets this rather than threading the container through the
+// theme subscription (mounts always reinstall, so "last" is "current").
+let lastInstallContainer: ParentNode | null = null;
 
 type QueueEntry = { node: HTMLElement; generation: number; themeInputs: MermaidThemeInputs };
 const renderQueue: QueueEntry[] = [];
@@ -51,12 +55,18 @@ export async function renderMermaidDiagrams(
   const generation = ++renderGeneration;
   activeObserver?.disconnect();
   activeObserver = null;
+  lastInstallContainer = container;
 
   const nodes = Array.from(container.querySelectorAll<HTMLElement>(".mermaid"));
   if (nodes.length === 0) {
     return;
   }
   for (const node of nodes) {
+    // Rendering replaces the node's content with the SVG, destroying the
+    // source — stash it so a theme re-render can restore and re-run.
+    if (node.dataset.mermaidSource === undefined) {
+      node.dataset.mermaidSource = (node.textContent ?? "").trim();
+    }
     node.classList.add(PENDING_CLASS);
   }
 
@@ -146,7 +156,7 @@ async function drainRenderQueue(): Promise<void> {
 }
 
 async function renderSingleDiagram(node: HTMLElement, themeInputs: MermaidThemeInputs): Promise<void> {
-  const source = (node.textContent ?? "").trim();
+  const source = (node.dataset.mermaidSource ?? node.textContent ?? "").trim();
   const cacheKey = `${serializeThemeInputs(themeInputs)}\u0000${source}`;
 
   const cachedSvg = renderedSvgCache.get(cacheKey);
@@ -322,6 +332,29 @@ export function __resetMermaidStateForTests(): void {
   renderedSvgCache.clear();
   activeObserver?.disconnect();
   activeObserver = null;
+  lastInstallContainer = null;
+}
+
+// Re-render the active preview's diagrams with new theme inputs (the
+// mermaid-rendering spec's theme-change requirement). Restores each
+// diagram's stashed source — rendering destroyed the node content — then
+// reinstalls lazy rendering over the same container, so off-screen
+// diagrams stay lazy and theme-keyed cache hits skip the renderer.
+export async function rerenderMermaidDiagrams(themeInputs: MermaidThemeInputs): Promise<void> {
+  const container = lastInstallContainer;
+  if (!container) {
+    return;
+  }
+  for (const node of Array.from(container.querySelectorAll<HTMLElement>(".mermaid"))) {
+    const source = node.dataset.mermaidSource;
+    if (source !== undefined) {
+      node.textContent = source;
+      // Mermaid stamps rendered nodes as processed and mermaid.run()
+      // silently skips them — clear the stamp or the re-render is a no-op.
+      node.removeAttribute("data-processed");
+    }
+  }
+  await renderMermaidDiagrams(container, themeInputs);
 }
 
 async function getMermaidRuntime(): Promise<MermaidRuntime | null> {
