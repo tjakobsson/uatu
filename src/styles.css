@@ -288,7 +288,13 @@ html.uatu-desktop-host body::before {
   content: "";
   position: fixed;
   top: 0;
-  left: 0;
+  /* The strip starts after the sidebar column: the sidebar is inset-padded
+     solid surface that never scrolls under the chrome, so frosting it does
+     nothing over the background but washes the brand logo where the
+     falloff overlaps the header. Keeping the left column out keeps the
+     logo sharp. The resizer/preview columns stay covered; the sidebar
+     width var tracks live resizing. */
+  left: var(--sidebar-width);
   right: 0;
   height: calc(var(--titlebar-inset, 0px) + 64px);
   pointer-events: none;
@@ -319,6 +325,10 @@ html.uatu-desktop-host body::before {
     rgba(0, 0, 0, 0.08) calc(var(--titlebar-inset, 0px) + 54px),
     rgba(0, 0, 0, 0) 100%
   );
+}
+
+html.uatu-desktop-host body:has(.app-shell.is-sidebar-collapsed)::before {
+  left: var(--sidebar-rail-width);
 }
 
 html.uatu-desktop-host .sidebar {

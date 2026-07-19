@@ -47,8 +47,21 @@ struct ContentView: View {
                         .ignoresSafeArea(edges: .top)
                     if split.isOpen {
                         splitDivider
-                        BrowserSplitView(split: split)
-                            .frame(width: splitWidth)
+                            .ignoresSafeArea(edges: .top)
+                        // The split pane also spans the full window height so
+                        // no dead band appears under the transparent titlebar;
+                        // its own chrome (tab strip, address bar) is padded
+                        // down by the covered height. The GeometryReader +
+                        // ignoresSafeArea pair is the standard recipe for
+                        // reading the inset being ignored — it tracks the
+                        // native tab bar appearing automatically.
+                        GeometryReader { geometry in
+                            BrowserSplitView(split: split)
+                                .padding(.top, geometry.safeAreaInsets.top)
+                        }
+                        .background(.background)
+                        .ignoresSafeArea(edges: .top)
+                        .frame(width: splitWidth)
                     }
                 }
             case .failed(let message):
@@ -106,6 +119,10 @@ struct ContentView: View {
                 }
                 .disabled(!isRunning || !web.canGoForward)
             }
+            // With the window title hidden there is no title area to push
+            // trailing items right — without an explicit flexible spacer the
+            // primary action packs in next to the navigation buttons.
+            ToolbarSpacer(.flexible)
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     split.toggle()
