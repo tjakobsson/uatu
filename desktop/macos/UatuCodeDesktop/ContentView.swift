@@ -51,17 +51,16 @@ struct ContentView: View {
                         // The split pane also spans the full window height so
                         // no dead band appears under the transparent titlebar;
                         // its own chrome (tab strip, address bar) is padded
-                        // down by the covered height. The GeometryReader +
-                        // ignoresSafeArea pair is the standard recipe for
-                        // reading the inset being ignored — it tracks the
-                        // native tab bar appearing automatically.
-                        GeometryReader { geometry in
-                            BrowserSplitView(split: split)
-                                .padding(.top, geometry.safeAreaInsets.top)
-                        }
-                        .background(.background)
-                        .ignoresSafeArea(edges: .top)
-                        .frame(width: splitWidth)
+                        // down by the covered height. The value comes from the
+                        // web host's contentLayoutRect observation — reading
+                        // safeAreaInsets via GeometryReader reports 0 once the
+                        // view ignores the safe area, so it can't be used.
+                        BrowserSplitView(split: split)
+                            .padding(.top, web.titlebarInset)
+                            .frame(maxHeight: .infinity)
+                            .background(.background)
+                            .ignoresSafeArea(edges: .top)
+                            .frame(width: splitWidth)
                     }
                 }
             case .failed(let message):

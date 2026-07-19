@@ -30,6 +30,11 @@ final class WebViewHost: NSObject {
     private var insetObservation: NSKeyValueObservation?
     private weak var insetWindow: NSWindow?
     private var lastInsetPoints: CGFloat = -1
+    /// The current covered-chrome height, for native views that need the
+    /// same offset the page gets (the split pane pads its chrome with it).
+    /// SwiftUI's safeAreaInsets can't be read reliably once a view ignores
+    /// the safe area, so the KVO-tracked window value is the one source.
+    private(set) var titlebarInset: CGFloat = 0
 
     override init() {
         webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
@@ -75,6 +80,7 @@ final class WebViewHost: NSObject {
         let rounded = (points * 2).rounded() / 2
         guard rounded != lastInsetPoints else { return }
         lastInsetPoints = rounded
+        titlebarInset = rounded
         let js = """
         document.documentElement.classList.add("uatu-desktop-host");
         document.documentElement.style.setProperty("--titlebar-inset", "\(rounded)px");
