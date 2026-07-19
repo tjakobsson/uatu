@@ -266,6 +266,38 @@ body.is-resizing-sidebar {
   display: flex;
 }
 
+/* Titlebar-inset contract with UatuCode Desktop (desktop-titlebar-inset
+   spec). The wrapper's full-height window floats the native titlebar and
+   glass toolbar OVER the page and announces the covered height by stamping
+   `uatu-desktop-host` + `--titlebar-inset` on <html> (a document-start user
+   script, so it survives live-reloads; the value tracks native chrome
+   height, e.g. the tab bar appearing). These rules push the app's own
+   chrome below the covered strip while letting backgrounds and scrolled
+   content flow beneath the glass. Without the marker class the variable
+   never applies, so browser/PWA layout is untouched. */
+html.uatu-desktop-host .sidebar {
+  padding-top: calc(1.5rem + var(--titlebar-inset, 0px));
+}
+
+html.uatu-desktop-host .sidebar-rail {
+  padding-top: var(--titlebar-inset, 0px);
+}
+
+/* The scroller's top padding alone positions AND pins the sticky header
+   at the inset: both Chromium and WebKit anchor a sticky child's `top`
+   constraint at the scroller's content edge (verified empirically in
+   both), so adding the inset to `.preview-header { top }` as well would
+   double the offset. Scrolled content still flows above the pinned
+   header into the covered strip, under the native glass. */
+html.uatu-desktop-host .preview-shell {
+  padding-top: var(--titlebar-inset, 0px);
+  scroll-padding-top: calc(9rem + var(--titlebar-inset, 0px));
+}
+
+html.uatu-desktop-host .terminal-panel[data-dock="right"] {
+  padding-top: var(--titlebar-inset, 0px);
+}
+
 .sidebar-header {
   display: flex;
   align-items: center;

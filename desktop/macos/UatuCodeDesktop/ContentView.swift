@@ -38,7 +38,13 @@ struct ContentView: View {
                 ProgressView("Starting uatu…")
             case .running:
                 HStack(spacing: 0) {
+                    // The web view spans the full window frame — the page is
+                    // visible beneath the transparent titlebar and the glass
+                    // toolbar (set up in the WindowResolver below). The split
+                    // pane and divider stay inside the safe area, so their
+                    // chrome starts below the toolbar without extra padding.
                     HostedWebView(host: web)
+                        .ignoresSafeArea(edges: .top)
                     if split.isOpen {
                         splitDivider
                         BrowserSplitView(split: split)
@@ -117,7 +123,15 @@ struct ContentView: View {
         }
         .background(WindowResolver { window in
             window.tabbingIdentifier = "se.coll8.uatucode.desktop.main"
+            // Safari-style full-height content: the content view spans the
+            // whole frame, the titlebar is transparent with no title text,
+            // and the toolbar floats over the page as system glass. All
+            // idempotent — the resolver re-runs on window re-resolution.
+            window.styleMask.insert(.fullSizeContentView)
+            window.titlebarAppearsTransparent = true
+            window.titleVisibility = .hidden
             server.bind(to: window)
+            web.bindTitlebarInset(to: window)
             split.hostWindow = window
             NativeTabCoordinator.shared.resolve(windowID: windowID, window: window)
             NativeWindowMenuCoordinator.shared.refresh()
