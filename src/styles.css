@@ -275,6 +275,52 @@ body.is-resizing-sidebar {
    chrome below the covered strip while letting backgrounds and scrolled
    content flow beneath the glass. Without the marker class the variable
    never applies, so browser/PWA layout is untouched. */
+/* Progressive frost under the native chrome. WKWebView cannot render the
+   system scroll-edge effect for an overlay it doesn't know about, so
+   scrolled content would otherwise show RAW in the transparent titlebar
+   strip, half-ghosted behind the tab bar's material, and frosted only
+   below — three different treatments stacked. The page frosts its own
+   covered strip instead (same recipe as .preview-header): solid blur
+   through the inset, dissolving over a falloff zone below it. Sits above
+   all page chrome (max otherwise is the tooltip at 30) but below the
+   modal layer (100). */
+html.uatu-desktop-host body::before {
+  content: "";
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: calc(var(--titlebar-inset, 0px) + 64px);
+  pointer-events: none;
+  z-index: 90;
+  /* Blur-forward, veil-light: a heavier white/dark wash turns dark
+     content under the strip into a flat gray smear. Keep the tint low so
+     the effect reads as "blurred content", and dissolve over an eased
+     64px ramp — a short linear cut leaves a visible band edge against
+     saturated content. */
+  background: light-dark(rgba(255, 255, 255, 0.3), rgba(13, 17, 23, 0.35));
+  -webkit-backdrop-filter: blur(22px) saturate(170%);
+  backdrop-filter: blur(22px) saturate(170%);
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 1) 0%,
+    rgba(0, 0, 0, 1) var(--titlebar-inset, 0px),
+    rgba(0, 0, 0, 0.6) calc(var(--titlebar-inset, 0px) + 20px),
+    rgba(0, 0, 0, 0.25) calc(var(--titlebar-inset, 0px) + 40px),
+    rgba(0, 0, 0, 0.08) calc(var(--titlebar-inset, 0px) + 54px),
+    rgba(0, 0, 0, 0) 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 1) 0%,
+    rgba(0, 0, 0, 1) var(--titlebar-inset, 0px),
+    rgba(0, 0, 0, 0.6) calc(var(--titlebar-inset, 0px) + 20px),
+    rgba(0, 0, 0, 0.25) calc(var(--titlebar-inset, 0px) + 40px),
+    rgba(0, 0, 0, 0.08) calc(var(--titlebar-inset, 0px) + 54px),
+    rgba(0, 0, 0, 0) 100%
+  );
+}
+
 html.uatu-desktop-host .sidebar {
   padding-top: calc(1.5rem + var(--titlebar-inset, 0px));
 }
