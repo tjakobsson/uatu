@@ -238,6 +238,12 @@ struct ContentView: View {
             }
         }
         .onDisappear {
+            // The window is going away: its server was already stopped by
+            // the close hook, so invalidate in-flight preflight/init
+            // completions — a slow probe finishing now would otherwise
+            // spawn a server no window owns (alive until app quit).
+            openRequestToken = UUID()
+            pendingGitInitFolder = nil
             if let browserKeyMonitor {
                 NSEvent.removeMonitor(browserKeyMonitor)
                 self.browserKeyMonitor = nil
@@ -341,6 +347,10 @@ struct ContentView: View {
         // startup failure reports as it always has.
         let token = UUID()
         openRequestToken = token
+        // A newer open supersedes an alert still waiting on the previous
+        // request — left up, its Initialize action would capture THIS
+        // token and clobber the new session with the stale folder.
+        pendingGitInitFolder = nil
         Task {
             let inWorktree = await Task.detached {
                 GitPreflight.isInsideWorktree(url, environment: UatuServer.loginEnvironment)
