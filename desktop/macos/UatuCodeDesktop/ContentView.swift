@@ -22,6 +22,14 @@ struct ContentView: View {
     @State private var splitDragBaseWidth: Double?
     @State private var browserKeyMonitor: Any?
     @State private var isPickingFolder = false
+    /// A picked folder waiting on the "initialize a git repository?"
+    /// decision; non-nil presents the confirmation alert.
+    @State private var pendingGitInitFolder: URL?
+    /// Identifies the latest open(_:) request. The launcher stays
+    /// interactive while a git probe or init runs, so a completion whose
+    /// token no longer matches was superseded by a newer open and must
+    /// discard itself instead of serving (or prompting for) a stale folder.
+    @State private var openRequestToken = UUID()
     @State private var nativeWindow: NSWindow?
     /// The folder served by THIS window. Each window has its own.
     @State private var folder: URL?
@@ -137,6 +145,19 @@ struct ContentView: View {
                 open(url)
             }
         }
+        .alert(
+            "Not a Git Repository",
+            isPresented: Binding(
+                get: { pendingGitInitFolder != nil },
+                set: { if !$0 { pendingGitInitFolder = nil } }
+            ),
+            presenting: pendingGitInitFolder
+        ) { url in
+            Button("Initialize Repository") { initializeAndServe(url) }
+            Button("Cancel", role: .cancel) { declineInitialization() }
+        } message: { url in
+            Text("“\(url.lastPathComponent)” isn't inside a git repository. Initialize one to start a new project?")
+        }
         .background(WindowResolver { window in
             window.tabbingIdentifier = "se.coll8.uatucode.desktop.main"
             // Safari-style full-height content: the content view spans the
@@ -217,6 +238,12 @@ struct ContentView: View {
             }
         }
         .onDisappear {
+            // The window is going away: its server was already stopped by
+            // the close hook, so invalidate in-flight preflight/init
+            // completions — a slow probe finishing now would otherwise
+            // spawn a server no window owns (alive until app quit).
+            openRequestToken = UUID()
+            pendingGitInitFolder = nil
             if let browserKeyMonitor {
                 NSEvent.removeMonitor(browserKeyMonitor)
                 self.browserKeyMonitor = nil
@@ -314,12 +341,67 @@ struct ContentView: View {
     }
 
     private func open(_ url: URL) {
+        // uatu's serve CLI rejects roots outside a git worktree, so probe
+        // first and offer `git init` instead of spawning a doomed child.
+        // An unlaunchable git (nil) falls through to the server, whose own
+        // startup failure reports as it always has.
+        let token = UUID()
+        openRequestToken = token
+        // A newer open supersedes an alert still waiting on the previous
+        // request — left up, its Initialize action would capture THIS
+        // token and clobber the new session with the stale folder.
+        pendingGitInitFolder = nil
+        Task {
+            let inWorktree = await Task.detached {
+                GitPreflight.isInsideWorktree(url, environment: UatuServer.loginEnvironment)
+            }.value
+            guard openRequestToken == token else { return }
+            if inWorktree == false {
+                pendingGitInitFolder = url
+            } else {
+                serve(url)
+            }
+        }
+    }
+
+    /// Records the recent entry and starts the server — the tail of
+    /// `open(_:)` once the git preflight has passed. Declined or failed
+    /// folders never reach this, so only served folders enter recents.
+    private func serve(_ url: URL) {
         folder = url
         var paths = recentFoldersStorage.split(separator: "\n").map(String.init)
         paths.removeAll { $0 == url.path }
         paths.insert(url.path, at: 0)
         recentFoldersStorage = paths.prefix(8).joined(separator: "\n")
         server.start(folder: url)
+    }
+
+    /// Cancel on the init alert. A failed window would otherwise stay at
+    /// its dead end, so it resets to the launcher; a running (or starting)
+    /// session is untouched — declining to init some other folder behaves
+    /// like canceling the open dialog, not like closing the session.
+    private func declineInitialization() {
+        if case .failed = server.status {
+            server.stop()
+            folder = nil
+        }
+    }
+
+    private func initializeAndServe(_ url: URL) {
+        let token = openRequestToken
+        Task {
+            let result = await Task.detached {
+                GitPreflight.initializeRepository(at: url, environment: UatuServer.loginEnvironment)
+            }.value
+            guard openRequestToken == token else { return }
+            switch result {
+            case .success:
+                serve(url)
+            case .failure(let error):
+                folder = url
+                server.fail(folder: url, message: "git init failed.\n\(error.message)")
+            }
+        }
     }
 
     private var isRunning: Bool {
@@ -336,7 +418,9 @@ struct ContentView: View {
             isPickingFolder = true
             return
         }
-        server.start(folder: folder)
+        // Through open(_:), not server.start, so Try Again after a git-init
+        // failure re-runs the preflight and re-offers initialization.
+        open(folder)
     }
 }
 
