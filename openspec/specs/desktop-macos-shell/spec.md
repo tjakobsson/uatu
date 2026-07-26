@@ -79,8 +79,10 @@ not inside a git worktree, the app SHALL present a confirmation dialog
 offering to initialize a new git repository there instead of spawning a
 server that is certain to fail the CLI's git preflight. On confirmation the
 app SHALL run `git init` in the folder and, if it succeeds, start the server
-for the folder as usual. On decline the app SHALL return to the launcher
-without starting a server. If `git init` fails, the app SHALL show the
+for the folder as usual. On decline the app MUST NOT start a server for the
+folder: a window with no live session (the launcher or the failure state)
+SHALL show the launcher, while a window whose session is starting or running
+SHALL keep that session untouched. If `git init` fails, the app SHALL show the
 window's failure state containing the git error output. If the git executable
 itself cannot be launched, the app SHALL skip the preflight and start the
 server as it does today. The app MUST NOT pass `--force` to the server; the
@@ -93,10 +95,16 @@ CLI git preflight in `serve-cli-startup` is unchanged.
 - **AND** starts the bundled server for it and loads the session as usual
 
 #### Scenario: Declining initialization returns to the launcher
-- **WHEN** the user opens a folder that is not inside a git worktree
+- **WHEN** the user opens a folder that is not inside a git worktree from the launcher or the failure state
 - **AND** declines the initialization dialog
 - **THEN** no server process is spawned
 - **AND** the window shows the launcher again
+
+#### Scenario: Declining with a running session keeps the session
+- **WHEN** a window is serving a folder and the user opens a non-git folder via the choose-folder command
+- **AND** declines the initialization dialog
+- **THEN** no server is started for the declined folder
+- **AND** the window's existing session keeps running unchanged
 
 #### Scenario: Git folder opens without any dialog
 - **WHEN** the user opens a folder inside an existing git worktree (including a subdirectory of a repository)

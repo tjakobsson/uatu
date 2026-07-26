@@ -25,6 +25,11 @@ struct ContentView: View {
     /// A picked folder waiting on the "initialize a git repository?"
     /// decision; non-nil presents the confirmation alert.
     @State private var pendingGitInitFolder: URL?
+    /// Identifies the latest open(_:) request. The launcher stays
+    /// interactive while a git probe or init runs, so a completion whose
+    /// token no longer matches was superseded by a newer open and must
+    /// discard itself instead of serving (or prompting for) a stale folder.
+    @State private var openRequestToken = UUID()
     @State private var nativeWindow: NSWindow?
     /// The folder served by THIS window. Each window has its own.
     @State private var folder: URL?
@@ -149,7 +154,7 @@ struct ContentView: View {
             presenting: pendingGitInitFolder
         ) { url in
             Button("Initialize Repository") { initializeAndServe(url) }
-            Button("Cancel", role: .cancel) {}
+            Button("Cancel", role: .cancel) { declineInitialization() }
         } message: { url in
             Text("“\(url.lastPathComponent)” isn't inside a git repository. Initialize one to start a new project?")
         }
@@ -334,10 +339,13 @@ struct ContentView: View {
         // first and offer `git init` instead of spawning a doomed child.
         // An unlaunchable git (nil) falls through to the server, whose own
         // startup failure reports as it always has.
+        let token = UUID()
+        openRequestToken = token
         Task {
             let inWorktree = await Task.detached {
                 GitPreflight.isInsideWorktree(url, environment: UatuServer.loginEnvironment)
             }.value
+            guard openRequestToken == token else { return }
             if inWorktree == false {
                 pendingGitInitFolder = url
             } else {
@@ -358,11 +366,24 @@ struct ContentView: View {
         server.start(folder: url)
     }
 
+    /// Cancel on the init alert. A failed window would otherwise stay at
+    /// its dead end, so it resets to the launcher; a running (or starting)
+    /// session is untouched — declining to init some other folder behaves
+    /// like canceling the open dialog, not like closing the session.
+    private func declineInitialization() {
+        if case .failed = server.status {
+            server.stop()
+            folder = nil
+        }
+    }
+
     private func initializeAndServe(_ url: URL) {
+        let token = openRequestToken
         Task {
             let result = await Task.detached {
                 GitPreflight.initializeRepository(at: url, environment: UatuServer.loginEnvironment)
             }.value
+            guard openRequestToken == token else { return }
             switch result {
             case .success:
                 serve(url)
