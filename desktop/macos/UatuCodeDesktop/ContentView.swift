@@ -22,6 +22,9 @@ struct ContentView: View {
     @State private var splitDragBaseWidth: Double?
     @State private var browserKeyMonitor: Any?
     @State private var isPickingFolder = false
+    /// A picked folder waiting on the "initialize a git repository?"
+    /// decision; non-nil presents the confirmation alert.
+    @State private var pendingGitInitFolder: URL?
     @State private var nativeWindow: NSWindow?
     /// The folder served by THIS window. Each window has its own.
     @State private var folder: URL?
@@ -136,6 +139,19 @@ struct ContentView: View {
             if case .success(let url) = result {
                 open(url)
             }
+        }
+        .alert(
+            "Not a Git Repository",
+            isPresented: Binding(
+                get: { pendingGitInitFolder != nil },
+                set: { if !$0 { pendingGitInitFolder = nil } }
+            ),
+            presenting: pendingGitInitFolder
+        ) { url in
+            Button("Initialize Repository") { initializeAndServe(url) }
+            Button("Cancel", role: .cancel) {}
+        } message: { url in
+            Text("“\(url.lastPathComponent)” isn't inside a git repository. Initialize one to start a new project?")
         }
         .background(WindowResolver { window in
             window.tabbingIdentifier = "se.coll8.uatucode.desktop.main"
@@ -314,12 +330,47 @@ struct ContentView: View {
     }
 
     private func open(_ url: URL) {
+        // uatu's serve CLI rejects roots outside a git worktree, so probe
+        // first and offer `git init` instead of spawning a doomed child.
+        // An unlaunchable git (nil) falls through to the server, whose own
+        // startup failure reports as it always has.
+        Task {
+            let inWorktree = await Task.detached {
+                GitPreflight.isInsideWorktree(url, environment: UatuServer.loginEnvironment)
+            }.value
+            if inWorktree == false {
+                pendingGitInitFolder = url
+            } else {
+                serve(url)
+            }
+        }
+    }
+
+    /// Records the recent entry and starts the server — the tail of
+    /// `open(_:)` once the git preflight has passed. Declined or failed
+    /// folders never reach this, so only served folders enter recents.
+    private func serve(_ url: URL) {
         folder = url
         var paths = recentFoldersStorage.split(separator: "\n").map(String.init)
         paths.removeAll { $0 == url.path }
         paths.insert(url.path, at: 0)
         recentFoldersStorage = paths.prefix(8).joined(separator: "\n")
         server.start(folder: url)
+    }
+
+    private func initializeAndServe(_ url: URL) {
+        Task {
+            let result = await Task.detached {
+                GitPreflight.initializeRepository(at: url, environment: UatuServer.loginEnvironment)
+            }.value
+            switch result {
+            case .success:
+                serve(url)
+            case .failure(let error):
+                folder = url
+                server.fail(folder: url, message: "git init failed.\n\(error.message)")
+            }
+        }
     }
 
     private var isRunning: Bool {
@@ -336,7 +387,9 @@ struct ContentView: View {
             isPickingFolder = true
             return
         }
-        server.start(folder: folder)
+        // Through open(_:), not server.start, so Try Again after a git-init
+        // failure re-runs the preflight and re-offers initialization.
+        open(folder)
     }
 }
 

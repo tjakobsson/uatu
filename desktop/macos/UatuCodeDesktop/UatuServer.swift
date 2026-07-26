@@ -120,8 +120,9 @@ final class UatuServer {
     // The user's environment as their terminal would see it: what a login
     // shell exports, on top of the GUI environment. Captured once per app run
     // (thread-safe lazy static); falls back to the plain GUI environment plus
-    // the standard user bin dirs if the shell probe fails.
-    private nonisolated static let loginEnvironment: [String: String] = {
+    // the standard user bin dirs if the shell probe fails. Also used by the
+    // git preflight so git resolves from the user's real PATH.
+    nonisolated static let loginEnvironment: [String: String] = {
         var env = ProcessInfo.processInfo.environment
         let shell = env["SHELL"].flatMap { $0.isEmpty ? nil : $0 } ?? "/bin/zsh"
         let probe = Process()
@@ -205,6 +206,15 @@ final class UatuServer {
         } catch {
             status = .failed("Failed to launch uatu: \(error.localizedDescription)")
         }
+    }
+
+    /// Puts the window into the failed state for an error raised before any
+    /// server was spawned (the wrapper's git preflight), so one surface —
+    /// with its Try Again / Choose Folder actions — reports every failure.
+    func fail(folder: URL, message: String) {
+        stop()
+        folderURL = folder
+        status = .failed(message)
     }
 
     func stop() {
