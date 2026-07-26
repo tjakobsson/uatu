@@ -83,10 +83,13 @@ for the folder as usual. On decline the app MUST NOT start a server for the
 folder: a window with no live session (the launcher or the failure state)
 SHALL show the launcher, while a window whose session is starting or running
 SHALL keep that session untouched. If `git init` fails, the app SHALL show the
-window's failure state containing the git error output. If the git executable
-itself cannot be launched, the app SHALL skip the preflight and start the
-server as it does today. The app MUST NOT pass `--force` to the server; the
-CLI git preflight in `serve-cli-startup` is unchanged.
+window's failure state containing the git error output. The dialog SHALL be
+offered only when the probe definitively reports that no repository exists
+(git's not-a-repository error); when the probe cannot determine this — the
+git executable cannot be launched, or it fails for any other reason such as
+a `safe.directory` ownership rejection — the app SHALL skip the preflight
+and start the server as it does today. The app MUST NOT pass `--force` to
+the server; the CLI git preflight in `serve-cli-startup` is unchanged.
 
 #### Scenario: Non-git folder is initialized and served
 - **WHEN** the user opens a folder that is not inside a git worktree
@@ -119,6 +122,11 @@ CLI git preflight in `serve-cli-startup` is unchanged.
 #### Scenario: git is unavailable
 - **WHEN** the git executable cannot be launched for the preflight
 - **THEN** the app starts the server for the folder without showing an initialization dialog
+
+#### Scenario: Probe fails without proving the repository is missing
+- **WHEN** the preflight probe fails for a reason other than a missing repository (for example a `safe.directory` ownership rejection)
+- **THEN** no initialization dialog appears
+- **AND** the app starts the server, whose own git preflight reports the error
 
 ### Requirement: Window reflects server lifecycle states
 Each window SHALL present distinct states for: no folder chosen (launcher),

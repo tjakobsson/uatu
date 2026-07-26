@@ -18,17 +18,26 @@ enum GitPreflight {
         let message: String
     }
 
-    /// Whether `folder` is inside a git worktree; `nil` when git itself
-    /// could not be run, in which case the caller should skip the
-    /// preflight and let the server's own startup report as it does today.
+    /// Whether `folder` is inside a git worktree; `nil` when the probe
+    /// cannot say, in which case the caller should skip the preflight and
+    /// let the server's own startup report as it does today.
+    ///
+    /// `false` requires git's definitive not-a-repository error: rev-parse
+    /// also exits non-zero when a repository EXISTS but git refuses to
+    /// touch it (e.g. a safe.directory ownership rejection), and offering
+    /// to init there would "succeed" by reinitializing while the server's
+    /// own probe keeps failing.
     nonisolated static func isInsideWorktree(
         _ folder: URL, environment: [String: String]
     ) -> Bool? {
-        guard let (status, _) = runGit(
+        guard let (status, output) = runGit(
             ["-C", folder.path, "rev-parse", "--show-toplevel"],
             in: folder, environment: environment
-        ), status != Self.commandNotFound else { return nil }
-        return status == 0
+        ) else { return nil }
+        if status == 0 { return true }
+        guard status != Self.commandNotFound,
+              output.contains("not a git repository") else { return nil }
+        return false
     }
 
     nonisolated static func initializeRepository(
@@ -59,6 +68,10 @@ enum GitPreflight {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = ["git"] + arguments
+        // Pin the message locale: isInsideWorktree matches git's
+        // not-a-repository error text, which a translated git would break.
+        var environment = environment
+        environment["LC_ALL"] = "C"
         process.environment = environment
         process.currentDirectoryURL = folder
         let out = Pipe()
