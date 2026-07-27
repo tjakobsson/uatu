@@ -315,11 +315,11 @@ Every sidebar pane header SHALL render its title (`<h2>`) and its metadata block
 
 ### Requirement: Sidebar interaction never moves keyboard focus out of the sidebar
 
-Selecting a document in the tree, or interacting with any sidebar pane control,
-SHALL leave keyboard focus where the user put it. The sidebar SHALL NOT move
-focus into the preview as a side effect of selection, so that whatever keyboard
-interaction the tree provides remains available to the user who just clicked in
-it.
+Sidebar interaction SHALL leave keyboard focus where the user put it, whether
+that interaction is selecting a document in the tree or operating any pane
+control. The sidebar SHALL NOT move focus into the preview as a side effect of
+selection, so whatever keyboard interaction the tree provides remains available
+to the user who just clicked in it.
 
 #### Scenario: Focus stays in the tree after a selection
 

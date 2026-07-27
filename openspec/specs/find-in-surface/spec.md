@@ -189,10 +189,11 @@ match list.
 
 ### Requirement: Find seeds from the selection and dismisses to the document
 
-Opening find while a non-empty selection exists inside the searched surface
-SHALL seed the query with the selected text and select it in the input, so
-typing replaces it. `Escape` SHALL dismiss the bar, clear highlighting, and move
-keyboard focus to the preview scroll container positioned at the current match.
+Opening find with a non-empty selection SHALL seed the query with the selected
+text and select it in the input, so typing replaces it. The selection counts
+only when it lies inside the searched surface. `Escape` SHALL dismiss the bar,
+clear highlighting, and move keyboard focus to the preview scroll container
+positioned at the current match.
 
 #### Scenario: Seeding from a selection
 
