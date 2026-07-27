@@ -539,15 +539,28 @@ h2 {
   min-width: 0;
 }
 
-/* Find bar. A zero-height sticky wrapper (same approach as .uatu-loading-bar)
-   so opening find never reflows the document under the reader. z-index clears
-   the sticky preview header (2) and the loading bar (3). */
-.find-bar {
-  position: sticky;
-  top: 0;
+/* Find bar. One bar serves every surface, relocating into the slot belonging
+   to whichever is being searched — a control that searches the terminal while
+   floating over the document reads as searching the document.
+
+   The slots are zero-height positioning contexts (same approach as
+   .uatu-loading-bar) so opening find never reflows the content under it.
+   z-index clears the sticky preview header (2) and the loading bar (3). */
+.find-slot {
   height: 0;
   overflow: visible;
   z-index: 4;
+}
+
+/* The preview slot lives inside the scroll container, so it sticks. */
+#preview-find-slot {
+  position: sticky;
+  top: 0;
+}
+
+/* The terminal panel does not scroll; relative is enough to anchor the bar. */
+#terminal-find-slot {
+  position: relative;
 }
 
 .find-bar[hidden] {
@@ -566,6 +579,34 @@ h2 {
   border-radius: 8px;
   background: var(--surface-raised);
   box-shadow: 0 6px 20px rgb(0 0 0 / 18%);
+}
+
+#terminal-find-slot .find-bar-inner {
+  right: 0.6rem;
+  border-color: rgb(255 255 255 / 18%);
+  background: #161b22;
+  color: #e6edf3;
+}
+
+#terminal-find-slot .find-query {
+  border-color: rgb(255 255 255 / 18%);
+  background: #0d1117;
+  color: #e6edf3;
+}
+
+#terminal-find-slot .find-status {
+  color: #8b949e;
+}
+
+#terminal-find-slot .find-toggle,
+#terminal-find-slot .find-nav-button {
+  color: #8b949e;
+}
+
+#terminal-find-slot .find-toggle:hover,
+#terminal-find-slot .find-nav-button:hover {
+  background: rgb(255 255 255 / 8%);
+  color: #e6edf3;
 }
 
 .find-query {

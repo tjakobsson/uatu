@@ -386,12 +386,14 @@
           </div>
         </header>
 
-        <!-- Find bar. A zero-height sticky wrapper holding an absolutely
-             positioned bar — the same trick .uatu-loading-bar uses — so the
-             bar pins to the top of the visible pane without shifting the
-             document's layout when it opens. -->
+        <!-- Find-bar slot for the preview. Zero-height and sticky — the same
+             trick .uatu-loading-bar uses — so the bar pins to the top of the
+             visible pane without shifting the document's layout when it opens.
+             The bar itself moves between this slot and the terminal's,
+             following whichever surface is being searched. -->
+        <div id="preview-find-slot" class="find-slot">
         <div id="find-bar" class="find-bar" hidden>
-        <div class="find-bar-inner" role="search" aria-label="Find in document">
+        <div class="find-bar-inner" role="search" aria-label="Find">
           <input
             id="find-query"
             class="find-query"
@@ -463,6 +465,7 @@
               <path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M4 4l8 8M12 4l-8 8"/>
             </svg>
           </button>
+        </div>
         </div>
         </div>
 
@@ -570,6 +573,9 @@
               >×</button>
             </div>
           </header>
+          <!-- The find bar relocates here while the terminal is the surface
+               being searched, so the control sits on the thing it searches. -->
+          <div id="terminal-find-slot" class="find-slot"></div>
           <div id="terminal-panes" class="terminal-panes" data-orientation="horizontal"></div>
         </section>
       </div>

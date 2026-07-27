@@ -25,6 +25,13 @@ export type FindOutcome = {
 export const NO_MATCHES: FindOutcome = { total: 0, index: -1, truncated: false, error: null };
 
 export type FindEngine = {
+  // Where the bar belongs while this engine is active, and what the query box
+  // says it is searching. A control that searches the terminal while floating
+  // over the document reads as searching the document — the bar has to sit on
+  // the surface it acts on, and say which one that is.
+  barHost(): HTMLElement | null;
+  readonly label: string;
+
   // Run `query`, optionally scrolling the first match into view. Called on
   // every keystroke (debounced) and whenever the searched content changes.
   run(query: string, options: MatchOptions, opts: { reveal: boolean }): void;

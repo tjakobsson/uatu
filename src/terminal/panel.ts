@@ -209,7 +209,7 @@ export function setupTerminalPanel(
         focus: () => entry.handle.focus(),
         onResults: listener => entry.handle.search.onResults(listener),
       };
-    }),
+    }, () => document.getElementById("terminal-find-slot")),
   );
   let state: TerminalPanelState = readTerminalPanelState(localStorageRef);
 

@@ -23,6 +23,7 @@ const nextButtonMaybe = document.querySelector<HTMLButtonElement>("#find-next");
 const closeButtonMaybe = document.querySelector<HTMLButtonElement>("#find-close");
 const previewElementMaybe = document.querySelector<HTMLElement>("#preview");
 const previewShellElementMaybe = document.querySelector<HTMLElement>(".preview-shell");
+const previewFindSlotMaybe = document.querySelector<HTMLElement>("#preview-find-slot");
 
 if (
   !findBarElementMaybe ||
@@ -35,7 +36,8 @@ if (
   !nextButtonMaybe ||
   !closeButtonMaybe ||
   !previewElementMaybe ||
-  !previewShellElementMaybe
+  !previewShellElementMaybe ||
+  !previewFindSlotMaybe
 ) {
   throw new Error("uatu UI failed to initialize (find/find-bar)");
 }
@@ -51,12 +53,13 @@ const nextButton: HTMLButtonElement = nextButtonMaybe;
 const closeButton: HTMLButtonElement = closeButtonMaybe;
 const previewElement: HTMLElement = previewElementMaybe;
 const previewShellElement: HTMLElement = previewShellElementMaybe;
+const previewFindSlot: HTMLElement = previewFindSlotMaybe;
 
 // Long enough that typing a word does not repaint on every keystroke, short
 // enough that the counter still feels live.
 const SEARCH_DEBOUNCE_MS = 120;
 
-const previewEngine = createPreviewEngine(previewElement, previewShellElement);
+const previewEngine = createPreviewEngine(previewElement, previewShellElement, previewFindSlot);
 
 let open = false;
 let engine: FindEngine | null = null;
@@ -160,6 +163,7 @@ export function openFindBar(target: FindEngine): void {
   engine = target;
   engine.setOnOutcome(receiveOutcome);
   engine.watch?.(refreshAfterContentChange);
+  mountOn(engine);
 
   const seed = selectionSeed();
   if (!open) {
@@ -206,6 +210,21 @@ export function closeFindBar(): void {
   // Hand focus back to the surface at the position the reader was left at, so
   // Space and PageDown keep working instead of falling through to the body.
   closing?.focusSurface();
+}
+
+// Relocate the bar onto the surface being searched, and say which one that is.
+// Moving the element keeps every listener intact — they are bound to the
+// controls, not to a position in the tree. Falls back to leaving the bar where
+// it is if the surface has no slot (the terminal panel is absent when the
+// backend is off).
+function mountOn(target: FindEngine): void {
+  const host = target.barHost();
+  if (host && findBarElement.parentElement !== host) {
+    host.appendChild(findBarElement);
+  }
+  const description = `Find in ${target.label}`;
+  queryInput.placeholder = description;
+  queryInput.setAttribute("aria-label", description);
 }
 
 function toggleOption(key: keyof MatchOptions): void {

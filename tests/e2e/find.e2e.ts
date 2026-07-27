@@ -384,5 +384,22 @@ test.describe("terminal surface", () => {
     // A match in the scrollback, and nothing painted over the document.
     await expect(page.locator("#find-status")).not.toHaveText("No results");
     expect(await highlightCounts(page)).toEqual({ matches: 0, current: 0 });
+
+    // The bar sits on the surface it searches, and says which one. A control
+    // floating over the document while searching the terminal reads as
+    // searching the document.
+    expect(
+      await page.evaluate(() => document.querySelector("#find-bar")?.parentElement?.id),
+    ).toBe("terminal-find-slot");
+    await expect(page.locator("#find-query")).toHaveAttribute("placeholder", "Find in terminal");
+
+    // Returning to the document brings the bar back with it.
+    await page.keyboard.press("Escape");
+    await page.locator("#preview").click({ position: { x: 10, y: 10 } });
+    await openFind(page);
+    expect(
+      await page.evaluate(() => document.querySelector("#find-bar")?.parentElement?.id),
+    ).toBe("preview-find-slot");
+    await expect(page.locator("#find-query")).toHaveAttribute("placeholder", "Find in document");
   });
 });

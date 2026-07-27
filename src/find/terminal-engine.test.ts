@@ -36,7 +36,7 @@ describe("terminal find engine", () => {
     const first = fakePane("first");
     const second = fakePane("second");
     let focused = first;
-    const engine = createTerminalEngine(() => focused.target);
+    const engine = createTerminalEngine(() => focused.target, () => null);
 
     engine.run("hello", DEFAULT_MATCH_OPTIONS, { reveal: true });
     focused = second;
@@ -49,7 +49,7 @@ describe("terminal find engine", () => {
   test("the unfocused pane of a split is never searched", () => {
     const focused = fakePane("focused");
     const other = fakePane("other");
-    const engine = createTerminalEngine(() => focused.target);
+    const engine = createTerminalEngine(() => focused.target, () => null);
 
     engine.run("query", DEFAULT_MATCH_OPTIONS, { reveal: true });
     engine.step(1, "query", DEFAULT_MATCH_OPTIONS);
@@ -62,7 +62,7 @@ describe("terminal find engine", () => {
     // The guarantee that searching cannot disturb a running program is
     // structural: the target exposes no method that reaches the PTY.
     const pane = fakePane("only");
-    const engine = createTerminalEngine(() => pane.target);
+    const engine = createTerminalEngine(() => pane.target, () => null);
     engine.run("x", DEFAULT_MATCH_OPTIONS, { reveal: true });
     engine.step(1, "x", DEFAULT_MATCH_OPTIONS);
     engine.clear();
@@ -73,7 +73,7 @@ describe("terminal find engine", () => {
 
   test("an empty query clears rather than searching for nothing", () => {
     const pane = fakePane("only");
-    const engine = createTerminalEngine(() => pane.target);
+    const engine = createTerminalEngine(() => pane.target, () => null);
     engine.run("", DEFAULT_MATCH_OPTIONS, { reveal: true });
     expect(pane.calls.some(c => c.kind === "clear")).toBe(true);
     expect(pane.calls.some(c => c.kind === "findNext")).toBe(false);
@@ -81,7 +81,7 @@ describe("terminal find engine", () => {
 
   test("step direction maps to forward and backward search", () => {
     const pane = fakePane("only");
-    const engine = createTerminalEngine(() => pane.target);
+    const engine = createTerminalEngine(() => pane.target, () => null);
     engine.step(1, "q", DEFAULT_MATCH_OPTIONS);
     engine.step(-1, "q", DEFAULT_MATCH_OPTIONS);
     expect(pane.calls.map(c => c.kind).filter(k => k.startsWith("find"))).toEqual([
@@ -92,7 +92,7 @@ describe("terminal find engine", () => {
 
   test("result counts reach the bar", () => {
     const pane = fakePane("only");
-    const engine = createTerminalEngine(() => pane.target);
+    const engine = createTerminalEngine(() => pane.target, () => null);
     const seen: FindOutcome[] = [];
     engine.setOnOutcome(outcome => seen.push(outcome));
 
@@ -106,7 +106,7 @@ describe("terminal find engine", () => {
     // The addon reports index -1 with a positive total when it stops
     // highlighting. That is the same situation the preview calls truncation.
     const pane = fakePane("only");
-    const engine = createTerminalEngine(() => pane.target);
+    const engine = createTerminalEngine(() => pane.target, () => null);
     const seen: FindOutcome[] = [];
     engine.setOnOutcome(outcome => seen.push(outcome));
 
@@ -117,7 +117,7 @@ describe("terminal find engine", () => {
   });
 
   test("with no focused pane there is nothing to search", () => {
-    const engine = createTerminalEngine(() => null);
+    const engine = createTerminalEngine(() => null, () => null);
     const seen: FindOutcome[] = [];
     engine.setOnOutcome(outcome => seen.push(outcome));
     engine.run("q", DEFAULT_MATCH_OPTIONS, { reveal: true });
@@ -128,7 +128,7 @@ describe("terminal find engine", () => {
     const first = fakePane("first");
     const second = fakePane("second");
     let focused = first;
-    const engine = createTerminalEngine(() => focused.target);
+    const engine = createTerminalEngine(() => focused.target, () => null);
 
     engine.run("q", DEFAULT_MATCH_OPTIONS, { reveal: true });
     focused = second;

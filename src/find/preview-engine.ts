@@ -18,6 +18,7 @@ import { buildTextIndex, locateSpan, toRange, type TextSpan } from "./text-index
 export function createPreviewEngine(
   previewElement: HTMLElement,
   shellElement: HTMLElement,
+  barSlot: HTMLElement,
 ): FindEngine {
   let spans: TextSpan[] = [];
   let ranges: Range[] = [];
@@ -45,6 +46,9 @@ export function createPreviewEngine(
   };
 
   return {
+    barHost: () => barSlot,
+    label: "document",
+
     run(query, options, opts) {
       // Where the reader currently is, so a re-run after a live reload lands
       // near it rather than snapping to the top of the document.

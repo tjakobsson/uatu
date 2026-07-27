@@ -22,7 +22,10 @@ export type TerminalSearchTarget = {
   onResults(listener: ((outcome: { index: number; total: number }) => void) | null): void;
 };
 
-export function createTerminalEngine(resolveTarget: () => TerminalSearchTarget | null): FindEngine {
+export function createTerminalEngine(
+  resolveTarget: () => TerminalSearchTarget | null,
+  resolveBarSlot: () => HTMLElement | null,
+): FindEngine {
   let onOutcome: ((outcome: FindOutcome) => void) | null = null;
   let subscribed: TerminalSearchTarget | null = null;
 
@@ -48,6 +51,9 @@ export function createTerminalEngine(resolveTarget: () => TerminalSearchTarget |
   };
 
   return {
+    barHost: resolveBarSlot,
+    label: "terminal",
+
     run(query, options) {
       const target = bind(resolveTarget());
       if (!target) {
