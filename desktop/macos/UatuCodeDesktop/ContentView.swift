@@ -176,6 +176,13 @@ struct ContentView: View {
             if browserKeyMonitor == nil {
                 browserKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [split, web] event in
                     let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
+                    // Escape closes the browser find bar. Unmodified, so it has
+                    // to be handled before the ⌘-only guard below.
+                    if modifiers.isEmpty, event.keyCode == 53, split.findOpen,
+                       split.hasFocus(in: event.window) || split.findBarFocused {
+                        split.closeFind()
+                        return nil
+                    }
                     // Find and Find Next/Previous. The page implements find for
                     // every surface it owns, but ⌘F only reaches it while the
                     // document has focus: WebKit swallows the key for its own
@@ -188,11 +195,21 @@ struct ContentView: View {
                     if modifiers == .command || modifiers == [.command, .shift] {
                         if let key = event.charactersIgnoringModifiers?.lowercased(),
                            key == "f" || key == "g" {
-                            // The split browser searches its own page natively;
-                            // until that lands, leave the key alone there rather
-                            // than searching a pane the user is not looking at.
-                            if split.hasFocus(in: event.window) {
-                                return event
+                            // The split browser hosts arbitrary external pages,
+                            // so it searches them with WebKit's own find rather
+                            // than the SPA's. ⇧⌘F is not routed here: project
+                            // search is global and always belongs to uatu.
+                            if split.hasFocus(in: event.window), !modifiers.contains(.shift) {
+                                if key == "f" {
+                                    split.openFind()
+                                } else {
+                                    split.findNext(backwards: false)
+                                }
+                                return nil
+                            }
+                            if split.hasFocus(in: event.window), key == "g" {
+                                split.findNext(backwards: modifiers.contains(.shift))
+                                return nil
                             }
                             let script: String
                             if key == "f" {

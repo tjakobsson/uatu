@@ -47,11 +47,11 @@
 
 ## 6. Split-browser native find
 
-- [ ] 6.1 Create `desktop/macos/UatuCodeDesktop/FindBar.swift` — a SwiftUI bar with query field, counter, prev/next, and close
-- [ ] 6.2 Drive matching with `WKWebView.find(_:configuration:)` against the selected tab, reporting match counts
-- [ ] 6.3 Hold find state per `BrowserTab` so switching tabs does not carry highlights across, and closing a tab discards it
-- [ ] 6.4 No-op when the split is open with no selected tab, rather than falling through to another surface
-- [ ] 6.5 `Escape` closes the bar, clears highlights, and returns focus to the tab's web view
+- [x] 6.1 Create `desktop/macos/UatuCodeDesktop/FindBar.swift` — query field, case toggle, prev/next, close. No counter: `WKFindResult` exposes only `matchFound`
+- [x] 6.2 Drive matching with `WKWebView.find(_:configuration:)` against the selected tab, reporting found / not-found — a count is not available from the API
+- [x] 6.3 Hold find state per `BrowserTab` so switching tabs does not carry highlights across, and closing a tab discards it
+- [x] 6.4 No-op when the split is open with no selected tab, rather than falling through to another surface
+- [x] 6.5 `Escape` closes the bar, clears highlights, and returns focus to the tab's web view
 
 ## 7. End-to-end coverage and docs
 

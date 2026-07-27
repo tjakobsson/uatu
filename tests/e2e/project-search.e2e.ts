@@ -184,8 +184,11 @@ test.describe("global routing", () => {
     await expect(page.locator("#terminal-panel")).toBeVisible();
     // Click the panes container rather than a fixed offset in the panel — the
     // header's controls move with the panel's width.
-    await expect(page.locator("#terminal-panes")).toBeVisible();
-    await page.locator("#terminal-panes").click({ position: { x: 10, y: 10 } });
+    // Wait for a pane to exist before clicking into it — on a cold start the
+    // panel is visible before its first pane is mounted, and this test is
+    // about the shortcut, not about how fast the terminal comes up.
+    await expect(page.locator(".terminal-pane-host").first()).toBeVisible({ timeout: 15_000 });
+    await page.locator(".terminal-pane-host").first().click({ position: { x: 10, y: 10 } });
 
     await openSearch(page);
     // Project search, not the terminal find bar.

@@ -23,6 +23,10 @@ struct BrowserSplitView: View {
             if let tab = split.selectedTab {
                 chromeRow(for: tab)
                 Divider()
+                if split.findOpen {
+                    BrowserFindBar(split: split)
+                    Divider()
+                }
                 BrowserTabWebView(tab: tab)
                     .id(tab.id)
             } else {

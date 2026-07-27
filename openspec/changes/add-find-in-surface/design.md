@@ -171,7 +171,7 @@ at invoke time which surface to target.
 Whether the wrapper must additionally strip SwiftUI's inherited `.textEditing`
 Find group depends on the spike below.
 
-### 8. Split-browser find is native, and sequenced last
+### 8. Split-browser find is native, offers less, and is sequenced last
 
 The split browser hosts arbitrary external pages; injecting a find bar into
 someone else's document is not on the table. `WKWebView.find(_:configuration:)`
@@ -179,6 +179,16 @@ does the matching and highlighting, and the wrapper supplies a small SwiftUI bar
 above the tab's web view. This is the only piece of the change with no web
 counterpart, so it is built last: if it slips, everything else ships and ⌘F over
 the split browser stays as inert as it is today — no regression.
+
+*What the API actually allows, measured during implementation.* `WKFindResult`
+exposes a single property, `matchFound`; there is no match count, so there is no
+"3 of 12" to display. `WKFindConfiguration` exposes backwards, case sensitivity,
+and wrapping — no whole-word, no regular expressions. The bar therefore offers
+one toggle and a found/not-found state rather than the three toggles and counter
+the in-document bar has. Simulating the difference would mean injecting a
+counting script into pages uatu does not own; offering less honestly is the
+better trade for the least-central surface. There is also no "clear find" call —
+finding *selects* the match — so dismissing clears the page selection instead.
 
 ## Risks / Trade-offs
 
