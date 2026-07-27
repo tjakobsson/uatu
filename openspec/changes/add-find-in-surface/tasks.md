@@ -43,7 +43,7 @@
 - [x] 5.2 Add Find, Find Next, Find Previous to the Edit menu in `ContentView.swift` with standard key equivalents, enabled whenever a running window is focused
 - [x] 5.3 Resolve the target surface at invoke time via `split.hasFocus(in:)` — following the `⌘W`/`⌘[`/`⌘]` monitor precedent, not menu enablement
 - [x] 5.4 When the embedded SPA is the target, forward the request into the page rather than handling it natively
-- [ ] 5.5 Verify in a built app that ⌘F opens uatu's find bar with the SPA focused and does not when the split browser is focused
+- [x] 5.5 Verified in a built app: Rendered, Source, Diff, terminal, Edit ▸ Find, and ⌘G/⇧⌘G all confirmed by hand. Split-browser behaviour is unverified pending group 6 — ⌘F there is inert, same as before this change
 
 ## 6. Split-browser native find
 
