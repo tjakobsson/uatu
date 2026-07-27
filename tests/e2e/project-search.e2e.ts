@@ -137,6 +137,77 @@ test("a match that exists only in source falls back to Source view", async ({ pa
     .toBe(1);
 });
 
+test("the second hit of a repeated string reveals that hit, not the first", async ({
+  page,
+  request,
+}) => {
+  // Every row for a repeated string used to reveal the first occurrence,
+  // because the reveal searched by text alone. The row knows which occurrence
+  // it is; landing on the wrong one is silent and easy to miss.
+  await request.post("/__e2e/reset", {
+    data: {
+      extras: {
+        "repeats.md": ["# Repeats", "", "marker one", "", "marker two", "", "marker three"].join(
+          "\n",
+        ),
+      },
+    },
+  });
+  await page.reload();
+  await openSearch(page);
+  await page.locator("#search-query").fill("marker");
+  await expect(page.locator(".search-hit")).toHaveCount(3, { timeout: 10_000 });
+
+  // Occurrence index is carried on the row.
+  await expect(page.locator(".search-hit").nth(2)).toHaveAttribute("data-occurrence", "2");
+
+  await page.locator(".search-hit").nth(2).click();
+  await expect(page.locator("#preview-path")).toHaveText("repeats.md");
+
+  // The highlighted range must sit in the third paragraph, not the first.
+  const revealed = await page.evaluate(() => {
+    const registry = (CSS as unknown as {
+      highlights: Map<string, Set<Range>>;
+    }).highlights;
+    const current = registry.get("uatu-find-current");
+    const range = current ? [...current][0] : null;
+    return range?.startContainer.textContent ?? null;
+  });
+  expect(revealed).toContain("three");
+});
+
+test("a widened result outside the scope still opens", async ({ page, request }) => {
+  // "Search all roots" can surface documents the session scope excludes.
+  // Opening one used to 404 into "Document unavailable", because /api/document
+  // resolves against the scoped roots — the escape hatch showed results it
+  // could not open.
+  await revealTreeRow(page, "alpha.md");
+  await treeRow(page, "alpha.md").click();
+  await expect(page.locator("#preview-path")).toHaveText("alpha.md");
+
+  const scoped = await request.post("/api/scope", {
+    data: { scope: { kind: "file", documentId: workspacePath("alpha.md") } },
+  });
+  expect(scoped.ok()).toBe(true);
+  await page.reload();
+
+  await openSearch(page);
+  await expect(page.locator("#search-scope")).toContainText("Scoped to one file", {
+    timeout: 15_000,
+  });
+  await page.locator('[data-search-scope="all"]').click();
+  await page.locator("#search-query").fill("compare-target");
+  await expect(page.locator("#search-summary")).toHaveText("3 results · 2 files", {
+    timeout: 15_000,
+  });
+
+  // beta.md is outside the scope; opening it must land on the document.
+  const outside = page.locator(".search-file", { hasText: "beta.md" }).locator(".search-hit").first();
+  await outside.click();
+  await expect(page.locator("#preview-path")).toHaveText("beta.md");
+  await expect(page.locator("#preview")).not.toContainText("unavailable");
+});
+
 test("arrow keys walk results and Enter opens the focused one", async ({ page }) => {
   await openSearch(page);
   await page.locator("#search-query").fill("compare-target");

@@ -19,19 +19,24 @@ if (!previewElementMaybe || !previewShellElementMaybe) {
 const previewElement: HTMLElement = previewElementMaybe;
 const previewShellElement: HTMLElement = previewShellElementMaybe;
 
-// Highlight and scroll to the first occurrence of `text` in the current view.
+// Highlight and scroll to an occurrence of `text` in the current view.
 //
-// Returns false when the text is not present — which is the signal callers
-// need, not an error: a match found in source frequently does not exist in the
-// rendered DOM, and the caller decides what to do about that. Nothing is
+// `occurrence` is which one, counted from zero in document order. Project
+// search reports several hits of the same string in one file, and revealing
+// the first for every row would land the reader in the wrong place for all but
+// the first — the row knows which occurrence it is, so it says.
+//
+// Returns false when that occurrence is not present — which is the signal
+// callers need, not an error: a match found in source frequently does not exist
+// in the rendered DOM, and the caller decides what to do about that. Nothing is
 // painted and nothing is scrolled in that case, so the reader is never left
 // staring at an arbitrary position.
-export function revealExternalMatch(text: string): boolean {
+export function revealExternalMatch(text: string, occurrence = 0): boolean {
   if (text.length === 0) {
     return false;
   }
   const index = buildTextIndex(previewElement);
-  const at = index.text.indexOf(text);
+  const at = nthIndexOf(index.text, text, occurrence);
   if (at === -1) {
     clearHighlights();
     return false;
@@ -51,6 +56,17 @@ export function revealExternalMatch(text: string): boolean {
   // to read, not to go back to the sidebar for arrow keys.
   previewShellElement.focus({ preventScroll: true });
   return true;
+}
+
+// The offset of the `n`th occurrence (0-based), or -1 when there are fewer
+// than `n + 1`. Occurrences are counted non-overlapping, matching how both the
+// server sweep and the in-document matcher enumerate.
+function nthIndexOf(haystack: string, needle: string, n: number): number {
+  let at = haystack.indexOf(needle);
+  for (let seen = 0; seen < n && at !== -1; seen += 1) {
+    at = haystack.indexOf(needle, at + needle.length);
+  }
+  return at;
 }
 
 export function clearExternalMatch(): void {

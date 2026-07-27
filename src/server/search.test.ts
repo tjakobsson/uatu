@@ -221,13 +221,24 @@ describe("bounds", () => {
   });
 
   test("a document that blows the time budget is reported, and the sweep continues", async () => {
-    // A clock that jumps past the budget once matching starts.
-    let ticks = 0;
+    // A clock that jumps past the per-document budget once slow.md's own
+    // matching starts — expressed in terms of that event rather than a call
+    // count, so it does not shift when the sweep gains a reading elsewhere.
+    // 1s is past the 250ms document budget and well inside the sweep
+    // deadline, so this exercises the per-document path alone.
+    let readingSlow = false;
+    let callsSinceRead = 0;
     const deps: SearchDeps = {
-      readFile: async path => (path === "/abs/slow.md" ? "a\nb\nc\n" : "hit\n"),
+      readFile: async path => {
+        readingSlow = path === "/abs/slow.md";
+        callsSinceRead = 0;
+        return readingSlow ? "a\nb\nc\n" : "hit\n";
+      },
       now: () => {
-        ticks += 1;
-        return ticks > 2 ? 10_000 : 0;
+        if (!readingSlow) return 0;
+        callsSinceRead += 1;
+        // The first reading after the read is the document's start stamp.
+        return callsSinceRead <= 1 ? 0 : 1_000;
       },
     };
     const events = await collect(roots(doc("slow.md"), doc("fast.md")), "hit", {}, {}, deps);
@@ -249,5 +260,52 @@ describe("streaming", () => {
     });
     // Two file events, then done — not one batch at the end.
     expect(events.map(e => e.kind)).toEqual(["file", "file", "done"]);
+  });
+});
+
+describe("sweep deadline", () => {
+  // The per-document budget is checked between lines, so it cannot interrupt
+  // backtracking inside a single match attempt. A whole-sweep deadline bounds
+  // the damage to "deadline plus one attempt".
+  test("a sweep past its deadline stops and says so", async () => {
+    const docs = Array.from({ length: 100 }, (_, i) => doc(`f${i}.md`));
+    const files = Object.fromEntries(docs.map(d => [d.id, "needle\n"]));
+    let clock = 0;
+    const deps: SearchDeps = {
+      readFile: async path => files[path] ?? null,
+      // 50ms per reading. Four readings per document keeps each one inside
+      // the 250ms per-document budget, so only the 10s sweep deadline fires —
+      // which is the bound under test.
+      now: () => (clock += 50),
+    };
+    const events: SearchEvent[] = [];
+    for await (const e of searchDocuments(roots(...docs), "needle", DEFAULT_SEARCH_OPTIONS, deps)) {
+      events.push(e);
+    }
+    const last = events.at(-1);
+    expect(last?.kind === "done" && last.abandoned).toBe(true);
+    // It stopped early rather than sweeping all fifty.
+    expect(fileResults(events).length).toBeLessThan(docs.length);
+  });
+
+  test("results collected before the deadline are still reported", async () => {
+    const docs = Array.from({ length: 100 }, (_, i) => doc(`f${i}.md`));
+    const files = Object.fromEntries(docs.map(d => [d.id, "needle\n"]));
+    let clock = 0;
+    const deps: SearchDeps = {
+      readFile: async path => files[path] ?? null,
+      now: () => (clock += 50),
+    };
+    const events: SearchEvent[] = [];
+    for await (const e of searchDocuments(roots(...docs), "needle", DEFAULT_SEARCH_OPTIONS, deps)) {
+      events.push(e);
+    }
+    expect(fileResults(events).length).toBeGreaterThan(0);
+  });
+
+  test("a sweep inside its deadline is not marked abandoned", async () => {
+    const events = await collect(roots(doc("a.md")), "needle", { "/abs/a.md": "needle\n" });
+    const last = events.at(-1);
+    expect(last?.kind === "done" && last.abandoned).toBeUndefined();
   });
 });

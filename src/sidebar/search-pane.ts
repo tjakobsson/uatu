@@ -61,6 +61,7 @@ let results: SearchFileResult[] = [];
 let running = false;
 let truncated = false;
 let expensive: string[] = [];
+let abandoned = false;
 let patternError: string | null = null;
 let stale = false;
 let searchAllRoots = false;
@@ -91,6 +92,7 @@ async function runSearch(): Promise<void> {
   results = [];
   truncated = false;
   expensive = [];
+  abandoned = false;
   patternError = null;
   stale = false;
 
@@ -172,6 +174,7 @@ function consume(event: SearchEvent): void {
       return;
     case "done":
       truncated = event.truncated;
+      abandoned = event.abandoned === true;
       return;
   }
 }
@@ -211,6 +214,10 @@ function renderNotice(): void {
     // exactly the wrong conclusion for a reviewer to draw.
     notes.push("Showing the first results — refine the query to see the rest.");
   }
+  if (abandoned) {
+    // Stopping early and saying nothing would read as "that is all there is".
+    notes.push("Search stopped early — it was taking too long. Narrow the query.");
+  }
   if (expensive.length > 0) {
     notes.push(
       `Pattern too expensive for ${expensive.length} file${expensive.length === 1 ? "" : "s"}.`,
@@ -249,8 +256,15 @@ function renderResults(): void {
   }
   const html = results
     .map(result => {
+      // Which occurrence of the same text each row is, within this document.
+      // Several rows can share a matched string, and the reveal needs to know
+      // which one to land on — otherwise every row reveals the first.
+      const seen = new Map<string, number>();
       const rows = result.matches
         .map(match => {
+          const matchText = match.text.slice(match.start, match.end);
+          const occurrence = seen.get(matchText) ?? 0;
+          seen.set(matchText, occurrence + 1);
           const line = displayLine(match.text, match.start, match.end);
           const before = escapeHtml(line.text.slice(0, line.start));
           const hit = escapeHtml(line.text.slice(line.start, line.end));
@@ -262,8 +276,9 @@ function renderResults(): void {
             ` data-document-id="${escapeHtml(result.documentId)}"` +
             ` data-line="${match.line}" data-start="${match.start}" data-end="${match.end}"` +
             // The literal slice that matched — for a regex this differs per
-            // hit, so it cannot be re-derived from the query alone.
-            ` data-match="${escapeHtmlAttribute(match.text.slice(match.start, match.end))}">` +
+            // hit, so it cannot be re-derived from the query alone — plus which
+            // occurrence of it this row is within the document.
+            ` data-match="${escapeHtmlAttribute(matchText)}" data-occurrence="${occurrence}">` +
             `<span class="search-hit-line">${match.line}</span>` +
             `<span class="search-hit-text">${lead}${before}<mark>${hit}</mark>${after}${tail}</span>` +
             `</button>`
@@ -396,6 +411,10 @@ function activate(hit: HTMLElement): void {
   }
   void openSearchResult(
     { documentId, line, start, end, query: queryInput.value },
-    { matchText: hit.dataset.match ?? queryInput.value },
+    {
+      matchText: hit.dataset.match ?? queryInput.value,
+      occurrence: Number(hit.dataset.occurrence ?? 0),
+      fromAllRoots: searchAllRoots,
+    },
   );
 }

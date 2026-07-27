@@ -337,8 +337,19 @@ Results stream as NDJSON rather than arriving in one batch: on a docs tree the
 difference is invisible, but pointed at a repository it is the difference
 between a pane that fills and one that hangs. The sweep is bounded on three
 axes — minimum query length, a total match cap, and a per-document time budget
-so a catastrophic backtracking pattern costs one skipped file instead of the
-server. Every bound that trips is disclosed in the pane; a silently truncated
+so a slow pattern costs one skipped file instead of the sweep.
+
+Both budgets are checked *between* match attempts, never during one, because a
+single `RegExp.exec` is not interruptible from JavaScript. The honest bound is
+therefore "deadline plus one attempt". Measured on Bun's JavaScriptCore, runaway
+backtracking plateaus around 460 ms per attempt rather than growing without
+limit, so that overshoot is bounded in practice — but by the engine, not by us.
+
+Running the sweep in a terminable worker would make the bound ours, and was
+built and reverted: `bun build --compile` does not embed the worker module, so
+the guarantee held from source and silently fell back in the shipped binary. A
+guarantee that only applies in development is worse than a weaker one that
+applies everywhere. Every bound that trips is disclosed in the pane; a silently truncated
 list would read as "that is everywhere it appears", which is the wrong
 conclusion for a reviewer to draw.
 

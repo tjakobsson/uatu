@@ -105,9 +105,13 @@ sweep is still running. The pane SHALL report the running match and file counts.
 
 Queries SHALL be debounced and SHALL NOT run below a minimum query length.
 Results SHALL be capped, and when the cap is reached the pane SHALL say results
-were truncated rather than presenting a partial list as complete. Regular
-expression evaluation SHALL be time-bounded so a pathological pattern cannot
-hang the server.
+were truncated rather than presenting a partial list as complete.
+
+A sweep exceeding its deadline SHALL stop and report the results collected so
+far as incomplete. The deadline is checked between match attempts, so the bound
+it provides is the deadline plus the duration of one attempt: a single regular
+expression evaluation is not interruptible, and a per-document budget alone
+cannot bound it because that budget is also only checked between attempts.
 
 #### Scenario: Truncation is disclosed
 
@@ -123,6 +127,11 @@ hang the server.
 
 - **WHEN** a regular expression exceeds the evaluation time bound on a document
 - **THEN** the sweep abandons that document, reports the pattern as too expensive, and the server remains responsive
+
+#### Scenario: A sweep that runs too long overall
+
+- **WHEN** matching across the corpus exceeds the sweep deadline
+- **THEN** the sweep stops, the pane says it stopped early rather than presenting the partial list as complete, and the results already found remain usable
 
 ### Requirement: Search offers case, whole-word, and regular-expression matching
 

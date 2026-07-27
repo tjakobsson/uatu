@@ -23,11 +23,17 @@ export type SearchResultTarget = {
   query: string;
 };
 
-// The literal text that matched, reconstructed from the query. For a literal
-// query that is the query itself; for a regex the matched text varies per hit,
-// so the offsets carry the truth and the caller supplies the matched slice.
 export type OpenOptions = {
+  // The literal text that matched. For a literal query that is the query
+  // itself; under a regex it varies per hit, so the row carries its own slice.
   matchText: string;
+  // Which occurrence of `matchText` within the document this row is, counted
+  // from zero in source order. Without it every row for a repeated string
+  // would reveal the first one.
+  occurrence: number;
+  // Whether the result came from a search that deliberately ignored the
+  // session scope.
+  fromAllRoots: boolean;
 };
 
 export async function openSearchResult(
@@ -35,6 +41,17 @@ export async function openSearchResult(
   options?: Partial<OpenOptions>,
 ): Promise<void> {
   const matchText = options?.matchText ?? target.query;
+  const occurrence = options?.occurrence ?? 0;
+
+  // A widened search can return documents the session's scope excludes. The
+  // client cannot find them in `appState.roots` and `/api/document` resolves
+  // against the scoped roots too, so opening one would 404 into "Document
+  // unavailable" — the escape hatch would surface results it cannot open.
+  // Widening the session first is the honest reading of "search all roots":
+  // the user already opted out of the scope to find this.
+  if (options?.fromAllRoots && !isDocumentInScope(target.documentId)) {
+    await widenSessionScope();
+  }
 
   // Rule A: this is a user navigation, so Follow turns off and history gets an
   // entry, exactly as a tree click would.
@@ -46,18 +63,56 @@ export async function openSearchResult(
 
   // Try where the reader already is. Forcing Rendered would override a
   // deliberate global preference on every single result click.
-  if (revealExternalMatch(matchText)) {
+  if (revealExternalMatch(matchText, occurrence)) {
     return;
   }
 
-  // Not visible here — Source is where the searched text lives.
+  // Not visible here — Source is where the searched text lives, and where the
+  // occurrence ordinal is exact, because source is what was searched.
   if (appState.viewMode !== "source") {
     applyViewMode("source");
     // `applyViewMode` remounts the preview asynchronously; wait for the swap
     // before looking again.
     await nextMount();
-    revealExternalMatch(matchText);
+    revealExternalMatch(matchText, occurrence);
   }
+}
+
+function isDocumentInScope(documentId: string): boolean {
+  return appState.roots.some(root => root.docs.some(doc => doc.id === documentId));
+}
+
+// Drop the session back to folder scope. Server-session state shared across
+// clients, so this is deliberate and visible rather than a silent per-request
+// override — the sidebar and the preview stay describing the same corpus.
+async function widenSessionScope(): Promise<void> {
+  try {
+    await fetch("/api/scope", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ scope: { kind: "folder" } }),
+    });
+    // The SSE snapshot that follows repopulates `appState.roots`; wait for it
+    // rather than racing the broadcast with the navigation below.
+    await waitForFolderScope();
+  } catch {
+    // Offline or refused — the navigation below will surface the failure.
+  }
+}
+
+// Poll briefly for the widened scope to arrive over SSE.
+function waitForFolderScope(timeoutMs = 2000): Promise<void> {
+  const startedAt = performance.now();
+  return new Promise(resolve => {
+    const tick = (): void => {
+      if (appState.scope.kind === "folder" || performance.now() - startedAt > timeoutMs) {
+        resolve();
+        return;
+      }
+      window.setTimeout(tick, 50);
+    };
+    tick();
+  });
 }
 
 // Resolve once the preview's children have been replaced, or after a short

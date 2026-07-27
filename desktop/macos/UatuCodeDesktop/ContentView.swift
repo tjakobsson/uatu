@@ -197,18 +197,16 @@ struct ContentView: View {
                            key == "f" || key == "g" {
                             // The split browser hosts arbitrary external pages,
                             // so it searches them with WebKit's own find rather
-                            // than the SPA's. ⇧⌘F is not routed here: project
+                            // than the SPA's. ⇧⌘F is never routed here: project
                             // search is global and always belongs to uatu.
-                            if split.hasFocus(in: event.window), !modifiers.contains(.shift) {
+                            let toBrowser = split.ownsFindShortcut(in: event.window)
+                                && !(key == "f" && modifiers.contains(.shift))
+                            if toBrowser {
                                 if key == "f" {
                                     split.openFind()
                                 } else {
-                                    split.findNext(backwards: false)
+                                    split.findNext(backwards: modifiers.contains(.shift))
                                 }
-                                return nil
-                            }
-                            if split.hasFocus(in: event.window), key == "g" {
-                                split.findNext(backwards: modifiers.contains(.shift))
                                 return nil
                             }
                             let script: String
@@ -381,9 +379,21 @@ struct ContentView: View {
             canGoForward: web.canGoForward,
             chooseFolder: { isPickingFolder = true },
             openFolder: { open($0) },
-            // nil opens find; a delta steps to the next/previous match. The
-            // page decides which surface is searched — see the key monitor.
+            // nil opens find; a delta steps to the next/previous match.
+            //
+            // Menu activation does not pass through the key monitor, so the
+            // same focus dispatch has to happen here — otherwise Edit ▸ Find
+            // searches the document hidden behind the split while the user is
+            // looking at a browser tab.
             find: { delta in
+                if split.ownsFindShortcut(in: nativeWindow) {
+                    if let delta {
+                        split.findNext(backwards: delta < 0)
+                    } else {
+                        split.openFind()
+                    }
+                    return
+                }
                 let script = delta.map { "window.__uatuFind?.step(\($0))" } ?? "window.__uatuFind?.open()"
                 web.webView.evaluateJavaScript(script)
             },

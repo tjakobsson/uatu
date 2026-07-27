@@ -37,6 +37,22 @@ export const MAX_RESULTS = 500;
 // than a hung server.
 export const PER_DOCUMENT_BUDGET_MS = 250;
 
+// How long a whole sweep may run before it is abandoned.
+//
+// Checked between match attempts, never during one: a single `RegExp.exec` is
+// not interruptible from JavaScript, so the honest bound is "this deadline,
+// plus however long one attempt takes". Measured on Bun's JavaScriptCore,
+// runaway backtracking plateaus around 460 ms per attempt rather than growing
+// without limit, so the overshoot is bounded in practice — but it is the engine
+// bounding it, not us.
+//
+// Running the sweep in a worker the server could terminate would make the bound
+// ours. That was built and reverted: `bun build --compile` does not embed the
+// worker module, so it held from source and silently fell back in the shipped
+// binary. A guarantee that only applies in development is worse than a weaker
+// one that applies everywhere.
+export const SWEEP_DEADLINE_MS = 10_000;
+
 export type SearchMatch = {
   // 1-based, the way editors and `grep -n` count.
   line: number;
@@ -59,7 +75,15 @@ export type SearchEvent =
   // sweep continues; the pane reports the pattern as too expensive rather
   // than pretending the file had no matches.
   | { kind: "expensive"; relativePath: string }
-  | { kind: "done"; truncated: boolean; filesSearched: number; totalMatches: number };
+  | {
+      kind: "done";
+      truncated: boolean;
+      filesSearched: number;
+      totalMatches: number;
+      // Set when the sweep hit its deadline and stopped early. Results
+      // collected before that point are still valid.
+      abandoned?: boolean;
+    };
 
 function escapeLiteral(query: string): string {
   return query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -150,6 +174,7 @@ export async function* searchDocuments(
   query: string,
   options: SearchOptions = DEFAULT_SEARCH_OPTIONS,
   deps: SearchDeps = defaultDeps,
+  deadlineMs: number = SWEEP_DEADLINE_MS,
 ): AsyncGenerator<SearchEvent> {
   if (query.length < MIN_QUERY_LENGTH) {
     yield { kind: "done", truncated: false, filesSearched: 0, totalMatches: 0 };
@@ -167,10 +192,16 @@ export async function* searchDocuments(
   let totalMatches = 0;
   let filesSearched = 0;
   let truncated = false;
+  let abandoned = false;
+  const sweepStartedAt = deps.now();
 
   for (const doc of searchableDocuments(roots)) {
     if (totalMatches >= MAX_RESULTS) {
       truncated = true;
+      break;
+    }
+    if (deps.now() - sweepStartedAt > deadlineMs) {
+      abandoned = true;
       break;
     }
 
@@ -186,8 +217,13 @@ export async function* searchDocuments(
     const lines = contents.split("\n");
 
     for (let index = 0; index < lines.length; index += 1) {
-      if (deps.now() - startedAt > PER_DOCUMENT_BUDGET_MS) {
+      const now = deps.now();
+      if (now - startedAt > PER_DOCUMENT_BUDGET_MS) {
         expensive = true;
+        break;
+      }
+      if (now - sweepStartedAt > deadlineMs) {
+        abandoned = true;
         break;
       }
       const remaining = MAX_RESULTS - totalMatches - matches.length;
@@ -206,6 +242,10 @@ export async function* searchDocuments(
       continue;
     }
 
+    if (abandoned) {
+      break;
+    }
+
     if (matches.length > 0) {
       totalMatches += matches.length;
       yield {
@@ -220,5 +260,11 @@ export async function* searchDocuments(
     }
   }
 
-  yield { kind: "done", truncated, filesSearched, totalMatches };
+  yield {
+    kind: "done",
+    truncated,
+    filesSearched,
+    totalMatches,
+    ...(abandoned ? { abandoned: true } : {}),
+  };
 }

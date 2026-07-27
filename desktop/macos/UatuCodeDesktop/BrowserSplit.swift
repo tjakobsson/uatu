@@ -246,6 +246,24 @@ final class BrowserSplit {
         selectedTab?.find(backwards: backwards)
     }
 
+    /// Whether the browser — not the SPA — should receive ⌘F / ⌘G right now.
+    ///
+    /// Broader than `hasFocus(in:)` on purpose: once the find bar opens, focus
+    /// moves into its SwiftUI text field, which is neither a tab web view nor
+    /// the address bar. Judging by `hasFocus` alone would send the *next* ⌘F
+    /// straight past the bar the user is typing in and into the document
+    /// hidden behind the split.
+    func ownsFindShortcut(in window: NSWindow?) -> Bool {
+        if hasFocus(in: window) {
+            return true
+        }
+        guard isOpen, findOpen, findBarFocused else { return false }
+        // Same window check `hasFocus` makes: every window installs an
+        // app-wide monitor, so one window's split must not claim another's key.
+        guard let window else { return true }
+        return window === hostWindow
+    }
+
     func toggle() {
         if isOpen {
             isOpen = false
