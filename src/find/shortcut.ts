@@ -18,11 +18,30 @@ import {
   step,
 } from "./find-bar";
 import { supportsHighlights } from "./highlight";
+import { clampSeed } from "./find-status";
 
 // The terminal registers its engine here rather than this module importing the
 // terminal — the router should not have to know how a surface searches itself,
 // only that it can.
 let terminalEngine: FindEngine | null = null;
+
+// Project search registers here rather than this module importing the sidebar,
+// keeping the shortcut router free of feature dependencies in both directions.
+let projectSearch: ((seed: string) => void) | null = null;
+
+export function registerProjectSearch(open: ((seed: string) => void) | null): void {
+  projectSearch = open;
+}
+
+// Selections seed both find and search, with the same clamping: a multi-line
+// or paragraph-length selection is not a search term.
+function seedFromSelection(): string {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed) {
+    return "";
+  }
+  return clampSeed(selection.toString());
+}
 
 export function registerTerminalFind(engine: FindEngine | null): void {
   terminalEngine = engine;
@@ -86,6 +105,18 @@ export function initFindShortcuts(): void {
         return;
       }
       const key = event.key.toLowerCase();
+
+      // ⇧⌘F is project search. Unlike ⌘F it does not consult the active
+      // surface — the tree is not a surface the user can be "in", so it means
+      // the same thing from the document, the terminal, or anywhere else.
+      if (key === "f" && event.shiftKey) {
+        if (!projectSearch) {
+          return;
+        }
+        event.preventDefault();
+        projectSearch(seedFromSelection());
+        return;
+      }
 
       if (key === "f" && !event.shiftKey) {
         const engine = activeEngine();

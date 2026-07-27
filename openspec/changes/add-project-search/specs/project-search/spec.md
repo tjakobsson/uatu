@@ -126,16 +126,21 @@ dispatching a query.
 ### Requirement: Activating a result opens the document at the match
 
 Activating a result SHALL open its document and reveal the match using the same
-highlight-and-reveal behavior as preview find. The document SHALL open in
-Rendered view. When the matched text is not present in the rendered view — as
-for link URLs, heading markers, and code-fence syntax — the view SHALL fall back
-to Source, where the match is always present. Activation SHALL move keyboard
-focus to the preview so the document is immediately scrollable.
+highlight-and-reveal behavior as preview find. The document SHALL open in the
+view mode the reader is currently using. When the matched text is not present in
+that view — as for link URLs, heading markers, and code-fence syntax — the view
+SHALL fall back to Source, where the match is always present. Activation SHALL
+move keyboard focus to the preview so the document is immediately scrollable.
 
-#### Scenario: Match present in the rendered view
+#### Scenario: Match present in the current view
 
-- **WHEN** the user activates a result whose matched text appears in rendered prose
-- **THEN** the document opens in Rendered view, scrolls to the match, and highlights it
+- **WHEN** the user activates a result whose matched text appears in the view they are already in
+- **THEN** the document opens in that view, scrolls to the match, and highlights it
+
+#### Scenario: A Source-view reader is not moved to Rendered
+
+- **WHEN** a reader working in Source view activates any result
+- **THEN** the document opens in Source view, because forcing Rendered would override a deliberate global preference on every result click
 
 #### Scenario: Match absent from the rendered view
 

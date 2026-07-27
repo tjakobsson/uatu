@@ -16,7 +16,8 @@ import { initSelectionInspectorControl } from "./sidebar/selection-inspector-mou
 import { initFollowToggle } from "./shell/follow";
 import { initActiveSurfaceTracking } from "./find/active-surface";
 import { initFindBar } from "./find/find-bar";
-import { initFindShortcuts } from "./find/shortcut";
+import { initFindShortcuts, registerProjectSearch } from "./find/shortcut";
+import { initSearchPane, openSearchPane } from "./sidebar/search-pane";
 import { initStaleHintActionHandler } from "./shell/stale-hint-mount";
 import { selectionInspector } from "./shell/inspector-instance";
 
@@ -104,6 +105,8 @@ if (
 
 initActiveSurfaceTracking();
 initFindBar();
+initSearchPane();
+registerProjectSearch(openSearchPane);
 initFindShortcuts();
 initSidebarCollapse();
 initSidebarPanes();

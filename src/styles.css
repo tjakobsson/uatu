@@ -539,6 +539,163 @@ h2 {
   min-width: 0;
 }
 
+/* Search pane. Result rows are dense on purpose — the value is scanning many
+   hits at once, and a sidebar has no room to spare. */
+.search-pane-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.search-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0 0.25rem;
+}
+
+.search-query {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0.28rem 0.45rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text-strong);
+  font: inherit;
+  font-size: 0.82rem;
+}
+
+.search-query:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.search-toggles {
+  display: flex;
+  gap: 0.1rem;
+}
+
+.search-summary {
+  color: var(--text-subtle);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.search-summary[data-state="invalid"],
+.search-summary[data-state="empty"] {
+  color: light-dark(#cf222e, #f85149);
+}
+
+.search-scope,
+.search-notice {
+  margin: 0;
+  padding: 0 0.35rem;
+  color: var(--text-subtle);
+  font-size: 0.74rem;
+  line-height: 1.35;
+}
+
+.search-scope[hidden],
+.search-notice[hidden] {
+  display: none;
+}
+
+.search-scope-action {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.search-results {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.search-file {
+  margin-bottom: 0.3rem;
+}
+
+.search-file-path {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.2rem 0.35rem;
+  color: var(--text-subtle);
+  font-size: 0.74rem;
+  /* The tail of a path identifies the file; the head is usually shared. */
+  direction: rtl;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.search-file-count {
+  flex: 0 0 auto;
+  padding: 0 0.3rem;
+  border-radius: 999px;
+  background: var(--surface-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.search-hit {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  width: 100%;
+  padding: 0.12rem 0.35rem 0.12rem 0.9rem;
+  border: 0;
+  background: none;
+  color: var(--text-strong);
+  font: inherit;
+  font-size: 0.76rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.search-hit:hover {
+  background: var(--surface-muted);
+}
+
+.search-hit:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.search-hit-line {
+  flex: 0 0 auto;
+  min-width: 2ch;
+  color: var(--text-subtle);
+  font-family: var(--mono-font-family);
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.search-hit-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--mono-font-family);
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.search-hit-text mark {
+  background: var(--find-match-bg);
+  color: var(--text-strong);
+  border-radius: 2px;
+}
+
 /* Find bar. One bar serves every surface, relocating into the slot belonging
    to whichever is being searched — a control that searches the terminal while
    floating over the document reads as searching the document.

@@ -259,6 +259,11 @@ App-defined WebSocket close codes: `4001` user-terminate (client→server: kill 
 
 Clipboard crosses the client/server boundary in two directions, both ending at `navigator.clipboard` — which is the **host** clipboard even when the uatu server runs in a container, because the browser is on the host. Paste reads it and forwards down the PTY (`clipboard.ts` shortcut handlers). Copy has two paths: xterm-owned selections go through the Windows-Terminal-parity shortcuts, while mouse-mode TUIs (Claude Code, opencode) emit OSC 52 up the PTY, which `client.ts` bridges via `term.parser.registerOscHandler(52, …)` → `createOsc52Handler` in `clipboard.ts`. The bridge is write-only by construction (read queries get no response — no exfiltration path), caps decoded payloads at 100 KB, and reports every accepted write through a pane-scoped toast in `panel.ts` so clipboard poisoning is always visible. Policy comes from `.uatu.json terminal.clipboard` (`notify` default / `confirm` / `silent` / `off`) and flows to the client through `/api/state.terminalConfig` like the font overrides. A gestureless `writeText` rejection (Firefox/Safari) promotes the toast to its Copy-button form, which performs the write inside the click.
 
+> **Upgrade hazard.** The terminal is constructed with `allowProposedApi: true`
+> because the search addon's decoration options are still proposed API in xterm
+> 6 — calling them without it throws rather than degrading. Proposed APIs can
+> shift across xterm minors, so read their changelog when bumping the dependency.
+
 ## Follow mode
 
 uatu is a single-mode app. There is no Author vs. Review distinction; the only behavioral toggle is **Follow**, surfaced as a switch in the sidebar header. The full contract is specified in `openspec/specs/follow-mode/spec.md`; the four rules are summarized in the State lifecycle section above.
@@ -313,6 +318,39 @@ mermaid diagrams, anchors, and code-block decorations are untouched by
 searching. Because the preview is replaced wholesale on live reload, the
 preview engine holds no DOM references across a swap and re-indexes on a scoped
 `childList` observer.
+
+### Project search (⇧⌘F)
+
+⌘F is scoped to a surface; **⇧⌘F is not**. That asymmetry is deliberate and
+matches VS Code: the tree is not a surface you can be "in", so project search
+means the same thing pressed from the document, the terminal, or anywhere else.
+
+The corpus costs almost nothing to assemble. `getSession().getRoots()` already
+holds every watched document, ignore-filtered (`.gitignore` + `.uatu.json`),
+binary-classified, and kept current by the watcher — so `/api/search` reads that
+list and matches. There is no index to invalidate and no second walker whose
+ignore rules could drift from the tree's. Passing `allRoots=1` swaps in
+`getUnscopedRoots()`, which is the escape hatch for a scope narrowed so far that
+search would otherwise look broken.
+
+Results stream as NDJSON rather than arriving in one batch: on a docs tree the
+difference is invisible, but pointed at a repository it is the difference
+between a pane that fills and one that hangs. The sweep is bounded on three
+axes — minimum query length, a total match cap, and a per-document time budget
+so a catastrophic backtracking pattern costs one skipped file instead of the
+server. Every bound that trips is disclosed in the pane; a silently truncated
+list would read as "that is everywhere it appears", which is the wrong
+conclusion for a reviewer to draw.
+
+Activating a result routes through follow-mode Rule A — it is a user
+navigation — then reveals the match with `find/reveal.ts`, which reuses the find
+bar's own text index and highlight registry rather than growing a second
+painting path. The awkwardness worth knowing about: the corpus is **source**
+text while the reading surface is often **rendered**, and matches inside link
+syntax, heading markers, or code fences exist in the file but not in the
+rendered DOM. So the result lands in whatever view the reader is already using
+and falls back to Source only when the match cannot be found there — Source
+being where the searched text always exists.
 
 ## How to extend
 

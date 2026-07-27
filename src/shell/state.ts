@@ -58,6 +58,7 @@ export type PreviewMode =
 // Sidebar pane registry. Single mode-independent catalog.
 export const ALL_PANE_DEFS = [
   { id: "change-overview", label: "Change Overview" },
+  { id: "search", label: "Search" },
   { id: "files", label: "Files" },
   { id: "git-log", label: "Git Log" },
   { id: "selection-inspector", label: "Selection Inspector" },
@@ -69,6 +70,9 @@ export type PaneState = Record<PaneId, { visible: boolean; collapsed: boolean; h
 function defaultPaneState(): PaneState {
   return {
     "change-overview": { visible: true, collapsed: false, height: 210 },
+    // Hidden by default: search is opened on demand by ⇧⌘F, and a pane that
+    // is empty until you ask it something should not take room from the tree.
+    search: { visible: false, collapsed: false, height: 260 },
     files: { visible: true, collapsed: false, height: null },
     "git-log": { visible: true, collapsed: false, height: 120 },
     "selection-inspector": { visible: true, collapsed: false, height: 160 },

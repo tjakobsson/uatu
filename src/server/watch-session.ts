@@ -314,6 +314,13 @@ export function createWatchSession(
       scope = { kind: "folder" };
     }
 
+    // Apply immediately rather than waiting for the scheduled rescan to do it.
+    // `applyScope` is a pure filter over roots we already hold, so there is no
+    // reason for `getRoots()` to keep reporting the old view in the meantime —
+    // and a reader that acts on the scope right after setting it (project
+    // search does) would otherwise see unscoped results. The refresh below
+    // still runs; it recomputes review data and rebroadcasts.
+    roots = applyScope(unscopedRoots);
     scheduleRefresh(null);
     return scope;
   };

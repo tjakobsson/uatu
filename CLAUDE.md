@@ -39,7 +39,8 @@ src/
 │                   metadata card, code-block decorations
 ├── sidebar/        the left pane — tree-view + tree-config, panes
 │                   shell/render, change-overview, git-log, files-filter,
-│                   selection-inspector
+│                   selection-inspector, search-pane (⇧⌘F project search:
+│                   pane + result model + open-and-jump)
 ├── terminal/       the embedded xterm panel — client + server +
 │                   auth + pty + pane-state + panel UI
 ├── cli/            CLI domain — parse (flags + usage text) and output
@@ -47,6 +48,7 @@ src/
 ├── server/         routes (single source of truth for the HTTP route
 │                   table + the shared fetch fallback), watch-session
 │                   (live-reload engine), roots (resolution + scanning),
+│                   search (content sweep over the watched roots),
 │                   render-dispatch, static-files, navigation, port-probe
 ├── document/       per-document concerns — metadata, diff, classify,
 │                   git-base-ref, language detection

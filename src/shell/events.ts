@@ -12,6 +12,7 @@ import { documentDiffCache, forgetDocumentCache, loadDocument } from "../preview
 import { renderEmptyPreview } from "../preview/empty";
 import { renderReviewScoreDetails } from "../sidebar/review-score-mount";
 import { renderSidebar } from "../sidebar/shell";
+import { markSearchResultsStale, syncSearchScope } from "../sidebar/search-pane";
 import {
   hasDocument,
   shouldRefreshPreview,
@@ -31,6 +32,8 @@ export function applyServerSnapshot(payload: StatePayload): void {
   appState.roots = payload.roots;
   appState.repositories = payload.repositories ?? [];
   appState.scope = payload.scope;
+  // The Search pane names the scope in effect; it has to hear about changes.
+  syncSearchScope();
   // Title, favicon tint, and sidebar marker all derive from roots;
   // re-applying on every payload keeps them honest if roots change.
   applyProjectIdentity(payload.roots);
@@ -82,6 +85,14 @@ export function connectEvents() {
       renderSidebar();
       renderCommitPreview(appState.previewMode);
       return;
+    }
+
+    // A watched file changed, so displayed search results captured line
+    // numbers that may no longer hold. Mark them rather than re-running: in a
+    // watched repository that would be a query storm, and rows would jump
+    // under the reader's cursor while they are reading them.
+    if (payload.changedId) {
+      markSearchResultsStale();
     }
 
     // Rule C/D selection decision (see follow-mode capability).

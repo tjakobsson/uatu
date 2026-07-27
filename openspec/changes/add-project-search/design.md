@@ -82,11 +82,20 @@ reviewer to draw. The regex time bound exists because the pattern comes from the
 user and runs on the user's own server: a catastrophic backtrack is not a
 security problem here, but hanging the app you are reading in is still a bug.
 
-### 4. Results land in Rendered view, falling back to Source
+### 4. Results land in the reader's current view, falling back to Source
 
-Activating a result opens the document rendered and reveals the match. If the
-matched text cannot be located in the rendered DOM, the view flips to Source,
-where it always can be.
+Activating a result opens the document in whatever view mode the reader is
+already using and reveals the match. If the matched text cannot be located
+there, the view flips to Source, where it always can be.
+
+*Revised during implementation.* This decision originally said results land in
+**Rendered** view specifically. That is wrong: `viewMode` is a single global,
+persisted preference, so forcing Rendered would yank a reader who deliberately
+works in Source back to Rendered on every single result click — and persist it.
+Landing in the current view is strictly better: it respects the preference, and
+it still guarantees the match is reachable because the fallback covers the only
+case where the current view cannot show it. A Source-view reader now never
+flips at all, since the searched text is source text by construction.
 
 *Why not always Source?* It is honest and always lands, but it answers a question
 about a document by showing a file. Most matches — ordinary prose — are perfectly
@@ -112,6 +121,14 @@ one-click widening.
 *Alternative considered:* ignoring scope entirely, on the grounds that ⇧⌘F is
 "global". Rejected — it would mean the sidebar shows one corpus and search
 silently uses another, which is worse than either behavior on its own.
+
+*A latent race this surfaced.* `setScope` stored the new scope and left the
+scoped root list to be recomputed by the debounced rescan it scheduled, so
+`getRoots()` kept reporting the previous view for a window after the scope
+changed. Nothing had noticed, because the only prior consumers read roots well
+after the rescan landed. Search reads them immediately, and searched everything.
+`applyScope` is a pure filter over roots already in memory, so `setScope` now
+applies it synchronously and lets the scheduled refresh do the rest.
 
 ### 6. The Search pane is a pane-stack tenant
 

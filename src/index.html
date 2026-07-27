@@ -143,6 +143,40 @@
             <div id="change-overview" class="pane-body"></div>
             <div class="pane-resizer" data-pane-resizer="change-overview" role="separator" aria-orientation="horizontal" aria-label="Resize Change Overview"></div>
           </section>
+          <section class="sidebar-pane" data-pane-id="search">
+            <header class="pane-header">
+              <h2>Search</h2>
+              <div class="pane-meta">
+                <span id="search-summary" class="search-summary" role="status" aria-live="polite"></span>
+              </div>
+              <div class="pane-actions">
+                <button class="pane-action" type="button" data-pane-collapse="search" aria-label="Collapse Search" title="Collapse pane">−</button>
+                <button class="pane-action" type="button" data-pane-hide="search" aria-label="Hide Search" title="Hide pane">×</button>
+              </div>
+            </header>
+            <div class="pane-body search-pane-body">
+              <div class="search-controls">
+                <input
+                  id="search-query"
+                  class="search-query"
+                  type="text"
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder="Search in files"
+                  aria-label="Search in files"
+                />
+                <div class="search-toggles" role="group" aria-label="Match options">
+                  <button id="search-case" class="find-toggle" type="button" aria-pressed="false" title="Match case" aria-label="Match case">Aa</button>
+                  <button id="search-word" class="find-toggle" type="button" aria-pressed="false" title="Match whole word" aria-label="Match whole word">ab</button>
+                  <button id="search-regex" class="find-toggle" type="button" aria-pressed="false" title="Use regular expression" aria-label="Use regular expression">.*</button>
+                </div>
+              </div>
+              <p id="search-scope" class="search-scope" hidden></p>
+              <p id="search-notice" class="search-notice" hidden></p>
+              <div id="search-results" class="search-results" role="tree" aria-label="Search results"></div>
+            </div>
+            <div class="pane-resizer" data-pane-resizer="search" role="separator" aria-orientation="horizontal" aria-label="Resize Search"></div>
+          </section>
           <section class="sidebar-pane" data-pane-id="files">
             <header class="pane-header">
               <h2>Files</h2>

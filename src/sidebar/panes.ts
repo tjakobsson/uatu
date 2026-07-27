@@ -136,7 +136,9 @@ function nextVisiblePane(paneId: PaneId): HTMLElement | null {
   return null;
 }
 
-function persistPaneState(): void {
+// Exported so the Search pane can reveal itself from ⇧⌘F and have that
+// stick, without reaching into localStorage on its own.
+export function persistPaneState(): void {
   try {
     window.localStorage.setItem(SIDEBAR_PANES_KEY, JSON.stringify(appState.panes));
   } catch {
