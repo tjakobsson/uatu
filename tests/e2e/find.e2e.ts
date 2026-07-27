@@ -346,4 +346,43 @@ test.describe("terminal surface", () => {
     await page.locator("#find-query").fill("alpha");
     await expect(page.locator("#find-status")).toHaveText("1 of 4");
   });
+
+  test("searches the live terminal buffer", async ({ page, request }) => {
+    // The routing test above deliberately avoids a PTY. This one needs it:
+    // the search addon's `decorations` option is proposed API, and calling it
+    // on a Terminal built without `allowProposedApi` throws rather than
+    // degrading — which is how terminal find looked completely dead. Only a
+    // real xterm exercises that path.
+    const tokenResp = await request.get("/__e2e/terminal-token");
+    const tokenBody = await tokenResp.json();
+    if (!tokenBody.enabled) {
+      test.skip(true, "terminal backend unavailable on this platform");
+    }
+    await page.goto(`/?t=${encodeURIComponent(tokenBody.token)}`);
+    await page.evaluate(() => {
+      try {
+        window.sessionStorage.removeItem("uatu:terminal-visible");
+      } catch {
+        // best-effort
+      }
+    });
+    await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
+
+    await page.locator("#terminal-toggle").click();
+    await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({
+      timeout: 8000,
+    });
+    await page.locator(".terminal-pane-host").first().click();
+
+    const marker = "findmarker12345";
+    await page.keyboard.type(`echo ${marker}`);
+    await page.keyboard.press("Enter");
+    await expect(page.locator(".terminal-pane-host")).toContainText(marker, { timeout: 8000 });
+
+    await openFind(page);
+    await page.locator("#find-query").fill(marker);
+    // A match in the scrollback, and nothing painted over the document.
+    await expect(page.locator("#find-status")).not.toHaveText("No results");
+    expect(await highlightCounts(page)).toEqual({ matches: 0, current: 0 });
+  });
 });

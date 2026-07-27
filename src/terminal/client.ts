@@ -284,7 +284,14 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
       // text height belongs to the document preview, not the terminal.
       lineHeight: 1.0,
       scrollback: 5000,
-      allowProposedApi: false,
+      // Search decorations (`registerDecoration`) are still proposed API in
+      // xterm 6, and calling into them without this throws rather than
+      // degrading — which is exactly how terminal find looked completely dead
+      // instead of merely unstyled. Flipped from `false` deliberately: the
+      // cost is that proposed APIs can shift across xterm minors, so read the
+      // changelog on upgrade. The gain is marking every match instead of only
+      // selecting one, matching how the preview reads.
+      allowProposedApi: true,
     });
     // Windows-Terminal-parity clipboard shortcuts. Attached BEFORE open()
     // because xterm.js consults this handler from its keydown listener; the

@@ -30,6 +30,11 @@ function shellOf(): Document {
         <button id="sidebar-expand" class="sidebar-rail"></button>
         <div class="main-stack">
           <main class="preview-shell" tabindex="-1">
+            <!-- Nested inside the shell, exactly as in index.html — that
+                 nesting is what made the bar claim the preview surface. -->
+            <div id="find-bar" class="find-bar">
+              <div class="find-bar-inner"><input id="find-query" /></div>
+            </div>
             <article id="preview" class="preview"><p id="para">text</p></article>
           </main>
           <section id="terminal-panel" class="terminal-panel">
@@ -53,6 +58,23 @@ describe("findSurfaceRoot", () => {
   test("the collapsed sidebar's expand rail counts as sidebar", () => {
     const document = shellOf();
     expect(findSurfaceRoot(document.querySelector("#sidebar-expand"))).toBe("sidebar");
+  });
+
+  test("the find bar is chrome, not a surface", () => {
+    // It is nested inside the preview shell for layout reasons. Without an
+    // explicit exclusion, focusing its query box claimed `preview` — so
+    // opening find over the terminal silently reassigned the surface and the
+    // next ⌘F searched the document instead.
+    const document = shellOf();
+    expect(findSurfaceRoot(document.querySelector("#find-query"))).toBeNull();
+    expect(findSurfaceRoot(document.querySelector("#find-bar"))).toBeNull();
+  });
+
+  test("opening find over the terminal leaves the terminal active", () => {
+    const document = shellOf();
+    setActiveSurface("terminal");
+    noteInteraction(document.querySelector("#find-query"));
+    expect(appState.activeSurface).toBe("terminal");
   });
 
   test("chrome outside every surface resolves to no root", () => {

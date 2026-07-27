@@ -56,6 +56,14 @@ export function findSurfaceRoot(target: EventTarget | null): SurfaceRoot | null 
   if (!element) {
     return null;
   }
+  // The find bar is chrome belonging to whichever surface is being searched,
+  // not a surface of its own. It is nested inside the preview shell for layout
+  // reasons, so without this it would claim `preview` the moment its query box
+  // takes focus — meaning opening find over the terminal silently reassigned
+  // the surface, and the *next* ⌘F searched the document instead.
+  if (element.closest("#find-bar")) {
+    return null;
+  }
   for (const [root, selector] of ROOT_SELECTORS) {
     if (element.closest(selector)) {
       return root;
