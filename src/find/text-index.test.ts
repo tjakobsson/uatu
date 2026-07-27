@@ -146,3 +146,45 @@ describe("locateSpan", () => {
     expect(locateSpan(index, { start: 0, end: 1 })).toBeNull();
   });
 });
+
+describe("shadow trees", () => {
+  // The Diff view renders into a `<diffs-container>` shadow root. Refusing to
+  // descend left `#preview` with nothing but toolbar text, which made the
+  // entire view unsearchable.
+  function withShadow(): { root: HTMLElement; shadow: ShadowRoot } {
+    const { document } = parseHTML(
+      `<!doctype html><html><body><div id="preview"><div class="toolbar">UnifiedSplit</div><diffs-container></diffs-container></div></body></html>`,
+    );
+    const host = document.querySelector("diffs-container") as unknown as HTMLElement;
+    const shadow = host.attachShadow({ mode: "open" });
+    shadow.innerHTML = `<div class="line">Added review-time edit.</div>`;
+    return {
+      root: document.querySelector("#preview") as unknown as HTMLElement,
+      shadow: shadow as unknown as ShadowRoot,
+    };
+  }
+
+  test("text inside a shadow root is indexed", () => {
+    const { root } = withShadow();
+    const index = buildTextIndex(root);
+    expect(index.text).toContain("Added review-time edit.");
+  });
+
+  test("the shadow root is reported so its highlight styles can be installed", () => {
+    const { root, shadow } = withShadow();
+    const index = buildTextIndex(root);
+    expect(index.shadowRoots).toContain(shadow);
+  });
+
+  test("a match inside the shadow tree resolves to its text node", () => {
+    const { root } = withShadow();
+    const index = buildTextIndex(root);
+    const start = index.text.indexOf("review-time");
+    expect(textOfSpan(index, start, start + "review-time".length)).toBe("review-time");
+  });
+
+  test("a document with no shadow trees reports none", () => {
+    const index = buildTextIndex(rootOf(`<p>plain</p>`));
+    expect(index.shadowRoots).toEqual([]);
+  });
+});

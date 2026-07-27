@@ -39,6 +39,39 @@ export function supportsHighlights(): boolean {
   return registry() !== null && typeof Highlight === "function";
 }
 
+// `::highlight()` styling is tree-scoped: the registry is per-document, but a
+// rule in the document stylesheet does not paint text living inside a shadow
+// tree. The Diff view renders into one, so any shadow root holding matches has
+// to be taught the rules directly. Mirrors the document-scope copy in
+// `styles.css` — keep the two in step. (`tree-view.ts` works around the same
+// boundary for its reveal cue.)
+const SHADOW_HIGHLIGHT_CSS = `
+::highlight(${ALL_MATCHES}) {
+  background-color: var(--find-match-bg, #fff8c5);
+  color: var(--text-strong, inherit);
+}
+::highlight(${CURRENT_MATCH}) {
+  background-color: var(--find-current-bg, #ffd33d);
+  color: var(--text-strong, inherit);
+}
+`;
+
+const STYLE_MARKER = "data-uatu-find-highlight";
+
+// Inject the highlight rules into any shadow root that might hold matches.
+// Idempotent — a root already carrying the marker is left alone.
+export function ensureShadowHighlightStyles(roots: readonly ShadowRoot[]): void {
+  for (const root of roots) {
+    if (root.querySelector(`style[${STYLE_MARKER}]`)) {
+      continue;
+    }
+    const style = root.ownerDocument.createElement("style");
+    style.setAttribute(STYLE_MARKER, "");
+    style.textContent = SHADOW_HIGHLIGHT_CSS;
+    root.appendChild(style);
+  }
+}
+
 let allMatches: HighlightLike | null = null;
 let currentMatch: HighlightLike | null = null;
 

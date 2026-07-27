@@ -5,7 +5,12 @@
 // wholesale on every live reload and view-mode switch, so every run rebuilds
 // the index from scratch.
 
-import { clearHighlights, paintMatches, revealRange } from "./highlight";
+import {
+  clearHighlights,
+  ensureShadowHighlightStyles,
+  paintMatches,
+  revealRange,
+} from "./highlight";
 import type { FindEngine, FindOutcome } from "./engine";
 import { findMatches, firstSpanAtOrAfter, stepIndex, type MatchOptions } from "./matcher";
 import { buildTextIndex, locateSpan, toRange, type TextSpan } from "./text-index";
@@ -58,6 +63,9 @@ export function createPreviewEngine(
       }
 
       reset();
+      // Matches inside a shadow tree (the Diff view renders into one) need the
+      // highlight rules present in that tree to paint at all.
+      ensureShadowHighlightStyles(index.shadowRoots);
       truncated = result.truncated;
       for (const span of result.spans) {
         const located = locateSpan(index, span);

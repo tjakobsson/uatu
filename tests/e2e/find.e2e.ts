@@ -2,7 +2,7 @@ import { expect, test } from "./fixtures";
 import { promises as fs } from "node:fs";
 
 import { workspacePath } from "./config";
-import { treeRow } from "./tree-helpers";
+import { revealTreeRow, treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";
 
 // Real-browser coverage for ⌘F. The matching, offset mapping, and counter
@@ -276,6 +276,40 @@ async function request_longDocument(page: import("@playwright/test").Page) {
   await treeRow(page, "long.md").click();
   await expect(page.locator("#preview-title")).toHaveText("Long");
 }
+
+test("finds text inside the Diff view's shadow tree", async ({ page, request }) => {
+  // The diff component renders into a `<diffs-container>` shadow root, leaving
+  // `#preview` holding nothing but toolbar text. Find has to descend into it
+  // or the entire view is unsearchable.
+  await request.post("/__e2e/reset", {
+    data: {
+      git: true,
+      dirty: {
+        "feature.md": "# Feature\n\nCommitted branch change.\n\nAdded review-time edit.\n",
+      },
+    },
+  });
+  await page.reload();
+  await revealTreeRow(page, "feature.md");
+  await treeRow(page, "feature.md").click();
+  await expect(page.locator("#preview-path")).toHaveText("feature.md");
+
+  await page.locator("#view-diff").click();
+  await expect(page.locator(".uatu-diff-host")).toBeVisible();
+
+  await page.locator("#preview").click({ position: { x: 10, y: 10 } });
+  await openFind(page);
+  await page.locator("#find-query").fill("review-time");
+  await expect(page.locator("#find-status")).toHaveText("1 of 1");
+
+  // And the shadow root carries the highlight rules, without which the match
+  // would be counted but invisible.
+  const styled = await page.evaluate(() => {
+    const host = document.querySelector("#preview diffs-container");
+    return !!host?.shadowRoot?.querySelector("style[data-uatu-find-highlight]");
+  });
+  expect(styled).toBe(true);
+});
 
 test.describe("terminal surface", () => {
   // Routing only: this asserts which surface ⌘F acts on, which is decided

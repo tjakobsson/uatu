@@ -95,6 +95,18 @@ Known limitation: `CSS.highlights` paints text; it does not paint inside SVG
 `<text>`. Matches inside rendered mermaid diagrams are therefore out of reach,
 consistent with treating a diagram as a picture rather than prose.
 
+*Shadow trees, revised during implementation.* The walk originally refused to
+descend into shadow roots, reasoning that the sidebar tree's shadow content is
+not a find target. That reasoning was redundant — scoping the walk to `#preview`
+already excludes the sidebar — and it silently broke the Diff view, which
+renders into a `<diffs-container>` shadow root: `#preview` held twelve
+characters of toolbar text and find reported no results for anything on screen.
+The walk now enters shadow roots inside the searched subtree. Painting them
+needs a second step, because `::highlight()` styling is tree-scoped even though
+the highlight registry is per-document: each shadow root holding matches gets
+the rules injected directly, the same workaround `tree-view.ts` uses for its
+reveal cue.
+
 ### 3. Find searches the current view mode's visible text
 
 ⌘F is find-*in-page*: it matches what is on screen. In Rendered view that means
@@ -212,8 +224,16 @@ desktop app is no worse than today until the wrapper lands.
 
 ## Open Questions
 
-- Does SwiftUI's inherited Edit ▸ Find group exist in this app's menu bar, and is
-  it what eats ⌘F? Resolved by the step-1 spike.
+- ~~Does SwiftUI's inherited Edit ▸ Find group exist in this app's menu bar, and
+  is it what eats ⌘F?~~ **Resolved, and the answer was more interesting than
+  either branch.** No menu item was intercepting: ⌘F reached the page and find
+  worked in Rendered and Source on the first desktop build. It did *not* work in
+  the terminal — because WebKit consumes ⌘F for its own editing machinery
+  whenever an **editable element** has focus, and xterm keeps a helper
+  `<textarea>` focused the entire time the terminal is in use. So the key
+  reaches the page exactly when the page does not most need help, and the
+  wrapper's key monitor is load-bearing rather than a discoverability nicety.
+  The Diff view failed for an unrelated reason — see Decision 2.
 - ~~Should the find bar sit inside the preview header or float over the
   document?~~ **Resolved: floating overlay.** The header already carries the
   view-mode chooser, the wrap toggle, and the action bar, and the query box

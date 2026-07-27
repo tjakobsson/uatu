@@ -117,4 +117,45 @@ export function initFindShortcuts(): void {
       closeFindBar();
     }
   });
+
+  installHostBridge();
+}
+
+// Entry point for a native host that intercepts the shortcut before the page
+// can see it.
+//
+// UatuCode Desktop needs this because ⌘F does not reliably reach the page: it
+// arrives fine while the document has focus, but WebKit consumes it for its own
+// editing machinery when an editable element does — and xterm keeps a helper
+// `<textarea>` focused the entire time the terminal is in use, which made find
+// dead exactly there. The wrapper claims the key with an `NSEvent` monitor and
+// calls in here instead. Routing still happens on this side, so the host does
+// not need to know which surface is active.
+declare global {
+  interface Window {
+    __uatuFind?: {
+      open(): void;
+      step(delta: number): void;
+      close(): void;
+    };
+  }
+}
+
+function installHostBridge(): void {
+  window.__uatuFind = {
+    open() {
+      const engine = activeEngine();
+      if (engine) {
+        openFindBar(engine);
+      }
+    },
+    step(delta: number) {
+      if (isFindBarOpen()) {
+        step(delta);
+      }
+    },
+    close() {
+      closeFindBar();
+    },
+  };
 }

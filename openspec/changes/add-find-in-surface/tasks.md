@@ -1,8 +1,8 @@
 ## 1. Spike: does ⌘F reach the page in UatuCode Desktop?
 
-- [ ] 1.1 Add a temporary `keydown` logger to the SPA that reports `⌘F` presses, build with `bun run build`, and open a folder in UatuCode Desktop
-- [ ] 1.2 Record whether the key reaches the page as-is; if not, add `CommandGroup(replacing: .textEditing) {}` and re-test to confirm SwiftUI's inherited Find group is the interceptor
-- [ ] 1.3 Write the finding into `design.md` under Open Questions and remove the temporary logger — group 5 depends on the answer, groups 2–4 do not
+- [x] 1.1 Spiked with the real feature instead of a logger — the find bar is its own probe
+- [x] 1.2 **Answer: ⌘F reaches the page — but only while a non-editable element has focus.** Rendered and Source find work untouched; the terminal does not, because WebKit swallows ⌘F for its own editing machinery whenever an editable element is focused, and xterm keeps a helper `<textarea>` focused throughout
+- [x] 1.3 Finding recorded in `design.md`; it makes the group-5 key monitor load-bearing rather than cosmetic
 
 ## 2. Active surface and preview focusability
 
@@ -39,10 +39,10 @@
 
 ## 5. macOS wrapper: menu and shortcut routing
 
-- [ ] 5.1 Apply the group-1 finding — strip or replace SwiftUI's inherited `.textEditing` Find group so nothing silently claims `⌘F`
-- [ ] 5.2 Add Find, Find Next, Find Previous to the Edit menu in `ContentView.swift` with standard key equivalents, enabled whenever a running window is focused
-- [ ] 5.3 Resolve the target surface at invoke time via `split.hasFocus(in:)` — following the `⌘W`/`⌘[`/`⌘]` monitor precedent, not menu enablement
-- [ ] 5.4 When the embedded SPA is the target, forward the request into the page rather than handling it natively
+- [x] 5.1 `CommandGroup(replacing: .textEditing)` — also drops the inherited Spelling/Substitutions submenus, which apply only to native text fields (the split browser's address bar)
+- [x] 5.2 Add Find, Find Next, Find Previous to the Edit menu in `ContentView.swift` with standard key equivalents, enabled whenever a running window is focused
+- [x] 5.3 Resolve the target surface at invoke time via `split.hasFocus(in:)` — following the `⌘W`/`⌘[`/`⌘]` monitor precedent, not menu enablement
+- [x] 5.4 When the embedded SPA is the target, forward the request into the page rather than handling it natively
 - [ ] 5.5 Verify in a built app that ⌘F opens uatu's find bar with the SPA focused and does not when the split browser is focused
 
 ## 6. Split-browser native find

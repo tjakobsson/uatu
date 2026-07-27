@@ -87,30 +87,7 @@ struct ContentView: View {
         }
         .frame(minWidth: 700, minHeight: 500)
         .navigationTitle(folderName ?? "UatuCode Desktop")
-        .focusedSceneValue(\.windowCommands, WindowCommands(
-            isRunning: isRunning,
-            folderPath: folder?.path,
-            nativeWindow: nativeWindow,
-            canGoBack: web.canGoBack,
-            canGoForward: web.canGoForward,
-            chooseFolder: { isPickingFolder = true },
-            openFolder: { open($0) },
-            reload: { web.reload() },
-            goBack: { web.goBack() },
-            goForward: { web.goForward() },
-            toggleSplitBrowser: { split.toggle() },
-            resetMagnification: {
-                web.webView.magnification = 1.0
-                for tab in split.tabs {
-                    tab.webView.magnification = 1.0
-                }
-            },
-            openInBrowser: {
-                if case .running(let url) = server.status {
-                    NSWorkspace.shared.open(url)
-                }
-            }
-        ))
+        .focusedSceneValue(\.windowCommands, windowCommands)
         .toolbar {
             ToolbarItemGroup(placement: .navigation) {
                 Button {
@@ -197,8 +174,39 @@ struct ContentView: View {
             // Back/Forward, window Close) whenever the browser isn't
             // focused.
             if browserKeyMonitor == nil {
-                browserKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [split] event in
-                    guard event.modifierFlags.intersection([.command, .shift, .option, .control]) == .command,
+                browserKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [split, web] event in
+                    let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
+                    // Find and Find Next/Previous. The page implements find for
+                    // every surface it owns, but ⌘F only reaches it while the
+                    // document has focus: WebKit swallows the key for its own
+                    // editing machinery whenever an editable element is focused,
+                    // and xterm keeps a helper <textarea> focused the whole time
+                    // the terminal is in use — which made find dead exactly
+                    // there. Claiming the key here and calling into the page
+                    // makes the behaviour identical regardless of what has
+                    // focus.
+                    if modifiers == .command || modifiers == [.command, .shift] {
+                        if let key = event.charactersIgnoringModifiers?.lowercased(),
+                           key == "f" || key == "g" {
+                            // The split browser searches its own page natively;
+                            // until that lands, leave the key alone there rather
+                            // than searching a pane the user is not looking at.
+                            if split.hasFocus(in: event.window) {
+                                return event
+                            }
+                            let script: String
+                            if key == "f" {
+                                script = "window.__uatuFind?.open()"
+                            } else {
+                                let delta = modifiers.contains(.shift) ? -1 : 1
+                                script = "window.__uatuFind?.step(\(delta))"
+                            }
+                            web.webView.evaluateJavaScript(script)
+                            return nil
+                        }
+                    }
+
+                    guard modifiers == .command,
                           let key = event.charactersIgnoringModifiers
                     else { return event }
                     // ⌘= is the standard alias for Zoom In on layouts
@@ -340,6 +348,41 @@ struct ContentView: View {
             .map { URL(fileURLWithPath: String($0)) }
     }
 
+    // Built outside the view body: inlining it pushed the body's expression
+    // past what the Swift type-checker will chew through in reasonable time.
+    private var windowCommands: WindowCommands {
+        WindowCommands(
+            isRunning: isRunning,
+            folderPath: folder?.path,
+            nativeWindow: nativeWindow,
+            canGoBack: web.canGoBack,
+            canGoForward: web.canGoForward,
+            chooseFolder: { isPickingFolder = true },
+            openFolder: { open($0) },
+            // nil opens find; a delta steps to the next/previous match. The
+            // page decides which surface is searched — see the key monitor.
+            find: { delta in
+                let script = delta.map { "window.__uatuFind?.step(\($0))" } ?? "window.__uatuFind?.open()"
+                web.webView.evaluateJavaScript(script)
+            },
+            reload: { web.reload() },
+            goBack: { web.goBack() },
+            goForward: { web.goForward() },
+            toggleSplitBrowser: { split.toggle() },
+            resetMagnification: {
+                web.webView.magnification = 1.0
+                for tab in split.tabs {
+                    tab.webView.magnification = 1.0
+                }
+            },
+            openInBrowser: {
+                if case .running(let url) = server.status {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+        )
+    }
+
     private func open(_ url: URL) {
         // uatu's serve CLI rejects roots outside a git worktree, so probe
         // first and offer `git init` instead of spawning a doomed child.
@@ -461,6 +504,7 @@ struct WindowCommands: Equatable {
     var canGoForward: Bool
     var chooseFolder: () -> Void
     var openFolder: (URL) -> Void
+    var find: (Int?) -> Void
     var reload: () -> Void
     var goBack: () -> Void
     var goForward: () -> Void
@@ -512,6 +556,24 @@ struct UatuCodeDesktopCommands: Commands {
                 }
             }
             .disabled(window == nil || recentFolders.isEmpty)
+        }
+        // Find lives in the Edit menu where macOS users look for it. These are
+        // discoverability and shortcut advertisement only: the key monitor in
+        // ContentView claims ⌘F / ⌘G before the menu sees it, because the key
+        // has to work even when WebKit would otherwise swallow it for a focused
+        // editable element (xterm's helper textarea). Replacing `.textEditing`
+        // also guarantees no inherited Find item is left bound to ⌘F targeting
+        // a responder that ignores it.
+        CommandGroup(replacing: .textEditing) {
+            Button("Find…") { window?.find(nil) }
+                .keyboardShortcut("f")
+                .disabled(window?.isRunning != true)
+            Button("Find Next") { window?.find(1) }
+                .keyboardShortcut("g")
+                .disabled(window?.isRunning != true)
+            Button("Find Previous") { window?.find(-1) }
+                .keyboardShortcut("g", modifiers: [.command, .shift])
+                .disabled(window?.isRunning != true)
         }
         CommandGroup(after: .toolbar) {
             Button("Back") { window?.goBack() }

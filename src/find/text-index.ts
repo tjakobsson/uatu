@@ -28,6 +28,11 @@ export type TextIndexEntry = {
 export type TextIndex = {
   text: string;
   entries: TextIndexEntry[];
+  // Shadow roots encountered while walking. Highlight styling is tree-scoped:
+  // a `::highlight()` rule in the document stylesheet does not reach text
+  // inside a shadow tree, so the painter needs to know which roots it must
+  // teach. Same constraint `tree-view.ts` works around for its reveal cue.
+  shadowRoots: ShadowRoot[];
 };
 
 export type TextSpan = { start: number; end: number };
@@ -64,11 +69,17 @@ function isSkippedElement(element: Element): boolean {
 // anyway. Two different traversals in test and production is exactly the
 // divergence not worth having in the code that decides what "the text" is.
 //
-// Descending only into child nodes also means shadow roots are excluded by
-// construction rather than by rule — which is what we want, since the tree
-// library's shadow content is not a find target.
+// Shadow roots inside the searched subtree ARE descended into. An earlier
+// version refused to, reasoning that the sidebar tree's shadow content is not
+// a find target — but that is already guaranteed by scoping the walk to
+// `#preview`, and refusing shadow roots made the entire Diff view unsearchable:
+// the diff component renders into a `<diffs-container>` shadow root, leaving
+// `#preview` with twelve characters of toolbar text and nothing else. Anything
+// inside the searched root is content the reader can see, whatever tree it
+// lives in.
 export function buildTextIndex(root: Node): TextIndex {
   const entries: TextIndexEntry[] = [];
+  const shadowRoots: ShadowRoot[] = [];
   let text = "";
 
   const visit = (node: Node): void => {
@@ -80,8 +91,21 @@ export function buildTextIndex(root: Node): TextIndex {
       }
       return;
     }
-    if (node.nodeType === ELEMENT_NODE && isSkippedElement(node as Element)) {
-      return;
+    if (node.nodeType === ELEMENT_NODE) {
+      const element = node as Element;
+      if (isSkippedElement(element)) {
+        return;
+      }
+      // Walk the shadow tree in place of the host's light-DOM children when
+      // one is attached: what the reader sees is the shadow content.
+      const shadow = element.shadowRoot;
+      if (shadow) {
+        shadowRoots.push(shadow);
+        for (let child = shadow.firstChild; child; child = child.nextSibling) {
+          visit(child);
+        }
+        return;
+      }
     }
     for (let child = node.firstChild; child; child = child.nextSibling) {
       visit(child);
@@ -89,7 +113,7 @@ export function buildTextIndex(root: Node): TextIndex {
   };
 
   visit(root);
-  return { text, entries };
+  return { text, entries, shadowRoots };
 }
 
 // The entry containing `offset` as a start boundary: `start <= offset < end`.
