@@ -1,0 +1,120 @@
+// Find-shortcut routing: the one place that decides which surface ⌘F acts on.
+//
+// The rule is a single line — find searches the active surface — and the
+// interesting part is what "active" means. It is not DOM focus; see
+// `active-surface.ts` for why. Surfaces with no find of their own fall
+// through to the preview, which is what makes ⌘F work immediately after a
+// tree click.
+
+import { detectIsMac } from "../terminal/clipboard";
+import { getActiveSurface } from "./active-surface";
+import type { FindEngine } from "./engine";
+import {
+  closeFindBar,
+  getPreviewEngine,
+  isFindBarOpen,
+  openFindBar,
+  previewIsSearchable,
+  step,
+} from "./find-bar";
+import { supportsHighlights } from "./highlight";
+
+// The terminal registers its engine here rather than this module importing the
+// terminal — the router should not have to know how a surface searches itself,
+// only that it can.
+let terminalEngine: FindEngine | null = null;
+
+export function registerTerminalFind(engine: FindEngine | null): void {
+  terminalEngine = engine;
+}
+
+// Whether any available signal says this is a Mac.
+//
+// `detectIsMac()` in the terminal module prefers `navigator.userAgentData` and
+// falls back to `navigator.platform`. That is right for its purpose, but it is
+// not safe here: UA-Client-Hints is reduced or spoofed in some environments —
+// headless Chromium reports `userAgentData.platform === "Windows"` while
+// `navigator.platform` still says `MacIntel` — and trusting the first signal
+// alone would make ⌘F silently do nothing on the platform this feature exists
+// for. Taking either signal as sufficient errs toward "is a Mac", which is the
+// safe direction for the one decision that depends on it below.
+function looksLikeMac(): boolean {
+  if (detectIsMac()) {
+    return true;
+  }
+  if (typeof navigator === "undefined") {
+    return false;
+  }
+  return (navigator.platform ?? "").toLowerCase().startsWith("mac");
+}
+
+// ⌘ always means find — no platform binds Super+F to anything that would
+// conflict. Ctrl means find only off the Mac: claiming Ctrl+F there would take
+// readline's forward-char away from every shell in the embedded terminal.
+function hasPrimaryModifier(event: KeyboardEvent): boolean {
+  if (event.metaKey) {
+    return !event.ctrlKey;
+  }
+  return event.ctrlKey && !looksLikeMac();
+}
+
+// Which engine ⌘F acts on right now. Surfaces without a find of their own
+// fall through to the preview — which is what makes the shortcut work
+// immediately after a tree click, with focus still inside the sidebar.
+//
+// `browser` never reaches here: when the split browser has focus this page
+// receives no key events at all, and the wrapper routes natively.
+function activeEngine(): FindEngine | null {
+  if (getActiveSurface() === "terminal" && terminalEngine !== null) {
+    return terminalEngine;
+  }
+  if (!supportsHighlights() || !previewIsSearchable()) {
+    return null;
+  }
+  return getPreviewEngine();
+}
+
+// Boot-time wiring. Called once by app.ts.
+//
+// Capture phase, because surfaces that install their own key handling — xterm
+// most of all — must not be able to swallow the shortcut before it is routed.
+export function initFindShortcuts(): void {
+  document.addEventListener(
+    "keydown",
+    event => {
+      if (!hasPrimaryModifier(event) || event.altKey) {
+        return;
+      }
+      const key = event.key.toLowerCase();
+
+      if (key === "f" && !event.shiftKey) {
+        const engine = activeEngine();
+        if (!engine) {
+          return;
+        }
+        // Claim the key. Letting the host's unscoped find through would be
+        // worse than nothing, which is the whole reason this feature exists.
+        event.preventDefault();
+        openFindBar(engine);
+        return;
+      }
+
+      if (key === "g") {
+        if (!isFindBarOpen()) {
+          return;
+        }
+        event.preventDefault();
+        step(event.shiftKey ? -1 : 1);
+      }
+    },
+    { capture: true },
+  );
+
+  // Escape closes find from anywhere, including when focus has already moved
+  // back into the document.
+  document.addEventListener("keydown", event => {
+    if (event.key === "Escape" && isFindBarOpen()) {
+      closeFindBar();
+    }
+  });
+}

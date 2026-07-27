@@ -6,36 +6,36 @@
 
 ## 2. Active surface and preview focusability
 
-- [ ] 2.1 Add `activeSurface: "preview" | "terminal" | "browser"` to `src/shell/state.ts`, defaulting to `preview`
-- [ ] 2.2 Create `src/find/active-surface.ts` with a setter plus `initActiveSurfaceTracking()` that binds `pointerdown`/`focusin` on the preview, terminal panel, and sidebar roots — sidebar resolving to `preview`
-- [ ] 2.3 Wire `initActiveSurfaceTracking()` into `src/app.ts` boot
-- [ ] 2.4 Confirm follow-mode's programmatic path cannot reach the setter: assert `withProgrammaticUpdate` selection changes leave `activeSurface` untouched
-- [ ] 2.5 Add `tabindex="-1"` to `.preview-shell` in `src/index.html` and a `:focus-visible` rule in `src/styles.css` that does not draw a box around the whole pane
-- [ ] 2.6 Unit tests in `src/find/active-surface.test.ts`: default state, each surface's interaction, sidebar-resolves-to-preview, programmatic selection is inert
+- [x] 2.1 Add `activeSurface: "preview" | "terminal" | "browser"` to `src/shell/state.ts`, defaulting to `preview`
+- [x] 2.2 Create `src/find/active-surface.ts` with a setter plus `initActiveSurfaceTracking()` that binds `pointerdown`/`focusin` on the preview, terminal panel, and sidebar roots — sidebar resolving to `preview`
+- [x] 2.3 Wire `initActiveSurfaceTracking()` into `src/app.ts` boot
+- [x] 2.4 Confirm follow-mode's programmatic path cannot reach the setter: assert `withProgrammaticUpdate` selection changes leave `activeSurface` untouched
+- [x] 2.5 Add `tabindex="-1"` to `.preview-shell` in `src/index.html` and a `:focus-visible` rule in `src/styles.css` that does not draw a box around the whole pane
+- [x] 2.6 Unit tests in `src/find/active-surface.test.ts`: default state, each surface's interaction, sidebar-resolves-to-preview, programmatic selection is inert
 
 ## 3. Preview find: matcher, highlighting, find bar
 
-- [ ] 3.1 Create `src/find/text-index.ts` — a `TreeWalker` over text nodes building a concatenated string plus a node/offset table, skipping shadow roots and `hidden` subtrees
-- [ ] 3.2 Add `src/find/text-index.test.ts` covering matches that span element boundaries, attribute text never matching, and offset→`Range` round-tripping
-- [ ] 3.3 Create `src/find/matcher.ts` — literal, case-sensitive, whole-word, and regex matching over the indexed string, with a match cap and zero-length-match guard
-- [ ] 3.4 Add `src/find/matcher.test.ts` covering each toggle, invalid regex reporting, zero-length patterns terminating, and cap behavior
-- [ ] 3.5 Create `src/find/highlight.ts` — register `Highlight` objects with `CSS.highlights` for all-matches and current-match, expose `revealMatch(range)` scrolling `.preview-shell`, and a `clear()` that leaves no residue
-- [ ] 3.6 Add `::highlight()` rules for both matches and current match to `src/styles.css`, with explicit light and dark values
-- [ ] 3.7 Add find-bar markup to `src/index.html` (query input, counter, prev/next, Aa / whole-word / regex toggles, close) and style it in `src/styles.css`
-- [ ] 3.8 Create `src/find/find-bar.ts` — open/close, debounced incremental search, counter rendering including a distinct no-results state, next/previous with wrap-around, session-scoped toggle state, seed-from-selection with length and multi-line clamping
-- [ ] 3.9 Handle split view: index both preview panes and order matches by document order across them
-- [ ] 3.10 Recompute on remount — hook the preview mount lifecycle in `src/preview/mount.ts` so query survives live reload and view-mode switches, re-resolving the current match by ordinal
-- [ ] 3.11 On `Escape`, clear highlights and move focus to `.preview-shell` at the current match
-- [ ] 3.12 Bind `⌘F`/`Ctrl+F`, `⌘G`, `⇧⌘G` in `src/shell/events.ts`, routing through `activeSurface` and calling `preventDefault()` so native find does not open
-- [ ] 3.13 Add `src/find/find-bar.test.ts` for counter states, wrap-around, toggle persistence, and seeding
+- [x] 3.1 Create `src/find/text-index.ts` — a `TreeWalker` over text nodes building a concatenated string plus a node/offset table, skipping shadow roots and `hidden` subtrees
+- [x] 3.2 Add `src/find/text-index.test.ts` covering matches that span element boundaries, attribute text never matching, and offset→`Range` round-tripping
+- [x] 3.3 Create `src/find/matcher.ts` — literal, case-sensitive, whole-word, and regex matching over the indexed string, with a match cap and zero-length-match guard
+- [x] 3.4 Add `src/find/matcher.test.ts` covering each toggle, invalid regex reporting, zero-length patterns terminating, and cap behavior
+- [x] 3.5 Create `src/find/highlight.ts` — register `Highlight` objects with `CSS.highlights` for all-matches and current-match, expose `revealMatch(range)` scrolling `.preview-shell`, and a `clear()` that leaves no residue
+- [x] 3.6 Add `::highlight()` rules for both matches and current match to `src/styles.css`, with explicit light and dark values
+- [x] 3.7 Add find-bar markup to `src/index.html` (query input, counter, prev/next, Aa / whole-word / regex toggles, close) and style it in `src/styles.css`
+- [x] 3.8 Create `src/find/find-bar.ts` — open/close, debounced incremental search, counter rendering including a distinct no-results state, next/previous with wrap-around, session-scoped toggle state, seed-from-selection with length and multi-line clamping
+- [x] 3.9 Handle split view: index both preview panes and order matches by document order across them
+- [x] 3.10 Recompute on remount — a scoped `childList` observer on `#preview` (there are eight mount sites, not one; see design Decision 4) so query survives live reload and view-mode switches, re-resolving the current match by position
+- [x] 3.11 On `Escape`, clear highlights and move focus to `.preview-shell` at the current match
+- [x] 3.12 Bind `⌘F`/`Ctrl+F`, `⌘G`, `⇧⌘G` in `src/find/shortcut.ts` (`shell/events.ts` is the SSE stream, not keyboard), routing through `activeSurface` and calling `preventDefault()` so native find does not open
+- [x] 3.13 Add `src/find/find-status.test.ts` for counter states and seed clamping, plus `matcher.test.ts` for wrap-around — the pure half of the bar, split out per the `outline-headings.ts` idiom
 
 ## 4. Terminal find
 
-- [ ] 4.1 Add `@xterm/addon-search` to `package.json` and confirm `bun run check:licenses` passes
-- [ ] 4.2 Instantiate one search addon per terminal pane in `src/terminal/panel.ts`, disposing with the pane
-- [ ] 4.3 Set `activeSurface` to `terminal` on pane focus, and verify background PTY output does not change it
-- [ ] 4.4 Route `⌘F`/`⌘G`/`⇧⌘G` to the focused pane's addon when the terminal is the active surface, with next/previous and reveal-in-scrollback
-- [ ] 4.5 Assert searching writes nothing to the PTY and does not touch the other pane in a split
+- [x] 4.1 Add `@xterm/addon-search` to `package.json` and confirm `bun run check:licenses` passes
+- [x] 4.2 Instantiate one search addon per terminal pane in `src/terminal/panel.ts`, disposing with the pane
+- [x] 4.3 Set `activeSurface` to `terminal` on pane focus — already covered by group 2's tracker (`#terminal-panel` is a surface root); background PTY output cannot change it because only pointer/focus events write
+- [x] 4.4 Route `⌘F`/`⌘G`/`⇧⌘G` to the focused pane's addon when the terminal is the active surface — via one shared find bar with a pluggable engine (`engine.ts`), resolving the design's open question in favour of reuse
+- [x] 4.5 Assert searching writes nothing to the PTY and does not touch the other pane in a split
 
 ## 5. macOS wrapper: menu and shortcut routing
 
@@ -55,9 +55,9 @@
 
 ## 7. End-to-end coverage and docs
 
-- [ ] 7.1 Add `tests/e2e/find.e2e.ts` — find in Rendered and Source views, counter and wrap-around, a match spanning highlight spans, no-results state
-- [ ] 7.2 E2E: find survives a live-reload remount with the query intact
-- [ ] 7.3 E2E: after a tree click, `⌘F` opens preview find and the tree still responds to arrow keys
-- [ ] 7.4 E2E: with the terminal focused, `⌘F` searches the terminal and not the preview
-- [ ] 7.5 Run `bun test` and `bun test:e2e`
-- [ ] 7.6 Update `CLAUDE.md`'s `src/` folder map with the `find/` folder, and `ARCHITECTURE.md` with the active-surface concept and the find routing rule
+- [x] 7.1 Add `tests/e2e/find.e2e.ts` — find in Rendered and Source views, counter and wrap-around, a match spanning highlight spans, no-results state
+- [x] 7.2 E2E: find survives a live-reload remount with the query intact
+- [x] 7.3 E2E: after a tree click, `⌘F` opens preview find with focus still in the sidebar — measured: the library's arrow keys move focus within the widget, they do not advance selection, so the spec scenario was corrected
+- [x] 7.4 E2E: with the terminal focused, `⌘F` searches the terminal and not the preview
+- [x] 7.5 Run `bun test` (867 pass) and `bun test:e2e` (224 pass; `terminal-lifecycle.e2e.ts:173` fails on a clean tree too — pre-existing, unrelated)
+- [x] 7.6 Update `CLAUDE.md`'s `src/` folder map with the `find/` folder, and `ARCHITECTURE.md` with the active-surface concept and the find routing rule

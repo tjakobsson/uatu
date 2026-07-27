@@ -5,6 +5,8 @@
 // through its named methods so persistence and refit happen consistently.
 
 import { mountTerminalPanel, type TerminalPanelHandle } from "./client";
+import { registerTerminalFind } from "../find/shortcut";
+import { createTerminalEngine } from "../find/terminal-engine";
 import type { Osc52Notice } from "./clipboard";
 import type { TerminalClipboardPolicy } from "../shared/types";
 import { formatSessionAge, pickerCandidates } from "./picker";
@@ -186,6 +188,29 @@ export function setupTerminalPanel(
 
   const panes = new Map<string, TerminalPaneEntry>();
   let activePaneId: string | null = null;
+
+  // Find over the terminal is scoped to the pane the user is in: searching a
+  // pane you are not looking at would be a strange thing to offer. The engine
+  // resolves the target at call time rather than capturing it, so splitting or
+  // closing panes mid-search cannot leave it pointed at a dead one.
+  registerTerminalFind(
+    createTerminalEngine(() => {
+      if (activePaneId === null) {
+        return null;
+      }
+      const entry = panes.get(activePaneId);
+      if (!entry || !entry.handle.isAttached()) {
+        return null;
+      }
+      return {
+        findNext: (query, options) => entry.handle.search.findNext(query, options),
+        findPrevious: (query, options) => entry.handle.search.findPrevious(query, options),
+        clear: () => entry.handle.search.clear(),
+        focus: () => entry.handle.focus(),
+        onResults: listener => entry.handle.search.onResults(listener),
+      };
+    }),
+  );
   let state: TerminalPanelState = readTerminalPanelState(localStorageRef);
 
   // Pane records are per-window (sessionStorage); the localStorage state's

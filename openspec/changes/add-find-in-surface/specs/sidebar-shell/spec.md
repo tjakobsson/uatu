@@ -4,14 +4,14 @@
 
 Selecting a document in the tree, or interacting with any sidebar pane control,
 SHALL leave keyboard focus where the user put it. The sidebar SHALL NOT move
-focus into the preview as a side effect of selection, so that the tree library's
-own keyboard navigation continues to work: after clicking a file, arrow keys
-SHALL keep walking the tree.
+focus into the preview as a side effect of selection, so that whatever keyboard
+interaction the tree provides remains available to the user who just clicked in
+it.
 
-#### Scenario: Arrow keys still browse after a click
+#### Scenario: Focus stays in the tree after a selection
 
-- **WHEN** the user clicks a file in the tree and then presses the down arrow
-- **THEN** tree selection advances to the next entry and its document loads
+- **WHEN** the user clicks a file in the tree
+- **THEN** the active element is still within the sidebar, not the preview
 
 #### Scenario: Pane controls do not steal focus
 

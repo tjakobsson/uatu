@@ -263,7 +263,11 @@
       </button>
 
       <div class="main-stack">
-      <main class="preview-shell">
+      <!-- tabindex="-1" makes the scroll container *able* to hold focus so
+           Space / PageUp / PageDown scroll the document and the find bar has
+           somewhere to hand focus back to. It is never focused automatically —
+           only by user action or by dismissing find. -->
+      <main class="preview-shell" tabindex="-1">
         <div
           id="stale-hint"
           class="stale-hint"
@@ -381,6 +385,86 @@
             </div>
           </div>
         </header>
+
+        <!-- Find bar. A zero-height sticky wrapper holding an absolutely
+             positioned bar — the same trick .uatu-loading-bar uses — so the
+             bar pins to the top of the visible pane without shifting the
+             document's layout when it opens. -->
+        <div id="find-bar" class="find-bar" hidden>
+        <div class="find-bar-inner" role="search" aria-label="Find in document">
+          <input
+            id="find-query"
+            class="find-query"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Find in document"
+            aria-label="Find in document"
+          />
+          <span id="find-status" class="find-status" role="status" aria-live="polite"></span>
+          <div class="find-toggles" role="group" aria-label="Match options">
+            <button
+              id="find-case"
+              class="find-toggle"
+              type="button"
+              aria-pressed="false"
+              title="Match case"
+              aria-label="Match case"
+            >Aa</button>
+            <button
+              id="find-word"
+              class="find-toggle"
+              type="button"
+              aria-pressed="false"
+              title="Match whole word"
+              aria-label="Match whole word"
+            >ab</button>
+            <button
+              id="find-regex"
+              class="find-toggle"
+              type="button"
+              aria-pressed="false"
+              title="Use regular expression"
+              aria-label="Use regular expression"
+            >.*</button>
+          </div>
+          <div class="find-nav" role="group" aria-label="Navigate matches">
+            <button
+              id="find-previous"
+              class="find-nav-button"
+              type="button"
+              title="Previous match (⇧Enter)"
+              aria-label="Previous match"
+            >
+              <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+                <path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M3 10l5-5 5 5"/>
+              </svg>
+            </button>
+            <button
+              id="find-next"
+              class="find-nav-button"
+              type="button"
+              title="Next match (Enter)"
+              aria-label="Next match"
+            >
+              <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+                <path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M3 6l5 5 5-5"/>
+              </svg>
+            </button>
+          </div>
+          <button
+            id="find-close"
+            class="find-nav-button find-close"
+            type="button"
+            title="Close (Escape)"
+            aria-label="Close find"
+          >
+            <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+              <path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M4 4l8 8M12 4l-8 8"/>
+            </svg>
+          </button>
+        </div>
+        </div>
 
         <article id="preview" class="preview markdown-body empty">
           <p>Add a directory with supported documents or save a file to get started.</p>

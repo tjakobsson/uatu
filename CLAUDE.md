@@ -26,6 +26,10 @@ src/
 ├── mono/           bundled-font config and runtime application — the
 │                   `.uatu.json mono.fontFamily` loader plus the helper
 │                   that writes `--mono-font-family` on `<html>` at boot
+├── find/           ⌘F — active-surface tracking (which surface the user is
+│                   working in, tracked from interaction, NOT from DOM focus),
+│                   the shared find bar and its pluggable engines (preview and
+│                   terminal), text indexing, matching, and highlight painting
 ├── shell/          boot, events, history, url, connection, pwa, follow,
 │                   follow-rules, state, storage, stale-hint — the
 │                   app-wide chrome and the appState singleton

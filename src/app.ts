@@ -14,6 +14,9 @@ import { initChangeOverviewClickHandler } from "./sidebar/change-overview";
 import { initFilesPaneFilterControls } from "./sidebar/files-filter";
 import { initSelectionInspectorControl } from "./sidebar/selection-inspector-mount";
 import { initFollowToggle } from "./shell/follow";
+import { initActiveSurfaceTracking } from "./find/active-surface";
+import { initFindBar } from "./find/find-bar";
+import { initFindShortcuts } from "./find/shortcut";
 import { initStaleHintActionHandler } from "./shell/stale-hint-mount";
 import { selectionInspector } from "./shell/inspector-instance";
 
@@ -99,6 +102,9 @@ if (
   throw new Error("uatu UI failed to initialize");
 }
 
+initActiveSurfaceTracking();
+initFindBar();
+initFindShortcuts();
 initSidebarCollapse();
 initSidebarPanes();
 initSidebarWidth();

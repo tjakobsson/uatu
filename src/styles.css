@@ -72,6 +72,11 @@
   --teal: #1ca8a7;
   --surface-muted: light-dark(#f3f5f7, #161b22);
   --scrollbar-thumb: light-dark(#cdd5df, #30363d);
+  /* Find highlighting. The current match has to win against the general one
+     at a glance, so the two differ in saturation rather than in hue —
+     scanning for "the bright one" is faster than distinguishing two colors. */
+  --find-match-bg: light-dark(#fff8c5, #3f2e00);
+  --find-current-bg: light-dark(#ffd33d, #9e6a03);
   /* Surface tiers: --surface is pane/page background, --surface-raised is
      anything that floats (menus, cards, tooltips, active segments),
      --surface-subtle is muted fills and hovers. Dark values follow
@@ -532,6 +537,146 @@ h2 {
   flex-direction: column;
   min-height: 0;
   min-width: 0;
+}
+
+/* Find bar. A zero-height sticky wrapper (same approach as .uatu-loading-bar)
+   so opening find never reflows the document under the reader. z-index clears
+   the sticky preview header (2) and the loading bar (3). */
+.find-bar {
+  position: sticky;
+  top: 0;
+  height: 0;
+  overflow: visible;
+  z-index: 4;
+}
+
+.find-bar[hidden] {
+  display: none;
+}
+
+.find-bar-inner {
+  position: absolute;
+  top: 0.6rem;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.4rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 18%);
+}
+
+.find-query {
+  width: 15rem;
+  padding: 0.25rem 0.45rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text-strong);
+  font: inherit;
+  font-size: 0.85rem;
+}
+
+.find-query:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* Reserves its own width so the bar does not resize on every keystroke as the
+   counter goes from "1 of 9" to "1 of 12" to "No results". */
+.find-status {
+  min-width: 6.5rem;
+  color: var(--text-subtle);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.find-status[data-state="invalid"],
+.find-status[data-state="empty"] {
+  color: light-dark(#cf222e, #f85149);
+}
+
+.find-toggles,
+.find-nav {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+}
+
+.find-toggle,
+.find-nav-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.6rem;
+  height: 1.6rem;
+  padding: 0 0.3rem;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: none;
+  color: var(--text-subtle);
+  font: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.find-toggle:hover,
+.find-nav-button:hover {
+  background: var(--surface-subtle, var(--surface-muted));
+  color: var(--text-strong);
+}
+
+.find-toggle[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text-strong);
+}
+
+.find-toggle:focus-visible,
+.find-nav-button:focus-visible {
+  outline: 2px solid var(--accent);
+}
+
+.find-nav-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.find-nav-button:disabled:hover {
+  background: none;
+  color: var(--text-subtle);
+}
+
+/* Find matches. Painted via the CSS Custom Highlight API over Ranges, so no
+   markup is inserted into the rendered document to show them. `::highlight()`
+   accepts only a narrow set of properties — background-color and color are
+   the two that matter here; borders and outlines are not available, which is
+   why the current match is distinguished by intensity. */
+::highlight(uatu-find-match) {
+  background-color: var(--find-match-bg);
+  color: var(--text-strong);
+}
+
+::highlight(uatu-find-current) {
+  background-color: var(--find-current-bg);
+  color: var(--text-strong);
+}
+
+/* The scroll container is programmatically focusable (tabindex="-1") so
+   keyboard scrolling works and find has somewhere to return focus. A default
+   focus ring would draw a box around the entire reading area every time, so
+   the cue is a restrained inset edge instead — enough to answer "do my arrow
+   keys go here?" without framing the document. */
+.preview-shell:focus {
+  outline: none;
+}
+
+.preview-shell:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent);
 }
 
 .preview-shell {

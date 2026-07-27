@@ -1,0 +1,45 @@
+// The contract between the find bar and whatever is being searched.
+//
+// One bar serves both surfaces. That was an open question in the design —
+// whether the terminal needed its own control — and it resolved in favour of
+// reuse once the xterm search addon turned out to take the same three options
+// (case, whole-word, regex) and report the same two numbers (index, total)
+// that the preview matcher does. Two bars would have been two vocabularies for
+// one idea.
+//
+// Outcomes arrive by callback rather than return value because the two
+// engines differ in timing: the preview matches synchronously, while xterm
+// reports counts through an event after the search runs.
+
+import type { MatchOptions } from "./matcher";
+
+export type FindOutcome = {
+  total: number;
+  // Zero-based index of the current match, or -1 when there is none.
+  index: number;
+  truncated: boolean;
+  // Non-null when the query itself is unusable (invalid regular expression).
+  error: string | null;
+};
+
+export const NO_MATCHES: FindOutcome = { total: 0, index: -1, truncated: false, error: null };
+
+export type FindEngine = {
+  // Run `query`, optionally scrolling the first match into view. Called on
+  // every keystroke (debounced) and whenever the searched content changes.
+  run(query: string, options: MatchOptions, opts: { reveal: boolean }): void;
+  // Move by `delta` matches, wrapping at both ends.
+  step(delta: number, query: string, options: MatchOptions): void;
+  // Drop all highlighting. Must leave the surface exactly as it was found.
+  clear(): void;
+  // Hand keyboard focus back to the surface when the bar closes, so the
+  // reader can keep scrolling without clicking first.
+  focusSurface(): void;
+  // Called when this engine becomes / stops being the active one.
+  setOnOutcome(listener: ((outcome: FindOutcome) => void) | null): void;
+  // Start / stop watching for the searched content being replaced underneath
+  // an open bar. Only the preview needs this; the terminal buffer is appended
+  // to rather than swapped.
+  watch?(onChanged: () => void): void;
+  unwatch?(): void;
+};

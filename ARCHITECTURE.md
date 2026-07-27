@@ -276,6 +276,44 @@ uatu is a single-mode app. There is no Author vs. Review distinction; the only b
 
 The `withProgrammaticUpdate(fn)` helper in `src/sidebar/tree-view.ts` is what makes Rule A reliable: it suppresses the `@pierre/trees` library's `onSelectionChange` callback during initial mount and `resetPaths`-driven refreshes so library-fired selections aren't mistaken for user clicks. That single helper is the root fix for the historical flake on `tests/e2e/preview-renderers.e2e.ts` (issue #45) and the `follow-mode auto-switch` test.
 
+## Find and the active surface
+
+⌘F is owned by the page, not the host. No engine — not Chrome, not
+`WKWebView.find` — can scope native find to a subtree, so a browser's ⌘F
+matches the tree, the git log, and the terminal scrollback alongside the
+document you were reading. Owning find is the only way to scope it, and it
+closes the desktop gap for free, since WKWebView ships no find bar at all.
+
+Routing is one line: **⌘F searches the active surface.**
+
+| Active surface | What ⌘F searches | Mechanism |
+|---|---|---|
+| `preview` | the current view's visible text | `find/` — text-node index + CSS Custom Highlight API |
+| `terminal` | the focused pane's scrollback | `@xterm/addon-search` |
+| `browser` | the split browser's page | native, in the macOS wrapper |
+
+`appState.activeSurface` is owned by `src/find/active-surface.ts` and is
+**deliberately not derived from `document.activeElement`**. Clicking a file in
+the tree leaves focus inside `@pierre/trees`' shadow root, so a literal focus
+rule would search the sidebar when the user has just declared interest in a
+document. Sidebar interaction therefore resolves to `preview` — directing the
+sidebar is an act about the document it is directing.
+
+The surface is written only by pointer and focus listeners, which is what makes
+follow mode inert: a file event (Rules C/D) changes the selection and the
+preview, but cannot move focus or relocate the user's working context. There is
+no code path from the watcher to the setter, and
+`find/active-surface.test.ts` asserts that structurally.
+
+One find bar serves both page surfaces via a pluggable engine (`find/engine.ts`);
+the xterm search addon happens to take the same three options and report the
+same index/total pair the preview matcher does. Highlighting never mutates the
+preview — it paints `Range`s through `CSS.highlights`, so rendered output,
+mermaid diagrams, anchors, and code-block decorations are untouched by
+searching. Because the preview is replaced wholesale on live reload, the
+preview engine holds no DOM references across a swap and re-indexes on a scoped
+`childList` observer.
+
 ## How to extend
 
 ### Add a new sidebar pane

@@ -1,5 +1,6 @@
 import { Terminal, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
 
 import "@xterm/xterm/css/xterm.css";
 
@@ -158,6 +159,26 @@ export type TerminalPanelHandle = {
   // Move keyboard focus into xterm. No-op when not attached.
   focus(): void;
   isAttached(): boolean;
+  // Scrollback search, driving the pane's own search addon. Reads the buffer
+  // and moves xterm's selection only — nothing is written to the PTY, so a
+  // running program is unaffected. All no-ops when not attached.
+  search: TerminalSearch;
+};
+
+// The searchable face of a pane, consumed by the find bar's terminal engine.
+export type TerminalSearch = {
+  findNext(query: string, options: TerminalSearchOptions): void;
+  findPrevious(query: string, options: TerminalSearchOptions): void;
+  clear(): void;
+  // Subscribe to result counts; pass null to unsubscribe. Only one listener
+  // at a time — the bar searches one pane.
+  onResults(listener: ((result: { index: number; total: number }) => void) | null): void;
+};
+
+export type TerminalSearchOptions = {
+  caseSensitive: boolean;
+  wholeWord: boolean;
+  regex: boolean;
 };
 
 export type MountTerminalOptions = {
@@ -209,6 +230,9 @@ const CLOSE_CODE_USER_TERMINATE = 4001;
 export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanelHandle {
   let term: Terminal | null = null;
   let fit: FitAddon | null = null;
+  let search: SearchAddon | null = null;
+  let searchResultsSubscription: { dispose(): void } | null = null;
+  let searchResultsListener: ((result: { index: number; total: number }) => void) | null = null;
   let socket: WebSocket | null = null;
   let attached = false;
   let resizeObserver: ResizeObserver | null = null;
@@ -283,6 +307,14 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     }
     fit = new FitAddon();
     term.loadAddon(fit);
+    search = new SearchAddon();
+    term.loadAddon(search);
+    // Route the addon's result counts to whoever is currently searching this
+    // pane. Subscribed once per mount; the listener itself is swappable so the
+    // find bar can move between panes without re-registering.
+    searchResultsSubscription = search.onDidChangeResults(result => {
+      searchResultsListener?.({ index: result.resultIndex, total: result.resultCount });
+    });
     options.container.replaceChildren();
 
     // xterm initialization is driven by ResizeObserver rather than rAF
@@ -482,6 +514,10 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     }
     term = null;
     fit = null;
+    searchResultsSubscription?.dispose();
+    searchResultsSubscription = null;
+    searchResultsListener = null;
+    search = null;
     try {
       resizeObserver?.disconnect();
     } catch {
@@ -567,6 +603,10 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     }
     term = null;
     fit = null;
+    searchResultsSubscription?.dispose();
+    searchResultsSubscription = null;
+    searchResultsListener = null;
+    search = null;
     try {
       resizeObserver?.disconnect();
     } catch {
@@ -622,6 +662,10 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     }
     term = null;
     fit = null;
+    searchResultsSubscription?.dispose();
+    searchResultsSubscription = null;
+    searchResultsListener = null;
+    search = null;
     options.container.replaceChildren();
   }
 
@@ -643,6 +687,10 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     }
     term = null;
     fit = null;
+    searchResultsSubscription?.dispose();
+    searchResultsSubscription = null;
+    searchResultsListener = null;
+    search = null;
     try {
       resizeObserver?.disconnect();
     } catch {
@@ -741,6 +789,35 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     }
   }
 
+  // Decorations give the scrollback the same "all matches plus a brighter
+  // current one" reading the preview highlights do. The colors are literals
+  // because the addon requires #RRGGBB and cannot resolve CSS variables; they
+  // mirror the dark-scheme --find-match-bg / --find-current-bg values, which
+  // is the right pair since the terminal is always dark-themed.
+  const searchDecorations = {
+    matchBackground: "#3f2e00",
+    activeMatchBackground: "#9e6a03",
+    matchOverviewRuler: "#3f2e00",
+    activeMatchColorOverviewRuler: "#9e6a03",
+  };
+
+  const terminalSearch: TerminalSearch = {
+    findNext(query, options) {
+      search?.findNext(query, { ...options, decorations: searchDecorations });
+    },
+    findPrevious(query, options) {
+      search?.findPrevious(query, { ...options, decorations: searchDecorations });
+    },
+    clear() {
+      // Searching for nothing is how the addon is told to drop its
+      // decorations and selection.
+      search?.findNext("", { decorations: searchDecorations });
+    },
+    onResults(listener) {
+      searchResultsListener = listener;
+    },
+  };
+
   return {
     attach,
     detach,
@@ -748,5 +825,6 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     fit: fitNow,
     focus: focusNow,
     isAttached: () => attached,
+    search: terminalSearch,
   };
 }

@@ -100,6 +100,16 @@ export function readPaneState(): PaneState {
   return fallback;
 }
 
+// Which surface the user is working in. Drives find-shortcut routing, and is
+// deliberately *not* derived from `document.activeElement` — see
+// `find/active-surface.ts` for why focus gives the wrong answer here.
+//
+// `browser` denotes UatuCode Desktop's split browser, which lives in a
+// separate WKWebView: page-side tracking never produces it, because when that
+// pane has focus this page receives no events at all. The wrapper owns that
+// state and resolves it before a key ever reaches here.
+export type ActiveSurface = "preview" | "terminal" | "browser";
+
 // Files-pane filter chip: `all` shows the full tree, `changed` reduces the
 // tree to `reviewLoad.changedFiles ∪ ignoredFiles` plus ancestor directories.
 export type FilesPaneFilter = "all" | "changed";
@@ -191,6 +201,9 @@ export const appState = {
   // or refresh action.
   staleHint: null as StaleHint | null,
   scope: { kind: "folder" } as Scope,
+  // Which surface find acts on. Set only from user interaction; file events
+  // and programmatic selection must leave it alone.
+  activeSurface: "preview" as ActiveSurface,
   panes: readPaneState(),
   filesPaneFilter: readFilesPaneFilterPreference() as FilesPaneFilter,
   gitLogLimit: readGitLogLimitPreference(),

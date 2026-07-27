@@ -59,8 +59,13 @@ sidebar, when the user has just declared interest in a document. The mapping
 cannot express.
 
 *Why not move focus to the preview on selection instead?* That was considered and
-rejected on two counts. It deletes the tree's arrow-key browsing, which the
-library owns and which works today (`tree-view.ts:1`). And because follow-mode
+rejected on two counts. It pulls focus out of the tree widget entirely — after a
+click the active element is the tree host, with a focused control inside its
+shadow root, and stealing that takes the tree's keyboard interaction away from
+the user who just clicked in it. (Measured during implementation: the library's
+arrow keys move focus *within* the widget; they do not advance the selection or
+load the next document, so the cost is the widget's own keyboard use, not
+document browsing.) And because follow-mode
 re-selects from file events, selection-moves-focus would let a background `git
 pull` yank focus out of the terminal mid-command. `withProgrammaticUpdate` could
 gate that, but needing a guard to make focus safe is evidence the coupling is
@@ -102,15 +107,26 @@ scrolled to, which is worse than not finding them. Source text is reachable by
 switching to Source view, and `add-project-search` searches source across the
 tree — so nothing is permanently hidden.
 
-### 4. Re-run on mount rather than track the DOM
+### 4. Observe the preview for replacement; hold no DOM references across it
 
-Find registers with the preview mount lifecycle and recomputes matches after
-every remount, retaining the query and re-resolving the current match by
-ordinal where possible. No `MutationObserver`, no cached nodes.
+Find recomputes its matches whenever `#preview`'s children are replaced,
+retaining the query and re-resolving the current match by document position.
+Nothing is cached across a swap.
 
-*Why not observe mutations?* The preview does not mutate incrementally; it is
-replaced. An observer would fire once per swap and do the same work with more
-machinery and more ways to leak.
+*Revised during implementation.* This decision originally called for hooking
+the preview mount lifecycle directly and explicitly rejected a
+`MutationObserver`, on the assumption there was one mount point to hook. There
+are eight: the single and split document paths in `mount.ts`, plus `diff.ts`,
+`image.ts`, `binary.ts`, `empty.ts`, `commit-message.ts`, and
+`review-score-mount.ts`. Hooking all eight would make every preview module
+import find and would silently break the moment a ninth is added.
+
+A single `childList` observer on `#preview` cannot be forgotten that way. The
+original objection — machinery that outlives its usefulness — is answered by
+scoping it: the observer is connected when the find bar opens and disconnected
+when it closes, so nothing runs during the overwhelmingly common case of not
+searching. Swaps that clear then append (`diff.ts` does) are coalesced through
+a microtask so one logical remount is one recomputation.
 
 ### 5. Terminal find via `@xterm/addon-search`, scoped to the focused pane
 
@@ -198,10 +214,25 @@ desktop app is no worse than today until the wrapper lands.
 
 - Does SwiftUI's inherited Edit ▸ Find group exist in this app's menu bar, and is
   it what eats ⌘F? Resolved by the step-1 spike.
-- Should the find bar sit inside the preview header (with the view-mode and wrap
-  controls) or float over the document as an overlay? The header keeps layout
-  honest and avoids covering content; an overlay is what every other tool does.
-  Deferred to implementation, when the header's crowding is visible.
-- Does terminal find need its own bar, or can the preview find bar be reused with
-  a surface-dependent backend? Reuse is tempting but the terminal's match model
-  (buffer coordinates, no Ranges) may not fit the same control cleanly.
+- ~~Should the find bar sit inside the preview header or float over the
+  document?~~ **Resolved: floating overlay.** The header already carries the
+  view-mode chooser, the wrap toggle, and the action bar, and the query box
+  needs real width — adding it there would crowd the header at exactly the
+  widths where the sidebar is widest. The bar uses the zero-height sticky
+  wrapper `.uatu-loading-bar` already established in this codebase, so opening
+  find does not reflow the document under the reader. It does overlap content
+  in the top-right corner; VS Code's trick of shifting the widget when a match
+  is behind it is the escalation if that proves annoying.
+- ~~Does terminal find need its own bar, or can the preview find bar be reused
+  with a surface-dependent backend?~~ **Resolved: one bar, pluggable engine.**
+  The worry was that the terminal's match model would not fit the same control.
+  It fits exactly: the xterm search addon takes the same three options (case,
+  whole-word, regex) and reports the same two numbers (result index, result
+  count) the preview matcher produces. Two bars would have been two
+  vocabularies for one idea. The seam is `engine.ts`; outcomes arrive by
+  callback rather than return value, because the preview matches synchronously
+  while xterm reports counts through an event.
+- Bun's CSS bundler emits `warn: Invalid selector. Unsupported pseudo-class or
+  pseudo-element 'highlight'` on every build. The rules are passed through
+  verbatim and work at runtime — verified in the built binary — but the warning
+  is noise on every `bun run build` until Bun learns the selector.
