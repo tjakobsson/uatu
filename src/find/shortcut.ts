@@ -166,6 +166,7 @@ declare global {
   interface Window {
     __uatuFind?: {
       open(): void;
+      search(): void;
       step(delta: number): void;
       close(): void;
     };
@@ -179,6 +180,11 @@ function installHostBridge(): void {
       if (engine) {
         openFindBar(engine);
       }
+    },
+    // ⇧⌘F. Separate from `open` because the two are different features, not
+    // one feature with a modifier: the host must not have to know that.
+    search() {
+      projectSearch?.(seedFromSelection());
     },
     step(delta: number) {
       if (isFindBarOpen()) {

@@ -196,7 +196,12 @@ struct ContentView: View {
                             }
                             let script: String
                             if key == "f" {
-                                script = "window.__uatuFind?.open()"
+                                // ⌘F is find on the active surface; ⇧⌘F is
+                                // project search, which is a different feature
+                                // rather than a modifier on the same one.
+                                script = modifiers.contains(.shift)
+                                    ? "window.__uatuFind?.search()"
+                                    : "window.__uatuFind?.open()"
                             } else {
                                 let delta = modifiers.contains(.shift) ? -1 : 1
                                 script = "window.__uatuFind?.step(\(delta))"
@@ -365,6 +370,9 @@ struct ContentView: View {
                 let script = delta.map { "window.__uatuFind?.step(\($0))" } ?? "window.__uatuFind?.open()"
                 web.webView.evaluateJavaScript(script)
             },
+            findInFiles: {
+                web.webView.evaluateJavaScript("window.__uatuFind?.search()")
+            },
             reload: { web.reload() },
             goBack: { web.goBack() },
             goForward: { web.goForward() },
@@ -505,6 +513,7 @@ struct WindowCommands: Equatable {
     var chooseFolder: () -> Void
     var openFolder: (URL) -> Void
     var find: (Int?) -> Void
+    var findInFiles: () -> Void
     var reload: () -> Void
     var goBack: () -> Void
     var goForward: () -> Void
@@ -567,6 +576,9 @@ struct UatuCodeDesktopCommands: Commands {
         CommandGroup(replacing: .textEditing) {
             Button("Find…") { window?.find(nil) }
                 .keyboardShortcut("f")
+                .disabled(window?.isRunning != true)
+            Button("Find in Files…") { window?.findInFiles() }
+                .keyboardShortcut("f", modifiers: [.command, .shift])
                 .disabled(window?.isRunning != true)
             Button("Find Next") { window?.find(1) }
                 .keyboardShortcut("g")
