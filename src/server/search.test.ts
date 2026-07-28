@@ -103,6 +103,22 @@ describe("matchLine", () => {
     expect(capped.matches).toHaveLength(2);
     expect(capped.more).toBe(true);
   });
+
+  test("a zero-width walk is interrupted when the budget trips", () => {
+    // Zero-width matches never count toward the limit, so on a long line the
+    // walk is bounded only by the budget callback.
+    const pattern = buildSearchPattern("(?=a)", { ...DEFAULT_SEARCH_OPTIONS, regex: true }) as RegExp;
+    let checks = 0;
+    const result = matchLine("a".repeat(5000), pattern, 500, () => (checks += 1) > 100);
+    expect(result.interrupted).toBe(true);
+    expect(checks).toBe(101);
+  });
+
+  test("a zero-width walk inside budget is not marked interrupted", () => {
+    const pattern = buildSearchPattern("(?=b)", { ...DEFAULT_SEARCH_OPTIONS, regex: true }) as RegExp;
+    const result = matchLine("abc", pattern, 500, () => false);
+    expect(result.interrupted).toBe(false);
+  });
 });
 
 describe("searchDocuments", () => {
@@ -272,6 +288,20 @@ describe("bounds", () => {
   test("under the cap nothing is marked truncated", async () => {
     const events = await collect(roots(doc("a.md")), "xy", { "/abs/a.md": "xy\n" });
     expect(doneEvent(events).truncated).toBe(false);
+  });
+
+  test("a zero-width pattern on one long line is reported expensive", async () => {
+    // All the outer budget checks sit between lines; a single-line file walks
+    // its zero-width matches inside `matchLine`, so the interruption has to
+    // come from the budget callback threaded into it.
+    let clock = 0;
+    const deps: SearchDeps = {
+      fileSize: async () => 10_000,
+      readFile: async () => "a".repeat(10_000),
+      now: () => (clock += 50),
+    };
+    const events = await collect(roots(doc("a.md")), "(?=a)", {}, { regex: true }, deps);
+    expect(events.map(e => e.kind)).toEqual(["expensive", "done"]);
   });
 });
 

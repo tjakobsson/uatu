@@ -93,9 +93,11 @@ export function connectEvents() {
     // A watched file changed, so displayed search results captured line
     // numbers that may no longer hold. Mark them rather than re-running: in a
     // watched repository that would be a query storm, and rows would jump
-    // under the reader's cursor while they are reading them.
+    // under the reader's cursor while they are reading them. The pane checks
+    // the id against its rows — a change to an unlisted file proves nothing
+    // about the results.
     if (payload.changedId) {
-      markSearchResultsStale();
+      markSearchResultsStale(payload.changedId);
     }
 
     // Rule C/D selection decision (see follow-mode capability).

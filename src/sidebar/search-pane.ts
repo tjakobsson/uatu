@@ -359,8 +359,15 @@ export function syncSearchScope(): void {
   renderScope();
 }
 
-export function markSearchResultsStale(): void {
+export function markSearchResultsStale(changedId: string): void {
   if (results.length === 0 || stale) {
+    return;
+  }
+  // Only a change to a document that actually appears in the results can
+  // invalidate them. Without this filter, a repository with generated or
+  // frequently edited files keeps the warning permanently lit for results
+  // those files never touched.
+  if (!results.some(result => result.documentId === changedId)) {
     return;
   }
   stale = true;

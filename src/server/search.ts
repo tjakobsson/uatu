@@ -150,11 +150,19 @@ export type LineMatch = Pick<SearchMatch, "text" | "start" | "end">;
 // carrying more hits than the cap allows would have the excess dropped in
 // silence, and a sweep that ended on that line would report a capped list as
 // complete — the exact reading a reviewer must not be given.
+//
+// `outOfBudget` is checked while stepping past zero-width matches. Real
+// matches are bounded by `limit`, but zero-width ones never fill `found`, so
+// on a long line that walk is O(line length) exec calls that no outer check
+// can interrupt — a pattern like `(?=(a?){50})` on a single-line file would
+// otherwise occupy the server far past every advertised bound. `interrupted`
+// reports the trip; the caller treats it like any blown document budget.
 export function matchLine(
   line: string,
   pattern: RegExp,
   limit: number,
-): { matches: LineMatch[]; more: boolean } {
+  outOfBudget?: () => boolean,
+): { matches: LineMatch[]; more: boolean; interrupted: boolean } {
   const found: LineMatch[] = [];
   let more = false;
   pattern.lastIndex = 0;
@@ -169,6 +177,9 @@ export function matchLine(
       }
       found.push({ text: line, start, end });
     } else {
+      if (outOfBudget?.()) {
+        return { matches: found, more, interrupted: true };
+      }
       pattern.lastIndex = start + 1;
       if (pattern.lastIndex > line.length) {
         break;
@@ -176,7 +187,7 @@ export function matchLine(
     }
     match = pattern.exec(line);
   }
-  return { matches: found, more };
+  return { matches: found, more, interrupted: false };
 }
 
 // How many non-overlapping literal occurrences of `needle` appear in `haystack`
@@ -330,9 +341,18 @@ export async function* searchDocuments(
       // below keeps the CR.
       const rawLine = lines[index]!;
       const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-      const lineHits = matchLine(line, pattern, remaining);
+      const lineHits = matchLine(
+        line,
+        pattern,
+        remaining,
+        () => deps.now() - startedAt > PER_DOCUMENT_BUDGET_MS,
+      );
       if (lineHits.more) {
         truncated = true;
+      }
+      if (lineHits.interrupted) {
+        expensive = true;
+        break;
       }
       for (const hit of lineHits.matches) {
         matches.push({
