@@ -126,6 +126,16 @@ function scheduleRun(): void {
 }
 
 export function step(delta: number): void {
+  // An edit inside the debounce window has updated the input but not the
+  // engine — stepping now would advance through matches of the old query.
+  // Flush the pending run instead; landing on the new query's current match
+  // is what Enter-after-typing means, and the next step continues from it.
+  if (debounceHandle !== null) {
+    window.clearTimeout(debounceHandle);
+    debounceHandle = null;
+    run(true);
+    return;
+  }
   engine?.step(delta, queryInput.value, options);
 }
 

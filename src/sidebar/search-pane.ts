@@ -84,6 +84,10 @@ let searchAllRoots = false;
 // row activation must describe the sweep that produced the rows, not the
 // toggle's present position.
 let resultsFromAllRoots = false;
+// The scope the sweep ran under, captured at dispatch like the toggle above.
+// A one-file sweep stops describing the session the moment the scope widens,
+// even though every row it produced still exists.
+let resultsScope: "file" | "folder" = "folder";
 let debounceHandle: number | null = null;
 // Abandons an in-flight sweep when the query changes under it — without this a
 // slow search would keep streaming rows for a query the user has moved on from.
@@ -120,6 +124,7 @@ async function runSearch(): Promise<void> {
   stale = false;
   staleDocuments = new Set();
   resultsFromAllRoots = searchAllRoots;
+  resultsScope = appState.scope.kind === "file" ? "file" : "folder";
 
   if (!shouldDispatch(query)) {
     running = false;
@@ -309,8 +314,16 @@ function renderResults(): void {
     resultsElement.replaceChildren();
     return;
   }
+  // Result paths are root-relative, so with several watched roots two
+  // documents can share one displayed path (`repo-a/src/config.ts` and
+  // `repo-b/src/config.ts` both read `src/config.ts`). Qualify with the
+  // root whenever the result set spans more than one.
+  const multiRoot = new Set(results.map(result => result.rootId)).size > 1;
   const html = results
     .map(result => {
+      const displayPath = multiRoot
+        ? `${rootLabelFor(result.rootId)}/${result.relativePath}`
+        : result.relativePath;
       const rows = result.matches
         .map(match => {
           const matchText = match.text.slice(match.start, match.end);
@@ -341,14 +354,21 @@ function renderResults(): void {
         .join("");
       return (
         `<div class="search-file">` +
-        `<div class="search-file-path" title="${escapeHtml(result.relativePath)}">` +
-        `${escapeHtml(result.relativePath)}` +
+        `<div class="search-file-path" title="${escapeHtml(displayPath)}">` +
+        `${escapeHtml(displayPath)}` +
         `<span class="search-file-count">${result.matches.length}</span>` +
         `</div>${rows}</div>`
       );
     })
     .join("");
   resultsElement.innerHTML = html;
+}
+
+// Widened results can reference roots outside the scoped `appState.roots`,
+// so fall back to the root path's last segment when no label is known.
+function rootLabelFor(rootId: string): string {
+  const root = appState.roots.find(candidate => candidate.id === rootId);
+  return root?.label ?? rootId.split("/").filter(Boolean).pop() ?? rootId;
 }
 
 function toggleOption(key: keyof Toggles): void {
@@ -395,16 +415,22 @@ export function markSearchResultsStale(changedId: string): void {
   if (results.length === 0) {
     return;
   }
-  // Only a change to a document that actually appears in the results can
-  // invalidate them. Without this filter, a repository with generated or
-  // frequently edited files keeps the warning permanently lit for results
-  // those files never touched.
-  if (!results.some(result => result.documentId === changedId)) {
-    return;
+  // Any change in the searched corpus invalidates the sweep, not only a
+  // change to a document already listed — a file with no hits gaining the
+  // query is invisible to every result-membership test, yet the displayed
+  // count is wrong the moment it happens. The watcher only broadcasts a
+  // `changedId` for searchable documents in the visible corpus, so every id
+  // arriving here is a corpus change by construction. The cost is a notice
+  // that lights up for edits that did not affect the results; the notice
+  // being occasionally cautious beats the count being silently wrong.
+  //
+  // Documents already in the results are additionally remembered per id:
+  // their rows carry reveal ordinals captured from the old content, and
+  // activation must skip the reveal for exactly those. (Collected even once
+  // the notice is up — activation needs every changed document.)
+  if (results.some(result => result.documentId === changedId)) {
+    staleDocuments.add(changedId);
   }
-  // Collected even once the notice is up: activation needs to know about
-  // every changed document, not only the first one.
-  staleDocuments.add(changedId);
   if (!stale) {
     stale = true;
     renderNotice();
@@ -419,6 +445,14 @@ export function markSearchResultsStale(changedId: string): void {
 // current, and activating one navigates to a document that no longer exists.
 export function noteSearchCorpusChange(): void {
   if (results.length === 0 || stale) {
+    return;
+  }
+  // A one-file sweep stops describing the session the moment the scope
+  // widens: every row it produced still exists, but the displayed count now
+  // silently excludes everything newly in scope.
+  if (resultsScope === "file" && !resultsFromAllRoots && appState.scope.kind === "folder") {
+    stale = true;
+    renderNotice();
     return;
   }
   // A widened sweep legitimately returns documents outside the scoped
