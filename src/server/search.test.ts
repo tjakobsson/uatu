@@ -83,7 +83,7 @@ describe("searchableDocuments", () => {
 describe("matchLine", () => {
   test("reports every match with its offsets", () => {
     const pattern = buildSearchPattern("at", DEFAULT_SEARCH_OPTIONS) as RegExp;
-    expect(matchLine("the cat sat", pattern, 10).map(m => [m.start, m.end])).toEqual([
+    expect(matchLine("the cat sat", pattern, 10).matches.map(m => [m.start, m.end])).toEqual([
       [5, 7],
       [9, 11],
     ]);
@@ -91,12 +91,14 @@ describe("matchLine", () => {
 
   test("a zero-width pattern terminates rather than enumerating forever", () => {
     const pattern = buildSearchPattern("x*", { ...DEFAULT_SEARCH_OPTIONS, regex: true }) as RegExp;
-    expect(matchLine("abc", pattern, 10)).toEqual([]);
+    expect(matchLine("abc", pattern, 10).matches).toEqual([]);
   });
 
   test("respects the remaining-results limit", () => {
     const pattern = buildSearchPattern("a", DEFAULT_SEARCH_OPTIONS) as RegExp;
-    expect(matchLine("aaaaa", pattern, 2)).toHaveLength(2);
+    const capped = matchLine("aaaaa", pattern, 2);
+    expect(capped.matches).toHaveLength(2);
+    expect(capped.more).toBe(true);
   });
 });
 
@@ -343,5 +345,30 @@ describe("literal ordinals", () => {
     const matches = fileResults(events)[0]!.matches;
     expect(matches).toHaveLength(1);
     expect(matches[0]!.ordinal).toBe(1);
+  });
+});
+
+describe("truncation within a single line", () => {
+  // A line holding more hits than the cap allows used to drop the excess in
+  // silence. If that line was the last one, the sweep reported a capped list
+  // as complete.
+  test("a single line past the cap still reports truncation", async () => {
+    const line = "xy ".repeat(MAX_RESULTS + 50);
+    const events = await collect(roots(doc("a.md")), "xy", { "/abs/a.md": line });
+    expect(doneEvent(events).truncated).toBe(true);
+  });
+
+  test("the only document, the only line, still reports truncation", async () => {
+    const line = "xy".repeat(MAX_RESULTS + 1);
+    const events = await collect(roots(doc("only.md")), "xy", { "/abs/only.md": line });
+    const total = fileResults(events).reduce((n, r) => n + r.matches.length, 0);
+    expect(total).toBe(MAX_RESULTS);
+    expect(doneEvent(events).truncated).toBe(true);
+  });
+
+  test("a line exactly at the cap with nothing beyond is not truncated", async () => {
+    const line = "xy".repeat(3);
+    const events = await collect(roots(doc("a.md")), "xy", { "/abs/a.md": line }, {}, undefined);
+    expect(doneEvent(events).truncated).toBe(false);
   });
 });

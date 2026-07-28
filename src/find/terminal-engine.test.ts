@@ -162,3 +162,18 @@ describe("moving between panes", () => {
     expect(pane.calls.filter(c => c.kind === "clear")).toHaveLength(0);
   });
 });
+
+describe("availability", () => {
+  test("a terminal with no focused pane reports itself unavailable", () => {
+    // The panel can be hidden or closed while it is still the active surface.
+    // Routing find there would mount the bar in a hidden slot over nothing.
+    const engine = createTerminalEngine(() => null, () => null);
+    expect(engine.isAvailable?.()).toBe(false);
+  });
+
+  test("a terminal with a focused pane is available", () => {
+    const pane = fakePane("only");
+    const engine = createTerminalEngine(() => pane.target, () => null);
+    expect(engine.isAvailable?.()).toBe(true);
+  });
+});

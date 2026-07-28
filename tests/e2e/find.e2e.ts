@@ -316,17 +316,12 @@ test.describe("terminal surface", () => {
   // before any PTY is involved. The terminal's own search behavior is unit
   // tested in `src/find/terminal-engine.test.ts`, and standing up a real shell
   // here would make the routing assertion hostage to PTY availability.
-  test("⌘F stops searching the preview once the terminal is the active surface", async ({
-    page,
-  }) => {
+  test("an open terminal with no attached pane falls back to the document", async ({ page }) => {
+    // The panel can be showing while no pane is attached — no PTY here. The
+    // surface is `terminal`, but there is nothing to search, so find must fall
+    // through instead of opening a bar over nothing.
     await treeRow(page, "find-target.md").click();
     await expect(page.locator("#preview-title")).toHaveText("Find Target");
-
-    // Baseline: the preview is the active surface and "alpha" occurs 4 times.
-    await openFind(page);
-    await page.locator("#find-query").fill("alpha");
-    await expect(page.locator("#find-status")).toHaveText("1 of 4");
-    await page.keyboard.press("Escape");
 
     await page.locator("#terminal-toggle").click();
     await expect(page.locator("#terminal-panel")).toBeVisible();
@@ -334,14 +329,24 @@ test.describe("terminal surface", () => {
 
     await openFind(page);
     await page.locator("#find-query").fill("alpha");
-    // The document's four matches are no longer what is being searched, and
-    // nothing is painted over the preview.
-    await expect(page.locator("#find-status")).not.toHaveText("1 of 4");
-    expect(await highlightCounts(page)).toEqual({ matches: 0, current: 0 });
+    await expect(page.locator("#find-status")).toHaveText("1 of 4");
+  });
 
-    // Clicking back into the document returns the surface to the preview.
-    await page.keyboard.press("Escape");
-    await page.locator("#preview").click({ position: { x: 10, y: 10 } });
+  test("hiding the terminal hands ⌘F back to the document", async ({ page }) => {
+    // The active surface stays `terminal` after the panel is toggled away.
+    // Routing there would mount the bar in a hidden slot with no pane to
+    // search, so find would look dead rather than fall back.
+    await treeRow(page, "find-target.md").click();
+    await expect(page.locator("#preview-title")).toHaveText("Find Target");
+
+    await page.locator("#terminal-toggle").click();
+    await expect(page.locator("#terminal-panel")).toBeVisible();
+    await page.locator("#terminal-panel").click({ position: { x: 40, y: 40 } });
+
+    // Toggle it away again without touching any other surface.
+    await page.locator("#terminal-toggle").click();
+    await expect(page.locator("#terminal-panel")).toBeHidden();
+
     await openFind(page);
     await page.locator("#find-query").fill("alpha");
     await expect(page.locator("#find-status")).toHaveText("1 of 4");

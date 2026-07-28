@@ -42,6 +42,11 @@ export type FindEngine = {
   // Hand keyboard focus back to the surface when the bar closes, so the
   // reader can keep scrolling without clicking first.
   focusSurface(): void;
+  // Whether this engine can act right now. A surface can be the last one the
+  // user touched and still have nothing to search — the terminal panel can be
+  // hidden or closed with its panes detached — in which case find must fall
+  // through rather than open a bar over nothing.
+  isAvailable?(): boolean;
   // Called when this engine becomes / stops being the active one.
   setOnOutcome(listener: ((outcome: FindOutcome) => void) | null): void;
   // Start / stop watching for the searched content being replaced underneath

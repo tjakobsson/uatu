@@ -339,6 +339,28 @@ export function markSearchResultsStale(): void {
   renderNotice();
 }
 
+// A file with visible results was removed from the corpus.
+//
+// Deletion is not a content change: the watcher broadcasts `changedId: null`
+// because there is no document to point at, so the change-driven path above
+// never fires. Rows for a deleted file would otherwise sit there looking
+// current, and activating one navigates to a document that no longer exists.
+export function noteSearchCorpusChange(): void {
+  if (results.length === 0 || stale) {
+    return;
+  }
+  const present = new Set<string>();
+  for (const root of appState.roots) {
+    for (const document of root.docs) {
+      present.add(document.id);
+    }
+  }
+  if (results.some(result => !present.has(result.documentId))) {
+    stale = true;
+    renderNotice();
+  }
+}
+
 // Boot-time wiring. Called once by app.ts.
 export function initSearchPane(): void {
   queryInput.addEventListener("input", scheduleSearch);

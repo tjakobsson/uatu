@@ -69,6 +69,14 @@ export async function openSearchResult(
 
   // Not visible here — Source is where the searched text lives, and where the
   // occurrence ordinal is exact, because source is what was searched.
+  //
+  // Known limitation: the ordinal is a *source* ordinal, and the rendered view
+  // can hold fewer occurrences (a link URL matched in source is not rendered as
+  // text). When it does, the ordinal overshoots what the rendered view offers
+  // and we fall back to Source even though the hit may have been visible.
+  // Landing on a different occurrence would be worse than an extra view flip,
+  // and identifying the right one needs a source-to-rendered position map the
+  // renderer does not emit.
   if (appState.viewMode !== "source") {
     applyViewMode("source");
     // `applyViewMode` remounts the preview asynchronously; wait for the swap

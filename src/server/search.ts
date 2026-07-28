@@ -127,14 +127,28 @@ export type LineMatch = Pick<SearchMatch, "text" | "start" | "end">;
 
 // Match one line. Zero-width matches are dropped and stepped past — a pattern
 // that can match the empty string would otherwise enumerate forever.
-export function matchLine(line: string, pattern: RegExp, limit: number): LineMatch[] {
+//
+// `more` says whether the line held matches beyond `limit`. Without it, a line
+// carrying more hits than the cap allows would have the excess dropped in
+// silence, and a sweep that ended on that line would report a capped list as
+// complete — the exact reading a reviewer must not be given.
+export function matchLine(
+  line: string,
+  pattern: RegExp,
+  limit: number,
+): { matches: LineMatch[]; more: boolean } {
   const found: LineMatch[] = [];
+  let more = false;
   pattern.lastIndex = 0;
   let match = pattern.exec(line);
-  while (match !== null && found.length < limit) {
+  while (match !== null) {
     const start = match.index;
     const end = start + match[0].length;
     if (end > start) {
+      if (found.length >= limit) {
+        more = true;
+        break;
+      }
       found.push({ text: line, start, end });
     } else {
       pattern.lastIndex = start + 1;
@@ -144,7 +158,7 @@ export function matchLine(line: string, pattern: RegExp, limit: number): LineMat
     }
     match = pattern.exec(line);
   }
-  return found;
+  return { matches: found, more };
 }
 
 // How many non-overlapping literal occurrences of `needle` appear in `haystack`
@@ -265,7 +279,11 @@ export async function* searchDocuments(
         break;
       }
       const line = lines[index]!;
-      for (const hit of matchLine(line, pattern, remaining)) {
+      const lineHits = matchLine(line, pattern, remaining);
+      if (lineHits.more) {
+        truncated = true;
+      }
+      for (const hit of lineHits.matches) {
         matches.push({
           ...hit,
           line: index + 1,

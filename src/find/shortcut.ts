@@ -84,7 +84,15 @@ function hasPrimaryModifier(event: KeyboardEvent): boolean {
 // `browser` never reaches here: when the split browser has focus this page
 // receives no key events at all, and the wrapper routes natively.
 function activeEngine(): FindEngine | null {
-  if (getActiveSurface() === "terminal" && terminalEngine !== null) {
+  // `isAvailable` is what keeps a hidden terminal from swallowing the
+  // shortcut: the surface stays `terminal` after the panel is toggled away,
+  // and routing there would mount the bar in a hidden slot with no pane to
+  // search, so find would look dead rather than fall back.
+  if (
+    getActiveSurface() === "terminal" &&
+    terminalEngine !== null &&
+    terminalEngine.isAvailable?.() !== false
+  ) {
     return terminalEngine;
   }
   if (!supportsHighlights() || !previewIsSearchable()) {

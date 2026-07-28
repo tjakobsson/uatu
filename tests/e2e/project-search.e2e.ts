@@ -249,6 +249,19 @@ test("results are marked stale when a watched file changes", async ({ page }) =>
   await expect(page.locator(".search-hit")).toHaveCount(3);
 });
 
+test("deleting a file with visible results marks them stale", async ({ page }) => {
+  // Deletion broadcasts no changedId — there is no document to point at — so
+  // the change-driven staleness path misses it and rows for a file that is
+  // gone would keep looking current.
+  await openSearch(page);
+  await page.locator("#search-query").fill("compare-target");
+  await expect(page.locator(".search-hit")).toHaveCount(3, { timeout: 10_000 });
+
+  await fs.rm(workspacePath("beta.md"));
+
+  await expect(page.locator("#search-notice")).toContainText("changed since", { timeout: 10_000 });
+});
+
 test.describe("global routing", () => {
   test("⇧⌘F opens project search even with the terminal active", async ({ page }) => {
     await page.locator("#terminal-toggle").click();

@@ -58,6 +58,10 @@ export function createTerminalEngine(
     barHost: resolveBarSlot,
     label: "terminal",
 
+    // No focused, attached pane means nothing to search — the panel was hidden
+    // or closed while it was still the active surface.
+    isAvailable: () => resolveTarget() !== null,
+
     run(query, options) {
       const target = bind(resolveTarget());
       if (!target) {

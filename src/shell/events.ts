@@ -12,7 +12,7 @@ import { documentDiffCache, forgetDocumentCache, loadDocument } from "../preview
 import { renderEmptyPreview } from "../preview/empty";
 import { renderReviewScoreDetails } from "../sidebar/review-score-mount";
 import { renderSidebar } from "../sidebar/shell";
-import { markSearchResultsStale, syncSearchScope } from "../sidebar/search-pane";
+import { markSearchResultsStale, noteSearchCorpusChange, syncSearchScope } from "../sidebar/search-pane";
 import {
   hasDocument,
   shouldRefreshPreview,
@@ -34,6 +34,9 @@ export function applyServerSnapshot(payload: StatePayload): void {
   appState.scope = payload.scope;
   // The Search pane names the scope in effect; it has to hear about changes.
   syncSearchScope();
+  // And a document vanishing from the corpus invalidates results that point at
+  // it — a deletion arrives with no `changedId`, so the change path misses it.
+  noteSearchCorpusChange();
   // Title, favicon tint, and sidebar marker all derive from roots;
   // re-applying on every payload keeps them honest if roots change.
   applyProjectIdentity(payload.roots);

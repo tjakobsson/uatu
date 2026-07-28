@@ -174,6 +174,11 @@ move keyboard focus to the preview so the document is immediately scrollable.
 - **WHEN** the user activates a result matching a link's URL, which the rendered view does not display
 - **THEN** the document opens in Source view at that line with the match highlighted
 
+#### Scenario: The rendered view holds fewer occurrences than the source
+
+- **WHEN** the source contains occurrences the rendered view drops, so the activated result's ordinal exceeds what the rendered view offers
+- **THEN** the view falls back to Source rather than highlighting a different occurrence, because without a source-to-rendered position map the correct one cannot be identified
+
 #### Scenario: Focus follows activation
 
 - **WHEN** the user activates a result
