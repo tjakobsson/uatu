@@ -48,6 +48,65 @@ final class BrowserTab: NSObject, Identifiable {
         ]
     }
 
+    // Find state belongs to the tab, not the split: switching tabs must not
+    // carry one page's match onto another, and closing a tab discards it.
+    var findQuery = "" {
+        didSet {
+            guard findQuery != oldValue else { return }
+            findState = .idle
+            if findQuery.isEmpty {
+                clearFindSelection()
+            } else {
+                find(backwards: false)
+            }
+        }
+    }
+    var findCaseSensitive = false {
+        didSet {
+            guard findCaseSensitive != oldValue, !findQuery.isEmpty else { return }
+            find(backwards: false)
+        }
+    }
+    private(set) var findState: FindState = .idle
+
+    enum FindState {
+        case idle
+        case found
+        case notFound
+    }
+
+    /// Run WebKit's own find. `WKFindResult` reports only whether a match was
+    /// found — there is no count available, which is why the bar shows a
+    /// found/not-found state rather than a position.
+    func find(backwards: Bool) {
+        guard !findQuery.isEmpty else {
+            clearFindSelection()
+            return
+        }
+        let configuration = WKFindConfiguration()
+        configuration.backwards = backwards
+        configuration.caseSensitive = findCaseSensitive
+        configuration.wraps = true
+        webView.find(findQuery, configuration: configuration) { [weak self] result in
+            MainActor.assumeIsolated {
+                self?.findState = result.matchFound ? .found : .notFound
+            }
+        }
+    }
+
+    /// Drop the find selection. WebKit exposes no "clear find" call — finding
+    /// selects the match — so clearing means clearing the page's selection.
+    func clearFindSelection() {
+        findState = .idle
+        webView.evaluateJavaScript("window.getSelection()?.removeAllRanges()")
+    }
+
+    func resetFind() {
+        findQuery = ""
+        findState = .idle
+        clearFindSelection()
+    }
+
     func load(_ url: URL) {
         webView.load(URLRequest(url: url))
     }
@@ -114,6 +173,20 @@ extension BrowserTab: WKNavigationDelegate {
         }
         decisionHandler(.allow)
     }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        // The navigation replaced the page, so the find selection and the
+        // found/not-found state describe a document that no longer exists.
+        // With the bar open over this tab, rerun the query against the new
+        // page; otherwise just drop the stale state — the retained query
+        // reruns when the bar reopens. Selectedness matters: a background
+        // tab finishing a load must not steal the selection with a find.
+        if split?.findOpen == true, split?.selectedID == id, !findQuery.isEmpty {
+            find(backwards: false)
+        } else {
+            findState = .idle
+        }
+    }
 }
 
 /// Per-window split browser state: an ordered set of tabs plus selection.
@@ -123,7 +196,20 @@ extension BrowserTab: WKNavigationDelegate {
 @Observable
 final class BrowserSplit {
     private(set) var tabs: [BrowserTab] = []
-    var selectedID: BrowserTab.ID?
+    var selectedID: BrowserTab.ID? {
+        didSet {
+            guard selectedID != oldValue else { return }
+            // One tab's match must not linger while another is on screen.
+            tabs.first { $0.id == oldValue }?.clearFindSelection()
+            // And the incoming tab's retained query comes back to life: with
+            // the bar open, returning to a tab that had a query would
+            // otherwise show that query idle, with no selected match, until
+            // the user edited it.
+            if findOpen, let tab = selectedTab, !tab.findQuery.isEmpty {
+                tab.find(backwards: false)
+            }
+        }
+    }
     private(set) var isOpen = false {
         // The address-bar focus flag can outlive the pane (the field
         // unmounts before its focus change fires); a stale true would make
@@ -146,6 +232,66 @@ final class BrowserSplit {
 
     var selectedTab: BrowserTab? {
         tabs.first { $0.id == selectedID }
+    }
+
+    /// Whether the find bar is showing over the selected tab. Find itself is
+    /// per-tab state; this is only whether the control is on screen.
+    private(set) var findOpen = false
+    /// Bumped on every ⌘F so an already-open bar re-focuses its query field,
+    /// the way pressing the shortcut twice behaves everywhere else.
+    private(set) var findFocusToken = 0
+    /// Mirrored from the find field's SwiftUI focus. Typing in the bar is not
+    /// "the web view has focus", so Escape needs this to reach `closeFind`.
+    var findBarFocused = false
+
+    /// ⌘F with the split focused. No-ops when there is no page to search
+    /// rather than falling through to another surface — searching the document
+    /// because the browser had nothing would be worse than doing nothing.
+    func openFind() {
+        guard isOpen, selectedTab != nil else { return }
+        let wasOpen = findOpen
+        findOpen = true
+        findFocusToken += 1
+        // A dismissed bar keeps its query, but `closeFind` cleared the match
+        // selection — reopening would otherwise show a query with nothing
+        // selected until the user edits it. Rerun it on a fresh open only:
+        // ⌘F on an already-open bar re-focuses the field and must not jump
+        // the selection to the next match.
+        if !wasOpen, let tab = selectedTab, !tab.findQuery.isEmpty {
+            tab.find(backwards: false)
+        }
+    }
+
+    func closeFind() {
+        guard findOpen else { return }
+        findOpen = false
+        selectedTab?.clearFindSelection()
+        // Back to the page, so it stays scrollable without a click.
+        if let webView = selectedTab?.webView {
+            webView.window?.makeFirstResponder(webView)
+        }
+    }
+
+    func findNext(backwards: Bool) {
+        selectedTab?.find(backwards: backwards)
+    }
+
+    /// Whether the browser — not the SPA — should receive ⌘F / ⌘G right now.
+    ///
+    /// Broader than `hasFocus(in:)` on purpose: once the find bar opens, focus
+    /// moves into its SwiftUI text field, which is neither a tab web view nor
+    /// the address bar. Judging by `hasFocus` alone would send the *next* ⌘F
+    /// straight past the bar the user is typing in and into the document
+    /// hidden behind the split.
+    func ownsFindShortcut(in window: NSWindow?) -> Bool {
+        if hasFocus(in: window) {
+            return true
+        }
+        guard isOpen, findOpen, findBarFocused else { return false }
+        // Same window check `hasFocus` makes: every window installs an
+        // app-wide monitor, so one window's split must not claim another's key.
+        guard let window else { return true }
+        return window === hostWindow
     }
 
     func toggle() {
@@ -196,8 +342,10 @@ final class BrowserSplit {
         if selectedID == tab.id {
             selectedID = tabs.indices.contains(index) ? tabs[index].id : tabs.last?.id
         }
+        tab.resetFind()
         if tabs.isEmpty {
             isOpen = false
+            findOpen = false
         }
     }
 

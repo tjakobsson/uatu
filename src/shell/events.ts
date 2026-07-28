@@ -12,6 +12,7 @@ import { documentDiffCache, forgetDocumentCache, loadDocument } from "../preview
 import { renderEmptyPreview } from "../preview/empty";
 import { renderReviewScoreDetails } from "../sidebar/review-score-mount";
 import { renderSidebar } from "../sidebar/shell";
+import { markSearchResultsStale, noteSearchCorpusChange, syncSearchScope } from "../sidebar/search-pane";
 import {
   hasDocument,
   shouldRefreshPreview,
@@ -31,6 +32,13 @@ export function applyServerSnapshot(payload: StatePayload): void {
   appState.roots = payload.roots;
   appState.repositories = payload.repositories ?? [];
   appState.scope = payload.scope;
+  appState.unscopedFingerprint = payload.unscopedFingerprint ?? null;
+  // The Search pane names the scope in effect; it has to hear about changes.
+  syncSearchScope();
+  // And a document vanishing from the corpus invalidates results that point at
+  // it — a deletion arrives with no `changedId`, so the change path misses it.
+  // (For widened results the fingerprint just stored is the signal instead.)
+  noteSearchCorpusChange();
   // Title, favicon tint, and sidebar marker all derive from roots;
   // re-applying on every payload keeps them honest if roots change.
   applyProjectIdentity(payload.roots);
@@ -66,6 +74,18 @@ export function connectEvents() {
     }
     applyMonoConfig(payload.monoConfig);
     syncStateGeneration(payload.generatedAt);
+
+    // A watched file changed, so displayed search results captured line
+    // numbers that may no longer hold. Mark them rather than re-running: in a
+    // watched repository that would be a query storm, and rows would jump
+    // under the reader's cursor while they are reading them. The pane checks
+    // the id against its rows — a change to an unlisted file proves nothing
+    // about the results. This must precede the preview-mode returns below:
+    // the Search pane is visible in those modes too, and its results go stale
+    // the same way there.
+    if (payload.changedId) {
+      markSearchResultsStale(payload.changedId);
+    }
 
     if (appState.previewMode.kind === "review-score") {
       renderSidebar();

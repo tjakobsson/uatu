@@ -5,6 +5,9 @@
 // through its named methods so persistence and refit happen consistently.
 
 import { mountTerminalPanel, type TerminalPanelHandle } from "./client";
+import { refreshFindTarget } from "../find/find-bar";
+import { registerTerminalFind } from "../find/shortcut";
+import { createTerminalEngine, type TerminalSearchTarget } from "../find/terminal-engine";
 import type { Osc52Notice } from "./clipboard";
 import type { TerminalClipboardPolicy } from "../shared/types";
 import { formatSessionAge, pickerCandidates } from "./picker";
@@ -186,6 +189,48 @@ export function setupTerminalPanel(
 
   const panes = new Map<string, TerminalPaneEntry>();
   let activePaneId: string | null = null;
+
+  // One search target per pane, cached.
+  //
+  // The engine compares targets by identity to decide whether find has moved
+  // between panes, and moving resets the pane it left. Handing back a fresh
+  // wrapper each call would make every ⌘G look like a pane switch: the search
+  // would be cleared and restarted, so Find Next would land on the first match
+  // for ever instead of advancing.
+  const searchTargets = new WeakMap<TerminalPaneEntry, TerminalSearchTarget>();
+
+  function searchTargetFor(entry: TerminalPaneEntry): TerminalSearchTarget {
+    const existing = searchTargets.get(entry);
+    if (existing) {
+      return existing;
+    }
+    const target: TerminalSearchTarget = {
+      findNext: (query, options) => entry.handle.search.findNext(query, options),
+      findPrevious: (query, options) => entry.handle.search.findPrevious(query, options),
+      clear: () => entry.handle.search.clear(),
+      focus: () => entry.handle.focus(),
+      onResults: listener => entry.handle.search.onResults(listener),
+    };
+    searchTargets.set(entry, target);
+    return target;
+  }
+
+  // Find over the terminal is scoped to the pane the user is in: searching a
+  // pane you are not looking at would be a strange thing to offer. The engine
+  // resolves the target at call time rather than capturing it, so splitting or
+  // closing panes mid-search cannot leave it pointed at a dead one.
+  registerTerminalFind(
+    createTerminalEngine(() => {
+      if (activePaneId === null) {
+        return null;
+      }
+      const entry = panes.get(activePaneId);
+      if (!entry || !entry.handle.isAttached()) {
+        return null;
+      }
+      return searchTargetFor(entry);
+    }, () => document.getElementById("terminal-find-slot")),
+  );
   let state: TerminalPanelState = readTerminalPanelState(localStorageRef);
 
   // Pane records are per-window (sessionStorage); the localStorage state's
@@ -312,6 +357,7 @@ export function setupTerminalPanel(
   }
 
   function setActivePane(id: string | null) {
+    const paneChanged = activePaneId !== id;
     activePaneId = id;
     let activeEntry: TerminalPaneEntry | null = null;
     for (const entry of panes.values()) {
@@ -321,6 +367,14 @@ export function setupTerminalPanel(
       } else {
         entry.element.removeAttribute("data-active");
       }
+    }
+    // With terminal find open, the engine is bound to the pane that was
+    // active — switching panes must rebind it now, or the old pane stays
+    // highlighted and the counter keeps describing it until the query is
+    // edited. The engine resolves its target at call time, so a re-run is
+    // the whole rebind.
+    if (paneChanged) {
+      refreshFindTarget("terminal");
     }
     // Move keyboard focus into the active pane's xterm so the user can
     // type immediately after a split, restore, or close. requestAnimationFrame

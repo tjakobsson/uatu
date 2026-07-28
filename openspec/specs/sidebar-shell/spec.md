@@ -313,3 +313,49 @@ Every sidebar pane header SHALL render its title (`<h2>`) and its metadata block
 - **AND** the metadata block contains visible content
 - **THEN** the title and metadata block do NOT visually overlap
 
+### Requirement: Sidebar interaction never moves keyboard focus out of the sidebar
+
+Sidebar interaction SHALL leave keyboard focus where the user put it, whether
+that interaction is selecting a document in the tree or operating any pane
+control. The sidebar SHALL NOT move focus into the preview as a side effect of
+selection, so whatever keyboard interaction the tree provides remains available
+to the user who just clicked in it.
+
+#### Scenario: Focus stays in the tree after a selection
+
+- **WHEN** the user clicks a file in the tree
+- **THEN** the active element is still within the sidebar, not the preview
+
+#### Scenario: Pane controls do not steal focus
+
+- **WHEN** the user collapses or resizes a sidebar pane
+- **THEN** keyboard focus is not moved into the preview
+
+### Requirement: Sidebar interaction resolves the active surface to the preview
+
+Interacting with the sidebar SHALL set the app's active surface to `preview`,
+because directing the sidebar is an act about the document being previewed. The
+sidebar SHALL NOT be addressable as a find surface of its own.
+
+#### Scenario: Find after a tree selection targets the document
+
+- **WHEN** the user was working in the terminal, clicks a file in the tree, and presses `⌘F`
+- **THEN** find opens over the preview rather than the terminal or the sidebar
+
+### Requirement: The sidebar hosts a Search pane in the pane stack
+
+The sidebar SHALL include a Search pane participating in the existing pane-stack
+behavior: it can be collapsed, hidden, resized, and restored from the panels
+menu, and its visibility and height SHALL persist across reloads like the other
+panes. The pane SHALL be present but may default to hidden, since it is opened
+on demand by its shortcut.
+
+#### Scenario: Search pane behaves like its siblings
+
+- **WHEN** the user collapses, hides, and then restores the Search pane from the panels menu
+- **THEN** it behaves identically to the Files and Git Log panes and its state persists across a reload
+
+#### Scenario: Shortcut reveals a hidden pane
+
+- **WHEN** the Search pane is hidden and the user opens project search by its shortcut
+- **THEN** the pane becomes visible and expanded without disturbing the other panes' persisted state

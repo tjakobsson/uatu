@@ -626,7 +626,7 @@ The terminal auth cookie name SHALL be derived from the port of the request's `H
 
 
 ### Requirement: Terminal bridges OSC 52 copy sequences to the host clipboard
-Each terminal pane SHALL register an OSC 52 handler on its `xterm.js` parser (`term.parser.registerOscHandler(52, …)`) that decodes application-initiated copy sequences (`ESC ] 52 ; <selection> ; <base64-data> BEL/ST`) arriving from the PTY and writes the decoded text to the system clipboard via `navigator.clipboard.writeText`, subject to the configured clipboard policy. The bridge SHALL be write-only: when the data field is `?` (a clipboard read query), the handler SHALL NOT emit any response sequence and SHALL NOT read the clipboard. The handler SHALL honor the selection parameters `c`, `p`, and `s` (all targeting the single browser clipboard) and SHALL ignore sequences with other selection parameters, invalid base64 data, or a decoded payload larger than 100 KB. `allowProposedApi` SHALL remain `false`.
+Each terminal pane SHALL register an OSC 52 handler on its `xterm.js` parser (`term.parser.registerOscHandler(52, …)`) that decodes application-initiated copy sequences (`ESC ] 52 ; <selection> ; <base64-data> BEL/ST`) arriving from the PTY and writes the decoded text to the system clipboard via `navigator.clipboard.writeText`, subject to the configured clipboard policy. The bridge SHALL be write-only: when the data field is `?` (a clipboard read query), the handler SHALL NOT emit any response sequence and SHALL NOT read the clipboard. The handler SHALL honor the selection parameters `c`, `p`, and `s` (all targeting the single browser clipboard) and SHALL ignore sequences with other selection parameters, invalid base64 data, or a decoded payload larger than 100 KB. `allowProposedApi` SHALL be `true`, enabled solely because search decorations (`registerDecoration`), which terminal find uses to mark every match, are proposed API in xterm 6 and throw without it. The OSC 52 bridge itself SHALL NOT depend on any proposed API.
 
 #### Scenario: TUI select-to-copy reaches the host clipboard
 - **WHEN** a program in the terminal (e.g. a mouse-mode TUI reacting to a selection) emits `ESC ] 52 ; c ; <base64 of "hello"> BEL` and the clipboard policy is `notify` or `silent`
@@ -679,3 +679,37 @@ The `terminal` block of `.uatu.json` SHALL accept an optional `clipboard` key wi
 #### Scenario: Rapid copies coalesce into one toast
 - **WHEN** multiple valid OSC 52 sequences arrive in quick succession under the `notify` policy
 - **THEN** at most one toast is visible in the pane, reflecting the most recent copy
+
+### Requirement: Focusing a terminal pane makes the terminal the active surface
+
+Clicking or otherwise focusing a terminal pane SHALL set the app's active
+surface to `terminal`, and the surface SHALL remain `terminal` until the user
+interacts with another surface. Terminal output arriving while the user is
+elsewhere SHALL NOT change the active surface.
+
+#### Scenario: Clicking into the terminal
+
+- **WHEN** the user clicks a terminal pane
+- **THEN** the active surface becomes `terminal`
+
+#### Scenario: Background output does not claim the surface
+
+- **WHEN** a detached command writes output while the user is reading the preview
+- **THEN** the active surface remains `preview`
+
+### Requirement: Terminal panes are searchable
+
+Each terminal pane SHALL support searching its scrollback buffer, scoped to the
+focused pane. Search SHALL reveal matches that are scrolled out of view, mark
+the current match, and support forward and backward navigation. Searching SHALL
+NOT write to the PTY or disturb the running program.
+
+#### Scenario: Search does not reach the shell
+
+- **WHEN** the user searches the terminal while a program is running
+- **THEN** no input is sent to the PTY and the program is unaffected
+
+#### Scenario: Search is scoped to the focused pane
+
+- **WHEN** the panel is split and the user searches from one pane
+- **THEN** matches in the other pane are neither counted nor highlighted

@@ -186,7 +186,7 @@ Every `appState` field has exactly one owning module: direct assignment (`appSta
 |---|---|
 | `selectedId`, `previewMode` | `shell/selection.ts` |
 | `followEnabled` | `shell/follow.ts` (the four follow-mode rules) |
-| `roots`, `repositories`, `scope` | `shell/events.ts` (`applyServerSnapshot`) |
+| `roots`, `repositories`, `scope`, `unscopedFingerprint` | `shell/events.ts` (`applyServerSnapshot`) |
 | `staleHint` | `shell/stale-hint-mount.ts` |
 | `viewMode`, `wrap` | `preview/view-mode.ts` |
 | `viewLayout`, `splitRatio` | `preview/layout.ts` |
@@ -259,6 +259,11 @@ App-defined WebSocket close codes: `4001` user-terminate (client→server: kill 
 
 Clipboard crosses the client/server boundary in two directions, both ending at `navigator.clipboard` — which is the **host** clipboard even when the uatu server runs in a container, because the browser is on the host. Paste reads it and forwards down the PTY (`clipboard.ts` shortcut handlers). Copy has two paths: xterm-owned selections go through the Windows-Terminal-parity shortcuts, while mouse-mode TUIs (Claude Code, opencode) emit OSC 52 up the PTY, which `client.ts` bridges via `term.parser.registerOscHandler(52, …)` → `createOsc52Handler` in `clipboard.ts`. The bridge is write-only by construction (read queries get no response — no exfiltration path), caps decoded payloads at 100 KB, and reports every accepted write through a pane-scoped toast in `panel.ts` so clipboard poisoning is always visible. Policy comes from `.uatu.json terminal.clipboard` (`notify` default / `confirm` / `silent` / `off`) and flows to the client through `/api/state.terminalConfig` like the font overrides. A gestureless `writeText` rejection (Firefox/Safari) promotes the toast to its Copy-button form, which performs the write inside the click.
 
+> **Upgrade hazard.** The terminal is constructed with `allowProposedApi: true`
+> because the search addon's decoration options are still proposed API in xterm
+> 6 — calling them without it throws rather than degrading. Proposed APIs can
+> shift across xterm minors, so read their changelog when bumping the dependency.
+
 ## Follow mode
 
 uatu is a single-mode app. There is no Author vs. Review distinction; the only behavioral toggle is **Follow**, surfaced as a switch in the sidebar header. The full contract is specified in `openspec/specs/follow-mode/spec.md`; the four rules are summarized in the State lifecycle section above.
@@ -275,6 +280,95 @@ uatu is a single-mode app. There is no Author vs. Review distinction; the only b
 | Sidebar panes available | Change Overview, Files, Git Log, Selection Inspector — all always available; toggle via the per-pane visibility menu |
 
 The `withProgrammaticUpdate(fn)` helper in `src/sidebar/tree-view.ts` is what makes Rule A reliable: it suppresses the `@pierre/trees` library's `onSelectionChange` callback during initial mount and `resetPaths`-driven refreshes so library-fired selections aren't mistaken for user clicks. That single helper is the root fix for the historical flake on `tests/e2e/preview-renderers.e2e.ts` (issue #45) and the `follow-mode auto-switch` test.
+
+## Find and the active surface
+
+⌘F is owned by the page, not the host. No engine — not Chrome, not
+`WKWebView.find` — can scope native find to a subtree, so a browser's ⌘F
+matches the tree, the git log, and the terminal scrollback alongside the
+document you were reading. Owning find is the only way to scope it, and it
+closes the desktop gap for free, since WKWebView ships no find bar at all.
+
+Routing is one line: **⌘F searches the active surface.**
+
+| Active surface | What ⌘F searches | Mechanism |
+|---|---|---|
+| `preview` | the current view's visible text | `find/` — text-node index + CSS Custom Highlight API |
+| `terminal` | the focused pane's scrollback | `@xterm/addon-search` |
+| `browser` | the split browser's page | native, in the macOS wrapper |
+
+`appState.activeSurface` is owned by `src/find/active-surface.ts` and is
+**deliberately not derived from `document.activeElement`**. Clicking a file in
+the tree leaves focus inside `@pierre/trees`' shadow root, so a literal focus
+rule would search the sidebar when the user has just declared interest in a
+document. Sidebar interaction therefore resolves to `preview` — directing the
+sidebar is an act about the document it is directing.
+
+The surface is written only by pointer and focus listeners, which is what makes
+follow mode inert: a file event (Rules C/D) changes the selection and the
+preview, but cannot move focus or relocate the user's working context. There is
+no code path from the watcher to the setter, and
+`find/active-surface.test.ts` asserts that structurally.
+
+The flat text the matcher sees keeps inline elements contiguous — that is what
+lets a query match across the `<span>`s syntax highlighting inserts — but breaks
+at block boundaries: `<p>foo</p><p>bar</p>` indexes as `foo\nbar`, never
+`foobar`, so a hit is never reported for text the reader does not see as one
+phrase. The separator is backed by no text node, and `locateSpan` refuses spans
+that cross the gap, so a regular expression cannot sneak across it either.
+
+One find bar serves both page surfaces via a pluggable engine (`find/engine.ts`);
+the xterm search addon happens to take the same three options and report the
+same index/total pair the preview matcher does. Highlighting never mutates the
+preview — it paints `Range`s through `CSS.highlights`, so rendered output,
+mermaid diagrams, anchors, and code-block decorations are untouched by
+searching. Because the preview is replaced wholesale on live reload, the
+preview engine holds no DOM references across a swap and re-indexes on a scoped
+`childList` observer.
+
+### Project search (⇧⌘F)
+
+⌘F is scoped to a surface; **⇧⌘F is not**. That asymmetry is deliberate and
+matches VS Code: the tree is not a surface you can be "in", so project search
+means the same thing pressed from the document, the terminal, or anywhere else.
+
+The corpus costs almost nothing to assemble. `getSession().getRoots()` already
+holds every watched document, ignore-filtered (`.gitignore` + `.uatu.json`),
+binary-classified, and kept current by the watcher — so `/api/search` reads that
+list and matches. There is no index to invalidate and no second walker whose
+ignore rules could drift from the tree's. Passing `allRoots=1` swaps in
+`getUnscopedRoots()`, which is the escape hatch for a scope narrowed so far that
+search would otherwise look broken.
+
+Results stream as NDJSON rather than arriving in one batch: on a docs tree the
+difference is invisible, but pointed at a repository it is the difference
+between a pane that fills and one that hangs. The sweep is bounded on three
+axes — minimum query length, a total match cap, and a per-document time budget
+so a slow pattern costs one skipped file instead of the sweep.
+
+Both budgets are checked *between* match attempts, never during one, because a
+single `RegExp.exec` is not interruptible from JavaScript. The honest bound is
+therefore "deadline plus one attempt". Measured on Bun's JavaScriptCore, runaway
+backtracking plateaus around 460 ms per attempt rather than growing without
+limit, so that overshoot is bounded in practice — but by the engine, not by us.
+
+Running the sweep in a terminable worker would make the bound ours, and was
+built and reverted: `bun build --compile` does not embed the worker module, so
+the guarantee held from source and silently fell back in the shipped binary. A
+guarantee that only applies in development is worse than a weaker one that
+applies everywhere. Every bound that trips is disclosed in the pane; a silently truncated
+list would read as "that is everywhere it appears", which is the wrong
+conclusion for a reviewer to draw.
+
+Activating a result routes through follow-mode Rule A — it is a user
+navigation — then reveals the match with `find/reveal.ts`, which reuses the find
+bar's own text index and highlight registry rather than growing a second
+painting path. The awkwardness worth knowing about: the corpus is **source**
+text while the reading surface is often **rendered**, and matches inside link
+syntax, heading markers, or code fences exist in the file but not in the
+rendered DOM. So the result lands in whatever view the reader is already using
+and falls back to Source only when the match cannot be found there — Source
+being where the searched text always exists.
 
 ## How to extend
 

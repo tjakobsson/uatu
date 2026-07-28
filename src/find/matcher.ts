@@ -1,0 +1,135 @@
+// Query → spans over the flattened text from `text-index.ts`.
+//
+// Pure string work: no DOM, no highlighting, no scrolling. Everything that
+// can go wrong with a user-supplied pattern is contained here — invalid
+// syntax, patterns that match nothing, patterns that match *everywhere*, and
+// patterns that can match the empty string and would otherwise enumerate
+// forever.
+
+import { buildMatchPattern, nextCodePointIndex } from "../shared/match-pattern";
+import type { TextSpan } from "./text-index";
+
+export type MatchOptions = {
+  caseSensitive: boolean;
+  wholeWord: boolean;
+  regex: boolean;
+};
+
+export const DEFAULT_MATCH_OPTIONS: MatchOptions = {
+  caseSensitive: false,
+  wholeWord: false,
+  regex: false,
+};
+
+// Above this, a highlight set stops being navigation and starts being a
+// second copy of the document. Callers disclose truncation rather than
+// presenting a capped list as complete.
+export const MATCH_CAP = 2000;
+
+export type MatchResult =
+  | { ok: true; spans: TextSpan[]; truncated: boolean }
+  | { ok: false; error: string };
+
+// Compilation — escaping, whole-word anchoring, Unicode boundaries — lives in
+// `shared/match-pattern.ts`, one definition for both find surfaces.
+export function buildPattern(query: string, options: MatchOptions): RegExp | { error: string } {
+  return buildMatchPattern(query, options);
+}
+
+// Enumerate every match of `query` in `text`.
+//
+// An empty query matches nothing rather than everything — an empty find box
+// should clear the highlight, not paint the document.
+//
+// This runs on the main thread, and a single catastrophic `RegExp.exec` —
+// `(a+)+$` against a long run of `a` — is not interruptible from JavaScript,
+// so a pathological user-typed pattern can stall the tab for the duration of
+// one attempt. That is the same residual the server sweep documents at
+// `SWEEP_DEADLINE_MS` and accepts deliberately: the interruptible-worker
+// alternative was built there and reverted, because `bun build --compile`
+// silently fails to embed worker modules and the shipped binary degraded to
+// exactly this behavior anyway — a bound that only holds in development is
+// worse than a documented one that holds everywhere. The author of the
+// pattern is the person whose tab it stalls, in a local tool; the caps below
+// bound everything that IS interruptible (match count, zero-width walks).
+export function findMatches(
+  text: string,
+  query: string,
+  options: MatchOptions = DEFAULT_MATCH_OPTIONS,
+  cap: number = MATCH_CAP,
+): MatchResult {
+  if (query.length === 0) {
+    return { ok: true, spans: [], truncated: false };
+  }
+
+  const pattern = buildPattern(query, options);
+  if ("error" in pattern) {
+    return { ok: false, error: pattern.error };
+  }
+
+  const spans: TextSpan[] = [];
+  let truncated = false;
+  let match = pattern.exec(text);
+  while (match !== null) {
+    const start = match.index;
+    const end = start + match[0].length;
+    if (end > start) {
+      spans.push({ start, end });
+      if (spans.length >= cap) {
+        truncated = pattern.exec(text) !== null;
+        break;
+      }
+    }
+    // A pattern that can match the empty string (`a*`, `(?:)`, `^`) leaves
+    // lastIndex where it was and would loop forever. Step past it — by a full
+    // code point, or a `u`-flagged pattern in front of an astral character
+    // would snap the index back and never progress. The match itself is
+    // dropped because a zero-width span cannot be highlighted or scrolled to.
+    if (end === start) {
+      pattern.lastIndex = nextCodePointIndex(text, start);
+      if (pattern.lastIndex > text.length) {
+        break;
+      }
+    }
+    match = pattern.exec(text);
+  }
+
+  return { ok: true, spans, truncated };
+}
+
+// The match to make current when the query changes, given where the reader
+// currently is. Keeps the viewport stable: retyping a query lands on the
+// first match at or after the previous position rather than jumping to the
+// top of the document.
+// The span nearest `offset`, preferring the one at or after it on a tie.
+//
+// This re-anchors the current match after a live reload. An edit *before*
+// the match shifts every later offset down, so "first span at or after the
+// old offset" would skip the reader's own match and land on the next
+// occurrence — or wrap to the top of the document. Offsets move a little
+// under nearby edits but the same occurrence stays the closest one, so
+// distance is the observable stand-in for occurrence identity.
+export function nearestSpan(spans: TextSpan[], offset: number): number {
+  let best = -1;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (let index = 0; index < spans.length; index += 1) {
+    const distance = Math.abs(spans[index]!.start - offset);
+    if (distance > bestDistance) {
+      // Spans are ordered; past the minimum, distances only grow.
+      break;
+    }
+    // `<=`, so of two equidistant spans the later one wins — the same
+    // at-or-after bias the previous re-anchoring had.
+    best = index;
+    bestDistance = distance;
+  }
+  return best;
+}
+
+// Step through matches with wrap-around at both ends.
+export function stepIndex(current: number, total: number, delta: number): number {
+  if (total <= 0) {
+    return -1;
+  }
+  return (((current + delta) % total) + total) % total;
+}

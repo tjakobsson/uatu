@@ -22,6 +22,7 @@ import type { createTerminalServer } from "../terminal/server";
 import { handleTerminalSessionsRoute } from "../terminal/sessions-route";
 import { findDocument, isReviewCompareTarget, isViewMode } from "../shared/types";
 import { renderDocument } from "./render-dispatch";
+import { buildSearchPattern, searchDocuments } from "./search";
 import { canSetFileScope, type WatchSession } from "./watch-session";
 
 // Bun.serve's idleTimeout. 0 = disabled: SSE connections and long-lived
@@ -220,6 +221,88 @@ export function buildRoutes(deps: BuildRoutesDeps) {
     },
     "/api/events": {
       GET: () => getSession().eventsResponse(),
+    },
+    "/api/search": {
+      // Content search across the watched roots. Streams NDJSON — one JSON
+      // object per line — rather than buffering the whole sweep: on a docs
+      // tree the difference is imperceptible, but pointed at a repository it
+      // is the difference between a pane that fills and one that hangs.
+      //
+      // The corpus is the session's own root groups, so `.gitignore`,
+      // `.uatu.json`, binary classification, and the active scope all apply
+      // without being reimplemented here.
+      GET: (request: Request) => {
+        const url = new URL(request.url);
+        const query = url.searchParams.get("q") ?? "";
+        const options = {
+          caseSensitive: url.searchParams.get("case") === "1",
+          wholeWord: url.searchParams.get("word") === "1",
+          regex: url.searchParams.get("regex") === "1",
+        };
+
+        // Reject an unusable pattern before starting a sweep, so the client
+        // gets a reportable error rather than an empty result set that looks
+        // like "no matches".
+        const pattern = buildSearchPattern(query, options);
+        if ("error" in pattern) {
+          return Response.json({ error: pattern.error }, { status: 400 });
+        }
+
+        // `allRoots` is the escape hatch for a scope narrowed so far that
+        // search would otherwise be useless — a single-file scope most of all.
+        const roots =
+          url.searchParams.get("allRoots") === "1"
+            ? getSession().getUnscopedRoots()
+            : getSession().getRoots();
+
+        // A superseded query aborts its fetch, but that alone only stops the
+        // browser-side consumer — a no-match sweep yields nothing until its
+        // final `done`, so without propagation it would keep reading and
+        // matching the whole corpus for a reader that is gone. The abort
+        // reaches us on two channels depending on timing — `request.signal`
+        // when the runtime notices the disconnect, stream `cancel` when the
+        // consumer stops reading — so both feed one controller the sweep
+        // watches.
+        const sweep = new AbortController();
+        const stopSweep = () => sweep.abort();
+        request.signal.addEventListener("abort", stopSweep, { once: true });
+
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream<Uint8Array>({
+          async start(controller) {
+            try {
+              for await (const event of searchDocuments(
+                roots,
+                query,
+                options,
+                undefined,
+                undefined,
+                sweep.signal,
+              )) {
+                controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+              }
+            } catch {
+              // A sweep that dies mid-flight closes the stream; the client
+              // reports what it received rather than hanging on more.
+            } finally {
+              request.signal.removeEventListener("abort", stopSweep);
+              try {
+                controller.close();
+              } catch {
+                // Already cancelled by the consumer.
+              }
+            }
+          },
+          cancel: stopSweep,
+        });
+
+        return new Response(stream, {
+          headers: {
+            "cache-control": "no-cache",
+            "content-type": "application/x-ndjson; charset=utf-8",
+          },
+        });
+      },
     },
     "/api/compare-target": {
       // Server-session view state shared across clients (mirrors /api/scope).

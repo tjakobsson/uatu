@@ -71,7 +71,7 @@ export function applyChipClick(): void {
 // fires for genuine user clicks — programmatic / library-mount callbacks are
 // suppressed at the TreeView's `duringProgrammaticUpdate` guard, so this
 // function does NOT need to re-check origin.
-export function applyUserRowClick(documentId: string): void {
+export function applyUserRowClick(documentId: string): Promise<void> {
   setFollowEnabled(false);
   setSelectedId(documentId);
   setPreviewMode({ kind: "document" });
@@ -82,7 +82,10 @@ export function applyUserRowClick(documentId: string): void {
   }
   syncFollowToggle();
   renderSidebar();
-  void loadDocument(documentId);
+  // Returns the load so callers that need to act on the mounted document —
+  // project search jumping to a match — can await it. Callers that don't
+  // simply ignore it, as the tree's selection handler does.
+  return loadDocument(documentId);
 }
 
 
