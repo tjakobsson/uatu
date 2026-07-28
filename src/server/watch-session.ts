@@ -292,6 +292,13 @@ export function createWatchSession(
     }
 
     if (scope.kind === "file" && absolutePath !== scope.documentId) {
+      // The pinned view ignores this path, but the *unscoped* corpus must
+      // not: "Search all roots" reads it, and without a refresh a file
+      // created outside the pin would be invisible there until the periodic
+      // reconcile. A null changedId keeps the scoped view quiet — the state
+      // fingerprint covers only visible roots, so nothing broadcasts unless
+      // something the clients can see actually changed.
+      scheduleRefresh(null);
       return;
     }
 

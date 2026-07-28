@@ -15,7 +15,7 @@ import {
   mergeResult,
   shouldDispatch,
 } from "./search-model";
-import { renderSidebar } from "./shell";
+import { renderSidebar, setSidebarCollapsed } from "./shell";
 import { persistPaneState } from "./panes";
 import { openSearchResult } from "./search-open";
 
@@ -65,6 +65,12 @@ let oversized: string[] = [];
 let abandoned = false;
 let patternError: string | null = null;
 let requestFailed = false;
+// The server ends every sweep with a `done` event. A stream that stops
+// without one was cut off — the server went away, the connection dropped —
+// and the rows on screen are however far it got, not the whole corpus.
+// Rendering them as a complete result set would be a quiet lie.
+let sawDone = false;
+let incomplete = false;
 let stale = false;
 let searchAllRoots = false;
 // Whether the rows currently on screen came from a widened sweep. Captured
@@ -104,6 +110,8 @@ async function runSearch(): Promise<void> {
   abandoned = false;
   patternError = null;
   requestFailed = false;
+  sawDone = false;
+  incomplete = false;
   stale = false;
   resultsFromAllRoots = searchAllRoots;
 
@@ -175,10 +183,13 @@ async function runSearch(): Promise<void> {
       render();
     }
   } catch {
-    // Stream died or was aborted; keep whatever arrived.
+    // Stream died or was aborted; keep whatever arrived. Whether that is a
+    // problem is decided below — an abort belongs to a superseding query and
+    // is not ours to report, while a still-current stream failure is.
   }
 
   if (!isCurrent(controller)) return;
+  incomplete = !sawDone;
   running = false;
   render();
 }
@@ -197,6 +208,7 @@ function consume(event: SearchEvent): void {
     case "done":
       truncated = event.truncated;
       abandoned = event.abandoned === true;
+      sawDone = true;
       return;
   }
 }
@@ -239,6 +251,10 @@ function renderNotice(): void {
   if (abandoned) {
     // Stopping early and saying nothing would read as "that is all there is".
     notes.push("Search stopped early — it was taking too long. Narrow the query.");
+  }
+  if (incomplete) {
+    // The stream ended without the server's `done` — cut off, not finished.
+    notes.push(`Search was interrupted — results may be incomplete. <button type="button" class="search-scope-action" data-search-rerun>Run again</button>`);
   }
   if (expensive.length > 0) {
     notes.push(
@@ -304,7 +320,8 @@ function renderResults(): void {
             // is what the reveal scans. Counting matched rows instead would be
             // wrong wherever a toggle excludes a literal occurrence — a
             // whole-word `cat` in `catapult cat` is match one but literal two.
-            ` data-match="${escapeHtmlAttribute(matchText)}" data-occurrence="${match.ordinal}">` +
+            ` data-match="${escapeHtmlAttribute(matchText)}" data-occurrence="${match.ordinal}"` +
+            ` data-total="${match.literalTotal}">` +
             `<span class="search-hit-line">${match.line}</span>` +
             `<span class="search-hit-text">${lead}${before}<mark>${hit}</mark>${after}${tail}</span>` +
             `</button>`
@@ -333,6 +350,10 @@ function toggleOption(key: keyof Toggles): void {
 // Other panes' persisted state is left alone — revealing search must not
 // rearrange the sidebar the user set up.
 export function openSearchPane(seed?: string): void {
+  // The whole sidebar first: collapsed, it is `display: none`, and expanding
+  // only the pane would focus an invisible input — the shortcut would look
+  // like it did nothing.
+  setSidebarCollapsed(false);
   const pane = appState.panes.search;
   if (!pane.visible || pane.collapsed) {
     pane.visible = true;
@@ -477,6 +498,7 @@ function activate(hit: HTMLElement): void {
     {
       matchText: hit.dataset.match ?? queryInput.value,
       occurrence: Number(hit.dataset.occurrence ?? 0),
+      sourceTotal: Number.isFinite(Number(hit.dataset.total)) ? Number(hit.dataset.total) : undefined,
       fromAllRoots: resultsFromAllRoots,
     },
   );

@@ -131,7 +131,7 @@ describe("searchDocuments", () => {
         documentId: "/abs/a.md",
         relativePath: "a.md",
         rootId: "/abs",
-        matches: [{ line: 2, text: "second needle here", start: 7, end: 13, ordinal: 0 }],
+        matches: [{ line: 2, text: "second needle here", start: 7, end: 13, ordinal: 0, literalTotal: 1 }],
       },
     ]);
   });
@@ -467,6 +467,17 @@ describe("literal ordinals", () => {
     const matches = fileResults(events)[0]!.matches;
     expect(matches).toHaveLength(1);
     expect(matches[0]!.ordinal).toBe(1);
+  });
+
+  test("every match carries the document's total literal occurrences", async () => {
+    // The reveal compares this total against what the rendered view holds —
+    // a mismatch means source ordinals do not map onto that view at all.
+    const events = await collect(roots(doc("a.md")), "cat", {
+      "/abs/a.md": "catapult cat\nconcatenate\n",
+    });
+    const matches = fileResults(events)[0]!.matches;
+    expect(matches).toHaveLength(3);
+    expect(matches.every(m => m.literalTotal === 3)).toBe(true);
   });
 });
 

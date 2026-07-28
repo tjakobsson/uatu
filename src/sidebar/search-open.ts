@@ -31,6 +31,11 @@ export type OpenOptions = {
   // from zero in source order. Without it every row for a repeated string
   // would reveal the first one.
   occurrence: number;
+  // Total literal occurrences of `matchText` in the source document. Lets the
+  // reveal verify that the view it lands in holds the same occurrences the
+  // source does — the only condition under which a source ordinal picks out
+  // the right one.
+  sourceTotal?: number;
   // Whether the result came from a search that deliberately ignored the
   // session scope.
   fromAllRoots: boolean;
@@ -63,20 +68,22 @@ export async function openSearchResult(
 
   // Try where the reader already is. Forcing Rendered would override a
   // deliberate global preference on every single result click.
-  if (revealExternalMatch(matchText, occurrence)) {
+  //
+  // `sourceTotal` makes the attempt honest: the ordinal is a *source* ordinal,
+  // and rendering can drop occurrences (a match inside a link URL exists in
+  // the file but not in the rendered DOM). If an earlier occurrence was the
+  // dropped one, ordinal n would land on a *different* visible occurrence and
+  // silently highlight the wrong place — so the reveal first checks that the
+  // view holds exactly as many occurrences as the source, and refuses when it
+  // does not. The refusal falls through to Source below, where the ordinal is
+  // exact because source is what was searched. An extra view flip when the
+  // counts diverge is the price of never lying about which hit was opened.
+  if (revealExternalMatch(matchText, occurrence, options?.sourceTotal)) {
     return;
   }
 
   // Not visible here — Source is where the searched text lives, and where the
-  // occurrence ordinal is exact, because source is what was searched.
-  //
-  // Known limitation: the ordinal is a *source* ordinal, and the rendered view
-  // can hold fewer occurrences (a link URL matched in source is not rendered as
-  // text). When it does, the ordinal overshoots what the rendered view offers
-  // and we fall back to Source even though the hit may have been visible.
-  // Landing on a different occurrence would be worse than an extra view flip,
-  // and identifying the right one needs a source-to-rendered position map the
-  // renderer does not emit.
+  // occurrence ordinal is exact.
   if (appState.viewMode !== "source") {
     // Observe before triggering: when the source payload is already cached,
     // `applyViewMode` swaps the preview synchronously, and an observer

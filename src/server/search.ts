@@ -79,6 +79,15 @@ export type SearchMatch = {
   // the reveal on the client scans literal occurrences, so it needs this
   // number rather than the match's position in the result list.
   ordinal: number;
+  // Total literal occurrences of the matched string in the whole document.
+  //
+  // The ordinal is a *source* ordinal; the client reveals against whatever
+  // view the reader is in, usually rendered. Rendering can drop occurrences
+  // (a match inside a link URL exists in source but not in the rendered DOM),
+  // and when it drops an *earlier* one, source ordinal n silently lands on a
+  // different rendered occurrence. Comparing this total against the count the
+  // client sees is how it knows whether the ordinals line up at all.
+  literalTotal: number;
 };
 
 export type SearchFileResult = {
@@ -311,6 +320,17 @@ export async function* searchDocuments(
     const matches: SearchMatch[] = [];
     const startedAt = deps.now();
     let expensive = false;
+    // One full-document scan per distinct matched string, not per match — for
+    // a literal query every hit shares one entry.
+    const literalTotals = new Map<string, number>();
+    const literalTotal = (text: string): number => {
+      let total = literalTotals.get(text);
+      if (total === undefined) {
+        total = literalOrdinal(contents, text, Number.POSITIVE_INFINITY);
+        literalTotals.set(text, total);
+      }
+      return total;
+    };
     const lines = contents.split("\n");
     // Absolute offset of the current line's start, so a match can be located
     // within the whole document rather than only within its line.
@@ -355,10 +375,12 @@ export async function* searchDocuments(
         break;
       }
       for (const hit of lineHits.matches) {
+        const matchedText = line.slice(hit.start, hit.end);
         matches.push({
           ...hit,
           line: index + 1,
-          ordinal: literalOrdinal(contents, line.slice(hit.start, hit.end), lineOffset + hit.start),
+          ordinal: literalOrdinal(contents, matchedText, lineOffset + hit.start),
+          literalTotal: literalTotal(matchedText),
         });
       }
       // +1 for the newline `split` consumed.

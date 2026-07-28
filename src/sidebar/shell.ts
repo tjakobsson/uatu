@@ -200,7 +200,10 @@ function readCollapsedPreference(): boolean {
   }
 }
 
-function setSidebarCollapsed(collapsed: boolean, options: { persist?: boolean } = {}) {
+// Exported for callers that reveal sidebar content programmatically — the
+// project-search shortcut must be able to un-collapse the whole sidebar, or
+// it would focus an input inside `display: none`.
+export function setSidebarCollapsed(collapsed: boolean, options: { persist?: boolean } = {}) {
   appShellElement.classList.toggle("is-sidebar-collapsed", collapsed);
   sidebarCollapseElement.setAttribute("aria-expanded", String(!collapsed));
   sidebarExpandElement.setAttribute("aria-expanded", String(!collapsed));

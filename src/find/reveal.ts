@@ -31,11 +31,23 @@ const previewShellElement: HTMLElement = previewShellElementMaybe;
 // in the rendered DOM, and the caller decides what to do about that. Nothing is
 // painted and nothing is scrolled in that case, so the reader is never left
 // staring at an arbitrary position.
-export function revealExternalMatch(text: string, occurrence = 0): boolean {
+//
+// `sourceTotal`, when given, is how many occurrences the *source* document
+// holds. The occurrence ordinal counts in source order, and it only maps onto
+// this view when the view holds every occurrence the source does. When
+// rendering dropped one — a match inside a link URL, say — the nth visible
+// occurrence is some *other* occurrence, and landing there would silently
+// highlight the wrong place. A count mismatch therefore refuses the reveal so
+// the caller falls back to Source, where the ordinal is exact.
+export function revealExternalMatch(text: string, occurrence = 0, sourceTotal?: number): boolean {
   if (text.length === 0) {
     return false;
   }
   const index = buildTextIndex(previewElement);
+  if (sourceTotal !== undefined && countOccurrences(index.text, text) !== sourceTotal) {
+    clearHighlights();
+    return false;
+  }
   const at = nthIndexOf(index.text, text, occurrence);
   if (at === -1) {
     clearHighlights();
@@ -67,6 +79,19 @@ function nthIndexOf(haystack: string, needle: string, n: number): number {
     at = haystack.indexOf(needle, at + needle.length);
   }
   return at;
+}
+
+// Non-overlapping, the same way `nthIndexOf` steps and the server sweep
+// counts — the comparison against `sourceTotal` is only meaningful when both
+// sides count identically.
+function countOccurrences(haystack: string, needle: string): number {
+  let count = 0;
+  let at = haystack.indexOf(needle);
+  while (at !== -1) {
+    count += 1;
+    at = haystack.indexOf(needle, at + needle.length);
+  }
+  return count;
 }
 
 export function clearExternalMatch(): void {
