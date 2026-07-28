@@ -286,6 +286,75 @@ describe("streaming", () => {
   });
 });
 
+describe("cancellation", () => {
+  test("an aborted sweep stops without a done event", async () => {
+    const docs = Array.from({ length: 20 }, (_, i) => doc(`f${i}.md`));
+    const files = Object.fromEntries(docs.map(d => [d.id, "needle\n"]));
+    const controller = new AbortController();
+    const events: SearchEvent[] = [];
+    for await (const event of searchDocuments(
+      roots(...docs),
+      "needle",
+      DEFAULT_SEARCH_OPTIONS,
+      depsFor(files),
+      undefined,
+      controller.signal,
+    )) {
+      events.push(event);
+      // The first hit supersedes the query, the way a pane abandoning its
+      // fetch does. The sweep must not go on to the other nineteen files.
+      controller.abort();
+    }
+    expect(events.length).toBe(1);
+    expect(events[0]!.kind).toBe("file");
+  });
+
+  test("a sweep aborted before it starts yields nothing", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const events: SearchEvent[] = [];
+    for await (const event of searchDocuments(
+      roots(doc("a.md")),
+      "needle",
+      DEFAULT_SEARCH_OPTIONS,
+      depsFor({ "/abs/a.md": "needle\n" }),
+      undefined,
+      controller.signal,
+    )) {
+      events.push(event);
+    }
+    expect(events).toEqual([]);
+  });
+});
+
+describe("CRLF line endings", () => {
+  test("line-anchored regex matches lines that end in CRLF", async () => {
+    const events = await collect(
+      roots(doc("a.md")),
+      "^heading$",
+      { "/abs/a.md": "heading\r\nbody\r\n" },
+      { regex: true },
+    );
+    const [result] = fileResults(events);
+    expect(result?.matches).toHaveLength(1);
+    expect(result?.matches[0]).toMatchObject({ line: 1, start: 0, end: 7, text: "heading" });
+  });
+
+  test("offsets and ordinals index the raw CRLF source", async () => {
+    // The second literal `needle` sits on line 3; the retained `\r` on the
+    // earlier lines must not shift where the ordinal scan looks.
+    const events = await collect(roots(doc("a.md")), "needle", {
+      "/abs/a.md": "needle first\r\nplain line\r\nthen needle again\r\n",
+    });
+    const [result] = fileResults(events);
+    expect(result?.matches.map(m => ({ line: m.line, ordinal: m.ordinal }))).toEqual([
+      { line: 1, ordinal: 0 },
+      { line: 3, ordinal: 1 },
+    ]);
+    expect(result?.matches.every(m => !m.text.includes("\r"))).toBe(true);
+  });
+});
+
 describe("sweep deadline", () => {
   // The per-document budget is checked between lines, so it cannot interrupt
   // backtracking inside a single match attempt. A whole-sweep deadline bounds

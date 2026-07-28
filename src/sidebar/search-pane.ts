@@ -67,6 +67,12 @@ let patternError: string | null = null;
 let requestFailed = false;
 let stale = false;
 let searchAllRoots = false;
+// Whether the rows currently on screen came from a widened sweep. Captured
+// when the request is dispatched, because `searchAllRoots` is the *toggle* and
+// can change while old rows are still visible — and both staleness checks and
+// row activation must describe the sweep that produced the rows, not the
+// toggle's present position.
+let resultsFromAllRoots = false;
 let debounceHandle: number | null = null;
 // Abandons an in-flight sweep when the query changes under it — without this a
 // slow search would keep streaming rows for a query the user has moved on from.
@@ -99,6 +105,7 @@ async function runSearch(): Promise<void> {
   patternError = null;
   requestFailed = false;
   stale = false;
+  resultsFromAllRoots = searchAllRoots;
 
   if (!shouldDispatch(query)) {
     running = false;
@@ -370,6 +377,14 @@ export function noteSearchCorpusChange(): void {
   if (results.length === 0 || stale) {
     return;
   }
+  // A widened sweep legitimately returns documents outside the scoped
+  // `appState.roots`, so membership there says nothing about deletion — every
+  // out-of-scope row would read as "deleted" on the next snapshot, however
+  // unrelated its cause. The unscoped corpus never reaches the client, so for
+  // these results deletion is undetectable; leave them as they are.
+  if (resultsFromAllRoots && appState.scope.kind === "file") {
+    return;
+  }
   const present = new Set<string>();
   for (const root of appState.roots) {
     for (const document of root.docs) {
@@ -455,7 +470,7 @@ function activate(hit: HTMLElement): void {
     {
       matchText: hit.dataset.match ?? queryInput.value,
       occurrence: Number(hit.dataset.occurrence ?? 0),
-      fromAllRoots: searchAllRoots,
+      fromAllRoots: resultsFromAllRoots,
     },
   );
 }

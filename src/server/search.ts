@@ -241,12 +241,17 @@ const defaultDeps: SearchDeps = {
 
 // Run the sweep, yielding each document's hits as they are found so the client
 // can render progressively rather than waiting on the whole tree.
+//
+// `signal` is the consumer saying "stop": a superseded query, a closed
+// connection. Once it fires there is nobody to report to, so the sweep returns
+// without a `done` event rather than sweeping the rest of the corpus for it.
 export async function* searchDocuments(
   roots: readonly RootGroup[],
   query: string,
   options: SearchOptions = DEFAULT_SEARCH_OPTIONS,
   deps: SearchDeps = defaultDeps,
   deadlineMs: number = SWEEP_DEADLINE_MS,
+  signal?: AbortSignal,
 ): AsyncGenerator<SearchEvent> {
   if (query.length < MIN_QUERY_LENGTH) {
     yield { kind: "done", truncated: false, filesSearched: 0, totalMatches: 0 };
@@ -268,6 +273,9 @@ export async function* searchDocuments(
   const sweepStartedAt = deps.now();
 
   for (const doc of searchableDocuments(roots)) {
+    if (signal?.aborted) {
+      return;
+    }
     if (totalMatches >= MAX_RESULTS) {
       truncated = true;
       break;
@@ -298,6 +306,9 @@ export async function* searchDocuments(
     let lineOffset = 0;
 
     for (let index = 0; index < lines.length; index += 1) {
+      if (signal?.aborted) {
+        return;
+      }
       const now = deps.now();
       if (now - startedAt > PER_DOCUMENT_BUDGET_MS) {
         expensive = true;
@@ -312,7 +323,13 @@ export async function* searchDocuments(
         truncated = true;
         break;
       }
-      const line = lines[index]!;
+      // In a CRLF document, `split("\n")` leaves the `\r` on every logical
+      // line, which sits between the last character and a `$` anchor. Match
+      // against the stripped line so regex behavior is independent of
+      // line-ending style; offsets index the raw source, so the accounting
+      // below keeps the CR.
+      const rawLine = lines[index]!;
+      const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
       const lineHits = matchLine(line, pattern, remaining);
       if (lineHits.more) {
         truncated = true;
@@ -325,7 +342,7 @@ export async function* searchDocuments(
         });
       }
       // +1 for the newline `split` consumed.
-      lineOffset += line.length + 1;
+      lineOffset += rawLine.length + 1;
     }
 
     if (expensive) {

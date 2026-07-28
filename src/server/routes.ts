@@ -255,20 +255,45 @@ export function buildRoutes(deps: BuildRoutesDeps) {
             ? getSession().getUnscopedRoots()
             : getSession().getRoots();
 
+        // A superseded query aborts its fetch, but that alone only stops the
+        // browser-side consumer — a no-match sweep yields nothing until its
+        // final `done`, so without propagation it would keep reading and
+        // matching the whole corpus for a reader that is gone. The abort
+        // reaches us on two channels depending on timing — `request.signal`
+        // when the runtime notices the disconnect, stream `cancel` when the
+        // consumer stops reading — so both feed one controller the sweep
+        // watches.
+        const sweep = new AbortController();
+        const stopSweep = () => sweep.abort();
+        request.signal.addEventListener("abort", stopSweep, { once: true });
+
         const encoder = new TextEncoder();
         const stream = new ReadableStream<Uint8Array>({
           async start(controller) {
             try {
-              for await (const event of searchDocuments(roots, query, options)) {
+              for await (const event of searchDocuments(
+                roots,
+                query,
+                options,
+                undefined,
+                undefined,
+                sweep.signal,
+              )) {
                 controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
               }
             } catch {
               // A sweep that dies mid-flight closes the stream; the client
               // reports what it received rather than hanging on more.
             } finally {
-              controller.close();
+              request.signal.removeEventListener("abort", stopSweep);
+              try {
+                controller.close();
+              } catch {
+                // Already cancelled by the consumer.
+              }
             }
           },
+          cancel: stopSweep,
         });
 
         return new Response(stream, {
