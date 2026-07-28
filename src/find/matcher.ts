@@ -40,6 +40,18 @@ export function buildPattern(query: string, options: MatchOptions): RegExp | { e
 //
 // An empty query matches nothing rather than everything — an empty find box
 // should clear the highlight, not paint the document.
+//
+// This runs on the main thread, and a single catastrophic `RegExp.exec` —
+// `(a+)+$` against a long run of `a` — is not interruptible from JavaScript,
+// so a pathological user-typed pattern can stall the tab for the duration of
+// one attempt. That is the same residual the server sweep documents at
+// `SWEEP_DEADLINE_MS` and accepts deliberately: the interruptible-worker
+// alternative was built there and reverted, because `bun build --compile`
+// silently fails to embed worker modules and the shipped binary degraded to
+// exactly this behavior anyway — a bound that only holds in development is
+// worse than a documented one that holds everywhere. The author of the
+// pattern is the person whose tab it stalls, in a local tool; the caps below
+// bound everything that IS interruptible (match count, zero-width walks).
 export function findMatches(
   text: string,
   query: string,
