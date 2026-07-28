@@ -51,9 +51,12 @@ progressive frost over the covered strip — blur-forward with a light tint,
 dissolving over an eased ramp below the inset — so content beneath the
 native chrome reads as blurred glass rather than raw content (the web view
 cannot render the system scroll-edge effect for chrome it does not know
-about). The frost SHALL NOT cover the sidebar column: the sidebar is
-inset-padded solid surface that never scrolls under the chrome, and
-frosting it only washes the brand mark.
+about). The frost SHALL only cover regions where scrolled content can flow
+under the chrome. Solid, non-scrolling app surfaces — the sidebar column
+and the right-docked terminal panel column — SHALL be excluded: they are
+inset-padded surfaces that never scroll under the chrome, and frosting
+them only washes the brand mark or smears the panel's opaque background
+into a gradient band across the toolbar.
 
 #### Scenario: Scrolled content under the titlebar reads as glass
 - **WHEN** dark or saturated document content scrolls into the covered strip
@@ -65,6 +68,12 @@ frosting it only washes the brand mark.
 - **THEN** the sidebar column, including the brand logo, renders without any
   frost overlay
 
+#### Scenario: The right-docked terminal column is not smeared
+- **WHEN** the terminal panel is docked right in the desktop wrapper
+- **THEN** the covered strip above the terminal column shows no blurred or
+  gradient-smeared rendering of the panel's dark surface, and the boundary
+  between the preview and terminal columns stays sharp under the toolbar
+
 ### Requirement: The split-browser pane honors the inset
 The in-app split browser pane SHALL position its tab strip below the covered
 titlebar region so its tabs and controls remain visible and clickable.
@@ -73,4 +82,30 @@ titlebar region so its tabs and controls remain visible and clickable.
 - **WHEN** the split browser is open in a window with a transparent titlebar
 - **THEN** the split pane's tab strip renders below the native chrome and its
   controls are clickable
+
+### Requirement: The right-docked terminal panel honors the inset
+When the inset marker is present and the terminal panel is docked right,
+the panel SHALL lay out its own chrome (the panel header and its controls)
+fully below the announced inset so nothing interactive sits under the
+native chrome, and the panel SHALL NOT paint its opaque surface into the
+covered strip. When the marker is absent (plain browser or PWA), the
+panel's layout MUST be unchanged.
+
+#### Scenario: Terminal header clears the native chrome
+- **WHEN** the terminal panel is docked right in the desktop wrapper with a
+  non-zero inset
+- **THEN** the panel header and its controls render fully below the native
+  toolbar and remain clickable
+
+#### Scenario: The strip above the terminal reads as window chrome
+- **WHEN** the terminal panel is docked right under the transparent titlebar
+- **THEN** the strip above the panel renders as clean window chrome —
+  consistent with the strip above the sidebar — not as the panel's
+  scrollback bleeding under the toolbar
+
+#### Scenario: Dock-bottom and non-desktop layouts unchanged
+- **WHEN** the terminal is docked at the bottom, or the SPA runs in a plain
+  browser or PWA
+- **THEN** the terminal panel's layout and background are unchanged from
+  pre-change behavior
 
