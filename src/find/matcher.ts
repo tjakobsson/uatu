@@ -6,7 +6,7 @@
 // patterns that can match the empty string and would otherwise enumerate
 // forever.
 
-import { buildMatchPattern } from "../shared/match-pattern";
+import { buildMatchPattern, nextCodePointIndex } from "../shared/match-pattern";
 import type { TextSpan } from "./text-index";
 
 export type MatchOptions = {
@@ -69,11 +69,12 @@ export function findMatches(
       }
     }
     // A pattern that can match the empty string (`a*`, `(?:)`, `^`) leaves
-    // lastIndex where it was and would loop forever. Step past it; the match
-    // itself is dropped because a zero-width span cannot be highlighted or
-    // scrolled to.
+    // lastIndex where it was and would loop forever. Step past it — by a full
+    // code point, or a `u`-flagged pattern in front of an astral character
+    // would snap the index back and never progress. The match itself is
+    // dropped because a zero-width span cannot be highlighted or scrolled to.
     if (end === start) {
-      pattern.lastIndex = start + 1;
+      pattern.lastIndex = nextCodePointIndex(text, start);
       if (pattern.lastIndex > text.length) {
         break;
       }

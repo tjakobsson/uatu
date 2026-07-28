@@ -10,7 +10,7 @@
 // syntax errors, patterns that match everywhere, patterns that can match the
 // empty string, and patterns that are simply too expensive to run.
 
-import { buildMatchPattern } from "../shared/match-pattern";
+import { buildMatchPattern, nextCodePointIndex } from "../shared/match-pattern";
 import type { DocumentMeta, RootGroup } from "../shared/types";
 
 export type SearchOptions = {
@@ -168,7 +168,10 @@ export function matchLine(
       if (outOfBudget?.()) {
         return { matches: found, more, interrupted: true };
       }
-      pattern.lastIndex = start + 1;
+      // A full code point, not one UTF-16 unit: a `u`-flagged pattern
+      // normalizes an index inside a surrogate pair back to the boundary,
+      // so stepping in front of an astral character would never progress.
+      pattern.lastIndex = nextCodePointIndex(line, start);
       if (pattern.lastIndex > line.length) {
         break;
       }

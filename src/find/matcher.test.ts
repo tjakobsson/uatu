@@ -109,6 +109,14 @@ describe("regex matching", () => {
     expect(result.ok && result.spans).toEqual([]);
   });
 
+  test("a zero-width u-flag pattern in front of an emoji terminates", () => {
+    // Whole-word patterns carry the `u` flag; stepping one UTF-16 unit into
+    // 😀's surrogate pair would be normalized back and never progress.
+    const result = findMatches("a 😀😀 b", "(?=😀)", options({ regex: true, wholeWord: true }));
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.spans).toEqual([]);
+  });
+
   test("case sensitivity applies to regex mode too", () => {
     expect(matched("Foo foo", "f.o", { regex: true, caseSensitive: true })).toEqual(["foo"]);
   });

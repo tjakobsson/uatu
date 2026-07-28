@@ -90,3 +90,16 @@ export function buildMatchPattern(
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : "invalid pattern";
 }
+
+// The index just past the code point at `index` — how far a zero-width match
+// must be stepped to guarantee progress.
+//
+// Both match loops step zero-width matches by writing `lastIndex` and calling
+// `exec` again. Under the `u` flag (which whole-word patterns carry), an index
+// placed inside a surrogate pair is normalized back to the code-point
+// boundary, so advancing by one UTF-16 unit in front of an astral character —
+// `(?=😀)` — re-delivers the same zero-width match forever.
+export function nextCodePointIndex(text: string, index: number): number {
+  const codePoint = text.codePointAt(index);
+  return index + (codePoint !== undefined && codePoint > 0xffff ? 2 : 1);
+}

@@ -119,6 +119,20 @@ describe("matchLine", () => {
     const result = matchLine("abc", pattern, 500, () => false);
     expect(result.interrupted).toBe(false);
   });
+
+  test("a zero-width u-flag walk in front of an emoji terminates", () => {
+    // Whole-word patterns carry the `u` flag, which normalizes a lastIndex
+    // placed inside 😀's surrogate pair back to the boundary — a one-unit
+    // step would re-deliver the same match forever.
+    const pattern = buildSearchPattern("(?=😀)", {
+      ...DEFAULT_SEARCH_OPTIONS,
+      regex: true,
+      wholeWord: true,
+    }) as RegExp;
+    const result = matchLine("a 😀😀 b", pattern, 500, () => false);
+    expect(result.matches).toEqual([]);
+    expect(result.interrupted).toBe(false);
+  });
 });
 
 describe("searchDocuments", () => {

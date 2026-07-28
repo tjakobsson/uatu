@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { buildMatchPattern, type MatchPatternOptions } from "./match-pattern";
+import { buildMatchPattern, nextCodePointIndex, type MatchPatternOptions } from "./match-pattern";
 
 const BASE: MatchPatternOptions = { caseSensitive: false, wholeWord: false, regex: false };
 
@@ -52,6 +52,14 @@ describe("whole word over regex sources", () => {
 
   test("regex whole-word is Unicode-aware", () => {
     expect(matchesIn("cafés café", "caf.", { wholeWord: true, regex: true })).toEqual(["café"]);
+  });
+});
+
+describe("nextCodePointIndex", () => {
+  test("steps one unit over BMP characters and two over astral ones", () => {
+    expect(nextCodePointIndex("ab", 0)).toBe(1);
+    expect(nextCodePointIndex("😀b", 0)).toBe(2);
+    expect(nextCodePointIndex("x", 5)).toBe(6);
   });
 });
 
