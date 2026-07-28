@@ -256,15 +256,9 @@ function renderResults(): void {
   }
   const html = results
     .map(result => {
-      // Which occurrence of the same text each row is, within this document.
-      // Several rows can share a matched string, and the reveal needs to know
-      // which one to land on — otherwise every row reveals the first.
-      const seen = new Map<string, number>();
       const rows = result.matches
         .map(match => {
           const matchText = match.text.slice(match.start, match.end);
-          const occurrence = seen.get(matchText) ?? 0;
-          seen.set(matchText, occurrence + 1);
           const line = displayLine(match.text, match.start, match.end);
           const before = escapeHtml(line.text.slice(0, line.start));
           const hit = escapeHtml(line.text.slice(line.start, line.end));
@@ -278,7 +272,11 @@ function renderResults(): void {
             // The literal slice that matched — for a regex this differs per
             // hit, so it cannot be re-derived from the query alone — plus which
             // occurrence of it this row is within the document.
-            ` data-match="${escapeHtmlAttribute(matchText)}" data-occurrence="${occurrence}">` +
+            // The ordinal counts *literal* occurrences before this one, which
+            // is what the reveal scans. Counting matched rows instead would be
+            // wrong wherever a toggle excludes a literal occurrence — a
+            // whole-word `cat` in `catapult cat` is match one but literal two.
+            ` data-match="${escapeHtmlAttribute(matchText)}" data-occurrence="${match.ordinal}">` +
             `<span class="search-hit-line">${match.line}</span>` +
             `<span class="search-hit-text">${lead}${before}<mark>${hit}</mark>${after}${tail}</span>` +
             `</button>`

@@ -57,7 +57,9 @@ describe("buildTextIndex", () => {
     const index = buildTextIndex(
       rootOf(`<p>before</p><script>secret</script><style>.x{}</style><p>after</p>`),
     );
-    expect(index.text).toBe("beforeafter");
+    // Paragraphs are separate blocks, so the two survivors are not contiguous.
+    expect(index.text).toBe("before\nafter");
+    expect(index.text).not.toContain("secret");
   });
 
   test("hidden subtrees are excluded", () => {
@@ -186,5 +188,45 @@ describe("shadow trees", () => {
   test("a document with no shadow trees reports none", () => {
     const index = buildTextIndex(rootOf(`<p>plain</p>`));
     expect(index.shadowRoots).toEqual([]);
+  });
+});
+
+describe("block boundaries", () => {
+  // Concatenating every text node makes visually separate blocks look like one
+  // phrase. A reader seeing two paragraphs would be shown a "match" spanning
+  // both, highlighted across a gap that is not there.
+  test("a match cannot span two paragraphs", () => {
+    const index = buildTextIndex(rootOf(`<p>foo</p><p>bar</p>`));
+    expect(index.text).toBe("foo\nbar");
+    expect(index.text).not.toContain("foobar");
+  });
+
+  test("inline elements stay contiguous — that is what makes highlighted code findable", () => {
+    const index = buildTextIndex(
+      rootOf(`<p><span class="hljs-keyword">const</span><span> foo</span></p>`),
+    );
+    expect(index.text).toBe("const foo");
+  });
+
+  test("list items are separate blocks", () => {
+    const index = buildTextIndex(rootOf(`<ul><li>one</li><li>two</li></ul>`));
+    expect(index.text.includes("onetwo")).toBe(false);
+  });
+
+  test("a line break separates text", () => {
+    const index = buildTextIndex(rootOf(`<p>foo<br>bar</p>`));
+    expect(index.text).toBe("foo\nbar");
+  });
+
+  test("a span that would cross a boundary resolves to nothing", () => {
+    const index = buildTextIndex(rootOf(`<p>foo</p><p>bar</p>`));
+    const start = index.text.indexOf("foo");
+    // "foo\nbar" — a span covering the newline has no backing text node there.
+    expect(locateSpan(index, { start, end: start + 7 })).toBeNull();
+  });
+
+  test("headings do not run into the paragraph after them", () => {
+    const index = buildTextIndex(rootOf(`<h2>Title</h2><p>Body</p>`));
+    expect(index.text).toBe("Title\nBody");
   });
 });

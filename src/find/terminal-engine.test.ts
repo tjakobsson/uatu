@@ -137,3 +137,28 @@ describe("terminal find engine", () => {
     expect(first.calls.filter(c => c.kind === "unsubscribe")).toHaveLength(1);
   });
 });
+
+describe("moving between panes", () => {
+  test("the pane being left is cleared, not just unsubscribed", () => {
+    // Otherwise a split keeps both panes highlighted, and closing the bar
+    // tidies only the one it happens to be pointed at.
+    const first = fakePane("first");
+    const second = fakePane("second");
+    let focused = first;
+    const engine = createTerminalEngine(() => focused.target, () => null);
+
+    engine.run("q", DEFAULT_MATCH_OPTIONS, { reveal: true });
+    focused = second;
+    engine.run("q", DEFAULT_MATCH_OPTIONS, { reveal: true });
+
+    expect(first.calls.some(c => c.kind === "clear")).toBe(true);
+  });
+
+  test("staying on one pane does not clear it between runs", () => {
+    const pane = fakePane("only");
+    const engine = createTerminalEngine(() => pane.target, () => null);
+    engine.run("q", DEFAULT_MATCH_OPTIONS, { reveal: true });
+    engine.run("qq", DEFAULT_MATCH_OPTIONS, { reveal: true });
+    expect(pane.calls.filter(c => c.kind === "clear")).toHaveLength(0);
+  });
+});

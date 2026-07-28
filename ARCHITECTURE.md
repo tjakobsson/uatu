@@ -310,6 +310,13 @@ preview, but cannot move focus or relocate the user's working context. There is
 no code path from the watcher to the setter, and
 `find/active-surface.test.ts` asserts that structurally.
 
+The flat text the matcher sees keeps inline elements contiguous — that is what
+lets a query match across the `<span>`s syntax highlighting inserts — but breaks
+at block boundaries: `<p>foo</p><p>bar</p>` indexes as `foo\nbar`, never
+`foobar`, so a hit is never reported for text the reader does not see as one
+phrase. The separator is backed by no text node, and `locateSpan` refuses spans
+that cross the gap, so a regular expression cannot sneak across it either.
+
 One find bar serves both page surfaces via a pluggable engine (`find/engine.ts`);
 the xterm search addon happens to take the same three options and report the
 same index/total pair the preview matcher does. Highlighting never mutates the

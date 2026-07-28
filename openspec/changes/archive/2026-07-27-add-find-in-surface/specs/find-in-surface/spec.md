@@ -106,6 +106,11 @@ markup rather than content.
 - **WHEN** the user searches for a string that appears only inside an element attribute, such as a class name
 - **THEN** no match is reported
 
+#### Scenario: A match may not span a block boundary
+
+- **WHEN** two adjacent paragraphs read `foo` and `bar`, and the user searches for `foobar`
+- **THEN** no match is reported, because that text is not contiguous on screen even though the two text nodes are adjacent in the tree
+
 ### Requirement: Find does not mutate the preview DOM
 
 Match highlighting SHALL be applied with the CSS Custom Highlight API over

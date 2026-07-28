@@ -18,6 +18,22 @@ const TEXT_NODE = 3;
 // Element names whose text is never reader-visible content.
 const SKIPPED_TAGS = new Set(["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT"]);
 
+// Elements that start a new visual block. Text either side of one is not
+// contiguous on screen, so a match must not span the boundary: `<p>foo</p>`
+// followed by `<p>bar</p>` reads as two paragraphs, and reporting a hit for
+// `foobar` would highlight something the reader cannot see as one phrase.
+//
+// Inline elements are deliberately absent — keeping them contiguous is the
+// whole point of walking text nodes, since that is what lets a query match
+// across the `<span>`s syntax highlighting inserts.
+const BLOCK_TAGS = new Set([
+  "ADDRESS", "ARTICLE", "ASIDE", "BLOCKQUOTE", "BR", "CAPTION", "DD", "DETAILS",
+  "DIALOG", "DIV", "DL", "DT", "FIELDSET", "FIGCAPTION", "FIGURE", "FOOTER",
+  "FORM", "H1", "H2", "H3", "H4", "H5", "H6", "HEADER", "HR", "LI", "MAIN",
+  "NAV", "OL", "P", "PRE", "SECTION", "SUMMARY", "TABLE", "TBODY", "TD",
+  "TFOOT", "TH", "THEAD", "TR", "UL",
+]);
+
 export type TextIndexEntry = {
   node: Text;
   // Half-open [start, end) in the flattened string.
@@ -96,6 +112,12 @@ export function buildTextIndex(root: Node): TextIndex {
       if (isSkippedElement(element)) {
         return;
       }
+      // A block boundary becomes a newline in the flat text, backed by no text
+      // node. `locateSpan` refuses spans that cross the resulting gap, so a
+      // match is never highlighted across a break the reader does not see.
+      if (BLOCK_TAGS.has(element.tagName) && text.length > 0 && !text.endsWith("\n")) {
+        text += "\n";
+      }
       // Walk the shadow tree in place of the host's light-DOM children when
       // one is attached: what the reader sees is the shadow content.
       const shadow = element.shadowRoot;
@@ -116,8 +138,9 @@ export function buildTextIndex(root: Node): TextIndex {
   return { text, entries, shadowRoots };
 }
 
-// The entry containing `offset` as a start boundary: `start <= offset < end`.
-function entryContaining(entries: TextIndexEntry[], offset: number): TextIndexEntry | null {
+// Index of the entry containing `offset` as a start boundary:
+// `start <= offset < end`.
+function indexContaining(entries: TextIndexEntry[], offset: number): number {
   let low = 0;
   let high = entries.length - 1;
   while (low <= high) {
@@ -128,17 +151,17 @@ function entryContaining(entries: TextIndexEntry[], offset: number): TextIndexEn
     } else if (offset >= entry.end) {
       low = mid + 1;
     } else {
-      return entry;
+      return mid;
     }
   }
-  return null;
+  return -1;
 }
 
-// The entry containing `offset` as an end boundary: `start < offset <= end`.
-// A match ending exactly on a node boundary belongs to the node it ended in,
-// not the one that happens to start there — otherwise the range would close
-// at offset 0 of the following node and render as zero-width.
-function entryEndingAt(entries: TextIndexEntry[], offset: number): TextIndexEntry | null {
+// Index of the entry containing `offset` as an end boundary:
+// `start < offset <= end`. A match ending exactly on a node boundary belongs to
+// the node it ended in, not the one that happens to start there — otherwise the
+// range would close at offset 0 of the following node and render as zero-width.
+function indexEndingAt(entries: TextIndexEntry[], offset: number): number {
   let low = 0;
   let high = entries.length - 1;
   while (low <= high) {
@@ -149,10 +172,10 @@ function entryEndingAt(entries: TextIndexEntry[], offset: number): TextIndexEntr
     } else if (offset > entry.end) {
       low = mid + 1;
     } else {
-      return entry;
+      return mid;
     }
   }
-  return null;
+  return -1;
 }
 
 // Map a span of the flattened string back to DOM positions. Returns null for
@@ -162,11 +185,23 @@ export function locateSpan(index: TextIndex, span: TextSpan): RangeDescriptor | 
   if (span.end <= span.start) {
     return null;
   }
-  const startEntry = entryContaining(index.entries, span.start);
-  const endEntry = entryEndingAt(index.entries, span.end);
-  if (!startEntry || !endEntry) {
+  const startIndex = indexContaining(index.entries, span.start);
+  const endIndex = indexEndingAt(index.entries, span.end);
+  if (startIndex === -1 || endIndex === -1) {
     return null;
   }
+  // Checking only the endpoints would let a span straddle a block boundary —
+  // the gap between entries is a separator with no text node behind it, and a
+  // regex can match across the newline it inserts. Every entry in between must
+  // be contiguous with its neighbour, or the span covers text the reader does
+  // not see as continuous.
+  for (let i = startIndex; i < endIndex; i += 1) {
+    if (index.entries[i]!.end !== index.entries[i + 1]!.start) {
+      return null;
+    }
+  }
+  const startEntry = index.entries[startIndex]!;
+  const endEntry = index.entries[endIndex]!;
   return {
     startNode: startEntry.node,
     startOffset: span.start - startEntry.start,

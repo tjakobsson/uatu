@@ -60,6 +60,15 @@ export type SearchMatch = {
   // Offsets of the match within `text`.
   start: number;
   end: number;
+  // How many literal occurrences of this exact matched string precede it in
+  // the document.
+  //
+  // Not the same as "which match this is": under whole-word or regex, literal
+  // occurrences exist that are not matches. A whole-word search for `cat` in
+  // `catapult cat` has one match, but it is the *second* literal `cat` — and
+  // the reveal on the client scans literal occurrences, so it needs this
+  // number rather than the match's position in the result list.
+  ordinal: number;
 };
 
 export type SearchFileResult = {
@@ -111,17 +120,22 @@ export function buildSearchPattern(
   }
 }
 
+// A hit within one line, before it is placed in the document. The line number
+// and the literal ordinal are added by the caller, which is the only place that
+// knows them.
+export type LineMatch = Pick<SearchMatch, "text" | "start" | "end">;
+
 // Match one line. Zero-width matches are dropped and stepped past — a pattern
 // that can match the empty string would otherwise enumerate forever.
-export function matchLine(line: string, pattern: RegExp, limit: number): SearchMatch[] {
-  const found: SearchMatch[] = [];
+export function matchLine(line: string, pattern: RegExp, limit: number): LineMatch[] {
+  const found: LineMatch[] = [];
   pattern.lastIndex = 0;
   let match = pattern.exec(line);
   while (match !== null && found.length < limit) {
     const start = match.index;
     const end = start + match[0].length;
     if (end > start) {
-      found.push({ line: 0, text: line, start, end });
+      found.push({ text: line, start, end });
     } else {
       pattern.lastIndex = start + 1;
       if (pattern.lastIndex > line.length) {
@@ -131,6 +145,22 @@ export function matchLine(line: string, pattern: RegExp, limit: number): SearchM
     match = pattern.exec(line);
   }
   return found;
+}
+
+// How many non-overlapping literal occurrences of `needle` appear in `haystack`
+// before `offset`. Counts the same way the client's reveal scans, which is what
+// makes the two agree.
+export function literalOrdinal(haystack: string, needle: string, offset: number): number {
+  if (needle.length === 0) {
+    return 0;
+  }
+  let count = 0;
+  let at = haystack.indexOf(needle);
+  while (at !== -1 && at < offset) {
+    count += 1;
+    at = haystack.indexOf(needle, at + needle.length);
+  }
+  return count;
 }
 
 // Every searchable document in tree order. Binaries carry no prose and would
@@ -215,6 +245,9 @@ export async function* searchDocuments(
     const startedAt = deps.now();
     let expensive = false;
     const lines = contents.split("\n");
+    // Absolute offset of the current line's start, so a match can be located
+    // within the whole document rather than only within its line.
+    let lineOffset = 0;
 
     for (let index = 0; index < lines.length; index += 1) {
       const now = deps.now();
@@ -233,8 +266,14 @@ export async function* searchDocuments(
       }
       const line = lines[index]!;
       for (const hit of matchLine(line, pattern, remaining)) {
-        matches.push({ ...hit, line: index + 1 });
+        matches.push({
+          ...hit,
+          line: index + 1,
+          ordinal: literalOrdinal(contents, line.slice(hit.start, hit.end), lineOffset + hit.start),
+        });
       }
+      // +1 for the newline `split` consumed.
+      lineOffset += line.length + 1;
     }
 
     if (expensive) {

@@ -28,7 +28,7 @@ function result(documentId: string, lines: number[]): SearchFileResult {
     documentId,
     relativePath: documentId,
     rootId: "/abs",
-    matches: lines.map(line => ({ line, text: "x", start: 0, end: 1 })),
+    matches: lines.map(line => ({ line, text: "x", start: 0, end: 1, ordinal: 0 })),
   };
 }
 

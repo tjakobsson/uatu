@@ -110,7 +110,7 @@ describe("searchDocuments", () => {
         documentId: "/abs/a.md",
         relativePath: "a.md",
         rootId: "/abs",
-        matches: [{ line: 2, text: "second needle here", start: 7, end: 13 }],
+        matches: [{ line: 2, text: "second needle here", start: 7, end: 13, ordinal: 0 }],
       },
     ]);
   });
@@ -307,5 +307,41 @@ describe("sweep deadline", () => {
     const events = await collect(roots(doc("a.md")), "needle", { "/abs/a.md": "needle\n" });
     const last = events.at(-1);
     expect(last?.kind === "done" && last.abandoned).toBeUndefined();
+  });
+});
+
+describe("literal ordinals", () => {
+  // The client's reveal scans *literal* occurrences, so the ordinal has to
+  // count those — not the match's position in the result list. Under
+  // whole-word or regex those two disagree, and the result lands on the wrong
+  // text with nothing to indicate it.
+  test("whole-word: the only match is the second literal occurrence", async () => {
+    const events = await collect(roots(doc("a.md")), "cat", { "/abs/a.md": "catapult cat\n" }, {
+      wholeWord: true,
+    });
+    const matches = fileResults(events)[0]!.matches;
+    expect(matches).toHaveLength(1);
+    expect(matches[0]!.ordinal).toBe(1);
+  });
+
+  test("literal search: ordinals run 0, 1, 2 in document order", async () => {
+    const events = await collect(roots(doc("a.md")), "cat", { "/abs/a.md": "cat\ncat\ncat\n" });
+    expect(fileResults(events)[0]!.matches.map(m => m.ordinal)).toEqual([0, 1, 2]);
+  });
+
+  test("ordinals count across lines, not within them", async () => {
+    const events = await collect(roots(doc("a.md")), "x", { "/abs/a.md": "xx\nx\n" }, {});
+    // Below the minimum query length — nothing to assert but termination.
+    expect(events.at(-1)?.kind).toBe("done");
+  });
+
+  test("a regex whose matches skip literal occurrences still lands right", async () => {
+    // `cat\d` matches only `cat9`, which is the second literal `cat`.
+    const events = await collect(roots(doc("a.md")), "cat(?=9)", { "/abs/a.md": "cat cat9\n" }, {
+      regex: true,
+    });
+    const matches = fileResults(events)[0]!.matches;
+    expect(matches).toHaveLength(1);
+    expect(matches[0]!.ordinal).toBe(1);
   });
 });

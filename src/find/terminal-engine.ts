@@ -34,6 +34,10 @@ export function createTerminalEngine(
     if (subscribed === target) {
       return target;
     }
+    // Clear the pane we are leaving, not just its subscription. Its decorations
+    // and selection survive otherwise, so a split ends up with both panes
+    // highlighted and closing the bar only tidies the current one.
+    subscribed?.clear();
     subscribed?.onResults(null);
     subscribed = target;
     subscribed?.onResults(({ index, total }) => {
