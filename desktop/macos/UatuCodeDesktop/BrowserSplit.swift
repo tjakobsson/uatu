@@ -228,8 +228,17 @@ final class BrowserSplit {
     /// because the browser had nothing would be worse than doing nothing.
     func openFind() {
         guard isOpen, selectedTab != nil else { return }
+        let wasOpen = findOpen
         findOpen = true
         findFocusToken += 1
+        // A dismissed bar keeps its query, but `closeFind` cleared the match
+        // selection — reopening would otherwise show a query with nothing
+        // selected until the user edits it. Rerun it on a fresh open only:
+        // ⌘F on an already-open bar re-focuses the field and must not jump
+        // the selection to the next match.
+        if !wasOpen, let tab = selectedTab, !tab.findQuery.isEmpty {
+            tab.find(backwards: false)
+        }
     }
 
     func closeFind() {

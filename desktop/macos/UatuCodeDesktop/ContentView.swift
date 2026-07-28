@@ -178,8 +178,12 @@ struct ContentView: View {
                     let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
                     // Escape closes the browser find bar. Unmodified, so it has
                     // to be handled before the ⌘-only guard below.
+                    // `ownsFindShortcut` rather than a bare `findBarFocused`:
+                    // it makes the host-window check, and every window installs
+                    // this monitor — without it, one window's focused find bar
+                    // would swallow an Escape pressed in another window.
                     if modifiers.isEmpty, event.keyCode == 53, split.findOpen,
-                       split.hasFocus(in: event.window) || split.findBarFocused {
+                       split.ownsFindShortcut(in: event.window) {
                         split.closeFind()
                         return nil
                     }
