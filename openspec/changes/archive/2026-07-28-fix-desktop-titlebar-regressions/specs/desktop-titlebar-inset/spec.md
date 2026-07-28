@@ -34,12 +34,12 @@ into a gradient band across the toolbar.
 ## ADDED Requirements
 
 ### Requirement: The right-docked terminal panel honors the inset
-When the inset marker is present and the terminal panel is docked right,
-the panel SHALL lay out its own chrome (the panel header and its controls)
-fully below the announced inset so nothing interactive sits under the
-native chrome, and the panel SHALL NOT paint its opaque surface into the
-covered strip. When the marker is absent (plain browser or PWA), the
-panel's layout MUST be unchanged.
+The right-docked terminal panel SHALL, when the inset marker is present,
+lay out its own chrome (the panel header and its controls) fully below
+the announced inset so nothing interactive sits under the native chrome,
+and it SHALL NOT paint its opaque surface into the covered strip. When
+the marker is absent (plain browser or PWA), the panel's layout MUST be
+unchanged.
 
 #### Scenario: Terminal header clears the native chrome
 - **WHEN** the terminal panel is docked right in the desktop wrapper with a
