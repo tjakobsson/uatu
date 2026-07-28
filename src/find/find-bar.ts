@@ -6,6 +6,7 @@
 // what keeps ⌘F feeling like one feature rather than two that share a key.
 
 import { appState } from "../shell/state";
+import { findDocument } from "../shared/types";
 import type { FindEngine } from "./engine";
 import { clampSeed, describeStatus } from "./find-status";
 import { supportsHighlights } from "./highlight";
@@ -281,5 +282,15 @@ export function initFindBar(): void {
 // Whether find should act on the preview at all. A binary notice or an empty
 // preview has nothing to search.
 export function previewIsSearchable(): boolean {
-  return appState.previewMode.kind !== "empty";
+  const mode = appState.previewMode.kind;
+  if (mode === "empty") {
+    return false;
+  }
+  if (mode !== "document") {
+    return true;
+  }
+  // A binary selection keeps `previewMode.kind` as "document" while rendering
+  // either an image or the "not viewable" notice — chrome, not document text.
+  // Opening a find bar over it would search nothing.
+  return findDocument(appState.roots, appState.selectedId)?.kind !== "binary";
 }

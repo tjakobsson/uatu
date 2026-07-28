@@ -72,6 +72,11 @@ let requestFailed = false;
 let sawDone = false;
 let incomplete = false;
 let stale = false;
+// Which result documents changed since the sweep — not just a pane-wide flag.
+// A changed file may still hold the same literal the same number of times
+// with everything moved, so the reveal's occurrence-count check cannot catch
+// it; activation consults this set to skip the reveal for those rows.
+let staleDocuments = new Set<string>();
 let searchAllRoots = false;
 // Whether the rows currently on screen came from a widened sweep. Captured
 // when the request is dispatched, because `searchAllRoots` is the *toggle* and
@@ -113,6 +118,7 @@ async function runSearch(): Promise<void> {
   sawDone = false;
   incomplete = false;
   stale = false;
+  staleDocuments = new Set();
   resultsFromAllRoots = searchAllRoots;
 
   if (!shouldDispatch(query)) {
@@ -386,7 +392,7 @@ export function syncSearchScope(): void {
 }
 
 export function markSearchResultsStale(changedId: string): void {
-  if (results.length === 0 || stale) {
+  if (results.length === 0) {
     return;
   }
   // Only a change to a document that actually appears in the results can
@@ -396,8 +402,13 @@ export function markSearchResultsStale(changedId: string): void {
   if (!results.some(result => result.documentId === changedId)) {
     return;
   }
-  stale = true;
-  renderNotice();
+  // Collected even once the notice is up: activation needs to know about
+  // every changed document, not only the first one.
+  staleDocuments.add(changedId);
+  if (!stale) {
+    stale = true;
+    renderNotice();
+  }
 }
 
 // A file with visible results was removed from the corpus.
@@ -498,10 +509,16 @@ function activate(hit: HTMLElement): void {
   if (!documentId || !Number.isFinite(line)) {
     return;
   }
+  // A row whose file changed since the sweep carries an ordinal captured
+  // from the old content. The same literal may still occur the same number
+  // of times with everything moved, so the reveal's count check cannot tell
+  // — highlighting ordinal n would land somewhere the row never pointed.
+  // Navigate without a reveal instead; the stale notice offers the re-run.
+  const documentStale = staleDocuments.has(documentId);
   void openSearchResult(
     { documentId, line, start, end, query: queryInput.value },
     {
-      matchText: hit.dataset.match ?? queryInput.value,
+      matchText: documentStale ? "" : hit.dataset.match ?? queryInput.value,
       occurrence: Number(hit.dataset.occurrence ?? 0),
       sourceTotal: Number.isFinite(Number(hit.dataset.total)) ? Number(hit.dataset.total) : undefined,
       fromAllRoots: resultsFromAllRoots,
