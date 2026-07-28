@@ -125,6 +125,16 @@ function scheduleRun(): void {
   }, SEARCH_DEBOUNCE_MS);
 }
 
+// The engine's target moved under an open bar — the terminal's active pane
+// switched, say. Engines resolve their target at call time, so re-running the
+// current query rebinds to the new target (clearing the old pane's highlights
+// and re-describing the counter) without touching the reading position.
+export function refreshFindTarget(label: string): void {
+  if (open && engine?.label === label) {
+    run(false);
+  }
+}
+
 export function step(delta: number): void {
   // An edit inside the debounce window has updated the input but not the
   // engine — stepping now would advance through matches of the old query.

@@ -225,6 +225,11 @@ export type StatePayload = {
   generatedAt: number;
   build: BuildSummary;
   scope: Scope;
+  // Opaque hash of the *unscoped* corpus (ids, paths, mtimes). In a scoped
+  // session the client never sees the unscoped roots, yet a widened search's
+  // results live there — comparing this across snapshots is the only way it
+  // can notice those documents changing.
+  unscopedFingerprint?: string;
   terminal?: TerminalAvailability;
   terminalConfig?: TerminalConfigPayload;
   monoConfig?: MonoConfigPayload;

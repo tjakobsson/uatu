@@ -5,6 +5,7 @@
 // through its named methods so persistence and refit happen consistently.
 
 import { mountTerminalPanel, type TerminalPanelHandle } from "./client";
+import { refreshFindTarget } from "../find/find-bar";
 import { registerTerminalFind } from "../find/shortcut";
 import { createTerminalEngine, type TerminalSearchTarget } from "../find/terminal-engine";
 import type { Osc52Notice } from "./clipboard";
@@ -356,6 +357,7 @@ export function setupTerminalPanel(
   }
 
   function setActivePane(id: string | null) {
+    const paneChanged = activePaneId !== id;
     activePaneId = id;
     let activeEntry: TerminalPaneEntry | null = null;
     for (const entry of panes.values()) {
@@ -365,6 +367,14 @@ export function setupTerminalPanel(
       } else {
         entry.element.removeAttribute("data-active");
       }
+    }
+    // With terminal find open, the engine is bound to the pane that was
+    // active — switching panes must rebind it now, or the old pane stays
+    // highlighted and the counter keeps describing it until the query is
+    // edited. The engine resolves its target at call time, so a re-run is
+    // the whole rebind.
+    if (paneChanged) {
+      refreshFindTarget("terminal");
     }
     // Move keyboard focus into the active pane's xterm so the user can
     // type immediately after a split, restore, or close. requestAnimationFrame

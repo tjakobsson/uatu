@@ -88,6 +88,10 @@ let resultsFromAllRoots = false;
 // A one-file sweep stops describing the session the moment the scope widens,
 // even though every row it produced still exists.
 let resultsScope: "file" | "folder" = "folder";
+// The unscoped-corpus fingerprint at dispatch. For a widened sweep this is
+// the only staleness signal there is: out-of-scope changes never carry a
+// `changedId` and their documents are invisible to `appState.roots`.
+let resultsUnscopedFingerprint: string | null = null;
 let debounceHandle: number | null = null;
 // Abandons an in-flight sweep when the query changes under it — without this a
 // slow search would keep streaming rows for a query the user has moved on from.
@@ -125,6 +129,7 @@ async function runSearch(): Promise<void> {
   staleDocuments = new Set();
   resultsFromAllRoots = searchAllRoots;
   resultsScope = appState.scope.kind === "file" ? "file" : "folder";
+  resultsUnscopedFingerprint = appState.unscopedFingerprint;
 
   if (!shouldDispatch(query)) {
     running = false;
@@ -411,8 +416,16 @@ export function syncSearchScope(): void {
   renderScope();
 }
 
+// Whether the pane is presenting a verdict a corpus change could falsify.
+// "No results" is a verdict too — an edit can introduce the query into a file
+// that had no hits — and so is an in-flight sweep that has not emitted its
+// first hit yet. Only a pane with nothing dispatched has nothing to go stale.
+function hasVerdict(): boolean {
+  return sawDone || running || results.length > 0;
+}
+
 export function markSearchResultsStale(changedId: string): void {
-  if (results.length === 0) {
+  if (!hasVerdict()) {
     return;
   }
   // Any change in the searched corpus invalidates the sweep, not only a
@@ -444,23 +457,35 @@ export function markSearchResultsStale(changedId: string): void {
 // never fires. Rows for a deleted file would otherwise sit there looking
 // current, and activating one navigates to a document that no longer exists.
 export function noteSearchCorpusChange(): void {
-  if (results.length === 0 || stale) {
+  if (stale || !hasVerdict()) {
     return;
   }
   // A one-file sweep stops describing the session the moment the scope
   // widens: every row it produced still exists, but the displayed count now
-  // silently excludes everything newly in scope.
+  // silently excludes everything newly in scope. (Applies to an empty
+  // verdict too — "No results" in one file says nothing about a folder.)
   if (resultsScope === "file" && !resultsFromAllRoots && appState.scope.kind === "folder") {
     stale = true;
     renderNotice();
     return;
   }
   // A widened sweep legitimately returns documents outside the scoped
-  // `appState.roots`, so membership there says nothing about deletion — every
-  // out-of-scope row would read as "deleted" on the next snapshot, however
-  // unrelated its cause. The unscoped corpus never reaches the client, so for
-  // these results deletion is undetectable; leave them as they are.
+  // `appState.roots`, so membership there says nothing about deletion. The
+  // unscoped corpus itself never reaches the client — but its fingerprint
+  // does, and a fingerprint change is the one signal that out-of-scope
+  // documents were added, edited, or deleted under these results.
   if (resultsFromAllRoots && appState.scope.kind === "file") {
+    if (
+      resultsUnscopedFingerprint !== null &&
+      appState.unscopedFingerprint !== null &&
+      appState.unscopedFingerprint !== resultsUnscopedFingerprint
+    ) {
+      stale = true;
+      renderNotice();
+    }
+    return;
+  }
+  if (results.length === 0) {
     return;
   }
   const present = new Set<string>();

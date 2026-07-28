@@ -54,11 +54,13 @@ export function createStatePayload(
   terminalConfig?: TerminalConfigPayload,
   monoConfig?: MonoConfigPayload,
   compareTarget: ReviewCompareTarget = DEFAULT_COMPARE_TARGET,
+  unscopedFingerprint?: string,
 ): StatePayload {
   return {
     roots,
     repositories,
     compareTarget,
+    ...(unscopedFingerprint === undefined ? {} : { unscopedFingerprint }),
     initialFollow,
     defaultDocumentId: defaultDocumentId(roots),
     changedId: changedId && hasDocument(roots, changedId) ? changedId : null,
@@ -170,6 +172,7 @@ export function createWatchSession(
   // (see design D4) instead of the request looking like a 404.
   let unscopedRoots: RootGroup[] = [];
   let stateFingerprint = "";
+  let unscopedFingerprint = "";
   let scope: Scope = { kind: "folder" };
   // Server-session compare target shared across all connected clients, exactly
   // like `scope`. Defaults to the reviewer's view; changed via setCompareTarget.
@@ -226,18 +229,27 @@ export function createWatchSession(
 
       const visibleRoots = applyScope(nextRoots);
       const nextFingerprint = createStateFingerprint(visibleRoots, nextRepositories, compareTarget);
+      const nextUnscopedFingerprint = hashCorpus(fingerprintRoots(nextRoots));
       const changedDoc = changedId ? findDocument(visibleRoots, changedId) : undefined;
       const changedDocumentId =
         changedDoc && changedDoc.kind !== "binary" ? changedId : null;
-      const shouldBroadcast = nextFingerprint !== stateFingerprint || changedDocumentId !== null;
+      // The unscoped fingerprint participates on its own: in a scoped
+      // session, an out-of-scope change alters neither the visible
+      // fingerprint nor `changedId`, yet a client holding widened search
+      // results needs to hear about it.
+      const shouldBroadcast =
+        nextFingerprint !== stateFingerprint
+        || changedDocumentId !== null
+        || nextUnscopedFingerprint !== unscopedFingerprint;
 
       roots = visibleRoots;
       unscopedRoots = nextRoots;
       repositories = nextRepositories;
       stateFingerprint = nextFingerprint;
+      unscopedFingerprint = nextUnscopedFingerprint;
 
       if (shouldBroadcast) {
-        broadcast(createStatePayload(roots, initialFollow, changedDocumentId, scope, repositories, terminalEnabled, terminalConfig, monoConfig, compareTarget));
+        broadcast(createStatePayload(roots, initialFollow, changedDocumentId, scope, repositories, terminalEnabled, terminalConfig, monoConfig, compareTarget, unscopedFingerprint));
       }
       metrics?.inc("refresh.completed_total");
       metrics?.set("refresh.last_success_at", Date.now());
@@ -387,6 +399,7 @@ export function createWatchSession(
       unscopedRoots = scanned;
       roots = applyScope(scanned);
       stateFingerprint = createStateFingerprint(roots, repositories, compareTarget);
+      unscopedFingerprint = hashCorpus(fingerprintRoots(scanned));
       reconcileTimer = setInterval(() => {
         metrics?.inc("reconcile.ticks_total");
         void refresh(null).catch(error => {
@@ -447,7 +460,7 @@ export function createWatchSession(
     },
     setScope,
     getStatePayload(changedId: string | null = null) {
-      return createStatePayload(roots, initialFollow, changedId, scope, repositories, terminalEnabled, terminalConfig, monoConfig, compareTarget);
+      return createStatePayload(roots, initialFollow, changedId, scope, repositories, terminalEnabled, terminalConfig, monoConfig, compareTarget, unscopedFingerprint);
     },
     eventsResponse() {
       let currentSubscriber: EventController | null = null;
@@ -456,7 +469,7 @@ export function createWatchSession(
         start(controller) {
           currentSubscriber = controller;
           subscribers.add(controller);
-          controller.enqueue(encoder.encode(`event: state\ndata: ${JSON.stringify(createStatePayload(roots, initialFollow, null, scope, repositories, terminalEnabled, terminalConfig, monoConfig, compareTarget))}\n\n`));
+          controller.enqueue(encoder.encode(`event: state\ndata: ${JSON.stringify(createStatePayload(roots, initialFollow, null, scope, repositories, terminalEnabled, terminalConfig, monoConfig, compareTarget, unscopedFingerprint))}\n\n`));
         },
         cancel() {
           if (currentSubscriber) {
@@ -487,6 +500,18 @@ export function createWatchSession(
       }
     }
   }
+}
+
+// Collapse a corpus fingerprint to a short opaque token. The full string
+// grows with the tree and travels in every SSE payload, so clients get a
+// hash to compare, never the corpus itself. djb2 is plenty: this is a
+// staleness hint, not an integrity check.
+function hashCorpus(input: string): string {
+  let hash = 5381;
+  for (let index = 0; index < input.length; index += 1) {
+    hash = ((hash << 5) + hash + input.charCodeAt(index)) | 0;
+  }
+  return (hash >>> 0).toString(36);
 }
 
 function fingerprintRoots(roots: RootGroup[]): string {

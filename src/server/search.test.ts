@@ -304,6 +304,21 @@ describe("bounds", () => {
     expect(doneEvent(events).truncated).toBe(false);
   });
 
+  test("deriving ordinals on one line is bounded by the budget", async () => {
+    // Ordinal/total derivation scans the document once per hit; on a
+    // single-line file there is no next line-top check to catch it.
+    let calls = 0;
+    const deps: SearchDeps = {
+      fileSize: async () => 100,
+      readFile: async () => "aa bb cc dd",
+      // Stay inside the budget through the line-top checks (first four
+      // readings), then blow it on the per-hit check.
+      now: () => ((calls += 1) <= 4 ? 0 : 1000),
+    };
+    const events = await collect(roots(doc("a.md")), "\\w+", {}, { regex: true }, deps);
+    expect(events.map(e => e.kind)).toEqual(["expensive", "done"]);
+  });
+
   test("a zero-width pattern on one long line is reported expensive", async () => {
     // All the outer budget checks sit between lines; a single-line file walks
     // its zero-width matches inside `matchLine`, so the interruption has to

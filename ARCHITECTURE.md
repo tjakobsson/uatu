@@ -186,7 +186,7 @@ Every `appState` field has exactly one owning module: direct assignment (`appSta
 |---|---|
 | `selectedId`, `previewMode` | `shell/selection.ts` |
 | `followEnabled` | `shell/follow.ts` (the four follow-mode rules) |
-| `roots`, `repositories`, `scope` | `shell/events.ts` (`applyServerSnapshot`) |
+| `roots`, `repositories`, `scope`, `unscopedFingerprint` | `shell/events.ts` (`applyServerSnapshot`) |
 | `staleHint` | `shell/stale-hint-mount.ts` |
 | `viewMode`, `wrap` | `preview/view-mode.ts` |
 | `viewLayout`, `splitRatio` | `preview/layout.ts` |

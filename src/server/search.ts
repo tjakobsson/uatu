@@ -357,6 +357,15 @@ export async function* searchDocuments(
         break;
       }
       for (const hit of lineHits.matches) {
+        // Deriving the ordinal and total scans the whole document per hit
+        // (memoized per distinct string for the total). Hundreds of hits on
+        // one long line can add work far past the line loop's last budget
+        // check — and a single-line file never reaches another one — so the
+        // budget applies here too.
+        if (deps.now() - startedAt > PER_DOCUMENT_BUDGET_MS) {
+          expensive = true;
+          break;
+        }
         const matchedText = line.slice(hit.start, hit.end);
         matches.push({
           ...hit,
@@ -364,6 +373,9 @@ export async function* searchDocuments(
           ordinal: literalOrdinal(contents, matchedText, lineOffset + hit.start),
           literalTotal: literalTotal(matchedText),
         });
+      }
+      if (expensive) {
+        break;
       }
       // +1 for the newline `split` consumed.
       lineOffset += rawLine.length + 1;

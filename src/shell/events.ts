@@ -32,10 +32,12 @@ export function applyServerSnapshot(payload: StatePayload): void {
   appState.roots = payload.roots;
   appState.repositories = payload.repositories ?? [];
   appState.scope = payload.scope;
+  appState.unscopedFingerprint = payload.unscopedFingerprint ?? null;
   // The Search pane names the scope in effect; it has to hear about changes.
   syncSearchScope();
   // And a document vanishing from the corpus invalidates results that point at
   // it — a deletion arrives with no `changedId`, so the change path misses it.
+  // (For widened results the fingerprint just stored is the signal instead.)
   noteSearchCorpusChange();
   // Title, favicon tint, and sidebar marker all derive from roots;
   // re-applying on every payload keeps them honest if roots change.

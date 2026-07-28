@@ -205,6 +205,11 @@ export const appState = {
   // or refresh action.
   staleHint: null as StaleHint | null,
   scope: { kind: "folder" } as Scope,
+  // Opaque hash of the unscoped corpus, from the server snapshot. The Search
+  // pane compares it across snapshots to notice out-of-scope documents
+  // changing under a widened ("Search all roots") result set — the only
+  // signal it gets, since those documents never appear in `roots`.
+  unscopedFingerprint: null as string | null,
   // Which surface find acts on. Set only from user interaction; file events
   // and programmatic selection must leave it alone.
   activeSurface: "preview" as ActiveSurface,
