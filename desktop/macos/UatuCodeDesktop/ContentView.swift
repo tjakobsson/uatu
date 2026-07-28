@@ -45,31 +45,39 @@ struct ContentView: View {
             case .starting:
                 ProgressView("Starting uatu…")
             case .running:
-                HStack(spacing: 0) {
-                    // The web view spans the full window frame — the page is
-                    // visible beneath the transparent titlebar and the glass
-                    // toolbar (set up in the WindowResolver below). The split
-                    // pane and divider stay inside the safe area, so their
-                    // chrome starts below the toolbar without extra padding.
-                    HostedWebView(host: web)
-                        .ignoresSafeArea(edges: .top)
-                    if split.isOpen {
-                        splitDivider
+                ZStack {
+                    HStack(spacing: 0) {
+                        // The web view spans the full window frame — the page is
+                        // visible beneath the transparent titlebar and the glass
+                        // toolbar (set up in the WindowResolver below). The split
+                        // pane and divider stay inside the safe area, so their
+                        // chrome starts below the toolbar without extra padding.
+                        HostedWebView(host: web)
                             .ignoresSafeArea(edges: .top)
-                        // The split pane also spans the full window height so
-                        // no dead band appears under the transparent titlebar;
-                        // its own chrome (tab strip, address bar) is padded
-                        // down by the covered height. The value comes from the
-                        // web host's contentLayoutRect observation — reading
-                        // safeAreaInsets via GeometryReader reports 0 once the
-                        // view ignores the safe area, so it can't be used.
-                        BrowserSplitView(split: split)
-                            .padding(.top, web.titlebarInset)
-                            .frame(maxHeight: .infinity)
-                            .background(.background)
-                            .ignoresSafeArea(edges: .top)
-                            .frame(width: splitWidth)
+                        if split.isOpen {
+                            splitDivider
+                                .ignoresSafeArea(edges: .top)
+                            // The split pane also spans the full window height so
+                            // no dead band appears under the transparent titlebar;
+                            // its own chrome (tab strip, address bar) is padded
+                            // down by the covered height. The value comes from the
+                            // web host's contentLayoutRect observation — reading
+                            // safeAreaInsets via GeometryReader reports 0 once the
+                            // view ignores the safe area, so it can't be used.
+                            BrowserSplitView(split: split)
+                                .padding(.top, web.titlebarInset)
+                                .frame(maxHeight: .infinity)
+                                .background(.background)
+                                .ignoresSafeArea(edges: .top)
+                                .frame(width: splitWidth)
+                        }
                     }
+                    // Full-frame overlay that hit-tests only the covered strip,
+                    // restoring titlebar dragging over the web view (see
+                    // TitlebarDragArea). Full-frame + internal hit-testing
+                    // sidesteps safe-area frame math entirely.
+                    TitlebarDragArea(inset: web.titlebarInset)
+                        .ignoresSafeArea(edges: .top)
                 }
             case .failed(let message):
                 ContentUnavailableView {

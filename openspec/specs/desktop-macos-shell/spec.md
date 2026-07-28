@@ -265,7 +265,9 @@ SHALL span the full window frame including the titlebar region, the titlebar
 SHALL be transparent with the window title hidden, and the toolbar controls
 (back/forward navigation, split-browser toggle) SHALL float over the content
 as system glass material so the page is visible beneath them. Window dragging
-via the titlebar region and toolbar interaction MUST keep working; page
+via the titlebar region and toolbar interaction MUST keep working at every
+horizontal position across the window — over the SPA web view (including a
+right-docked terminal column) and over the split-browser pane alike; page
 content in the covered strip is visible but not interactive, matching
 system-browser behavior.
 
@@ -279,6 +281,13 @@ system-browser behavior.
 - **WHEN** the user drags in the titlebar region above the content
 - **THEN** the window moves, and clicks on toolbar controls activate those
   controls, not the page beneath
+
+#### Scenario: Dragging works over the SPA side, not only the split pane
+- **WHEN** the user drags in the titlebar strip above the SPA web view —
+  including above the sidebar, the preview, and a right-docked terminal —
+  with or without the split browser open
+- **THEN** the window moves, exactly as it does when dragging above the
+  split-browser pane
 
 ### Requirement: Non-running states render correctly under the transparent titlebar
 The launcher, starting, and failure states SHALL render correctly with the
