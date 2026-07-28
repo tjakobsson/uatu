@@ -137,8 +137,13 @@ function refreshAfterContentChange(): void {
 }
 
 // The reader's current selection, if it lies inside the searched surface — a
-// selection elsewhere is not a statement about this search.
-function selectionSeed(): string {
+// selection elsewhere is not a statement about this search. Only the preview
+// engine searches the DOM the selection lives in; a preview selection says
+// nothing about a terminal search.
+function selectionSeed(target: FindEngine): string {
+  if (target !== previewEngine) {
+    return "";
+  }
   const selection = window.getSelection();
   if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
     return "";
@@ -165,7 +170,7 @@ export function openFindBar(target: FindEngine): void {
   engine.watch?.(refreshAfterContentChange);
   mountOn(engine);
 
-  const seed = selectionSeed();
+  const seed = selectionSeed(target);
   if (!open) {
     open = true;
     findBarElement.hidden = false;

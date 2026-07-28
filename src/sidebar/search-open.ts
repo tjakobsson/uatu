@@ -78,10 +78,13 @@ export async function openSearchResult(
   // and identifying the right one needs a source-to-rendered position map the
   // renderer does not emit.
   if (appState.viewMode !== "source") {
+    // Observe before triggering: when the source payload is already cached,
+    // `applyViewMode` swaps the preview synchronously, and an observer
+    // installed afterward would miss the mutation and sit out the full
+    // fallback timeout.
+    const mounted = nextMount();
     applyViewMode("source");
-    // `applyViewMode` remounts the preview asynchronously; wait for the swap
-    // before looking again.
-    await nextMount();
+    await mounted;
     revealExternalMatch(matchText, occurrence);
   }
 }

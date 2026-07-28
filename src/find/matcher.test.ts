@@ -69,6 +69,15 @@ describe("whole-word matching", () => {
   test("a fully non-word query is unaffected by the toggle", () => {
     expect(matched("a -> b -> c", "->", { wholeWord: true })).toHaveLength(2);
   });
+
+  test("a regex alternation is grouped before anchoring", () => {
+    // Ungrouped, `\bfoo|bar\b` would let `foo` match inside `foobar` and
+    // `bar` match inside `crowbar`.
+    expect(matched("foobar crowbar foo bar", "foo|bar", { wholeWord: true, regex: true })).toEqual([
+      "foo",
+      "bar",
+    ]);
+  });
 });
 
 describe("regex matching", () => {

@@ -113,11 +113,16 @@ function escapeLiteral(query: string): string {
 
 // Word boundaries only at edges that are themselves word characters — the same
 // rule the in-document matcher uses, so the two toggles mean the same thing on
-// both sides of the app.
-function applyWholeWord(source: string, query: string): string {
+// both sides of the app. A regex source must be grouped before anchoring, or
+// `\bfoo|bar\b` distributes the boundaries across the alternation.
+function applyWholeWord(source: string, query: string, group: boolean): string {
   const leading = /^\w/.test(query) ? "\\b" : "";
   const trailing = /\w$/.test(query) ? "\\b" : "";
-  return `${leading}${source}${trailing}`;
+  if (leading === "" && trailing === "") {
+    return source;
+  }
+  const body = group ? `(?:${source})` : source;
+  return `${leading}${body}${trailing}`;
 }
 
 export function buildSearchPattern(
@@ -125,7 +130,7 @@ export function buildSearchPattern(
   options: SearchOptions,
 ): RegExp | { error: string } {
   const base = options.regex ? query : escapeLiteral(query);
-  const source = options.wholeWord ? applyWholeWord(base, query) : base;
+  const source = options.wholeWord ? applyWholeWord(base, query, options.regex) : base;
   try {
     return new RegExp(source, options.caseSensitive ? "g" : "gi");
   } catch (error) {

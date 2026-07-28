@@ -203,6 +203,20 @@ describe("match options", () => {
     const built = buildSearchPattern("(unterminated", { ...DEFAULT_SEARCH_OPTIONS, regex: true });
     expect("error" in built).toBe(true);
   });
+
+  test("whole-word groups a regex alternation before anchoring", async () => {
+    // Ungrouped, `\bfoo|bar\b` would match `foo` inside `foobar` and `bar`
+    // inside `crowbar`.
+    const files = { "/abs/a.md": "foobar crowbar foo bar\n" };
+    const events = await collect(roots(doc("a.md")), "foo|bar", files, {
+      wholeWord: true,
+      regex: true,
+    });
+    expect(fileResults(events)[0]!.matches.map(m => m.text.slice(m.start, m.end))).toEqual([
+      "foo",
+      "bar",
+    ]);
+  });
 });
 
 describe("bounds", () => {

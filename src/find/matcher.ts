@@ -37,15 +37,22 @@ function escapeLiteral(query: string): string {
 // characters. `\bfoo(\b` never matches anything, because there is no boundary
 // between `(` and whatever follows — so anchoring unconditionally would make
 // whole-word silently break every punctuated query.
-function applyWholeWord(source: string, query: string): string {
+//
+// A regex source must be grouped before anchoring: `\bfoo|bar\b` distributes
+// the boundaries across the alternation, matching `foo` inside `foobar`.
+function applyWholeWord(source: string, query: string, group: boolean): string {
   const leading = /^\w/.test(query) ? "\\b" : "";
   const trailing = /\w$/.test(query) ? "\\b" : "";
-  return `${leading}${source}${trailing}`;
+  if (leading === "" && trailing === "") {
+    return source;
+  }
+  const body = group ? `(?:${source})` : source;
+  return `${leading}${body}${trailing}`;
 }
 
 export function buildPattern(query: string, options: MatchOptions): RegExp | { error: string } {
   const base = options.regex ? query : escapeLiteral(query);
-  const source = options.wholeWord ? applyWholeWord(base, query) : base;
+  const source = options.wholeWord ? applyWholeWord(base, query, options.regex) : base;
   const flags = options.caseSensitive ? "g" : "gi";
   try {
     return new RegExp(source, flags);
