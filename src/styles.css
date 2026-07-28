@@ -355,8 +355,37 @@ html.uatu-desktop-host .preview-shell {
   scroll-padding-top: calc(9rem + var(--titlebar-inset, 0px));
 }
 
+/* Margin, not padding: backgrounds paint through padding, so an inset-padded
+   panel fills the covered strip with its opaque surface and the frost above
+   smears it into a gradient band across the toolbar. With a margin the panel
+   starts below the strip and the strip shows the shell background — the same
+   reading as the strip above the sidebar. */
 html.uatu-desktop-host .terminal-panel[data-dock="right"] {
-  padding-top: var(--titlebar-inset, 0px);
+  margin-top: var(--titlebar-inset, 0px);
+}
+
+/* Fullscreen overlays the main stack from the window top regardless of dock,
+   so it needs the same strip clearance. */
+html.uatu-desktop-host .terminal-panel[data-display="fullscreen"] {
+  margin-top: var(--titlebar-inset, 0px);
+}
+
+/* Like the sidebar, the right-docked terminal is a solid non-scrolling
+   surface: nothing of it ever flows under the native chrome, so the frost
+   has nothing to frost there and only paints a visible blur seam at the
+   preview/terminal boundary. Cap the strip at the panel's left edge.
+   Fullscreen is excluded — there the panel spans the full width and the
+   strip above it shows only shell background, which the frost may cover. */
+html.uatu-desktop-host
+  body:has(.terminal-panel[data-dock="right"]:not([hidden]):not([data-display="fullscreen"]))::before {
+  right: var(--terminal-panel-width, 360px);
+}
+
+/* The minimized dock-right rail collapses to a fixed 36px strip; the width
+   variable still holds the expanded width, so the cap is pinned instead. */
+html.uatu-desktop-host
+  body:has(.terminal-panel[data-dock="right"][data-display="minimized"]:not([hidden]))::before {
+  right: 36px;
 }
 
 .sidebar-header {

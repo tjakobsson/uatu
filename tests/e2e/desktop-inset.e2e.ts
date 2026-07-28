@@ -85,6 +85,40 @@ test("with the marker, chrome clears the covered strip and content scrolls benea
   expect(scrolled.contentAbove).toBe(true);
 });
 
+test("the right-docked terminal clears the strip and caps the frost", async ({ page }) => {
+  await page.locator("#terminal-toggle").click();
+  await expect(page.locator("#terminal-panel")).toBeVisible();
+  await page.locator("#terminal-dock-toggle").click();
+  await expect(page.locator("#terminal-panel")).toHaveAttribute("data-dock", "right");
+
+  await applyInsetMarker(page, INSET);
+
+  const metrics = await page.evaluate(() => {
+    const panel = document.querySelector("#terminal-panel")!.getBoundingClientRect();
+    const frost = getComputedStyle(document.body, "::before");
+    return {
+      panelTop: panel.top,
+      panelLeft: panel.left,
+      frostRight: parseFloat(frost.right),
+      innerWidth: window.innerWidth,
+    };
+  });
+  // The panel's opaque surface starts below the covered strip. Margin, not
+  // padding: a padded panel still paints its background into the strip.
+  expect(metrics.panelTop).toBeGreaterThanOrEqual(INSET);
+  // The frost stops at the panel's left edge instead of smearing its dark
+  // surface into a gradient band across the covered strip.
+  expect(metrics.innerWidth - metrics.frostRight).toBeLessThanOrEqual(metrics.panelLeft + 1);
+
+  // The minimized rail is a fixed 36px strip; the cap follows it.
+  await page.locator("#terminal-minimize").click();
+  await expect(page.locator("#terminal-panel")).toHaveAttribute("data-display", "minimized");
+  const minimizedRight = await page.evaluate(
+    () => parseFloat(getComputedStyle(document.body, "::before").right),
+  );
+  expect(minimizedRight).toBeCloseTo(36, 0);
+});
+
 test("a live inset change (native tab bar) re-lays-out without reload", async ({ page }) => {
   await applyInsetMarker(page, INSET);
   const before = await chromeTops(page);
