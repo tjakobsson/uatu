@@ -13,7 +13,14 @@ export const MIN_QUERY_LENGTH = 2;
 // thing you can see.
 export const LINE_WINDOW = 120;
 
-export type SearchSummaryState = "idle" | "short" | "searching" | "results" | "empty" | "invalid";
+export type SearchSummaryState =
+  | "idle"
+  | "short"
+  | "searching"
+  | "results"
+  | "empty"
+  | "invalid"
+  | "failed";
 
 export type SearchSummary = {
   state: SearchSummaryState;
@@ -27,7 +34,14 @@ export function describeSearchSummary(input: {
   running: boolean;
   truncated: boolean;
   error: string | null;
+  failed?: boolean;
 }): SearchSummary {
+  // A request that never completed is not a bad pattern. Saying "Invalid
+  // pattern" when the server went away sends the reader to fix a query that
+  // was fine.
+  if (input.failed === true) {
+    return { state: "failed", label: "Search unavailable" };
+  }
   if (input.error !== null) {
     return { state: "invalid", label: "Invalid pattern" };
   }

@@ -585,6 +585,7 @@ h2 {
 }
 
 .search-summary[data-state="invalid"],
+.search-summary[data-state="failed"],
 .search-summary[data-state="empty"] {
   color: light-dark(#cf222e, #f85149);
 }

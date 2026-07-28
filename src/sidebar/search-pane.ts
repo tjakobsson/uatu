@@ -61,8 +61,10 @@ let results: SearchFileResult[] = [];
 let running = false;
 let truncated = false;
 let expensive: string[] = [];
+let oversized: string[] = [];
 let abandoned = false;
 let patternError: string | null = null;
+let requestFailed = false;
 let stale = false;
 let searchAllRoots = false;
 let debounceHandle: number | null = null;
@@ -92,8 +94,10 @@ async function runSearch(): Promise<void> {
   results = [];
   truncated = false;
   expensive = [];
+  oversized = [];
   abandoned = false;
   patternError = null;
+  requestFailed = false;
   stale = false;
 
   if (!shouldDispatch(query)) {
@@ -111,7 +115,15 @@ async function runSearch(): Promise<void> {
   try {
     response = await fetch(buildUrl(query), { signal: controller.signal });
   } catch {
-    // Aborted or offline; a newer query owns the pane now.
+    // An abort means a newer query owns the pane and will render for itself.
+    // Anything else is a real failure — the local server going away, most
+    // likely — and leaving `running` set would show "Searching…" for ever with
+    // no error and no way to retry.
+    if (isCurrent(controller)) {
+      running = false;
+      requestFailed = true;
+      render();
+    }
     return;
   }
 
@@ -172,6 +184,9 @@ function consume(event: SearchEvent): void {
     case "expensive":
       expensive.push(event.relativePath);
       return;
+    case "oversized":
+      oversized.push(event.relativePath);
+      return;
     case "done":
       truncated = event.truncated;
       abandoned = event.abandoned === true;
@@ -223,6 +238,11 @@ function renderNotice(): void {
       `Pattern too expensive for ${expensive.length} file${expensive.length === 1 ? "" : "s"}.`,
     );
   }
+  if (oversized.length > 0) {
+    notes.push(
+      `Skipped ${oversized.length} file${oversized.length === 1 ? "" : "s"} too large to search.`,
+    );
+  }
   if (stale) {
     notes.push(`Files changed since this search. <button type="button" class="search-scope-action" data-search-rerun>Run again</button>`);
   }
@@ -238,6 +258,7 @@ function render(): void {
     running,
     truncated,
     error: patternError,
+    failed: requestFailed,
   });
   summaryElement.textContent = summary.label;
   summaryElement.dataset.state = summary.state;

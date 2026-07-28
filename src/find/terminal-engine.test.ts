@@ -177,3 +177,21 @@ describe("availability", () => {
     expect(engine.isAvailable?.()).toBe(true);
   });
 });
+
+describe("target identity", () => {
+  test("stepping the same pane does not reset its search", () => {
+    // The engine treats a different target object as a pane switch, and moving
+    // panes clears the one being left. A resolver handing back a fresh wrapper
+    // each call would therefore clear and restart on every ⌘G, pinning Find
+    // Next to the first match.
+    const pane = fakePane("only");
+    const engine = createTerminalEngine(() => pane.target, () => null);
+
+    engine.run("q", DEFAULT_MATCH_OPTIONS, { reveal: true });
+    engine.step(1, "q", DEFAULT_MATCH_OPTIONS);
+    engine.step(1, "q", DEFAULT_MATCH_OPTIONS);
+
+    expect(pane.calls.filter(c => c.kind === "clear")).toHaveLength(0);
+    expect(pane.calls.filter(c => c.kind === "findNext")).toHaveLength(3);
+  });
+});

@@ -123,6 +123,16 @@ cannot bound it because that budget is also only checked between attempts.
 - **WHEN** the user has typed fewer characters than the minimum
 - **THEN** no search is dispatched and the pane invites a longer query
 
+#### Scenario: A file too large to read
+
+- **WHEN** a watched document exceeds the sweep's file-size limit
+- **THEN** it is skipped without being read, and the pane says how many files were skipped rather than omitting them silently
+
+#### Scenario: The request fails
+
+- **WHEN** a search request fails rather than completing
+- **THEN** the pane reports the search as unavailable and stops showing progress, rather than leaving an indefinite searching state or blaming the pattern
+
 #### Scenario: Pathological pattern
 
 - **WHEN** a regular expression exceeds the evaluation time bound on a document

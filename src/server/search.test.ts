@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   DEFAULT_SEARCH_OPTIONS,
+  MAX_FILE_BYTES,
   MAX_RESULTS,
   matchLine,
   searchDocuments,
@@ -31,6 +32,8 @@ function roots(...docs: ReturnType<typeof doc>[]): RootGroup[] {
 function depsFor(files: Record<string, string>, clock?: () => number): SearchDeps {
   return {
     readFile: async absolutePath => files[absolutePath] ?? null,
+    fileSize: async absolutePath =>
+      files[absolutePath] === undefined ? null : files[absolutePath]!.length,
     now: clock ?? (() => 0),
   };
 }
@@ -139,6 +142,7 @@ describe("searchDocuments", () => {
         read.push(path);
         return "match";
       },
+      fileSize: async () => 5,
       now: () => 0,
     };
     await collect(roots(doc("a.md"), doc("logo.png", "binary")), "match", {}, {}, deps);
@@ -152,6 +156,7 @@ describe("searchDocuments", () => {
         read.push(path);
         return "a";
       },
+      fileSize: async () => 1,
       now: () => 0,
     };
     const events = await collect(roots(doc("a.md")), "a", {}, {}, deps);  // 1 char
@@ -216,6 +221,7 @@ describe("bounds", () => {
         read.push(path);
         return "xy\n".repeat(MAX_RESULTS + 10);
       },
+      fileSize: async () => 100,
       now: () => 0,
     };
     await collect(roots(doc("a.md"), doc("b.md")), "xy", {}, {}, deps);
@@ -231,6 +237,7 @@ describe("bounds", () => {
     let readingSlow = false;
     let callsSinceRead = 0;
     const deps: SearchDeps = {
+      fileSize: async () => 10,
       readFile: async path => {
         readingSlow = path === "/abs/slow.md";
         callsSinceRead = 0;
@@ -275,6 +282,7 @@ describe("sweep deadline", () => {
     let clock = 0;
     const deps: SearchDeps = {
       readFile: async path => files[path] ?? null,
+      fileSize: async () => 10,
       // 50ms per reading. Four readings per document keeps each one inside
       // the 250ms per-document budget, so only the 10s sweep deadline fires —
       // which is the bound under test.
@@ -296,6 +304,7 @@ describe("sweep deadline", () => {
     let clock = 0;
     const deps: SearchDeps = {
       readFile: async path => files[path] ?? null,
+      fileSize: async () => 10,
       now: () => (clock += 50),
     };
     const events: SearchEvent[] = [];
@@ -370,5 +379,43 @@ describe("truncation within a single line", () => {
     const line = "xy".repeat(3);
     const events = await collect(roots(doc("a.md")), "xy", { "/abs/a.md": line }, {}, undefined);
     expect(doneEvent(events).truncated).toBe(false);
+  });
+});
+
+describe("oversized files", () => {
+  // Reading happens before any budget can be checked, so a huge generated file
+  // costs its full read no matter what the deadline says.
+  test("a file past the byte cap is never read", async () => {
+    const read: string[] = [];
+    const deps: SearchDeps = {
+      fileSize: async path => (path === "/abs/huge.md" ? MAX_FILE_BYTES + 1 : 10),
+      readFile: async path => {
+        read.push(path);
+        return "needle\n";
+      },
+      now: () => 0,
+    };
+    await collect(roots(doc("huge.md"), doc("small.md")), "needle", {}, {}, deps);
+    expect(read).toEqual(["/abs/small.md"]);
+  });
+
+  test("skipping is disclosed, not silent", async () => {
+    const deps: SearchDeps = {
+      fileSize: async () => MAX_FILE_BYTES + 1,
+      readFile: async () => "needle\n",
+      now: () => 0,
+    };
+    const events = await collect(roots(doc("huge.md")), "needle", {}, {}, deps);
+    expect(events.some(e => e.kind === "oversized" && e.relativePath === "huge.md")).toBe(true);
+  });
+
+  test("a file at the cap is still searched", async () => {
+    const deps: SearchDeps = {
+      fileSize: async () => MAX_FILE_BYTES,
+      readFile: async () => "needle\n",
+      now: () => 0,
+    };
+    const events = await collect(roots(doc("edge.md")), "needle", {}, {}, deps);
+    expect(fileResults(events)).toHaveLength(1);
   });
 });

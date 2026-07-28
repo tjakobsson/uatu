@@ -146,3 +146,19 @@ describe("countMatches", () => {
     expect(countMatches([])).toBe(0);
   });
 });
+
+describe("request failure", () => {
+  test("a failed request is not reported as a bad pattern", () => {
+    // Saying "Invalid pattern" when the server went away sends the reader off
+    // to fix a query that was fine.
+    expect(summary({ failed: true })).toEqual({ state: "failed", label: "Search unavailable" });
+  });
+
+  test("failure outranks an invalid pattern — the request never got that far", () => {
+    expect(summary({ failed: true, error: "bad" }).state).toBe("failed");
+  });
+
+  test("a healthy request is unaffected", () => {
+    expect(summary({ files: 1, matches: 1, failed: false }).state).toBe("results");
+  });
+});

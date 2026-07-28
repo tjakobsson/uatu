@@ -37,6 +37,16 @@ export const MAX_RESULTS = 500;
 // than a hung server.
 export const PER_DOCUMENT_BUDGET_MS = 250;
 
+// Largest file the sweep will read.
+//
+// Reading happens before any budget can be checked, and `split("\n")` then
+// allocates a second copy — so a single generated file, minified bundle, or
+// long log can cost far more than the sweep deadline suggests, in memory as
+// well as time. Files past this are skipped and disclosed rather than silently
+// dropped. (`document/diff.ts` bounds itself the same way, for the same
+// reason.)
+export const MAX_FILE_BYTES = 2_000_000;
+
 // How long a whole sweep may run before it is abandoned.
 //
 // Checked between match attempts, never during one: a single `RegExp.exec` is
@@ -84,6 +94,9 @@ export type SearchEvent =
   // sweep continues; the pane reports the pattern as too expensive rather
   // than pretending the file had no matches.
   | { kind: "expensive"; relativePath: string }
+  // A document too large to read within the sweep's means. Skipped, and said
+  // out loud — silently omitting a file makes the results a quiet lie.
+  | { kind: "oversized"; relativePath: string }
   | {
       kind: "done";
       truncated: boolean;
@@ -195,10 +208,20 @@ export function searchableDocuments(roots: readonly RootGroup[]): DocumentMeta[]
 export type SearchDeps = {
   // Injected so the sweep can be tested without touching the filesystem.
   readFile: (absolutePath: string) => Promise<string | null>;
+  // Size in bytes, or null when the file is unreadable. Consulted before the
+  // read so an oversized file is never loaded at all.
+  fileSize: (absolutePath: string) => Promise<number | null>;
   now: () => number;
 };
 
 const defaultDeps: SearchDeps = {
+  fileSize: async absolutePath => {
+    try {
+      return Bun.file(absolutePath).size;
+    } catch {
+      return null;
+    }
+  },
   readFile: async absolutePath => {
     try {
       return await Bun.file(absolutePath).text();
@@ -247,6 +270,12 @@ export async function* searchDocuments(
     if (deps.now() - sweepStartedAt > deadlineMs) {
       abandoned = true;
       break;
+    }
+
+    const size = await deps.fileSize(doc.id);
+    if (size !== null && size > MAX_FILE_BYTES) {
+      yield { kind: "oversized", relativePath: doc.relativePath };
+      continue;
     }
 
     const contents = await deps.readFile(doc.id);
