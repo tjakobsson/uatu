@@ -12,7 +12,7 @@ import {
   revealRange,
 } from "./highlight";
 import type { FindEngine, FindOutcome } from "./engine";
-import { findMatches, firstSpanAtOrAfter, stepIndex, type MatchOptions } from "./matcher";
+import { findMatches, nearestSpan, stepIndex, type MatchOptions } from "./matcher";
 import { buildTextIndex, locateSpan, toRange, type TextSpan } from "./text-index";
 
 export function createPreviewEngine(
@@ -78,7 +78,7 @@ export function createPreviewEngine(
           ranges.push(toRange(located, previewElement.ownerDocument));
         }
       }
-      currentIndex = spans.length === 0 ? -1 : firstSpanAtOrAfter(spans, anchor ?? 0);
+      currentIndex = spans.length === 0 ? -1 : nearestSpan(spans, anchor ?? 0);
       paint(opts.reveal);
       emit(null);
     },

@@ -43,7 +43,8 @@ export function revealExternalMatch(text: string, occurrence = 0, sourceTotal?: 
   if (text.length === 0) {
     return false;
   }
-  const index = buildTextIndex(previewElement);
+  const root = revealRoot();
+  const index = buildTextIndex(root);
   if (sourceTotal !== undefined && countOccurrences(index.text, text) !== sourceTotal) {
     clearHighlights();
     return false;
@@ -59,7 +60,7 @@ export function revealExternalMatch(text: string, occurrence = 0, sourceTotal?: 
     return false;
   }
   ensureShadowHighlightStyles(index.shadowRoots);
-  const range = toRange(located, previewElement.ownerDocument);
+  const range = toRange(located, root.ownerDocument);
   // Painted as the current match: there is exactly one, and it is the one the
   // reader asked for.
   paintMatches([range], 0);
@@ -68,6 +69,17 @@ export function revealExternalMatch(text: string, occurrence = 0, sourceTotal?: 
   // to read, not to go back to the sidebar for arrow keys.
   previewShellElement.focus({ preventScroll: true });
   return true;
+}
+
+// The subtree the reveal verifies and lands in.
+//
+// In a split layout both the Source and Rendered panes are children of
+// `#preview`, so indexing the whole element counts ordinary prose twice —
+// every occurrence check against the source document's total would fail.
+// The source pane alone holds exactly the searched text, so it is the one
+// pane whose ordinals the sweep's numbers are guaranteed to describe.
+function revealRoot(): HTMLElement {
+  return previewElement.querySelector<HTMLElement>(".preview-pane-source") ?? previewElement;
 }
 
 // The offset of the `n`th occurrence (0-based), or -1 when there are fewer

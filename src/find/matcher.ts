@@ -88,13 +88,29 @@ export function findMatches(
 // currently is. Keeps the viewport stable: retyping a query lands on the
 // first match at or after the previous position rather than jumping to the
 // top of the document.
-export function firstSpanAtOrAfter(spans: TextSpan[], offset: number): number {
+// The span nearest `offset`, preferring the one at or after it on a tie.
+//
+// This re-anchors the current match after a live reload. An edit *before*
+// the match shifts every later offset down, so "first span at or after the
+// old offset" would skip the reader's own match and land on the next
+// occurrence — or wrap to the top of the document. Offsets move a little
+// under nearby edits but the same occurrence stays the closest one, so
+// distance is the observable stand-in for occurrence identity.
+export function nearestSpan(spans: TextSpan[], offset: number): number {
+  let best = -1;
+  let bestDistance = Number.POSITIVE_INFINITY;
   for (let index = 0; index < spans.length; index += 1) {
-    if (spans[index]!.start >= offset) {
-      return index;
+    const distance = Math.abs(spans[index]!.start - offset);
+    if (distance > bestDistance) {
+      // Spans are ordered; past the minimum, distances only grow.
+      break;
     }
+    // `<=`, so of two equidistant spans the later one wins — the same
+    // at-or-after bias the previous re-anchoring had.
+    best = index;
+    bestDistance = distance;
   }
-  return spans.length > 0 ? 0 : -1;
+  return best;
 }
 
 // Step through matches with wrap-around at both ends.

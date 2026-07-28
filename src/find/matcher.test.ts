@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   DEFAULT_MATCH_OPTIONS,
   findMatches,
-  firstSpanAtOrAfter,
+  nearestSpan,
   stepIndex,
   type MatchOptions,
 } from "./matcher";
@@ -133,25 +133,31 @@ describe("match cap", () => {
   });
 });
 
-describe("firstSpanAtOrAfter", () => {
+describe("nearestSpan", () => {
   const spans = [
     { start: 5, end: 8 },
     { start: 20, end: 23 },
     { start: 40, end: 43 },
   ];
 
-  test("lands on the first match at or after the reader's position", () => {
-    expect(firstSpanAtOrAfter(spans, 0)).toBe(0);
-    expect(firstSpanAtOrAfter(spans, 6)).toBe(1);
-    expect(firstSpanAtOrAfter(spans, 20)).toBe(1);
+  test("lands on the span nearest the reader's position", () => {
+    expect(nearestSpan(spans, 0)).toBe(0);
+    expect(nearestSpan(spans, 20)).toBe(1);
+    expect(nearestSpan(spans, 100)).toBe(2);
   });
 
-  test("wraps to the first match when the position is past the last one", () => {
-    expect(firstSpanAtOrAfter(spans, 100)).toBe(0);
+  test("an edit before the match does not skip past it", () => {
+    // The reader's match was at 22 before a deletion shifted it to 20. The
+    // old at-or-after rule would skip it and jump to the next occurrence.
+    expect(nearestSpan(spans, 22)).toBe(1);
+  });
+
+  test("prefers the later span when equidistant", () => {
+    expect(nearestSpan([{ start: 10, end: 12 }, { start: 30, end: 32 }], 20)).toBe(1);
   });
 
   test("reports nothing for an empty set", () => {
-    expect(firstSpanAtOrAfter([], 0)).toBe(-1);
+    expect(nearestSpan([], 0)).toBe(-1);
   });
 });
 
