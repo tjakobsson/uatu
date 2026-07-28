@@ -214,6 +214,11 @@ function consume(event: SearchEvent): void {
 }
 
 function scheduleSearch(): void {
+  // The sweep on the wire is superseded the moment the text changes — not
+  // when the debounce fires. Left running through the debounce window, it
+  // would keep appending and rendering rows for the old query under a
+  // summary already describing the new one.
+  inFlight?.abort();
   if (debounceHandle !== null) {
     window.clearTimeout(debounceHandle);
   }

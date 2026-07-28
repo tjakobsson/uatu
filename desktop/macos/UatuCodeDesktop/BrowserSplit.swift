@@ -173,6 +173,20 @@ extension BrowserTab: WKNavigationDelegate {
         }
         decisionHandler(.allow)
     }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        // The navigation replaced the page, so the find selection and the
+        // found/not-found state describe a document that no longer exists.
+        // With the bar open over this tab, rerun the query against the new
+        // page; otherwise just drop the stale state — the retained query
+        // reruns when the bar reopens. Selectedness matters: a background
+        // tab finishing a load must not steal the selection with a find.
+        if split?.findOpen == true, split?.selectedID == id, !findQuery.isEmpty {
+            find(backwards: false)
+        } else {
+            findState = .idle
+        }
+    }
 }
 
 /// Per-window split browser state: an ordered set of tabs plus selection.
