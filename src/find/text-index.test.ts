@@ -229,6 +229,13 @@ describe("block boundaries", () => {
     const index = buildTextIndex(rootOf(`<h2>Title</h2><p>Body</p>`));
     expect(index.text).toBe("Title\nBody");
   });
+
+  test("text after a block does not run into it", () => {
+    // The boundary holds on the way out of a block too — `<div>foo</div>bar`
+    // is two visual lines, not the phrase `foobar`.
+    const index = buildTextIndex(rootOf(`<div>foo</div>bar`));
+    expect(index.text).toBe("foo\nbar");
+  });
 });
 
 describe("collapsed disclosures", () => {

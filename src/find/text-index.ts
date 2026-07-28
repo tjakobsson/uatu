@@ -115,34 +115,41 @@ export function buildTextIndex(root: Node): TextIndex {
       // A block boundary becomes a newline in the flat text, backed by no text
       // node. `locateSpan` refuses spans that cross the resulting gap, so a
       // match is never highlighted across a break the reader does not see.
-      if (BLOCK_TAGS.has(element.tagName) && text.length > 0 && !text.endsWith("\n")) {
+      // The boundary holds on the way out as well: `<div>foo</div>bar` is two
+      // visual lines, and marking only the entry would flatten it to `foobar`.
+      const block = BLOCK_TAGS.has(element.tagName);
+      if (block && text.length > 0 && !text.endsWith("\n")) {
         text += "\n";
       }
-      // A closed `<details>` shows only its first `<summary>`; the rest of
-      // the subtree exists in the DOM but not on screen, and a match there
-      // would be reported yet never visible — and a project-search reveal
-      // into it would count as success while highlighting nothing the reader
-      // can see. The find engine re-runs when the `open` attribute toggles,
-      // so the collapsed body becomes searchable the moment it is disclosed.
       if (element.tagName === "DETAILS" && !element.hasAttribute("open")) {
+        // A closed `<details>` shows only its first `<summary>`; the rest of
+        // the subtree exists in the DOM but not on screen, and a match there
+        // would be reported yet never visible — and a project-search reveal
+        // into it would count as success while highlighting nothing the
+        // reader can see. The find engine re-runs when the `open` attribute
+        // toggles, so the collapsed body becomes searchable on disclosure.
         for (let child = element.firstChild; child; child = child.nextSibling) {
           if (child.nodeType === ELEMENT_NODE && (child as Element).tagName === "SUMMARY") {
             visit(child);
             break;
           }
         }
-        return;
-      }
-      // Walk the shadow tree in place of the host's light-DOM children when
-      // one is attached: what the reader sees is the shadow content.
-      const shadow = element.shadowRoot;
-      if (shadow) {
-        shadowRoots.push(shadow);
-        for (let child = shadow.firstChild; child; child = child.nextSibling) {
+      } else if (element.shadowRoot) {
+        // Walk the shadow tree in place of the host's light-DOM children when
+        // one is attached: what the reader sees is the shadow content.
+        shadowRoots.push(element.shadowRoot);
+        for (let child = element.shadowRoot.firstChild; child; child = child.nextSibling) {
           visit(child);
         }
-        return;
+      } else {
+        for (let child = node.firstChild; child; child = child.nextSibling) {
+          visit(child);
+        }
       }
+      if (block && text.length > 0 && !text.endsWith("\n")) {
+        text += "\n";
+      }
+      return;
     }
     for (let child = node.firstChild; child; child = child.nextSibling) {
       visit(child);
@@ -150,6 +157,11 @@ export function buildTextIndex(root: Node): TextIndex {
   };
 
   visit(root);
+  // Boundary newlines separate content; one at the very end separates nothing,
+  // and every document ending in a block element would otherwise carry it.
+  if (text.endsWith("\n")) {
+    text = text.slice(0, -1);
+  }
   return { text, entries, shadowRoots };
 }
 

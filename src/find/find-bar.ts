@@ -149,10 +149,26 @@ function selectionSeed(target: FindEngine): string {
     return "";
   }
   const anchor = selection.anchorNode;
-  if (!anchor || !previewElement.contains(anchor)) {
+  if (!anchor || !isWithinPreview(anchor)) {
     return "";
   }
   return clampSeed(selection.toString());
+}
+
+// `Node.contains` does not cross shadow boundaries, and Diff view's visible
+// text lives inside `<diffs-container>`'s shadow root — a selection there is
+// part of the searched surface, but its anchor is not "contained" by
+// `#preview` in light-DOM terms. Climb host chains until the light tree.
+function isWithinPreview(node: Node): boolean {
+  let current: Node | null = node;
+  while (current) {
+    if (previewElement.contains(current)) {
+      return true;
+    }
+    const root = current.getRootNode();
+    current = root instanceof ShadowRoot ? root.host : null;
+  }
+  return false;
 }
 
 // Open the bar against `target`. Reopening against a different surface swaps

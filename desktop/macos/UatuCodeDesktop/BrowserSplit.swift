@@ -201,6 +201,13 @@ final class BrowserSplit {
             guard selectedID != oldValue else { return }
             // One tab's match must not linger while another is on screen.
             tabs.first { $0.id == oldValue }?.clearFindSelection()
+            // And the incoming tab's retained query comes back to life: with
+            // the bar open, returning to a tab that had a query would
+            // otherwise show that query idle, with no selected match, until
+            // the user edited it.
+            if findOpen, let tab = selectedTab, !tab.findQuery.isEmpty {
+                tab.find(backwards: false)
+            }
         }
     }
     private(set) var isOpen = false {

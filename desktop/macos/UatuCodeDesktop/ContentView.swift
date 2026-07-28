@@ -603,8 +603,23 @@ struct UatuCodeDesktopCommands: Commands {
         // has to work even when WebKit would otherwise swallow it for a focused
         // editable element (xterm's helper textarea). Replacing `.textEditing`
         // also guarantees no inherited Find item is left bound to ⌘F targeting
-        // a responder that ignores it.
+        // a responder that ignores it — but the replaced placement carries the
+        // standard editing commands too, so they are restored explicitly here:
+        // dropping them would strip Cut/Copy/Paste and Select All from the
+        // Edit menu for every text field and web view, which menu-based and
+        // accessibility-driven editing depends on. Each targets the responder
+        // chain, exactly as the native items do.
         CommandGroup(replacing: .textEditing) {
+            Button("Cut") { NSApp.sendAction(#selector(NSText.cut(_:)), to: nil, from: nil) }
+                .keyboardShortcut("x")
+            Button("Copy") { NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil) }
+                .keyboardShortcut("c")
+            Button("Paste") { NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: nil) }
+                .keyboardShortcut("v")
+            Button("Delete") { NSApp.sendAction(#selector(NSText.delete(_:)), to: nil, from: nil) }
+            Button("Select All") { NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil) }
+                .keyboardShortcut("a")
+            Divider()
             Button("Find…") { window?.find(nil) }
                 .keyboardShortcut("f")
                 .disabled(window?.isRunning != true)
