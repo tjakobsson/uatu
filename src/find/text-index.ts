@@ -118,6 +118,21 @@ export function buildTextIndex(root: Node): TextIndex {
       if (BLOCK_TAGS.has(element.tagName) && text.length > 0 && !text.endsWith("\n")) {
         text += "\n";
       }
+      // A closed `<details>` shows only its first `<summary>`; the rest of
+      // the subtree exists in the DOM but not on screen, and a match there
+      // would be reported yet never visible — and a project-search reveal
+      // into it would count as success while highlighting nothing the reader
+      // can see. The find engine re-runs when the `open` attribute toggles,
+      // so the collapsed body becomes searchable the moment it is disclosed.
+      if (element.tagName === "DETAILS" && !element.hasAttribute("open")) {
+        for (let child = element.firstChild; child; child = child.nextSibling) {
+          if (child.nodeType === ELEMENT_NODE && (child as Element).tagName === "SUMMARY") {
+            visit(child);
+            break;
+          }
+        }
+        return;
+      }
       // Walk the shadow tree in place of the host's light-DOM children when
       // one is attached: what the reader sees is the shadow content.
       const shadow = element.shadowRoot;

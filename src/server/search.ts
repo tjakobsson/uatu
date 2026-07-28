@@ -10,6 +10,7 @@
 // syntax errors, patterns that match everywhere, patterns that can match the
 // empty string, and patterns that are simply too expensive to run.
 
+import { buildMatchPattern } from "../shared/match-pattern";
 import type { DocumentMeta, RootGroup } from "../shared/types";
 
 export type SearchOptions = {
@@ -116,35 +117,13 @@ export type SearchEvent =
       abandoned?: boolean;
     };
 
-function escapeLiteral(query: string): string {
-  return query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-// Word boundaries only at edges that are themselves word characters — the same
-// rule the in-document matcher uses, so the two toggles mean the same thing on
-// both sides of the app. A regex source must be grouped before anchoring, or
-// `\bfoo|bar\b` distributes the boundaries across the alternation.
-function applyWholeWord(source: string, query: string, group: boolean): string {
-  const leading = /^\w/.test(query) ? "\\b" : "";
-  const trailing = /\w$/.test(query) ? "\\b" : "";
-  if (leading === "" && trailing === "") {
-    return source;
-  }
-  const body = group ? `(?:${source})` : source;
-  return `${leading}${body}${trailing}`;
-}
-
+// Compilation — escaping, whole-word anchoring, Unicode boundaries — lives in
+// `shared/match-pattern.ts`, one definition for both find surfaces.
 export function buildSearchPattern(
   query: string,
   options: SearchOptions,
 ): RegExp | { error: string } {
-  const base = options.regex ? query : escapeLiteral(query);
-  const source = options.wholeWord ? applyWholeWord(base, query, options.regex) : base;
-  try {
-    return new RegExp(source, options.caseSensitive ? "g" : "gi");
-  } catch (error) {
-    return { error: error instanceof Error ? error.message : "invalid pattern" };
-  }
+  return buildMatchPattern(query, options);
 }
 
 // A hit within one line, before it is placed in the document. The line number

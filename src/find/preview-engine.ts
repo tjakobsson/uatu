@@ -125,7 +125,17 @@ export function createPreviewEngine(
         // `diff.ts` clears then appends: two records, one logical swap.
         queueMicrotask(onChanged);
       });
-      observer.observe(previewElement, { childList: true });
+      // Subtree-wide, and `open` toggles specifically: the index excludes the
+      // collapsed body of a closed `<details>` (metadata card), so disclosing
+      // one changes what is searchable and the run must repeat. Re-running
+      // paints via `CSS.highlights` without touching the DOM, so the observer
+      // cannot feed itself.
+      observer.observe(previewElement, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["open"],
+      });
     },
 
     unwatch() {

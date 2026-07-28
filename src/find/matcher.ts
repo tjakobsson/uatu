@@ -6,6 +6,7 @@
 // patterns that can match the empty string and would otherwise enumerate
 // forever.
 
+import { buildMatchPattern } from "../shared/match-pattern";
 import type { TextSpan } from "./text-index";
 
 export type MatchOptions = {
@@ -29,36 +30,10 @@ export type MatchResult =
   | { ok: true; spans: TextSpan[]; truncated: boolean }
   | { ok: false; error: string };
 
-function escapeLiteral(query: string): string {
-  return query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-// Word boundaries are applied only at edges that are themselves word
-// characters. `\bfoo(\b` never matches anything, because there is no boundary
-// between `(` and whatever follows — so anchoring unconditionally would make
-// whole-word silently break every punctuated query.
-//
-// A regex source must be grouped before anchoring: `\bfoo|bar\b` distributes
-// the boundaries across the alternation, matching `foo` inside `foobar`.
-function applyWholeWord(source: string, query: string, group: boolean): string {
-  const leading = /^\w/.test(query) ? "\\b" : "";
-  const trailing = /\w$/.test(query) ? "\\b" : "";
-  if (leading === "" && trailing === "") {
-    return source;
-  }
-  const body = group ? `(?:${source})` : source;
-  return `${leading}${body}${trailing}`;
-}
-
+// Compilation — escaping, whole-word anchoring, Unicode boundaries — lives in
+// `shared/match-pattern.ts`, one definition for both find surfaces.
 export function buildPattern(query: string, options: MatchOptions): RegExp | { error: string } {
-  const base = options.regex ? query : escapeLiteral(query);
-  const source = options.wholeWord ? applyWholeWord(base, query, options.regex) : base;
-  const flags = options.caseSensitive ? "g" : "gi";
-  try {
-    return new RegExp(source, flags);
-  } catch (error) {
-    return { error: error instanceof Error ? error.message : "invalid pattern" };
-  }
+  return buildMatchPattern(query, options);
 }
 
 // Enumerate every match of `query` in `text`.

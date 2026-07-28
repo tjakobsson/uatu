@@ -230,3 +230,31 @@ describe("block boundaries", () => {
     expect(index.text).toBe("Title\nBody");
   });
 });
+
+describe("collapsed disclosures", () => {
+  // A closed <details> shows only its summary; indexing the hidden body would
+  // report matches the reader cannot see and let a project-search reveal
+  // "succeed" while highlighting nothing visible.
+  test("a closed details indexes only its summary", () => {
+    const index = buildTextIndex(
+      rootOf(`<details><summary>Metadata</summary><p>hidden token</p></details>`),
+    );
+    expect(index.text).toContain("Metadata");
+    expect(index.text).not.toContain("hidden token");
+  });
+
+  test("an open details indexes its whole body", () => {
+    const index = buildTextIndex(
+      rootOf(`<details open><summary>Metadata</summary><p>hidden token</p></details>`),
+    );
+    expect(index.text).toContain("hidden token");
+  });
+
+  test("content after a closed details is still indexed", () => {
+    const index = buildTextIndex(
+      rootOf(`<details><summary>S</summary><p>secret</p></details><p>after</p>`),
+    );
+    expect(index.text).not.toContain("secret");
+    expect(index.text).toContain("after");
+  });
+});
