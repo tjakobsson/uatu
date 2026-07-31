@@ -17,6 +17,8 @@ concurrency:
   group: desktop-edge
   cancel-in-progress: false
 
+permissions: {}
+
 jobs:
   build:
     runs-on: macos-26

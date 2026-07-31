@@ -10,14 +10,15 @@ on:
   issues:
     types: [opened, assigned]
 
-permissions:
-  contents: write
-  pull-requests: write
-  issues: write
-  id-token: write
+permissions: {}
 
 jobs:
   claude:
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
     if: |
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude') && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude') && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
