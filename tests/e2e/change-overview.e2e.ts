@@ -114,21 +114,30 @@ test("long configured base refs wrap inside the review-burden meter", async ({ p
   await expect(meter.locator("strong")).toBeVisible();
   await expect(anchor).toHaveText(`vs ${baseRef}`);
 
-  const layout = await meter.evaluate(element => {
-    const meterRect = element.getBoundingClientRect();
-    const anchor = element.querySelector<HTMLElement>(".burden-anchor")!;
-    const anchorRect = anchor.getBoundingClientRect();
-    const fontSize = Number.parseFloat(getComputedStyle(anchor).fontSize);
-    const contained = [".burden-headline", ".burden-level", "strong", ".burden-anchor"]
-      .map(selector => element.querySelector<HTMLElement>(selector)!.getBoundingClientRect())
-      .every(rect => rect.left >= meterRect.left && rect.right <= meterRect.right);
-    return {
-      contained,
-      noHorizontalOverflow: element.scrollWidth <= element.clientWidth,
-      anchorWrapped: anchorRect.height > fontSize * 1.5,
-    };
-  });
-  expect(layout).toEqual({ contained: true, noHorizontalOverflow: true, anchorWrapped: true });
+  // Poll: the pane can re-render (swapping the meter node) between the text
+  // assertion above and this measurement; a detached node measures as all
+  // zeros. Retry until the resolved node is connected and laid out.
+  await expect
+    .poll(() =>
+      meter.evaluate(element => {
+        if (!element.isConnected || element.getBoundingClientRect().width === 0) {
+          return null;
+        }
+        const meterRect = element.getBoundingClientRect();
+        const anchor = element.querySelector<HTMLElement>(".burden-anchor")!;
+        const anchorRect = anchor.getBoundingClientRect();
+        const fontSize = Number.parseFloat(getComputedStyle(anchor).fontSize);
+        const contained = [".burden-headline", ".burden-level", "strong", ".burden-anchor"]
+          .map(selector => element.querySelector<HTMLElement>(selector)!.getBoundingClientRect())
+          .every(rect => rect.left >= meterRect.left && rect.right <= meterRect.right);
+        return {
+          contained,
+          noHorizontalOverflow: element.scrollWidth <= element.clientWidth,
+          anchorWrapped: anchorRect.height > fontSize * 1.5,
+        };
+      }),
+    )
+    .toEqual({ contained: true, noHorizontalOverflow: true, anchorWrapped: true });
 });
 
 test("tree distinguishes untracked rows from added rows via git-status annotations", async ({ page, request }) => {
