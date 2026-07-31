@@ -109,7 +109,27 @@ jobs:
         with:
           subject-path: dist/release/uatu-*
 
+      - name: Download provenance bundles for the archives
+        # The attest step pushes provenance to the GitHub attestation store,
+        # but Scorecard's Signed-Releases check — and anyone verifying
+        # without `gh` — reads the release assets themselves. Fetch each
+        # archive's Sigstore bundle back out of the store so it ships next
+        # to the archive. Download is digest-addressed, so on a rerun the
+        # bundle always matches the freshly rebuilt archive.
+        run: |
+          for f in dist/release/uatu-*; do
+            name="$(basename "$f")"
+            dir="$(mktemp -d)"
+            (cd "$dir" && gh attestation download "$GITHUB_WORKSPACE/$f" --repo "$GITHUB_REPOSITORY" --limit 1)
+            mv "$dir"/*.jsonl "dist/release/$name.sigstore.json"
+          done
+          ls -l dist/release/*.sigstore.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - name: Upload release assets
+        # The uatu-* glob includes the archives and their .sigstore.json
+        # provenance bundles.
         run: |
           gh release upload "$GITHUB_REF_NAME" \
             --clobber \

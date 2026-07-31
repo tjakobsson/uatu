@@ -27,7 +27,9 @@ terminal, and extension points.
 3. Keep implementation, tests, documentation, and the OpenSpec task list in
    sync as work progresses.
 4. Open a pull request and address required CI and review findings.
-5. Squash-merge with a Conventional Commit title.
+5. Squash-merge with a Conventional Commit title. A ruleset on `main`
+   enforces this flow: direct pushes are rejected, and merging requires
+   the CI `validate` check to pass.
 6. Sync changed capability specs and archive completed OpenSpec artifacts as
    part of the change before its final merge.
 

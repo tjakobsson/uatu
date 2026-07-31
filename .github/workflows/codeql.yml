@@ -1,0 +1,54 @@
+name: CodeQL
+
+# Static analysis over the TypeScript codebase. Findings surface in the
+# Security tab (code scanning); this is not a required PR check. The Swift
+# desktop wrapper is deliberately excluded — analyzing it needs a macOS
+# runner and can be added as a follow-up.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "openspec/**"
+      - "testdata/**"
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "openspec/**"
+      - "testdata/**"
+  schedule:
+    # Wednesdays 06:00 UTC — a weekly backstop so main is analyzed even in
+    # weeks where every change lands under paths-ignore.
+    - cron: "0 6 * * 3"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    permissions:
+      contents: read
+      # Required to upload analysis results to code scanning.
+      security-events: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
+        with:
+          languages: javascript-typescript
+          build-mode: none
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
+        with:
+          category: "/language:javascript-typescript"
