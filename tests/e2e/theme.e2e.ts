@@ -111,7 +111,9 @@ test("an OS scheme flip restyles live, re-renders mermaid, updates theme-color",
   await page.emulateMedia({ colorScheme: "dark" });
 
   await expect.poll(() => rootStyles(page).then(s => s.background)).toBe("rgb(13, 17, 23)");
-  expect(await themeColorMeta(page)).toBe("#0d1117");
+  // Poll: the meta is written by the media-query change listener, which can
+  // land a tick after the CSS restyle the previous poll observed.
+  await expect.poll(() => themeColorMeta(page)).toBe("#0d1117");
   // The visible diagram re-renders with dark theme inputs — new SVG markup.
   await expect
     .poll(async () => {
@@ -128,5 +130,5 @@ test("an OS scheme flip restyles live, re-renders mermaid, updates theme-color",
   // Flip back: the page returns to the light palette live.
   await page.emulateMedia({ colorScheme: "light" });
   await expect.poll(() => rootStyles(page).then(s => s.background)).toBe("rgb(255, 255, 255)");
-  expect(await themeColorMeta(page)).toBe("#0a1c38");
+  await expect.poll(() => themeColorMeta(page)).toBe("#0a1c38");
 });
