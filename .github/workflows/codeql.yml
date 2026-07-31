@@ -1,28 +1,19 @@
 name: CodeQL
 
 # Static analysis over the TypeScript codebase. Findings surface in the
-# Security tab (code scanning); this is not a required PR check. The Swift
-# desktop wrapper is deliberately excluded — analyzing it needs a macOS
-# runner and can be added as a follow-up.
+# Security tab (code scanning); this is not a required PR check. Every
+# push and pull request is analyzed — no path filters, so no commit goes
+# unanalyzed (OpenSSF Scorecard's SAST check counts coverage per commit).
+# The Swift desktop wrapper is deliberately excluded — analyzing it needs
+# a macOS runner and can be added as a follow-up.
 
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
-      - "openspec/**"
-      - "testdata/**"
   pull_request:
     branches: [main]
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
-      - "openspec/**"
-      - "testdata/**"
   schedule:
-    # Wednesdays 06:00 UTC — a weekly backstop so main is analyzed even in
-    # weeks where every change lands under paths-ignore.
+    # Wednesdays 06:00 UTC — a weekly backstop analysis of main.
     - cron: "0 6 * * 3"
 
 permissions:
