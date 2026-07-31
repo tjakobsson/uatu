@@ -27,6 +27,11 @@ jobs:
       security-events: write
       # Required by publish_results to sign the results with OIDC.
       id-token: write
+      # Not strictly needed while the repo is public (public contents are
+      # readable regardless of token scopes), but explicit so the job-level
+      # block overriding the workflow-level read-all keeps checkout working
+      # even if the repo ever goes private.
+      contents: read
 
     steps:
       - name: Check out repository
