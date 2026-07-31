@@ -56,7 +56,8 @@ should require the normal CI checks on the generated release PR.
 6. The tag triggers `.github/workflows/release.yml`, which validates that the
    tag matches `package.json`, cross-compiles four binaries, smoke-tests the
    linux-x64 artifact, verifies its version, packages archives, writes
-   `SHA256SUMS`, and creates provenance attestations.
+   `SHA256SUMS`, creates provenance attestations, and attaches each
+   archive's attestation as a `<archive>.sigstore.json` release asset.
 7. The workflow uploads all assets and publishes the draft release.
 8. The dependent tap job regenerates and pushes `Formula/uatu.rb` using
    `HOMEBREW_TAP_TOKEN`.
@@ -85,10 +86,14 @@ uatu --version
 
 Verify that:
 
-- Four platform archives and `SHA256SUMS` are attached.
+- Four platform archives, their `<archive>.sigstore.json` provenance
+  bundles, and `SHA256SUMS` are attached.
 - The release is public rather than draft.
 - The release notes contain user-facing changes without routine chores.
 - `gh attestation verify <archive> --repo tjakobsson/uatu` succeeds.
+- Without `gh`, the attached bundle verifies with standard Sigstore
+  tooling, e.g.
+  `cosign verify-blob-attestation --bundle <archive>.sigstore.json --new-bundle-format --certificate-identity-regexp 'github.com/tjakobsson/uatu' --certificate-oidc-issuer https://token.actions.githubusercontent.com <archive>`.
 - `tjakobsson/homebrew-tap` contains the matching formula version and hashes.
 - `brew test uatu` succeeds where Homebrew verification is available.
 
