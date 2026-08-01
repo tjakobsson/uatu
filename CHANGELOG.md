@@ -4,6 +4,20 @@ Notable user-facing changes to uatu are documented here. Versions follow
 [Semantic Versioning](https://semver.org/) and are generated from Conventional
 Commits by [Release Please](https://github.com/googleapis/release-please).
 
+## [0.4.0](https://github.com/tjakobsson/uatu/compare/v0.3.0...v0.4.0) (2026-08-01)
+
+
+### Features
+
+* **desktop:** offer git init when opening a non-git folder ([#143](https://github.com/tjakobsson/uatu/issues/143)) ([00d0072](https://github.com/tjakobsson/uatu/commit/00d00721ca03c7a10622f0ab2e269ce95ef4719e))
+* **find:** in-document find (⌘F) and project search (⇧⌘F) ([9d036c3](https://github.com/tjakobsson/uatu/commit/9d036c383b2c042ba85ab082f95368a8cff48ac7))
+
+
+### Bug Fixes
+
+* **deps:** update dependency @pierre/diffs to v1.3.1 ([#148](https://github.com/tjakobsson/uatu/issues/148)) ([50105e7](https://github.com/tjakobsson/uatu/commit/50105e7dc7df6848831acaac478fd8c99d132338))
+* **desktop:** restore titlebar dragging and clean the dock-right terminal strip ([#147](https://github.com/tjakobsson/uatu/issues/147)) ([167870e](https://github.com/tjakobsson/uatu/commit/167870e501ecff784c9721d928810584b60d73bc))
+
 ## [0.3.0](https://github.com/tjakobsson/uatu/compare/v0.2.0...v0.3.0) (2026-07-19)
 
 
