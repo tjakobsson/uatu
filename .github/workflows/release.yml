@@ -227,6 +227,24 @@ jobs:
         with:
           subject-path: dist/release/UatuCode-Desktop-*
 
+      - name: Download provenance bundles for the app archives
+        if: steps.gate.outputs.signing == 'true'
+        # Same round-trip as the release job's binaries: pull each archive's
+        # Sigstore bundle back out of the attestation store so it ships as a
+        # release asset next to the archive. Download is digest-addressed,
+        # so on a rerun the bundle always matches the freshly rebuilt
+        # archive.
+        run: |
+          for f in dist/release/UatuCode-Desktop-*.zip; do
+            name="$(basename "$f")"
+            dir="$(mktemp -d)"
+            (cd "$dir" && gh attestation download "$GITHUB_WORKSPACE/$f" --repo "$GITHUB_REPOSITORY" --limit 1)
+            mv "$dir"/*.jsonl "dist/release/$name.sigstore.json"
+          done
+          ls -l dist/release/*.sigstore.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - name: Upload app archives and updated checksums to the release
         if: steps.gate.outputs.signing == 'true'
         run: |
@@ -235,7 +253,7 @@ jobs:
           grep -v "UatuCode-Desktop-" dist/release/SHA256SUMS.orig > dist/release/SHA256SUMS || true
           (cd dist/release && shasum -a 256 UatuCode-Desktop-*.zip >> SHA256SUMS && cat SHA256SUMS)
           gh release upload "$GITHUB_REF_NAME" --clobber \
-            dist/release/UatuCode-Desktop-*.zip dist/release/SHA256SUMS
+            dist/release/UatuCode-Desktop-*.zip dist/release/UatuCode-Desktop-*.zip.sigstore.json dist/release/SHA256SUMS
         env:
           GH_TOKEN: ${{ github.token }}
 

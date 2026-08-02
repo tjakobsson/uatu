@@ -35,8 +35,9 @@ jobs:
 
       - name: Skip when the current main is already fully published
         id: guard
-        # "Published" means the edge tag points at HEAD AND all assets are
-        # on the release — not just the tag. gh release create makes the
+        # "Published" means the edge tag points at HEAD AND all assets —
+        # archives, their provenance bundles, SHA256SUMS, VERSION — are
+        # on the release, not just the tag. gh release create makes the
         # tag itself on the first publication, so a tag-only check would
         # let a failed inaugural (or partial) upload block every retry
         # until main moves again.
@@ -47,7 +48,9 @@ jobs:
           published="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/edge" --jq .object.sha 2>/dev/null || echo none)"
           assets="$(gh release view edge --json assets --jq '.assets[].name' 2>/dev/null || true)"
           complete=true
-          for asset in UatuCode-Desktop-arm64.zip UatuCode-Desktop-x64.zip SHA256SUMS VERSION; do
+          for asset in UatuCode-Desktop-arm64.zip UatuCode-Desktop-arm64.zip.sigstore.json \
+                       UatuCode-Desktop-x64.zip UatuCode-Desktop-x64.zip.sigstore.json \
+                       SHA256SUMS VERSION; do
             echo "$assets" | grep -qx "$asset" || complete=false
           done
           if [ "$current" = "$published" ] && [ "$complete" = true ]; then
@@ -142,6 +145,26 @@ jobs:
         with:
           subject-path: dist/release/UatuCode-Desktop-*
 
+      - name: Download provenance bundles for the archives
+        if: steps.guard.outputs.changed == 'true'
+        # Mirrors the release workflow: the attest step pushes provenance to
+        # the GitHub attestation store, but Scorecard's Signed-Releases
+        # check — and anyone verifying without `gh` — reads the release
+        # assets themselves. Fetch each archive's Sigstore bundle back out
+        # of the store so it ships next to the archive. Download is
+        # digest-addressed, so on a rerun the bundle always matches the
+        # freshly rebuilt archive.
+        run: |
+          for f in dist/release/UatuCode-Desktop-*.zip; do
+            name="$(basename "$f")"
+            dir="$(mktemp -d)"
+            (cd "$dir" && gh attestation download "$GITHUB_WORKSPACE/$f" --repo "$GITHUB_REPOSITORY" --limit 1)
+            mv "$dir"/*.jsonl "dist/release/$name.sigstore.json"
+          done
+          ls -l dist/release/*.sigstore.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - name: Publish rolling edge prerelease
         id: publish
         if: steps.guard.outputs.changed == 'true'
@@ -168,7 +191,7 @@ jobs:
             gh release create edge --prerelease --target "$commit" \
               --title "UatuCode Desktop edge" --notes "$notes"
           fi
-          gh release upload edge --clobber dist/release/UatuCode-Desktop-*.zip dist/release/SHA256SUMS dist/release/VERSION
+          gh release upload edge --clobber dist/release/UatuCode-Desktop-*.zip dist/release/UatuCode-Desktop-*.zip.sigstore.json dist/release/SHA256SUMS dist/release/VERSION
           gh release edit edge --prerelease --title "UatuCode Desktop edge" --notes "$notes"
           git tag -f edge "$commit"
           git push -f origin edge
