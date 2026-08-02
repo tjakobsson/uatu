@@ -92,7 +92,7 @@ otherwise.
 - **THEN** the desktop build job does not run
 
 ### Requirement: A nightly edge workflow builds signed desktop apps from main
-A scheduled workflow (nightly cron plus manual `workflow_dispatch`) SHALL build UatuCode Desktop from `main` for both architectures using the same embed/sign/notarize/staple pipeline as releases, and SHALL exit early without building when `main` has not moved since the last published edge build. When Developer ID signing secrets are unavailable the workflow MUST fail without publishing anything — unsigned edge builds are never distributed, and the failure is loud so a bad secret rotation cannot silently stop the channel.
+A scheduled workflow (nightly cron plus manual `workflow_dispatch`) SHALL build UatuCode Desktop from `main` for both architectures using the same embed/sign/notarize/staple pipeline as releases, and SHALL exit early without building when `main` has not moved since the last fully published edge build — "fully published" meaning the `edge` tag points at `main`'s HEAD AND the release carries the complete asset set (archives, provenance bundles, SHA256SUMS, VERSION). When Developer ID signing secrets are unavailable the workflow MUST fail without publishing anything — unsigned edge builds are never distributed, and the failure is loud so a bad secret rotation cannot silently stop the channel.
 
 #### Scenario: main moved overnight
 
@@ -101,7 +101,7 @@ A scheduled workflow (nightly cron plus manual `workflow_dispatch`) SHALL build 
 
 #### Scenario: main unchanged
 
-- **WHEN** the nightly run finds the edge release already points at `main`'s HEAD
+- **WHEN** the nightly run finds the edge release already points at `main`'s HEAD with the complete asset set present
 - **THEN** it exits early without building or notarizing
 
 #### Scenario: signing secrets missing
