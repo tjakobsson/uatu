@@ -7,6 +7,10 @@
 //
 //   bun run scripts/build.ts
 //   bun run scripts/build.ts --target=bun-darwin-arm64 --outfile=dist/uatu-darwin-arm64
+//
+// `--version` overrides the embedded version string (default: package.json) —
+// the edge workflow stamps `<base>-edge.<timestamp>.<shortsha>` so nightly
+// binaries self-identify and the uatu@edge formula's self-test passes.
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 
@@ -33,8 +37,9 @@ function readFlag(argv: string[], name: string): string | undefined {
 const argv = process.argv.slice(2);
 const target = readFlag(argv, "--target");
 const outfileArg = readFlag(argv, "--outfile");
+const versionOverride = readFlag(argv, "--version");
 
-const git = readGitBuildInfo(PACKAGE_VERSION);
+const git = readGitBuildInfo(versionOverride ?? PACKAGE_VERSION);
 const buildInfo: BuildInfo = {
   ...git,
   release: true,

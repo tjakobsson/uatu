@@ -71,18 +71,24 @@ The app is a companion, not a replacement — the CLI and browser workflow
 above works exactly the same with or without it. Desktop source lives in
 [`desktop/macos/`](desktop/macos/).
 
-Want the bleeding edge instead? A signed build of `main` is published
-nightly (when `main` has changed) to the rolling
+### Edge channel (nightly)
+
+Want the bleeding edge instead? Builds of `main` — the CLI for every
+platform, plus a signed desktop app — are published nightly (when `main`
+has changed) to the rolling
 [`edge` prerelease](https://github.com/tjakobsson/uatu/releases/tag/edge):
 
 ```bash
-brew install --cask tjakobsson/tap/uatu-desktop@edge
+brew install tjakobsson/tap/uatu@edge                 # CLI (macOS and Linux)
+brew install --cask tjakobsson/tap/uatu-desktop@edge  # desktop app
 brew upgrade              # follows the nightly channel
 ```
 
-Edge is exactly what's merged — expect occasional rough edges. Switch
-back with `brew uninstall --cask uatu-desktop@edge && brew install --cask
-tjakobsson/tap/uatu-desktop`.
+Edge is exactly what's merged — expect occasional rough edges. Each
+channel conflicts with its stable sibling, so switch back with
+`brew uninstall uatu@edge && brew install tjakobsson/tap/uatu` (and
+likewise `brew uninstall --cask uatu-desktop@edge && brew install --cask
+tjakobsson/tap/uatu-desktop`).
 
 ### Manual download
 

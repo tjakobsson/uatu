@@ -115,7 +115,7 @@ describe("artifact publication workflow", () => {
       }
     }
     // The notarize/staple shell lives in the composite action shared with
-    // the desktop-edge workflow; the gated step must call it, and the
+    // the edge workflow; the gated step must call it, and the
     // action itself must still notarize and staple.
     expect(
       signedSteps.some(step => (step as { uses?: string }).uses === "./.github/actions/sign-notarize-app"),
@@ -129,8 +129,8 @@ describe("artifact publication workflow", () => {
   });
 
   test("edge workflow fails without secrets, orders versions by timestamp, and gates the tap on publishing", async () => {
-    const workflow = parseYaml(await read(".github/workflows/desktop-edge.yml"));
-    const steps = workflow.jobs.build.steps as Array<{ id?: string; run?: string; env?: Record<string, string> }>;
+    const workflow = parseYaml(await read(".github/workflows/edge.yml"));
+    const steps = workflow.jobs.build.steps as Array<{ id?: string; name?: string; run?: string; env?: Record<string, string> }>;
 
     // No unsigned fallback: missing secrets must fail the run loudly, not
     // skip green, so a bad secret rotation surfaces.
@@ -147,9 +147,32 @@ describe("artifact publication workflow", () => {
 
     // The guard must verify assets, not just the tag: gh release create
     // makes the tag itself on first publication, so a tag-only check
-    // would let a failed inaugural upload block every retry.
+    // would let a failed inaugural upload block every retry. It counts
+    // the CLI archives and every provenance bundle, so a partial publish
+    // is retried instead of skipped.
     const guard = steps.find(step => step.id === "guard")!;
     expect(guard.run).toContain("--json assets");
+    for (const asset of [
+      "uatu-darwin-arm64.zip",
+      "uatu-darwin-x64.zip",
+      "uatu-linux-x64.tar.gz",
+      "uatu-linux-arm64.tar.gz",
+    ]) {
+      expect(guard.run).toContain(asset);
+      expect(guard.run).toContain(`${asset}.sigstore.json`);
+    }
+
+    // Edge binaries are stamped with the edge version (so uatu --version
+    // identifies the channel and the formula's self-test passes), and the
+    // freshly compiled host binary must pass the smoke gate before either
+    // product publishes.
+    const names = steps.map(step => step.name ?? "");
+    const compile = steps.find(step => step.name === "Cross-compile all CLI targets")!;
+    expect(compile.run).toContain("--version");
+    expect(names.indexOf("Compute edge version")).toBeLessThan(names.indexOf("Cross-compile all CLI targets"));
+    expect(names.indexOf("Smoke-test the darwin-arm64 binary")).toBeLessThan(
+      names.indexOf("Build UatuCode Desktop for both architectures"),
+    );
 
     // Assets before tag: the skip guard keys on the tag, so a failed
     // upload must leave the old tag for the next run to retry.
@@ -168,6 +191,14 @@ describe("artifact publication workflow", () => {
     const tapSteps = workflow.jobs["update-tap"].steps as Array<{ run?: string }>;
     expect(tapSteps.some(step => step.run?.includes("--pattern VERSION"))).toBe(true);
     expect(guard.run).toContain("VERSION");
+
+    // The tap job keeps both channel artifacts in lockstep: the uatu@edge
+    // formula (unconditional — a complete edge release always has CLI
+    // archives) and the uatu-desktop@edge cask.
+    const tapUpdate = tapSteps.find(step => step.run?.includes("generate-formula.ts"))!;
+    expect(tapUpdate.run).toContain("--name uatu@edge --tag edge");
+    expect(tapUpdate.run).toContain("generate-cask.ts");
+    expect(tapUpdate.run).toContain("--name uatu-desktop@edge --tag edge");
   });
 
   test("tap update regenerates the formula and tolerates cask-less (unsigned) releases", async () => {
