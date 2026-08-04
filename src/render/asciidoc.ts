@@ -28,7 +28,28 @@ import { escapeHtml, highlightCodeBlocks, SYNTAX_HIGHLIGHT_BYTES_LIMIT } from ".
 // per-conversion reset (so the registry is safe to reuse across renders). The
 // bare `Extensions.create(fn)` form treats `fn` as the group *name* and
 // silently registers nothing.
-const mermaidExtensionRegistry = Extensions.create("uatu-mermaid", function () {
+// Minimal `this` types for the block-style extension DSL, which
+// @asciidoctor/core ships untyped (its DSL declarations are namespaces of
+// loose functions, not `this` interfaces). Only the members uatu calls.
+interface AsciidoctorBlockProcessorInstance {
+  createBlock(parent: unknown, context: string, source: string[], attrs: Record<string, string>): unknown;
+}
+interface AsciidoctorBlockDsl {
+  named(name: string): void;
+  onContext(contexts: string[]): void;
+  process(
+    handler: (
+      this: AsciidoctorBlockProcessorInstance,
+      parent: unknown,
+      reader: { getLines(): string[] },
+    ) => unknown,
+  ): void;
+}
+interface AsciidoctorRegistryDsl {
+  block(handler: (this: AsciidoctorBlockDsl) => void): void;
+}
+
+const mermaidExtensionRegistry = Extensions.create("uatu-mermaid", function (this: AsciidoctorRegistryDsl) {
   this.block(function () {
     this.named("mermaid");
     this.onContext(["listing", "literal", "open"]);
@@ -114,9 +135,13 @@ const ALLOWED_ASCIIDOC_CLASSES = new Set([
 // default, broaden the `className` allowlist on the elements Asciidoctor uses
 // for structure, and pick up the Markdown sanitize allowances for `align`/etc.
 // so README idioms shared between Markdown and AsciiDoc behave the same.
+// The attribute-rule element type, derived because the package doesn't
+// re-export it from its root.
+type PropertyDefinition = NonNullable<Schema["attributes"]>[string][number];
+
 const sanitizeSchema: Schema = (() => {
   const baseAttributes = defaultSchema.attributes ?? {};
-  const expandedClassName: Array<string | [string, ...Array<string | RegExp>]> = [
+  const expandedClassName: PropertyDefinition[] = [
     [
       "className",
       ...ALLOWED_ASCIIDOC_CLASSES,
@@ -130,7 +155,7 @@ const sanitizeSchema: Schema = (() => {
   // hast-util-sanitize keeps only the FIRST attribute rule that matches a
   // given attribute name, so our className allowlist must be prepended to
   // shadow the narrower one the default schema defines on some elements.
-  const withClass = (existing: ReadonlyArray<string | [string, ...Array<string | RegExp>]> | undefined) => {
+  const withClass = (existing: readonly PropertyDefinition[] | undefined): PropertyDefinition[] => {
     return [...expandedClassName, ...(existing ?? [])];
   };
 

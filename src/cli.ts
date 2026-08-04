@@ -3,6 +3,8 @@
 import { promises as fs } from "node:fs";
 import readline from "node:readline";
 
+import type { WebSocketHandler } from "bun";
+
 import mermaidAsset from "mermaid/dist/mermaid.min.js" with { type: "file" };
 import logoAsset from "./assets/uatu-logo.svg" with { type: "file" };
 import icon192Asset from "./assets/icon-192.png" with { type: "file" };
@@ -218,25 +220,25 @@ async function runWatch(options: WatchOptions) {
         }),
       },
       fetch: (request, srv) => fetchFallback(request, srv),
-      websocket: terminalServer
+      // The serve options type is an XOR (websocket required, or absent) and
+      // cannot express "present iff the terminal is enabled" — and this call
+      // must stay a single object literal so Bun's bundler can analyze the
+      // route table (see the routes comment above), which rules out separate
+      // enabled/disabled Bun.serve calls. Runtime accepts undefined here (it
+      // shipped that way), so assert the enabled arm's shape.
+      websocket: (terminalServer
         ? {
-            open: socket => {
-              void terminalServer!.open(socket as unknown as Parameters<NonNullable<typeof terminalServer>["open"]>[0]);
+            open: (socket: Parameters<NonNullable<typeof terminalServer>["open"]>[0]) => {
+              void terminalServer!.open(socket);
             },
-            message: (socket, data) => {
-              terminalServer!.message(
-                socket as unknown as Parameters<NonNullable<typeof terminalServer>["message"]>[0],
-                data,
-              );
+            message: (socket: Parameters<NonNullable<typeof terminalServer>["message"]>[0], data: string | Buffer) => {
+              terminalServer!.message(socket, data);
             },
-            close: (socket, code) => {
-              terminalServer!.close(
-                socket as unknown as Parameters<NonNullable<typeof terminalServer>["close"]>[0],
-                code,
-              );
+            close: (socket: Parameters<NonNullable<typeof terminalServer>["close"]>[0], code: number) => {
+              terminalServer!.close(socket, code);
             },
           }
-        : undefined,
+        : undefined) as WebSocketHandler<Parameters<NonNullable<typeof terminalServer>["open"]>[0]["data"]>,
     });
   } catch (error) {
     clearIndexingStatus();

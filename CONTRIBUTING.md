@@ -80,10 +80,15 @@ dependency security fix may be `fix(deps)`, while a routine lockfile refresh is
 
 ## Validation
 
+Changes that add or change functionality must include tests — unit tests in
+the colocated `*.test.ts` files, plus an e2e test when the behavior is only
+observable through the UI.
+
 Run the checks relevant to your change. Before requesting final review, the
 same core checks as CI should pass:
 
 ```bash
+bun run typecheck
 bun audit --audit-level=moderate
 bun test
 bun run check:licenses

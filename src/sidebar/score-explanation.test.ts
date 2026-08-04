@@ -19,7 +19,7 @@ function availableLoad(overrides: Partial<ReviewLoadResult> = {}): ReviewLoadRes
     score: 18,
     level: "medium",
     thresholds: { medium: 10, high: 30 },
-    base: { mode: "configured", ref: "main", mergeBase: "abc1234" },
+    base: { mode: "configured", ref: "main", mergeBase: "abc1234", compareTarget: "base", comparedAgainstRef: "main", targetsCollapsed: false },
     changedFiles: [
       { path: "a.ts", oldPath: null, status: "M ", additions: 5, deletions: 1, hunks: 2 },
       { path: "b.ts", oldPath: null, status: "M ", additions: 3, deletions: 0, hunks: 1 },

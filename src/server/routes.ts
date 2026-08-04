@@ -9,6 +9,8 @@
 // `/api/auth`, the terminal-sessions inventory, and navigation dispatch.
 // Both server entry points obtain both pieces here with mode-specific deps.
 
+import type { Serve } from "bun";
+
 import { getDocumentDiff } from "../document/diff";
 import { collectFileFacts } from "../document/file-facts";
 import {
@@ -84,7 +86,10 @@ export type E2ERouteDeps = BaseDeps & {
 
 export type BuildRoutesDeps = ProdRouteDeps | E2ERouteDeps;
 
-export function buildRoutes(deps: BuildRoutesDeps) {
+// Explicit return type: the prod/e2e conditional otherwise makes this a
+// union of two route tables, which Bun.serve's `Routes` generic rejects when
+// the result is spread at the call sites.
+export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string> {
   const { assets, getSession } = deps;
 
   const modeRoutes =

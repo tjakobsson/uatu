@@ -87,7 +87,7 @@ export const documentDiffCache = new Map<string, DocumentDiffPayload>();
 // already-loaded document is instantaneous. Dropped entries are recreated on
 // the next fetch; we drop a document's entry when navigating away to bound
 // memory across long sessions.
-type DocumentViewCacheEntry = { source?: RenderedDocument; rendered?: RenderedDocument };
+type DocumentViewCacheEntry = Partial<Record<ViewMode, RenderedDocument>>;
 export const documentViewCache = new Map<string, DocumentViewCacheEntry>();
 
 export function rememberDocumentPayload(payload: RenderedDocument): void {

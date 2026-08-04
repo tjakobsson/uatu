@@ -9,7 +9,7 @@
 // model). Selection events are translated from the prefixed canonical path
 // back to the document ID expected by the existing routing flow.
 
-import { FileTree, themeToTreeStyles, type GitStatusEntry, type TreeThemeStyles } from "@pierre/trees";
+import { FileTree, themeToTreeStyles, type FileTreeDirectoryHandle, type FileTreeItemHandle, type GitStatusEntry, type TreeThemeStyles } from "@pierre/trees";
 
 import type { DocumentMeta, RepositoryReviewSnapshot, RootGroup } from "../shared/types";
 import { activeColorScheme, onColorSchemeChange, type ColorScheme } from "../shell/theme";
@@ -52,6 +52,12 @@ export type TreeViewUpdateOptions = {
   // the tree renders the full path set unchanged.
   filter?: FilesPaneFilterMembership | null;
 };
+
+// The library types `isDirectory()` with literal returns per variant but not
+// as a type predicate, so calling it doesn't narrow the handle union.
+function isDirectoryHandle(handle: FileTreeItemHandle): handle is FileTreeDirectoryHandle {
+  return handle.isDirectory();
+}
 
 export class TreeView {
   private readonly container: HTMLElement;
@@ -371,7 +377,7 @@ export class TreeView {
       if (tree === null) return;
       for (const ancestor of ancestorPaths(path)) {
         const handle = tree.getItem(ancestor);
-        if (handle && handle.isDirectory() && !handle.isExpanded()) {
+        if (handle && isDirectoryHandle(handle) && !handle.isExpanded()) {
           handle.expand();
         }
       }
@@ -443,7 +449,7 @@ export class TreeView {
     const expanded: string[] = [];
     for (const dirPath of distinctDirectoryPaths(this.pathToDocumentId.keys())) {
       const handle = this.tree.getItem(dirPath);
-      if (handle && handle.isDirectory() && handle.isExpanded()) {
+      if (handle && isDirectoryHandle(handle) && handle.isExpanded()) {
         expanded.push(dirPath);
       }
     }
