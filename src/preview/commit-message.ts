@@ -4,6 +4,7 @@
 // feature folder owns this body writer alongside the other preview
 // renderers.
 
+import { appUrl } from "../shared/app-url";
 import { escapeHtml } from "../shared/html";
 import { recomputeSelectionInspector } from "../shell/inspector-instance";
 import type { RepositoryReviewSnapshot } from "../shared/types";
@@ -43,7 +44,7 @@ export function renderCommitMessage(
   previewPathElement.textContent = `${repository.label} · ${commit.sha}`;
   clearPreviewType();
   hideViewToggle();
-  previewBaseElement.href = new URL("/", window.location.origin).toString();
+  previewBaseElement.href = new URL(appUrl("/"), window.location.origin).toString();
   previewElement.classList.remove("empty");
   previewElement.innerHTML = `
     <section class="commit-preview">

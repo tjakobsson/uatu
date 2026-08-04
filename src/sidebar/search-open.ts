@@ -9,6 +9,7 @@
 // only when the match cannot be found there. Source is where the match always
 // exists, because that is what was searched.
 
+import { appUrl } from "../shared/app-url";
 import { applyUserRowClick } from "../shell/follow";
 import { applyViewMode } from "../preview/view-mode";
 import { appState } from "../shell/state";
@@ -105,7 +106,7 @@ function isDocumentInScope(documentId: string): boolean {
 // override — the sidebar and the preview stay describing the same corpus.
 async function widenSessionScope(): Promise<void> {
   try {
-    await fetch("/api/scope", {
+    await fetch(appUrl("/api/scope"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ scope: { kind: "folder" } }),

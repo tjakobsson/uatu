@@ -6,6 +6,7 @@ import {
   detectIsMac,
   handleClipboardKeyEvent,
   parseOsc52Payload,
+  synthesizeCtrlByte,
   resetKeyboardLockForTests,
   type ClipboardTerminal,
   type Osc52Notice,
@@ -626,5 +627,42 @@ describe("createOsc52Handler", () => {
       expect(writeText).not.toHaveBeenCalled();
       expect(notices).toEqual(expected as never);
     }
+  });
+});
+
+describe("synthesizeCtrlByte", () => {
+  const ctrlEvent = (overrides: Partial<KeyboardEvent>): KeyboardEvent =>
+    ({
+      type: "keydown",
+      key: "c",
+      ctrlKey: true,
+      altKey: false,
+      metaKey: false,
+      shiftKey: false,
+      isComposing: false,
+      preventDefault: () => undefined,
+      ...overrides,
+    }) as KeyboardEvent;
+
+  it("synthesizes control bytes for bare Ctrl+letter regardless of keyCode shape", () => {
+    // iPadOS delivers hardware Ctrl chords with unusable keyCodes; the byte
+    // comes from event.key, so both healthy and malformed shapes work.
+    expect(synthesizeCtrlByte(ctrlEvent({ key: "c" }))).toBe("\x03");
+    expect(synthesizeCtrlByte(ctrlEvent({ key: "d" }))).toBe("\x04");
+    expect(synthesizeCtrlByte(ctrlEvent({ key: "z" }))).toBe("\x1a");
+    expect(synthesizeCtrlByte(ctrlEvent({ key: "a" }))).toBe("\x01");
+    // CapsLock: uppercase letter, still bare Ctrl.
+    expect(synthesizeCtrlByte(ctrlEvent({ key: "C" }))).toBe("\x03");
+  });
+
+  it("only handles bare Ctrl on a single letter during keydown", () => {
+    expect(synthesizeCtrlByte(ctrlEvent({ ctrlKey: false }))).toBeNull();
+    expect(synthesizeCtrlByte(ctrlEvent({ shiftKey: true }))).toBeNull();
+    expect(synthesizeCtrlByte(ctrlEvent({ altKey: true }))).toBeNull();
+    expect(synthesizeCtrlByte(ctrlEvent({ metaKey: true }))).toBeNull();
+    expect(synthesizeCtrlByte(ctrlEvent({ key: "Enter" }))).toBeNull();
+    expect(synthesizeCtrlByte(ctrlEvent({ key: "1" }))).toBeNull();
+    expect(synthesizeCtrlByte(ctrlEvent({ type: "keyup" }))).toBeNull();
+    expect(synthesizeCtrlByte(ctrlEvent({ isComposing: true }))).toBeNull();
   });
 });

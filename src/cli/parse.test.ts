@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { DEFAULT_PORT, parseCommand, usageText } from "./parse";
+import { DEFAULT_PORT, normalizeBasePath, parseCommand, usageText } from "./parse";
 
 describe("parseCommand", () => {
   test("defaults watch roots, follow, and open behavior", () => {
@@ -202,5 +202,64 @@ describe("parseCommand", () => {
     const text = usageText();
     expect(text).toContain("uatu [serve] [PATH...]");
     expect(text).toContain("deprecated alias");
+  });
+
+  test("basePath defaults to /", () => {
+    const parsed = parseCommand(["serve"]);
+    if (parsed.kind !== "watch") throw new Error("expected watch");
+    expect(parsed.options.basePath).toBe("/");
+  });
+
+  test("--base-path accepts both value forms and normalizes the trailing slash", () => {
+    const spaced = parseCommand(["serve", "--base-path", "/s/uatu"]);
+    if (spaced.kind !== "watch") throw new Error("expected watch");
+    expect(spaced.options.basePath).toBe("/s/uatu/");
+
+    const inline = parseCommand(["serve", "--base-path=/s/uatu/"]);
+    if (inline.kind !== "watch") throw new Error("expected watch");
+    expect(inline.options.basePath).toBe("/s/uatu/");
+  });
+
+  test("--base-path rejects invalid prefixes", () => {
+    expect(() => parseCommand(["serve", "--base-path", "relative/path"])).toThrow(/must start with '\/'/);
+    expect(() => parseCommand(["serve", "--base-path", "/has space/"])).toThrow(/whitespace or reserved/);
+    expect(() => parseCommand(["serve", "--base-path", "/a/../b/"])).toThrow(/dot segments/);
+    expect(() => parseCommand(["serve", "--base-path", "/a//b/"])).toThrow(/empty path segment/);
+    expect(() => parseCommand(["serve", "--base-path", "/x?y=1"])).toThrow(/whitespace or reserved/);
+    expect(() => parseCommand(["serve", "--base-path"])).toThrow(/missing value/);
+  });
+
+  test("normalizeBasePath keeps / as the identity prefix", () => {
+    expect(normalizeBasePath("/")).toBe("/");
+    expect(normalizeBasePath("/s/alpha")).toBe("/s/alpha/");
+  });
+
+  test("hub subcommand parses with and without --config", () => {
+    expect(parseCommand(["hub"])).toEqual({ kind: "hub", options: { configPath: undefined } });
+    expect(parseCommand(["hub", "--config", "/etc/uatu/hub.json"])).toEqual({
+      kind: "hub",
+      options: { configPath: "/etc/uatu/hub.json" },
+    });
+    expect(parseCommand(["hub", "--config=/etc/hub.json"])).toEqual({
+      kind: "hub",
+      options: { configPath: "/etc/hub.json" },
+    });
+  });
+
+  test("hub hash-password parses and rejects extra arguments", () => {
+    expect(parseCommand(["hub", "hash-password"])).toEqual({ kind: "hub-hash-password" });
+    expect(() => parseCommand(["hub", "hash-password", "hunter2"])).toThrow(/read from stdin/);
+  });
+
+  test("hub rejects unknown arguments and missing --config values", () => {
+    expect(() => parseCommand(["hub", "--nope"])).toThrow(/unknown hub argument/);
+    expect(() => parseCommand(["hub", "--config"])).toThrow(/missing value/);
+    expect(parseCommand(["hub", "--help"]).kind).toBe("help");
+  });
+
+  test("a folder named hub is still servable via the explicit serve command", () => {
+    const parsed = parseCommand(["serve", "hub"]);
+    if (parsed.kind !== "watch") throw new Error("expected watch");
+    expect(parsed.options.rootPaths).toEqual(["hub"]);
   });
 });

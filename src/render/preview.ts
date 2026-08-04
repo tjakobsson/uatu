@@ -1,3 +1,5 @@
+import { appUrl } from "../shared/app-url";
+
 type MermaidRuntime = {
   initialize: (options: { startOnLoad: boolean; securityLevel: string; theme: string; themeVariables?: Record<string, string | boolean> }) => void;
   run: (options: { nodes: HTMLElement[]; suppressErrors?: boolean }) => Promise<void>;
@@ -396,7 +398,7 @@ async function getMermaidRuntime(): Promise<MermaidRuntime | null> {
   }
 
   if (!mermaidLoadPromise) {
-    mermaidLoadPromise = loadScript("/assets/mermaid.min.js").then(() => {
+    mermaidLoadPromise = loadScript(appUrl("/assets/mermaid.min.js")).then(() => {
       const runtime = globalThis.mermaid;
       return runtime ? (runtime as MermaidRuntime) : null;
     });

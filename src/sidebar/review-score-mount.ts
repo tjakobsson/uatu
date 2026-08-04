@@ -4,6 +4,7 @@
 // `app.ts` so the sidebar feature folder owns this preview alongside the
 // other score / change-overview presentation helpers.
 
+import { appUrl } from "../shared/app-url";
 import type { RepositoryReviewSnapshot } from "../shared/types";
 import { recomputeSelectionInspector } from "../shell/inspector-instance";
 import { clearPreviewType } from "../preview/header";
@@ -44,7 +45,7 @@ export function renderReviewScoreDetails(repository: RepositoryReviewSnapshot) {
   previewPathElement.textContent = repository.label;
   clearPreviewType();
   hideViewToggle();
-  previewBaseElement.href = new URL("/", window.location.origin).toString();
+  previewBaseElement.href = new URL(appUrl("/"), window.location.origin).toString();
   previewElement.classList.remove("empty");
   previewElement.innerHTML = buildScoreExplanationHTML(load);
   recomputeSelectionInspector();

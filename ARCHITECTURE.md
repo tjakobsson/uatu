@@ -86,6 +86,12 @@ src/
 │                         (@asciidoctor/core), sanitization + mermaid markers
 ├── review/               Review-burden score data layer
 ├── ignore/               .gitignore + .uatu.json tree.exclude engine
+├── hub/                  The self-hostable session hub (`uatu hub`): config,
+│                         XDG state dir, workspace registry, the
+│                         SessionBackend seam + local-process backend,
+│                         HTTP/SSE/WS reverse proxy, hub auth (users, signed
+│                         cookie, rate limit, CSRF), dashboard pages, server
+│                         assembly, process wiring
 ├── watchdog/             Heartbeat-driven hang recovery — spawned sibling
 │                         subprocess + forensic dump bundle
 ├── debug/                Observability — XDG-cache path resolution +
@@ -132,6 +138,39 @@ focused browser tab, falling back to the window when the split lacks focus.
 Nothing else crosses the boundary — the browser remains a first-class client,
 and the desktop app rides the same release train (see
 `.github/workflows/release.yml`, jobs `desktop-macos`/`update-tap`).
+
+## Base paths and the hub
+
+A serve session is relocatable under a path prefix: `uatu serve --base-path
+/s/uatu/` moves the entire HTTP surface — routes, assets, PWA scope, pushState
+document URLs, the terminal cookie's `Path` — under the prefix, with `/` as
+the byte-for-byte-unchanged default. Server-side, `buildRoutes` prefixes its
+static keys and the fetch fallback 404s anything outside the prefix;
+client-side, every server-relative URL flows through `appUrl()` in
+`src/shared/app-url.ts`, which reads the `<meta name="uatu-base-path">` the
+server injects into the shell (`relocateShellHtml` in
+`server/navigation.ts`, which also rewrites the HTMLBundle's root-absolute
+chunk references). A structural test (`shared/app-url-discipline.test.ts`)
+fails any module that builds a root-relative `/api`/`/assets` URL outside
+the helper.
+
+The consumer of that relocatability is **the hub** (`uatu hub`, `src/hub/`):
+a self-hostable daemon that owns a **workspaces root** (default: its cwd;
+refused if the root is itself inside a git worktree) and a workspace
+registry (stable collision-suffixed slugs; `backend` field reserved for a
+future container/VM backend), starts one loopback-bound `uatu serve` child
+per workspace through
+the `SessionBackend` interface (`hub/backend.ts` — the desktop wrapper's
+spawn contract: URL on stdout, held stdin as orphan backstop, SIGTERM), and
+reverse-proxies HTTP, SSE, and WebSockets under `/s/<id>/` from a single
+TLS-terminating, login-gated port (`hub/proxy.ts`, `hub/auth.ts`,
+`hub/server.ts`). The hub is a trusted intermediary: it authenticates the
+browser and validates its Origin, then forwards loopback-shaped
+`Host`/`Origin` headers and brokers the child's session token server-side —
+children keep their localhost security model unchanged and are never
+network-reachable. Operator documentation lives in `docs/SELF-HOSTING.md`;
+the design rationale (single-origin proxy over port-per-session, restart
+semantics, trust model) in `openspec/changes/add-uatu-hub/design.md`.
 
 ## Request lifecycle
 

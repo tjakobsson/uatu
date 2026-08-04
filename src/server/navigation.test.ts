@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { createNavigationFetchHandler, prefersHtmlNavigation, resolveKnownDocument, spaShellResponse } from "./navigation";
+import { createNavigationFetchHandler, prefersHtmlNavigation, relocateCssUrls, relocateShellHtml, resolveKnownDocument, spaShellResponse } from "./navigation";
 import { resolveWatchRoots, scanRoots } from "./roots";
 import { createWatchSession } from "./watch-session";
 
@@ -119,6 +119,7 @@ describe("Accept-based navigation dispatch", () => {
   async function withDispatchServer<T>(
     rootDirectory: string,
     block: (origin: string) => Promise<T>,
+    basePath?: string,
   ): Promise<T> {
     const session = createWatchSession(
       [{ kind: "dir", absolutePath: rootDirectory }],
@@ -136,15 +137,20 @@ describe("Accept-based navigation dispatch", () => {
         getEntries: () => entries,
         getRespectGitignore: () => true,
         getServer: () => server!,
+        basePath,
       });
       server = Bun.serve({
         hostname: "127.0.0.1",
         port: 0,
         idleTimeout: 0,
         routes: {
-          "/": () =>
-            new Response(`<!doctype html><html><body>${SHELL_MARKER}</body></html>`, {
+          ["/__uatu/shell"]: () =>
+            new Response(`<!doctype html><html><head></head><body>${SHELL_MARKER}<script src="/chunk-test.js"></script></body></html>`, {
               headers: { "content-type": "text/html; charset=utf-8" },
+            }),
+          "/chunk-test.js": () =>
+            new Response("// chunk", {
+              headers: { "content-type": "application/javascript" },
             }),
         },
         fetch: navigationHandler,
@@ -268,6 +274,170 @@ describe("Accept-based navigation dispatch", () => {
       expect(response.status).toBe(404);
       expect(body).not.toContain(SHELL_MARKER);
       expect(body).toBe("Not Found");
+    });
+  });
+});
+
+describe("relocateShellHtml", () => {
+  test("is the identity at /", () => {
+    const html = `<html><head></head><body><script src="/chunk-a.js"></script></body></html>`;
+    expect(relocateShellHtml(html, "/")).toBe(html);
+  });
+
+  test("prefixes root-absolute refs and injects the base-path meta", () => {
+    const html = `<html><head><base id="preview-base" href="/" /></head><body><script src="/chunk-a.js"></script><a href="//example.com/x">ext</a></body></html>`;
+    const relocated = relocateShellHtml(html, "/s/alpha/");
+    expect(relocated).toContain(`<meta name="uatu-base-path" content="/s/alpha/" />`);
+    expect(relocated).toContain(`src="/s/alpha/chunk-a.js"`);
+    expect(relocated).toContain(`href="/s/alpha/"`);
+    // Protocol-relative URLs stay untouched.
+    expect(relocated).toContain(`href="//example.com/x"`);
+  });
+});
+
+describe("relocateCssUrls", () => {
+  test("is the identity at /", () => {
+    const css = `@font-face { src: url("/font.woff2"); }`;
+    expect(relocateCssUrls(css, "/")).toBe(css);
+  });
+
+  test("prefixes root-absolute url() refs in every quoting style", () => {
+    const css = `a { background: url(/img.png); } @font-face { src: url("/font.woff2") format("woff2"); } b { mask: url('/mask.svg'); } c { d: url(//cdn.example/x); }`;
+    const out = relocateCssUrls(css, "/s/alpha/");
+    expect(out).toContain(`url(/s/alpha/img.png)`);
+    expect(out).toContain(`url("/s/alpha/font.woff2")`);
+    expect(out).toContain(`url('/s/alpha/mask.svg')`);
+    // Protocol-relative URLs stay untouched.
+    expect(out).toContain(`url(//cdn.example/x)`);
+  });
+});
+
+describe("base-path navigation dispatch", () => {
+  const SHELL_MARKER = "<!-- spa-shell-test-marker -->";
+  const BASE = "/s/alpha/";
+
+  test("prefix root serves the relocated shell regardless of Accept", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-base-root-"));
+    tempDirectories.push(tempDirectory);
+    await writeFile(path.join(tempDirectory, "README.md"), "# Hello\n");
+
+    await withBaseDispatchServer(tempDirectory, async origin => {
+      const response = await fetch(`${origin}/s/alpha/`, { headers: { accept: "*/*" } });
+      const body = await response.text();
+      expect(response.status).toBe(200);
+      expect(body).toContain(SHELL_MARKER);
+      expect(body).toContain(`content="/s/alpha/"`);
+      expect(body).toContain(`src="/s/alpha/chunk-test.js"`);
+    });
+  });
+
+  test("prefixed document navigation serves the relocated shell and raw fetch serves bytes", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-base-doc-"));
+    tempDirectories.push(tempDirectory);
+    await writeFile(path.join(tempDirectory, "README.md"), "# Hello\n");
+
+    await withBaseDispatchServer(tempDirectory, async origin => {
+      const navigated = await fetch(`${origin}/s/alpha/README.md`, {
+        headers: { accept: "text/html,application/xhtml+xml,*/*;q=0.8" },
+      });
+      expect(navigated.status).toBe(200);
+      expect(await navigated.text()).toContain(SHELL_MARKER);
+
+      const raw = await fetch(`${origin}/s/alpha/README.md`, { headers: { accept: "*/*" } });
+      expect(raw.status).toBe(200);
+      expect(await raw.text()).toBe("# Hello\n");
+    });
+  });
+
+  test("prefixed shell subresources pass through to the internal chunk routes", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-base-chunk-"));
+    tempDirectories.push(tempDirectory);
+    await writeFile(path.join(tempDirectory, "README.md"), "# Hello\n");
+
+    await withBaseDispatchServer(tempDirectory, async origin => {
+      const chunk = await fetch(`${origin}/s/alpha/chunk-test.js`, { headers: { accept: "*/*" } });
+      expect(chunk.status).toBe(200);
+      expect(await chunk.text()).toBe("// chunk");
+    });
+  });
+
+  test("requests outside the prefix are 404", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-base-outside-"));
+    tempDirectories.push(tempDirectory);
+    await writeFile(path.join(tempDirectory, "README.md"), "# Hello\n");
+
+    await withBaseDispatchServer(tempDirectory, async origin => {
+      const response = await fetch(`${origin}/s/other/README.md`, {
+        headers: { accept: "text/html" },
+      });
+      expect(response.status).toBe(404);
+    });
+  });
+
+  // Mirror of withDispatchServer with the base path wired through — kept
+  // local so the default-mode harness above stays untouched.
+  async function withBaseDispatchServer<T>(
+    rootDirectory: string,
+    block: (origin: string) => Promise<T>,
+  ): Promise<T> {
+    const session = createWatchSession(
+      [{ kind: "dir", absolutePath: rootDirectory }],
+      true,
+      { usePolling: true },
+    );
+    await session.start();
+    await waitUntil(() => session.getRoots().some(root => root.docs.length >= 1));
+
+    let server: ReturnType<typeof Bun.serve> | null = null;
+    try {
+      const entries = [{ kind: "dir", absolutePath: rootDirectory } as const];
+      const navigationHandler = createNavigationFetchHandler({
+        getUnscopedRoots: () => session.getUnscopedRoots(),
+        getEntries: () => entries,
+        getRespectGitignore: () => true,
+        getServer: () => server!,
+        basePath: BASE,
+      });
+      server = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        idleTimeout: 0,
+        routes: {
+          ["/__uatu/shell"]: () =>
+            new Response(`<!doctype html><html><head></head><body>${SHELL_MARKER}<script src="/chunk-test.js"></script></body></html>`, {
+              headers: { "content-type": "text/html; charset=utf-8" },
+            }),
+          "/chunk-test.js": () =>
+            new Response("// chunk", {
+              headers: { "content-type": "application/javascript" },
+            }),
+          "/chunk-test.css": () =>
+            new Response(`@font-face { src: url("/font-test.woff2") format("woff2"); }`, {
+              headers: { "content-type": "text/css; charset=utf-8" },
+            }),
+        },
+        fetch: navigationHandler,
+      });
+
+      const origin = `http://${server.hostname}:${server.port}`;
+      return await block(origin);
+    } finally {
+      server?.stop(true);
+      await session.stop();
+    }
+  }
+
+  test("CSS chunks passed through the prefix have their url() refs relocated", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-base-css-"));
+    tempDirectories.push(tempDirectory);
+    await writeFile(path.join(tempDirectory, "README.md"), "# Hello\n");
+
+    await withBaseDispatchServer(tempDirectory, async origin => {
+      const css = await fetch(`${origin}/s/alpha/chunk-test.css`, { headers: { accept: "text/css,*/*;q=0.1" } });
+      expect(css.status).toBe(200);
+      const body = await css.text();
+      expect(body).toContain(`url("/s/alpha/font-test.woff2")`);
+      expect(body).not.toContain(`url("/font-test.woff2")`);
     });
   });
 });

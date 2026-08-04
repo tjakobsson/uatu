@@ -1,4 +1,5 @@
 import { captureTerminalToken } from "./terminal/client";
+import { initHubNav } from "./shell/hub-nav";
 import { injectPwaLinks, registerServiceWorker } from "./shell/pwa";
 import { attachPopstateHandler } from "./shell/history";
 import { loadInitialState } from "./shell/boot";
@@ -110,6 +111,7 @@ registerProjectSearch(openSearchPane);
 initFindShortcuts();
 initSidebarCollapse();
 initSidebarPanes();
+initHubNav();
 initSidebarWidth();
 initGitLogControls();
 initGitLogClickHandler();

@@ -4,7 +4,9 @@
 // owns the closure that mutates panel state — every UI handler funnels
 // through its named methods so persistence and refit happen consistently.
 
+import { appUrl } from "../shared/app-url";
 import { mountTerminalPanel, type TerminalPanelHandle } from "./client";
+import { initTerminalKeybar } from "./keybar";
 import { refreshFindTarget } from "../find/find-bar";
 import { registerTerminalFind } from "../find/shortcut";
 import { createTerminalEngine, type TerminalSearchTarget } from "../find/terminal-engine";
@@ -189,6 +191,27 @@ export function setupTerminalPanel(
 
   const panes = new Map<string, TerminalPaneEntry>();
   let activePaneId: string | null = null;
+  // A user-initiated panel show that found no pane yet (fresh spawn path):
+  // the next pane added takes focus once its terminal opens.
+  let focusPaneWhenReady = false;
+
+  // Touch keybar (visible on coarse pointers only, CSS-gated): control
+  // sequences software keyboards can't type, sent to the focused pane.
+  const keybarContainer = document.getElementById("terminal-keybar");
+  if (keybarContainer) {
+    initTerminalKeybar({
+      container: keybarContainer,
+      sendToActivePane(sequence) {
+        const entry = activePaneId ? panes.get(activePaneId) : undefined;
+        if (!entry || !entry.handle.isAttached()) {
+          return false;
+        }
+        entry.handle.sendInput(sequence);
+        entry.handle.focus();
+        return true;
+      },
+    });
+  }
 
   // One search target per pane, cached.
   //
@@ -580,6 +603,10 @@ export function setupTerminalPanel(
     rebuildPanesContainer();
     entry.handle.attach();
     setActivePane(id);
+    if (focusPaneWhenReady) {
+      focusPaneWhenReady = false;
+      entry.handle.focus();
+    }
     persistState();
     requestAnimationFrame(() => fitAll());
     return entry;
@@ -589,8 +616,8 @@ export function setupTerminalPanel(
     try {
       const token = getToken();
       const url = token
-        ? `/api/terminal/sessions?t=${encodeURIComponent(token)}`
-        : "/api/terminal/sessions";
+        ? appUrl(`/api/terminal/sessions?t=${encodeURIComponent(token)}`)
+        : appUrl("/api/terminal/sessions");
       const response = await fetch(url, { method: "GET" });
       if (!response.ok) return [];
       const body = (await response.json()) as { sessions?: TerminalSessionInfo[] };
@@ -604,8 +631,8 @@ export function setupTerminalPanel(
     try {
       const token = getToken();
       const url = token
-        ? `/api/terminal/sessions/${encodeURIComponent(id)}?t=${encodeURIComponent(token)}`
-        : `/api/terminal/sessions/${encodeURIComponent(id)}`;
+        ? appUrl(`/api/terminal/sessions/${encodeURIComponent(id)}?t=${encodeURIComponent(token)}`)
+        : appUrl(`/api/terminal/sessions/${encodeURIComponent(id)}`);
       const response = await fetch(url, { method: "DELETE" });
       return response.status === 204;
     } catch {
@@ -854,7 +881,7 @@ export function setupTerminalPanel(
     setVisible(false);
   }
 
-  function setVisible(visible: boolean, persist = true) {
+  function setVisible(visible: boolean, persist = true, focusOnShow = false) {
     if (visible) {
       panel!.removeAttribute("hidden");
       resizer!.removeAttribute("hidden");
@@ -877,6 +904,21 @@ export function setupTerminalPanel(
         }
       }
       requestAnimationFrame(() => fitAll());
+      // A user-initiated show should land the cursor in the terminal —
+      // opening a terminal and then having to click into it is dead UX.
+      // handle.focus() is deferred client-side (it parks the intent until
+      // xterm actually opens), so no frame-timing guesses are needed. When
+      // no pane exists yet (fresh spawn, session chooser), addPane consumes
+      // the flag once the pane is created. Restore-on-boot shows pass
+      // focusOnShow=false so page load never steals focus.
+      if (focusOnShow) {
+        const entry = activePaneId ? panes.get(activePaneId) : undefined;
+        if (entry) {
+          entry.handle.focus();
+        } else {
+          focusPaneWhenReady = true;
+        }
+      }
     } else {
       panel!.setAttribute("hidden", "");
       resizer!.setAttribute("hidden", "");
@@ -899,7 +941,7 @@ export function setupTerminalPanel(
 
   function toggleVisible() {
     const visible = !panel!.hasAttribute("hidden");
-    setVisible(!visible);
+    setVisible(!visible, true, true);
   }
 
   function setDock(next: TerminalDock) {

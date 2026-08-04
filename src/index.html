@@ -93,6 +93,27 @@
           </div>
         </div>
 
+        <!-- Hub workspace switcher: hidden unless the session is served
+             through a uatu hub (shell/hub-nav.ts unhides it after probing
+             the hub API at the origin root). -->
+        <div class="sidebar-hub-row" id="hub-control" hidden>
+          <button
+            id="hub-toggle"
+            class="hub-toggle-button"
+            type="button"
+            aria-expanded="false"
+            aria-controls="hub-menu"
+            aria-label="Switch workspace or open the hub dashboard"
+            title="Switch workspace or open the hub dashboard"
+          >
+            <span class="indicator-dot is-live" aria-hidden="true"></span>
+            <span id="hub-current" class="hub-toggle-label"></span>
+            <svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true">
+              <path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
+          <div id="hub-menu" class="panels-menu hub-menu" hidden></div>
+        </div>
         <div class="sidebar-mode-row">
           <button
             id="follow-toggle"
@@ -610,6 +631,10 @@
           <!-- The find bar relocates here while the terminal is the surface
                being searched, so the control sits on the thing it searches. -->
           <div id="terminal-find-slot" class="find-slot"></div>
+          <!-- Touch keybar: keys software keyboards can't type (Esc, Tab,
+               Ctrl combos, arrows). Populated by terminal/keybar.ts; shown
+               only on coarse-pointer devices via CSS. -->
+          <div id="terminal-keybar" class="terminal-keybar" role="group" aria-label="Terminal keys"></div>
           <div id="terminal-panes" class="terminal-panes" data-orientation="horizontal"></div>
         </section>
       </div>

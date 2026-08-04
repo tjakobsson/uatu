@@ -17,8 +17,9 @@ import nerdFontsLicenseAsset from "./assets/fonts/LICENSE-nerdfonts.txt" with { 
 import fontNoticesAsset from "./assets/fonts/NOTICES.md" with { type: "file" };
 import index from "./index.html";
 import { parseCommand, usageText, versionText, type WatchOptions } from "./cli/parse";
-import { printIndexingStatus, printStartupBanner } from "./cli/output";
-import { createNavigationFetchHandler, openBrowser } from "./server/navigation";
+import { runHashPassword, runHub } from "./hub/main";
+import { formatSessionUrl, printIndexingStatus, printStartupBanner } from "./cli/output";
+import { createNavigationFetchHandler, INTERNAL_SHELL_PATH, openBrowser } from "./server/navigation";
 import { findNonGitWatchEntries, resolveWatchRoots, type WatchEntry } from "./server/roots";
 import { createWatchSession } from "./server/watch-session";
 import { buildFetchFallback, buildRoutes, SERVE_IDLE_TIMEOUT_SECONDS } from "./server/routes";
@@ -83,6 +84,14 @@ async function main() {
   }
 
   try {
+    if (parsed.kind === "hub") {
+      await runHub(parsed.options);
+      return;
+    }
+    if (parsed.kind === "hub-hash-password") {
+      await runHashPassword();
+      return;
+    }
     await runWatch(parsed.options);
   } catch (error) {
     console.error(`uatu: ${error instanceof Error ? error.message : String(error)}`);
@@ -177,12 +186,14 @@ async function runWatch(options: WatchOptions) {
       getEntries: () => rootEntries,
       getRespectGitignore: () => options.respectGitignore,
       getServer: () => server!,
+      basePath: options.basePath,
     });
 
     const fetchFallback = buildFetchFallback({
       getTerminalServer: () => terminalServer,
       getTerminalToken: () => watchSession!.getTerminalToken(),
       navigationFetch,
+      basePath: options.basePath,
     });
 
     server = Bun.serve({
@@ -190,14 +201,21 @@ async function runWatch(options: WatchOptions) {
       port: chosenPort,
       idleTimeout: SERVE_IDLE_TIMEOUT_SECONDS,
       routes: {
-        // `"/": index` MUST be a literal at this call site so Bun's
-        // bundler can analyze the route table during `bun build --compile`
-        // and wire up the HTMLBundle's chunk URLs. Routing through
+        // The HTMLBundle MUST appear as a literal at this call site so
+        // Bun's bundler can analyze the route table during `bun build
+        // --compile` and wire up the chunk URLs — routing through
         // `buildRoutes` alone is opaque to that analysis and the compiled
-        // binary fails to serve /chunk-*.js. The remaining routes are
-        // deduplicated across cli.ts and tests/e2e/server.ts via
-        // `buildRoutes`.
-        "/": index,
+        // binary fails to serve /chunk-*.js. It lives on an internal path;
+        // "/" maps to it ONLY at the default base path, because under a
+        // prefix the raw bundle is unrelocated (root-absolute chunk refs,
+        // no base-path meta) and external "/" must 404 like every other
+        // outside-prefix path. The remaining routes are deduplicated
+        // across cli.ts and tests/e2e/server.ts via `buildRoutes`.
+        [INTERNAL_SHELL_PATH]: index,
+        // Cast: TS types the conditional spread's "/" as optional-undefined,
+        // which Bun's Routes type rejects; at runtime the key is simply
+        // absent in prefix mode.
+        ...((options.basePath === "/" ? { "/": index } : {}) as { "/": typeof index }),
         ...buildRoutes({
           mode: "prod",
           assets: {
@@ -215,6 +233,7 @@ async function runWatch(options: WatchOptions) {
             },
           },
           getSession: () => watchSession!,
+          basePath: options.basePath,
           debug: options.debug,
           getMetricsSnapshot: () => metrics.snapshot(),
         }),
@@ -268,11 +287,14 @@ async function runWatch(options: WatchOptions) {
     throw new Error("failed to start watch session");
   }
 
-  const baseUrl = `http://127.0.0.1:${server.port}`;
   // Token is appended only when the terminal feature is on so unrelated runs
   // don't surface a confusing `?t=` in the printed URL. The browser strips it
   // from `location` on first load and stores it for later WS upgrades.
-  const url = terminalEnabled ? `${baseUrl}/?t=${encodeURIComponent(watchSession.getTerminalToken())}` : baseUrl;
+  const url = formatSessionUrl(
+    server.port!,
+    options.basePath,
+    terminalEnabled ? watchSession.getTerminalToken() : undefined,
+  );
   printStartupBanner(process.stdout);
   console.log(url);
 

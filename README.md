@@ -153,6 +153,38 @@ is taken; pass `--port 0` for an ephemeral port. **Breaking from earlier
 versions:** the default changed from 4312 to 4711 to keep PWA install
 identity stable across launches. Pass `--port 4312` to keep old behavior.
 
+`--base-path <PREFIX>` serves the whole session under an absolute path
+prefix (default `/`). It exists for supervisors that mount several sessions
+under one origin — most notably the hub below — and is rarely useful by
+hand.
+
+## The hub: remote sessions (`uatu hub`)
+
+`uatu hub` runs a self-hostable session server on a machine you own: one
+HTTPS port serving a login-gated dashboard, one supervised `uatu serve`
+child per workspace, every session reverse-proxied under
+`https://<host>/s/<workspace-id>/`. Sessions keep the full uatu experience —
+live preview, review burden, detachable terminals — reachable from any
+browser, including an iPad that installs the hub as a PWA.
+
+```bash
+printf '%s' 'a-password' | uatu hub hash-password   # → paste into hub.json
+uatu hub --config ~/.config/uatu/hub.json
+```
+
+The hub owns a **workspaces root** (default: the folder you start it in —
+it must contain repositories, not be one). The dashboard lists running
+sessions with live shell detail, resumes stopped workspaces, offers the
+root's subfolders to serve (with a `git init` offer for non-repos), and
+clones new repositories into the root. Terminal sessions detach and
+reattach across connectivity blips — a shell (or an agent running in it)
+keeps working while your train is in a tunnel.
+
+The full operator guide — trust model (hub users share the daemon's OS
+user; no isolation), config reference, certificate walkthroughs (mkcert,
+`tailscale cert`, `tailscale serve`), and systemd/launchd service
+definitions — is in [docs/SELF-HOSTING.md](./docs/SELF-HOSTING.md).
+
 ## Configuration: `.uatu.json`
 
 Optional repo-root file. All sections are independent and validation errors
@@ -207,7 +239,7 @@ renamed / untracked) is surfaced as ambient row annotations on the tree.
 The terminal endpoint accepts shell input, so it ships with a stricter
 envelope than the rest of uatu:
 
-- **Localhost binding only** — server binds `127.0.0.1`, never `0.0.0.0`
+- **Localhost binding only** — server binds `127.0.0.1`, never `0.0.0.0`. This holds even under the hub: remote access always terminates at the hub's authenticated HTTPS listener, and session children remain loopback-only
 - **Per-server token** — 32-byte token minted at startup, required for the WS upgrade. Restarting rotates it; the URL with the token lands in stdout and may persist in logs — treat as a short-lived credential
 - **Origin allowlist** — rejects upgrade unless the `Origin` hostname is `127.0.0.1` or `localhost` AND its port matches the request's `Host` header. Matching against `Host` (not the listen port) means port-mapped setups — a container publishing 4711→4712, an SSH forward — work with zero configuration, while pages served from any *other* localhost port stay blocked. One documented failure mode: a reverse proxy that rewrites the `Host` header makes the browser's `Origin` mismatch it, and the terminal refuses the connection — the pane then shows an explicit "blocked for this address" notice (the `GET /api/auth` probe answers 403: valid credentials, rejected origin) rather than a misleading re-auth prompt
 - **HttpOnly cookie** — `?t=<token>` mints a `uatu_term_<port>` HttpOnly + SameSite=Strict cookie (named for the port the browser used, so several uatu instances on different ports hold independent credentials) so PWA launches re-auth without pasting; rotates with the in-memory token
