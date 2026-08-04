@@ -61,7 +61,14 @@ export function createSessionCookieValue(user: string, key: string, nowSeconds: 
   return `${payload}.${sign(payload, key)}`;
 }
 
-export function verifySessionCookieValue(value: string, key: string): HubSession | null {
+// Small allowance for clock skew when rejecting future-dated timestamps.
+const IAT_SKEW_SECONDS = 300;
+
+export function verifySessionCookieValue(
+  value: string,
+  key: string,
+  nowSeconds: number = Math.floor(Date.now() / 1000),
+): HubSession | null {
   const dot = value.lastIndexOf(".");
   if (dot <= 0) return null;
   const payload = value.slice(0, dot);
@@ -77,6 +84,16 @@ export function verifySessionCookieValue(value: string, key: string): HubSession
   }
   const record = parsed as { user?: unknown; iat?: unknown };
   if (typeof record.user !== "string" || typeof record.iat !== "number") {
+    return null;
+  }
+  // Enforce the lifetime server-side: Max-Age only asks a conforming
+  // browser to discard its copy — a captured cookie would otherwise grant
+  // shell access forever. Future-dated timestamps (beyond clock skew) are
+  // equally invalid.
+  if (record.iat + HUB_COOKIE_MAX_AGE < nowSeconds) {
+    return null;
+  }
+  if (record.iat > nowSeconds + IAT_SKEW_SECONDS) {
     return null;
   }
   return { user: record.user, issuedAt: record.iat };

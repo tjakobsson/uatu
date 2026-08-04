@@ -15,8 +15,8 @@ Make a `uatu serve` session relocatable under a configured path prefix: every ro
 - **AND** selecting a document places the browser at `/s/uatu/guides/setup.md`
 
 #### Scenario: Requests outside the prefix are not served
-- **WHEN** the server runs with base path `/s/uatu/` and a client requests `/api/state`
-- **THEN** the server responds 404
+- **WHEN** the server runs with base path `/s/uatu/` and a client requests `/api/state` or `/`
+- **THEN** the server responds 404 — including for the root, which must not leak the unrelocated bundle shell
 
 #### Scenario: Live reload and terminal work under the prefix
 - **WHEN** the server runs with base path `/s/uatu/` and the SPA is loaded

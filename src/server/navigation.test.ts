@@ -144,7 +144,7 @@ describe("Accept-based navigation dispatch", () => {
         port: 0,
         idleTimeout: 0,
         routes: {
-          "/": () =>
+          ["/__uatu/shell"]: () =>
             new Response(`<!doctype html><html><head></head><body>${SHELL_MARKER}<script src="/chunk-test.js"></script></body></html>`, {
               headers: { "content-type": "text/html; charset=utf-8" },
             }),
@@ -403,7 +403,7 @@ describe("base-path navigation dispatch", () => {
         port: 0,
         idleTimeout: 0,
         routes: {
-          "/": () =>
+          ["/__uatu/shell"]: () =>
             new Response(`<!doctype html><html><head></head><body>${SHELL_MARKER}<script src="/chunk-test.js"></script></body></html>`, {
               headers: { "content-type": "text/html; charset=utf-8" },
             }),

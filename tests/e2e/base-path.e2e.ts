@@ -118,6 +118,9 @@ test("requests outside the prefix are 404", async ({ request }) => {
   expect(state.status()).toBe(404);
   const doc = await request.get(`${origin}/README.md`, { headers: { accept: "text/html" } });
   expect(doc.status()).toBe(404);
+  // The root too: the raw HTMLBundle must not leak an unrelocated shell.
+  const root = await request.get(`${origin}/`, { headers: { accept: "text/html" } });
+  expect(root.status()).toBe(404);
 });
 
 test("terminal auth promotes the token to a base-path-scoped cookie", async ({ request }) => {

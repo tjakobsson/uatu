@@ -420,6 +420,36 @@ describe("hub end to end", () => {
     expect(await unknown.text()).toContain("No workspace");
   });
 
+  test("a valid cookie for a user removed from the config is rejected", async () => {
+    const { createSessionCookieValue } = await import("./auth");
+    const ghostCookie = `uatu_hub=${createSessionCookieValue("departed-user", "integration-signing-key-0123456789")}`;
+    const response = await fetch(`${origin}/api/hub/state`, { headers: { cookie: ghostCookie } });
+    expect(response.status).toBe(401);
+    const proxied = await fetch(`${origin}/s/myproject/api/state`, { headers: { cookie: ghostCookie } });
+    expect(proxied.status).toBe(401);
+  });
+
+  test("cookies gain Secure when a fronting proxy reports HTTPS", async () => {
+    const response = await fetch(`${origin}/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-forwarded-proto": "https" },
+      body: JSON.stringify({ name: "tobias", password: "open sesame" }),
+      redirect: "manual",
+    });
+    expect(response.status).toBe(303);
+    expect(response.headers.get("set-cookie") ?? "").toContain("Secure");
+
+    // Plain loopback without a proxy stays un-Secure so local plain-HTTP
+    // login keeps working.
+    const plain = await fetch(`${origin}/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "tobias", password: "open sesame" }),
+      redirect: "manual",
+    });
+    expect(plain.headers.get("set-cookie") ?? "").not.toContain("Secure");
+  });
+
   test("logout clears the hub session cookie and re-gates everything", async () => {
     const response = await fetch(`${origin}/logout`, {
       method: "POST",

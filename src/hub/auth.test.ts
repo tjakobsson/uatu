@@ -42,18 +42,32 @@ describe("verifyLogin", () => {
 describe("session cookie", () => {
   test("sign → verify round-trips the user identity", () => {
     const value = createSessionCookieValue("tobias", KEY, 1_700_000_000);
-    const session = verifySessionCookieValue(value, KEY);
+    const session = verifySessionCookieValue(value, KEY, 1_700_000_100);
     expect(session).toEqual({ user: "tobias", issuedAt: 1_700_000_000 });
   });
 
   test("tampered payloads and signatures are rejected", () => {
-    const value = createSessionCookieValue("tobias", KEY);
+    const now = Math.floor(Date.now() / 1000);
+    const value = createSessionCookieValue("tobias", KEY, now);
     const [payload, signature] = value.split(".") as [string, string];
     const forgedPayload = Buffer.from(JSON.stringify({ user: "root", iat: 1 }), "utf8").toString("base64url");
     expect(verifySessionCookieValue(`${forgedPayload}.${signature}`, KEY)).toBeNull();
     expect(verifySessionCookieValue(`${payload}.AAAA`, KEY)).toBeNull();
     expect(verifySessionCookieValue("garbage", KEY)).toBeNull();
     expect(verifySessionCookieValue(value, "other-key-other-key-other-key-oth")).toBeNull();
+  });
+
+  test("expired and future-dated cookies are rejected server-side", () => {
+    const now = 1_700_000_000;
+    const fresh = createSessionCookieValue("tobias", KEY, now);
+    // Just inside the lifetime: valid.
+    expect(verifySessionCookieValue(fresh, KEY, now + 60 * 60 * 24 * 30 - 1)?.user).toBe("tobias");
+    // Past the lifetime: Max-Age is advisory to browsers; the server is not.
+    expect(verifySessionCookieValue(fresh, KEY, now + 60 * 60 * 24 * 30 + 1)).toBeNull();
+    // Future-dated beyond clock skew: forged-looking, rejected.
+    expect(verifySessionCookieValue(createSessionCookieValue("tobias", KEY, now + 3600), KEY, now)).toBeNull();
+    // Small skew tolerated.
+    expect(verifySessionCookieValue(createSessionCookieValue("tobias", KEY, now + 60), KEY, now)?.user).toBe("tobias");
   });
 
   test("verification survives a signer restart with the same key", () => {

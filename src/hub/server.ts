@@ -60,12 +60,30 @@ function htmlResponse(body: string, status = 200): Response {
 export function createHubFetchHandler(deps: HubDeps) {
   const { config, registry, sessions, signingKey } = deps;
   const limiter = new LoginRateLimiter();
-  const secureCookies = config.tls !== null;
+
+  // Whether the browser-facing connection is HTTPS: either the hub
+  // terminates TLS itself, or a fronting proxy (tailscale serve, Caddy,
+  // nginx) says so via X-Forwarded-Proto. The header can only ADD the
+  // Secure attribute — a forged value on a plain-HTTP hop hardens the
+  // cookie, never weakens it — so trusting it needs no proxy allowlist.
+  const secureCookies = (request: Request): boolean =>
+    config.tls !== null ||
+    (request.headers.get("x-forwarded-proto") ?? "").toLowerCase().includes("https");
+
+  // The gate's verdict: a structurally valid, unexpired, correctly signed
+  // cookie AND a user that still exists in the config. Removing a user
+  // from the config (plus a restart) revokes their outstanding cookies —
+  // without this, only rotating the signing key would.
+  const authenticatedSession = (request: Request) => {
+    const session = readHubSession(request, signingKey);
+    if (!session) return null;
+    if (!config.users.some(user => user.name === session.user)) return null;
+    return session;
+  };
 
   const handleLogin = async (request: Request, server: HubServer): Promise<Response> => {
     if (request.method === "GET") {
-      const session = readHubSession(request, signingKey);
-      if (session) {
+      if (authenticatedSession(request)) {
         return Response.redirect("/", 303);
       }
       return htmlResponse(loginPage());
@@ -112,7 +130,7 @@ export function createHubFetchHandler(deps: HubDeps) {
       headers: {
         location: "/",
         "set-cookie": formatHubCookie(createSessionCookieValue(user.name, signingKey), {
-          secure: secureCookies,
+          secure: secureCookies(request),
         }),
       },
     });
@@ -279,7 +297,7 @@ export function createHubFetchHandler(deps: HubDeps) {
         status: 303,
         headers: {
           location: "/login",
-          "set-cookie": formatHubCookieClear({ secure: secureCookies }),
+          "set-cookie": formatHubCookieClear({ secure: secureCookies(request) }),
         },
       });
     }
@@ -289,8 +307,9 @@ export function createHubFetchHandler(deps: HubDeps) {
       });
     }
 
-    // The gate. Everything below requires an authenticated hub session.
-    const session = readHubSession(request, signingKey);
+    // The gate. Everything below requires an authenticated hub session
+    // belonging to a still-configured user.
+    const session = authenticatedSession(request);
     if (!session) {
       const wantsHtml = (request.headers.get("accept") ?? "").includes("text/html");
       if (request.method === "GET" && wantsHtml && !pathname.startsWith("/api/")) {

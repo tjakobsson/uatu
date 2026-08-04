@@ -66,13 +66,20 @@ export function prefersHtmlNavigation(request: Request): boolean {
   return htmlQuality > 0 && htmlQuality >= otherQuality;
 }
 
+// The route the raw HTMLBundle is registered under at every Bun.serve call
+// site. Internal on purpose: under a non-root base path the bundle's HTML is
+// unrelocated (root-absolute chunk refs, no base-path meta), so external
+// traffic must reach the shell only through the relocating paths — "/" maps
+// to the bundle ONLY at the default base path.
+export const INTERNAL_SHELL_PATH = "/__uatu/shell";
+
 // Cache the bundled SPA shell HTML on first use so subsequent navigation
 // requests can return it without another self-fetch. The bundled HTML is
-// reachable via the server's own `/` route (Bun's HTMLBundle handling
-// produces it); a one-time real HTTP fetch lifts the body out of that
-// route so the catch-all `fetch` handler can serve it for direct-link
-// requests too. Caching is safe because the bundle does not change at
-// runtime — a rebuild restarts the process.
+// reachable via the server's own INTERNAL_SHELL_PATH route (Bun's
+// HTMLBundle handling produces it); a one-time real HTTP fetch lifts the
+// body out of that route so the catch-all `fetch` handler can serve it for
+// direct-link requests too. Caching is safe because the bundle does not
+// change at runtime — a rebuild restarts the process.
 type ShellCache = { body: string; contentType: string };
 const shellCache = new Map<string, ShellCache>();
 
@@ -134,7 +141,7 @@ export async function spaShellResponse(
   let body: string;
   let contentType: string;
   try {
-    const fetched = await fetch(`http://${hostname}:${port}/`, {
+    const fetched = await fetch(`http://${hostname}:${port}${INTERNAL_SHELL_PATH}`, {
       headers: { accept: "text/html" },
     });
     if (!fetched.ok) {
