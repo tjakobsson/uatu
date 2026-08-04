@@ -1,11 +1,15 @@
-name: Desktop Edge
+name: Edge
 
-# Nightly bleeding-edge channel for UatuCode Desktop: builds main with the
-# same embed/sign/notarize pipeline as releases and publishes to the
-# rolling `edge` prerelease that Casks/uatu-desktop@edge.rb follows.
+# Nightly bleeding-edge channel for uatu and UatuCode Desktop: builds main
+# with the same compile/smoke pipeline (CLI) and embed/sign/notarize
+# pipeline (desktop) as releases, and publishes everything to the rolling
+# `edge` prerelease that Formula/uatu-edge.rb and Casks/uatu-desktop@edge.rb
+# follow. (The formula token is uatu-edge, not uatu@edge: brew's
+# filename→class mapping only rewrites `@` before a digit, so an @edge
+# formula could never load; cask tokens have no such rule.)
 # Skips when main hasn't moved since the last edge build, and never
-# publishes unsigned builds — with signing secrets unavailable the run
-# FAILS (red nightly) so a bad secret rotation can't silently stop the
+# publishes unsigned desktop builds — with signing secrets unavailable the
+# run FAILS (red nightly) so a bad secret rotation can't silently stop the
 # channel.
 
 on:
@@ -14,7 +18,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: desktop-edge
+  group: edge
   cancel-in-progress: false
 
 permissions: {}
@@ -36,10 +40,10 @@ jobs:
       - name: Skip when the current main is already fully published
         id: guard
         # "Published" means the edge tag points at HEAD AND all assets —
-        # archives, their provenance bundles, SHA256SUMS, VERSION — are
-        # on the release, not just the tag. gh release create makes the
-        # tag itself on the first publication, so a tag-only check would
-        # let a failed inaugural (or partial) upload block every retry
+        # desktop and CLI archives, their provenance bundles, SHA256SUMS,
+        # VERSION — are on the release, not just the tag. gh release create
+        # makes the tag itself on the first publication, so a tag-only check
+        # would let a failed inaugural (or partial) upload block every retry
         # until main moves again.
         env:
           GH_TOKEN: ${{ github.token }}
@@ -50,6 +54,10 @@ jobs:
           complete=true
           for asset in UatuCode-Desktop-arm64.zip UatuCode-Desktop-arm64.zip.sigstore.json \
                        UatuCode-Desktop-x64.zip UatuCode-Desktop-x64.zip.sigstore.json \
+                       uatu-darwin-arm64.zip uatu-darwin-arm64.zip.sigstore.json \
+                       uatu-darwin-x64.zip uatu-darwin-x64.zip.sigstore.json \
+                       uatu-linux-x64.tar.gz uatu-linux-x64.tar.gz.sigstore.json \
+                       uatu-linux-arm64.tar.gz uatu-linux-arm64.tar.gz.sigstore.json \
                        SHA256SUMS VERSION; do
             echo "$assets" | grep -qx "$asset" || complete=false
           done
@@ -90,13 +98,6 @@ jobs:
         if: steps.guard.outputs.changed == 'true'
         run: bun install --frozen-lockfile
 
-      - name: Compile darwin binaries
-        if: steps.guard.outputs.changed == 'true'
-        run: |
-          for target in darwin-arm64 darwin-x64; do
-            bun run scripts/build.ts --target="bun-$target" --outfile="dist/$target/uatu"
-          done
-
       - name: Compute edge version
         id: version
         if: steps.guard.outputs.changed == 'true'
@@ -104,11 +105,50 @@ jobs:
         # release and the next one, and the full timestamp keeps same-day
         # builds ordered too (short SHAs don't sort by commit order), so
         # brew upgrade always moves forward — including edge → next stable.
+        # Computed before compilation so the binaries are stamped with it.
         run: |
           base="$(bun -e 'console.log(require("./package.json").version)')"
           version="$base-edge.$(date -u +%Y%m%d%H%M%S).$(git rev-parse --short HEAD)"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "edge version: $version"
+
+      - name: Cross-compile all CLI targets
+        if: steps.guard.outputs.changed == 'true'
+        # Same four targets as stable releases; the darwin binaries do
+        # double duty as the desktop app's embedded CLI. --version stamps
+        # the edge version so `uatu --version` identifies an edge build and
+        # the uatu-edge formula's self-test passes.
+        run: |
+          for target in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
+            bun run scripts/build.ts --target="bun-$target" --outfile="dist/$target/uatu" \
+              --version "${{ steps.version.outputs.version }}"
+          done
+
+      - name: Install Playwright Chromium
+        if: steps.guard.outputs.changed == 'true'
+        run: bunx playwright install --with-deps chromium
+
+      - name: Smoke-test the darwin-arm64 binary
+        if: steps.guard.outputs.changed == 'true'
+        # The runner is arm64 macOS, so this artifact — an exact binary
+        # being published — can be executed here. A failure stops the
+        # nightly before anything (CLI or desktop) is published.
+        run: bun run smoke
+        env:
+          UATU_SMOKE_BINARY: dist/darwin-arm64/uatu
+
+      - name: Package CLI release assets
+        if: steps.guard.outputs.changed == 'true'
+        # Same contract as stable releases: zip for darwin, tar.gz for
+        # linux, each archive holding a single `uatu` binary at its root.
+        run: |
+          mkdir -p dist/release
+          for target in darwin-arm64 darwin-x64; do
+            zip -j "dist/release/uatu-$target.zip" "dist/$target/uatu"
+          done
+          for target in linux-x64 linux-arm64; do
+            tar -czf "dist/release/uatu-$target.tar.gz" -C "dist/$target" uatu
+          done
 
       - name: Build UatuCode Desktop for both architectures
         if: steps.guard.outputs.changed == 'true'
@@ -143,7 +183,9 @@ jobs:
         if: steps.guard.outputs.changed == 'true'
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
-          subject-path: dist/release/UatuCode-Desktop-*
+          subject-path: |
+            dist/release/UatuCode-Desktop-*
+            dist/release/uatu-*
 
       - name: Download provenance bundles for the archives
         if: steps.guard.outputs.changed == 'true'
@@ -155,7 +197,7 @@ jobs:
         # digest-addressed, so on a rerun the bundle always matches the
         # freshly rebuilt archive.
         run: |
-          for f in dist/release/UatuCode-Desktop-*.zip; do
+          for f in dist/release/UatuCode-Desktop-*.zip dist/release/uatu-darwin-*.zip dist/release/uatu-linux-*.tar.gz; do
             name="$(basename "$f")"
             dir="$(mktemp -d)"
             (cd "$dir" && gh attestation download "$GITHUB_WORKSPACE/$f" --repo "$GITHUB_REPOSITORY" --limit 1)
@@ -172,35 +214,40 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          (cd dist/release && shasum -a 256 UatuCode-Desktop-*.zip > SHA256SUMS && cat SHA256SUMS)
+          (cd dist/release && shasum -a 256 UatuCode-Desktop-*.zip uatu-darwin-*.zip uatu-linux-*.tar.gz > SHA256SUMS && cat SHA256SUMS)
           printf '%s\n' "$VERSION" > dist/release/VERSION
           commit="$(git rev-parse HEAD)"
-          notes="Bleeding-edge build of UatuCode Desktop from \`main\`.
+          notes="Bleeding-edge build of uatu and UatuCode Desktop from \`main\`.
 
           - commit: $commit
           - version: $VERSION
           - built: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-          Install: \`brew install --cask tjakobsson/tap/uatu-desktop@edge\`
-          Stable channel: \`brew install --cask tjakobsson/tap/uatu-desktop\`"
+          CLI: \`brew install tjakobsson/tap/uatu-edge\`
+          Desktop: \`brew install --cask tjakobsson/tap/uatu-desktop@edge\`
+          Stable channels: \`brew install tjakobsson/tap/uatu\` / \`brew install --cask tjakobsson/tap/uatu-desktop\`"
           # Assets first, tag last: the skip guard keys on the tag, so a
           # failed upload must leave the old tag in place — otherwise the
           # next nightly would see "unchanged" and never retry, leaving
           # stale assets behind a moved tag.
           if ! gh release view edge > /dev/null 2>&1; then
             gh release create edge --prerelease --target "$commit" \
-              --title "UatuCode Desktop edge" --notes "$notes"
+              --title "uatu edge" --notes "$notes"
           fi
-          gh release upload edge --clobber dist/release/UatuCode-Desktop-*.zip dist/release/UatuCode-Desktop-*.zip.sigstore.json dist/release/SHA256SUMS dist/release/VERSION
-          gh release edit edge --prerelease --title "UatuCode Desktop edge" --notes "$notes"
+          gh release upload edge --clobber \
+            dist/release/UatuCode-Desktop-*.zip dist/release/UatuCode-Desktop-*.zip.sigstore.json \
+            dist/release/uatu-darwin-*.zip dist/release/uatu-linux-*.tar.gz \
+            dist/release/uatu-darwin-*.zip.sigstore.json dist/release/uatu-linux-*.tar.gz.sigstore.json \
+            dist/release/SHA256SUMS dist/release/VERSION
+          gh release edit edge --prerelease --title "uatu edge" --notes "$notes"
           git tag -f edge "$commit"
           git push -f origin edge
 
   update-tap:
     # Runs on every successful nightly — including skipped-build runs —
-    # and reconciles the cask with whatever the edge release currently
-    # holds, so a transiently failed tap push self-heals the next night
-    # without rebuilding.
+    # and reconciles the formula and cask with whatever the edge release
+    # currently holds, so a transiently failed tap push self-heals the
+    # next night without rebuilding.
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -231,14 +278,23 @@ jobs:
           echo "exists=true" >> "$GITHUB_OUTPUT"
           echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
 
-      - name: Update the uatu-desktop@edge cask
+      - name: Update the uatu-edge formula and uatu-desktop@edge cask
         if: steps.meta.outputs.exists == 'true'
+        # The formula is unconditional — a complete edge release always
+        # carries CLI archives, so a missing SHA256SUMS entry is a real
+        # error, unlike the cask's tolerated exit-2 unsigned-release skip
+        # in the stable workflow. The formula token is uatu-edge (see the
+        # header comment); the cask keeps its @edge token.
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
           git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/tjakobsson/homebrew-tap.git" tap
-          mkdir -p tap/Casks
+          mkdir -p tap/Formula tap/Casks
+          bun run scripts/generate-formula.ts \
+            --version "$VERSION" --sums SHA256SUMS \
+            --name uatu-edge --tag edge \
+            --out "tap/Formula/uatu-edge.rb"
           bun run scripts/generate-cask.ts \
             --version "$VERSION" --sums SHA256SUMS \
             --name uatu-desktop@edge --tag edge \
@@ -246,10 +302,10 @@ jobs:
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "Casks/uatu-desktop@edge.rb"
+          git add "Formula/uatu-edge.rb" "Casks/uatu-desktop@edge.rb"
           if git diff --cached --quiet; then
-            echo "Tap already up to date for uatu-desktop@edge $VERSION"
+            echo "Tap already up to date for edge $VERSION"
           else
-            git commit -m "uatu-desktop@edge $VERSION"
+            git commit -m "uatu-edge + uatu-desktop@edge $VERSION"
             git push origin HEAD
           fi
