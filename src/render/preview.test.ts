@@ -115,7 +115,7 @@ describe("renderMermaidDiagrams theme inputs", () => {
   });
 
   test("re-initializes only when theme inputs change", async () => {
-    const initialize = mock(() => undefined);
+    const initialize = mock((_options: { theme?: string; themeVariables?: Record<string, string> }) => undefined);
     const run = mock(async () => undefined);
     (globalThis as { mermaid?: unknown }).mermaid = { initialize, run };
 

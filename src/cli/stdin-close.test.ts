@@ -10,7 +10,10 @@ const REPO_ROOT = path.resolve(import.meta.dir, "..", "..");
 const DOCS = path.join(REPO_ROOT, "testdata", "watch-docs");
 
 type Served = {
-  proc: ReturnType<typeof Bun.spawn>;
+  // Typed to the spawn call's actual stdio config so `proc.stdin` is a
+  // FileSink rather than the all-config union `ReturnType<typeof Bun.spawn>`
+  // degrades to.
+  proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
   exited: Promise<number>;
 };
 

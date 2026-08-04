@@ -217,7 +217,7 @@ export function createTrailingSignal(
   // call it with `this === schedule` — an Illegal invocation TypeError.
   schedule: { set: typeof setTimeout; clear: typeof clearTimeout } = {
     set: ((callback: () => void, ms: number) => setTimeout(callback, ms)) as typeof setTimeout,
-    clear: (id => clearTimeout(id)) as typeof clearTimeout,
+    clear: ((id?: number) => clearTimeout(id)) as typeof clearTimeout,
   },
 ): TrailingSignal {
   let timer: ReturnType<typeof setTimeout> | null = null;

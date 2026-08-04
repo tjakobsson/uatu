@@ -151,15 +151,18 @@ export async function loadInitialState() {
     }
   }
 
-  if (appState.previewMode.kind === "review-score") {
-    const repository = appState.repositories.find(candidate => candidate.id === appState.previewMode.repositoryId);
+  // Local snapshot so the discriminant narrowing survives into the closures
+  // below (narrowing on a mutable property does not).
+  const previewMode = appState.previewMode;
+  if (previewMode.kind === "review-score") {
+    const repository = appState.repositories.find(candidate => candidate.id === previewMode.repositoryId);
     if (repository && repository.reviewLoad.status === "available") {
       renderReviewScoreDetails(repository);
     } else {
       renderEmptyPreview("Review score unavailable", "Repository data is not available for this score view.");
     }
-  } else if (appState.previewMode.kind === "commit") {
-    renderCommitPreview(appState.previewMode);
+  } else if (previewMode.kind === "commit") {
+    renderCommitPreview(previewMode);
   } else if (directLinkMessage) {
     renderEmptyPreview(directLinkMessage.title, directLinkMessage.body);
   } else if (appState.selectedId) {

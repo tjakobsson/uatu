@@ -353,7 +353,7 @@ describe("computeFilesPaneFilterMembership", () => {
         score: 0,
         level: "low",
         thresholds: { medium: 10, high: 25 },
-        base: { mode: "configured", ref: "main", mergeBase: null },
+        base: { mode: "configured", ref: "main", mergeBase: null, compareTarget: "base", comparedAgainstRef: "main", targetsCollapsed: false },
         changedFiles: [],
         ignoredFiles: [],
         gitIgnoredFiles: [],

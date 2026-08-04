@@ -12,6 +12,7 @@
     "dev": "bun run src/cli.ts serve",
     "bench:render": "bun run scripts/bench-render.ts",
     "test": "bun test",
+    "typecheck": "tsc --noEmit",
     "check:licenses": "bun run src/shared/license-check.ts",
     "e2e:install": "playwright install chromium",
     "test:e2e": "playwright test",
@@ -48,7 +49,8 @@
     "bun-types": "^1.3.14",
     "fast-check": "^4.9.0",
     "linkedom": "^0.18.13",
-    "mitata": "^1.0.34"
+    "mitata": "^1.0.34",
+    "typescript": "7.0.2"
   },
   "overrides": {
     "dompurify": "^3.4.11",

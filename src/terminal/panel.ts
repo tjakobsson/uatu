@@ -1053,7 +1053,7 @@ export function setupTerminalPanel(
 
     function onUp(ev: PointerEvent) {
       try {
-        resizer.releasePointerCapture(ev.pointerId);
+        resizer!.releasePointerCapture(ev.pointerId);
       } catch {
         // Pointer already released.
       }

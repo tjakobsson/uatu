@@ -87,9 +87,11 @@ export function connectEvents() {
       markSearchResultsStale(payload.changedId);
     }
 
-    if (appState.previewMode.kind === "review-score") {
+    // Local snapshot so the discriminant narrowing survives into the closure.
+    const previewMode = appState.previewMode;
+    if (previewMode.kind === "review-score") {
       renderSidebar();
-      const repository = appState.repositories.find(candidate => candidate.id === appState.previewMode.repositoryId);
+      const repository = appState.repositories.find(candidate => candidate.id === previewMode.repositoryId);
       if (repository && repository.reviewLoad.status === "available") {
         renderReviewScoreDetails(repository);
       } else {
@@ -98,9 +100,9 @@ export function connectEvents() {
       return;
     }
 
-    if (appState.previewMode.kind === "commit") {
+    if (previewMode.kind === "commit") {
       renderSidebar();
-      renderCommitPreview(appState.previewMode);
+      renderCommitPreview(previewMode);
       return;
     }
 
