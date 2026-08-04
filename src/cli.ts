@@ -17,7 +17,8 @@ import nerdFontsLicenseAsset from "./assets/fonts/LICENSE-nerdfonts.txt" with { 
 import fontNoticesAsset from "./assets/fonts/NOTICES.md" with { type: "file" };
 import index from "./index.html";
 import { parseCommand, usageText, versionText, type WatchOptions } from "./cli/parse";
-import { printIndexingStatus, printStartupBanner } from "./cli/output";
+import { runHashPassword, runHub } from "./hub/main";
+import { formatSessionUrl, printIndexingStatus, printStartupBanner } from "./cli/output";
 import { createNavigationFetchHandler, openBrowser } from "./server/navigation";
 import { findNonGitWatchEntries, resolveWatchRoots, type WatchEntry } from "./server/roots";
 import { createWatchSession } from "./server/watch-session";
@@ -83,6 +84,14 @@ async function main() {
   }
 
   try {
+    if (parsed.kind === "hub") {
+      await runHub(parsed.options);
+      return;
+    }
+    if (parsed.kind === "hub-hash-password") {
+      await runHashPassword();
+      return;
+    }
     await runWatch(parsed.options);
   } catch (error) {
     console.error(`uatu: ${error instanceof Error ? error.message : String(error)}`);
@@ -177,12 +186,14 @@ async function runWatch(options: WatchOptions) {
       getEntries: () => rootEntries,
       getRespectGitignore: () => options.respectGitignore,
       getServer: () => server!,
+      basePath: options.basePath,
     });
 
     const fetchFallback = buildFetchFallback({
       getTerminalServer: () => terminalServer,
       getTerminalToken: () => watchSession!.getTerminalToken(),
       navigationFetch,
+      basePath: options.basePath,
     });
 
     server = Bun.serve({
@@ -215,6 +226,7 @@ async function runWatch(options: WatchOptions) {
             },
           },
           getSession: () => watchSession!,
+          basePath: options.basePath,
           debug: options.debug,
           getMetricsSnapshot: () => metrics.snapshot(),
         }),
@@ -268,11 +280,14 @@ async function runWatch(options: WatchOptions) {
     throw new Error("failed to start watch session");
   }
 
-  const baseUrl = `http://127.0.0.1:${server.port}`;
   // Token is appended only when the terminal feature is on so unrelated runs
   // don't surface a confusing `?t=` in the printed URL. The browser strips it
   // from `location` on first load and stores it for later WS upgrades.
-  const url = terminalEnabled ? `${baseUrl}/?t=${encodeURIComponent(watchSession.getTerminalToken())}` : baseUrl;
+  const url = formatSessionUrl(
+    server.port!,
+    options.basePath,
+    terminalEnabled ? watchSession.getTerminalToken() : undefined,
+  );
   printStartupBanner(process.stdout);
   console.log(url);
 

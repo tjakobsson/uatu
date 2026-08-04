@@ -15,6 +15,7 @@
 // `initOutline()` wires the toggle / copy-source / filter / resize controls
 // once at boot.
 
+import { appUrl } from "../shared/app-url";
 import type { ViewMode } from "../shared/types";
 import { copyToClipboard } from "./code-block";
 import { copySourceButton, outlineToggleButton } from "./header";
@@ -517,7 +518,7 @@ async function handleCopySource(): Promise<void> {
     // the raw text escaped inside a `<pre>`; reading it back as textContent
     // recovers the source verbatim.
     const response = await fetch(
-      `/api/document?id=${encodeURIComponent(currentDocId)}&view=source`,
+      appUrl(`/api/document?id=${encodeURIComponent(currentDocId)}&view=source`),
     );
     if (!response.ok) {
       throw new Error(`status ${response.status}`);

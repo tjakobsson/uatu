@@ -4,6 +4,7 @@
 // the Follow toggle's behavior; this file's only job is the initial state
 // resolution.
 
+import { appDocumentRelativePath, appUrl } from "../shared/app-url";
 import { findDocumentById, findDocumentByRelativePath, syncStateGeneration } from "./storage";
 import { loadDocument } from "../preview/mount";
 import { renderEmptyPreview } from "../preview/empty";
@@ -35,12 +36,7 @@ export async function loadInitialState() {
   // Decode the requested URL path BEFORE fetching state so we can decide
   // whether to honor the server's defaultDocumentId or override with a
   // URL-derived doc selection (direct-link arrival, per design D3).
-  let urlRelativePath = "";
-  try {
-    urlRelativePath = decodeURIComponent(window.location.pathname).replace(/^\/+/, "");
-  } catch {
-    urlRelativePath = "";
-  }
+  const urlRelativePath = appDocumentRelativePath(window.location.pathname);
   // Capture the hash before our own `replaceSelection` (below) overwrites
   // the URL with a hashless version — otherwise the post-load fragment
   // scroll has nothing to scroll to.
@@ -51,7 +47,7 @@ export async function loadInitialState() {
   // the tree view subscribe on their own).
   initColorSchemeTracking();
 
-  const response = await fetch("/api/state");
+  const response = await fetch(appUrl("/api/state"));
   const payload = (await response.json()) as StatePayload;
 
   applyServerSnapshot(payload);
@@ -66,7 +62,7 @@ export async function loadInitialState() {
   // SSE rebroadcast then delivers the matching snapshots.
   if (appState.compareTarget !== payload.compareTarget) {
     try {
-      await fetch("/api/compare-target", {
+      await fetch(appUrl("/api/compare-target"), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ target: appState.compareTarget }),

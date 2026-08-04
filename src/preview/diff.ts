@@ -4,6 +4,7 @@
 // Extracted from `app.ts` so the preview/ feature folder owns the entire
 // view pipeline (single, split, diff) in one place.
 
+import { appUrl } from "../shared/app-url";
 import { findDocumentById } from "../shell/storage";
 import { prepareDiffRender, renderDocumentDiff, type DocumentDiffPayload } from "./diff-view";
 import { createLoadingSignal, type LoadingSignal } from "./loading-signal";
@@ -99,7 +100,7 @@ export async function applyDiffForActiveDocument(documentId: string): Promise<vo
 
 export async function fetchDocumentDiff(documentId: string): Promise<DocumentDiffPayload | null> {
   try {
-    const response = await fetch(`/api/document/diff?id=${encodeURIComponent(documentId)}`);
+    const response = await fetch(appUrl(`/api/document/diff?id=${encodeURIComponent(documentId)}`));
     if (!response.ok) {
       return null;
     }

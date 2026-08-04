@@ -3,6 +3,7 @@
 // stale-hint behavior, follow-mode auto-switching, and on-disk-change reloads
 // lives in here, intentionally close to its trigger (the SSE message).
 
+import { appUrl } from "../shared/app-url";
 import { chooseSelectionForFileEvent } from "./follow";
 import { applyProjectIdentity } from "./identity";
 import { findDocumentById, syncStateGeneration } from "./storage";
@@ -45,7 +46,7 @@ export function applyServerSnapshot(payload: StatePayload): void {
 }
 
 export function connectEvents() {
-  const events = new EventSource("/api/events");
+  const events = new EventSource(appUrl("/api/events"));
 
   events.addEventListener("open", () => {
     setConnectionState("live", "Online");

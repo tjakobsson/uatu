@@ -55,6 +55,11 @@ src/
 ├── render/         source → HTML (markdown, asciidoc, mermaid sanitization)
 ├── review/         load — the review-burden score data layer
 ├── ignore/         engine (.uatu.json + --no-gitignore)
+├── hub/            `uatu hub` — self-hostable session server: config,
+│                   state-dir, registry (stable workspace slugs), backend
+│                   (SessionBackend seam + local-process impl), proxy
+│                   (HTTP/SSE/WS + token brokering), auth (users + signed
+│                   cookie + rate limit + CSRF), pages, server, main
 ├── watchdog/       main + capture — heartbeat-driven hang recovery
 ├── debug/          cache + metrics + the heartbeat integration test
 ├── pwa/            PWA install affordance (asset references only)
@@ -83,6 +88,10 @@ path-filtered (`.github/workflows/desktop-ci.yml`); local builds need
 - **Cross-cutting helpers** like `escapeHtml` live in `src/shared/`.
   Don't reach into `app.ts` for them — that path has caused
   circular-import TDZ bugs.
+- **Client URLs go through `appUrl()`** (`src/shared/app-url.ts`) — never a
+  root-relative `/api`/`/assets` literal; `shared/app-url-discipline.test.ts`
+  enforces it. This is what makes a session relocatable under
+  `--base-path` (which the hub relies on).
 - E2E tests live in `tests/e2e/` under feature-named files
   (`mermaid.e2e.ts`, `sidebar.e2e.ts`, `document-tree.e2e.ts`, etc.) —
   there is no monolithic `uatu.e2e.ts`.

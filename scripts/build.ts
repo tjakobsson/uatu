@@ -49,6 +49,9 @@ const result = Bun.spawnSync({
     "bun",
     "build",
     "--compile",
+    // Minify the bundle — the SPA's client chunk carries bundled syntax
+    // grammars and is size-critical for hub-served (remote) sessions.
+    "--minify",
     ...(target ? [`--target=${target}`] : []),
     `--define=__UATU_BUILD__=${JSON.stringify(buildInfo)}`,
     path.join(root, "src/cli.ts"),

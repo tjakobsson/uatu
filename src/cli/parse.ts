@@ -3,6 +3,7 @@
 // entrypoint (`src/cli.ts`) imports from here and owns all process wiring.
 
 import { DEFAULT_RESPECT_GITIGNORE } from "../server/roots";
+import { normalizeBasePath } from "../shared/base-path";
 import { BUILD, formatBuildIdentifier, type BuildInfo } from "../shared/version";
 
 // Stable default so the eventual PWA install identity (origin =
@@ -35,10 +36,24 @@ export type WatchOptions = {
   // even by crash — the pipe closes and the server shuts itself down instead
   // of running orphaned.
   exitOnStdinClose: boolean;
+  // Absolute path prefix the whole session is served under. Always normalized
+  // to lead and trail with "/" ("/" itself for the default). Non-default
+  // values are how the hub mounts a session at /s/<workspace-id>/.
+  basePath: string;
+};
+
+export type HubOptions = {
+  // Path to the hub config file; undefined means the loader's default
+  // location ($XDG_CONFIG_HOME/uatu/hub.json or ~/.config/uatu/hub.json).
+  configPath?: string;
 };
 
 export type ParsedCommand =
   | { kind: "watch"; options: WatchOptions }
+  | { kind: "hub"; options: HubOptions }
+  // `uatu hub hash-password` — reads the password from stdin and prints the
+  // hash to paste into the config's users list.
+  | { kind: "hub-hash-password" }
   | { kind: "help" }
   | { kind: "version" };
 
@@ -47,11 +62,18 @@ export function usageText(build: BuildInfo = BUILD): string {
 
 Usage:
   uatu [serve] [PATH...] [--force] [--no-open] [--no-follow] [--no-gitignore] [--port <PORT>] [--debug]
+  uatu hub [--config <PATH>]
+  uatu hub hash-password
   uatu --help
   uatu --version
 
 The 'serve' command is the default: 'uatu docs' and 'uatu serve docs' are
 equivalent. 'uatu watch' is a deprecated alias for 'uatu serve'.
+
+The 'hub' command runs the self-hostable session hub: a daemon that serves a
+dashboard, supervises one 'uatu serve' child per workspace, and reverse-
+proxies each session under /s/<workspace-id>/. 'hub hash-password' reads a
+password from stdin and prints the hash for the config's users list.
 
 Options:
   --no-open               Do not open a browser automatically
@@ -61,6 +83,7 @@ Options:
   -p, --port              Bind the local server to a specific port
   --debug                 Record verbose 1Hz counter history under \$XDG_CACHE_HOME/uatu (or ~/.cache/uatu)
   --exit-on-stdin-close   Shut down when stdin reaches EOF (for supervising wrappers, so a crashed supervisor cannot orphan the server)
+  --base-path <PREFIX>    Serve the whole session under an absolute path prefix (default: /)
   --no-watchdog           Suppress the companion watchdog subprocess (escape hatch — leaves no recovery on freeze)
   --watchdog-timeout <ms> Override the heartbeat staleness threshold (default: 30000)
   -h, --help              Show help
@@ -70,6 +93,42 @@ Options:
 
 export function versionText(build: BuildInfo = BUILD): string {
   return formatBuildIdentifier(build);
+}
+
+export { normalizeBasePath };
+
+function parseHubCommand(rest: string[]): ParsedCommand {
+  if (rest[0] === "hash-password") {
+    if (rest.length > 1) {
+      throw new Error("hub hash-password takes no arguments (the password is read from stdin)");
+    }
+    return { kind: "hub-hash-password" };
+  }
+
+  let configPath: string | undefined;
+  for (let index = 0; index < rest.length; index += 1) {
+    const arg = rest[index]!;
+    if (arg === "-h" || arg === "--help") {
+      return { kind: "help" };
+    }
+    if (arg === "--config" || arg.startsWith("--config=")) {
+      let value: string | undefined;
+      if (arg === "--config") {
+        value = rest[index + 1];
+        if (!value) {
+          throw new Error("missing value for --config");
+        }
+        index += 1;
+      } else {
+        value = arg.slice("--config=".length);
+      }
+      configPath = value;
+      continue;
+    }
+    throw new Error(`unknown hub argument: ${arg}`);
+  }
+
+  return { kind: "hub", options: { configPath } };
 }
 
 export function parseCommand(
@@ -88,6 +147,10 @@ export function parseCommand(
   // deprecation warning (stderr only, so piped-stdout consumers capturing the
   // URL are unaffected). Anything else — flags, paths, or nothing at all — is
   // the bare-invocation default and behaves exactly as `serve`.
+  if (argv[0] === "hub") {
+    return parseHubCommand(argv.slice(1));
+  }
+
   let rest = argv;
   if (argv[0] === "serve") {
     rest = argv.slice(1);
@@ -106,6 +169,7 @@ export function parseCommand(
   let watchdogEnabled = true;
   let watchdogTimeoutMs: number | undefined;
   let exitOnStdinClose = false;
+  let basePath = "/";
   const rootPaths: string[] = [];
 
   for (let index = 0; index < rest.length; index += 1) {
@@ -172,6 +236,21 @@ export function parseCommand(
       continue;
     }
 
+    if (arg === "--base-path" || arg.startsWith("--base-path=")) {
+      let value: string | undefined;
+      if (arg === "--base-path") {
+        value = rest[index + 1];
+        if (!value) {
+          throw new Error("missing value for --base-path");
+        }
+        index += 1;
+      } else {
+        value = arg.slice("--base-path=".length);
+      }
+      basePath = normalizeBasePath(value);
+      continue;
+    }
+
     if (arg === "--watchdog-timeout" || arg.startsWith("--watchdog-timeout=")) {
       let value: string | undefined;
       if (arg === "--watchdog-timeout") {
@@ -222,6 +301,7 @@ export function parseCommand(
       watchdogEnabled,
       watchdogTimeoutMs,
       exitOnStdinClose,
+      basePath,
     },
   };
 }

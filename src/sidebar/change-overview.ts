@@ -3,6 +3,7 @@
 // the file-count chip. Extracted from `app.ts` so the sidebar feature
 // folder owns the change-overview presentation in one place.
 
+import { appUrl } from "../shared/app-url";
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
 import type { RepositoryReviewSnapshot, ReviewCompareTarget } from "../shared/types";
 import { identityColor, identityHue } from "../shell/identity";
@@ -322,7 +323,7 @@ async function applyCompareTargetChange(target: ReviewCompareTarget): Promise<vo
   // burden numbers + anchor refresh when the server rebroadcasts snapshots.
   renderSidebar();
   try {
-    await fetch("/api/compare-target", {
+    await fetch(appUrl("/api/compare-target"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ target }),

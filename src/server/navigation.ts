@@ -4,6 +4,7 @@
 
 import { spawn } from "node:child_process";
 
+import { stripBasePath } from "../shared/base-path";
 import type { DocumentMeta, RootGroup } from "../shared/types";
 import type { WatchEntry } from "./roots";
 import { staticFileResponse } from "./static-files";
@@ -75,16 +76,47 @@ export function prefersHtmlNavigation(request: Request): boolean {
 type ShellCache = { body: string; contentType: string };
 const shellCache = new Map<string, ShellCache>();
 
-export async function spaShellResponse(server: {
-  hostname?: string | undefined;
-  port?: number | undefined;
-}): Promise<Response> {
+// Relocates the bundled shell HTML under a base path. Bun's HTMLBundle emits
+// root-absolute chunk/asset references (src="/chunk-….js"), which a browser
+// that loaded the page at /s/<id>/ would request outside the prefix — so
+// every root-absolute src/href is prefixed (protocol-relative "//…" URLs are
+// excluded), and a <meta name="uatu-base-path"> is injected for the SPA's
+// boot-time URL helper. Identity at "/": the untransformed bundle is what
+// today's users get, byte for byte.
+export function relocateShellHtml(body: string, basePath: string): string {
+  if (basePath === "/") {
+    return body;
+  }
+  return body
+    .replace(/(src|href)="\/(?!\/)/g, `$1="${basePath}`)
+    .replace("<head>", `<head><meta name="uatu-base-path" content="${basePath}" />`);
+}
+
+// Relocates root-absolute url() references inside a CSS body under the base
+// path. Bun's CSS bundler emits root-absolute asset URLs (the bundled Nerd
+// Font most importantly: url("/HackNerdFontMono-….woff2")), which a page
+// loaded at /s/<id>/ would request outside the prefix — where nothing
+// answers. Protocol-relative url(//…) stays untouched; identity at "/".
+export function relocateCssUrls(css: string, basePath: string): string {
+  if (basePath === "/") {
+    return css;
+  }
+  return css.replace(/url\(\s*(['"]?)\/(?!\/)/g, `url($1${basePath}`);
+}
+
+export async function spaShellResponse(
+  server: {
+    hostname?: string | undefined;
+    port?: number | undefined;
+  },
+  basePath: string = "/",
+): Promise<Response> {
   const hostname = server.hostname ?? "127.0.0.1";
   const port = server.port;
   if (port === undefined) {
     throw new Error("spaShellResponse: server has no port");
   }
-  const key = `${hostname}:${port}`;
+  const key = `${hostname}:${port}:${basePath}`;
   const existing = shellCache.get(key);
   if (existing) {
     return new Response(existing.body, {
@@ -108,7 +140,7 @@ export async function spaShellResponse(server: {
     if (!fetched.ok) {
       return new Response(`SPA shell unavailable: ${fetched.status}`, { status: 502 });
     }
-    body = await fetched.text();
+    body = relocateShellHtml(await fetched.text(), basePath);
     contentType = fetched.headers.get("content-type") ?? "text/html; charset=utf-8";
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -135,19 +167,35 @@ export function createNavigationFetchHandler(deps: {
   getEntries: () => WatchEntry[];
   getRespectGitignore: () => boolean;
   getServer: () => { hostname?: string | undefined; port?: number | undefined };
+  basePath?: string;
 }): (request: Request) => Promise<Response> {
+  const basePath = deps.basePath ?? "/";
   return async request => {
     const requestUrl = new URL(request.url);
+    // Root-relative dispatch below; requests outside the prefix have nothing
+    // here (the fetch fallback already 404s them, but this handler is also
+    // wired directly in tests).
+    const pathname = stripBasePath(requestUrl.pathname, basePath);
+    if (pathname === null) {
+      return new Response("Not Found", { status: 404 });
+    }
     const htmlPreferring = prefersHtmlNavigation(request);
 
+    // The prefix root is always the shell: under a base path the "/" static
+    // HTMLBundle route only serves the internal, untransformed bundle, so
+    // /s/<id>/ must resolve here regardless of the Accept header.
+    if (basePath !== "/" && pathname === "/") {
+      return await spaShellResponse(deps.getServer(), basePath);
+    }
+
     if (htmlPreferring) {
-      const doc = resolveKnownDocument(requestUrl.pathname, deps.getUnscopedRoots());
+      const doc = resolveKnownDocument(pathname, deps.getUnscopedRoots());
       if (doc) {
-        return await spaShellResponse(deps.getServer());
+        return await spaShellResponse(deps.getServer(), basePath);
       }
     }
 
-    const response = await staticFileResponse(requestUrl.pathname, deps.getEntries(), {
+    const response = await staticFileResponse(pathname, deps.getEntries(), {
       respectGitignore: deps.getRespectGitignore(),
     });
     if (response) {
@@ -162,7 +210,89 @@ export function createNavigationFetchHandler(deps: {
     // Non-HTML-preferring requests (curl, sub-resource fetches) keep
     // receiving plain 404 so they aren't quietly served a stale HTML body.
     if (htmlPreferring) {
-      return await spaShellResponse(deps.getServer());
+      return await spaShellResponse(deps.getServer(), basePath);
+    }
+
+    // Under a base path, the shell's subresources (Bun HTMLBundle chunks)
+    // are served by the internal root-relative routes the static table can't
+    // express. Pass unresolved GETs through to ourselves at the stripped
+    // path — a chunk answers 200; anything else re-enters this fallback
+    // outside the prefix and terminates at the 404 above.
+    if (basePath !== "/" && (request.method === "GET" || request.method === "HEAD")) {
+      const server = deps.getServer();
+      const hostname = server.hostname ?? "127.0.0.1";
+      if (server.port !== undefined) {
+        try {
+          const conditionalHeaders: Record<string, string> = {};
+          // Forward conditional headers so Bun's internal ETag-bearing chunk
+          // routes can answer 304 instead of re-shipping megabytes.
+          const ifNoneMatch = request.headers.get("if-none-match");
+          if (ifNoneMatch) conditionalHeaders["if-none-match"] = ifNoneMatch;
+          const ifModifiedSince = request.headers.get("if-modified-since");
+          if (ifModifiedSince) conditionalHeaders["if-modified-since"] = ifModifiedSince;
+
+          const passthrough = await fetch(`http://${hostname}:${server.port}${pathname}`, {
+            method: request.method,
+            headers: { accept: request.headers.get("accept") ?? "*/*", ...conditionalHeaders },
+          });
+          if (passthrough.status === 304) {
+            return new Response(null, { status: 304, headers: passthrough.headers });
+          }
+          // Bun's dev-mode asset routes ignore conditional headers, so honor
+          // If-None-Match here: matching ETag → 304 without the body.
+          const upstreamEtag = passthrough.headers.get("etag");
+          if (
+            ifNoneMatch &&
+            upstreamEtag &&
+            ifNoneMatch
+              .split(",")
+              .map(tag => tag.trim().replace(/^W\//, ""))
+              .includes(upstreamEtag.replace(/^W\//, ""))
+          ) {
+            return new Response(null, { status: 304, headers: { etag: upstreamEtag } });
+          }
+          if (passthrough.ok) {
+            // Content-hashed bundle assets are immutable by construction —
+            // a new build mints new names — so tell the browser to keep
+            // them. Without this the SPA's main chunk re-downloads on
+            // every visit, which is brutal over remote links.
+            // Compiled binaries emit /chunk-<hash>.js-style names; dev-mode
+            // Bun serves content-addressed /_bun/asset/… and /_bun/client/…
+            // paths. Both are immutable by construction.
+            const immutable =
+              /^\/[A-Za-z0-9_.-]+-[a-z0-9]{8}\.(js|css|woff2)$/.test(pathname) ||
+              /^\/_bun\/(asset|client)\/[A-Za-z0-9_.-]+$/.test(pathname);
+            // CSS chunks carry root-absolute asset url() references (the
+            // bundled font above all) that must relocate with the page.
+            const contentType = passthrough.headers.get("content-type") ?? "";
+            if (contentType.includes("text/css")) {
+              const headers = new Headers(passthrough.headers);
+              headers.delete("content-length");
+              headers.delete("content-encoding");
+              if (immutable) headers.set("cache-control", "public, max-age=31536000, immutable");
+              return new Response(relocateCssUrls(await passthrough.text(), basePath), {
+                status: passthrough.status,
+                headers,
+              });
+            }
+            if (immutable) {
+              // Buffered rather than streamed so the response carries a
+              // real Content-Length — fronting proxies and the hub's
+              // compression path treat length-known bodies far better than
+              // open-ended chunked streams. These are build assets; their
+              // size is bounded by the binary itself.
+              const body = new Uint8Array(await passthrough.arrayBuffer());
+              const headers = new Headers(passthrough.headers);
+              headers.set("cache-control", "public, max-age=31536000, immutable");
+              headers.set("content-length", String(body.byteLength));
+              return new Response(body, { status: passthrough.status, headers });
+            }
+            return passthrough;
+          }
+        } catch {
+          // Self-fetch failures fall through to the plain 404.
+        }
+      }
     }
 
     return new Response("Not Found", { status: 404 });

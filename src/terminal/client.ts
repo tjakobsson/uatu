@@ -1,3 +1,4 @@
+import { appUrl } from "../shared/app-url";
 import { Terminal, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
@@ -9,6 +10,7 @@ import {
   createOsc52Handler,
   detectIsMac,
   handleClipboardKeyEvent,
+  synthesizeCtrlByte,
   type Osc52Notice,
 } from "./clipboard";
 import type { TerminalClipboardPolicy } from "../shared/types";
@@ -97,7 +99,7 @@ export function buildTerminalWebSocketUrl(
 ): string {
   const wsUrl = new URL(pageUrl);
   wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
-  wsUrl.pathname = "/api/terminal";
+  wsUrl.pathname = appUrl("/api/terminal");
   wsUrl.hash = "";
   const params = new URLSearchParams();
   if (token) params.set("t", token);
@@ -129,7 +131,7 @@ export function classifyAuthProbeStatus(status: number): PreOpenFailureKind {
 // whether to retry the WebSocket connection.
 async function persistTerminalToken(token: string): Promise<boolean> {
   try {
-    const response = await fetch("/api/auth", {
+    const response = await fetch(appUrl("/api/auth"), {
       method: "POST",
       credentials: "same-origin",
       headers: { "content-type": "application/json" },
@@ -158,6 +160,10 @@ export type TerminalPanelHandle = {
   fit(): void;
   // Move keyboard focus into xterm. No-op when not attached.
   focus(): void;
+  // Write raw bytes down the PTY exactly as typed input would travel —
+  // the touch keybar's path for control sequences (^C, Esc, arrows) that
+  // software keyboards cannot produce. No-op when not connected.
+  sendInput(data: string): void;
   isAttached(): boolean;
   // Scrollback search, driving the pane's own search addon. Reads the buffer
   // and moves xterm's selection only — nothing is written to the PTY, so a
@@ -229,6 +235,9 @@ const CLOSE_CODE_USER_TERMINATE = 4001;
 // xterm + WebSocket lifecycle for a single pane.
 export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanelHandle {
   let term: Terminal | null = null;
+  // Set by focusNow() when focus is requested before xterm has opened;
+  // consumed by openXtermNow() the moment it can actually take focus.
+  let pendingFocus = false;
   let fit: FitAddon | null = null;
   let search: SearchAddon | null = null;
   let searchResultsSubscription: { dispose(): void } | null = null;
@@ -298,7 +307,26 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     // listener is wired during open(). Mac short-circuits to passthrough
     // inside the handler so Cmd+C / Cmd+V keep using xterm's defaults.
     const isMac = detectIsMac();
-    term.attachCustomKeyEventHandler(event => handleClipboardKeyEvent(event, term!, isMac));
+    term.attachCustomKeyEventHandler(event => {
+      // Clipboard shortcuts first: on non-Mac, Ctrl+C with a selection is a
+      // copy and must win over the interrupt.
+      if (!handleClipboardKeyEvent(event, term!, isMac)) {
+        return false;
+      }
+      // Bare Ctrl+letter: synthesize the control byte from event.key and
+      // send it down the PTY ourselves. xterm derives these from keyCode,
+      // which iPadOS hardware keyboards don't populate usably — deriving
+      // from key works everywhere and emits the same bytes on desktop.
+      const ctrlByte = synthesizeCtrlByte(event);
+      if (ctrlByte !== null) {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(new TextEncoder().encode(ctrlByte));
+        }
+        event.preventDefault();
+        return false;
+      }
+      return true;
+    });
     // OSC 52 bridge: application-initiated copies (mouse-mode TUIs) reach the
     // host clipboard. `registerOscHandler` is stable public API — no
     // allowProposedApi needed. Write-only by construction; see clipboard.ts.
@@ -357,6 +385,11 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
         // send a corrected resize now that we have real dimensions.
         if (socket && socket.readyState === WebSocket.OPEN) {
           socket.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+        }
+        // Honor a focus requested before the terminal could take it.
+        if (pendingFocus) {
+          pendingFocus = false;
+          term.focus();
         }
       } catch {
         // Container vanished between observe() and the callback. Undo so
@@ -742,7 +775,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     let verdict: PreOpenFailureKind = "auth-required";
     try {
       const token = options.getToken();
-      const url = token ? `/api/auth?t=${encodeURIComponent(token)}` : "/api/auth";
+      const url = token ? appUrl(`/api/auth?t=${encodeURIComponent(token)}`) : appUrl("/api/auth");
       // Same-origin GETs carry no Origin header, so ship the page origin
       // explicitly — without it the server synthesizes the origin from
       // Host, which matches by construction, and the origin-rejected
@@ -789,11 +822,22 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
   }
 
   function focusNow(): void {
+    // Focus is a promise, not a moment: xterm can only take focus after
+    // term.open() runs, and open happens on the first ResizeObserver tick —
+    // an unpredictable time after attach() (WS connect, layout, session
+    // chooser). Focusing "now" when the terminal isn't open yet is the race
+    // that made the sidebar button only sometimes land the cursor, so an
+    // early call parks the intent and openXtermNow() honors it.
     try {
-      term?.focus();
+      if (term?.element) {
+        term.focus();
+        pendingFocus = false;
+        return;
+      }
     } catch {
-      // term has been disposed or hasn't opened yet — no-op.
+      // term has been disposed — fall through and park the intent.
     }
+    pendingFocus = true;
   }
 
   // Decorations give the scrollback the same "all matches plus a brighter
@@ -831,6 +875,10 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     terminate,
     fit: fitNow,
     focus: focusNow,
+    sendInput(data: string) {
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      socket.send(new TextEncoder().encode(data));
+    },
     isAttached: () => attached,
     search: terminalSearch,
   };

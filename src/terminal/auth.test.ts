@@ -97,6 +97,21 @@ describe("formatTerminalCookie", () => {
     const cookie = formatTerminalCookie("t", new URL("http://localhost:4712/api/auth"));
     expect(cookie).toContain(`${TERMINAL_COOKIE_PREFIX}_4712=t`);
   });
+
+  it("scopes Path to the session base path so origin-sharing sessions stay independent", () => {
+    const alpha = formatTerminalCookie("t", REQUEST_URL, "/s/alpha/");
+    const beta = formatTerminalCookie("t", REQUEST_URL, "/s/beta/");
+    expect(alpha).toContain("Path=/s/alpha/");
+    expect(beta).toContain("Path=/s/beta/");
+    // Same name (same Host port) — the Path attribute is what partitions
+    // the browser's presentation of the two cookies.
+    expect(alpha.split("=")[0]).toBe(beta.split("=")[0]);
+  });
+
+  it("defaults Path to / when no base path is given", () => {
+    const cookie = formatTerminalCookie("t", REQUEST_URL);
+    expect(cookie).toContain("Path=/;");
+  });
 });
 
 describe("readCookie", () => {

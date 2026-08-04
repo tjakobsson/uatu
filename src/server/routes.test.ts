@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import path from "node:path";
 
-import { buildRoutes } from "./routes";
+import { buildFetchFallback, buildRoutes } from "./routes";
 
 // Minimal stub: the asset routes never touch the session, so a thrown
 // getter is fine — it makes accidental coupling fail loudly.
@@ -9,9 +9,10 @@ const stubSession = () => {
   throw new Error("session should not be touched by asset routes");
 };
 
-function buildFontTestRoutes() {
+function buildFontTestRoutes(basePath?: string) {
   const repoRoot = path.resolve(import.meta.dir, "..", "..");
   return buildRoutes({
+    basePath,
     mode: "prod",
     assets: {
       mermaid: path.join(repoRoot, "node_modules/mermaid/dist/mermaid.min.js"),
@@ -72,6 +73,90 @@ describe("buildRoutes — bundled font asset routes", () => {
 
     const noticesBody = await notices.text();
     expect(noticesBody).toContain("Hack Nerd Font Mono");
+  });
+});
+
+describe("buildRoutes — base-path prefixing", () => {
+  test("default table is byte-for-byte the unprefixed table", () => {
+    const routes = buildFontTestRoutes();
+    expect(Object.keys(routes)).toContain("/api/state");
+    expect(Object.keys(routes)).toContain("/assets/mermaid.min.js");
+    expect(Object.keys(routes).every(key => !key.startsWith("/s/"))).toBe(true);
+  });
+
+  test("a base path prefixes every route key", () => {
+    const routes = buildFontTestRoutes("/s/alpha/");
+    const keys = Object.keys(routes);
+    expect(keys).toContain("/s/alpha/api/state");
+    expect(keys).toContain("/s/alpha/api/events");
+    expect(keys).toContain("/s/alpha/sw.js");
+    expect(keys).toContain("/s/alpha/manifest.webmanifest");
+    expect(keys).toContain("/s/alpha/debug/metrics");
+    expect(keys.every(key => key.startsWith("/s/alpha/"))).toBe(true);
+  });
+
+  test("the service worker is allowed to control the base-path scope", () => {
+    const routes = buildFontTestRoutes("/s/alpha/");
+    const sw = routes["/s/alpha/sw.js"] as Response;
+    expect(sw.headers.get("service-worker-allowed")).toBe("/s/alpha/");
+  });
+
+  test("the manifest is rewritten to live under the base path", async () => {
+    const routes = buildFontTestRoutes("/s/alpha/");
+    const handler = routes["/s/alpha/manifest.webmanifest"] as { GET: () => Promise<Response> };
+    const response = await handler.GET();
+    const manifest = (await response.json()) as {
+      start_url: string;
+      scope: string;
+      icons: { src: string }[];
+    };
+    expect(manifest.start_url).toBe("/s/alpha/");
+    expect(manifest.scope).toBe("/s/alpha/");
+    expect(manifest.icons.every(icon => icon.src.startsWith("/s/alpha/assets/"))).toBe(true);
+  });
+
+  test("the default manifest serves the bundled file untouched", async () => {
+    const routes = buildFontTestRoutes();
+    const response = routes["/manifest.webmanifest"] as Response;
+    const manifest = (await response.json()) as { start_url: string; scope: string };
+    expect(manifest.start_url).toBe("/");
+    expect(manifest.scope).toBe("/");
+  });
+});
+
+describe("buildFetchFallback — base-path gating", () => {
+  const makeFallback = (basePath: string) =>
+    buildFetchFallback({
+      getTerminalServer: () => null,
+      getTerminalToken: () => "token",
+      navigationFetch: async () => new Response("navigated", { status: 200 }),
+      basePath,
+    });
+
+  const stubServer = { upgrade: () => false };
+
+  test("requests outside the prefix are 404", async () => {
+    const fallback = makeFallback("/s/alpha/");
+    const outside = await fallback(new Request("http://127.0.0.1:4711/api/terminal"), stubServer);
+    expect(outside?.status).toBe(404);
+  });
+
+  test("prefixed paths are dispatched at their root-relative meaning", async () => {
+    const fallback = makeFallback("/s/alpha/");
+    // /api/terminal with no PTY backend answers 503 — proof the handler ran
+    // rather than the outside-prefix 404.
+    const upgrade = await fallback(new Request("http://127.0.0.1:4711/s/alpha/api/terminal"), stubServer);
+    expect(upgrade?.status).toBe(503);
+
+    const navigated = await fallback(new Request("http://127.0.0.1:4711/s/alpha/anything"), stubServer);
+    expect(navigated?.status).toBe(200);
+    expect(await navigated?.text()).toBe("navigated");
+  });
+
+  test("the default base path dispatches unprefixed paths unchanged", async () => {
+    const fallback = makeFallback("/");
+    const upgrade = await fallback(new Request("http://127.0.0.1:4711/api/terminal"), stubServer);
+    expect(upgrade?.status).toBe(503);
   });
 });
 

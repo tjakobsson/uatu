@@ -173,3 +173,18 @@ test.describe("terminal fit: grid never clips at pane edges", () => {
     }
   });
 });
+
+test("opening the terminal via the sidebar control focuses the shell", async ({ page, request }) => {
+  await bootWithTerminalCookie(page, request);
+  await openTerminal(page);
+
+  // Focus must land in xterm's hidden input textarea — the element that
+  // receives keystrokes — without any further click. The focus request is
+  // deferred client-side until xterm opens, so poll briefly rather than
+  // asserting a single frame.
+  await expect
+    .poll(async () =>
+      page.evaluate(() => document.activeElement?.classList.contains("xterm-helper-textarea") ?? false),
+    )
+    .toBe(true);
+});

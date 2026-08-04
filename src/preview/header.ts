@@ -1,3 +1,5 @@
+import { appUrl } from "../shared/app-url";
+
 // Preview header chrome — title chip, path label, type chip, and the
 // per-document `<base href>` that anchors relative URLs inside rendered
 // documents. Extracted from `app.ts` so the preview/ feature folder owns
@@ -87,5 +89,5 @@ export function setPreviewBase(relativePath: string) {
   // URLs the server's static file fallback already knows how to serve.
   const lastSlash = relativePath.lastIndexOf("/");
   const directory = lastSlash === -1 ? "" : relativePath.slice(0, lastSlash + 1);
-  previewBaseElement.href = new URL(`/${directory}`, window.location.origin).toString();
+  previewBaseElement.href = new URL(appUrl(`/${directory}`), window.location.origin).toString();
 }

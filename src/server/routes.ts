@@ -22,6 +22,7 @@ import {
 } from "../terminal/auth";
 import type { createTerminalServer } from "../terminal/server";
 import { handleTerminalSessionsRoute } from "../terminal/sessions-route";
+import { joinBasePath, stripBasePath } from "../shared/base-path";
 import { findDocument, isReviewCompareTarget, isViewMode } from "../shared/types";
 import { renderDocument } from "./render-dispatch";
 import { buildSearchPattern, searchDocuments } from "./search";
@@ -66,6 +67,9 @@ type BaseDeps = {
   // session on every `/__e2e/reset`, so the routes must read through to the
   // current instance each time they're invoked.
   getSession: () => WatchSession;
+  // Normalized base-path prefix (leading + trailing "/"). Every static
+  // route key is served under it; "/" (the default) is the identity.
+  basePath?: string;
 };
 
 export type ProdRouteDeps = BaseDeps & {
@@ -91,55 +95,91 @@ export type BuildRoutesDeps = ProdRouteDeps | E2ERouteDeps;
 // the result is spread at the call sites.
 export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string> {
   const { assets, getSession } = deps;
+  const basePath = deps.basePath ?? "/";
+  // Static route keys are data to Bun.serve, so prefixing them is enough to
+  // move the whole HTTP surface under the base path. (The HTMLBundle route
+  // stays a literal at each Bun.serve call site — see RouteAssets.)
+  const p = (path: string) => joinBasePath(basePath, path);
 
   const modeRoutes =
     deps.mode === "prod"
-      ? buildProdRoutes(deps)
-      : buildE2ERoutes(deps);
+      ? buildProdRoutes(deps, p)
+      : buildE2ERoutes(deps, p);
 
   return {
-    "/assets/mermaid.min.js": new Response(Bun.file(assets.mermaid), {
+    [p("/assets/mermaid.min.js")]: new Response(Bun.file(assets.mermaid), {
       headers: {
         "content-type": "application/javascript; charset=utf-8",
       },
     }),
-    "/assets/uatu-logo.svg": new Response(Bun.file(assets.logo), {
+    [p("/assets/uatu-logo.svg")]: new Response(Bun.file(assets.logo), {
       headers: {
         "content-type": "image/svg+xml",
         "cache-control": "public, max-age=3600",
       },
     }),
-    "/assets/icon-192.png": new Response(Bun.file(assets.icon192), {
+    [p("/assets/icon-192.png")]: new Response(Bun.file(assets.icon192), {
       headers: {
         "content-type": "image/png",
         "cache-control": "public, max-age=86400",
       },
     }),
-    "/assets/icon-512.png": new Response(Bun.file(assets.icon512), {
+    [p("/assets/icon-512.png")]: new Response(Bun.file(assets.icon512), {
       headers: {
         "content-type": "image/png",
         "cache-control": "public, max-age=86400",
       },
     }),
-    "/manifest.webmanifest": new Response(Bun.file(assets.manifest), {
-      headers: {
-        "content-type": "application/manifest+json",
-        "cache-control": "public, max-age=3600",
-      },
-    }),
-    "/sw.js": new Response(Bun.file(assets.sw), {
+    // Under a base path the manifest's root-absolute members (start_url,
+    // scope, icon srcs) must relocate with the session, so it is rewritten
+    // per-request; at "/" the bundled file serves untouched.
+    [p("/manifest.webmanifest")]:
+      basePath === "/"
+        ? new Response(Bun.file(assets.manifest), {
+            headers: {
+              "content-type": "application/manifest+json",
+              "cache-control": "public, max-age=3600",
+            },
+          })
+        : {
+            GET: async () => {
+              const manifest = (await Bun.file(assets.manifest).json()) as {
+                start_url?: string;
+                scope?: string;
+                icons?: { src?: string }[];
+              };
+              if (typeof manifest.start_url === "string") {
+                manifest.start_url = joinBasePath(basePath, manifest.start_url);
+              }
+              if (typeof manifest.scope === "string") {
+                manifest.scope = joinBasePath(basePath, manifest.scope);
+              }
+              for (const icon of manifest.icons ?? []) {
+                if (typeof icon.src === "string" && icon.src.startsWith("/")) {
+                  icon.src = joinBasePath(basePath, icon.src);
+                }
+              }
+              return Response.json(manifest, {
+                headers: {
+                  "content-type": "application/manifest+json",
+                  "cache-control": "public, max-age=3600",
+                },
+              });
+            },
+          },
+    [p("/sw.js")]: new Response(Bun.file(assets.sw), {
       headers: {
         "content-type": "application/javascript; charset=utf-8",
         // No-cache: when a uatu upgrade changes the SW logic, the new
         // worker must reach the user on the next reload instead of
         // being shadowed by a cached older version.
         "cache-control": "no-cache",
-        // Allow the worker to control the entire site even though it's
-        // served from /sw.js (no path-prefix nesting needed).
-        "service-worker-allowed": "/",
+        // Allow the worker to control the whole base-path scope even though
+        // it's served from <basePath>sw.js rather than nested deeper.
+        "service-worker-allowed": basePath,
       },
     }),
-    "/assets/fonts/HackNerdFontMono-Regular.woff2": new Response(Bun.file(assets.fonts.hackMono), {
+    [p("/assets/fonts/HackNerdFontMono-Regular.woff2")]: new Response(Bun.file(assets.fonts.hackMono), {
       headers: {
         "content-type": "font/woff2",
         // Immutable: the file is part of the compiled binary and only
@@ -147,28 +187,28 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
         "cache-control": "public, max-age=31536000, immutable",
       },
     }),
-    "/assets/fonts/LICENSE-hack.md": new Response(Bun.file(assets.fonts.hackLicense), {
+    [p("/assets/fonts/LICENSE-hack.md")]: new Response(Bun.file(assets.fonts.hackLicense), {
       headers: {
         "content-type": "text/markdown; charset=utf-8",
         "cache-control": "public, max-age=86400",
       },
     }),
-    "/assets/fonts/LICENSE-nerdfonts.txt": new Response(Bun.file(assets.fonts.nerdFontsLicense), {
+    [p("/assets/fonts/LICENSE-nerdfonts.txt")]: new Response(Bun.file(assets.fonts.nerdFontsLicense), {
       headers: {
         "content-type": "text/plain; charset=utf-8",
         "cache-control": "public, max-age=86400",
       },
     }),
-    "/assets/fonts/NOTICES.md": new Response(Bun.file(assets.fonts.notices), {
+    [p("/assets/fonts/NOTICES.md")]: new Response(Bun.file(assets.fonts.notices), {
       headers: {
         "content-type": "text/markdown; charset=utf-8",
         "cache-control": "public, max-age=86400",
       },
     }),
-    "/api/state": {
+    [p("/api/state")]: {
       GET: () => Response.json(getSession().getStatePayload()),
     },
-    "/api/document": {
+    [p("/api/document")]: {
       GET: async (request: Request) => {
         const url = new URL(request.url);
         const documentId = url.searchParams.get("id");
@@ -191,7 +231,7 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
         }
       },
     },
-    "/api/document/diff": {
+    [p("/api/document/diff")]: {
       GET: async (request: Request) => {
         const url = new URL(request.url);
         const documentId = url.searchParams.get("id");
@@ -224,10 +264,10 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
         }
       },
     },
-    "/api/events": {
+    [p("/api/events")]: {
       GET: () => getSession().eventsResponse(),
     },
-    "/api/search": {
+    [p("/api/search")]: {
       // Content search across the watched roots. Streams NDJSON — one JSON
       // object per line — rather than buffering the whole sweep: on a docs
       // tree the difference is imperceptible, but pointed at a repository it
@@ -309,7 +349,7 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
         });
       },
     },
-    "/api/compare-target": {
+    [p("/api/compare-target")]: {
       // Server-session view state shared across clients (mirrors /api/scope).
       // Setting it recomputes review snapshots and rebroadcasts over SSE; the
       // client receives the updated burden + anchor through the event stream.
@@ -329,7 +369,7 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
         return Response.json({ compareTarget: getSession().setCompareTarget(target) });
       },
     },
-    "/api/scope": {
+    [p("/api/scope")]: {
       POST: async (request: Request) => {
         let body: unknown;
         try {
@@ -366,10 +406,10 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
   };
 }
 
-function buildProdRoutes(deps: ProdRouteDeps) {
+function buildProdRoutes(deps: ProdRouteDeps, p: (path: string) => string) {
   const { debug, getMetricsSnapshot } = deps;
   return {
-    "/debug/metrics": {
+    [p("/debug/metrics")]: {
       GET: () => {
         if (!debug) {
           return new Response("Not found", { status: 404 });
@@ -380,10 +420,10 @@ function buildProdRoutes(deps: ProdRouteDeps) {
   };
 }
 
-function buildE2ERoutes(deps: E2ERouteDeps) {
+function buildE2ERoutes(deps: E2ERouteDeps, p: (path: string) => string) {
   const { getSession, handleE2EReset } = deps;
   return {
-    "/__e2e/terminal-token": {
+    [p("/__e2e/terminal-token")]: {
       // Tests don't see the URL token (the e2e server doesn't print it to
       // stdout the way cli.ts does), so this exposes it directly. Localhost-
       // only by Bun.serve's hostname binding; not a real auth bypass — only
@@ -396,7 +436,7 @@ function buildE2ERoutes(deps: E2ERouteDeps) {
         });
       },
     },
-    "/__e2e/reset": {
+    [p("/__e2e/reset")]: {
       POST: (request: Request) => handleE2EReset(request),
     },
   };
@@ -424,6 +464,10 @@ export type FetchFallbackDeps = {
   getTerminalServer: () => TerminalServerInstance | null;
   getTerminalToken: () => string;
   navigationFetch: (request: Request) => Promise<Response>;
+  // Normalized base-path prefix. Requests outside it are 404'd here — a
+  // prefixed server does not answer at its internal root-relative paths —
+  // and handlers below see the stripped, root-relative pathname.
+  basePath?: string;
 };
 
 export function buildFetchFallback(deps: FetchFallbackDeps) {
@@ -491,14 +535,29 @@ export function buildFetchFallback(deps: FetchFallbackDeps) {
       headers: {
         "content-type": "application/json",
         // Named for the request's Host port so instances on different host
-        // ports keep independent credentials (see terminalCookieName).
-        "set-cookie": formatTerminalCookie(provided, requestUrl),
+        // ports keep independent credentials (see terminalCookieName), and
+        // Path-scoped to the base path so sessions sharing an origin behind
+        // the hub keep independent credentials too.
+        "set-cookie": formatTerminalCookie(provided, requestUrl, basePath),
       },
     });
   };
 
+  const basePath = deps.basePath ?? "/";
+
   return (request: Request, srv: FetchFallbackServer): Response | Promise<Response> | undefined => {
     const requestUrl = new URL(request.url);
+    // Handlers below match on root-relative paths, so strip the base-path
+    // prefix once here. Outside the prefix there is nothing to serve: the
+    // static route table is prefixed too, so an unprefixed /api/* request
+    // lands here and must 404 rather than leak the internal route surface.
+    const stripped = stripBasePath(requestUrl.pathname, basePath);
+    if (stripped === null) {
+      return new Response("Not Found", { status: 404 });
+    }
+    if (stripped !== requestUrl.pathname) {
+      requestUrl.pathname = stripped;
+    }
     if (requestUrl.pathname === "/api/terminal") {
       return handleTerminalUpgrade(request, requestUrl, srv);
     }

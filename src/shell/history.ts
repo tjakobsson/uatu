@@ -7,6 +7,7 @@
 // caller (app.ts) controls when it's attached — importing this module
 // must not, by itself, install a global event listener.
 
+import { appDocumentRelativePath, appUrl } from "../shared/app-url";
 import { applyStaleHint } from "./stale-hint-mount";
 import { findDocumentById, findDocumentByRelativePath } from "./storage";
 import { loadDocument } from "../preview/mount";
@@ -38,7 +39,7 @@ const previewShellElement = document.querySelector<HTMLElement>(".preview-shell"
 // `/` separators stay as path separators and other special characters
 // (spaces, unicode, `#`, `?`) are escaped.
 export function buildDocumentPath(relativePath: string): string {
-  return "/" + relativePath.split("/").map(encodeURIComponent).join("/");
+  return appUrl("/" + relativePath.split("/").map(encodeURIComponent).join("/"));
 }
 
 // Push a new history entry for a user-initiated selection change. No-op when
@@ -53,7 +54,7 @@ export function pushSelection(documentId: string, relativePath: string) {
 }
 
 export function pushReviewScore(repositoryId: string) {
-  const url = new URL("/", window.location.origin);
+  const url = new URL(appUrl("/"), window.location.origin);
   url.searchParams.set("reviewScore", repositoryId);
   const nextPath = `${url.pathname}${url.search}`;
   if (window.location.pathname === url.pathname && window.location.search === url.search) {
@@ -63,7 +64,7 @@ export function pushReviewScore(repositoryId: string) {
 }
 
 export function buildCommitPreviewPath(repositoryId: string, sha: string): string {
-  const url = new URL("/", window.location.origin);
+  const url = new URL(appUrl("/"), window.location.origin);
   url.searchParams.set("repository", repositoryId);
   url.searchParams.set("commit", sha);
   return `${url.pathname}${url.search}`;
@@ -123,13 +124,8 @@ function isSameDocumentHashOnlyNavigation(): boolean {
   if (!activeDoc) {
     return false;
   }
-  let pathname: string;
-  try {
-    pathname = decodeURIComponent(window.location.pathname).replace(/^\/+/, "");
-  } catch {
-    return false;
-  }
-  return pathname === activeDoc.relativePath;
+  const pathname = appDocumentRelativePath(window.location.pathname);
+  return pathname !== "" && pathname === activeDoc.relativePath;
 }
 
 // Handle browser back/forward navigation. The browser has already moved the
@@ -182,12 +178,7 @@ export function attachPopstateHandler() {
       return;
     }
 
-    let urlRelativePath = "";
-    try {
-      urlRelativePath = decodeURIComponent(window.location.pathname).replace(/^\/+/, "");
-    } catch {
-      urlRelativePath = "";
-    }
+    const urlRelativePath = appDocumentRelativePath(window.location.pathname);
 
     if (!urlRelativePath) {
       const fallbackId = defaultDocumentId(appState.roots);

@@ -45,13 +45,18 @@ export function constantTimeEqual(a: string, b: string): boolean {
   }
 }
 
-export function formatTerminalCookie(token: string, requestUrl: URL): string {
+export function formatTerminalCookie(token: string, requestUrl: URL, basePath: string = "/"): string {
   // Localhost over HTTP — `Secure` would actually break things here. The
   // SameSite=Strict + Origin allowlist + HttpOnly together still close the
   // realistic attack surface for a localhost-bound dev tool.
+  //
+  // `Path` is the session's base path: when several sessions share one
+  // origin behind a prefixing proxy (the hub), the browser then presents
+  // each session's cookie only to that session's subtree, so the same-named
+  // cookies cannot collide. At the default "/" this is today's `Path=/`.
   return [
     `${terminalCookieName(requestUrl)}=${encodeURIComponent(token)}`,
-    "Path=/",
+    `Path=${basePath}`,
     `Max-Age=${TERMINAL_COOKIE_MAX_AGE}`,
     "HttpOnly",
     "SameSite=Strict",

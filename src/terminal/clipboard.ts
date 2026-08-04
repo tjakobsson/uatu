@@ -78,6 +78,23 @@ export function resetKeyboardLockForTests(): void {
   keyboardLockAttempted = false;
 }
 
+// Bare Ctrl+letter chords are synthesized here rather than left to xterm.
+// xterm's evaluator derives them from `event.keyCode`, and iPadOS Safari
+// delivers hardware-keyboard Ctrl chords in shapes that path drops — so
+// Ctrl-C from a connected iPad keyboard dies silently. Deriving the byte
+// from `event.key` instead works on every platform, and for desktop the
+// output is byte-for-byte what xterm would have produced (^A = 0x01 …
+// ^Z = 0x1a), so owning the chord universally changes nothing there.
+// Composition events and any modifier beyond bare Ctrl decline to xterm.
+export function synthesizeCtrlByte(event: KeyboardEvent): string | null {
+  if (event.type !== "keydown") return null;
+  if (event.isComposing) return null;
+  if (!event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return null;
+  const key = (event.key ?? "").toLowerCase();
+  if (key.length !== 1 || key < "a" || key > "z") return null;
+  return String.fromCharCode(key.charCodeAt(0) - 96);
+}
+
 // Pure event-handling logic. Returns `true` to let xterm.js process the key
 // normally, `false` to swallow. On Mac OR for any key outside the handled
 // chord set, always returns `true`. Async clipboard work is fire-and-forget

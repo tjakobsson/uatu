@@ -3,6 +3,7 @@
 // popstate handler in `history.ts` need to read URL parameters and turn
 // them into preview activations.
 
+import { appPathname } from "../shared/app-url";
 import { renderEmptyPreview } from "../preview/empty";
 import { renderSidebar } from "../sidebar/shell";
 import { renderCommitMessage } from "../preview/commit-message";
@@ -30,7 +31,7 @@ export function reviewScoreRepositoryIdFromUrl(): string | null {
 
 export function commitPreviewParamsFromUrl(): CommitPreviewParams | null {
   const url = new URL(window.location.href);
-  if (url.pathname !== "/") {
+  if (appPathname(url.pathname) !== "/") {
     return null;
   }
 

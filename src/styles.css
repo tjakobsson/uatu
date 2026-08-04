@@ -473,6 +473,157 @@ html.uatu-desktop-host
   position: relative;
 }
 
+/* Hub workspace switcher — visible only when the session is served through
+   a uatu hub (see shell/hub-nav.ts). A full-width row under the brand
+   header, same shape as the Terminal row; the dropdown reuses the
+   panels-menu surface. */
+.sidebar-hub-row {
+  position: relative;
+  /* Top padding mirrors the mode row's gap so the switcher breathes from
+     the brand header above it. */
+  padding: 0.85rem 0.75rem 0;
+  flex-shrink: 0;
+}
+
+.sidebar-hub-row[hidden] {
+  display: none;
+}
+
+.hub-toggle-button {
+  appearance: none;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.4rem 0.6rem;
+  background: transparent;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  color: var(--text-strong);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  text-align: left;
+}
+
+.hub-toggle-button:hover {
+  background: var(--surface-muted);
+  border-color: var(--border-medium);
+}
+
+.hub-toggle-button svg {
+  color: var(--text-subtle);
+  flex-shrink: 0;
+}
+
+.hub-toggle-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hub-menu {
+  left: 0.75rem;
+  right: 0.75rem;
+  min-width: 0;
+}
+
+/* The connection chip's live-dot treatment, available to the hub switcher's
+   standalone dots (the base .indicator-dot rules only color the dot inside
+   .connection-state). */
+.hub-toggle-button .indicator-dot.is-live,
+.hub-menu .indicator-dot.is-live {
+  background: var(--success);
+  animation: uatu-pulse 1.8s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hub-toggle-button .indicator-dot.is-live,
+  .hub-menu .indicator-dot.is-live {
+    animation: none;
+  }
+}
+
+.hub-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.35rem 0.4rem;
+  color: var(--text-strong);
+  font-size: 0.78rem;
+  border-radius: 0.3rem;
+  text-decoration: none;
+}
+
+.hub-menu-item:hover {
+  background: var(--surface-subtle);
+  text-decoration: none;
+}
+
+.hub-menu-item[aria-current="true"] {
+  font-weight: 700;
+}
+
+.hub-menu-item .hub-menu-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hub-menu-item .hub-menu-state {
+  color: var(--text-subtle);
+  font-size: 0.7rem;
+  flex-shrink: 0;
+}
+
+.hub-menu-divider {
+  margin: 0.3rem 0.15rem;
+  border: 0;
+  border-top: 1px solid var(--border-soft);
+}
+
+/* Terminal touch keybar — hidden everywhere except coarse-pointer devices
+   (iPad and friends), whose software keyboards have no Esc/Ctrl/arrows. */
+.terminal-keybar {
+  display: none;
+  flex-shrink: 0;
+  gap: 0.35rem;
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--surface-subtle);
+  overflow-x: auto;
+}
+
+@media (pointer: coarse) {
+  .terminal-keybar {
+    display: flex;
+  }
+}
+
+.terminal-keybar-key {
+  appearance: none;
+  flex-shrink: 0;
+  min-width: 2.4rem;
+  padding: 0.3rem 0.55rem;
+  font-family: var(--mono-font-family);
+  font-size: 0.8rem;
+  color: var(--text-strong);
+  background: var(--surface);
+  border: 1px solid var(--border-medium);
+  border-radius: 0.375rem;
+  cursor: pointer;
+}
+
+.terminal-keybar-key:active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
 .panels-menu {
   position: absolute;
   z-index: 5;
