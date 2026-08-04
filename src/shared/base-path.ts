@@ -13,6 +13,14 @@ export function normalizeBasePath(value: string): string {
   if (/\s/.test(value) || value.includes("?") || value.includes("#")) {
     throw new Error(`invalid --base-path (contains whitespace or reserved characters): '${value}'`);
   }
+  // Percent-encoding is rejected wholesale: URL parsers canonicalize
+  // sequences like %2e%2e during navigation, so a literal-encoded prefix
+  // would never match the routes registered against it (and %2e%2e is a
+  // smuggled dot segment besides). Hub workspace slugs are [a-z0-9-], so
+  // legitimate prefixes never need encoding.
+  if (value.includes("%")) {
+    throw new Error(`invalid --base-path (percent-encoding not allowed): '${value}'`);
+  }
   const segments = value.split("/");
   if (segments.some(segment => segment === "." || segment === "..")) {
     throw new Error(`invalid --base-path (dot segments not allowed): '${value}'`);

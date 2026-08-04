@@ -133,3 +133,35 @@ describe("registry persistence under concurrency", () => {
     expect(readdirSync(dir).filter(name => name.includes(".tmp"))).toEqual([]);
   });
 });
+
+describe("registry rollback on persistence failure", () => {
+  test("a failed save rolls the mutation back so retries re-attempt the write", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-hub-registry-"));
+    tempDirectories.push(dir);
+    // A registry whose file lives in a directory that does not exist:
+    // every save fails (temp-file write ENOENT).
+    const registry = new WorkspaceRegistry(path.join(dir, "missing", "registry.json"));
+    await registry.load();
+
+    await expect(registry.register("/srv/workspaces/doomed")).rejects.toThrow();
+    // The in-memory entry must not linger — a later retry would otherwise
+    // return it without ever persisting.
+    expect(registry.list()).toEqual([]);
+    expect(registry.byPath("/srv/workspaces/doomed")).toBeUndefined();
+  });
+
+  test("a failed remove restores the entry", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-hub-registry-"));
+    tempDirectories.push(dir);
+    const stateDir = path.join(dir, "state");
+    await (await import("node:fs/promises")).mkdir(stateDir);
+    const registry = new WorkspaceRegistry(path.join(stateDir, "registry.json"));
+    await registry.load();
+    await registry.register("/srv/workspaces/keeper");
+
+    // Make subsequent saves fail by removing the directory.
+    await rm(stateDir, { recursive: true, force: true });
+    await expect(registry.remove("keeper")).rejects.toThrow();
+    expect(registry.byId("keeper")).toBeDefined();
+  });
+});

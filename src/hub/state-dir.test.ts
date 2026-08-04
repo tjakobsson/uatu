@@ -47,6 +47,20 @@ describe("loadOrCreateSigningKey", () => {
     expect(second).toBe(first);
   });
 
+  test("a reused key with permissive mode is tightened to 0600", async () => {
+    const stateRoot = await tempStateRoot();
+    await ensureStateDir(stateRoot);
+    const key = "k".repeat(64);
+    const { writeFile, chmod } = await import("node:fs/promises");
+    await writeFile(signingKeyPath(stateRoot), `${key}\n`, { mode: 0o644 });
+    await chmod(signingKeyPath(stateRoot), 0o644);
+
+    const loaded = await loadOrCreateSigningKey(stateRoot);
+    expect(loaded).toBe(key);
+    const mode = (await stat(signingKeyPath(stateRoot))).mode & 0o777;
+    expect(mode).toBe(0o600);
+  });
+
   test("the state dir itself is owner-only", async () => {
     const stateRoot = await tempStateRoot();
     await ensureStateDir(stateRoot);

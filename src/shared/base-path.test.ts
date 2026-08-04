@@ -20,6 +20,10 @@ describe("normalizeBasePath", () => {
     expect(() => normalizeBasePath("/a/../b")).toThrow(/dot segments/);
     expect(() => normalizeBasePath("/a/./b")).toThrow(/dot segments/);
     expect(() => normalizeBasePath("/a//b")).toThrow(/empty path segment/);
+    // URL parsers canonicalize encoded sequences (%2e%2e → dot segments),
+    // so literal-encoded prefixes can never match their routes.
+    expect(() => normalizeBasePath("/s/%2e%2e/")).toThrow(/percent-encoding/);
+    expect(() => normalizeBasePath("/s/%61/")).toThrow(/percent-encoding/);
   });
 });
 

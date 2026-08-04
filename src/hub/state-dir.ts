@@ -37,12 +37,20 @@ export async function loadOrCreateSigningKey(stateRoot: string): Promise<string>
   try {
     const existing = (await fs.readFile(keyPath, "utf8")).trim();
     if (existing.length >= 32) {
+      // A pre-existing key (restored from backup, created by an older
+      // version, copied by hand) may carry permissive bits — and a locally
+      // readable signing key lets any OS user forge session cookies.
+      // Enforce owner-only on every load, not just at creation.
+      await fs.chmod(keyPath, 0o600);
       return existing;
     }
   } catch {
     // Missing or unreadable — create below.
   }
   const key = crypto.randomBytes(32).toString("hex");
+  // writeFile's mode only applies when the file is created; chmod covers
+  // the overwrite-of-a-short-existing-file path too.
   await fs.writeFile(keyPath, `${key}\n`, { mode: 0o600 });
+  await fs.chmod(keyPath, 0o600);
   return key;
 }

@@ -115,7 +115,15 @@ export class WorkspaceRegistry {
 
     const entry: WorkspaceEntry = { id, path: folderPath, backend };
     this.workspaces.push(entry);
-    await this.save();
+    try {
+      await this.save();
+    } catch (error) {
+      // Persistence failed (full/unwritable state volume): roll the
+      // mutation back so memory and disk cannot drift — a retry must
+      // re-attempt the save rather than find a phantom in-memory entry.
+      this.workspaces = this.workspaces.filter(candidate => candidate !== entry);
+      throw error;
+    }
     return entry;
   }
 
@@ -131,18 +139,29 @@ export class WorkspaceRegistry {
     if (removed.length === 0) {
       return [];
     }
+    const previous = this.workspaces;
     this.workspaces = this.workspaces.filter(entry => !removed.includes(entry));
-    await this.save();
+    try {
+      await this.save();
+    } catch (error) {
+      this.workspaces = previous;
+      throw error;
+    }
     return removed;
   }
 
   async remove(id: string): Promise<boolean> {
-    const before = this.workspaces.length;
+    const previous = this.workspaces;
     this.workspaces = this.workspaces.filter(entry => entry.id !== id);
-    if (this.workspaces.length === before) {
+    if (this.workspaces.length === previous.length) {
       return false;
     }
-    await this.save();
+    try {
+      await this.save();
+    } catch (error) {
+      this.workspaces = previous;
+      throw error;
+    }
     return true;
   }
 }
