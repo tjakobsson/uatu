@@ -4,9 +4,13 @@
 // pushes the output to tjakobsson/homebrew-tap — the formula is
 // regenerated wholesale every release, never edited in place, so the job
 // is idempotent and safe to re-run from any published release. The edge
-// workflow runs the same generator with `--name uatu@edge --tag edge` to
+// workflow runs the same generator with `--name uatu-edge --tag edge` to
 // keep the nightly channel's formula in lockstep (mirroring how
-// generate-cask.ts serves both desktop channels).
+// generate-cask.ts serves both desktop channels). The edge token is
+// dash-suffixed, not `uatu@edge`: Homebrew's filename→class mapping only
+// rewrites `@` when a digit follows (versioned formulas), so an `@edge`
+// formula file can never resolve to a loadable class — unlike cask
+// tokens, which are plain strings and keep `@edge` on the desktop side.
 //
 //   bun run scripts/generate-formula.ts --version 0.1.0 --sums dist/release/SHA256SUMS
 //
@@ -23,24 +27,23 @@ export const FORMULA_ASSETS = [
 ] as const;
 
 export interface FormulaOptions {
-  /** Formula name; the edge channel uses "uatu@edge". */
+  /** Formula name; the edge channel uses "uatu-edge". */
   name?: string;
   /** Release tag holding the assets; defaults to the versioned tag. */
   tag?: string;
 }
 
-// Homebrew's name→class rule: capitalize dash/underscore/dot-separated
-// segments, render `@` as "AT" ("uatu@edge" → UatuATEdge).
+// Faithful port of Homebrew's Formulary.class_s filename→class rule:
+// capitalize, uppercase the letter after -/_/./space, `+` → "x", and
+// rewrite `@` as "AT" only when a digit follows ("uatu-edge" → UatuEdge,
+// "uatu@1.1" → UatuAT11). Anything the rule can't turn into a valid Ruby
+// constant (e.g. "uatu@edge") is unloadable by brew, so the generator
+// must only ever be fed tokens this function maps cleanly.
 export function formulaClassName(name: string): string {
-  return name
-    .split("@")
-    .map(part =>
-      part
-        .split(/[-_.]/)
-        .map(seg => seg.charAt(0).toUpperCase() + seg.slice(1))
-        .join(""),
-    )
-    .join("AT");
+  return (name.charAt(0).toUpperCase() + name.slice(1).toLowerCase())
+    .replace(/[-_.\s]([a-zA-Z0-9])/g, (_, ch: string) => ch.toUpperCase())
+    .replace(/\+/g, "x")
+    .replace(/(.)@(\d)/, "$1AT$2");
 }
 
 export function generateFormula(
@@ -62,7 +65,7 @@ export function generateFormula(
   const base = `https://github.com/tjakobsson/uatu/releases/download/${tag}`;
   // Stable and edge install the same `bin/uatu`, so exactly one of the
   // two formulas may be installed at a time.
-  const conflictsWith = name === "uatu" ? "uatu@edge" : "uatu";
+  const conflictsWith = name === "uatu" ? "uatu-edge" : "uatu";
 
   return `# typed: false
 # frozen_string_literal: true

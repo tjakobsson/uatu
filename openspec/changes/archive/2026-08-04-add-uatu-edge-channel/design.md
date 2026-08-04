@@ -9,7 +9,7 @@ One version wrinkle: the formula's `test do` asserts `version.to_s` appears in `
 ## Goals / Non-Goals
 
 **Goals:**
-- `brew install tjakobsson/tap/uatu@edge` installs last night's `main` on macOS and Linux.
+- `brew install tjakobsson/tap/uatu-edge` installs last night's `main` on macOS and Linux.
 - Edge CLI archives carry the same integrity artifacts as stable ones (SHA256SUMS entries, attestation, Sigstore bundles on the release).
 - `uatu --version` on an edge binary reports the edge version string.
 - The channel self-heals: partial publishes are completed by the next nightly, transient tap failures reconcile without a rebuild.
@@ -40,7 +40,7 @@ The edge release gains `uatu-darwin-arm64.zip`, `uatu-darwin-x64.zip`, `uatu-lin
 
 ### `generate-formula.ts` mirrors `generate-cask.ts`
 
-Refactor to export `parseSums` (or import the cask's) and `generateFormula(version, sums, {name, tag})`, keeping the CLI wrapper. `--name uatu@edge --tag edge` produces `Formula/uatu@edge.rb`: class name `UatuATEdge` (Homebrew's `@` → `AT` convention), URLs pointing at the `edge` tag, and `conflicts_with formula: "uatu"` / the stable formula generated with `conflicts_with formula: "uatu@edge"` — both channels install the same `bin/uatu`, so exactly one may be installed, mirroring the cask pair. A colocated `scripts/generate-formula.test.ts` covers both channels, following `generate-cask.test.ts`.
+Refactor to export `parseSums` (or import the cask's) and `generateFormula(version, sums, {name, tag})`, keeping the CLI wrapper. `--name uatu-edge --tag edge` produces `Formula/uatu-edge.rb`: class name `UatuEdge` (a dash token — Homebrew's filename→class rule only rewrites `@` before a digit, so an `@edge` formula could never load; cask tokens have no such rule, which is why the desktop channel keeps `uatu-desktop@edge`), URLs pointing at the `edge` tag, and `conflicts_with formula: "uatu"` / the stable formula generated with `conflicts_with formula: "uatu-edge"` — both channels install the same `bin/uatu`, so exactly one may be installed, mirroring the cask pair. A colocated `scripts/generate-formula.test.ts` covers both channels, following `generate-cask.test.ts`.
 
 Note: adding `conflicts_with` to the stable formula's output means the next *stable* release also updates `Formula/uatu.rb` — acceptable, since the tap regenerates it wholesale each release anyway.
 
@@ -50,7 +50,7 @@ Stable releases smoke-test the binary that the runner can execute before anythin
 
 ### Tap job generates the formula alongside the cask
 
-The existing `update-tap` reconciliation job additionally runs the formula generator with `--name uatu@edge --tag edge` and commits `Formula/uatu@edge.rb` in the same push. It keeps the reconcile-on-every-run semantics: a skipped-build nightly still repairs a previously failed tap update. Unlike the cask (which is skipped when SHA256SUMS lacks app archives, exit 2), the formula generation is unconditional — CLI archives are always on a complete edge release; a missing entry is a real error.
+The existing `update-tap` reconciliation job additionally runs the formula generator with `--name uatu-edge --tag edge` and commits `Formula/uatu-edge.rb` in the same push. It keeps the reconcile-on-every-run semantics: a skipped-build nightly still repairs a previously failed tap update. Unlike the cask (which is skipped when SHA256SUMS lacks app archives, exit 2), the formula generation is unconditional — CLI archives are always on a complete edge release; a missing entry is a real error.
 
 ## Risks / Trade-offs
 

@@ -3,8 +3,11 @@ name: Edge
 # Nightly bleeding-edge channel for uatu and UatuCode Desktop: builds main
 # with the same compile/smoke pipeline (CLI) and embed/sign/notarize
 # pipeline (desktop) as releases, and publishes everything to the rolling
-# `edge` prerelease that Formula/uatu@edge.rb and Casks/uatu-desktop@edge.rb
-# follow. Skips when main hasn't moved since the last edge build, and never
+# `edge` prerelease that Formula/uatu-edge.rb and Casks/uatu-desktop@edge.rb
+# follow. (The formula token is uatu-edge, not uatu@edge: brew's
+# filename→class mapping only rewrites `@` before a digit, so an @edge
+# formula could never load; cask tokens have no such rule.)
+# Skips when main hasn't moved since the last edge build, and never
 # publishes unsigned desktop builds — with signing secrets unavailable the
 # run FAILS (red nightly) so a bad secret rotation can't silently stop the
 # channel.
@@ -114,7 +117,7 @@ jobs:
         # Same four targets as stable releases; the darwin binaries do
         # double duty as the desktop app's embedded CLI. --version stamps
         # the edge version so `uatu --version` identifies an edge build and
-        # the uatu@edge formula's self-test passes.
+        # the uatu-edge formula's self-test passes.
         run: |
           for target in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
             bun run scripts/build.ts --target="bun-$target" --outfile="dist/$target/uatu" \
@@ -220,7 +223,7 @@ jobs:
           - version: $VERSION
           - built: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-          CLI: \`brew install tjakobsson/tap/uatu@edge\`
+          CLI: \`brew install tjakobsson/tap/uatu-edge\`
           Desktop: \`brew install --cask tjakobsson/tap/uatu-desktop@edge\`
           Stable channels: \`brew install tjakobsson/tap/uatu\` / \`brew install --cask tjakobsson/tap/uatu-desktop\`"
           # Assets first, tag last: the skip guard keys on the tag, so a
@@ -275,12 +278,13 @@ jobs:
           echo "exists=true" >> "$GITHUB_OUTPUT"
           echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
 
-      - name: Update the uatu@edge formula and uatu-desktop@edge cask
+      - name: Update the uatu-edge formula and uatu-desktop@edge cask
         if: steps.meta.outputs.exists == 'true'
         # The formula is unconditional — a complete edge release always
         # carries CLI archives, so a missing SHA256SUMS entry is a real
         # error, unlike the cask's tolerated exit-2 unsigned-release skip
-        # in the stable workflow.
+        # in the stable workflow. The formula token is uatu-edge (see the
+        # header comment); the cask keeps its @edge token.
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           VERSION: ${{ steps.meta.outputs.version }}
@@ -289,8 +293,8 @@ jobs:
           mkdir -p tap/Formula tap/Casks
           bun run scripts/generate-formula.ts \
             --version "$VERSION" --sums SHA256SUMS \
-            --name uatu@edge --tag edge \
-            --out "tap/Formula/uatu@edge.rb"
+            --name uatu-edge --tag edge \
+            --out "tap/Formula/uatu-edge.rb"
           bun run scripts/generate-cask.ts \
             --version "$VERSION" --sums SHA256SUMS \
             --name uatu-desktop@edge --tag edge \
@@ -298,10 +302,10 @@ jobs:
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "Formula/uatu@edge.rb" "Casks/uatu-desktop@edge.rb"
+          git add "Formula/uatu-edge.rb" "Casks/uatu-desktop@edge.rb"
           if git diff --cached --quiet; then
             echo "Tap already up to date for edge $VERSION"
           else
-            git commit -m "uatu@edge + uatu-desktop@edge $VERSION"
+            git commit -m "uatu-edge + uatu-desktop@edge $VERSION"
             git push origin HEAD
           fi

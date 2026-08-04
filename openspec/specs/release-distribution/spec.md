@@ -125,22 +125,22 @@ The repository README SHALL document how to install uatu, listing Homebrew (`bre
 - **AND** the macOS quarantine workaround is documented alongside the manual method
 
 ### Requirement: uatu is installable from the edge channel via the tap
-The tap automation SHALL generate `Formula/uatu@edge.rb` in `tjakobsson/homebrew-tap` from the edge release's SHA256SUMS, pointing at the `edge` tag's CLI archives with the edge version string, on every successful edge workflow run — including runs whose build was skipped — so a transiently failed tap update self-heals from the published release without a rebuild. The edge formula SHALL declare `conflicts_with` the stable `uatu` formula and the stable formula SHALL declare the reciprocal conflict (both install `bin/uatu`, so exactly one may be installed at a time), and the stable formula's version and URLs MUST remain unaffected by edge publishing. Both formulas SHALL be emitted by the same generator (`scripts/generate-formula.ts`), parameterized by formula name and release tag the way the cask generator already is, with unit tests covering both channels.
+The tap automation SHALL generate `Formula/uatu-edge.rb` in `tjakobsson/homebrew-tap` from the edge release's SHA256SUMS, pointing at the `edge` tag's CLI archives with the edge version string, on every successful edge workflow run — including runs whose build was skipped — so a transiently failed tap update self-heals from the published release without a rebuild. The edge formula SHALL declare `conflicts_with` the stable `uatu` formula and the stable formula SHALL declare the reciprocal conflict (both install `bin/uatu`, so exactly one may be installed at a time), and the stable formula's version and URLs MUST remain unaffected by edge publishing. Both formulas SHALL be emitted by the same generator (`scripts/generate-formula.ts`), parameterized by formula name and release tag the way the cask generator already is, with unit tests covering both channels.
 
 #### Scenario: Opting into the CLI edge channel
 
-- **WHEN** a user runs `brew install tjakobsson/tap/uatu@edge` on macOS or Linux
+- **WHEN** a user runs `brew install tjakobsson/tap/uatu-edge` on macOS or Linux
 - **THEN** the latest nightly `main` build of uatu installs, and a later `brew upgrade` after a new edge build moves them forward
 
 #### Scenario: Channels are mutually exclusive
 
-- **WHEN** a user with the stable `uatu` formula installed attempts to install `uatu@edge` (or vice versa)
+- **WHEN** a user with the stable `uatu` formula installed attempts to install `uatu-edge` (or vice versa)
 - **THEN** Homebrew reports the conflict instead of shadowing one binary with the other
 
 #### Scenario: Tap update self-heals after a transient failure
 
 - **WHEN** an edge run published CLI archives but its tap update failed transiently
-- **THEN** the next run regenerates `Formula/uatu@edge.rb` from the published release without rebuilding
+- **THEN** the next run regenerates `Formula/uatu-edge.rb` from the published release without rebuilding
 
 #### Scenario: Stable formula version untouched by edge
 
@@ -157,7 +157,7 @@ Binaries published to the edge channel SHALL be stamped with the edge version st
 
 #### Scenario: The edge formula self-tests
 
-- **WHEN** `brew test uatu@edge` runs
+- **WHEN** `brew test uatu-edge` runs
 - **THEN** the installed binary's `--version` output matches the formula's version
 
 ### Requirement: The build script supports version overrides

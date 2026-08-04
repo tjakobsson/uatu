@@ -79,14 +79,14 @@ has changed) to the rolling
 [`edge` prerelease](https://github.com/tjakobsson/uatu/releases/tag/edge):
 
 ```bash
-brew install tjakobsson/tap/uatu@edge                 # CLI (macOS and Linux)
+brew install tjakobsson/tap/uatu-edge                 # CLI (macOS and Linux)
 brew install --cask tjakobsson/tap/uatu-desktop@edge  # desktop app
 brew upgrade              # follows the nightly channel
 ```
 
 Edge is exactly what's merged — expect occasional rough edges. Each
 channel conflicts with its stable sibling, so switch back with
-`brew uninstall uatu@edge && brew install tjakobsson/tap/uatu` (and
+`brew uninstall uatu-edge && brew install tjakobsson/tap/uatu` (and
 likewise `brew uninstall --cask uatu-desktop@edge && brew install --cask
 tjakobsson/tap/uatu-desktop`).
 

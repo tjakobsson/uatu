@@ -17,9 +17,14 @@ const SUMS = [
 ].join("\n");
 
 describe("generate-formula", () => {
-  test("derives Homebrew class names, rendering @ as AT", () => {
+  test("derives class names exactly like Homebrew's Formulary.class_s", () => {
     expect(formulaClassName("uatu")).toBe("Uatu");
-    expect(formulaClassName("uatu@edge")).toBe("UatuATEdge");
+    expect(formulaClassName("uatu-edge")).toBe("UatuEdge");
+    // The @→AT rewrite only fires before a digit (versioned formulas);
+    // that's why the edge channel is `uatu-edge`, not `uatu@edge` — brew
+    // would compute the invalid constant "Uatu@edge" and fail to load it.
+    expect(formulaClassName("uatu@1.1")).toBe("UatuAT11");
+    expect(formulaClassName("uatu@edge")).toBe("Uatu@edge");
   });
 
   test("emits per-platform urls and checksums for the tagged version", () => {
@@ -40,15 +45,15 @@ describe("generate-formula", () => {
 
   test("stable formula declares a conflict with the edge formula", () => {
     const formula = generateFormula("0.2.0", parseSums(SUMS));
-    expect(formula).toContain('conflicts_with "uatu@edge"');
+    expect(formula).toContain('conflicts_with "uatu-edge"');
   });
 
-  test("edge options emit the @edge class, edge-tag urls, and the inverse conflict", () => {
+  test("edge options emit the uatu-edge class, edge-tag urls, and the inverse conflict", () => {
     const formula = generateFormula("0.2.0-edge.20260804031700.abc1234", parseSums(SUMS), {
-      name: "uatu@edge",
+      name: "uatu-edge",
       tag: "edge",
     });
-    expect(formula).toContain("class UatuATEdge < Formula");
+    expect(formula).toContain("class UatuEdge < Formula");
     expect(formula).toContain('version "0.2.0-edge.20260804031700.abc1234"');
     for (const asset of FORMULA_ASSETS) {
       expect(formula).toContain(
@@ -56,7 +61,7 @@ describe("generate-formula", () => {
       );
     }
     expect(formula).toContain('conflicts_with "uatu"');
-    expect(formula).not.toContain('conflicts_with "uatu@edge"');
+    expect(formula).not.toContain('conflicts_with "uatu-edge"');
   });
 
   test("refuses to generate when any CLI archive is missing from the sums", () => {

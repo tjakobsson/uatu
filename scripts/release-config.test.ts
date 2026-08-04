@@ -192,11 +192,12 @@ describe("artifact publication workflow", () => {
     expect(tapSteps.some(step => step.run?.includes("--pattern VERSION"))).toBe(true);
     expect(guard.run).toContain("VERSION");
 
-    // The tap job keeps both channel artifacts in lockstep: the uatu@edge
+    // The tap job keeps both channel artifacts in lockstep: the uatu-edge
     // formula (unconditional — a complete edge release always has CLI
-    // archives) and the uatu-desktop@edge cask.
+    // archives; dash token because brew can't load an @edge formula class)
+    // and the uatu-desktop@edge cask.
     const tapUpdate = tapSteps.find(step => step.run?.includes("generate-formula.ts"))!;
-    expect(tapUpdate.run).toContain("--name uatu@edge --tag edge");
+    expect(tapUpdate.run).toContain("--name uatu-edge --tag edge");
     expect(tapUpdate.run).toContain("generate-cask.ts");
     expect(tapUpdate.run).toContain("--name uatu-desktop@edge --tag edge");
   });

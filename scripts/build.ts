@@ -10,7 +10,7 @@
 //
 // `--version` overrides the embedded version string (default: package.json) —
 // the edge workflow stamps `<base>-edge.<timestamp>.<shortsha>` so nightly
-// binaries self-identify and the uatu@edge formula's self-test passes.
+// binaries self-identify and the uatu-edge formula's self-test passes.
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 
