@@ -10,6 +10,7 @@ import type { ServerWebSocket } from "bun";
 import hubMonoFontAsset from "../assets/fonts/HackNerdFontMono-Regular.woff2" with { type: "file" };
 
 import {
+  clientKeyForRateLimit,
   formatHubCookie,
   formatHubCookieClear,
   isSameOriginRequest,
@@ -95,7 +96,10 @@ export function createHubFetchHandler(deps: HubDeps) {
       return htmlResponse(loginPage({ error: "cross-origin login rejected" }), 403);
     }
 
-    const ip = server.requestIP?.(request)?.address ?? "unknown";
+    const ip = clientKeyForRateLimit(
+      server.requestIP?.(request)?.address ?? null,
+      request.headers.get("x-forwarded-for"),
+    );
     if (!limiter.allow(ip)) {
       return htmlResponse(loginPage({ error: "too many attempts — wait a minute and try again" }), 429);
     }
@@ -318,9 +322,19 @@ export function createHubFetchHandler(deps: HubDeps) {
       return json(401, { error: "authentication required" });
     }
 
-    // Proxied session traffic.
+    // Proxied session traffic. Validate the browser's origin BEFORE any
+    // rewriting: SameSite=Lax still attaches the cookie on same-site
+    // cross-origin requests (another port, a sibling subdomain), and the
+    // proxy deliberately replaces Origin with a loopback one the child
+    // trusts — so an unchecked hostile Origin here would ride the rewrite
+    // straight past the child's own gate to an interactive shell. Browsers
+    // always send Origin on WebSocket upgrades and cross-origin fetches;
+    // absent Origin (same-origin GETs, non-browser clients) passes.
     const sessionMatch = SESSION_PATH.exec(pathname);
     if (sessionMatch) {
+      if (!isSameOriginRequest(request)) {
+        return json(403, { error: "cross-origin request rejected" });
+      }
       const workspaceId = decodeURIComponent(sessionMatch[1]!);
       const running = sessions.get(workspaceId);
       if (!running) {
@@ -384,7 +398,11 @@ export function createHubFetchHandler(deps: HubDeps) {
         if (!registry.byId(workspaceId)) {
           return json(404, { error: `unknown workspace: ${workspaceId}` });
         }
-        if (sessions.isRunning(workspaceId)) {
+        // Starting counts as active: removing the registry entry while a
+        // backend start is in flight would strand the freshly spawned
+        // child reachable at /s/<id>/ but absent from the dashboard, with
+        // the stop API 404ing on it.
+        if (sessions.isRunning(workspaceId) || sessions.isStarting(workspaceId)) {
           return json(409, { error: `stop the session for '${workspaceId}' before forgetting it` });
         }
         await registry.remove(workspaceId);

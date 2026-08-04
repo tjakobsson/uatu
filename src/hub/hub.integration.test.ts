@@ -393,6 +393,41 @@ describe("hub end to end", () => {
     expect(payload).toHaveProperty("terminal");
   });
 
+  test("proxied session traffic rejects foreign origins before any rewriting", async () => {
+    // A same-site-but-different-origin page can carry the SameSite=Lax
+    // cookie; the hub must refuse it before loopback-shaping the Origin
+    // for the child.
+    const proxied = await fetch(`${origin}/s/myproject/api/state`, {
+      headers: { cookie, origin: "https://attacker.example" },
+    });
+    expect(proxied.status).toBe(403);
+
+    const sessionId = crypto.randomUUID();
+    const ws = new WebSocket(`ws://127.0.0.1:${server.port}/s/myproject/api/terminal?sessionId=${sessionId}`, {
+      headers: { cookie, origin: "https://attacker.example" },
+    } as unknown as string[]);
+    const outcome = await new Promise<string>(resolve => {
+      const timeout = setTimeout(() => resolve("timeout"), 10_000);
+      ws.addEventListener("message", () => {
+        clearTimeout(timeout);
+        resolve("message");
+      });
+      ws.addEventListener("open", () => {
+        // An open without messages still means the bridge was built; wait
+        // for close/message to classify.
+      });
+      ws.addEventListener("close", () => {
+        clearTimeout(timeout);
+        resolve("closed");
+      });
+      ws.addEventListener("error", () => {
+        clearTimeout(timeout);
+        resolve("closed");
+      });
+    });
+    expect(outcome).toBe("closed");
+  }, 20_000);
+
   test("cross-origin state changes are rejected", async () => {
     const response = await fetch(`${origin}/api/hub/sessions/myproject/stop`, {
       method: "POST",

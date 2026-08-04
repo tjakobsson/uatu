@@ -163,6 +163,26 @@ export function isSameOriginRequest(request: Request): boolean {
 
 // --- login rate limiting ---------------------------------------------------
 
+const LOOPBACK_ADDRESSES = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
+
+// The rate-limit bucket key for a login attempt. Behind the documented
+// loopback proxies (tailscale serve, Caddy, nginx) every request's socket
+// address is the proxy's loopback — one shared bucket would let a single
+// remote client lock every user out with five failures a minute. When the
+// socket peer IS loopback, the proxy's X-Forwarded-For identifies the real
+// client and is trusted (something able to forge it from loopback is
+// already on the box); from any non-loopback peer the header is untrusted
+// attacker input and the socket address is used.
+export function clientKeyForRateLimit(socketAddress: string | null, forwardedFor: string | null): string {
+  if (socketAddress && LOOPBACK_ADDRESSES.has(socketAddress) && forwardedFor) {
+    const first = forwardedFor.split(",")[0]!.trim();
+    if (first !== "") {
+      return first;
+    }
+  }
+  return socketAddress ?? "unknown";
+}
+
 const WINDOW_MS = 60_000;
 const MAX_FAILURES_PER_WINDOW = 5;
 

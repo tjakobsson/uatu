@@ -28,6 +28,14 @@ export class SessionManager {
     return this.running.has(workspaceId);
   }
 
+  // True while a backend start is in flight but not yet installed. Callers
+  // that must not race a start (forget, above all: removing the registry
+  // entry mid-start would strand a live child off the dashboard) treat
+  // starting as active.
+  isStarting(workspaceId: string): boolean {
+    return this.starting.has(workspaceId);
+  }
+
   runningIds(): string[] {
     return [...this.running.keys()];
   }

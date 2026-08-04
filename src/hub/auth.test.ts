@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  clientKeyForRateLimit,
   createSessionCookieValue,
   formatHubCookie,
   hashPassword,
@@ -107,6 +108,21 @@ describe("isSameOriginRequest", () => {
     expect(isSameOriginRequest(make())).toBe(true);
     expect(isSameOriginRequest(make("https://attacker.example"))).toBe(false);
     expect(isSameOriginRequest(make("null"))).toBe(false);
+  });
+});
+
+describe("clientKeyForRateLimit", () => {
+  test("uses X-Forwarded-For only when the socket peer is loopback", () => {
+    // Behind a loopback proxy: the forwarded client identifies the bucket.
+    expect(clientKeyForRateLimit("127.0.0.1", "100.64.1.2")).toBe("100.64.1.2");
+    expect(clientKeyForRateLimit("::1", "100.64.1.2, 127.0.0.1")).toBe("100.64.1.2");
+    expect(clientKeyForRateLimit("::ffff:127.0.0.1", "203.0.113.9")).toBe("203.0.113.9");
+    // Direct exposure: the header is attacker-controlled — ignored.
+    expect(clientKeyForRateLimit("203.0.113.9", "1.2.3.4")).toBe("203.0.113.9");
+    // No header behind loopback: fall back to the socket address.
+    expect(clientKeyForRateLimit("127.0.0.1", null)).toBe("127.0.0.1");
+    expect(clientKeyForRateLimit("127.0.0.1", "  ")).toBe("127.0.0.1");
+    expect(clientKeyForRateLimit(null, "1.2.3.4")).toBe("unknown");
   });
 });
 

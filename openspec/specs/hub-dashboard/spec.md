@@ -29,14 +29,14 @@ The dashboard SHALL offer a stop action per running session that terminates the 
 - **THEN** the session's child process is terminated and the workspace moves to the stopped list
 
 ### Requirement: Dashboard can forget a stopped workspace
-The dashboard SHALL offer a forget action on stopped workspaces that removes the registration only: the folder on disk MUST NOT be touched and SHALL reappear in the folder listing as an unregistered candidate. The hub SHALL reject forgetting a workspace whose session is running.
+The dashboard SHALL offer a forget action on stopped workspaces that removes the registration only: the folder on disk MUST NOT be touched and SHALL reappear in the folder listing as an unregistered candidate. The hub SHALL reject forgetting a workspace whose session is running or still starting, so a forget can never race an in-flight spawn into a live child that the dashboard no longer knows about.
 
 #### Scenario: Forgetting returns the folder to the candidates
 - **WHEN** the user forgets a stopped workspace whose folder lives in the workspaces root
 - **THEN** the workspace disappears from the registered list and its folder is offered again as an unregistered candidate
 
-#### Scenario: A running session cannot be forgotten
-- **WHEN** a forget request names a workspace with a running session
+#### Scenario: A running or starting session cannot be forgotten
+- **WHEN** a forget request names a workspace whose session is running or whose start is still in flight
 - **THEN** the hub rejects it and the registration is unchanged
 
 ### Requirement: Dashboard creates workspaces from the workspaces root
