@@ -202,10 +202,49 @@ tailscale serve status   # verify
 
 The hub is now `https://homebox.tail1234.ts.net/` on your tailnet. The
 `--bg` configuration persists across reboots on its own; you only need the
-hub service below. (The same shape works with Caddy or nginx in front for
-non-tailscale setups — anything that proxies HTTPS to `127.0.0.1:4700`.)
+hub service below.
 
 Finish with the [systemd unit](#systemd) or [launchd plist](#launchd) below.
+
+### Path C variant: your own reverse proxy (Caddy, nginx)
+
+The same loopback shape works with any HTTPS-terminating proxy — with one
+requirement: **the proxy must pass the browser's `Host` through unchanged**,
+because the hub validates the browser's `Origin` against the `Host` it
+receives (login, state-changing APIs, and session WebSockets all 403 on a
+mismatch). It should also forward the scheme and client address so cookies
+gain `Secure` and login rate limiting keys per client.
+
+Caddy does all of this by default — `reverse_proxy 127.0.0.1:4700` is a
+complete config. nginx does **not**: a default `proxy_pass` rewrites `Host`
+to the upstream address. A working block:
+
+```nginx
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ""      close;
+}
+
+server {
+    listen 443 ssl;
+    server_name hub.example.com;
+    # ssl_certificate / ssl_certificate_key as usual
+
+    location / {
+        proxy_pass http://127.0.0.1:4700;
+        proxy_http_version 1.1;
+        # REQUIRED: the hub's origin gate compares Origin against this.
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # WebSockets (the terminal) and SSE (live reload).
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_buffering off;
+        proxy_read_timeout 1d;
+    }
+}
+```
 
 ## Running as a service
 

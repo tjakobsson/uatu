@@ -80,14 +80,28 @@ export async function runHub(options: { configPath?: string }): Promise<void> {
   process.on("SIGHUP", shutdown);
 }
 
+// Strips exactly the trailing line terminator from piped password input —
+// `printf '%s\n' 'pw' | uatu hub hash-password` must hash `pw`, while a
+// password that deliberately begins or ends with spaces must survive
+// untouched (login verification preserves whitespace, so hashing must too).
+export function passwordFromPipedInput(raw: string): string {
+  return raw.replace(/\r?\n$/, "");
+}
+
 // `uatu hub hash-password`: reads the password from stdin (so it never lands
 // in shell history or the process table) and prints the hash for the
-// config's users list.
+// config's users list. Interactively, one LINE is the password — Enter
+// completes the read rather than waiting for EOF.
 export async function runHashPassword(): Promise<void> {
+  let input: string;
   if (process.stdin.isTTY) {
-    process.stderr.write("Password (input is not hidden; pipe stdin to avoid the prompt): ");
+    const readline = await import("node:readline/promises");
+    const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+    input = await rl.question("Password (input is not hidden; pipe stdin to avoid the prompt): ");
+    rl.close();
+  } else {
+    input = passwordFromPipedInput(await new Response(process.stdin as unknown as ReadableStream).text());
   }
-  const input = (await new Response(process.stdin as unknown as ReadableStream).text()).trim();
   if (input === "") {
     throw new Error("no password on stdin");
   }
