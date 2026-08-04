@@ -222,7 +222,10 @@ export function createHubFetchHandler(deps: HubDeps) {
     } catch {
       return json(400, { error: "invalid JSON body" });
     }
-    const name = typeof body.name === "string" ? body.name.trim() : "";
+    // The name is used EXACTLY as submitted — the folder listing emits
+    // exact dirent names, and trimming here would break (or worse,
+    // misdirect to a trimmed sibling of) a folder with edge whitespace.
+    const name = typeof body.name === "string" ? body.name : "";
     const folder = name === "" ? null : resolveWorkspaceFolder(name);
     if (folder === null) {
       return json(400, { error: "name must be a folder directly inside the workspaces root" });

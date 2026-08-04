@@ -428,6 +428,40 @@ describe("hub end to end", () => {
     expect(outcome).toBe("closed");
   }, 20_000);
 
+  test("a stale browser-supplied ?t= is overwritten by the brokered token", async () => {
+    // The SPA may have captured a stale token in session storage from an
+    // earlier direct visit; through the hub, the auth probe must still
+    // succeed because the hub replaces — not merely fills — the t param.
+    const probe = await fetch(`${origin}/s/myproject/api/auth?t=stale-garbage-token`, {
+      headers: { cookie },
+    });
+    expect(probe.status).toBe(204);
+  });
+
+  test("workspace folder names with edge whitespace round-trip exactly", async () => {
+    const spaced = path.join(tempRoot, "workspaces", " padded ");
+    execFileSync("mkdir", ["-p", spaced]);
+    execFileSync("git", ["init"], { cwd: spaced, stdio: "ignore" });
+
+    const folders = await fetch(`${origin}/api/hub/folders`, { headers: { cookie } });
+    const payload = (await folders.json()) as { folders: { name: string }[] };
+    expect(payload.folders.some(folder => folder.name === " padded ")).toBe(true);
+
+    const created = await fetch(`${origin}/api/hub/workspaces`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ name: " padded " }),
+    });
+    expect(created.status).toBe(200);
+    const id = ((await created.json()) as { id: string }).id;
+    expect(registry.byId(id)?.path).toBe(spaced);
+    await sessions.stop(id);
+    await fetch(`${origin}/api/hub/workspaces/${encodeURIComponent(id)}/forget`, {
+      method: "POST",
+      headers: { cookie, origin },
+    });
+  }, 60_000);
+
   test("cross-origin state changes are rejected", async () => {
     const response = await fetch(`${origin}/api/hub/sessions/myproject/stop`, {
       method: "POST",

@@ -44,10 +44,15 @@ function childOrigin(session: RunningSession): string {
 }
 
 // Builds the child-side URL for a proxied request: same (prefixed) path and
-// query against the loopback endpoint, with the brokered token appended.
+// query against the loopback endpoint, with the brokered token applied.
+// Applied means OVERWRITTEN, not merely filled in: a browser-supplied `?t=`
+// is at best a stale value the SPA captured earlier and at worst arbitrary —
+// preserving it would make the child reject credentials the hub is supposed
+// to broker, stranding the user at a token prompt for a token that is never
+// exposed to them.
 export function childUrlFor(session: RunningSession, requestUrl: URL): URL {
   const target = new URL(requestUrl.pathname + requestUrl.search, childOrigin(session));
-  if (session.token && !target.searchParams.has("t")) {
+  if (session.token) {
     target.searchParams.set("t", session.token);
   }
   return target;
