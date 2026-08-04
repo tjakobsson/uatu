@@ -82,3 +82,27 @@ describe("LocalProcessBackend", () => {
     60_000,
   );
 });
+
+describe("LocalProcessBackend stdout parsing", () => {
+  test(
+    "a URL split across stream chunks is parsed only once the line completes",
+    async () => {
+      // A fake child that writes the URL in two chunks with a pause — a
+      // premature regex match would yield host "0.0.0.127" and a NaN port.
+      // The backend appends its serve args; `bash -c` routes them into
+      // $0/$@ where the script ignores them.
+      const script = 'printf "http://127"; sleep 0.3; printf ".0.0.1:43210/s/split/?t=abc\n"; sleep 30';
+      const backend = new LocalProcessBackend({ uatuArgv: ["bash", "-c", script] });
+
+      running = await backend.start({ id: "split", path: "/tmp", backend: "local" }, "/s/split/");
+      expect(running.endpoint.hostname).toBe("127.0.0.1");
+      expect(running.endpoint.port).toBe(43210);
+      expect(running.token).toBe("abc");
+
+      const session = running;
+      running = null;
+      await session.stop();
+    },
+    30_000,
+  );
+});

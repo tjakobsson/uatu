@@ -139,9 +139,17 @@ async function readFirstUrlLine(
         throw new Error("child stdout closed before printing a session URL");
       }
       buffered += decoder.decode(next.value, { stream: true });
-      const match = buffered.match(/http:\/\/\S+/);
-      if (match) {
-        return match[0];
+      // Parse COMPLETE lines only. The contract is a URL line; matching the
+      // raw buffer would accept a chunk-split fragment ("http://127" parses
+      // as host 0.0.0.127 with a NaN port) and register an unreachable
+      // session. Scanned lines are dropped so the buffer stays bounded.
+      const lastNewline = buffered.lastIndexOf("\n");
+      if (lastNewline >= 0) {
+        const match = buffered.slice(0, lastNewline).match(/http:\/\/\S+/);
+        if (match) {
+          return match[0];
+        }
+        buffered = buffered.slice(lastNewline + 1);
       }
     }
   } finally {

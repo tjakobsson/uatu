@@ -3,6 +3,14 @@
 // stop-everything path used at hub shutdown. Purely in-memory — the
 // registry owns persistence; a hub restart restarts sessions from the
 // dashboard's resume action (see design D7).
+//
+// LIFECYCLE OPERATIONS ARE SERIALIZED PER WORKSPACE: every start and stop
+// runs to completion on that workspace's chain before the next begins, so
+// operation interleavings are impossible by construction. This replaced a
+// growing choreography of point fixes (stop must cover an in-flight start,
+// start must join an in-flight stop, a queued start must be visible to a
+// second stop, …) — with a chain, each operation simply observes the true
+// settled state left by its predecessor.
 
 import type { RunningSession, SessionBackend } from "./backend";
 import type { WorkspaceEntry, WorkspaceRegistry } from "./registry";
@@ -13,12 +21,12 @@ export function sessionBasePath(workspaceId: string): string {
 
 export class SessionManager {
   private readonly running = new Map<string, RunningSession>();
+  // Published at CALL time — before the operation even reaches the front of
+  // the chain — so gates (forget) and joiners see a queued start, not just
+  // an executing one. Cleared when the call settles.
   private readonly starting = new Map<string, Promise<RunningSession>>();
-  // Mirror of `starting` for teardown: while a stop is settling, a start
-  // for the same workspace must wait — otherwise it would spawn a second
-  // child beside the one still shutting down (port/resource overlap, and
-  // the old child's exit reaper no longer matches once replaced).
-  private readonly stopping = new Map<string, Promise<void>>();
+  // Per-workspace operation chain tails.
+  private readonly lifecycle = new Map<string, Promise<unknown>>();
 
   constructor(
     private readonly registry: WorkspaceRegistry,
@@ -33,10 +41,9 @@ export class SessionManager {
     return this.running.has(workspaceId);
   }
 
-  // True while a backend start is in flight but not yet installed. Callers
-  // that must not race a start (forget, above all: removing the registry
-  // entry mid-start would strand a live child off the dashboard) treat
-  // starting as active.
+  // True from the moment a start() call is made until it settles — covering
+  // starts still queued behind an earlier operation. Callers that must not
+  // race a start (forget, above all) treat this as active.
   isStarting(workspaceId: string): boolean {
     return this.starting.has(workspaceId);
   }
@@ -45,91 +52,79 @@ export class SessionManager {
     return [...this.running.keys()];
   }
 
-  // Starts (or joins the in-flight start of) the session for a registered
-  // workspace. A crashed/exited child is reaped lazily on the next lookup.
-  async start(workspaceId: string): Promise<RunningSession> {
-    // Join any in-flight stop first — see `stopping` above.
-    const stopInFlight = this.stopping.get(workspaceId);
-    if (stopInFlight) {
-      await stopInFlight.catch(() => undefined);
-    }
-    const existing = this.running.get(workspaceId);
-    if (existing) {
-      return existing;
-    }
-    const inFlight = this.starting.get(workspaceId);
-    if (inFlight) {
-      return inFlight;
-    }
-
-    const workspace = this.registry.byId(workspaceId);
-    if (!workspace) {
-      throw new Error(`unknown workspace: ${workspaceId}`);
-    }
-    const backend = this.backends[workspace.backend];
-    if (!backend) {
-      throw new Error(`no backend registered for '${workspace.backend}'`);
-    }
-
-    const startPromise = backend
-      .start(workspace, sessionBasePath(workspace.id))
-      .then(session => {
-        this.running.set(workspace.id, session);
-        // Reap on child exit so a crashed session shows as stopped rather
-        // than proxying into a dead endpoint forever.
-        void session.exited.then(() => {
-          if (this.running.get(workspace.id) === session) {
-            this.running.delete(workspace.id);
-          }
-        });
-        return session;
-      })
-      .finally(() => {
-        this.starting.delete(workspace.id);
-      });
-
-    this.starting.set(workspace.id, startPromise);
-    return startPromise;
+  // Enqueues one lifecycle operation behind every earlier one for the same
+  // workspace; a failed predecessor does not block successors.
+  private enqueue<T>(workspaceId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.lifecycle.get(workspaceId) ?? Promise.resolve();
+    const next = previous.then(operation, operation);
+    this.lifecycle.set(workspaceId, next.then(
+      () => undefined,
+      () => undefined,
+    ));
+    return next;
   }
 
-  async stop(workspaceId: string): Promise<boolean> {
-    // A stop must also cover an in-flight start: returning "not running"
-    // while backend.start() is pending would let the spawn resolve into a
-    // live child moments after the caller was told it was stopped. The
-    // start promise's install handler runs before it settles, so awaiting
-    // it guarantees the running map reflects the outcome.
-    const pending = this.starting.get(workspaceId);
-    if (pending) {
-      await pending.catch(() => undefined);
+  // Starts (or joins the pending start of) the session for a registered
+  // workspace.
+  start(workspaceId: string): Promise<RunningSession> {
+    const joined = this.starting.get(workspaceId);
+    if (joined) {
+      return joined;
     }
-    const session = this.running.get(workspaceId);
-    if (!session) {
-      return false;
-    }
-    this.running.delete(workspaceId);
-    // Publish the teardown so a concurrent start() waits for it instead of
-    // spawning a replacement beside the still-exiting child.
-    const teardown = session.stop().finally(() => {
-      if (this.stopping.get(workspaceId) === teardown) {
-        this.stopping.delete(workspaceId);
+
+    const operation = this.enqueue(workspaceId, async () => {
+      const existing = this.running.get(workspaceId);
+      if (existing) {
+        return existing;
+      }
+
+      const workspace = this.registry.byId(workspaceId);
+      if (!workspace) {
+        throw new Error(`unknown workspace: ${workspaceId}`);
+      }
+      const backend = this.backends[workspace.backend];
+      if (!backend) {
+        throw new Error(`no backend registered for '${workspace.backend}'`);
+      }
+
+      const session = await backend.start(workspace, sessionBasePath(workspace.id));
+      this.running.set(workspace.id, session);
+      // Reap on child exit so a crashed session shows as stopped rather
+      // than proxying into a dead endpoint forever.
+      void session.exited.then(() => {
+        if (this.running.get(workspace.id) === session) {
+          this.running.delete(workspace.id);
+        }
+      });
+      return session;
+    });
+
+    let published: Promise<RunningSession>;
+    published = operation.finally(() => {
+      if (this.starting.get(workspaceId) === published) {
+        this.starting.delete(workspaceId);
       }
     });
-    this.stopping.set(workspaceId, teardown);
-    await teardown;
-    return true;
+    this.starting.set(workspaceId, published);
+    return published;
+  }
+
+  stop(workspaceId: string): Promise<boolean> {
+    return this.enqueue(workspaceId, async () => {
+      const session = this.running.get(workspaceId);
+      if (!session) {
+        return false;
+      }
+      this.running.delete(workspaceId);
+      await session.stop();
+      return true;
+    });
   }
 
   async stopAll(): Promise<void> {
-    // Settle every in-flight start first so late-resolving children are in
-    // the running map and get stopped rather than surviving shutdown.
-    const pending = [...this.starting.values()];
-    if (pending.length > 0) {
-      await Promise.all(pending.map(promise => promise.catch(() => undefined)));
-    }
-    const sessions = [...this.running.values()];
-    this.running.clear();
-    await Promise.all(sessions.map(session => session.stop().catch(() => undefined)));
-    // And any teardown a concurrent per-workspace stop() still owns.
-    await Promise.all([...this.stopping.values()].map(promise => promise.catch(() => undefined)));
+    // Every workspace with a live child OR a pending/queued start gets a
+    // stop enqueued behind whatever it is doing.
+    const ids = new Set([...this.running.keys(), ...this.starting.keys()]);
+    await Promise.all([...ids].map(id => this.stop(id).catch(() => undefined)));
   }
 }
