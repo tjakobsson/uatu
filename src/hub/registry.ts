@@ -36,6 +36,12 @@ export function workspaceSlug(folderPath: string): string {
 
 export class WorkspaceRegistry {
   private workspaces: WorkspaceEntry[] = [];
+  // Saves are chained so concurrent mutations (two users creating/
+  // forgetting at once) can neither interleave writes nor let an older
+  // snapshot finish last, and each write is atomic (temp file + rename) so
+  // a crash mid-write cannot corrupt the registry.
+  private saveChain: Promise<void> = Promise.resolve();
+  private saveCounter = 0;
 
   constructor(private readonly filePath: string) {}
 
@@ -63,9 +69,19 @@ export class WorkspaceRegistry {
     );
   }
 
-  private async save(): Promise<void> {
-    const data: RegistryData = { workspaces: this.workspaces };
-    await fs.writeFile(this.filePath, `${JSON.stringify(data, null, 2)}\n`);
+  private save(): Promise<void> {
+    // Snapshot NOW, enqueue behind every earlier save: completion order
+    // matches mutation order, and the last mutation's snapshot wins.
+    const data: RegistryData = { workspaces: [...this.workspaces] };
+    const serialized = `${JSON.stringify(data, null, 2)}\n`;
+    const temp = `${this.filePath}.${process.pid}.${(this.saveCounter += 1)}.tmp`;
+    this.saveChain = this.saveChain
+      .catch(() => undefined)
+      .then(async () => {
+        await fs.writeFile(temp, serialized);
+        await fs.rename(temp, this.filePath);
+      });
+    return this.saveChain;
   }
 
   list(): WorkspaceEntry[] {

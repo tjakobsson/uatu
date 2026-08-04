@@ -27,7 +27,7 @@ The hub SHALL resolve a **workspaces root** — the directory whose subfolders a
 ### Requirement: Workspaces are registered with stable identifiers and a backend field
 The hub SHALL maintain a persistent workspace registry where each entry records a stable workspace id, the workspace source (folder path), and a session backend identifier. The id SHALL be a slug derived from the workspace folder name, suffixed on collision, and SHALL never change once assigned, so session URLs (`/s/<id>/…`) survive hub and session restarts. In this change the only valid backend identifier SHALL be `local`; the field SHALL exist in the registry schema so additional backends are additive.
 
-The registry SHALL be confined to the workspaces root: at startup the hub SHALL forget (unregister, never deleting from disk) every entry whose folder is not a direct child of the configured workspaces root, reporting what was dropped, so entries from an earlier root or an older configuration cannot linger on the dashboard as unreachable workspaces.
+Registry persistence SHALL be serialized and atomic — concurrent mutations may neither interleave writes nor let an older snapshot finish last, and a crash mid-write MUST NOT corrupt the file. The registry SHALL be confined to the workspaces root: at startup the hub SHALL forget (unregister, never deleting from disk) every entry whose folder is not a direct child of the configured workspaces root, reporting what was dropped, so entries from an earlier root or an older configuration cannot linger on the dashboard as unreachable workspaces.
 
 #### Scenario: Workspace id is stable across restarts
 - **WHEN** a workspace for `~/src/uatu` is created, the hub restarts, and the session is resumed

@@ -13,14 +13,14 @@ afterEach(async () => {
   await Promise.all(tempDirectories.splice(0).map(dir => rm(dir, { recursive: true, force: true })));
 });
 
-function fakeSession(workspaceId: string): RunningSession {
+function fakeSession(workspaceId: string, onStop?: () => void): RunningSession {
   return {
     workspaceId,
     basePath: `/s/${workspaceId}/`,
     endpoint: { hostname: "127.0.0.1", port: 1 },
     token: null,
     exited: new Promise<number | null>(() => undefined),
-    stop: async () => undefined,
+    stop: async () => onStop?.(),
   };
 }
 
@@ -51,5 +51,64 @@ describe("SessionManager.isStarting", () => {
     await startPromise;
     expect(sessions.isStarting("slow")).toBe(false);
     expect(sessions.isRunning("slow")).toBe(true);
+  });
+});
+
+describe("SessionManager.stop during an in-flight start", () => {
+  test("awaits the start and terminates the child instead of reporting not-running", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-stop-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    await registry.register("/srv/workspaces/slow");
+
+    let releaseStart!: (session: RunningSession) => void;
+    const backend: SessionBackend = {
+      start: () =>
+        new Promise<RunningSession>(resolve => {
+          releaseStart = resolve;
+        }),
+    };
+    const sessions = new SessionManager(registry, { local: backend });
+
+    let stopped = false;
+    void sessions.start("slow");
+    const stopPromise = sessions.stop("slow");
+    // The spawn resolves AFTER the stop was requested — the classic race.
+    releaseStart(fakeSession("slow", () => {
+      stopped = true;
+    }));
+
+    expect(await stopPromise).toBe(true);
+    expect(stopped).toBe(true);
+    expect(sessions.isRunning("slow")).toBe(false);
+    expect(sessions.isStarting("slow")).toBe(false);
+  });
+
+  test("stopAll settles in-flight starts and terminates their children", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-stopall-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    await registry.register("/srv/workspaces/slow");
+
+    let releaseStart!: (session: RunningSession) => void;
+    const backend: SessionBackend = {
+      start: () =>
+        new Promise<RunningSession>(resolve => {
+          releaseStart = resolve;
+        }),
+    };
+    const sessions = new SessionManager(registry, { local: backend });
+
+    let stopped = false;
+    void sessions.start("slow");
+    const stopAllPromise = sessions.stopAll();
+    releaseStart(fakeSession("slow", () => {
+      stopped = true;
+    }));
+    await stopAllPromise;
+    expect(stopped).toBe(true);
+    expect(sessions.runningIds()).toEqual([]);
   });
 });

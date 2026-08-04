@@ -22,7 +22,7 @@ The hub SHALL serve an authenticated dashboard listing running sessions and stop
 - **THEN** the hub starts a session for it via the workspace's backend and the entry becomes running
 
 ### Requirement: Dashboard can stop a running session
-The dashboard SHALL offer a stop action per running session that terminates the session's server after an explicit confirmation naming the workspace, since stopping terminates that session's shells.
+The dashboard SHALL offer a stop action per running session that terminates the session's server after an explicit confirmation naming the workspace, since stopping terminates that session's shells. A stop that races an in-flight session start SHALL await the start and then terminate the child, so no session can come alive after its stop was reported.
 
 #### Scenario: Stop requires confirmation
 - **WHEN** the user activates stop on a running session and confirms

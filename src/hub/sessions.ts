@@ -83,6 +83,15 @@ export class SessionManager {
   }
 
   async stop(workspaceId: string): Promise<boolean> {
+    // A stop must also cover an in-flight start: returning "not running"
+    // while backend.start() is pending would let the spawn resolve into a
+    // live child moments after the caller was told it was stopped. The
+    // start promise's install handler runs before it settles, so awaiting
+    // it guarantees the running map reflects the outcome.
+    const pending = this.starting.get(workspaceId);
+    if (pending) {
+      await pending.catch(() => undefined);
+    }
     const session = this.running.get(workspaceId);
     if (!session) {
       return false;
@@ -93,6 +102,12 @@ export class SessionManager {
   }
 
   async stopAll(): Promise<void> {
+    // Settle every in-flight start first so late-resolving children are in
+    // the running map and get stopped rather than surviving shutdown.
+    const pending = [...this.starting.values()];
+    if (pending.length > 0) {
+      await Promise.all(pending.map(promise => promise.catch(() => undefined)));
+    }
     const sessions = [...this.running.values()];
     this.running.clear();
     await Promise.all(sessions.map(session => session.stop().catch(() => undefined)));

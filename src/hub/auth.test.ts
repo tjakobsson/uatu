@@ -115,7 +115,6 @@ describe("clientKeyForRateLimit", () => {
   test("uses X-Forwarded-For only when the socket peer is loopback", () => {
     // Behind a loopback proxy: the forwarded client identifies the bucket.
     expect(clientKeyForRateLimit("127.0.0.1", "100.64.1.2")).toBe("100.64.1.2");
-    expect(clientKeyForRateLimit("::1", "100.64.1.2, 127.0.0.1")).toBe("100.64.1.2");
     expect(clientKeyForRateLimit("::ffff:127.0.0.1", "203.0.113.9")).toBe("203.0.113.9");
     // Direct exposure: the header is attacker-controlled — ignored.
     expect(clientKeyForRateLimit("203.0.113.9", "1.2.3.4")).toBe("203.0.113.9");
@@ -123,6 +122,17 @@ describe("clientKeyForRateLimit", () => {
     expect(clientKeyForRateLimit("127.0.0.1", null)).toBe("127.0.0.1");
     expect(clientKeyForRateLimit("127.0.0.1", "  ")).toBe("127.0.0.1");
     expect(clientKeyForRateLimit(null, "1.2.3.4")).toBe("unknown");
+  });
+
+  test("keys on the LAST hop — the one the trusted proxy appended", () => {
+    // Append-style proxies (nginx $proxy_add_x_forwarded_for, Caddy) add
+    // the peer they saw to the END; earlier hops are client-supplied. An
+    // attacker varying a forged prefix must not mint fresh buckets.
+    expect(clientKeyForRateLimit("::1", "6.6.6.6, 100.64.1.2")).toBe("100.64.1.2");
+    expect(clientKeyForRateLimit("127.0.0.1", "a, b, 198.51.100.7")).toBe("198.51.100.7");
+    expect(clientKeyForRateLimit("127.0.0.1", "spoofed, 100.64.1.2")).toBe(
+      clientKeyForRateLimit("127.0.0.1", "other-spoof, 100.64.1.2"),
+    );
   });
 });
 

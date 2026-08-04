@@ -104,3 +104,32 @@ describe("WorkspaceRegistry", () => {
     expect(registry.list()).toEqual([]);
   });
 });
+
+describe("registry persistence under concurrency", () => {
+  test("concurrent mutations all survive a reload (serialized, atomic saves)", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-hub-registry-"));
+    tempDirectories.push(dir);
+    const filePath = path.join(dir, "registry.json");
+
+    const registry = new WorkspaceRegistry(filePath);
+    await registry.load();
+    // Fire a burst of unawaited mutations — creates and a forget — then
+    // settle them all; the last snapshot must win with every entry intact.
+    const churn = [
+      registry.register("/a/one"),
+      registry.register("/b/two"),
+      registry.register("/c/three"),
+      registry.register("/d/four"),
+      registry.register("/e/five"),
+    ];
+    await Promise.all(churn);
+    await registry.remove("two");
+
+    const reloaded = new WorkspaceRegistry(filePath);
+    await reloaded.load();
+    expect(reloaded.list().map(entry => entry.id).sort()).toEqual(["five", "four", "one", "three"]);
+    // No temp files left behind.
+    const { readdirSync } = await import("node:fs");
+    expect(readdirSync(dir).filter(name => name.includes(".tmp"))).toEqual([]);
+  });
+});
