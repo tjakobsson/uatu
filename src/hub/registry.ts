@@ -36,14 +36,25 @@ export function workspaceSlug(folderPath: string): string {
 
 export class WorkspaceRegistry {
   private workspaces: WorkspaceEntry[] = [];
-  // Saves are chained so concurrent mutations (two users creating/
-  // forgetting at once) can neither interleave writes nor let an older
-  // snapshot finish last, and each write is atomic (temp file + rename) so
-  // a crash mid-write cannot corrupt the registry.
-  private saveChain: Promise<void> = Promise.resolve();
+  // MUTATIONS are serialized, not merely their writes: each mutate → save →
+  // rollback-on-failure runs to completion before the next begins. Anything
+  // weaker is unsound — with only writes chained, a concurrent register
+  // could snapshot state that a failing sibling then rolls back (the
+  // rejected entry resurrects from disk), and a whole-array rollback could
+  // clobber a concurrent registration from memory. Each write is atomic
+  // (temp file + rename) so a crash mid-write cannot corrupt the registry.
+  private mutationChain: Promise<unknown> = Promise.resolve();
   private saveCounter = 0;
 
   constructor(private readonly filePath: string) {}
+
+  // Enqueues one mutation behind every earlier one; a failed predecessor
+  // does not block successors.
+  private enqueueMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const next = this.mutationChain.then(operation, operation);
+    this.mutationChain = next.catch(() => undefined);
+    return next;
+  }
 
   async load(): Promise<void> {
     let raw: unknown;
@@ -69,19 +80,14 @@ export class WorkspaceRegistry {
     );
   }
 
-  private save(): Promise<void> {
-    // Snapshot NOW, enqueue behind every earlier save: completion order
-    // matches mutation order, and the last mutation's snapshot wins.
+  // Persist the current state atomically. Only ever called from inside the
+  // mutation chain, so the snapshot cannot observe a half-applied sibling.
+  private async save(): Promise<void> {
     const data: RegistryData = { workspaces: [...this.workspaces] };
     const serialized = `${JSON.stringify(data, null, 2)}\n`;
     const temp = `${this.filePath}.${process.pid}.${(this.saveCounter += 1)}.tmp`;
-    this.saveChain = this.saveChain
-      .catch(() => undefined)
-      .then(async () => {
-        await fs.writeFile(temp, serialized);
-        await fs.rename(temp, this.filePath);
-      });
-    return this.saveChain;
+    await fs.writeFile(temp, serialized);
+    await fs.rename(temp, this.filePath);
   }
 
   list(): WorkspaceEntry[] {
@@ -99,32 +105,34 @@ export class WorkspaceRegistry {
   // Registers a folder, returning the existing entry when the folder is
   // already known (its id never changes) or minting a collision-suffixed
   // slug for a new one.
-  async register(folderPath: string, backend: WorkspaceBackend = "local"): Promise<WorkspaceEntry> {
-    const existing = this.byPath(folderPath);
-    if (existing) {
-      return existing;
-    }
+  register(folderPath: string, backend: WorkspaceBackend = "local"): Promise<WorkspaceEntry> {
+    return this.enqueueMutation(async () => {
+      const existing = this.byPath(folderPath);
+      if (existing) {
+        return existing;
+      }
 
-    const base = workspaceSlug(folderPath);
-    let id = base;
-    let suffix = 2;
-    while (this.byId(id)) {
-      id = `${base}-${suffix}`;
-      suffix += 1;
-    }
+      const base = workspaceSlug(folderPath);
+      let id = base;
+      let suffix = 2;
+      while (this.byId(id)) {
+        id = `${base}-${suffix}`;
+        suffix += 1;
+      }
 
-    const entry: WorkspaceEntry = { id, path: folderPath, backend };
-    this.workspaces.push(entry);
-    try {
-      await this.save();
-    } catch (error) {
-      // Persistence failed (full/unwritable state volume): roll the
-      // mutation back so memory and disk cannot drift — a retry must
-      // re-attempt the save rather than find a phantom in-memory entry.
-      this.workspaces = this.workspaces.filter(candidate => candidate !== entry);
-      throw error;
-    }
-    return entry;
+      const entry: WorkspaceEntry = { id, path: folderPath, backend };
+      this.workspaces.push(entry);
+      try {
+        await this.save();
+      } catch (error) {
+        // Persistence failed (full/unwritable state volume): roll the
+        // mutation back so memory and disk cannot drift — a retry must
+        // re-attempt the save rather than find a phantom in-memory entry.
+        this.workspaces = this.workspaces.filter(candidate => candidate !== entry);
+        throw error;
+      }
+      return entry;
+    });
   }
 
   // Drops every entry whose folder is not a DIRECT child of the workspaces
@@ -133,35 +141,39 @@ export class WorkspaceRegistry {
   // root (or an older hub version that accepted arbitrary paths) disappear
   // from the dashboard instead of lingering as unreachable ghosts. Only the
   // registration is dropped; folders on disk are never touched.
-  async pruneOutsideRoot(workspacesDir: string): Promise<WorkspaceEntry[]> {
-    const root = path.resolve(workspacesDir);
-    const removed = this.workspaces.filter(entry => path.dirname(path.resolve(entry.path)) !== root);
-    if (removed.length === 0) {
-      return [];
-    }
-    const previous = this.workspaces;
-    this.workspaces = this.workspaces.filter(entry => !removed.includes(entry));
-    try {
-      await this.save();
-    } catch (error) {
-      this.workspaces = previous;
-      throw error;
-    }
-    return removed;
+  pruneOutsideRoot(workspacesDir: string): Promise<WorkspaceEntry[]> {
+    return this.enqueueMutation(async () => {
+      const root = path.resolve(workspacesDir);
+      const removed = this.workspaces.filter(entry => path.dirname(path.resolve(entry.path)) !== root);
+      if (removed.length === 0) {
+        return [];
+      }
+      const previous = this.workspaces;
+      this.workspaces = this.workspaces.filter(entry => !removed.includes(entry));
+      try {
+        await this.save();
+      } catch (error) {
+        this.workspaces = previous;
+        throw error;
+      }
+      return removed;
+    });
   }
 
-  async remove(id: string): Promise<boolean> {
-    const previous = this.workspaces;
-    this.workspaces = this.workspaces.filter(entry => entry.id !== id);
-    if (this.workspaces.length === previous.length) {
-      return false;
-    }
-    try {
-      await this.save();
-    } catch (error) {
-      this.workspaces = previous;
-      throw error;
-    }
-    return true;
+  remove(id: string): Promise<boolean> {
+    return this.enqueueMutation(async () => {
+      const previous = this.workspaces;
+      this.workspaces = this.workspaces.filter(entry => entry.id !== id);
+      if (this.workspaces.length === previous.length) {
+        return false;
+      }
+      try {
+        await this.save();
+      } catch (error) {
+        this.workspaces = previous;
+        throw error;
+      }
+      return true;
+    });
   }
 }

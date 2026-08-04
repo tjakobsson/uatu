@@ -165,3 +165,60 @@ describe("registry rollback on persistence failure", () => {
     expect(registry.byId("keeper")).toBeDefined();
   });
 });
+
+describe("registry mutation serialization", () => {
+  test("interleaved register/remove bursts settle with memory equal to disk", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-hub-registry-"));
+    tempDirectories.push(dir);
+    const filePath = path.join(dir, "registry.json");
+    const registry = new WorkspaceRegistry(filePath);
+    await registry.load();
+
+    // Unawaited interleaving: registers racing a remove racing more
+    // registers. Serialized mutations mean the outcome is the sequential
+    // one, and disk matches memory exactly afterwards.
+    const burst = [
+      registry.register("/w/alpha"),
+      registry.register("/w/beta"),
+      registry.remove("alpha"),
+      registry.register("/w/gamma"),
+      registry.remove("beta"),
+      registry.register("/w/delta"),
+    ];
+    await Promise.all(burst);
+
+    const inMemory = registry.list().map(entry => entry.id).sort();
+    expect(inMemory).toEqual(["delta", "gamma"]);
+
+    const reloaded = new WorkspaceRegistry(filePath);
+    await reloaded.load();
+    expect(reloaded.list().map(entry => entry.id).sort()).toEqual(inMemory);
+  });
+
+  test("a failed mutation does not block or corrupt later ones", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-hub-registry-"));
+    tempDirectories.push(dir);
+    const stateDir = path.join(dir, "state");
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(stateDir);
+    const filePath = path.join(stateDir, "registry.json");
+    const registry = new WorkspaceRegistry(filePath);
+    await registry.load();
+
+    // First mutation fails (directory vanishes mid-flight is hard to
+    // stage deterministically, so: registry pointed at a good path,
+    // remove the dir, fail one register, restore the dir, succeed another).
+    await rm(stateDir, { recursive: true, force: true });
+    await expect(registry.register("/w/doomed")).rejects.toThrow();
+    expect(registry.byPath("/w/doomed")).toBeUndefined();
+
+    await mkdir(stateDir);
+    const entry = await registry.register("/w/phoenix");
+    expect(entry.id).toBe("phoenix");
+
+    const reloaded = new WorkspaceRegistry(filePath);
+    await reloaded.load();
+    // The rejected registration must NOT resurrect from any snapshot.
+    expect(reloaded.list().map(e => e.id)).toEqual(["phoenix"]);
+  });
+});

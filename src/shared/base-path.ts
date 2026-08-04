@@ -21,6 +21,11 @@ export function normalizeBasePath(value: string): string {
   if (value.includes("%")) {
     throw new Error(`invalid --base-path (percent-encoding not allowed): '${value}'`);
   }
+  // Backslashes canonicalize to "/" in HTTP URL parsing — the browser would
+  // request /s/uatu/ while the route table holds the literal "/s\\uatu/".
+  if (value.includes("\\")) {
+    throw new Error(`invalid --base-path (backslash not allowed): '${value}'`);
+  }
   const segments = value.split("/");
   if (segments.some(segment => segment === "." || segment === "..")) {
     throw new Error(`invalid --base-path (dot segments not allowed): '${value}'`);

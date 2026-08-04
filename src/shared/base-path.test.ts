@@ -24,6 +24,8 @@ describe("normalizeBasePath", () => {
     // so literal-encoded prefixes can never match their routes.
     expect(() => normalizeBasePath("/s/%2e%2e/")).toThrow(/percent-encoding/);
     expect(() => normalizeBasePath("/s/%61/")).toThrow(/percent-encoding/);
+    // Backslashes canonicalize to "/" in URL parsing — same mismatch class.
+    expect(() => normalizeBasePath("/s\\uatu/")).toThrow(/backslash/);
   });
 });
 

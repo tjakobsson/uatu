@@ -3,6 +3,7 @@
 // lives in one module. Both handlers are attached to `#preview` and decide
 // per-click whether to override the browser's default navigation.
 
+import { appDocumentRelativePath } from "../shared/app-url";
 import { findDocumentById, findDocumentByRelativePath } from "../shell/storage";
 import { buildInPageAnchorUrl } from "./anchor-url";
 import { loadDocument } from "./mount";
@@ -146,13 +147,12 @@ export function initCrossDocAnchorHandler() {
       return;
     }
 
-    let pathname: string;
-    try {
-      pathname = decodeURIComponent(resolved.pathname);
-    } catch {
-      return;
-    }
-    const relativePath = pathname.replace(/^\/+/, "");
+    // Base-path aware: under a hub prefix the per-document <base href> makes
+    // relative links resolve to /s/<id>/guides/other.md — the document lookup
+    // needs the prefix stripped. Outside-prefix same-origin URLs (the hub
+    // dashboard, sibling sessions) resolve to "" and fall through to a real
+    // browser navigation, which is where they must go.
+    const relativePath = appDocumentRelativePath(resolved.pathname);
     if (!relativePath) {
       return;
     }
