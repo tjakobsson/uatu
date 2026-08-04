@@ -112,3 +112,52 @@ describe("SessionManager.stop during an in-flight start", () => {
     expect(sessions.runningIds()).toEqual([]);
   });
 });
+
+describe("SessionManager start during an in-flight stop", () => {
+  test("start waits for the teardown instead of spawning a second child", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-race-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    await registry.register("/srv/workspaces/contended");
+
+    let startCalls = 0;
+    let releaseStop!: () => void;
+    const backend: SessionBackend = {
+      start: async () => {
+        startCalls += 1;
+        const id = startCalls;
+        return {
+          workspaceId: "contended",
+          basePath: "/s/contended/",
+          endpoint: { hostname: "127.0.0.1", port: id },
+          token: null,
+          exited: new Promise<number | null>(() => undefined),
+          stop: () =>
+            id === 1
+              ? new Promise<void>(resolve => {
+                  releaseStop = resolve;
+                })
+              : Promise.resolve(),
+        };
+      },
+    };
+    const sessions = new SessionManager(registry, { local: backend });
+
+    await sessions.start("contended");
+    expect(startCalls).toBe(1);
+
+    const stopPromise = sessions.stop("contended");
+    // Old child is mid-teardown; a concurrent start must NOT spawn yet.
+    const startPromise = sessions.start("contended");
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(startCalls).toBe(1);
+
+    releaseStop();
+    const [stopped, restarted] = await Promise.all([stopPromise, startPromise]);
+    expect(stopped).toBe(true);
+    expect(startCalls).toBe(2);
+    expect(restarted.endpoint.port).toBe(2);
+    expect(sessions.isRunning("contended")).toBe(true);
+  });
+});

@@ -254,6 +254,9 @@ describe("hub end to end", () => {
   test("the folder listing offers workspaces-root subfolders with git status", async () => {
     const plain = path.join(tempRoot, "workspaces", "plain-folder");
     execFileSync("mkdir", ["-p", plain]);
+    // Dot-prefixed folders are candidates too — everything the creation
+    // resolver accepts must be discoverable.
+    execFileSync("mkdir", ["-p", path.join(tempRoot, "workspaces", ".dotted")]);
 
     const response = await fetch(`${origin}/api/hub/folders`, { headers: { cookie } });
     expect(response.status).toBe(200);
@@ -268,6 +271,7 @@ describe("hub end to end", () => {
     const plainEntry = payload.folders.find(folder => folder.name === "plain-folder");
     expect(plainEntry?.git).toBe(false);
     expect(plainEntry?.registeredId).toBeNull();
+    expect(payload.folders.some(folder => folder.name === ".dotted")).toBe(true);
   });
 
   test("creation names are resolved strictly against the workspaces root", async () => {

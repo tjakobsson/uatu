@@ -148,7 +148,10 @@ export function createHubFetchHandler(deps: HubDeps) {
         if (running) {
           try {
             const url = childUrlFor(running, new URL(`http://x/s/${entry.id}/api/terminal/sessions`));
-            const response = await fetch(url);
+            // Bounded: a wedged child that accepts but never answers must
+            // degrade to an omitted summary, not hang the whole dashboard
+            // state endpoint. Two seconds is generous for a loopback call.
+            const response = await fetch(url, { signal: AbortSignal.timeout(2000) });
             if (response.ok) {
               const payload = (await response.json()) as { sessions?: TerminalSessionInfo[] };
               shells = (payload.sessions ?? []).map(({ attached, label }) => ({ attached, label }));
@@ -178,7 +181,9 @@ export function createHubFetchHandler(deps: HubDeps) {
       const dirents = await fs.readdir(config.workspacesDir, { withFileTypes: true });
       entries = await Promise.all(
         dirents
-          .filter(dirent => dirent.isDirectory() && !dirent.name.startsWith("."))
+          // Directories only — including dot-prefixed ones, so everything
+          // the creation resolver accepts is also discoverable.
+          .filter(dirent => dirent.isDirectory())
           .sort((a, b) => a.name.localeCompare(b.name))
           .map(async dirent => {
             const folder = path.join(config.workspacesDir, dirent.name);

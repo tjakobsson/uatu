@@ -14,6 +14,11 @@ export function sessionBasePath(workspaceId: string): string {
 export class SessionManager {
   private readonly running = new Map<string, RunningSession>();
   private readonly starting = new Map<string, Promise<RunningSession>>();
+  // Mirror of `starting` for teardown: while a stop is settling, a start
+  // for the same workspace must wait — otherwise it would spawn a second
+  // child beside the one still shutting down (port/resource overlap, and
+  // the old child's exit reaper no longer matches once replaced).
+  private readonly stopping = new Map<string, Promise<void>>();
 
   constructor(
     private readonly registry: WorkspaceRegistry,
@@ -43,6 +48,11 @@ export class SessionManager {
   // Starts (or joins the in-flight start of) the session for a registered
   // workspace. A crashed/exited child is reaped lazily on the next lookup.
   async start(workspaceId: string): Promise<RunningSession> {
+    // Join any in-flight stop first — see `stopping` above.
+    const stopInFlight = this.stopping.get(workspaceId);
+    if (stopInFlight) {
+      await stopInFlight.catch(() => undefined);
+    }
     const existing = this.running.get(workspaceId);
     if (existing) {
       return existing;
@@ -97,7 +107,15 @@ export class SessionManager {
       return false;
     }
     this.running.delete(workspaceId);
-    await session.stop();
+    // Publish the teardown so a concurrent start() waits for it instead of
+    // spawning a replacement beside the still-exiting child.
+    const teardown = session.stop().finally(() => {
+      if (this.stopping.get(workspaceId) === teardown) {
+        this.stopping.delete(workspaceId);
+      }
+    });
+    this.stopping.set(workspaceId, teardown);
+    await teardown;
     return true;
   }
 
@@ -111,5 +129,7 @@ export class SessionManager {
     const sessions = [...this.running.values()];
     this.running.clear();
     await Promise.all(sessions.map(session => session.stop().catch(() => undefined)));
+    // And any teardown a concurrent per-workspace stop() still owns.
+    await Promise.all([...this.stopping.values()].map(promise => promise.catch(() => undefined)));
   }
 }
