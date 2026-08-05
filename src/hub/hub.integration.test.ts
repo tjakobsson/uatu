@@ -13,6 +13,7 @@ import path from "node:path";
 import { LocalProcessBackend } from "./backend";
 import { hashPassword } from "./auth";
 import type { HubConfig } from "./config";
+import { PersonalWorkspaceStateStore } from "./personal-state";
 import { WorkspaceRegistry } from "./registry";
 import { startHubServer } from "./server";
 import { SessionManager } from "./sessions";
@@ -23,6 +24,7 @@ const CLI_PATH = path.join(REPO_ROOT, "src", "cli.ts");
 let tempRoot = "";
 let workspace = "";
 let registry: WorkspaceRegistry;
+let personalState: PersonalWorkspaceStateStore;
 let sessions: SessionManager;
 let server: ReturnType<typeof startHubServer>;
 let origin = "";
@@ -46,10 +48,12 @@ beforeAll(async () => {
 
   registry = new WorkspaceRegistry(path.join(tempRoot, "registry.json"));
   await registry.load();
+  personalState = new PersonalWorkspaceStateStore(path.join(tempRoot, "personal-state.json"));
+  await personalState.load();
   sessions = new SessionManager(registry, {
     local: new LocalProcessBackend({ uatuArgv: ["bun", "run", CLI_PATH] }),
   });
-  server = startHubServer({ config, registry, sessions, signingKey: "integration-signing-key-0123456789" });
+  server = startHubServer({ config, registry, sessions, personalState, signingKey: "integration-signing-key-0123456789" });
   origin = `http://127.0.0.1:${server.port}`;
 }, 30_000);
 
@@ -236,7 +240,13 @@ describe("hub end to end", () => {
   }, 30_000);
 
   test("terminal WebSocket bridges through the hub with the token brokered server-side", async () => {
-    const sessionId = crypto.randomUUID();
+    const created = await fetch(`${origin}/s/myproject/api/terminal/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ cols: 80, rows: 24 }),
+    });
+    expect(created.status).toBe(201);
+    const sessionId = ((await created.json()) as { id: string }).id;
     // The browser-visible URL carries NO token — the hub injects the
     // child's credential during proxying.
     const ws = new WebSocket(`ws://127.0.0.1:${server.port}/s/myproject/api/terminal?sessionId=${sessionId}`, {
@@ -245,7 +255,13 @@ describe("hub end to end", () => {
 
     const gotOutput = await new Promise<boolean>(resolve => {
       const timeout = setTimeout(() => resolve(false), 15_000);
+      let reconstructionReceived = false;
       ws.addEventListener("message", () => {
+        if (!reconstructionReceived) {
+          reconstructionReceived = true;
+          ws.send(new TextEncoder().encode("echo bridged\r\n"));
+          return;
+        }
         clearTimeout(timeout);
         resolve(true);
       });
@@ -254,7 +270,7 @@ describe("hub end to end", () => {
         resolve(false);
       });
       ws.addEventListener("open", () => {
-        ws.send(JSON.stringify({ type: "input", data: "echo bridged\r" }));
+        ws.send(JSON.stringify({ type: "attach-ready", cols: 80, rows: 24 }));
       });
     });
     expect(gotOutput).toBe(true);

@@ -10,12 +10,12 @@
 
 import {
   DEFAULT_COMPARE_TARGET,
+  DEFAULT_VIEW_MODE,
   isReviewCompareTarget,
   readDiffStylePreference,
   readPreviewWrapPreference,
   readSplitRatioPreference,
   readViewLayoutPreference,
-  readViewModePreference,
   type DiffStyle,
   type RepositoryReviewSnapshot,
   type ReviewCompareTarget,
@@ -26,16 +26,13 @@ import {
   type ViewMode,
 } from "../shared/types";
 import type { StaleHint } from "./stale-hint";
+import { presentationLocalStorage } from "./presentation-storage";
 
 // Best-effort access to window.localStorage. Wrapped because cross-origin
 // iframes, certain privacy modes, and quota issues can make the property
 // access itself throw, not just `getItem` / `setItem`.
 export function safeLocalStorage(): Storage | null {
-  try {
-    return window.localStorage;
-  } catch {
-    return null;
-  }
+  return presentationLocalStorage();
 }
 
 // Storage keys for state-related preferences. UI-only preferences (sidebar
@@ -44,8 +41,6 @@ export function safeLocalStorage(): Storage | null {
 // hosted here.
 export const SIDEBAR_PANES_KEY = "uatu:sidebar-panes";
 export const GIT_LOG_LIMIT_KEY = "uatu:git-log-limit";
-const FILES_PANE_FILTER_KEY = "uatu.filesPaneFilter";
-const COMPARE_TARGET_KEY = "uatu:compare-target";
 
 // Discriminated union describing what the preview pane is showing. Drives
 // the renderer dispatch in `connectEvents` / `loadInitialState`.
@@ -82,7 +77,7 @@ function defaultPaneState(): PaneState {
 export function readPaneState(): PaneState {
   const fallback = defaultPaneState();
   try {
-    const raw = window.localStorage.getItem(SIDEBAR_PANES_KEY);
+    const raw = safeLocalStorage()?.getItem(SIDEBAR_PANES_KEY);
     if (!raw) {
       return fallback;
     }
@@ -120,51 +115,13 @@ export type FilesPaneFilter = "all" | "changed";
 
 const DEFAULT_FILES_PANE_FILTER: FilesPaneFilter = "all";
 
-export function readFilesPaneFilterPreference(): FilesPaneFilter {
-  try {
-    const raw = window.localStorage.getItem(FILES_PANE_FILTER_KEY);
-    return raw === "all" || raw === "changed" ? raw : DEFAULT_FILES_PANE_FILTER;
-  } catch {
-    return DEFAULT_FILES_PANE_FILTER;
-  }
-}
-
-export function writeFilesPaneFilterPreference(value: FilesPaneFilter): void {
-  try {
-    window.localStorage.setItem(FILES_PANE_FILTER_KEY, value);
-  } catch {
-    // best-effort persistence; localStorage may be disabled
-  }
-}
-
-// Compare target — which lens the Change Overview measures against. The
-// server holds the authoritative session value; this persisted preference is
-// what the client reconciles the server to on boot. Defaults to the reviewer's
-// view (the product's hero).
-export function readCompareTargetPreference(): ReviewCompareTarget {
-  try {
-    const raw = window.localStorage.getItem(COMPARE_TARGET_KEY);
-    return isReviewCompareTarget(raw) ? raw : DEFAULT_COMPARE_TARGET;
-  } catch {
-    return DEFAULT_COMPARE_TARGET;
-  }
-}
-
-export function writeCompareTargetPreference(value: ReviewCompareTarget): void {
-  try {
-    window.localStorage.setItem(COMPARE_TARGET_KEY, value);
-  } catch {
-    // best-effort persistence; localStorage may be disabled
-  }
-}
-
 export function isGitLogLimit(value: number): value is 10 | 25 | 50 | 100 {
   return value === 10 || value === 25 || value === 50 || value === 100;
 }
 
 export function readGitLogLimitPreference(): number {
   try {
-    const value = Number(window.localStorage.getItem(GIT_LOG_LIMIT_KEY));
+    const value = Number(safeLocalStorage()?.getItem(GIT_LOG_LIMIT_KEY));
     if (isGitLogLimit(value)) {
       return value;
     }
@@ -185,7 +142,7 @@ export const appState = {
   // resolved on boot from localStorage; defaults to "rendered". Files without
   // a separate rendered representation (text / source / code) ignore this —
   // the server forces source rendering for them.
-  viewMode: readViewModePreference(safeLocalStorage()) as ViewMode,
+  viewMode: DEFAULT_VIEW_MODE as ViewMode,
   // Preview layout for Markdown / AsciiDoc: "single" shows one representation
   // (driven by viewMode); "split-h" and "split-v" show both side-by-side or
   // stacked. Global preference, persisted to localStorage.
@@ -214,11 +171,11 @@ export const appState = {
   // and programmatic selection must leave it alone.
   activeSurface: "preview" as ActiveSurface,
   panes: readPaneState(),
-  filesPaneFilter: readFilesPaneFilterPreference() as FilesPaneFilter,
+  filesPaneFilter: DEFAULT_FILES_PANE_FILTER as FilesPaneFilter,
   gitLogLimit: readGitLogLimitPreference(),
   // Which lens the Change Overview measures review burden against. Mirrors the
   // server-session value; persisted and reconciled to the server on boot.
-  compareTarget: readCompareTargetPreference() as ReviewCompareTarget,
+  compareTarget: DEFAULT_COMPARE_TARGET as ReviewCompareTarget,
 };
 
 export type AppState = typeof appState;

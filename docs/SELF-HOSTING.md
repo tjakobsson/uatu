@@ -65,7 +65,7 @@ to `$XDG_CONFIG_HOME/uatu/hub.json` (usually `~/.config/uatu/hub.json`):
 | `host` | `127.0.0.1` | Bind address. Non-loopback requires `tls`. |
 | `tls` | none | PEM certificate + private key paths. Omit only for loopback (dev, or behind your own HTTPS proxy). |
 | `users` | — | Required, non-empty. Password hashes only — generate with `uatu hub hash-password`. |
-| `stateDir` | `~/.local/state/uatu-hub` | Workspace registry + cookie-signing key (created `0600`) |
+| `stateDir` | `~/.local/state/uatu-hub` | Workspace registry, personal workspace state, and cookie-signing key (secret-bearing files are created owner-only) |
 
 **Workspaces are folders you add**, anywhere on the machine: the dashboard's
 Add Folder pane is a directory browser (starting at the daemon user's home)
@@ -84,9 +84,15 @@ printf '%s' 'your-password-here' | uatu hub hash-password
 Paste the printed `$argon2id$…` string into `users[].passwordHash`.
 
 State that persists across restarts: the workspace registry (ids are stable —
-`/s/uatu/` today is `/s/uatu/` after any number of restarts) and the
+`/s/uatu/` today is `/s/uatu/` after any number of restarts), the
 cookie-signing key (logins survive restarts; delete
-`~/.local/state/uatu-hub/hub.key` to force everyone to sign in again).
+`~/.local/state/uatu-hub/hub.key` to force everyone to sign in again), and
+`personal-workspace-state.json`. Personal state is isolated by signed-in user
+and workspace and contains semantic resume choices such as document, Follow,
+preview/filter/compare modes, and the last-active PTY reference. Browser layout,
+dock, split, and dimensions remain client-local and are not stored by the Hub.
+Forgetting a stopped workspace removes every user's personal record for it as
+part of the same coordinated operation.
 
 ## Certificates — three worked paths
 
@@ -336,7 +342,10 @@ tail -f /tmp/uatu-hub.log
   workspace.
 - **Losing connectivity is fine**: closing the iPad's lid, a train tunnel, a
   hub-reachability blip — terminal sessions detach and reattach with their
-  scrollback; the shell keeps running as long as the *child* stays up.
+  scrollback and active TUI state; the shell keeps running as long as the
+  *child* stays up. A different client sees the PTY in the session picker and
+  must explicitly attach or take it over; saved last-active state never causes
+  an automatic cross-client attachment.
 - **Stopping a session** from the dashboard terminates its shells — the
   dashboard asks for confirmation naming the workspace.
 - **Login lockout**: five failed attempts per minute per address; wait a

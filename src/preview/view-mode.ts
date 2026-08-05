@@ -3,8 +3,9 @@
 // Extracted from `app.ts` so the preview/ feature folder owns the entire
 // view-mode flow alongside layout and mount.
 
-import { writePreviewWrapPreference, writeViewModePreference, type ViewMode } from "../shared/types";
+import { writePreviewWrapPreference, type ViewMode } from "../shared/types";
 import { appState, safeLocalStorage } from "../shell/state";
+import { persistPersonalWorkspaceState } from "../shell/personal-state";
 import { applySourceWrap } from "./code-block";
 import { applyDiffForActiveDocument } from "./diff";
 import { hideFileFactsStrip } from "./file-facts-strip";
@@ -164,7 +165,7 @@ export function applyViewMode(next: ViewMode): void {
     return;
   }
   appState.viewMode = next;
-  writeViewModePreference(safeLocalStorage(), next);
+  persistPersonalWorkspaceState({ previewMode: next });
   // Re-render the active document in the new view. Prefer the cached
   // payload when both representations are already in memory — this is what
   // makes Source ↔ Rendered toggling feel instantaneous and avoids a flash

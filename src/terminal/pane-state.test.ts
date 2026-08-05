@@ -197,12 +197,12 @@ describe("readTerminalPanelState — round-trip via new key", () => {
       bottomHeight: 280,
       rightWidth: 420,
       panes: [
-        { id: crypto.randomUUID(), createdAt: 100 },
-        { id: crypto.randomUUID(), createdAt: 200 },
+        { id: crypto.randomUUID(), sessionId: crypto.randomUUID(), createdAt: 100 },
+        { id: crypto.randomUUID(), sessionId: crypto.randomUUID(), createdAt: 200 },
       ],
     };
     writeTerminalPanelState(storage, state);
-    expect(readTerminalPanelState(storage)).toEqual(state);
+    expect(readTerminalPanelState(storage)).toEqual({ ...state, panes: [] });
   });
 
   it("ignores invalid dock values and falls back to default", () => {
@@ -213,7 +213,7 @@ describe("readTerminalPanelState — round-trip via new key", () => {
     expect(readTerminalPanelState(storage).dock).toBe("bottom");
   });
 
-  it("filters out malformed pane entries", () => {
+  it("ignores pane entries because attachment records are window-local", () => {
     const validId = crypto.randomUUID();
     storage.setItem(
       TERMINAL_STATE_KEY,
@@ -231,7 +231,7 @@ describe("readTerminalPanelState — round-trip via new key", () => {
         ],
       }),
     );
-    expect(readTerminalPanelState(storage).panes).toEqual([{ id: validId, createdAt: 1 }]);
+    expect(readTerminalPanelState(storage).panes).toEqual([]);
   });
 
   it("treats corrupt JSON as missing and falls back to defaults", () => {
@@ -240,21 +240,13 @@ describe("readTerminalPanelState — round-trip via new key", () => {
   });
 });
 
-describe("readTerminalPanelState — legacy migration", () => {
-  it("migrates a legacy height into the new shape and persists it", () => {
+describe("readTerminalPanelState — clean reset", () => {
+  it("ignores a legacy height without writing the new key", () => {
     storage.setItem(TERMINAL_HEIGHT_KEY, "320");
     const state = readTerminalPanelState(storage);
-    expect(state.bottomHeight).toBe(320);
+    expect(state.bottomHeight).toBe(TERMINAL_DEFAULT_BOTTOM_HEIGHT);
     expect(state.dock).toBe("bottom");
-    // Persisted to the new key so subsequent reads are O(parse) rather than
-    // re-running the migration branch.
-    expect(storage.dump()[TERMINAL_STATE_KEY]).toBeDefined();
-    expect(JSON.parse(storage.dump()[TERMINAL_STATE_KEY]!)).toEqual(state);
-  });
-
-  it("does not delete the legacy key (forward-only writes)", () => {
-    storage.setItem(TERMINAL_HEIGHT_KEY, "320");
-    readTerminalPanelState(storage);
+    expect(storage.dump()[TERMINAL_STATE_KEY]).toBeUndefined();
     expect(storage.dump()[TERMINAL_HEIGHT_KEY]).toBe("320");
   });
 
@@ -268,12 +260,6 @@ describe("readTerminalPanelState — legacy migration", () => {
     expect(readTerminalPanelState(storage)).toEqual(defaultTerminalPanelState());
   });
 
-  it("can opt out of migration writes for inspection", () => {
-    storage.setItem(TERMINAL_HEIGHT_KEY, "320");
-    const state = readTerminalPanelState(storage, { writeOnMigrate: false });
-    expect(state.bottomHeight).toBe(320);
-    expect(storage.dump()[TERMINAL_STATE_KEY]).toBeUndefined();
-  });
 });
 
 describe("defaultTerminalPanelState", () => {
@@ -287,20 +273,28 @@ describe("defaultTerminalPanelState", () => {
   });
 });
 
-describe("own pane records (sessionStorage) + restart hints", () => {
-  const paneA = { id: "11111111-1111-4111-8111-111111111111", createdAt: 1000 };
-  const paneB = { id: "22222222-2222-4222-8222-222222222222", createdAt: 2000 };
+describe("own pane records (sessionStorage)", () => {
+  const paneA = {
+    id: "11111111-1111-4111-8111-111111111111",
+    sessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    createdAt: 1000,
+  };
+  const paneB = {
+    id: "22222222-2222-4222-8222-222222222222",
+    sessionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    createdAt: 2000,
+  };
 
-  it("round-trips own records with the hintOwner flag", () => {
-    writeOwnPaneRecords(storage, { panes: [paneA, paneB], hintOwner: true });
-    expect(readOwnPaneRecords(storage)).toEqual({ panes: [paneA, paneB], hintOwner: true });
-    writeOwnPaneRecords(storage, { panes: [paneA], hintOwner: false });
-    expect(readOwnPaneRecords(storage)).toEqual({ panes: [paneA], hintOwner: false });
+  it("round-trips own records", () => {
+    writeOwnPaneRecords(storage, { panes: [paneA, paneB] });
+    expect(readOwnPaneRecords(storage)).toEqual({ panes: [paneA, paneB] });
+    writeOwnPaneRecords(storage, { panes: [paneA] });
+    expect(readOwnPaneRecords(storage)).toEqual({ panes: [paneA] });
   });
 
   it("an empty pane list clears the store and reads as absent", () => {
-    writeOwnPaneRecords(storage, { panes: [paneA], hintOwner: true });
-    writeOwnPaneRecords(storage, { panes: [], hintOwner: true });
+    writeOwnPaneRecords(storage, { panes: [paneA] });
+    writeOwnPaneRecords(storage, { panes: [] });
     expect(readOwnPaneRecords(storage)).toBeNull();
     expect(storage.dump()[TERMINAL_PANES_KEY]).toBeUndefined();
   });
@@ -308,7 +302,7 @@ describe("own pane records (sessionStorage) + restart hints", () => {
   it("rejects malformed records the server would reject", () => {
     storage.setItem(
       TERMINAL_PANES_KEY,
-      JSON.stringify({ panes: [{ id: "not-a-uuid", createdAt: 1 }], hintOwner: true }),
+      JSON.stringify({ panes: [{ id: "not-a-uuid", sessionId: paneA.sessionId, createdAt: 1 }] }),
     );
     expect(readOwnPaneRecords(storage)).toBeNull();
     storage.setItem(TERMINAL_PANES_KEY, "{corrupt json");
@@ -318,26 +312,26 @@ describe("own pane records (sessionStorage) + restart hints", () => {
   it("tolerates a throwing storage", () => {
     const failing = createFailingStorage();
     expect(readOwnPaneRecords(failing)).toBeNull();
-    expect(() => writeOwnPaneRecords(failing, { panes: [paneA], hintOwner: true })).not.toThrow();
+    expect(() => writeOwnPaneRecords(failing, { panes: [paneA] })).not.toThrow();
   });
 
   it("boot resolution prefers this window's own records", () => {
     const local = createMemoryStorage();
     writeTerminalPanelState(local, { ...defaultTerminalPanelState(), panes: [paneA] });
-    writeOwnPaneRecords(storage, { panes: [paneB], hintOwner: false });
+    writeOwnPaneRecords(storage, { panes: [paneB] });
     const resolved = resolveBootPaneRecords(storage, readTerminalPanelState(local));
-    expect(resolved).toEqual({ panes: [paneB], hintOwner: false });
+    expect(resolved).toEqual({ panes: [paneB] });
   });
 
-  it("boot resolution adopts the shared hints when no own records exist", () => {
+  it("boot resolution ignores shared local-storage hints", () => {
     const local = createMemoryStorage();
     writeTerminalPanelState(local, { ...defaultTerminalPanelState(), panes: [paneA] });
     const resolved = resolveBootPaneRecords(storage, readTerminalPanelState(local));
-    expect(resolved).toEqual({ panes: [paneA], hintOwner: true });
+    expect(resolved).toEqual({ panes: [] });
   });
 
-  it("boot resolution with neither store yields fresh ownership and no panes", () => {
+  it("boot resolution with neither store yields no panes", () => {
     const resolved = resolveBootPaneRecords(storage, defaultTerminalPanelState());
-    expect(resolved).toEqual({ panes: [], hintOwner: true });
+    expect(resolved).toEqual({ panes: [] });
   });
 });

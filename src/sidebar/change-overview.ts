@@ -3,7 +3,6 @@
 // the file-count chip. Extracted from `app.ts` so the sidebar feature
 // folder owns the change-overview presentation in one place.
 
-import { appUrl } from "../shared/app-url";
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
 import type { RepositoryReviewSnapshot, ReviewCompareTarget } from "../shared/types";
 import { identityColor, identityHue } from "../shell/identity";
@@ -12,7 +11,9 @@ import { renderSidebar } from "./shell";
 import { syncFollowToggle } from "../shell/follow";
 import { pushReviewScore } from "../shell/history";
 import { nextStaleHint } from "../shell/stale-hint";
-import { appState, writeCompareTargetPreference } from "../shell/state";
+import { appState } from "../shell/state";
+import { persistPersonalWorkspaceState } from "../shell/personal-state";
+import { refreshServerStateForContext } from "../shell/events";
 import { documentDiffCache, loadDocument } from "../preview/mount";
 import type { FilesPaneFilterMembership, GitStatusForView } from "./tree-view";
 import { baseModeLabel, capitalize } from "./git-log";
@@ -306,7 +307,7 @@ function mapChangedFileStatus(raw: string): GitStatusForView["status"] | null {
 // and the SSE reducer adopting another tab's switch).
 export function adoptCompareTarget(target: ReviewCompareTarget): void {
   appState.compareTarget = target;
-  writeCompareTargetPreference(target);
+  persistPersonalWorkspaceState({ compareTarget: target });
   // Cached diffs were computed against the previous target.
   documentDiffCache.clear();
 }
@@ -322,15 +323,7 @@ async function applyCompareTargetChange(target: ReviewCompareTarget): Promise<vo
   // Optimistic re-render so the toggle reflects the choice immediately; the
   // burden numbers + anchor refresh when the server rebroadcasts snapshots.
   renderSidebar();
-  try {
-    await fetch(appUrl("/api/compare-target"), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ target }),
-    });
-  } catch {
-    // Best-effort; the SSE broadcast or the next reload reconciles state.
-  }
+  await refreshServerStateForContext().catch(() => undefined);
   // The server sets its target synchronously before responding, so by now the
   // diff endpoint will resolve against the new target. Re-fetch the active
   // document if it is currently in Diff view.

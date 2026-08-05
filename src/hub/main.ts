@@ -7,9 +7,11 @@ import { LocalProcessBackend } from "./backend";
 import { hashPassword } from "./auth";
 import { isLoopbackHost, loadHubConfig, localHubConfig } from "./config";
 import { WorkspaceRegistry } from "./registry";
+import { PersonalWorkspaceStateStore } from "./personal-state";
 import {
   ensureStateDir,
   loadOrCreateSigningKey,
+  personalWorkspaceStatePath,
   registryPath,
   resolveHubStateRoot,
 } from "./state-dir";
@@ -47,9 +49,12 @@ export async function runHub(options: RunHubOptions): Promise<void> {
 
   const registry = new WorkspaceRegistry(registryPath(stateRoot));
   await registry.load();
+  const personalState = new PersonalWorkspaceStateStore(personalWorkspaceStatePath(stateRoot));
+  await personalState.load();
+  await personalState.recoverPendingForgets(workspaceId => registry.byId(workspaceId) !== undefined);
 
   const sessions = new SessionManager(registry, { local: new LocalProcessBackend() });
-  const server = startHubServer({ config, registry, sessions, signingKey });
+  const server = startHubServer({ config, registry, sessions, signingKey, personalState });
 
   const scheme = config.tls ? "https" : "http";
   console.log(`${scheme}://${config.host}:${server.port}/`);

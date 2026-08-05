@@ -14,17 +14,24 @@ import { setupTerminalPanel } from "../terminal/panel";
 import { applyMonoConfig } from "../mono/apply";
 import { initColorSchemeTracking } from "./theme";
 import { setFilesPaneFilter, syncFilesPaneFilterControl } from "../sidebar/files-filter";
+import { adoptCompareTarget } from "../sidebar/change-overview";
 import { setPaneState } from "../sidebar/panes";
 import { setFollowEnabled, syncFollowToggle } from "./follow";
 import type { StatePayload } from "../shared/types";
+import { applyViewMode } from "../preview/view-mode";
 import { renderBuildBadge } from "./connection";
 import { applyServerSnapshot, connectEvents } from "./events";
 import { replaceSelection, scrollToFragment } from "./history";
 import {
   appState,
-  readFilesPaneFilterPreference,
   readPaneState,
 } from "./state";
+import {
+  enablePersonalStatePersistence,
+  loadPersonalWorkspaceState,
+  persistPersonalWorkspaceState,
+} from "./personal-state";
+import { contextualAppUrl } from "./watch-context";
 import { setPreviewMode, setSelectedId } from "./selection";
 import {
   commitPreviewParamsFromUrl,
@@ -41,77 +48,76 @@ export async function loadInitialState() {
   // the URL with a hashless version — otherwise the post-load fragment
   // scroll has nothing to scroll to.
   const initialHash = window.location.hash;
+  const hasExplicitRoute = Boolean(urlRelativePath || initialHash);
 
   // Before any rendering: the tracker sets the theme-color meta for the
   // resolved scheme and starts listening for OS scheme flips (mermaid and
   // the tree view subscribe on their own).
   initColorSchemeTracking();
 
-  const response = await fetch(appUrl("/api/state"));
-  const payload = (await response.json()) as StatePayload;
+  const [response, personalState] = await Promise.all([
+    fetch(appUrl("/api/state")),
+    loadPersonalWorkspaceState(),
+  ]);
+  let payload = (await response.json()) as StatePayload;
+
+  adoptCompareTarget(personalState.compareTarget ?? "base");
+  if (personalState.previewMode) applyViewMode(personalState.previewMode);
+  if (payload.compareTarget !== appState.compareTarget) {
+    const contextualResponse = await fetch(contextualAppUrl(appUrl("/api/state")));
+    if (contextualResponse.ok) payload = (await contextualResponse.json()) as StatePayload;
+  }
 
   applyServerSnapshot(payload);
-  // Reconcile the persisted compare-target preference (read into appState at
-  // module load) with the server session, which starts at the default. This is
-  // AWAITED: the initial loadDocument() below may fetch /api/document/diff,
-  // which resolves against the server's current target. If we let the POST run
-  // fire-and-forget, that diff could be fetched against the stale default and
-  // cached — and the later SSE rebroadcast would NOT clear it, because
-  // appState.compareTarget already equals the persisted value (so the reducer
-  // sees no change). Awaiting flips the server target first; the recompute +
-  // SSE rebroadcast then delivers the matching snapshots.
-  if (appState.compareTarget !== payload.compareTarget) {
-    try {
-      await fetch(appUrl("/api/compare-target"), {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ target: appState.compareTarget }),
-      });
-    } catch {
-      // Best-effort; the server keeps the default and the toggle still works.
-    }
-  }
   syncStateGeneration(payload.generatedAt);
   renderBuildBadge(payload.build);
   applyMonoConfig(payload.monoConfig);
-  setupTerminalPanel(payload.terminal === "enabled", payload.terminalConfig);
+  setupTerminalPanel(payload.terminal === "enabled", payload.terminalConfig, personalState.lastPtyId);
 
   setPaneState(readPaneState());
-  setFilesPaneFilter(readFilesPaneFilterPreference());
+  setFilesPaneFilter(personalState.filesFilter ?? "all");
   syncFilesPaneFilterControl();
 
   let directLinkMessage: { title: string; body: string } | null = null;
+  let explicitDocumentPath: string | null = null;
   const initialReviewScoreRepositoryId = reviewScoreRepositoryIdFromUrl();
   const initialCommitPreview = commitPreviewParamsFromUrl();
 
   if (initialReviewScoreRepositoryId) {
+    setFollowEnabled(false);
     setSelectedId(null);
     setPreviewMode({ kind: "review-score", repositoryId: initialReviewScoreRepositoryId });
   } else if (initialCommitPreview) {
+    setFollowEnabled(false);
     setSelectedId(null);
     setPreviewMode({ kind: "commit", ...initialCommitPreview });
+  } else if (!hasExplicitRoute) {
+    setFollowEnabled(personalState.follow ?? payload.initialFollow);
+    const savedDocument = personalState.documentPath
+      ? findDocumentByRelativePath(personalState.documentPath)
+      : null;
+    setSelectedId(savedDocument?.kind !== "binary" ? savedDocument?.id ?? payload.defaultDocumentId : payload.defaultDocumentId);
+    setPreviewMode({ kind: "document" });
   } else if (!urlRelativePath) {
-    // Default boot at `/` — honor the CLI follow default (Rule "Follow
-    // defaults to ON" of the follow-mode capability).
-    setFollowEnabled(payload.initialFollow);
+    // A fragment-bearing root URL is explicit navigation. Render the session
+    // default rather than applying a saved document from another route.
+    setFollowEnabled(false);
     setSelectedId(payload.defaultDocumentId);
     setPreviewMode({ kind: "document" });
   } else {
+    setFollowEnabled(false);
     const requestedDoc = findDocumentByRelativePath(urlRelativePath);
     if (requestedDoc && requestedDoc.kind !== "binary") {
       // Direct link to a known non-binary doc — force follow off (Rule
       // "URL direct links force OFF on boot") and override the
       // server-provided default selection.
-      setFollowEnabled(false);
       setSelectedId(requestedDoc.id);
+      explicitDocumentPath = requestedDoc.relativePath;
       setPreviewMode({ kind: "document" });
     } else if (payload.scope.kind === "file") {
       // Direct link to a doc outside the CLI single-file watch scope. Keep
       // the scoped doc as the selection but render a "session scoped to a
-      // single file" message in place of the preview. Follow stays at the
-      // server-provided default — it's meaningless in a single-file session
-      // (`syncFollowToggle` disables the chip when scope.kind === "file"),
-      // so we don't need to explicitly clear it here.
+      // single file" message in place of the preview without widening it.
       setSelectedId(payload.defaultDocumentId);
       setPreviewMode({ kind: "empty" });
       const scopedDoc = appState.selectedId
@@ -173,4 +179,15 @@ export async function loadInitialState() {
   }
 
   connectEvents();
+  enablePersonalStatePersistence();
+  // Restored/default values are read-only at boot: writing a full snapshot
+  // here could overwrite newer field-level writes from another open client.
+  // An explicit route is current user intent, so only its affected fields are
+  // persisted for future root arrivals.
+  if (initialReviewScoreRepositoryId || initialCommitPreview || hasExplicitRoute) {
+    persistPersonalWorkspaceState({
+      follow: false,
+      ...(explicitDocumentPath ? { documentPath: explicitDocumentPath } : {}),
+    });
+  }
 }

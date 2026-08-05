@@ -92,21 +92,28 @@ The `TreeView` wrapper around `@pierre/trees` SHALL distinguish between genuine 
 
 ### Requirement: Follow defaults to ON; URL direct links force OFF on boot
 
-The system SHALL initialize `followEnabled` from the server-provided `initialFollow` payload (default `true`) ONLY when the SPA boots at the root URL (`location.pathname === "/"`). When the SPA boots with `location.pathname` resolving to a known non-binary document, the system MUST set `followEnabled = false` for the session regardless of the server-provided default. The user MAY re-enable Follow after a direct-link arrival by clicking the chip. The CLI `--no-follow` flag MUST flip the server-provided default to `false`.
+The system SHALL restore `followEnabled` from the current user's personal workspace state when the SPA boots at the workspace root. If no saved Follow value exists, it SHALL use the server-provided `initialFollow` value, whose default is `true` and which the CLI `--no-follow` flag sets to `false`. When an explicit document or preview URL is opened, the system MUST set Follow off for that client regardless of saved or server defaults. User changes to Follow SHALL be persisted for future root arrivals but SHALL NOT change Follow in another already-open client.
 
-#### Scenario: Boot at `/` honors the CLI follow default
-- **WHEN** a user navigates to `http://127.0.0.1:NNNN/`
+#### Scenario: Root arrival restores saved Follow
+- **WHEN** personal workspace state contains `follow=false`
+- **AND** the user opens the workspace root
+- **THEN** Follow boots off even when the CLI default is on
+
+#### Scenario: Root arrival without saved state honors CLI default
+- **WHEN** no personal Follow value exists
 - **AND** the CLI was started without `--no-follow`
-- **THEN** the SPA boots with `followEnabled = true`
+- **THEN** Follow boots on
 
-#### Scenario: Direct-link boot forces Follow off
-- **WHEN** a user navigates to `http://127.0.0.1:NNNN/guides/setup.md`
-- **AND** the CLI was started without `--no-follow`
-- **THEN** the SPA boots with `followEnabled = false`
+#### Scenario: Direct link arrival turns Follow off
+- **WHEN** a user opens an explicit document or preview URL
+- **THEN** Follow is off in that client
+- **AND** the user may re-enable it afterward
 
-#### Scenario: --no-follow propagates to the SPA default
-- **WHEN** the CLI was started with `--no-follow` and the user navigates to `http://127.0.0.1:NNNN/`
-- **THEN** the SPA boots with `followEnabled = false`
+#### Scenario: One client's Follow change does not control another
+- **WHEN** two clients have the same user's workspace open
+- **AND** one client toggles Follow
+- **THEN** the other open client's Follow state is unchanged
+- **AND** the new value is available on a future root arrival
 
 ### Requirement: Follow-driven selection never moves focus or the active surface
 

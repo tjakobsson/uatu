@@ -96,8 +96,19 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 2000): Promise<vo
   }
 }
 
+async function readSsePayload(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<ReturnType<typeof createStatePayload>> {
+  const result = await Promise.race([
+    reader.read(),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("SSE payload timeout")), 3000)),
+  ]);
+  const text = new TextDecoder().decode(result.value);
+  const data = text.split("data: ").at(-1)?.trim();
+  if (!data) throw new Error("SSE payload missing data");
+  return JSON.parse(data);
+}
+
 describe("watchSession scope", () => {
-  test("pinning narrows visible roots to the selected file and unpin restores folder scope", async () => {
+  test("different callers project folder and file scopes without mutating each other", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-pin-"));
     tempDirectories.push(tempDirectory);
     const readme = path.join(tempDirectory, "README.md");
@@ -115,16 +126,57 @@ describe("watchSession scope", () => {
       await session.start();
       await waitUntil(() => session.getRoots().some(root => root.docs.length >= 2));
 
-      session.setScope({ kind: "file", documentId: readme });
-      await waitUntil(() => {
-        const docs = session.getRoots().flatMap(root => root.docs);
-        return docs.length === 1 && docs[0]?.id === readme;
-      });
-      expect(session.getScope()).toEqual({ kind: "file", documentId: readme });
+      const pinned = { scope: { kind: "file" as const, documentId: readme }, compareTarget: "base" as const };
+      const folder = { scope: { kind: "folder" as const }, compareTarget: "last-commit" as const };
+      expect(session.getRoots(pinned).flatMap(root => root.docs).map(doc => doc.id)).toEqual([readme]);
+      expect(session.getRoots(folder).flatMap(root => root.docs).map(doc => doc.id).sort()).toEqual([guide, readme].sort());
+      expect(session.getStatePayload(null, pinned).scope).toEqual(pinned.scope);
+      expect(session.getStatePayload(null, folder).compareTarget).toBe("last-commit");
+    } finally {
+      await session.stop();
+    }
+  });
 
-      session.setScope({ kind: "folder" });
-      await waitUntil(() => session.getRoots().flatMap(root => root.docs).length >= 2);
-      expect(session.getScope()).toEqual({ kind: "folder" });
+  test("concurrent SSE subscribers retain independent contexts after refresh", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-context-sse-"));
+    tempDirectories.push(tempDirectory);
+    const readme = path.join(tempDirectory, "README.md");
+    const guide = path.join(tempDirectory, "guide.md");
+    await writeFile(readme, "# Readme\n");
+    await writeFile(guide, "# Guide\n");
+    const session = createWatchSession(
+      [{ kind: "dir", absolutePath: tempDirectory }],
+      true,
+      { usePolling: true },
+    );
+
+    try {
+      await session.start();
+      const pinnedContext = { scope: { kind: "file" as const, documentId: readme }, compareTarget: "last-commit" as const };
+      const folderContext = { scope: { kind: "folder" as const }, compareTarget: "base" as const };
+      const pinnedReader = session.eventsResponse(pinnedContext).body!.getReader();
+      const folderReader = session.eventsResponse(folderContext).body!.getReader();
+      const [pinnedInitial, folderInitial] = await Promise.all([
+        readSsePayload(pinnedReader),
+        readSsePayload(folderReader),
+      ]);
+      expect(pinnedInitial.scope).toEqual(pinnedContext.scope);
+      expect(pinnedInitial.compareTarget).toBe("last-commit");
+      expect(pinnedInitial.roots.flatMap(root => root.docs).map(doc => doc.id)).toEqual([readme]);
+      expect(folderInitial.scope).toEqual(folderContext.scope);
+      expect(folderInitial.compareTarget).toBe("base");
+      expect(folderInitial.roots.flatMap(root => root.docs)).toHaveLength(2);
+
+      await writeFile(readme, "# Readme changed\n");
+      const [pinnedRefresh, folderRefresh] = await Promise.all([
+        readSsePayload(pinnedReader),
+        readSsePayload(folderReader),
+      ]);
+      expect(pinnedRefresh.scope).toEqual(pinnedContext.scope);
+      expect(pinnedRefresh.compareTarget).toBe("last-commit");
+      expect(folderRefresh.scope).toEqual(folderContext.scope);
+      expect(folderRefresh.compareTarget).toBe("base");
+      await Promise.all([pinnedReader.cancel(), folderReader.cancel()]);
     } finally {
       await session.stop();
     }
@@ -155,7 +207,7 @@ describe("watchSession scope", () => {
     expect(canSetFileScope(roots, binary)).toBe(false);
   });
 
-  test("unlinking the pinned file reverts scope to folder automatically", async () => {
+  test("an SSE pin stays widened after its file is unlinked and recreated", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-pin-unlink-"));
     tempDirectories.push(tempDirectory);
     const readme = path.join(tempDirectory, "README.md");
@@ -173,19 +225,22 @@ describe("watchSession scope", () => {
       await session.start();
       await waitUntil(() => session.getRoots().some(root => root.docs.length >= 2));
 
-      session.setScope({ kind: "file", documentId: readme });
-      await waitUntil(() => {
-        const docs = session.getRoots().flatMap(root => root.docs);
-        return docs.length === 1 && docs[0]?.id === readme;
-      });
+      const pinned = { scope: { kind: "file" as const, documentId: readme }, compareTarget: "base" as const };
+      const reader = session.eventsResponse(pinned).body!.getReader();
+      expect((await readSsePayload(reader)).scope).toEqual(pinned.scope);
 
       await unlink(readme);
-      await waitUntil(
-        () =>
-          session.getScope().kind === "folder" &&
-          session.getRoots().flatMap(root => root.docs).some(doc => doc.id === guide),
-      );
-      expect(session.getScope()).toEqual({ kind: "folder" });
+      await waitUntil(() => session.getUnscopedRoots().flatMap(root => root.docs).every(doc => doc.id !== readme));
+      const widened = await readSsePayload(reader);
+      expect(widened.scope).toEqual({ kind: "folder" });
+      expect(widened.roots.flatMap(root => root.docs).some(doc => doc.id === guide)).toBe(true);
+
+      await writeFile(readme, "# Readme recreated\n");
+      await waitUntil(() => session.getUnscopedRoots().flatMap(root => root.docs).some(doc => doc.id === readme));
+      const recreated = await readSsePayload(reader);
+      expect(recreated.scope).toEqual({ kind: "folder" });
+      expect(recreated.roots.flatMap(root => root.docs).map(doc => doc.id).sort()).toEqual([guide, readme].sort());
+      await reader.cancel();
     } finally {
       await session.stop();
     }

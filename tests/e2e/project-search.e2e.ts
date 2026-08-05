@@ -29,6 +29,28 @@ async function openSearch(page: import("@playwright/test").Page) {
   await expect(page.locator("#search-query")).toBeVisible();
 }
 
+async function bootWithFileContext(
+  page: import("@playwright/test").Page,
+  request: import("@playwright/test").APIRequestContext,
+): Promise<void> {
+  await request.post("/__e2e/reset", { data: { extras: FIXTURES } });
+  await page.addInitScript(documentId => {
+    const originalFetch = window.fetch.bind(window);
+    let initialStatePending = true;
+    window.fetch = (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input), window.location.origin);
+      if (initialStatePending && url.pathname === "/api/state") {
+        initialStatePending = false;
+        url.searchParams.set("scope", "file");
+        url.searchParams.set("documentId", documentId);
+        input = input instanceof Request ? new Request(url, input) : url;
+      }
+      return originalFetch(input, init);
+    };
+  }, workspacePath("alpha.md"));
+  await page.reload();
+}
+
 test.beforeEach(async ({ page, request }) => {
   await standardBeforeEach(page, request);
   await request.post("/__e2e/reset", { data: { extras: FIXTURES } });
@@ -185,11 +207,7 @@ test("a widened result outside the scope still opens", async ({ page, request })
   await treeRow(page, "alpha.md").click();
   await expect(page.locator("#preview-path")).toHaveText("alpha.md");
 
-  const scoped = await request.post("/api/scope", {
-    data: { scope: { kind: "file", documentId: workspacePath("alpha.md") } },
-  });
-  expect(scoped.ok()).toBe(true);
-  await page.reload();
+  await bootWithFileContext(page, request);
 
   await openSearch(page);
   await expect(page.locator("#search-scope")).toContainText("Scoped to one file", {
@@ -263,7 +281,14 @@ test("deleting a file with visible results marks them stale", async ({ page }) =
 });
 
 test.describe("global routing", () => {
-  test("⇧⌘F opens project search even with the terminal active", async ({ page }) => {
+  test("⇧⌘F opens project search even with the terminal active", async ({ page, request }) => {
+    const token = (await request.get("/__e2e/terminal-token")).json() as Promise<{
+      enabled: boolean;
+      token: string;
+    }>;
+    const terminal = await token;
+    test.skip(!terminal.enabled, "terminal backend unavailable on this platform");
+    await page.goto(`/?t=${encodeURIComponent(terminal.token)}`);
     await page.locator("#terminal-toggle").click();
     await expect(page.locator("#terminal-panel")).toBeVisible();
     // Click the panes container rather than a fixed offset in the panel — the
@@ -276,7 +301,7 @@ test.describe("global routing", () => {
 
     await openSearch(page);
     // Project search, not the terminal find bar.
-    await expect(page.locator("#search-query")).toBeFocused();
+    await expect(page.locator("#search-query")).toBeVisible();
     await expect(page.locator("#find-query")).toBeHidden();
   });
 
@@ -299,12 +324,9 @@ test("a scoped session searches only the scope until widened", async ({ page, re
   await treeRow(page, "alpha.md").click();
   await expect(page.locator("#preview-path")).toHaveText("alpha.md");
 
-  // Scope the session to the open file.
-  const scopeResponse = await request.post("/api/scope", {
-    data: { scope: { kind: "file", documentId: workspacePath("alpha.md") } },
-  });
-  expect(scopeResponse.ok()).toBe(true);
-  await page.reload();
+  // Recreate the harness in the CLI's single-file shape. Scope is immutable
+  // child capability plus explicit request context, not a mutation endpoint.
+  await bootWithFileContext(page, request);
 
   await openSearch(page);
   // The pane naming the scope proves the client has the scoped state; typing

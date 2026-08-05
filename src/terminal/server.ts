@@ -13,8 +13,9 @@ import { resolveTerminalBackend } from "./backend";
 import { resolveForegroundLabels } from "./process-label";
 import { SHELL_FALLBACK_NOTICE, shellIsUnset } from "./shell-warning";
 import type { PtyProcess } from "./pty";
+import { TerminalModel } from "./model";
 
-type SocketData = { sessionId: string; takeover?: boolean };
+type SocketData = { sessionId: string; takeover?: boolean; ready?: boolean; attaching?: boolean };
 
 // App-defined close code the client sends from the confirmed pane-close path.
 // It is the ONLY close code that kills the PTY; everything else — 1001
@@ -28,15 +29,6 @@ export const CLOSE_CODE_USER_TERMINATE = 4001;
 const CLOSE_CODE_SESSION_TAKEN = 4410;
 // WebSocket.OPEN. Not exposed as a named constant on Bun's ServerWebSocket type.
 const WS_OPEN = 1;
-// Cap the per-session replay buffer. On reattach we resend recent PTY output
-// to the new socket so the new xterm canvas reconstructs the screen (the
-// previous canvas is gone — fresh `Terminal` instance after browser refresh).
-// TUIs (htop, vim, btop) use absolute cursor positioning, so replaying the
-// last few frames' worth of bytes lets xterm rebuild the visible screen.
-// 128KB ≈ several frames of a busy htop at full terminal width; comfortably
-// enough for the worst case while keeping per-session memory bounded.
-const REPLAY_BUFFER_CAP_BYTES = 128 * 1024;
-
 // Final safe fallback when `$SHELL` is unset/empty. Present on every POSIX
 // system, so the terminal always starts even in a stripped sandbox. The
 // matching stdout warning is emitted once at startup from cli.ts; here we only
@@ -55,7 +47,11 @@ export function isValidSessionId(value: unknown): value is string {
 type Session = {
   id: string;
   pty: PtyProcess;
+  model: TerminalModel;
   socket: ServerWebSocket<SocketData> | null;
+  pendingClaim: ServerWebSocket<SocketData> | null;
+  pendingOutput: Uint8Array[];
+  deferredHolderResize: { cols: number; rows: number } | null;
   // Wall-clock millis at spawn; surfaces as age in the session inventory.
   createdAt: number;
   // Basename of the spawned shell — the inventory label fallback when no
@@ -63,11 +59,7 @@ type Session = {
   shellName: string;
   cols: number;
   rows: number;
-  // Replay buffer: recent PTY output captured in chunk-sized pieces. Used on
-  // reattach to seed the new client's xterm canvas with the bytes the
-  // previous client received. See REPLAY_BUFFER_CAP_BYTES comment.
-  replayChunks: Uint8Array[];
-  replayBytes: number;
+  closing: boolean;
 };
 
 export type TerminalServerOptions = {
@@ -92,9 +84,7 @@ export type TerminalServerOptions = {
 };
 
 export type PrepareSessionResult =
-  // The id is well-formed and free; the upgrade should proceed and `open()`
-  // will spawn a fresh PTY.
-  | { kind: "fresh" }
+  | { kind: "unknown" }
   // The id is well-formed and matches a detached session whose PTY is still
   // running. The upgrade should proceed and `open()` will reattach to the
   // existing PTY, however long ago the previous socket went away.
@@ -124,6 +114,7 @@ export type TerminalServer = {
   // Returns true if a PTY backend is loadable in this process. The CLI uses
   // this to decide whether to expose `terminal: "enabled"` in /api/state.
   isAvailable(): Promise<boolean>;
+  createSession(dimensions?: { cols?: number; rows?: number }): Promise<TerminalSessionInfo>;
   // Pre-upgrade gate: validates the client-supplied `sessionId` and reports
   // whether the upgrade should produce a fresh PTY, reattach to an existing
   // one, take over an attached one, or be rejected. cli.ts uses the result
@@ -154,15 +145,191 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
     metrics?.set("pty.sessions_active", sessions.size);
   };
 
+  const createSession = async (
+    dimensions: { cols?: number; rows?: number } = {},
+  ): Promise<TerminalSessionInfo> => {
+    const backend = await resolveTerminalBackend();
+    if (!backend.available) throw new Error("terminal backend unavailable");
+    const cols = Math.max(1, Math.floor(dimensions.cols ?? options.initialCols ?? 80));
+    const rows = Math.max(1, Math.floor(dimensions.rows ?? options.initialRows ?? 24));
+    if (!Number.isFinite(cols) || !Number.isFinite(rows) || cols > 1000 || rows > 1000) {
+      throw new Error("invalid terminal dimensions");
+    }
+    const env = options.env ?? process.env;
+    const shell = options.shell ?? (shellIsUnset(env) ? DEFAULT_SHELL : env.SHELL!);
+    const shellFellBack = !options.shell && shellIsUnset(env);
+    const ptyEnv: Record<string, string> = {
+      ...(process.env as Record<string, string>),
+      COLORTERM: "truecolor",
+      TERM: "xterm-256color",
+    };
+    const pty = backend.spawn(shell, [], { cols, rows, cwd: options.cwd, env: ptyEnv });
+    const id = crypto.randomUUID();
+    const session: Session = {
+      id,
+      pty,
+      model: new TerminalModel(cols, rows),
+      socket: null,
+      pendingClaim: null,
+      pendingOutput: [],
+      deferredHolderResize: null,
+      createdAt: Date.now(),
+      shellName: shell.split("/").at(-1) ?? shell,
+      cols,
+      rows,
+      closing: false,
+    };
+    sessions.set(id, session);
+    metrics?.inc("pty.spawned_total");
+    updateActive();
+
+    if (shellFellBack) {
+      session.model.write(new TextEncoder().encode(SHELL_FALLBACK_NOTICE));
+    }
+    pty.onData(bytes => {
+      if (session.closing) return;
+      session.model.write(bytes);
+      if (session.pendingClaim) session.pendingOutput.push(new Uint8Array(bytes));
+      if (session.socket && session.socket.readyState === WS_OPEN) {
+        try {
+          session.socket.send(bytes);
+        } catch {
+          // Socket closing; close() will detach it.
+        }
+      }
+    });
+    pty.onExit(({ exitCode, signal }) => {
+      session.closing = true;
+      const pendingClaim = session.pendingClaim;
+      session.pendingClaim = null;
+      session.pendingOutput = [];
+      session.deferredHolderResize = null;
+      const attachedSockets = new Set([session.socket, pendingClaim]);
+      for (const socket of attachedSockets) {
+        if (!socket || socket.readyState !== WS_OPEN) continue;
+        try {
+          socket.send(JSON.stringify({ type: "exit", exitCode, signal }));
+          socket.close(1000, "shell exited");
+        } catch {
+          // Socket may already be closing.
+        }
+      }
+      if (sessions.get(id) === session) {
+        sessions.delete(id);
+        updateActive();
+      }
+      session.model.dispose();
+      metrics?.inc("pty.reaped_total");
+    });
+    return {
+      id,
+      attached: false,
+      createdAt: session.createdAt,
+      cols,
+      rows,
+      label: session.shellName,
+    };
+  };
+
+  const applyResize = (session: Session, cols: number, rows: number): void => {
+    session.cols = cols;
+    session.rows = rows;
+    const modelResize = session.model.resize(cols, rows);
+    try {
+      session.pty.resize(cols, rows);
+    } catch {
+      // Resize can fail if the PTY just exited; model cleanup follows exit.
+    }
+    void modelResize.catch(() => undefined);
+  };
+
+  const restoreDeferredHolderResize = (session: Session): void => {
+    const deferred = session.deferredHolderResize;
+    session.deferredHolderResize = null;
+    if (!deferred || session.pendingClaim || !session.socket) return;
+    applyResize(session, deferred.cols, deferred.rows);
+  };
+
+  const completeAttach = async (session: Session, socket: ServerWebSocket<SocketData>, cols: number, rows: number) => {
+    if (session.socket && session.socket !== socket && !socket.data.takeover) {
+      socket.close(4409, "sessionId in use");
+      return;
+    }
+    if (session.pendingClaim && session.pendingClaim !== socket) {
+      socket.close(4409, "session claim in progress");
+      return;
+    }
+    if (socket.data.attaching) return;
+    socket.data.attaching = true;
+    session.pendingClaim = socket;
+    session.pendingOutput = [];
+    try {
+      await session.model.resize(cols, rows);
+      // The claimant may disconnect while queued model writes drain. Its
+      // close handler releases the claim, and another socket can claim the
+      // session before this coroutine resumes. Do not mutate that newer
+      // claim's dimensions or output buffer.
+      if (session.pendingClaim !== socket || socket.readyState !== WS_OPEN) return;
+      // resize() drains all output queued before this point. Start the live
+      // buffer at the serialization boundary so bytes already represented in
+      // the snapshot are not sent twice.
+      session.pendingOutput = [];
+      session.cols = cols;
+      session.rows = rows;
+      session.pty.resize(cols, rows);
+      // resize() may synchronously emit a redraw. The model includes it in
+      // the snapshot, so begin buffering live output after that boundary.
+      session.pendingOutput = [];
+      const snapshot = await session.model.serialize();
+      if (session.pendingClaim !== socket || socket.readyState !== WS_OPEN) return;
+      const previous = session.socket;
+      const send = (bytes: Uint8Array): void => {
+        if (socket.send(bytes) < 0) throw new Error("terminal attach delivery failed");
+      };
+      send(snapshot);
+      for (const bytes of session.pendingOutput) send(bytes);
+      // Commit ownership only after reconstruction delivery succeeds. A
+      // failed claimant must leave the current holder usable.
+      session.deferredHolderResize = null;
+      session.socket = socket;
+      session.pendingOutput = [];
+      session.pendingClaim = null;
+      socket.data.attaching = false;
+      socket.data.ready = true;
+      if (previous && previous !== socket) {
+        try {
+          previous.close(CLOSE_CODE_SESSION_TAKEN, "session taken");
+        } catch {
+          // Previous holder may already be closing.
+        }
+      }
+    } catch {
+      if (session.pendingClaim === socket) {
+        session.pendingClaim = null;
+        session.pendingOutput = [];
+        restoreDeferredHolderResize(session);
+      }
+      socket.data.attaching = false;
+      try {
+        socket.close(1011, "terminal attach failed");
+      } catch {
+        // Already closed.
+      }
+    }
+  };
+
   return {
     async isAvailable() {
       return (await resolveTerminalBackend()).available;
     },
 
+    createSession,
+
     prepareSession(sessionId, options) {
       if (!isValidSessionId(sessionId)) return { kind: "invalid" };
       const existing = sessions.get(sessionId);
-      if (!existing) return { kind: "fresh" };
+      if (!existing) return { kind: "unknown" };
+      if (existing.pendingClaim !== null) return { kind: "collision" };
       if (existing.socket !== null) {
         // Attached elsewhere. An explicit takeover claim moves the session;
         // without it, reject so concurrent PTYs from one tab don't get
@@ -180,7 +347,7 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
       );
       return entries.map(s => ({
         id: s.id,
-        attached: s.socket !== null,
+        attached: s.socket !== null || s.pendingClaim !== null,
         createdAt: s.createdAt,
         cols: s.cols,
         rows: s.rows,
@@ -191,12 +358,14 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
     killSession(sessionId) {
       const session = sessions.get(sessionId);
       if (!session) return false;
+      session.closing = true;
       // An attached holder learns its shell died the normal way: SIGHUP →
       // pty.onExit → exit frame + close(1000) on its socket.
       try {
         session.pty.kill("SIGHUP");
       } catch {
         // Already dead.
+        session.model.dispose();
       }
       // Remove immediately so the inventory reflects the kill on the next
       // request; pty.onExit's own delete is an idempotent no-op. Metrics
@@ -209,213 +378,12 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
     async open(socket) {
       const id = socket.data.sessionId;
       const existing = sessions.get(id);
-      if (existing && existing.socket !== null) {
-        if (socket.data.takeover) {
-          // Explicit takeover claim: detach the current holder with the
-          // "session taken" code so its pane parks (notice + take-back)
-          // instead of dying, then fall through to the reattach path with
-          // the new socket. Swap the reference BEFORE closing so the old
-          // socket's close callback fails the ownership guard in `close()`
-          // and cannot detach the new holder.
-          const previous = existing.socket;
-          existing.socket = null;
-          try {
-            previous.close(CLOSE_CODE_SESSION_TAKEN, "session taken");
-          } catch {
-            // Already closing.
-          }
-        } else {
-          // Lost a race against another upgrade for the same id (the
-          // pre-upgrade gate is best-effort). Refuse the new socket so the
-          // older session keeps its PTY. Using a 4xxx app-defined close code
-          // so the client can distinguish "your session was hijacked" from a
-          // generic disconnect; 1008 (policy violation) is too generic.
-          socket.close(4409, "sessionId in use");
-          return;
-        }
-      }
-
-      if (existing) {
-        // Reattach path: swap in the new socket. The PTY keeps running. The
-        // reattaching client will send its own `{ type: "resize", cols, rows }`
-        // from its WebSocket open handler, so the PTY's pty-side dimensions
-        // get re-synced to whatever the new tab's xterm reports.
-        existing.socket = socket;
-
-        // Replay the recent PTY output to the new client's blank xterm
-        // canvas. TUIs (htop, vim, btop) use absolute cursor positioning,
-        // so even though earlier frames in the buffer are now obsolete,
-        // each subsequent frame overwrites them and the final terminal
-        // state matches what the previous client was showing. Without
-        // this, the new canvas stays blank until the running program
-        // happens to emit new output — and for a SIGWINCH-driven redraw
-        // (see the resize toggle below) that can be over a second on a
-        // typical htop refresh cadence.
-        for (const chunk of existing.replayChunks) {
-          try {
-            socket.send(chunk);
-          } catch {
-            // Socket already closing; nothing useful to do.
-            break;
-          }
-        }
-
-        // Belt-and-suspenders: force a SIGWINCH so any running TUI also
-        // does a fresh redraw at its current dimensions. `ioctl(TIOCSWINSZ)`
-        // only signals when the dimensions actually CHANGE — and on a page
-        // refresh the new panel is typically the same size as before, so
-        // the client's own resize message arrives as a no-op. We
-        // momentarily shrink by one row to force the kernel to signal,
-        // then restore. The replay above handles the common case; the
-        // SIGWINCH covers TUIs that were mid-frame at disconnect.
-        //
-        // Edge case: rows === 1 means we can't shrink further (Math.max
-        // clamps both calls to the same value, so no kernel signal). A
-        // single-row terminal can't usefully run a TUI anyway, and the
-        // replay buffer alone is sufficient for whatever a shell would
-        // be doing at rows=1, so this is acceptable.
-        try {
-          existing.pty.resize(existing.cols, Math.max(1, existing.rows - 1));
-          existing.pty.resize(existing.cols, existing.rows);
-        } catch {
-          // PTY may have just exited; benign.
-        }
-        return;
-      }
-
-      const backend = await resolveTerminalBackend();
-      if (!backend.available) {
-        // Available was checked pre-upgrade; if it's gone now something is
-        // very wrong. Close with policy-violation.
-        socket.close(1008, "terminal backend unavailable");
-        return;
-      }
-
-      const cols = options.initialCols ?? 80;
-      const rows = options.initialRows ?? 24;
-      // Trust `$SHELL` like any interactive terminal emulator, falling back to
-      // `/bin/sh` only when it is unset/empty. We do not reconstruct the login
-      // shell from the user database; instead the fallback is made visible (see
-      // below) so a sandbox that omits SHELL is diagnosable and fixable.
-      const env = options.env ?? process.env;
-      const shell = options.shell ?? (shellIsUnset(env) ? DEFAULT_SHELL : env.SHELL!);
-      const shellFellBack = !options.shell && shellIsUnset(env);
-
-      // Advertise truecolor to TUIs. Without this, nvim/btop/lazygit detect
-      // 256-color (from $TERM) and quantize their gruvbox/dracula/etc. themes
-      // to the nearest palette entry, which looks wrong (washed-out yellow
-      // backgrounds, banding). xterm.js itself accepts 24-bit ANSI escapes;
-      // we just have to tell the consumer it's safe to send them.
-      //
-      // SHELL is deliberately left exactly as inherited — we never synthesize
-      // it. If it is unset, that is the user's environment to own (they may
-      // have a reason); uatu warns about the consequence above but does not
-      // decide a shell on their behalf or hide the gap from child programs.
-      const ptyEnv: Record<string, string> = {
-        ...(process.env as Record<string, string>),
-        COLORTERM: "truecolor",
-        TERM: "xterm-256color",
-      };
-
-      const pty = backend.spawn(shell, [], {
-        cols,
-        rows,
-        cwd: options.cwd,
-        env: ptyEnv,
-      });
-
-      const session: Session = {
-        id,
-        pty,
-        socket,
-        createdAt: Date.now(),
-        shellName: shell.split("/").at(-1) ?? shell,
-        cols,
-        rows,
-        replayChunks: [],
-        replayBytes: 0,
-      };
-      sessions.set(id, session);
-      metrics?.inc("pty.spawned_total");
-      updateActive();
-
-      if (shellFellBack && socket.readyState === WS_OPEN) {
-        // Browser-user-facing: a dim line in the fresh session's scrollback,
-        // sent before the shell's first prompt. Per-open by design — each new
-        // terminal is its own context that hasn't seen the previous notice. The
-        // operator-facing stdout warning is emitted once at startup (cli.ts).
-        try {
-          socket.send(new TextEncoder().encode(SHELL_FALLBACK_NOTICE));
-        } catch {
-          // Socket closing/closed; the close handler detaches the session.
-        }
-      }
-
-      pty.onData(bytes => {
-        // Capture before forwarding so the replay buffer also records output
-        // produced while the socket is detached — a TUI like htop refreshes
-        // every ~1.5s and we want the reattaching client to see the freshest
-        // frame, not a stale pre-disconnect one.
-        // Bun reuses the same backing storage for the PTY callback's
-        // Uint8Array, so we MUST copy before stashing into the replay
-        // ring. socket.send() handles its own copy; the buffer doesn't.
-        const copy = new Uint8Array(bytes);
-        session.replayChunks.push(copy);
-        session.replayBytes += copy.byteLength;
-        while (
-          session.replayBytes > REPLAY_BUFFER_CAP_BYTES
-          && session.replayChunks.length > 1
-        ) {
-          const dropped = session.replayChunks.shift();
-          if (dropped) session.replayBytes -= dropped.byteLength;
-        }
-
-        if (session.socket && session.socket.readyState === WS_OPEN) {
-          try {
-            session.socket.send(bytes);
-          } catch {
-            // Socket is closing/closed; the close handler detaches the session.
-          }
-        }
-      });
-
-      pty.onExit(({ exitCode, signal }) => {
-        if (session.socket && session.socket.readyState === WS_OPEN) {
-          try {
-            session.socket.send(JSON.stringify({ type: "exit", exitCode, signal }));
-          } catch {
-            // Socket may already be closing.
-          }
-          try {
-            session.socket.close(1000, "shell exited");
-          } catch {
-            // No-op: just cleanup below.
-          }
-        }
-        // Runs for attached AND detached sessions alike — a shell exiting
-        // while nobody is connected still frees its session slot, so a later
-        // upgrade with the same sessionId spawns fresh. Identity-guarded:
-        // killSession() and the user-terminate close remove the entry
-        // eagerly, and the id may have been REUSED for a fresh PTY by the
-        // time this exit fires — deleting by id alone would drop that new
-        // session from routing and the inventory.
-        if (sessions.get(id) === session) {
-          sessions.delete(id);
-          updateActive();
-        }
-        metrics?.inc("pty.reaped_total");
-      });
+      if (!existing) socket.close(4404, "unknown session");
     },
 
     message(socket, data) {
       const session = sessions.get(socket.data.sessionId);
       if (!session) return;
-      // Ownership guard: after a takeover the previous holder's close
-      // handshake is asynchronous, and its already-queued input/resize
-      // frames still arrive here. Only the session's current socket may
-      // write to or resize the PTY.
-      if (session.socket !== socket) return;
-
       if (typeof data === "string") {
         // Control frame (resize, ping, ...)
         let parsed: unknown;
@@ -424,21 +392,35 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
         } catch {
           return;
         }
+        if (parsed && typeof parsed === "object" && (parsed as { type?: unknown }).type === "attach-ready") {
+          const cols = Math.floor(Number((parsed as { cols?: unknown }).cols));
+          const rows = Math.floor(Number((parsed as { rows?: unknown }).rows));
+          if (!socket.data.ready && !socket.data.attaching && Number.isFinite(cols) && Number.isFinite(rows)
+            && cols > 0 && rows > 0 && cols <= 1000 && rows <= 1000) {
+            void completeAttach(session, socket, cols, rows);
+          }
+          return;
+        }
+        if (!socket.data.ready || session.socket !== socket) return;
         if (parsed && typeof parsed === "object" && (parsed as { type?: unknown }).type === "resize") {
           const cols = Math.max(1, Math.floor(Number((parsed as { cols?: unknown }).cols)));
           const rows = Math.max(1, Math.floor(Number((parsed as { rows?: unknown }).rows)));
-          if (Number.isFinite(cols) && Number.isFinite(rows)) {
-            session.cols = cols;
-            session.rows = rows;
-            try {
-              session.pty.resize(cols, rows);
-            } catch {
-              // Resize can fail if the PTY just exited; benign.
+          if (Number.isFinite(cols) && Number.isFinite(rows) && cols <= 1000 && rows <= 1000) {
+            if (session.pendingClaim && session.pendingClaim !== socket) {
+              // The current holder remains interactive until takeover commits,
+              // but changing the shared model mid-snapshot would reconstruct
+              // the claimant at the wrong dimensions. Keep only the latest
+              // resize and restore it if the claim aborts.
+              session.deferredHolderResize = { cols, rows };
+            } else {
+              applyResize(session, cols, rows);
             }
           }
         }
         return;
       }
+
+      if (!socket.data.ready || session.socket !== socket) return;
 
       // Binary input from the browser → write straight to the shell.
       const buf = data instanceof Uint8Array ? data : Buffer.from(data);
@@ -452,6 +434,11 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
     close(socket, code) {
       const session = sessions.get(socket.data.sessionId);
       if (!session) return;
+      if (session.pendingClaim === socket) {
+        session.pendingClaim = null;
+        session.pendingOutput = [];
+        restoreDeferredHolderResize(session);
+      }
       // Guard against the hijack-refusal path: `open()` closes a LOSING
       // socket with 4409 while the session's winning socket stays attached.
       // Only the socket that owns the session may detach or terminate it.
@@ -462,12 +449,14 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
         // the session, so kill the PTY and free the sessionId eagerly.
         // Metrics accounting stays with pty.onExit (which fires on the
         // SIGHUP) so reaped_total counts each PTY exactly once.
+        session.closing = true;
         try {
           session.pty.kill("SIGHUP");
         } catch {
           // Already dead.
         }
         sessions.delete(session.id);
+        session.model.dispose();
         updateActive();
         return;
       }
@@ -482,10 +471,13 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
 
     disposeAll() {
       for (const session of sessions.values()) {
+        session.closing = true;
         try {
           session.pty.kill("SIGHUP");
         } catch {
           // Already dead.
+        } finally {
+          session.model.dispose();
         }
       }
       sessions.clear();

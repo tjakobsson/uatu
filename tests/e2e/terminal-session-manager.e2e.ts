@@ -71,11 +71,13 @@ test.describe("terminal session manager", () => {
     await expect(page.locator(".terminal-picker")).toHaveCount(0);
     await waitForPrompt(page);
 
-    // Window 2 collides on the hinted id, recovers a fresh session, stashes
-    // a marker in it, then closes for good — orphaning that session.
+    // Window 2 sees window 1 in inventory and explicitly chooses a new shell,
+    // then closes for good — orphaning that new session.
     const page2 = await context.newPage();
     await page2.goto("/");
     await page2.locator("#terminal-toggle").click();
+    await expect(page2.locator(".terminal-picker")).toBeVisible({ timeout: 5000 });
+    await page2.locator(".terminal-picker-fresh").click();
     await expect(page2.locator(".terminal-pane-host .xterm").first()).toBeVisible({
       timeout: 5000,
     });
@@ -117,6 +119,7 @@ test.describe("terminal session manager", () => {
     await expect(page.locator(".terminal-pane-host")).toHaveCount(2);
     const secondPane = page.locator(".terminal-pane-host").nth(1);
     await expect(secondPane.locator(".xterm")).toBeVisible({ timeout: 5000 });
+    await expect(secondPane).toHaveAttribute("data-terminal-ready", "true", { timeout: 5000 });
     await page.evaluate(() => {
       const hosts = document.querySelectorAll(".terminal-pane-host");
       const helper = hosts[1]?.querySelector(".xterm-helper-textarea") as
@@ -143,15 +146,10 @@ test.describe("terminal session manager", () => {
       timeout: 5000,
     });
 
-    // Window 2: fresh tab, collide → recover fresh shell, then split and
-    // take over window 1's session from the picker.
+    // Window 2 starts at the inventory and explicitly takes over window 1.
     const page2 = await context.newPage();
     await page2.goto("/");
     await page2.locator("#terminal-toggle").click();
-    await expect(page2.locator(".terminal-pane-host .xterm").first()).toBeVisible({
-      timeout: 5000,
-    });
-    await page2.locator("#terminal-split").click();
     await expect(page2.locator(".terminal-picker")).toBeVisible({ timeout: 5000 });
     await expect(page2.locator(".terminal-picker-meta").first()).toContainText(
       "attached elsewhere",
@@ -159,11 +157,11 @@ test.describe("terminal session manager", () => {
     await page2.locator(".terminal-picker-attach").first().click();
 
     // Window 2 now owns the session — the marker variable proves identity.
-    const takenPane = page2.locator(".terminal-pane-host").nth(1);
+    const takenPane = page2.locator(".terminal-pane-host").first();
     await expect(takenPane.locator(".xterm")).toBeVisible({ timeout: 5000 });
     await page2.evaluate(() => {
-      const hosts = document.querySelectorAll(".terminal-pane-host");
-      const helper = hosts[1]?.querySelector(".xterm-helper-textarea") as
+      const host = document.querySelector(".terminal-pane-host");
+      const helper = host?.querySelector(".xterm-helper-textarea") as
         | HTMLTextAreaElement
         | null;
       helper?.focus();
@@ -201,12 +199,13 @@ test.describe("terminal session manager", () => {
     await openTerminal(page);
     await waitForPrompt(page);
 
-    // Orphan a second session (same recipe as above, minimal). Wait for the
-    // recovered shell to render a prompt — closing before the collision
-    // recovery finishes would orphan nothing.
+    // Explicitly create and orphan a second session. Wait for its prompt so
+    // closing the page cannot race resource creation.
     const page2 = await context.newPage();
     await page2.goto("/");
     await page2.locator("#terminal-toggle").click();
+    await expect(page2.locator(".terminal-picker")).toBeVisible({ timeout: 5000 });
+    await page2.locator(".terminal-picker-fresh").click();
     await expect(page2.locator(".terminal-pane-host .xterm").first()).toBeVisible({
       timeout: 5000,
     });

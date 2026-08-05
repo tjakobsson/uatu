@@ -1,11 +1,8 @@
 import { expect, test } from "./fixtures";
 
-// Coverage for fix-second-window-session-collision: two windows of the same
-// browser share localStorage, so the second window's terminal tries to claim
-// the first window's persisted sessionId and is refused pre-upgrade (409).
-// The client must resolve that to a fresh session — NOT the paste-token
-// form — and must not clobber the first window's reattach hints. The
-// paste-token form remains reserved for genuine auth failures.
+// Cross-window resource behavior: pane attachments are per-window, while the
+// personal last-active PTY is only an inventory hint. A new window must
+// explicitly choose New shell or Take over; it never auto-attaches.
 
 async function bootWithTerminalCookie(
   page: import("@playwright/test").Page,
@@ -81,12 +78,15 @@ test.describe("terminal collision: a second window gets its own session", () => 
     await waitForPrompt(page);
     await typeLine(page, "UATU_WIN=one");
 
-    // Second window: same context = shared localStorage + auth cookie. No
-    // reset, no storage clearing — it must adopt window 1's hints, lose the
-    // claim, and recover with a fresh session.
+    // Second window shares credentials and personal state but not pane
+    // attachments. Opening the panel must show inventory rather than attach.
     const page2 = await context.newPage();
     await page2.goto("/");
     await expect(page2.locator("#connection-state .connection-label")).toHaveText("Connected");
+    await page2.locator("#terminal-toggle").click();
+    await expect(page2.locator(".terminal-picker")).toBeVisible({ timeout: 5000 });
+    await expect(page2.locator(".terminal-picker-meta")).toContainText("attached elsewhere");
+    await page2.locator(".terminal-picker-fresh").click();
     await openAndFocusTerminal(page2);
     await waitForPrompt(page2);
 
@@ -111,8 +111,7 @@ test.describe("terminal collision: a second window gets its own session", () => 
       timeout: 5000,
     });
 
-    // Window 1's reattach hints survived window 2's recovery: a reload of
-    // window 1 reattaches to its original shell.
+    // Window 1's per-window attachment survives its own reload.
     await page.evaluate(() => {
       window.sessionStorage.setItem("uatu:terminal-visible", "1");
     });

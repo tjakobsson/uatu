@@ -32,6 +32,7 @@ import {
   type UpgradableServer,
 } from "./proxy";
 import type { WorkspaceRegistry } from "./registry";
+import type { PersonalWorkspaceStateStore } from "./personal-state";
 import type { SessionManager } from "./sessions";
 import type { TerminalSessionInfo } from "../terminal/server";
 import { BUILD, formatBuildIdentifier } from "../shared/version";
@@ -41,6 +42,7 @@ export type HubDeps = {
   registry: WorkspaceRegistry;
   sessions: SessionManager;
   signingKey: string;
+  personalState: PersonalWorkspaceStateStore;
 };
 
 type HubServer = UpgradableServer & {
@@ -61,7 +63,7 @@ function htmlResponse(body: string, status = 200): Response {
 }
 
 export function createHubFetchHandler(deps: HubDeps) {
-  const { config, registry, sessions, signingKey } = deps;
+  const { config, registry, sessions, signingKey, personalState } = deps;
   const limiter = new LoginRateLimiter();
 
   // Whether the browser-facing connection is HTTPS: either the hub
@@ -359,7 +361,47 @@ export function createHubFetchHandler(deps: HubDeps) {
       if (!isSameOriginRequest(request)) {
         return json(403, { error: "cross-origin request rejected" });
       }
-      const workspaceId = decodeURIComponent(sessionMatch[1]!);
+      let workspaceId: string;
+      try {
+        workspaceId = decodeURIComponent(sessionMatch[1]!);
+      } catch {
+        return json(400, { error: "malformed workspace id" });
+      }
+      const suffix = pathname.slice(sessionMatch[0].endsWith("/") ? sessionMatch[0].length - 1 : sessionMatch[0].length);
+      if (suffix === "/api/personal-state") {
+        if (!registry.byId(workspaceId)) {
+          return json(404, { error: `unknown workspace: ${workspaceId}` });
+        }
+        if (request.method === "GET") {
+          return json(200, personalState.get(session.user, workspaceId));
+        }
+        if (request.method !== "PATCH") {
+          return new Response(JSON.stringify({ error: "method not allowed" }), {
+            status: 405,
+            headers: { "content-type": "application/json", allow: "GET, PATCH" },
+          });
+        }
+        let body: unknown;
+        try {
+          body = await request.json();
+        } catch {
+          return json(400, { error: "invalid JSON body" });
+        }
+        try {
+          const state = await sessions.runExclusive(workspaceId, async () => {
+            if (!registry.byId(workspaceId)) throw new Error(`unknown workspace: ${workspaceId}`);
+            return personalState.patch(session.user, workspaceId, body);
+          });
+          return json(200, state);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (message.startsWith("unknown workspace:")) return json(404, { error: message });
+          if (/personal state|documentPath|follow|previewMode|compareTarget|filesFilter|lastPtyId|unknown/.test(message)) {
+            return json(400, { error: message });
+          }
+          return json(500, { error: "failed to persist personal state" });
+        }
+      }
       const running = sessions.get(workspaceId);
       if (!running) {
         return htmlResponse(stoppedSessionPage(workspaceId, registry.byId(workspaceId) !== undefined), 503);
@@ -422,15 +464,16 @@ export function createHubFetchHandler(deps: HubDeps) {
         if (!registry.byId(workspaceId)) {
           return json(404, { error: `unknown workspace: ${workspaceId}` });
         }
-        // Starting counts as active: removing the registry entry while a
-        // backend start is in flight would strand the freshly spawned
-        // child reachable at /s/<id>/ but absent from the dashboard, with
-        // the stop API 404ing on it.
-        if (sessions.isRunning(workspaceId) || sessions.isStarting(workspaceId)) {
-          return json(409, { error: `stop the session for '${workspaceId}' before forgetting it` });
+        try {
+          await sessions.runWhileStopped(workspaceId, () =>
+            personalState.forgetWorkspace(workspaceId, () => registry.remove(workspaceId))
+          );
+          return json(200, { id: workspaceId, forgotten: true });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (message.includes("before forgetting")) return json(409, { error: message });
+          return json(500, { error: "failed to forget workspace" });
         }
-        await registry.remove(workspaceId);
-        return json(200, { id: workspaceId, forgotten: true });
       }
       return json(404, { error: "not found" });
     }

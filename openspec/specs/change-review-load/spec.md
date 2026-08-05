@@ -29,32 +29,35 @@ The system SHALL determine whether each watched root belongs to a git repository
 
 ### Requirement: Select the review compare target
 
-The system SHALL expose a user-selectable compare target for the Change Overview that determines what each repository's review burden is measured against. The supported targets MUST be `base` (the resolved review base, i.e. the merge-base of the resolved base ref and `HEAD`, including committed, staged, and unstaged changes) and `last-commit` (staged and unstaged worktree changes against `HEAD`). The selected target SHALL be a single session-global value that applies uniformly to the review-burden snapshot for every watched repository in the session. The default target on a fresh session MUST be `base`. The selected target SHALL persist across reloads within the same browser session. Changing the target MUST recompute and refresh the review burden without requiring a watch-session restart, and MUST NOT alter `.uatu.json` configuration or the resolved base ref itself.
+The system SHALL expose a user-selectable compare target for the Change Overview. Supported targets MUST be `base` and `last-commit` with their existing diff meanings. The selected target SHALL apply uniformly to every watched repository in that client's view, SHALL persist as personal workspace state, and SHALL default to `base` when no saved value exists. Changing it MUST recompute and refresh only that client's review burden and diff requests without restarting the watch session, changing `.uatu.json`, altering the resolved base ref, or forcing another client to adopt the target. The watch child SHALL accept compare target as request/subscription context rather than retaining one mutable session-global selection.
 
 #### Scenario: Default compare target is the review base
-- **WHEN** a user opens the Change Overview in a fresh session
-- **THEN** the compare target is `base`
+- **WHEN** a user has no saved compare target
+- **THEN** the client uses `base`
 - **AND** the review burden reflects changes between the resolved review base and the worktree
 
-#### Scenario: Switching to last commit recomputes burden against HEAD
-- **WHEN** a user selects the `last-commit` compare target
-- **THEN** the review burden recomputes from staged and unstaged changes against `HEAD`
-- **AND** the changed-files list reflects only those worktree changes
+#### Scenario: Switching to last commit recomputes against HEAD
+- **WHEN** a user selects `last-commit`
+- **THEN** that client's burden and changed-files view recompute against `HEAD`
 - **AND** no watch-session restart is required
 
-#### Scenario: Selection persists across reload
-- **WHEN** a user selects the `last-commit` compare target and reloads the page within the same session
-- **THEN** the compare target remains `last-commit`
+#### Scenario: Selection follows the user to another client
+- **WHEN** a user saves `last-commit` and later opens the workspace root in another browser
+- **THEN** the new client uses `last-commit`
 
-#### Scenario: Compare target is session-global across repositories
-- **WHEN** a watch session includes more than one repository
-- **AND** the user changes the compare target
-- **THEN** every repository's review-burden snapshot is computed against the same selected target
+#### Scenario: Open clients may use different targets
+- **WHEN** two clients view the same workspace with different compare targets
+- **THEN** each receives repository snapshots and diffs for its own target
+- **AND** neither toggle changes because of the other's selection
+
+#### Scenario: Compare target is uniform across repositories within one client
+- **WHEN** a workspace includes multiple repositories
+- **THEN** one client's selected target applies to all repositories in that client's view
 
 #### Scenario: Targets collapse when no base is resolvable
-- **WHEN** the resolved review base is dirty-worktree-only because no base ref is available
-- **THEN** the `base` and `last-commit` targets describe the same diff (staged and unstaged changes against `HEAD`)
-- **AND** the UI reflects that the choice is not meaningful in this state rather than implying two distinct results
+- **WHEN** the resolved review base is dirty-worktree-only
+- **THEN** `base` and `last-commit` describe the same diff
+- **AND** the UI reflects that the choice is not meaningful
 
 ### Requirement: Report the resolved compare target as a precise portable anchor
 

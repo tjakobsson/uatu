@@ -74,6 +74,10 @@ test.describe("terminal lifecycle: SPA-level navigation survives", () => {
     await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({
       timeout: 5000,
     });
+    await expect.poll(async () => {
+      const rows = await page.locator(".terminal-pane-host .xterm-rows > div").allTextContents();
+      return rows.some(text => text.trim().length > 0);
+    }, { timeout: 5000 }).toBe(true);
     const xtermHandle = await page
       .locator(".terminal-pane-host .xterm")
       .first()
@@ -182,6 +186,10 @@ test.describe("terminal lifecycle: SPA-level navigation survives", () => {
     await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({
       timeout: 5000,
     });
+    await expect.poll(async () => {
+      const rows = await page.locator(".terminal-pane-host .xterm-rows > div").allTextContents();
+      return rows.some(text => text.trim().length > 0);
+    }, { timeout: 5000 }).toBe(true);
     await page.evaluate(() => {
       const host = document.querySelector(".terminal-pane-host") as HTMLElement | null;
       const xtermHelper = host?.querySelector(".xterm-helper-textarea") as

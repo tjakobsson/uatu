@@ -5,6 +5,7 @@
 // view pipeline (single, split, diff) in one place.
 
 import { appUrl } from "../shared/app-url";
+import { contextualAppUrl } from "../shell/watch-context";
 import { findDocumentById } from "../shell/storage";
 import { prepareDiffRender, renderDocumentDiff, type DocumentDiffPayload } from "./diff-view";
 import { createLoadingSignal, type LoadingSignal } from "./loading-signal";
@@ -100,7 +101,7 @@ export async function applyDiffForActiveDocument(documentId: string): Promise<vo
 
 export async function fetchDocumentDiff(documentId: string): Promise<DocumentDiffPayload | null> {
   try {
-    const response = await fetch(appUrl(`/api/document/diff?id=${encodeURIComponent(documentId)}`));
+    const response = await fetch(contextualAppUrl(appUrl(`/api/document/diff?id=${encodeURIComponent(documentId)}`)));
     if (!response.ok) {
       return null;
     }

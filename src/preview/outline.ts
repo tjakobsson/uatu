@@ -16,6 +16,8 @@
 // once at boot.
 
 import { appUrl } from "../shared/app-url";
+import { contextualAppUrl } from "../shell/watch-context";
+import { presentationLocalStorage } from "../shell/presentation-storage";
 import type { ViewMode } from "../shared/types";
 import { copyToClipboard } from "./code-block";
 import { copySourceButton, outlineToggleButton } from "./header";
@@ -31,7 +33,7 @@ const EDGE_MARGIN = 16; // px kept between the panel and the preview-area edges
 
 function readWidthPreference(): number | null {
   try {
-    const raw = window.localStorage.getItem(WIDTH_KEY);
+    const raw = presentationLocalStorage()?.getItem(WIDTH_KEY) ?? null;
     const value = raw === null ? NaN : Number.parseFloat(raw);
     return Number.isFinite(value) ? value : null;
   } catch {
@@ -41,7 +43,7 @@ function readWidthPreference(): number | null {
 
 function writeWidthPreference(width: number): void {
   try {
-    window.localStorage.setItem(WIDTH_KEY, String(Math.round(width)));
+    presentationLocalStorage()?.setItem(WIDTH_KEY, String(Math.round(width)));
   } catch {
     // best-effort persistence; localStorage may be disabled
   }
@@ -518,7 +520,7 @@ async function handleCopySource(): Promise<void> {
     // the raw text escaped inside a `<pre>`; reading it back as textContent
     // recovers the source verbatim.
     const response = await fetch(
-      appUrl(`/api/document?id=${encodeURIComponent(currentDocId)}&view=source`),
+      contextualAppUrl(appUrl(`/api/document?id=${encodeURIComponent(currentDocId)}&view=source`)),
     );
     if (!response.ok) {
       throw new Error(`status ${response.status}`);

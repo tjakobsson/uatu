@@ -98,6 +98,7 @@ test("⌘G steps matches without focus in the query box", async ({ page }) => {
   await openFind(page);
   await page.locator("#find-query").fill("alpha");
   await expect(page.locator("#find-status")).toHaveText("1 of 4");
+  await page.locator("#preview").click({ position: { x: 20, y: 20 } });
 
   await page.keyboard.press(STEP);
   await expect(page.locator("#find-status")).toHaveText("2 of 4");

@@ -6,6 +6,7 @@
 // repository-sized sweep fills the pane instead of hanging it.
 
 import { appUrl } from "../shared/app-url";
+import { contextualAppUrl } from "../shell/watch-context";
 import { appState } from "../shell/state";
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
 import type { SearchEvent, SearchFileResult } from "../server/search";
@@ -111,7 +112,7 @@ function buildUrl(query: string): string {
   if (toggles.wholeWord) params.set("word", "1");
   if (toggles.regex) params.set("regex", "1");
   if (searchAllRoots) params.set("allRoots", "1");
-  return appUrl(`/api/search?${params.toString()}`);
+  return contextualAppUrl(appUrl(`/api/search?${params.toString()}`));
 }
 
 async function runSearch(): Promise<void> {

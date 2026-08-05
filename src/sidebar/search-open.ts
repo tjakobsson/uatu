@@ -9,11 +9,12 @@
 // only when the match cannot be found there. Source is where the match always
 // exists, because that is what was searched.
 
-import { appUrl } from "../shared/app-url";
 import { applyUserRowClick } from "../shell/follow";
 import { applyViewMode } from "../preview/view-mode";
 import { appState } from "../shell/state";
 import { revealExternalMatch } from "../find/reveal";
+import { refreshServerStateForContext } from "../shell/events";
+import { setClientScope } from "../shell/watch-context";
 
 export type SearchResultTarget = {
   documentId: string;
@@ -101,37 +102,15 @@ function isDocumentInScope(documentId: string): boolean {
   return appState.roots.some(root => root.docs.some(doc => doc.id === documentId));
 }
 
-// Drop the session back to folder scope. Server-session state shared across
-// clients, so this is deliberate and visible rather than a silent per-request
-// override — the sidebar and the preview stay describing the same corpus.
+// Drop only this client back to folder scope, then replace its contextual
+// state/SSE stream before navigating to the widened result.
 async function widenSessionScope(): Promise<void> {
   try {
-    await fetch(appUrl("/api/scope"), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ scope: { kind: "folder" } }),
-    });
-    // The SSE snapshot that follows repopulates `appState.roots`; wait for it
-    // rather than racing the broadcast with the navigation below.
-    await waitForFolderScope();
+    setClientScope({ kind: "folder" });
+    await refreshServerStateForContext();
   } catch {
     // Offline or refused — the navigation below will surface the failure.
   }
-}
-
-// Poll briefly for the widened scope to arrive over SSE.
-function waitForFolderScope(timeoutMs = 2000): Promise<void> {
-  const startedAt = performance.now();
-  return new Promise(resolve => {
-    const tick = (): void => {
-      if (appState.scope.kind === "folder" || performance.now() - startedAt > timeoutMs) {
-        resolve();
-        return;
-      }
-      window.setTimeout(tick, 50);
-    };
-    tick();
-  });
 }
 
 // Resolve once the preview's children have been replaced, or after a short

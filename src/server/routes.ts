@@ -23,10 +23,11 @@ import {
 import type { createTerminalServer } from "../terminal/server";
 import { handleTerminalSessionsRoute } from "../terminal/sessions-route";
 import { joinBasePath, stripBasePath } from "../shared/base-path";
-import { findDocument, isReviewCompareTarget, isViewMode } from "../shared/types";
+import { findDocument, isViewMode } from "../shared/types";
+import { parseWatchContext, type WatchContext } from "../shared/watch-context";
 import { renderDocument } from "./render-dispatch";
 import { buildSearchPattern, searchDocuments } from "./search";
-import { canSetFileScope, type WatchSession } from "./watch-session";
+import type { WatchSession } from "./watch-session";
 
 // Bun.serve's idleTimeout. 0 = disabled: SSE connections and long-lived
 // terminal WebSockets must never be reaped by an idle timer.
@@ -86,6 +87,9 @@ export type E2ERouteDeps = BaseDeps & {
   // (active file path, workspace root, follow mode, etc.) and re-creates
   // the watch session, so it stays a callback owned by the caller.
   handleE2EReset: (request: Request) => Promise<Response>;
+  // The production endpoint is Hub-owned. The direct-child Playwright
+  // harness supplies an in-memory equivalent so resume behavior is testable.
+  handleE2EPersonalState: (request: Request) => Promise<Response>;
 };
 
 export type BuildRoutesDeps = ProdRouteDeps | E2ERouteDeps;
@@ -100,6 +104,14 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
   // move the whole HTTP surface under the base path. (The HTMLBundle route
   // stays a literal at each Bun.serve call site — see RouteAssets.)
   const p = (path: string) => joinBasePath(basePath, path);
+
+  const requestContext = (request: Request): WatchContext | Response => {
+    const parsed = parseWatchContext(new URL(request.url).searchParams);
+    if ("error" in parsed) {
+      return Response.json({ error: parsed.error }, { status: 400 });
+    }
+    return parsed.context;
+  };
 
   const modeRoutes =
     deps.mode === "prod"
@@ -206,11 +218,18 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
       },
     }),
     [p("/api/state")]: {
-      GET: () => Response.json(getSession().getStatePayload()),
+      GET: (request: Request) => {
+        const context = requestContext(request);
+        return context instanceof Response
+          ? context
+          : Response.json(getSession().getStatePayload(null, context));
+      },
     },
     [p("/api/document")]: {
       GET: async (request: Request) => {
         const url = new URL(request.url);
+        const context = requestContext(request);
+        if (context instanceof Response) return context;
         const documentId = url.searchParams.get("id");
         if (!documentId) {
           return Response.json({ error: "missing document id" }, { status: 400 });
@@ -220,7 +239,7 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
         const view = rawView && isViewMode(rawView) ? rawView : undefined;
 
         try {
-          const document = await renderDocument(getSession().getRoots(), documentId, { view });
+          const document = await renderDocument(getSession().getRoots(context), documentId, { view });
           return Response.json(document);
         } catch (error) {
           const message = error instanceof Error ? error.message : "";
@@ -234,17 +253,19 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
     [p("/api/document/diff")]: {
       GET: async (request: Request) => {
         const url = new URL(request.url);
+        const context = requestContext(request);
+        if (context instanceof Response) return context;
         const documentId = url.searchParams.get("id");
         if (!documentId) {
           return Response.json({ error: "missing document id" }, { status: 400 });
         }
 
         try {
-          const roots = getSession().getRoots();
+          const roots = getSession().getRoots(context);
           const payload = await getDocumentDiff(
             roots,
             documentId,
-            getSession().getCompareTarget(),
+            context.compareTarget,
           );
           // Attach file facts so a diff-first load (the /api/document payload
           // was never fetched) can still populate the facts strip's
@@ -265,7 +286,10 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
       },
     },
     [p("/api/events")]: {
-      GET: () => getSession().eventsResponse(),
+      GET: (request: Request) => {
+        const context = requestContext(request);
+        return context instanceof Response ? context : getSession().eventsResponse(context);
+      },
     },
     [p("/api/search")]: {
       // Content search across the watched roots. Streams NDJSON — one JSON
@@ -278,6 +302,8 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
       // without being reimplemented here.
       GET: (request: Request) => {
         const url = new URL(request.url);
+        const context = requestContext(request);
+        if (context instanceof Response) return context;
         const query = url.searchParams.get("q") ?? "";
         const options = {
           caseSensitive: url.searchParams.get("case") === "1",
@@ -298,7 +324,7 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
         const roots =
           url.searchParams.get("allRoots") === "1"
             ? getSession().getUnscopedRoots()
-            : getSession().getRoots();
+            : getSession().getRoots(context);
 
         // A superseded query aborts its fetch, but that alone only stops the
         // browser-side consumer — a no-match sweep yields nothing until its
@@ -349,59 +375,6 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
         });
       },
     },
-    [p("/api/compare-target")]: {
-      // Server-session view state shared across clients (mirrors /api/scope).
-      // Setting it recomputes review snapshots and rebroadcasts over SSE; the
-      // client receives the updated burden + anchor through the event stream.
-      POST: async (request: Request) => {
-        let body: unknown;
-        try {
-          body = await request.json();
-        } catch {
-          return Response.json({ error: "invalid JSON body" }, { status: 400 });
-        }
-
-        const target = (body as { target?: unknown } | null)?.target;
-        if (!isReviewCompareTarget(target)) {
-          return Response.json({ error: "invalid compare target" }, { status: 400 });
-        }
-
-        return Response.json({ compareTarget: getSession().setCompareTarget(target) });
-      },
-    },
-    [p("/api/scope")]: {
-      POST: async (request: Request) => {
-        let body: unknown;
-        try {
-          body = await request.json();
-        } catch {
-          return Response.json({ error: "invalid JSON body" }, { status: 400 });
-        }
-
-        const scope = (body as { scope?: unknown } | null)?.scope;
-        if (!scope || typeof scope !== "object") {
-          return Response.json({ error: "missing scope" }, { status: 400 });
-        }
-
-        const kind = (scope as { kind?: unknown }).kind;
-        if (kind === "folder") {
-          return Response.json({ scope: getSession().setScope({ kind: "folder" }) });
-        }
-
-        if (kind === "file") {
-          const documentId = (scope as { documentId?: unknown }).documentId;
-          if (typeof documentId !== "string" || documentId.length === 0) {
-            return Response.json({ error: "missing documentId" }, { status: 400 });
-          }
-          if (!canSetFileScope(getSession().getRoots(), documentId)) {
-            return Response.json({ error: "document not found" }, { status: 404 });
-          }
-          return Response.json({ scope: getSession().setScope({ kind: "file", documentId }) });
-        }
-
-        return Response.json({ error: "unsupported scope kind" }, { status: 400 });
-      },
-    },
     ...modeRoutes,
   };
 }
@@ -421,7 +394,7 @@ function buildProdRoutes(deps: ProdRouteDeps, p: (path: string) => string) {
 }
 
 function buildE2ERoutes(deps: E2ERouteDeps, p: (path: string) => string) {
-  const { getSession, handleE2EReset } = deps;
+  const { getSession, handleE2EReset, handleE2EPersonalState } = deps;
   return {
     [p("/__e2e/terminal-token")]: {
       // Tests don't see the URL token (the e2e server doesn't print it to
@@ -438,6 +411,10 @@ function buildE2ERoutes(deps: E2ERouteDeps, p: (path: string) => string) {
     },
     [p("/__e2e/reset")]: {
       POST: (request: Request) => handleE2EReset(request),
+    },
+    [p("/api/personal-state")]: {
+      GET: (request: Request) => handleE2EPersonalState(request),
+      PATCH: (request: Request) => handleE2EPersonalState(request),
     },
   };
 }
@@ -496,6 +473,9 @@ export function buildFetchFallback(deps: FetchFallbackDeps) {
     const result = terminalServer.prepareSession(sessionId, { takeover });
     if (result.kind === "invalid") {
       return new Response("invalid or missing sessionId", { status: 400 });
+    }
+    if (result.kind === "unknown") {
+      return new Response("unknown sessionId", { status: 404 });
     }
     if (result.kind === "collision") {
       return new Response("sessionId in use", { status: 409 });

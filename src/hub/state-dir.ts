@@ -21,6 +21,10 @@ export function registryPath(stateRoot: string): string {
   return path.join(stateRoot, "registry.json");
 }
 
+export function personalWorkspaceStatePath(stateRoot: string): string {
+  return path.join(stateRoot, "personal-workspace-state.json");
+}
+
 export function signingKeyPath(stateRoot: string): string {
   return path.join(stateRoot, "hub.key");
 }

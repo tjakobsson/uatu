@@ -2,6 +2,8 @@
 // that appears above markdown / asciidoc bodies. Extracted from `app.ts` so
 // rendering of the card and its open/closed preference live together.
 
+import { presentationLocalStorage } from "../shell/presentation-storage";
+
 type RenderedDocumentAuthor = { name: string; email?: string };
 
 type RenderedDocumentMetadata = {
@@ -22,7 +24,7 @@ export const METADATA_CARD_OPEN_KEY = "uatu:metadata-card-open";
 
 export function readMetadataCardOpenPreference(): boolean {
   try {
-    return window.localStorage.getItem(METADATA_CARD_OPEN_KEY) === "1";
+    return presentationLocalStorage()?.getItem(METADATA_CARD_OPEN_KEY) === "1";
   } catch {
     return false;
   }
@@ -30,7 +32,7 @@ export function readMetadataCardOpenPreference(): boolean {
 
 export function writeMetadataCardOpenPreference(open: boolean): void {
   try {
-    window.localStorage.setItem(METADATA_CARD_OPEN_KEY, open ? "1" : "0");
+    presentationLocalStorage()?.setItem(METADATA_CARD_OPEN_KEY, open ? "1" : "0");
   } catch {
     // best-effort persistence; localStorage may be disabled
   }

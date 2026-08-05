@@ -4,6 +4,7 @@
 // owns the entire render-on-load flow.
 
 import { appUrl } from "../shared/app-url";
+import { contextualAppUrl } from "../shell/watch-context";
 import { recomputeSelectionInspector } from "../shell/inspector-instance";
 import type { DocumentDiffPayload } from "./diff-view";
 import { findDocumentById } from "../shell/storage";
@@ -244,7 +245,7 @@ export async function fetchDocumentView(
 ): Promise<RenderedDocument | null> {
   try {
     const response = await fetch(
-      appUrl(`/api/document?id=${encodeURIComponent(documentId)}&view=${encodeURIComponent(view)}`),
+      contextualAppUrl(appUrl(`/api/document?id=${encodeURIComponent(documentId)}&view=${encodeURIComponent(view)}`)),
     );
     if (!response.ok) return null;
     return (await response.json()) as RenderedDocument;
@@ -373,7 +374,7 @@ export async function loadDocument(documentId: string) {
   // assertion narrows the param so the response stays well-typed.
   const apiView: "rendered" | "source" = appState.viewMode === "source" ? "source" : "rendered";
   const response = await fetch(
-    appUrl(`/api/document?id=${encodeURIComponent(documentId)}&view=${encodeURIComponent(apiView)}`),
+    contextualAppUrl(appUrl(`/api/document?id=${encodeURIComponent(documentId)}&view=${encodeURIComponent(apiView)}`)),
   );
 
   if (!response.ok) {

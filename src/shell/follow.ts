@@ -17,6 +17,7 @@ import { renderSidebar } from "../sidebar/shell";
 import { pushSelection } from "./history";
 import { appState } from "./state";
 import { setPreviewMode, setSelectedId } from "./selection";
+import { persistPersonalWorkspaceState } from "./personal-state";
 
 export { chooseSelectionForFileEvent };
 
@@ -39,6 +40,7 @@ export function initFollowToggle(): void {
 // instead of assigning directly (module-structure appState field ownership).
 export function setFollowEnabled(next: boolean): void {
   appState.followEnabled = next;
+  persistPersonalWorkspaceState({ follow: next });
 }
 
 // Rule B: user clicks the Follow chip. Flip `followEnabled`. When flipping
