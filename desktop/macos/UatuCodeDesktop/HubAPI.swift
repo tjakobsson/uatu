@@ -204,6 +204,11 @@ enum HubCookies {
             .value: value,
             .domain: host,
             .path: "/",
+            // Preserve the server cookie's HttpOnly: the injected copy must
+            // not be script-readable via document.cookie, or an XSS on any
+            // hub/session page could exfiltrate the bearer token. Foundation
+            // has no public constant for this key, but HTTPCookie honors it.
+            HTTPCookiePropertyKey("HttpOnly"): "TRUE",
         ]
         if hubURL.scheme?.lowercased() == "https" {
             properties[.secure] = "TRUE"
