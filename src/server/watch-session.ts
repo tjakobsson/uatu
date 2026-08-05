@@ -438,9 +438,10 @@ export function createWatchSession(
 
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
-          currentSubscriber = { controller, context };
+          const normalizedContext = normalizeContext(context);
+          currentSubscriber = { controller, context: normalizedContext };
           subscribers.add(currentSubscriber);
-          controller.enqueue(encoder.encode(`event: state\ndata: ${JSON.stringify(payloadFor(context))}\n\n`));
+          controller.enqueue(encoder.encode(`event: state\ndata: ${JSON.stringify(payloadFor(normalizedContext))}\n\n`));
         },
         cancel() {
           if (currentSubscriber) {
@@ -463,6 +464,10 @@ export function createWatchSession(
   function broadcast(changedId: string | null) {
     for (const subscriber of subscribers) {
       try {
+        // Once an invalid pin widens, folder scope becomes this subscriber's
+        // current context. Retaining the stale file id would re-pin the client
+        // if that path were recreated later in the same connection.
+        subscriber.context = normalizeContext(subscriber.context);
         const message = encoder.encode(`event: state\ndata: ${JSON.stringify(payloadFor(subscriber.context, changedId))}\n\n`);
         subscriber.controller.enqueue(message);
       } catch {

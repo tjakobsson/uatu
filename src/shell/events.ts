@@ -29,6 +29,11 @@ import { contextualAppUrl, setClientScope } from "./watch-context";
 
 let activeEvents: EventSource | null = null;
 
+function scopesEqual(left: StatePayload["scope"], right: StatePayload["scope"]): boolean {
+  return left.kind === right.kind
+    && (left.kind === "folder" || (right.kind === "file" && left.documentId === right.documentId));
+}
+
 // Owner mutator for the server-snapshot triple (`roots`, `repositories`,
 // `scope`). The SSE reducer below is the ongoing writer; the boot path
 // (`shell/boot.ts`) applies its initial /api/state payload through this too.
@@ -64,9 +69,16 @@ export function connectEvents() {
   events.addEventListener("state", async event => {
     const payload = JSON.parse((event as MessageEvent<string>).data) as StatePayload;
     const previousSelectedId = appState.selectedId;
+    const previousScope = appState.scope;
     const shouldReload = shouldRefreshPreview(previousSelectedId, payload.changedId);
 
     applyServerSnapshot(payload);
+    if (!scopesEqual(previousScope, payload.scope)) {
+      // EventSource automatically reconnects its original URL. Replace it
+      // after server-side normalization so a later reconnect cannot revive a
+      // deleted file pin that this client has already widened away from.
+      connectEvents();
+    }
     applyMonoConfig(payload.monoConfig);
     syncStateGeneration(payload.generatedAt);
 

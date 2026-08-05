@@ -207,7 +207,7 @@ describe("watchSession scope", () => {
     expect(canSetFileScope(roots, binary)).toBe(false);
   });
 
-  test("a request context whose pinned file is unlinked projects folder scope", async () => {
+  test("an SSE pin stays widened after its file is unlinked and recreated", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-pin-unlink-"));
     tempDirectories.push(tempDirectory);
     const readme = path.join(tempDirectory, "README.md");
@@ -226,13 +226,21 @@ describe("watchSession scope", () => {
       await waitUntil(() => session.getRoots().some(root => root.docs.length >= 2));
 
       const pinned = { scope: { kind: "file" as const, documentId: readme }, compareTarget: "base" as const };
-      expect(session.getRoots(pinned).flatMap(root => root.docs).map(doc => doc.id)).toEqual([readme]);
+      const reader = session.eventsResponse(pinned).body!.getReader();
+      expect((await readSsePayload(reader)).scope).toEqual(pinned.scope);
 
       await unlink(readme);
       await waitUntil(() => session.getUnscopedRoots().flatMap(root => root.docs).every(doc => doc.id !== readme));
-      const payload = session.getStatePayload(null, pinned);
-      expect(payload.scope).toEqual({ kind: "folder" });
-      expect(payload.roots.flatMap(root => root.docs).some(doc => doc.id === guide)).toBe(true);
+      const widened = await readSsePayload(reader);
+      expect(widened.scope).toEqual({ kind: "folder" });
+      expect(widened.roots.flatMap(root => root.docs).some(doc => doc.id === guide)).toBe(true);
+
+      await writeFile(readme, "# Readme recreated\n");
+      await waitUntil(() => session.getUnscopedRoots().flatMap(root => root.docs).some(doc => doc.id === readme));
+      const recreated = await readSsePayload(reader);
+      expect(recreated.scope).toEqual({ kind: "folder" });
+      expect(recreated.roots.flatMap(root => root.docs).map(doc => doc.id).sort()).toEqual([guide, readme].sort());
+      await reader.cancel();
     } finally {
       await session.stop();
     }
