@@ -1,9 +1,17 @@
-# desktop-macos-shell Specification
+# desktop-macos-shell — delta for unify-desktop-on-hub
 
-## Purpose
+## REMOVED Requirements
 
-Define the UatuCode Desktop macOS wrapper app: a native shell that supervises a single bundled local uatu hub, presents a launcher splash with hub cards and a folder picker, reflects hub and session lifecycle states in each window's UI, and exposes window and navigation commands through the menu bar.
-## Requirements
+### Requirement: App supervises a bundled uatu server per window
+**Reason**: Windows no longer own server processes; the app supervises one local hub and windows are hub clients.
+**Migration**: Replaced by "App supervises a single local hub" below, which carries over the bundled-binary, stdout-URL, login-shell-environment, and termination/backstop contracts at the hub level.
+
+### Requirement: Launcher offers folder selection and recent folders
+**Reason**: The launcher becomes the hub splash; the recents list is superseded by the local hub's registered workspaces.
+**Migration**: Replaced by "Launcher presents the hub splash" below. Existing recents are imported into the local hub registry once (best-effort, missing paths skipped).
+
+## ADDED Requirements
+
 ### Requirement: App supervises a single local hub
 UatuCode Desktop SHALL bundle a `uatu` binary inside the app bundle and, at app launch, SHALL launch it directly as a child process (no intermediate shell) with the arguments `hub --local --port 0 --exit-on-stdin-close`. The app SHALL own exactly one hub process regardless of how many windows are open. The app MUST read the child's standard output and treat the first line matching `http://…` as the local hub's base URL. The app MUST terminate the hub process when the app quits (after the quit confirmation, when applicable), and the hub's stdin-close backstop covers the crash path. If the hub process exits unexpectedly, the app SHALL surface a native failure state (with the tail of the hub's output and a relaunch action) in affected windows rather than dead web views, and relaunching SHALL restore the splash.
 
@@ -52,6 +60,28 @@ When a window has no open page, the app SHALL show a splash with the app identit
 - **WHEN** the user first launches a version with the hub splash, having recents from an earlier version
 - **THEN** each still-existing recent folder appears as a registered local workspace
 - **AND** recents whose folders no longer exist are skipped silently
+
+### Requirement: Web page JavaScript dialogs present natively
+JavaScript `alert()` and `confirm()` raised by pages in the embedded WebView SHALL present as native panels and return the user's choice to the page. WKWebView shows no JS dialogs without app-provided implementations — it silently answers false — which would turn the hub dashboard's confirmation-gated actions (stop, initialize-and-serve) into dead controls.
+
+#### Scenario: Dashboard confirmations work in the desktop
+- **WHEN** a hub page calls `confirm()` (e.g. the dashboard's stop confirmation)
+- **THEN** a native dialog appears in the window
+- **AND** confirming returns true to the page so the action proceeds
+
+### Requirement: Quitting warns when local sessions have live terminal shells
+The app SHALL intercept quit. When no local session is running, or none has live terminal shells, quit SHALL proceed silently. Otherwise the app SHALL present a confirmation listing each affected local workspace with its shell count, stating that sessions on this Mac will stop and that remote sessions are unaffected. Cancel SHALL abort termination entirely; confirming SHALL terminate the hub (which stops its sessions) and quit. The shell information SHALL come from the local hub's state API.
+
+#### Scenario: Quiet quit with nothing to lose
+- **WHEN** the user quits while local sessions run but no terminal shells are open in any of them
+- **THEN** the app quits without a confirmation dialog
+
+#### Scenario: Live shells prompt a confirmation
+- **WHEN** the user quits while a local session has two terminal shells
+- **THEN** a dialog names the workspace and its shell count and notes that remote sessions are unaffected
+- **AND** cancel leaves everything running while confirm stops the hub and quits
+
+## MODIFIED Requirements
 
 ### Requirement: Opening a non-git folder offers repository initialization
 Folder registration SHALL go through the hub's initialization handshake: the app submits the picked folder to the local hub, and when the hub answers that the folder needs initialization (its probe definitively found no repository), the app SHALL present a confirmation dialog offering to initialize a new git repository there. On confirmation the app SHALL resubmit with initialization requested, and the hub runs `git init`, registers, and serves the folder. On decline the app MUST NOT register or serve the folder: a window with no open page SHALL show the splash, while a window with a running session SHALL keep it untouched. If initialization fails hub-side, the app SHALL surface the git error output in the window's failure state. When the hub's probe cannot determine repository state, the hub starts the session and the CLI's own git preflight reports; the app SHALL NOT run its own git probe or `git init`. The app MUST NOT cause `--force` to be passed to the server.
@@ -162,161 +192,3 @@ The app SHALL provide a native "New Tab" command (Command-T) that opens a splash
 #### Scenario: Commands disabled without an open page
 - **WHEN** the focused window shows the splash
 - **THEN** "Reload Page", "Open in Browser", and "Toggle Split Browser" are disabled
-
-### Requirement: Web page JavaScript dialogs present natively
-JavaScript `alert()` and `confirm()` raised by pages in the embedded WebView SHALL present as native panels and return the user's choice to the page. WKWebView shows no JS dialogs without app-provided implementations — it silently answers false — which would turn the hub dashboard's confirmation-gated actions (stop, initialize-and-serve) into dead controls.
-
-#### Scenario: Dashboard confirmations work in the desktop
-- **WHEN** a hub page calls `confirm()` (e.g. the dashboard's stop confirmation)
-- **THEN** a native dialog appears in the window
-- **AND** confirming returns true to the page so the action proceeds
-
-### Requirement: Quitting warns when local sessions have live terminal shells
-The app SHALL intercept quit. When no local session is running, or none has live terminal shells, quit SHALL proceed silently. Otherwise the app SHALL present a confirmation listing each affected local workspace with its shell count, stating that sessions on this Mac will stop and that remote sessions are unaffected. Cancel SHALL abort termination entirely; confirming SHALL terminate the hub (which stops its sessions) and quit. The shell information SHALL come from the local hub's state API.
-
-#### Scenario: Quiet quit with nothing to lose
-- **WHEN** the user quits while local sessions run but no terminal shells are open in any of them
-- **THEN** the app quits without a confirmation dialog
-
-#### Scenario: Live shells prompt a confirmation
-- **WHEN** the user quits while a local session has two terminal shells
-- **THEN** a dialog names the workspace and its shell count and notes that remote sessions are unaffected
-- **AND** cancel leaves everything running while confirm stops the hub and quits
-
-### Requirement: External links open outside the embedded WebView
-The app SHALL route link activations that target a new browsing context (`target="_blank"` anchors, `window.open()` calls, terminal OSC 8 hyperlink activation) out of the embedded WebView. By default, `http(s)` URLs open in the window's split browser pane (per the `desktop-split-browser` capability); when the "Open external links in system browser" setting is enabled, or the user `⌘`-clicks, they open in the user's default browser instead. Other schemes are always handed to their registered system handler. The WebView MUST NOT silently drop such activations.
-
-#### Scenario: External link in a rendered document
-
-- **WHEN** the user clicks an external `https://` link in a rendered
-  Markdown document with default settings
-- **THEN** the URL opens in the window's split browser pane and the uatu
-  pane keeps its current document
-
-#### Scenario: Opt-out restores system-browser behavior
-
-- **WHEN** "Open external links in system browser" is enabled and the user
-  clicks an external `https://` link
-- **THEN** the URL opens in the user's default browser and the split is
-  unchanged
-
-#### Scenario: Hyperlink printed by a terminal program
-
-- **WHEN** a TUI in the embedded terminal emits an OSC 8 hyperlink and the
-  user activates it with default settings
-- **THEN** the URL opens in the window's split browser pane
-
-#### Scenario: Non-http scheme
-
-- **WHEN** the user clicks a `mailto:` link
-- **THEN** the system's registered mail handler opens
-
-### Requirement: Window chrome exposes Back and Forward for the embedded SPA
-The app SHALL provide Back and Forward controls — menu commands with `⌘[` and `⌘]` shortcuts and window-toolbar buttons — that navigate the embedded page's back-forward history. Controls MUST be disabled when the corresponding direction has no history entry or no server is running. While the split browser pane has keyboard focus, the `⌘[`/`⌘]` shortcuts SHALL act on the focused browser tab's history instead (see `desktop-split-browser`); the menu items and toolbar buttons continue to reflect the embedded page's history.
-
-#### Scenario: Shortcuts follow the focused browser tab
-
-- **WHEN** the split browser pane has keyboard focus and the user presses `⌘[`
-- **THEN** the focused browser tab navigates back and the uatu pane's history is untouched
-
-#### Scenario: Back returns to the previously selected document
-
-- **WHEN** the user selects document A, then document B, then invokes Back
-- **THEN** the preview shows document A again, and Forward becomes enabled
-
-#### Scenario: Controls disabled at history edges
-
-- **WHEN** a window has just loaded its first page
-- **THEN** both Back and Forward controls are disabled
-
-### Requirement: Windows use a transparent full-height content layout
-Content windows SHALL use a full-size content layout: the hosted web view
-SHALL span the full window frame including the titlebar region, the titlebar
-SHALL be transparent with the window title hidden, and the toolbar controls
-(back/forward navigation, split-browser toggle) SHALL float over the content
-as system glass material so the page is visible beneath them. Window dragging
-via the titlebar region and toolbar interaction MUST keep working at every
-horizontal position across the window — over the SPA web view (including a
-right-docked terminal column) and over the split-browser pane alike; page
-content in the covered strip is visible but not interactive, matching
-system-browser behavior.
-
-#### Scenario: Page content reaches the top window edge
-- **WHEN** a folder is being served and the SPA is loaded in a window
-- **THEN** the page's rendered content extends to the top edge of the window
-- **AND** the toolbar renders as glass over the page rather than on an opaque
-  bar
-
-#### Scenario: Window remains draggable by the top region
-- **WHEN** the user drags in the titlebar region above the content
-- **THEN** the window moves, and clicks on toolbar controls activate those
-  controls, not the page beneath
-
-#### Scenario: Dragging works over the SPA side, not only the split pane
-- **WHEN** the user drags in the titlebar strip above the SPA web view —
-  including above the sidebar, the preview, and a right-docked terminal —
-  with or without the split browser open
-- **THEN** the window moves, exactly as it does when dragging above the
-  split-browser pane
-
-### Requirement: Non-running states render correctly under the transparent titlebar
-The launcher, starting, and failure states SHALL render correctly with the
-transparent titlebar: no control or text in those layouts may be obscured by
-the traffic lights or floating toolbar.
-
-#### Scenario: Launcher under the transparent titlebar
-- **WHEN** a window shows the launcher (no folder open)
-- **THEN** the logo, folder chooser, and recent-folder list are fully visible
-  and clickable
-
-### Requirement: Native tabbing remains correct with full-height content
-Native window tabs SHALL continue to work with the full-size content layout:
-opening a second tab shows the native tab bar, tab switching works, and the
-wrapper reflects the resulting change in covered chrome height to the hosted
-page (per the desktop-titlebar-inset capability).
-
-#### Scenario: Opening a second native tab
-- **WHEN** the user opens a new tab in a content window
-- **THEN** the native tab bar appears and both tabs remain fully usable
-- **AND** each tab's hosted page receives the updated titlebar inset
-
-### Requirement: The find shortcut reaches the surface that has focus
-
-The wrapper SHALL ensure no menu item silently claims `⌘F`, `⌘G`, or `⇧⌘G` on
-behalf of a responder that cannot act on them. Because `NSMenu` performs the
-first matching key equivalent even when the item is disabled, the wrapper SHALL
-NOT rely on menu-item enablement to express focus-dependent routing; routing
-SHALL be resolved at press time from the window's first responder.
-
-#### Scenario: Find in the embedded SPA
-
-- **WHEN** the embedded uatu web view has focus and the user presses `⌘F`
-- **THEN** the key reaches the page and uatu's own find opens
-
-#### Scenario: Find in the split browser
-
-- **WHEN** the split browser has focus and the user presses `⌘F`
-- **THEN** the wrapper's native find bar opens over the browser tab and the page's find does not
-
-#### Scenario: Stock text-finding menu items do not intercept
-
-- **WHEN** the app's menu bar is built
-- **THEN** no inherited text-editing Find item is left bound to `⌘F` targeting a responder that ignores it
-
-### Requirement: Menu bar exposes find commands for the focused surface
-
-The Edit menu SHALL expose Find, Find Next, and Find Previous with their
-standard key equivalents, so the shortcuts are discoverable. These items SHALL
-be enabled whenever a window with a running server is focused, and their action
-SHALL resolve the target surface when invoked rather than when the menu was
-last rebuilt.
-
-#### Scenario: Find is discoverable in the menu
-
-- **WHEN** the user opens the Edit menu with a running window focused
-- **THEN** Find, Find Next, and Find Previous are present and enabled with their standard shortcuts
-
-#### Scenario: Menu action follows focus changes
-
-- **WHEN** the user moves focus from the SPA to the split browser and then chooses Edit ▸ Find
-- **THEN** find opens over the split browser, not the SPA
