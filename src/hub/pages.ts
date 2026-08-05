@@ -59,8 +59,12 @@ const SHARED_STYLE = `
   a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
 
-  main { position: relative; max-width: 680px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
-  .sign-out { position: absolute; top: 1.25rem; right: 1.25rem; }
+  /* UatuCode Desktop serves these pages in a full-height WebView under a
+     transparent titlebar/tab bar and announces the covered height as
+     --titlebar-inset on <html>; pad below it so nothing renders under the
+     native chrome. Plain browsers see the 0px default. */
+  main { position: relative; max-width: 680px; margin: 0 auto; padding: calc(2.5rem + var(--titlebar-inset, 0px)) 1.25rem 4rem; }
+  .sign-out { position: absolute; top: calc(1.25rem + var(--titlebar-inset, 0px)); right: 1.25rem; }
   .sign-out button {
     background: transparent;
     border-color: transparent;
@@ -221,6 +225,41 @@ const SHARED_STYLE = `
   .form-row { display: flex; gap: 0.5rem; padding: 0.6rem 1rem; }
   .empty { padding: 0.75rem 1rem; color: var(--text-subtle); font-size: 0.8rem; }
   .error-text { color: var(--danger); font-size: 0.8rem; margin: 0.75rem 0; }
+  .hub-version {
+    margin: -1.5rem 0 2rem;
+    text-align: center;
+    color: var(--text-subtle);
+    font-size: 0.72rem;
+    font-family: var(--mono-font-family);
+  }
+
+  /* Full-page indicator for the started-but-still-loading gap: shown the
+     moment the dashboard navigates into a session, replaced by the session
+     page itself. Without it, a restored button reads as "nothing
+     happened" while the SPA is still booting. */
+  .nav-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+    background: color-mix(in srgb, var(--surface) 94%, transparent);
+    backdrop-filter: blur(3px);
+  }
+  .nav-overlay-spinner {
+    width: 28px;
+    height: 28px;
+    border-radius: 999px;
+    border: 3px solid var(--border-medium);
+    border-top-color: var(--accent);
+    animation: uatu-spin 0.8s linear infinite;
+  }
+  @keyframes uatu-spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .nav-overlay-spinner { animation-duration: 2.4s; } }
+  .nav-overlay-label { font-size: 0.85rem; color: var(--text-subtle); }
   [hidden] { display: none !important; }
 `;
 
@@ -273,28 +312,41 @@ export function loginPage(options: { error?: string } = {}): string {
   );
 }
 
-// The dashboard renders client-side from /api/hub/state + /api/hub/folders
-// so live status (shell counts, foreground labels, new folders) stays
-// current without a reload.
-export function dashboardPage(): string {
+// The dashboard renders client-side from /api/hub/state + /api/hub/browse
+// so live status (shell counts, foreground labels, the hub version, new
+// folders) stays current without a reload. In local mode (the desktop's
+// trusted loopback hub) there is no session to sign out of, and folder
+// adding is the desktop app's native picker — so the sign-out control and
+// the Add Folder browser/clone form are omitted.
+export function dashboardPage(options: { local?: boolean } = {}): string {
+  const signOut = options.local
+    ? ""
+    : `<form class="sign-out" method="post" action="/logout"><button type="submit">Sign out</button></form>\n`;
+  const addFolder = options.local
+    ? ""
+    : `<section class="pane">
+  <div class="pane-header"><h2>Add folder</h2><span id="browse-path" class="pane-meta"></span></div>
+  <div id="browser"><p class="empty">Loading…</p></div>
+  <form class="form-row" id="clone-form" style="border-top: 1px solid var(--border-soft);">
+    <input type="text" id="clone-url" placeholder="Clone a repository into this folder — git URL" aria-label="Git clone URL" />
+    <button type="submit">Clone</button>
+  </form>
+</section>
+`;
   return page(
     "UatuCode Hub",
-    `<form class="sign-out" method="post" action="/logout"><button type="submit">Sign out</button></form>
-${brandHeader()}
+    `${signOut}${brandHeader()}
+<p id="hub-version" class="hub-version"></p>
 <p id="action-error" class="error-text" hidden></p>
 <section class="pane">
   <div class="pane-header"><h2>Sessions</h2></div>
   <div id="sessions"><p class="empty">Loading…</p></div>
 </section>
 <section class="pane">
-  <div class="pane-header"><h2>Workspaces</h2><span id="workspaces-dir" class="pane-meta"></span></div>
+  <div class="pane-header"><h2>Workspaces</h2></div>
   <div id="workspaces"><p class="empty">Loading…</p></div>
-  <form class="form-row" id="clone-form" style="border-top: 1px solid var(--border-soft);">
-    <input type="text" id="clone-url" placeholder="Clone a repository — git URL" aria-label="Git clone URL" />
-    <button type="submit">Clone</button>
-  </form>
 </section>
-<script>
+${addFolder}<script>
 const errorEl = document.getElementById("action-error");
 function showError(message) {
   errorEl.textContent = message;
@@ -325,7 +377,7 @@ function el(tag, className, text) {
   if (text !== undefined) node.textContent = text;
   return node;
 }
-function row({ title, href, path, detail, live, chip, chipWarn, button, buttons }) {
+function row({ title, href, titleClick, path, detail, live, chip, chipWarn, button, buttons }) {
   const div = el("div", "row");
   if (live !== undefined) {
     const dot = el("span", "indicator-dot" + (live ? " is-live" : ""));
@@ -333,10 +385,13 @@ function row({ title, href, path, detail, live, chip, chipWarn, button, buttons 
   }
   const main = el("div", "row-main");
   const titleRow = el("div", "row-title");
-  if (href) {
+  if (href || titleClick) {
     const link = document.createElement("a");
-    link.href = href;
+    link.href = href || "#";
     link.textContent = title;
+    if (titleClick) {
+      link.onclick = event => { event.preventDefault(); titleClick(); };
+    }
     titleRow.appendChild(link);
   } else {
     titleRow.appendChild(el("strong", null, title));
@@ -348,10 +403,30 @@ function row({ title, href, path, detail, live, chip, chipWarn, button, buttons 
   div.appendChild(main);
   for (const spec of buttons ?? (button ? [button] : [])) {
     const action = el("button", spec.className || null, spec.label);
-    action.onclick = spec.onClick;
+    action.onclick = () => spec.onClick(action);
     div.appendChild(action);
   }
   return div;
+}
+// Session starts (a real server spawn) take seconds; a silent button reads
+// as dead. Disable and relabel the control until the action settles.
+//
+// uiBusy pauses the interval-driven refresh while any action is in flight:
+// refresh() rebuilds the rows wholesale, which would replace an in-flight
+// "Starting…" button with a freshly rendered idle one mid-action.
+let uiBusy = 0;
+async function withBusy(button, busyLabel, action) {
+  uiBusy += 1;
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = busyLabel;
+  try {
+    await action();
+  } finally {
+    uiBusy -= 1;
+    button.disabled = false;
+    button.textContent = original;
+  }
 }
 function renderInto(container, rows, emptyText) {
   container.replaceChildren();
@@ -362,36 +437,100 @@ function renderInto(container, rows, emptyText) {
   for (const r of rows) container.appendChild(r);
 }
 function sessionUrl(id) { return "/s/" + encodeURIComponent(id) + "/"; }
-async function serveFolder(name) {
+// Navigate into a session behind a full-page opening indicator — the SPA
+// takes a moment to boot even after the start API has answered.
+function openSession(id) {
+  const overlay = el("div", "nav-overlay");
+  overlay.appendChild(el("div", "nav-overlay-spinner"));
+  overlay.appendChild(el("div", "nav-overlay-label", "Opening " + id + "…"));
+  document.body.appendChild(overlay);
+  location.href = sessionUrl(id);
+}
+// Returns true when it navigated into a session (the caller's button then
+// stays in its busy state — the overlay owns the screen until the session
+// page replaces us), false when the user declined or an error was shown.
+async function addFolder(folder) {
   showError("");
   try {
-    const result = await api("/api/hub/workspaces", { name });
-    location.href = sessionUrl(result.id);
+    const result = await api("/api/hub/workspaces", { path: folder });
+    openSession(result.id);
+    return true;
   } catch (error) {
     if (error.payload && error.payload.needsInit) {
-      if (!confirm('"' + name + '" is not a git repository. Initialize one with git init and serve it?')) return;
+      if (!confirm('"' + folder + '" is not a git repository. Initialize one with git init and serve it?')) return false;
       try {
-        const result = await api("/api/hub/workspaces", { name, init: true });
-        location.href = sessionUrl(result.id);
+        const result = await api("/api/hub/workspaces", { path: folder, init: true });
+        openSession(result.id);
+        return true;
       } catch (inner) { showError(inner.message); }
-      return;
+      return false;
     }
     showError(error.message);
+    return false;
   }
 }
-async function refresh() {
-  let state, folders;
+
+// The Add Folder browser: one directory level at a time, drill in by name,
+// add the current candidate with its button. Server defaults to the home
+// directory; the resolved path comes back with every listing. Absent in
+// local mode (no #browser element), where the desktop's native picker owns
+// folder adding.
+let browsePath = null;
+async function loadBrowser() {
+  if (!document.getElementById("browser")) return;
+  let listing;
   try {
-    const [stateResponse, foldersResponse] = await Promise.all([
-      fetch("/api/hub/state"),
-      fetch("/api/hub/folders"),
-    ]);
-    if (!stateResponse.ok || !foldersResponse.ok) return;
+    const query = browsePath === null ? "" : "?path=" + encodeURIComponent(browsePath);
+    const response = await fetch("/api/hub/browse" + query);
+    if (!response.ok) return;
+    listing = await response.json();
+  } catch { return; }
+  browsePath = listing.path;
+  document.getElementById("browse-path").textContent = listing.path;
+  const rows = [];
+  if (listing.parent) {
+    rows.push(row({
+      title: "..",
+      titleClick: () => { browsePath = listing.parent; loadBrowser(); },
+      detail: "up",
+    }));
+  }
+  for (const dir of listing.dirs) {
+    rows.push(row({
+      title: dir.name,
+      titleClick: () => { browsePath = listing.path + (listing.path.endsWith("/") ? "" : "/") + dir.name; loadBrowser(); },
+      chip: dir.registeredId ? "added" : (dir.git ? "git" : "no git"),
+      chipWarn: !dir.registeredId && !dir.git,
+      button: dir.registeredId
+        ? { label: "Open", onClick: () => openSession(dir.registeredId) }
+        : {
+            label: "Add",
+            onClick: async button => {
+              uiBusy += 1;
+              const original = button.textContent;
+              button.disabled = true;
+              button.textContent = "Starting…";
+              if (!(await addFolder(listing.path + (listing.path.endsWith("/") ? "" : "/") + dir.name))) {
+                uiBusy -= 1;
+                button.disabled = false;
+                button.textContent = original;
+              }
+            },
+          },
+    }));
+  }
+  renderInto(document.getElementById("browser"), rows, "No subfolders here.");
+}
+async function refresh(force) {
+  if (!force && uiBusy > 0) return;
+  let state;
+  try {
+    const stateResponse = await fetch("/api/hub/state");
+    if (!stateResponse.ok) return;
     state = await stateResponse.json();
-    folders = await foldersResponse.json();
   } catch { return; }
 
-  document.getElementById("workspaces-dir").textContent = folders.workspacesDir;
+  document.getElementById("hub-version").textContent = state.version || "";
 
   const running = state.workspaces.filter(w => w.running);
   renderInto(
@@ -405,11 +544,13 @@ async function refresh() {
       button: {
         label: "Stop",
         className: "danger",
-        onClick: async () => {
+        onClick: async button => {
           if (!confirm('Stop session "' + w.id + '"? Its shells will be terminated.')) return;
           showError("");
-          try { await api("/api/hub/sessions/" + encodeURIComponent(w.id) + "/stop"); await refresh(); }
-          catch (error) { showError(error.message); }
+          await withBusy(button, "Stopping…", async () => {
+            try { await api("/api/hub/sessions/" + encodeURIComponent(w.id) + "/stop"); await refresh(true); }
+            catch (error) { showError(error.message); }
+          });
         },
       },
     })),
@@ -417,8 +558,6 @@ async function refresh() {
   );
 
   const stopped = state.workspaces.filter(w => !w.running);
-  const registeredPaths = new Set(state.workspaces.map(w => w.path));
-  const available = folders.folders.filter(f => !f.registeredId);
   const rows = [
     ...stopped.map(w => row({
       title: w.id,
@@ -427,12 +566,26 @@ async function refresh() {
       buttons: [
         {
           label: "Resume",
-          onClick: async () => {
+          // On success the button STAYS "Starting…" — restoring it while
+          // the overlay covers the load read as a return to idle. Only an
+          // error brings it back.
+          onClick: async button => {
             showError("");
+            uiBusy += 1;
+            const original = button.textContent;
+            button.disabled = true;
+            button.textContent = "Starting…";
             try {
               await api("/api/hub/sessions/" + encodeURIComponent(w.id) + "/start");
-              location.href = sessionUrl(w.id);
-            } catch (error) { showError(error.message); }
+              // uiBusy stays held: the page is navigating away and any
+              // repaint now would flash idle controls under the overlay.
+              openSession(w.id);
+            } catch (error) {
+              showError(error.message);
+              uiBusy -= 1;
+              button.disabled = false;
+              button.textContent = original;
+            }
           },
         },
         {
@@ -448,41 +601,52 @@ async function refresh() {
         },
       ],
     })),
-    ...available.map(f => row({
-      title: f.name,
-      chip: f.git ? "git" : "no git",
-      chipWarn: !f.git,
-      button: { label: "Serve", onClick: () => serveFolder(f.name) },
-    })),
   ];
   renderInto(
     document.getElementById("workspaces"),
     rows,
-    "No folders in the workspaces root yet — clone a repository below.",
+    "No stopped workspaces${options.local ? "" : " — add a folder below to serve one"}.",
   );
 }
-document.getElementById("clone-form").onsubmit = async event => {
+const cloneForm = document.getElementById("clone-form");
+if (cloneForm) cloneForm.onsubmit = async event => {
   event.preventDefault();
   showError("");
   const input = document.getElementById("clone-url");
   const url = input.value.trim();
   if (!url) return;
   const button = event.target.querySelector("button");
+  uiBusy += 1;
   button.disabled = true;
   button.textContent = "Cloning…";
   try {
-    const result = await api("/api/hub/clone", { url });
+    const result = await api("/api/hub/clone", { url, dest: browsePath });
     input.value = "";
-    location.href = sessionUrl(result.id);
+    openSession(result.id);
   } catch (error) {
     showError(error.message);
   } finally {
+    uiBusy -= 1;
     button.disabled = false;
     button.textContent = "Clone";
-    await refresh();
+    await refresh(true);
+    await loadBrowser();
   }
 };
+// Back/forward restores this page from WebKit's page cache exactly as we
+// left it — including a stale opening overlay and busy buttons. Clear the
+// overlay and re-render from fresh state.
+window.addEventListener("pageshow", event => {
+  if (!event.persisted) return;
+  for (const overlay of document.querySelectorAll(".nav-overlay")) overlay.remove();
+  // The page cache preserves the JS heap too — a busy hold from the
+  // navigation that left this page would otherwise pin refresh forever.
+  uiBusy = 0;
+  refresh(true);
+  loadBrowser();
+});
 refresh();
+loadBrowser();
 setInterval(refresh, 5000);
 </script>`,
   );

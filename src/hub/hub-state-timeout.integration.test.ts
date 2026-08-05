@@ -52,8 +52,8 @@ beforeAll(async () => {
     host: "127.0.0.1",
     tls: null,
     users: [{ name: "t", passwordHash: await hashPassword("x") }],
-    workspacesDir: path.join(tempRoot, "workspaces"),
     stateDir: path.join(tempRoot, "state"),
+    local: false,
   };
   hub = startHubServer({ config, registry, sessions, signingKey: KEY });
 });

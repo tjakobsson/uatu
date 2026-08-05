@@ -3,12 +3,9 @@
 // terminates every child before the hub exits. cli.ts dispatches here for
 // `uatu hub` and `uatu hub hash-password`.
 
-import { promises as fs } from "node:fs";
-
 import { LocalProcessBackend } from "./backend";
 import { hashPassword } from "./auth";
-import { loadHubConfig } from "./config";
-import { probeGitRepository } from "./git";
+import { isLoopbackHost, loadHubConfig, localHubConfig } from "./config";
 import { WorkspaceRegistry } from "./registry";
 import {
   ensureStateDir,
@@ -19,19 +16,29 @@ import {
 import { startHubServer } from "./server";
 import { SessionManager } from "./sessions";
 
-export async function runHub(options: { configPath?: string }): Promise<void> {
-  const config = await loadHubConfig(options.configPath);
+export type RunHubOptions = {
+  configPath?: string;
+  // `uatu hub --local`: trusted single-user loopback mode, no config file.
+  local?: boolean;
+  // Overrides the port (config or default). `--local --port 0` is how the
+  // desktop app gets an ephemeral port it reads back from stdout.
+  port?: number;
+  // Orphan backstop for supervising wrappers, mirroring `uatu serve`.
+  exitOnStdinClose?: boolean;
+};
 
-  // The workspaces root is where repositories LIVE — it must not itself be
-  // one. A hub started inside a repo (a natural mistake: `cd myproject &&
-  // uatu hub`) is surfaced immediately instead of serving a confusing root.
-  await fs.mkdir(config.workspacesDir, { recursive: true });
-  const rootProbe = await probeGitRepository(config.workspacesDir);
-  if (rootProbe.kind === "repository") {
-    throw new Error(
-      `workspaces root ${config.workspacesDir} is inside a git repository (${rootProbe.toplevel}). ` +
-        `The workspaces root is the folder that CONTAINS your repositories — start the hub from (or point workspacesDir at) their parent folder.`,
-    );
+export async function runHub(options: RunHubOptions): Promise<void> {
+  const config = options.local
+    ? localHubConfig({ port: options.port ?? 0 })
+    : await loadHubConfig(options.configPath);
+  if (options.port !== undefined) {
+    config.port = options.port;
+  }
+  // Local mode is trusted BECAUSE it is unreachable from the network; a
+  // non-loopback bind would be an open shell. localHubConfig hardcodes
+  // loopback, so this guards against future config plumbing, not users.
+  if (config.local && !isLoopbackHost(config.host)) {
+    throw new Error(`hub --local is loopback-only; refusing to bind '${config.host}'`);
   }
 
   const stateRoot = config.stateDir ?? resolveHubStateRoot();
@@ -40,14 +47,6 @@ export async function runHub(options: { configPath?: string }): Promise<void> {
 
   const registry = new WorkspaceRegistry(registryPath(stateRoot));
   await registry.load();
-  const pruned = await registry.pruneOutsideRoot(config.workspacesDir);
-  if (pruned.length > 0) {
-    console.error(
-      `uatu hub: forgot ${pruned.length} workspace(s) outside the workspaces root (folders untouched): ${pruned
-        .map(entry => `${entry.id} (${entry.path})`)
-        .join(", ")}`,
-    );
-  }
 
   const sessions = new SessionManager(registry, { local: new LocalProcessBackend() });
   const server = startHubServer({ config, registry, sessions, signingKey });
@@ -55,7 +54,7 @@ export async function runHub(options: { configPath?: string }): Promise<void> {
   const scheme = config.tls ? "https" : "http";
   console.log(`${scheme}://${config.host}:${server.port}/`);
   console.error(
-    `uatu hub: workspaces in ${config.workspacesDir}; state in ${stateRoot}; ${registry.list().length} registered workspace(s)`,
+    `uatu hub${config.local ? " (local mode)" : ""}: state in ${stateRoot}; ${registry.list().length} registered workspace(s)`,
   );
 
   let shuttingDown = false;
@@ -78,6 +77,24 @@ export async function runHub(options: { configPath?: string }): Promise<void> {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
   process.on("SIGHUP", shutdown);
+
+  // --exit-on-stdin-close: a supervising wrapper (the desktop app) holds our
+  // stdin pipe for its whole lifetime. EOF means the supervisor is gone —
+  // even by crash — so shut down exactly as SIGTERM would instead of running
+  // orphaned with live session children. Same contract as `uatu serve`.
+  if (options.exitOnStdinClose && !process.stdin.isTTY) {
+    // EOF fires both "end" and "close"; shutdown treats a second call as a
+    // force-quit (exit 1), so collapse the pair to one graceful shutdown.
+    let stdinGone = false;
+    const onStdinGone = () => {
+      if (stdinGone) return;
+      stdinGone = true;
+      shutdown();
+    };
+    process.stdin.resume();
+    process.stdin.on("end", onStdinGone);
+    process.stdin.on("close", onStdinGone);
+  }
 }
 
 // Strips exactly the trailing line terminator from piped password input —

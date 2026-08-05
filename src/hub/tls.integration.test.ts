@@ -33,8 +33,8 @@ beforeAll(async () => {
     host: "127.0.0.1",
     tls: { cert: certPath, key: keyPath },
     users: [{ name: "tobias", passwordHash: await hashPassword("open sesame") }],
-    workspacesDir: path.join(tempRoot, "workspaces"),
     stateDir: path.join(tempRoot, "state"),
+    local: false,
   };
   const registry = new WorkspaceRegistry(path.join(tempRoot, "registry.json"));
   await registry.load();

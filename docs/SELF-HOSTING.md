@@ -4,7 +4,9 @@
 into a session server: it serves a dashboard over one HTTPS port, supervises
 one `uatu serve` child per workspace, and reverse-proxies every session under
 `https://<your-host>/s/<workspace-id>/`. Any browser is a client; an iPad can
-install the hub as a PWA and every session lives inside it.
+install the hub as a PWA and every session lives inside it, and UatuCode
+Desktop can connect natively — Add Hub… on its splash screen signs in and
+lists the hub's workspaces alongside local ones.
 
 This document is the operator runbook: the trust model, the config
 reference, certificate walkthroughs (mkcert and both tailscale shapes), and
@@ -31,6 +33,11 @@ service definitions for systemd and launchd.
 - **`git clone` runs with the daemon user's ambient credentials** (its
   `~/.gitconfig`, ssh agent, credential helpers). The hub stores no
   credentials of its own.
+- **Signed-in users can browse the daemon user's filesystem.** The
+  dashboard's Add Folder browser lists directories so users can pick any
+  folder to serve. This adds nothing to the threat model — the embedded
+  terminal already grants a full shell as the daemon user — but be aware
+  that the login is the *only* boundary.
 
 ## Configuration
 
@@ -48,7 +55,6 @@ to `$XDG_CONFIG_HOME/uatu/hub.json` (usually `~/.config/uatu/hub.json`):
   "users": [
     { "name": "tobias", "passwordHash": "$argon2id$…" }
   ],
-  "workspacesDir": "~/workspaces",
   "stateDir": "~/.local/state/uatu-hub"
 }
 ```
@@ -59,16 +65,14 @@ to `$XDG_CONFIG_HOME/uatu/hub.json` (usually `~/.config/uatu/hub.json`):
 | `host` | `127.0.0.1` | Bind address. Non-loopback requires `tls`. |
 | `tls` | none | PEM certificate + private key paths. Omit only for loopback (dev, or behind your own HTTPS proxy). |
 | `users` | — | Required, non-empty. Password hashes only — generate with `uatu hub hash-password`. |
-| `workspacesDir` | the directory `uatu hub` was started in | The **workspaces root** — see below |
 | `stateDir` | `~/.local/state/uatu-hub` | Workspace registry + cookie-signing key (created `0600`) |
 
-**The workspaces root** is the folder whose subfolders are this hub's
-workspaces: the dashboard offers its subfolders (with their git status) to
-serve, and `git clone` checks out into it. It defaults to wherever you start
-the hub, so `cd ~/workspaces && uatu hub` is a complete setup. The root must
-*contain* repositories, not *be* one — the hub refuses to start when the
-root is inside a git worktree, since that is almost always `uatu hub` run
-from inside a project by mistake.
+**Workspaces are folders you add**, anywhere on the machine: the dashboard's
+Add Folder pane is a directory browser (starting at the daemon user's home)
+— drill to a folder and add it, and `git clone` checks out into whichever
+directory you have browsed to. There is no configured workspaces root; a
+`workspacesDir` key in the config is rejected at startup (it existed only in
+pre-release edge builds — delete the key).
 
 Generate a password hash (read from stdin so it never lands in shell
 history):
@@ -112,6 +116,19 @@ General → VPN & Device Management → install the profile, and Settings →
 General → About → Certificate Trust Settings → enable full trust for it.
 Safari will then treat `https://homebox.lan:4700` as secure, which is what
 makes the PWA install and clipboard work.
+
+**Trust the CA on other Macs (UatuCode Desktop)**: the desktop app connects
+to hubs with system trust only — there is no certificate-exception dialog.
+On any Mac that isn't the mkcert machine, import `rootCA.pem` into the
+System keychain and mark it trusted:
+
+```sh
+sudo security add-trusted-cert -d -r trustRoot \
+  -k /Library/Keychains/System.keychain rootCA.pem
+```
+
+Certificates from a public CA (Path B/C, Let's Encrypt via tailscale) need
+none of this — they are trusted everywhere already.
 
 Finish with the [systemd unit](#systemd) or [launchd plist](#launchd) below.
 
