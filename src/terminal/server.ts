@@ -51,6 +51,7 @@ type Session = {
   socket: ServerWebSocket<SocketData> | null;
   pendingClaim: ServerWebSocket<SocketData> | null;
   pendingOutput: Uint8Array[];
+  deferredHolderResize: { cols: number; rows: number } | null;
   // Wall-clock millis at spawn; surfaces as age in the session inventory.
   createdAt: number;
   // Basename of the spawned shell — the inventory label fallback when no
@@ -171,6 +172,7 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
       socket: null,
       pendingClaim: null,
       pendingOutput: [],
+      deferredHolderResize: null,
       createdAt: Date.now(),
       shellName: shell.split("/").at(-1) ?? shell,
       cols,
@@ -201,6 +203,7 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
       const pendingClaim = session.pendingClaim;
       session.pendingClaim = null;
       session.pendingOutput = [];
+      session.deferredHolderResize = null;
       const attachedSockets = new Set([session.socket, pendingClaim]);
       for (const socket of attachedSockets) {
         if (!socket || socket.readyState !== WS_OPEN) continue;
@@ -226,6 +229,25 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
       rows,
       label: session.shellName,
     };
+  };
+
+  const applyResize = (session: Session, cols: number, rows: number): void => {
+    session.cols = cols;
+    session.rows = rows;
+    const modelResize = session.model.resize(cols, rows);
+    try {
+      session.pty.resize(cols, rows);
+    } catch {
+      // Resize can fail if the PTY just exited; model cleanup follows exit.
+    }
+    void modelResize.catch(() => undefined);
+  };
+
+  const restoreDeferredHolderResize = (session: Session): void => {
+    const deferred = session.deferredHolderResize;
+    session.deferredHolderResize = null;
+    if (!deferred || session.pendingClaim || !session.socket) return;
+    applyResize(session, deferred.cols, deferred.rows);
   };
 
   const completeAttach = async (session: Session, socket: ServerWebSocket<SocketData>, cols: number, rows: number) => {
@@ -268,6 +290,7 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
       for (const bytes of session.pendingOutput) send(bytes);
       // Commit ownership only after reconstruction delivery succeeds. A
       // failed claimant must leave the current holder usable.
+      session.deferredHolderResize = null;
       session.socket = socket;
       session.pendingOutput = [];
       session.pendingClaim = null;
@@ -284,6 +307,7 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
       if (session.pendingClaim === socket) {
         session.pendingClaim = null;
         session.pendingOutput = [];
+        restoreDeferredHolderResize(session);
       }
       socket.data.attaching = false;
       try {
@@ -382,14 +406,14 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
           const cols = Math.max(1, Math.floor(Number((parsed as { cols?: unknown }).cols)));
           const rows = Math.max(1, Math.floor(Number((parsed as { rows?: unknown }).rows)));
           if (Number.isFinite(cols) && Number.isFinite(rows) && cols <= 1000 && rows <= 1000) {
-            session.cols = cols;
-            session.rows = rows;
-            try {
-              const modelResize = session.model.resize(cols, rows);
-              session.pty.resize(cols, rows);
-              void modelResize.catch(() => undefined);
-            } catch {
-              // Resize can fail if the PTY just exited; benign.
+            if (session.pendingClaim && session.pendingClaim !== socket) {
+              // The current holder remains interactive until takeover commits,
+              // but changing the shared model mid-snapshot would reconstruct
+              // the claimant at the wrong dimensions. Keep only the latest
+              // resize and restore it if the claim aborts.
+              session.deferredHolderResize = { cols, rows };
+            } else {
+              applyResize(session, cols, rows);
             }
           }
         }
@@ -413,6 +437,7 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
       if (session.pendingClaim === socket) {
         session.pendingClaim = null;
         session.pendingOutput = [];
+        restoreDeferredHolderResize(session);
       }
       // Guard against the hijack-refusal path: `open()` closes a LOSING
       // socket with 4409 while the session's winning socket stays attached.
