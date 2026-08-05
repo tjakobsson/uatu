@@ -48,6 +48,7 @@ export async function loadInitialState() {
   // the URL with a hashless version — otherwise the post-load fragment
   // scroll has nothing to scroll to.
   const initialHash = window.location.hash;
+  const hasExplicitRoute = Boolean(urlRelativePath || initialHash);
 
   // Before any rendering: the tracker sets the theme-color meta for the
   // resolved scheme and starts listening for OS scheme flips (mermaid and
@@ -78,6 +79,7 @@ export async function loadInitialState() {
   syncFilesPaneFilterControl();
 
   let directLinkMessage: { title: string; body: string } | null = null;
+  let explicitDocumentPath: string | null = null;
   const initialReviewScoreRepositoryId = reviewScoreRepositoryIdFromUrl();
   const initialCommitPreview = commitPreviewParamsFromUrl();
 
@@ -89,29 +91,33 @@ export async function loadInitialState() {
     setFollowEnabled(false);
     setSelectedId(null);
     setPreviewMode({ kind: "commit", ...initialCommitPreview });
-  } else if (!urlRelativePath) {
+  } else if (!hasExplicitRoute) {
     setFollowEnabled(personalState.follow ?? payload.initialFollow);
     const savedDocument = personalState.documentPath
       ? findDocumentByRelativePath(personalState.documentPath)
       : null;
     setSelectedId(savedDocument?.kind !== "binary" ? savedDocument?.id ?? payload.defaultDocumentId : payload.defaultDocumentId);
     setPreviewMode({ kind: "document" });
+  } else if (!urlRelativePath) {
+    // A fragment-bearing root URL is explicit navigation. Render the session
+    // default rather than applying a saved document from another route.
+    setFollowEnabled(false);
+    setSelectedId(payload.defaultDocumentId);
+    setPreviewMode({ kind: "document" });
   } else {
+    setFollowEnabled(false);
     const requestedDoc = findDocumentByRelativePath(urlRelativePath);
     if (requestedDoc && requestedDoc.kind !== "binary") {
       // Direct link to a known non-binary doc — force follow off (Rule
       // "URL direct links force OFF on boot") and override the
       // server-provided default selection.
-      setFollowEnabled(false);
       setSelectedId(requestedDoc.id);
+      explicitDocumentPath = requestedDoc.relativePath;
       setPreviewMode({ kind: "document" });
     } else if (payload.scope.kind === "file") {
       // Direct link to a doc outside the CLI single-file watch scope. Keep
       // the scoped doc as the selection but render a "session scoped to a
-      // single file" message in place of the preview. Follow stays at the
-      // server-provided default — it's meaningless in a single-file session
-      // (`syncFollowToggle` disables the chip when scope.kind === "file"),
-      // so we don't need to explicitly clear it here.
+      // single file" message in place of the preview without widening it.
       setSelectedId(payload.defaultDocumentId);
       setPreviewMode({ kind: "empty" });
       const scopedDoc = appState.selectedId
@@ -174,12 +180,14 @@ export async function loadInitialState() {
 
   connectEvents();
   enablePersonalStatePersistence();
-  const selected = appState.selectedId ? findDocumentById(appState.selectedId) : null;
-  persistPersonalWorkspaceState({
-    ...(selected ? { documentPath: selected.relativePath } : {}),
-    follow: appState.followEnabled,
-    previewMode: appState.viewMode,
-    compareTarget: appState.compareTarget,
-    filesFilter: appState.filesPaneFilter,
-  });
+  // Restored/default values are read-only at boot: writing a full snapshot
+  // here could overwrite newer field-level writes from another open client.
+  // An explicit route is current user intent, so only its affected fields are
+  // persisted for future root arrivals.
+  if (initialReviewScoreRepositoryId || initialCommitPreview || hasExplicitRoute) {
+    persistPersonalWorkspaceState({
+      follow: false,
+      ...(explicitDocumentPath ? { documentPath: explicitDocumentPath } : {}),
+    });
+  }
 }

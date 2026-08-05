@@ -48,4 +48,18 @@ test.describe("personal workspace resume state", () => {
     await laterContext.close();
     await secondContext.close();
   });
+
+  test("a fragment-bearing root uses the session default instead of a saved document", async ({
+    page,
+    request,
+  }) => {
+    await request.post("/__e2e/reset");
+    await request.patch("/api/personal-state", {
+      data: { documentPath: "guides/setup.md", follow: true },
+    });
+
+    await page.goto("/#uatu");
+    await expect(page.locator("#preview-path")).toHaveText("README.md");
+    await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
+  });
 });

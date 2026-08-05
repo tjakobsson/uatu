@@ -13,7 +13,7 @@
 // confuse the picker after a token rotation.
 
 import { hasValidTerminalCredentials, isAllowedOrigin } from "./auth";
-import type { TerminalServer } from "./server";
+import { isValidSessionId, type TerminalServer } from "./server";
 
 const SESSIONS_PATH = "/api/terminal/sessions";
 const SESSION_PATH_PREFIX = `${SESSIONS_PATH}/`;
@@ -73,7 +73,13 @@ export function handleTerminalSessionsRoute(
     if (!isAllowedOrigin(request.headers.get("origin"), requestUrl)) {
       return new Response("forbidden origin", { status: 403 });
     }
-    const id = decodeURIComponent(path.slice(SESSION_PATH_PREFIX.length));
+    let id: string;
+    try {
+      id = decodeURIComponent(path.slice(SESSION_PATH_PREFIX.length));
+    } catch {
+      return new Response("invalid session", { status: 400 });
+    }
+    if (!isValidSessionId(id)) return new Response("invalid session", { status: 400 });
     if (terminalServer.killSession(id)) {
       return new Response(null, { status: 204 });
     }

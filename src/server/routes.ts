@@ -27,7 +27,7 @@ import { findDocument, isViewMode } from "../shared/types";
 import { parseWatchContext, type WatchContext } from "../shared/watch-context";
 import { renderDocument } from "./render-dispatch";
 import { buildSearchPattern, searchDocuments } from "./search";
-import { canSetFileScope, type WatchSession } from "./watch-session";
+import type { WatchSession } from "./watch-session";
 
 // Bun.serve's idleTimeout. 0 = disabled: SSE connections and long-lived
 // terminal WebSockets must never be reaped by an idle timer.
@@ -109,12 +109,6 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
     const parsed = parseWatchContext(new URL(request.url).searchParams);
     if ("error" in parsed) {
       return Response.json({ error: parsed.error }, { status: 400 });
-    }
-    if (
-      parsed.context.scope.kind === "file"
-      && !canSetFileScope(getSession().getUnscopedRoots(), parsed.context.scope.documentId)
-    ) {
-      return Response.json({ error: "document not found" }, { status: 404 });
     }
     return parsed.context;
   };

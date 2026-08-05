@@ -817,7 +817,10 @@ describe.skipIf(!backendOk)("terminal-server session manager", () => {
           resolve();
         });
       });
-      first.send(new TextEncoder().encode("printf ORDER_BEFORE; sleep 0.15; printf ORDER_AFTER\r\n"));
+      // Keep exact markers out of the echoed command line. Otherwise shells
+      // with input echo make each marker appear twice without duplicated
+      // server delivery.
+      first.send(new TextEncoder().encode("printf ORDER_%s BEFORE; sleep 0.15; printf ORDER_%s AFTER\r\n"));
       await sawBefore;
 
       const second = await openSocket(local.port, id, true);

@@ -15,7 +15,7 @@ import { SHELL_FALLBACK_NOTICE, shellIsUnset } from "./shell-warning";
 import type { PtyProcess } from "./pty";
 import { TerminalModel } from "./model";
 
-type SocketData = { sessionId: string; takeover?: boolean; ready?: boolean };
+type SocketData = { sessionId: string; takeover?: boolean; ready?: boolean; attaching?: boolean };
 
 // App-defined close code the client sends from the confirmed pane-close path.
 // It is the ONLY close code that kills the PTY; everything else — 1001
@@ -58,6 +58,7 @@ type Session = {
   shellName: string;
   cols: number;
   rows: number;
+  closing: boolean;
 };
 
 export type TerminalServerOptions = {
@@ -174,6 +175,7 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
       shellName: shell.split("/").at(-1) ?? shell,
       cols,
       rows,
+      closing: false,
     };
     sessions.set(id, session);
     metrics?.inc("pty.spawned_total");
@@ -183,6 +185,7 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
       session.model.write(new TextEncoder().encode(SHELL_FALLBACK_NOTICE));
     }
     pty.onData(bytes => {
+      if (session.closing) return;
       session.model.write(bytes);
       if (session.pendingClaim) session.pendingOutput.push(new Uint8Array(bytes));
       if (session.socket && session.socket.readyState === WS_OPEN) {
@@ -194,10 +197,16 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
       }
     });
     pty.onExit(({ exitCode, signal }) => {
-      if (session.socket && session.socket.readyState === WS_OPEN) {
+      session.closing = true;
+      const pendingClaim = session.pendingClaim;
+      session.pendingClaim = null;
+      session.pendingOutput = [];
+      const attachedSockets = new Set([session.socket, pendingClaim]);
+      for (const socket of attachedSockets) {
+        if (!socket || socket.readyState !== WS_OPEN) continue;
         try {
-          session.socket.send(JSON.stringify({ type: "exit", exitCode, signal }));
-          session.socket.close(1000, "shell exited");
+          socket.send(JSON.stringify({ type: "exit", exitCode, signal }));
+          socket.close(1000, "shell exited");
         } catch {
           // Socket may already be closing.
         }
@@ -228,6 +237,8 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
       socket.close(4409, "session claim in progress");
       return;
     }
+    if (socket.data.attaching) return;
+    socket.data.attaching = true;
     session.pendingClaim = socket;
     session.pendingOutput = [];
     try {
@@ -239,10 +250,24 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
       session.cols = cols;
       session.rows = rows;
       session.pty.resize(cols, rows);
+      // resize() may synchronously emit a redraw. The model includes it in
+      // the snapshot, so begin buffering live output after that boundary.
+      session.pendingOutput = [];
       const snapshot = await session.model.serialize();
       if (session.pendingClaim !== socket || socket.readyState !== WS_OPEN) return;
       const previous = session.socket;
+      const send = (bytes: Uint8Array): void => {
+        if (socket.send(bytes) < 0) throw new Error("terminal attach delivery failed");
+      };
+      send(snapshot);
+      for (const bytes of session.pendingOutput) send(bytes);
+      // Commit ownership only after reconstruction delivery succeeds. A
+      // failed claimant must leave the current holder usable.
       session.socket = socket;
+      session.pendingOutput = [];
+      session.pendingClaim = null;
+      socket.data.attaching = false;
+      socket.data.ready = true;
       if (previous && previous !== socket) {
         try {
           previous.close(CLOSE_CODE_SESSION_TAKEN, "session taken");
@@ -250,16 +275,12 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
           // Previous holder may already be closing.
         }
       }
-      socket.send(snapshot);
-      for (const bytes of session.pendingOutput) socket.send(bytes);
-      session.pendingOutput = [];
-      session.pendingClaim = null;
-      socket.data.ready = true;
     } catch {
       if (session.pendingClaim === socket) {
         session.pendingClaim = null;
         session.pendingOutput = [];
       }
+      socket.data.attaching = false;
       try {
         socket.close(1011, "terminal attach failed");
       } catch {
@@ -279,6 +300,7 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
       if (!isValidSessionId(sessionId)) return { kind: "invalid" };
       const existing = sessions.get(sessionId);
       if (!existing) return { kind: "unknown" };
+      if (existing.pendingClaim !== null) return { kind: "collision" };
       if (existing.socket !== null) {
         // Attached elsewhere. An explicit takeover claim moves the session;
         // without it, reject so concurrent PTYs from one tab don't get
@@ -296,7 +318,7 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
       );
       return entries.map(s => ({
         id: s.id,
-        attached: s.socket !== null,
+        attached: s.socket !== null || s.pendingClaim !== null,
         createdAt: s.createdAt,
         cols: s.cols,
         rows: s.rows,
@@ -307,12 +329,14 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
     killSession(sessionId) {
       const session = sessions.get(sessionId);
       if (!session) return false;
+      session.closing = true;
       // An attached holder learns its shell died the normal way: SIGHUP →
       // pty.onExit → exit frame + close(1000) on its socket.
       try {
         session.pty.kill("SIGHUP");
       } catch {
         // Already dead.
+        session.model.dispose();
       }
       // Remove immediately so the inventory reflects the kill on the next
       // request; pty.onExit's own delete is an idempotent no-op. Metrics
@@ -342,7 +366,7 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
         if (parsed && typeof parsed === "object" && (parsed as { type?: unknown }).type === "attach-ready") {
           const cols = Math.floor(Number((parsed as { cols?: unknown }).cols));
           const rows = Math.floor(Number((parsed as { rows?: unknown }).rows));
-          if (!socket.data.ready && Number.isFinite(cols) && Number.isFinite(rows)
+          if (!socket.data.ready && !socket.data.attaching && Number.isFinite(cols) && Number.isFinite(rows)
             && cols > 0 && rows > 0 && cols <= 1000 && rows <= 1000) {
             void completeAttach(session, socket, cols, rows);
           }
@@ -356,8 +380,9 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
             session.cols = cols;
             session.rows = rows;
             try {
+              const modelResize = session.model.resize(cols, rows);
               session.pty.resize(cols, rows);
-              void session.model.resize(cols, rows);
+              void modelResize.catch(() => undefined);
             } catch {
               // Resize can fail if the PTY just exited; benign.
             }
@@ -394,6 +419,7 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
         // the session, so kill the PTY and free the sessionId eagerly.
         // Metrics accounting stays with pty.onExit (which fires on the
         // SIGHUP) so reaped_total counts each PTY exactly once.
+        session.closing = true;
         try {
           session.pty.kill("SIGHUP");
         } catch {
@@ -415,11 +441,13 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
 
     disposeAll() {
       for (const session of sessions.values()) {
+        session.closing = true;
         try {
           session.pty.kill("SIGHUP");
-          session.model.dispose();
         } catch {
           // Already dead.
+        } finally {
+          session.model.dispose();
         }
       }
       sessions.clear();

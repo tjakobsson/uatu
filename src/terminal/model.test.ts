@@ -66,6 +66,14 @@ describe("TerminalModel reconstruction", () => {
     source.dispose();
   });
 
+  test("restores the most recently selected mouse encoding", async () => {
+    const source = new TerminalModel(30, 6);
+    source.write(new TextEncoder().encode("\x1b[?1006h\x1b[?1005h\x1b[?1006h"));
+    const serialized = new TextDecoder().decode(await source.serialize());
+    expect(serialized.lastIndexOf("\x1b[?1006h")).toBeGreaterThan(serialized.lastIndexOf("\x1b[?1005h"));
+    source.dispose();
+  });
+
   test("reconstructs after resizing from a large to a small grid", async () => {
     const source = new TerminalModel(120, 40);
     source.write(new TextEncoder().encode("line one\r\nline two\r\nline three"));

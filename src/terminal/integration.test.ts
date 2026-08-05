@@ -427,6 +427,13 @@ describe("handleTerminalSessionsRoute", () => {
       origin: true,
     }, stubTerminal(false))) as Response;
     expect(missing.status).toBe(404);
+
+    const malformed = (await run("/api/terminal/sessions/%ZZ", {
+      method: "DELETE",
+      cookie: true,
+      origin: true,
+    })) as Response;
+    expect(malformed.status).toBe(400);
   });
 
   it("creates a session with validated dimensions and rejects cross-origin creation", async () => {

@@ -101,6 +101,20 @@ describe("PersonalWorkspaceStateStore", () => {
     expect(reloaded.get("tobias", "uatu")).toEqual(store.get("tobias", "uatu"));
   });
 
+  test("treats prototype-named users and workspaces as ordinary identities", async () => {
+    const { store, filePath } = await tempStore();
+    await store.patch("__proto__", "constructor", { follow: false });
+    await store.patch("constructor", "__proto__", { filesFilter: "changed" });
+
+    expect(store.get("__proto__", "constructor")).toEqual({ version: 1, follow: false });
+    expect(store.get("constructor", "__proto__")).toEqual({ version: 1, filesFilter: "changed" });
+
+    const reloaded = new PersonalWorkspaceStateStore(filePath);
+    await reloaded.load();
+    expect(reloaded.get("__proto__", "constructor")).toEqual({ version: 1, follow: false });
+    expect(reloaded.get("constructor", "__proto__")).toEqual({ version: 1, filesFilter: "changed" });
+  });
+
   test("null clears one field and workspace removal clears every user only there", async () => {
     const { store } = await tempStore();
     await store.patch("tobias", "uatu", { documentPath: "README.md", follow: false });
@@ -137,6 +151,22 @@ describe("PersonalWorkspaceStateStore", () => {
       throw new Error("registry disk full");
     })).rejects.toThrow(/registry disk full/);
     expect(store.get("tobias", "uatu")).toEqual({ version: 1, documentPath: "README.md" });
+  });
+
+  test("failed journal cleanup does not restore state after registry removal", async () => {
+    const { store, filePath } = await tempStore();
+    await store.patch("tobias", "uatu", { documentPath: "README.md" });
+    const cleanupTemp = `${filePath}.${process.pid}.3.tmp`;
+
+    await expect(store.forgetWorkspace("uatu", async () => {
+      await mkdir(cleanupTemp);
+      return true;
+    })).rejects.toThrow();
+    expect(store.get("tobias", "uatu")).toEqual({ version: 1 });
+
+    await rm(cleanupTemp, { recursive: true });
+    await store.recoverPendingForgets(() => false);
+    expect(store.get("tobias", "uatu")).toEqual({ version: 1 });
   });
 
   test("pending forget recovery restores or commits according to the registry", async () => {

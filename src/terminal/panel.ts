@@ -646,6 +646,7 @@ export function setupTerminalPanel(
         body: JSON.stringify({ cols: 80, rows: 24 }),
       });
       if (response.status === 401) renderTerminalAuth();
+      if (response.status === 403) renderTerminalOriginRejected();
       return response.ok ? await response.json() as TerminalSessionInfo : null;
     } catch {
       return null;
@@ -700,8 +701,24 @@ export function setupTerminalPanel(
         // The HttpOnly cookie is sufficient when sessionStorage is unavailable.
       }
       wrap.remove();
-      void addPane();
+      void addPaneInteractive();
     });
+  }
+
+  function renderTerminalOriginRejected(): void {
+    if (panesContainer!.querySelector(".terminal-origin-rejected")) return;
+    const wrap = document.createElement("div");
+    wrap.className = "terminal-pane terminal-origin-rejected";
+    const heading = document.createElement("p");
+    heading.className = "terminal-origin-rejected-heading";
+    heading.textContent = "Terminal blocked for this address";
+    const help = document.createElement("p");
+    help.className = "terminal-origin-rejected-help";
+    help.textContent =
+      `Your credentials are valid, but ${window.location.host} did not pass the terminal origin check. `
+      + "Open uatu through localhost or 127.0.0.1 on the same port.";
+    wrap.append(heading, help);
+    panesContainer!.append(wrap);
   }
 
   async function killSessionRemote(id: string): Promise<boolean> {

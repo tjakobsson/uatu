@@ -244,6 +244,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
   let searchResultsListener: ((result: { index: number; total: number }) => void) | null = null;
   let socket: WebSocket | null = null;
   let attached = false;
+  let protocolReady = false;
   let resizeObserver: ResizeObserver | null = null;
   // Set to true when the caller invokes `detach()` so the close-event
   // handler can distinguish "the panel hid me" from "the server hung up".
@@ -274,6 +275,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
   function connect(token: string | null): void {
     if (attached) return;
     detachInitiated = false;
+    protocolReady = false;
     delete options.container.dataset.terminalReady;
 
     term = new Terminal({
@@ -320,7 +322,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
       // from key works everywhere and emits the same bytes on desktop.
       const ctrlByte = synthesizeCtrlByte(event);
       if (ctrlByte !== null) {
-        if (readyAccepted && socket && socket.readyState === WebSocket.OPEN) {
+        if (protocolReady && socket && socket.readyState === WebSocket.OPEN) {
           socket.send(new TextEncoder().encode(ctrlByte));
         }
         event.preventDefault();
@@ -366,7 +368,6 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     // user-initiated resizes.
     let openDone = false;
     let readySent = false;
-    let readyAccepted = false;
     let lastCols = 0;
     let lastRows = 0;
 
@@ -449,9 +450,9 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
         return;
       }
       const bytes = new Uint8Array(event.data as ArrayBuffer);
-      if (!readyAccepted) {
+      if (!protocolReady) {
         term.write(bytes, () => {
-          readyAccepted = true;
+          protocolReady = true;
           options.container.dataset.terminalReady = "true";
         });
         return;
@@ -504,7 +505,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
 
     const encoder = new TextEncoder();
     term.onData(data => {
-      if (!readyAccepted || !socket || socket.readyState !== WebSocket.OPEN) return;
+      if (!protocolReady || !socket || socket.readyState !== WebSocket.OPEN) return;
       socket.send(encoder.encode(data));
     });
 
@@ -536,7 +537,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
       if (term.cols !== lastCols || term.rows !== lastRows) {
         lastCols = term.cols;
         lastRows = term.rows;
-        if (readyAccepted && socket && socket.readyState === WebSocket.OPEN) {
+        if (protocolReady && socket && socket.readyState === WebSocket.OPEN) {
           socket.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
         }
       }
@@ -561,6 +562,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
       // Already closing.
     }
     socket = null;
+    protocolReady = false;
     try {
       term?.dispose();
     } catch {
@@ -650,6 +652,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
       // Already closing.
     }
     socket = null;
+    protocolReady = false;
     try {
       term?.dispose();
     } catch {
@@ -710,6 +713,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
       // Already closing.
     }
     socket = null;
+    protocolReady = false;
     try {
       term?.dispose();
     } catch {
@@ -735,6 +739,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
       // Already closing.
     }
     socket = null;
+    protocolReady = false;
     try {
       term?.dispose();
     } catch {
@@ -891,7 +896,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     fit: fitNow,
     focus: focusNow,
     sendInput(data: string) {
-      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      if (!protocolReady || !socket || socket.readyState !== WebSocket.OPEN) return;
       socket.send(new TextEncoder().encode(data));
     },
     isAttached: () => attached,

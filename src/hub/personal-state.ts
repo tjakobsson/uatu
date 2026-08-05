@@ -23,6 +23,38 @@ type PersistedState = {
   pendingForgets: Record<string, Record<string, PersonalWorkspaceState>>;
 };
 
+function emptyDictionary<T>(): Record<string, T> {
+  return Object.create(null) as Record<string, T>;
+}
+
+function cloneRecords(
+  source: PersistedState["records"],
+): PersistedState["records"] {
+  const clone = emptyDictionary<Record<string, PersonalWorkspaceState>>();
+  for (const [user, workspaces] of Object.entries(source)) {
+    const userRecords = emptyDictionary<PersonalWorkspaceState>();
+    for (const [workspaceId, state] of Object.entries(workspaces)) {
+      userRecords[workspaceId] = { ...state };
+    }
+    clone[user] = userRecords;
+  }
+  return clone;
+}
+
+function clonePendingForgets(
+  source: PersistedState["pendingForgets"],
+): PersistedState["pendingForgets"] {
+  const clone = emptyDictionary<Record<string, PersonalWorkspaceState>>();
+  for (const [workspaceId, users] of Object.entries(source)) {
+    const workspaceRecords = emptyDictionary<PersonalWorkspaceState>();
+    for (const [user, state] of Object.entries(users)) {
+      workspaceRecords[user] = { ...state };
+    }
+    clone[workspaceId] = workspaceRecords;
+  }
+  return clone;
+}
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const PATCH_FIELDS = new Set([
   "version",
@@ -131,8 +163,8 @@ function applyPatch(
 }
 
 export class PersonalWorkspaceStateStore {
-  private records: PersistedState["records"] = {};
-  private pendingForgets: PersistedState["pendingForgets"] = {};
+  private records: PersistedState["records"] = emptyDictionary();
+  private pendingForgets: PersistedState["pendingForgets"] = emptyDictionary();
   private mutationChain: Promise<unknown> = Promise.resolve();
   private saveCounter = 0;
 
@@ -150,8 +182,8 @@ export class PersonalWorkspaceStateStore {
       text = await fs.readFile(this.filePath, "utf8");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        this.records = {};
-        this.pendingForgets = {};
+        this.records = emptyDictionary();
+        this.pendingForgets = emptyDictionary();
         return;
       }
       throw error;
@@ -174,12 +206,12 @@ export class PersonalWorkspaceStateStore {
       || Array.isArray(envelope.records)
     ) throw new Error(`personal workspace state is corrupt: ${this.filePath}`);
 
-    const records: PersistedState["records"] = {};
+    const records = emptyDictionary<Record<string, PersonalWorkspaceState>>();
     for (const [user, workspaces] of Object.entries(envelope.records as Record<string, unknown>)) {
       if (!workspaces || typeof workspaces !== "object" || Array.isArray(workspaces)) {
         throw new Error(`personal workspace state is corrupt: ${this.filePath}`);
       }
-      records[user] = {};
+      records[user] = emptyDictionary();
       for (const [workspaceId, candidate] of Object.entries(workspaces as Record<string, unknown>)) {
         const state = parseState(candidate);
         if (!state) throw new Error(`personal workspace state is corrupt: ${this.filePath}`);
@@ -202,9 +234,9 @@ export class PersonalWorkspaceStateStore {
   ): Promise<PersonalWorkspaceState> {
     const patch = parsePersonalWorkspaceStatePatch(value);
     return this.enqueueMutation(async () => {
-      const previous = structuredClone(this.records);
+      const previous = cloneRecords(this.records);
       const next = applyPatch(this.get(user, workspaceId), patch);
-      this.records[user] ??= {};
+      this.records[user] ??= emptyDictionary();
       this.records[user]![workspaceId] = next;
       try {
         await this.save();
@@ -218,7 +250,7 @@ export class PersonalWorkspaceStateStore {
 
   removeWorkspace(workspaceId: string): Promise<boolean> {
     return this.enqueueMutation(async () => {
-      const previous = structuredClone(this.records);
+      const previous = cloneRecords(this.records);
       let removed = false;
       for (const [user, workspaces] of Object.entries(this.records)) {
         if (workspaceId in workspaces) {
@@ -248,11 +280,6 @@ export class PersonalWorkspaceStateStore {
       this.deleteWorkspaceRecords(workspaceId);
       try {
         await this.save();
-        const removed = await removeRegistryEntry();
-        if (!removed) throw new Error(`unknown workspace: ${workspaceId}`);
-        delete this.pendingForgets[workspaceId];
-        await this.save();
-        return true;
       } catch (error) {
         this.restoreWorkspaceRecords(workspaceId, removedRecords);
         delete this.pendingForgets[workspaceId];
@@ -263,14 +290,39 @@ export class PersonalWorkspaceStateStore {
         }
         throw error;
       }
+      try {
+        const removed = await removeRegistryEntry();
+        if (!removed) throw new Error(`unknown workspace: ${workspaceId}`);
+      } catch (error) {
+        this.restoreWorkspaceRecords(workspaceId, removedRecords);
+        delete this.pendingForgets[workspaceId];
+        try {
+          await this.save();
+        } catch (rollbackError) {
+          throw new AggregateError([error, rollbackError], `failed to forget '${workspaceId}' and roll back personal state`);
+        }
+        throw error;
+      }
+
+      delete this.pendingForgets[workspaceId];
+      try {
+        await this.save();
+      } catch (error) {
+        // Registry deletion is already committed. Keep the journal in memory
+        // so a later save or restart can finish the forget without resurrecting
+        // records for a workspace that no longer exists.
+        this.pendingForgets[workspaceId] = removedRecords;
+        throw error;
+      }
+      return true;
     });
   }
 
   recoverPendingForgets(workspaceExists: (workspaceId: string) => boolean): Promise<void> {
     return this.enqueueMutation(async () => {
       if (Object.keys(this.pendingForgets).length === 0) return;
-      const previousRecords = structuredClone(this.records);
-      const previousPending = structuredClone(this.pendingForgets);
+      const previousRecords = cloneRecords(this.records);
+      const previousPending = clonePendingForgets(this.pendingForgets);
       for (const [workspaceId, removedRecords] of Object.entries(this.pendingForgets)) {
         if (workspaceExists(workspaceId)) {
           this.restoreWorkspaceRecords(workspaceId, removedRecords);
@@ -291,12 +343,12 @@ export class PersonalWorkspaceStateStore {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
       throw new Error(`personal workspace state is corrupt: ${this.filePath}`);
     }
-    const pending: PersistedState["pendingForgets"] = {};
+    const pending = emptyDictionary<Record<string, PersonalWorkspaceState>>();
     for (const [workspaceId, users] of Object.entries(value as Record<string, unknown>)) {
       if (!users || typeof users !== "object" || Array.isArray(users)) {
         throw new Error(`personal workspace state is corrupt: ${this.filePath}`);
       }
-      pending[workspaceId] = {};
+      pending[workspaceId] = emptyDictionary();
       for (const [user, candidate] of Object.entries(users as Record<string, unknown>)) {
         const state = parseState(candidate);
         if (!state) throw new Error(`personal workspace state is corrupt: ${this.filePath}`);
@@ -307,7 +359,7 @@ export class PersonalWorkspaceStateStore {
   }
 
   private collectWorkspaceRecords(workspaceId: string): Record<string, PersonalWorkspaceState> {
-    const collected: Record<string, PersonalWorkspaceState> = {};
+    const collected = emptyDictionary<PersonalWorkspaceState>();
     for (const [user, workspaces] of Object.entries(this.records)) {
       const state = workspaces[workspaceId];
       if (state) collected[user] = { ...state };
@@ -327,7 +379,7 @@ export class PersonalWorkspaceStateStore {
     records: Record<string, PersonalWorkspaceState>,
   ): void {
     for (const [user, state] of Object.entries(records)) {
-      this.records[user] ??= {};
+      this.records[user] ??= emptyDictionary();
       this.records[user]![workspaceId] = { ...state };
     }
   }

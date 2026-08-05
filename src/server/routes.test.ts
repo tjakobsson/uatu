@@ -9,7 +9,7 @@ const stubSession = () => {
   throw new Error("session should not be touched by asset routes");
 };
 
-function buildFontTestRoutes(basePath?: string) {
+function buildFontTestRoutes(basePath?: string, getSession: () => never = stubSession) {
   const repoRoot = path.resolve(import.meta.dir, "..", "..");
   return buildRoutes({
     basePath,
@@ -28,7 +28,7 @@ function buildFontTestRoutes(basePath?: string) {
         notices: path.join(repoRoot, "src/assets/fonts/NOTICES.md"),
       },
     },
-    getSession: stubSession as never,
+    getSession,
     debug: false,
     getMetricsSnapshot: () => ({}),
   });
@@ -121,6 +121,27 @@ describe("buildRoutes — base-path prefixing", () => {
     const manifest = (await response.json()) as { start_url: string; scope: string };
     expect(manifest.start_url).toBe("/");
     expect(manifest.scope).toBe("/");
+  });
+});
+
+describe("buildRoutes — watch context", () => {
+  test("lets the session normalize a stale file scope", async () => {
+    let receivedScope: unknown;
+    const getSession = (() => ({
+      getStatePayload: (_changedId: null, context: { scope: unknown }) => {
+        receivedScope = context.scope;
+        return { scope: { kind: "folder" } };
+      },
+    })) as never;
+    const routes = buildFontTestRoutes(undefined, getSession);
+    const handler = routes["/api/state"] as { GET: (request: Request) => Response };
+    const response = handler.GET(new Request(
+      "http://127.0.0.1/api/state?scope=file&documentId=%2Fremoved%2FREADME.md",
+    ));
+
+    expect(response.status).toBe(200);
+    expect(receivedScope).toEqual({ kind: "file", documentId: "/removed/README.md" });
+    expect(await response.json()).toEqual({ scope: { kind: "folder" } });
   });
 });
 

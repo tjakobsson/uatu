@@ -28,6 +28,7 @@ export class TerminalModel {
   }
 
   write(bytes: Uint8Array): void {
+    if (this.disposed) return;
     const copy = new Uint8Array(bytes);
     this.trackUnserializedModes(copy);
     this.writeQueue = this.writeQueue.then(() => new Promise<void>(resolve => {
@@ -35,9 +36,12 @@ export class TerminalModel {
     }));
   }
 
-  async resize(cols: number, rows: number): Promise<void> {
-    await this.drain();
-    this.terminal.resize(cols, rows);
+  resize(cols: number, rows: number): Promise<void> {
+    if (this.disposed) return Promise.resolve();
+    this.writeQueue = this.writeQueue.then(() => {
+      if (!this.disposed) this.terminal.resize(cols, rows);
+    });
+    return this.writeQueue;
   }
 
   drain(): Promise<void> {
@@ -60,6 +64,9 @@ export class TerminalModel {
       for (const mode of match[1]!.split(";")) {
         if (mode === "25") this.cursorVisible = match[2] === "h";
         if (mode === "1005" || mode === "1006" || mode === "1015") {
+          // Preserve the latest protocol-selection order when an application
+          // switches back to an earlier encoding.
+          this.mouseEncodings.delete(mode);
           this.mouseEncodings.set(mode, match[2] === "h");
         }
       }
@@ -83,7 +90,12 @@ export class TerminalModel {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    this.serializer.dispose();
-    this.terminal.dispose();
+    // Existing xterm writes complete asynchronously. Queue teardown behind
+    // them so shell-exit cleanup cannot dispose the parser out from under a
+    // final output callback.
+    this.writeQueue = this.writeQueue.catch(() => undefined).then(() => {
+      this.serializer.dispose();
+      this.terminal.dispose();
+    });
   }
 }
