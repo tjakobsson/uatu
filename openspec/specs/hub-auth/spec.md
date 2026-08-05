@@ -23,19 +23,23 @@ Outside local mode, the hub SHALL authenticate browsers before serving the dashb
 - **AND** further attempts are rate-limited, keyed to the requesting client — behind a loopback fronting proxy the trusted hop of the forwarded-address header (the last entry, the one the immediate proxy appended) identifies the client, so one remote attacker cannot exhaust a bucket shared by every user
 
 ### Requirement: Local mode bypasses authentication on loopback
-When the hub runs in local mode it SHALL treat every request as an implicit authenticated local identity: no session cookie is issued or checked, the login and logout routes SHALL NOT be served (404), and login rate limiting is inert. Local mode SHALL be usable only with a loopback bind (enforced at startup per hub-service); the trust model is the same as `uatu serve`'s loopback sessions — any process that can reach loopback already owns the account. Non-local hubs MUST be entirely unaffected: the presence of the local-mode code path MUST NOT weaken the gate when `--local` is not set.
+When the Hub runs in local mode it SHALL treat every request as the implicit authenticated identity named `local`: no session cookie is issued or checked, login and logout routes SHALL remain absent, and login rate limiting is inert. The stable identity SHALL own local personal workspace state across Hub restarts. Local mode SHALL remain loopback-only and MUST NOT weaken authentication outside local mode.
 
 #### Scenario: Local mode serves without credentials
-- **WHEN** a request without any cookie reaches a `--local` hub's dashboard, state API, or a proxied session route
-- **THEN** it is served as the implicit local user
+- **WHEN** a request without a cookie reaches a local Hub route
+- **THEN** it is served as the implicit `local` user
 
-#### Scenario: Login routes are absent in local mode
-- **WHEN** a request targets `/login` or `/logout` on a `--local` hub
+#### Scenario: Local personal state has stable ownership
+- **WHEN** local mode saves personal workspace state, restarts, and serves that workspace again
+- **THEN** the state is resolved for the same `local` identity
+
+#### Scenario: Login routes remain absent
+- **WHEN** a request targets `/login` or `/logout` in local mode
 - **THEN** the hub responds 404
 
-#### Scenario: A configured hub still gates every route
-- **WHEN** a hub starts from a configuration file without `--local`
-- **THEN** unauthenticated requests are rejected exactly as before local mode existed
+#### Scenario: Configured Hub still gates every route
+- **WHEN** the Hub starts outside local mode
+- **THEN** configured-user authentication remains required
 
 ### Requirement: Native clients can authenticate without a browser
 The login endpoint SHALL accept an `application/json` body (`{name, password}`) in addition to the form-encoded body, and SHALL succeed for requests that carry no `Origin` header (native HTTP clients), issuing the same signed session cookie in both cases. Unauthenticated requests to API routes SHALL receive a JSON 401 (never an HTML redirect), so a native client can distinguish "signed out" from other failures. These behaviors exist today; this requirement pins them as a compatibility contract for the desktop hub client.

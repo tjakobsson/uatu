@@ -6,9 +6,19 @@
 // side effects stay at the call sites.
 
 import { appState, type PreviewMode } from "./state";
+import { persistPersonalWorkspaceState } from "./personal-state";
 
 export function setSelectedId(next: string | null): void {
   appState.selectedId = next;
+  if (next) {
+    for (const root of appState.roots) {
+      const document = root.docs.find(candidate => candidate.id === next);
+      if (document) {
+        persistPersonalWorkspaceState({ documentPath: document.relativePath });
+        break;
+      }
+    }
+  }
 }
 
 export function setPreviewMode(next: PreviewMode): void {

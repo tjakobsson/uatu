@@ -82,38 +82,37 @@ The browser URL pathname SHALL track the document currently rendered in the prev
 - **AND** the URL remains parseable and round-trips back to the original relative path on decode
 
 ### Requirement: Open a document by direct URL
-The browser UI SHALL initialize on the document identified by `location.pathname` when the SPA boots. When `location.pathname` is `/`, the system MUST select the server-provided default document (today's behavior). When `location.pathname` resolves to a known non-binary document under a watched root, the system MUST select that document as the initial active preview, overriding the server-provided `defaultDocumentId`. When the watch session was started against a single file (`uatu watch some-file.md`) and `location.pathname` resolves to a document that exists but is outside that single-file watch scope, the SPA MUST render an empty-preview state explaining that the session is scoped to a single file rather than silently selecting the wrong document or auto-widening the scope. When `location.pathname` does not resolve to any known document under any watched root, the server MUST return a 404 via the static-file fallback (the SPA shell is not served — see "Serve adjacent files from watched roots as static content"); the SPA's "document not found" empty-preview state instead handles in-session cases where a previously-known document becomes unresolvable, covered under "Navigate document history with the browser back and forward buttons". When `location.hash` is present, the system MUST scroll the matching element into view after the document loads, mirroring the existing in-page anchor handler's `user-content-` prefix logic.
+The browser UI SHALL initialize on the document or preview identified by the explicit URL when the SPA boots. When the workspace-root URL has no explicit preview query, the system MUST select a valid document path from the current user's personal workspace state, falling back to the server-provided default document when no valid saved path exists. When `location.pathname` resolves to a known non-binary document under a watched root, the system MUST select that document as the initial active preview, overriding both personal state and `defaultDocumentId`. Explicit commit-preview and review-score query parameters likewise MUST override a saved document. When the watch session was started against a single file and an explicit path resolves outside that scope, the SPA MUST render the existing scoped-session empty state. Unknown paths SHALL follow the existing static-fallback/SPA behavior. A fragment SHALL scroll the matching element into view after render.
 
-#### Scenario: Navigating directly to a document URL renders that document
-- **WHEN** a user navigates the browser to `http://127.0.0.1:NNNN/guides/setup.md` (typed URL, bookmark, or shared link)
-- **AND** `guides/setup.md` is a known non-binary document under a watched root
-- **THEN** the SPA boots with `guides/setup.md` as the active preview
-- **AND** the rendered preview is the Markdown rendering of `guides/setup.md`, not its raw source bytes
-- **AND** the sidebar selection follows the active document
-
-#### Scenario: Refreshing the page restores the active document
-- **WHEN** a user has navigated to a document and the URL pathname reflects it
-- **AND** the user refreshes the page
-- **THEN** the SPA boots and renders the same document as before the refresh
+#### Scenario: Root URL restores the personal document
+- **WHEN** a user opens the workspace root and personal state names `guides/setup.md`
+- **AND** that document is currently viewable
+- **THEN** the SPA's initial preview is `guides/setup.md`
 - **AND** the sidebar selection matches
 
-#### Scenario: A direct link to a document includes a fragment
-- **WHEN** a user navigates to `http://127.0.0.1:NNNN/guides/setup.md#installation`
-- **AND** the document contains a heading whose sanitized id is `user-content-installation`
-- **THEN** the document loads
-- **AND** the page scrolls to the matching heading after render
+#### Scenario: Root URL falls back to the session default
+- **WHEN** a user opens the workspace root with no valid saved document
+- **THEN** the SPA selects the server-provided default document
 
-#### Scenario: A direct link to an unknown path returns 404
-- **WHEN** a user navigates the browser to a path that does not resolve to any document under a watched root
-- **THEN** the server responds with 404 via the static-file fallback
-- **AND** the SPA shell is NOT served (no empty-preview state for unresolvable paths on direct-link arrival — see design D4)
+#### Scenario: Navigating directly to a document URL renders that document
+- **WHEN** a user navigates directly to `guides/setup.md`
+- **AND** personal state names a different document
+- **THEN** the SPA renders `guides/setup.md`
+- **AND** the sidebar selection follows the explicit URL
+
+#### Scenario: Refreshing an explicit document preserves it
+- **WHEN** the current URL identifies a document and the user refreshes
+- **THEN** the SPA renders that URL's document rather than a different saved document
+
+#### Scenario: Explicit preview query wins over saved document
+- **WHEN** the root URL contains a resolvable commit-preview or review-score query
+- **THEN** the requested preview is rendered
+- **AND** no saved document replaces it
 
 #### Scenario: A direct link outside a single-file watch scope is rejected
-- **WHEN** the watch session was started with `uatu watch README.md`
-- **AND** a user navigates to `http://127.0.0.1:NNNN/guides/setup.md`
-- **THEN** the SPA renders an empty-preview state explaining the session is scoped to `README.md`
-- **AND** the active preview is NOT switched to `guides/setup.md`
-- **AND** the sidebar still shows only the scoped file
+- **WHEN** the session was started for one file and an explicit URL names another document
+- **THEN** the SPA renders the single-file-scope explanation
+- **AND** does not widen the session
 
 ### Requirement: Server returns the SPA shell for unknown HTML-preferring navigations
 The server's navigation fallback SHALL distinguish HTML-preferring navigation requests (i.e., a top-level browser navigation whose `Accept` header expresses a preference for `text/html`) from non-HTML-preferring requests (e.g., `curl` with `Accept: */*`, sub-resource fetches with `Accept: image/*`). For an HTML-preferring request whose path does NOT resolve to a known viewable document AND does NOT match an existing static file under any watched root, the server SHALL return the SPA shell (the same HTML body it returns for known viewable doc paths) instead of a `404 Not Found` response. The SPA then renders the in-app "Document not found" empty state from its own boot path. For non-HTML-preferring requests at unknown paths, the server's behavior is unchanged — `404 Not Found`.
@@ -290,4 +289,3 @@ When a user clicks an anchor whose `href` begins with `#` inside the rendered pr
 - **AND** the user clicks a fragment-only anchor inside the active document
 - **THEN** follow mode remains enabled
 - **AND** subsequent file-system changes can still auto-switch the preview
-

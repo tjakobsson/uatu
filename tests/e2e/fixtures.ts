@@ -129,6 +129,10 @@ export async function standardBeforeEach(page: Page, request: APIRequestContext)
     await page.locator("#follow-toggle").click();
   }
   await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
+  // Semantic persistence coalesces writes for 50ms. Many tests reset the
+  // harness again immediately after this baseline; let the baseline PATCH
+  // settle first so it cannot repopulate state after that later reset.
+  await page.waitForTimeout(75);
 }
 
 export async function waitForPreviewToSettle(page: Page): Promise<void> {

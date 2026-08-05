@@ -64,6 +64,19 @@ export class SessionManager {
     return next;
   }
 
+  runExclusive<T>(workspaceId: string, operation: () => Promise<T>): Promise<T> {
+    return this.enqueue(workspaceId, operation);
+  }
+
+  runWhileStopped<T>(workspaceId: string, operation: () => Promise<T>): Promise<T> {
+    return this.enqueue(workspaceId, async () => {
+      if (this.running.has(workspaceId)) {
+        throw new Error(`stop the session for '${workspaceId}' before forgetting it`);
+      }
+      return operation();
+    });
+  }
+
   // Starts (or joins the pending start of) the session for a registered
   // workspace.
   start(workspaceId: string): Promise<RunningSession> {

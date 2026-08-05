@@ -5,7 +5,8 @@
 // per-Mode default map already live in `shell/state.ts`.
 
 import { primaryReviewBaseLabel } from "./change-overview";
-import { appState, type FilesPaneFilter, writeFilesPaneFilterPreference } from "../shell/state";
+import { appState, type FilesPaneFilter } from "../shell/state";
+import { persistPersonalWorkspaceState } from "../shell/personal-state";
 import { renderSidebar } from "./shell";
 
 const filesPaneFilterAllButtonMaybe = document.querySelector<HTMLButtonElement>("#files-pane-filter-all");
@@ -22,7 +23,7 @@ const filesPaneFilterChangedButton: HTMLButtonElement = filesPaneFilterChangedBu
 // hydration and the chip handler both go through here.
 export function setFilesPaneFilter(next: FilesPaneFilter): void {
   appState.filesPaneFilter = next;
-  writeFilesPaneFilterPreference(next);
+  persistPersonalWorkspaceState({ filesFilter: next });
 }
 
 export function applyFilesPaneFilter(next: FilesPaneFilter): void {

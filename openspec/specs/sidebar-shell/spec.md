@@ -248,49 +248,37 @@ The sidebar SHALL scroll within its own container and MUST NOT scroll together w
 
 ### Requirement: Provide a Files-pane filter chip with single persisted state
 
-The browser UI SHALL render a segmented binary chip in the `Files` pane header that toggles between `All` and `Changed`. The chip MUST be visually positioned beside the existing file count display so the relationship between filter state and the count is legible. The chip's default state on first boot SHALL be `All`. The chip's selected state SHALL persist across reloads in the same browser for that origin under a single storage key (no per-Mode partitioning).
+The browser UI SHALL render the existing segmented `All`/`Changed` chip beside the Files count. Its default SHALL be `All`; its selected value SHALL persist as personal workspace state and follow the user to another client. Changing it SHALL affect only the current client's rendered Files path set and future resume state, not another open client, Follow, pane visibility, or active selection. Existing empty-state behavior for empty, non-git, and unavailable change sets SHALL remain unchanged.
 
-When the filter is `Changed` and the union `reviewLoad.changedFiles ∪ reviewLoad.ignoredFiles` does not intersect any path the tree would otherwise render, the `Files` pane body SHALL render an empty-state message in place of the tree. The empty-state copy SHALL name the resolved review base (e.g. `No changes vs origin/main`) when `reviewLoad.status === "available"`. When `reviewLoad.status` is `"non-git"` or `"unavailable"`, the empty-state copy SHALL state that the Changed filter is unavailable because no git repository is present. The empty state MUST disappear and the tree MUST return as soon as the filter is toggled to `All` OR the change set becomes non-empty.
+#### Scenario: Default state is All
+- **WHEN** the user has no saved Files filter
+- **THEN** the chip selects `All`
+- **AND** the full path set renders
 
-The chip SHALL be operable by mouse and keyboard activation following the existing pane-control conventions in this capability. The chip MUST NOT modify Follow state, pane visibility, or any other sibling control; it affects only the rendered path set in the `Files` pane.
+#### Scenario: Filter follows the user to another browser
+- **WHEN** a user selects `Changed`
+- **AND** later opens the workspace root in another browser
+- **THEN** the new client restores `Changed`
 
-#### Scenario: Chip renders in the Files-pane header beside the file count
-- **WHEN** the `Files` pane is rendered
-- **THEN** a segmented chip with options `All` and `Changed` is visible in the pane header
-- **AND** the chip is positioned beside the file count display
+#### Scenario: Open clients retain independent filters
+- **WHEN** two clients are open and one changes its Files filter
+- **THEN** the other client's rendered tree does not change
 
-#### Scenario: Default state is `All` on first boot
-- **WHEN** the user opens uatu for the first time (no persisted filter state)
-- **THEN** the chip's selected state is `All`
-- **AND** the tree renders the full path set on first paint
+#### Scenario: Empty state names the review base
+- **WHEN** the filter is `Changed`, review data is available, and no changed path intersects the tree
+- **THEN** the Files pane shows an empty state naming the resolved review base
 
-#### Scenario: Filter state persists across reloads
-- **WHEN** the user toggles the chip to `Changed`
-- **AND** reloads the page
-- **THEN** the chip reads `Changed` and the tree is filtered
+#### Scenario: Non-git empty state explains unavailability
+- **WHEN** the filter is `Changed` and review data is non-git or unavailable
+- **THEN** the Files pane explains that the Changed filter is unavailable
 
-#### Scenario: Empty state names the review base when the change set is empty
-- **WHEN** the filter is `Changed`
-- **AND** `reviewLoad.status === "available"`
-- **AND** `reviewLoad.changedFiles ∪ reviewLoad.ignoredFiles` is empty (or intersects no tree paths)
-- **THEN** the `Files` pane body renders an empty-state message naming the resolved review base (e.g. `No changes vs origin/main`)
-- **AND** the tree itself is not rendered
+#### Scenario: Toggling to All clears the empty state
+- **WHEN** a Changed-filter empty state is visible and the user selects `All`
+- **THEN** the full tree returns
 
-#### Scenario: Empty state explains unavailability in non-git contexts
-- **WHEN** the filter is `Changed`
-- **AND** `reviewLoad.status` is `"non-git"` or `"unavailable"`
-- **THEN** the `Files` pane body renders an empty-state message stating that the Changed filter is unavailable because no git repository is present
-
-#### Scenario: Toggling to `All` clears the empty state
-- **WHEN** the empty state is being shown because the change set is empty under filter `Changed`
-- **AND** the user toggles the chip to `All`
-- **THEN** the empty state is removed
-- **AND** the full tree renders
-
-#### Scenario: Chip does NOT alter Follow-mode state
-- **WHEN** the user toggles the chip
-- **THEN** the Follow-mode toggle state is unchanged
-- **AND** the active document selection is unchanged (unless follow-mode subsequently auto-switches for unrelated reasons)
+#### Scenario: Chip does not alter Follow or selection
+- **WHEN** the user toggles the Files filter
+- **THEN** Follow and active document selection remain unchanged
 
 ### Requirement: Pane headers render title and metadata without visual overlap
 Every sidebar pane header SHALL render its title (`<h2>`) and its metadata block (file count, filter chip, and any action buttons) without visual overlap at every supported sidebar width. When the metadata and action blocks together would otherwise crowd the title to the point of overlap, the title MUST clip with an ellipsis rather than paint into the metadata block's coordinate space. The metadata and action blocks MUST NOT shrink at any width — they hold the time-varying information the user reads at a glance. The horizontal gap between title and metadata MUST be non-zero so the layout remains visually parsable even when the title is heavily clipped.

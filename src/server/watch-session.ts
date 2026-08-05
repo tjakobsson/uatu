@@ -1,6 +1,5 @@
 // The live-reload engine: owns the chokidar watcher, the debounced rescan +
-// git-snapshot refresh cycle, the SSE subscriber set, and the server-session
-// state shared across clients (scope, compare target, terminal token).
+// git-snapshot refresh cycle, contextual SSE subscribers, and terminal token.
 
 import chokidar from "chokidar";
 import path from "node:path";
@@ -24,6 +23,10 @@ import {
   type TerminalConfigPayload,
 } from "../shared/types";
 import { BUILD, formatBuildIdentifier } from "../shared/version";
+import {
+  DEFAULT_WATCH_CONTEXT,
+  type WatchContext,
+} from "../shared/watch-context";
 import { DEFAULT_RESPECT_GITIGNORE, scanRoots, type WatchEntry } from "./roots";
 
 export const BUILD_SUMMARY: BuildSummary = {
@@ -163,8 +166,6 @@ export function createWatchSession(
   const monoConfig: MonoConfigPayload | undefined = options.monoConfig;
   const terminalToken = createTerminalToken();
   const metrics = options.metrics;
-  let roots: RootGroup[] = [];
-  let repositories: RepositoryReviewSnapshot[] = [];
   // The unscoped index holds every viewable doc under the watched roots,
   // ignoring the current pin. Server-side direct-link dispatch consults this
   // so a navigation to `/guides/setup.md` while pinned to `README.md` still
@@ -173,24 +174,27 @@ export function createWatchSession(
   let unscopedRoots: RootGroup[] = [];
   let stateFingerprint = "";
   let unscopedFingerprint = "";
-  let scope: Scope = { kind: "folder" };
-  // Server-session compare target shared across all connected clients, exactly
-  // like `scope`. Defaults to the reviewer's view; changed via setCompareTarget.
-  let compareTarget: ReviewCompareTarget = DEFAULT_COMPARE_TARGET;
+  let repositoriesByTarget: Record<ReviewCompareTarget, RepositoryReviewSnapshot[]> = {
+    base: [],
+    "last-commit": [],
+  };
   let reconcileTimer: ReturnType<typeof setInterval> | null = null;
   let refreshTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingChangedId: string | null = null;
-  const subscribers = new Set<EventController>();
+  const subscribers = new Set<{ controller: EventController; context: WatchContext }>();
   const matcherCache = new Map<string, IgnoreMatcher>();
 
   const watchPaths = entries.map(entry => entry.absolutePath);
   const dirRoots = entries.filter(entry => entry.kind === "dir").map(entry => entry.absolutePath);
+  const constrainedDocumentId = entries.length === 1 && entries[0]?.kind === "file"
+    ? entries[0].absolutePath
+    : null;
 
   const isPathIgnored = buildWatcherIgnorePredicate(dirRoots, matcherCache);
 
   let watcher: ReturnType<typeof chokidar.watch> | null = null;
 
-  const applyScope = (source: RootGroup[]): RootGroup[] => {
+  const applyScope = (source: RootGroup[], scope: Scope): RootGroup[] => {
     if (scope.kind === "folder") {
       return source;
     }
@@ -213,24 +217,58 @@ export function createWatchSession(
     return pinnedRoots;
   };
 
+  const normalizeContext = (context: WatchContext): WatchContext => {
+    if (constrainedDocumentId) {
+      return { ...context, scope: { kind: "file", documentId: constrainedDocumentId } };
+    }
+    return context.scope.kind === "file" && !canSetFileScope(unscopedRoots, context.scope.documentId)
+      ? { ...context, scope: { kind: "folder" } }
+      : context;
+  };
+
+  const payloadFor = (context: WatchContext, changedId: string | null = null): StatePayload => {
+    const normalized = normalizeContext(context);
+    const roots = applyScope(unscopedRoots, normalized.scope);
+    return createStatePayload(
+      roots,
+      initialFollow,
+      changedId,
+      normalized.scope,
+      repositoriesByTarget[normalized.compareTarget],
+      terminalEnabled,
+      terminalConfig,
+      monoConfig,
+      normalized.compareTarget,
+      unscopedFingerprint,
+    );
+  };
+
+  const collectAllRepositorySnapshots = async (
+    nextRoots: RootGroup[],
+  ): Promise<Record<ReviewCompareTarget, RepositoryReviewSnapshot[]>> => {
+    const previous = repositoriesByTarget;
+    const [base, lastCommit] = await Promise.all([
+      collectRepositorySnapshots(entries, nextRoots, "base").catch(error => {
+        console.error(`uatu: failed to refresh base review data: ${error instanceof Error ? error.message : String(error)}`);
+        return previous.base;
+      }),
+      collectRepositorySnapshots(entries, nextRoots, "last-commit").catch(error => {
+        console.error(`uatu: failed to refresh last-commit review data: ${error instanceof Error ? error.message : String(error)}`);
+        return previous["last-commit"];
+      }),
+    ]);
+    return { base, "last-commit": lastCommit };
+  };
+
   const refresh = async (changedId: string | null) => {
     metrics?.set("refresh.in_flight", 1);
     const startedAt = Date.now();
     try {
       const nextRoots = await scanRoots(entries, { respectGitignore, matcherCache });
-      const nextRepositories = await collectRepositorySnapshots(entries, nextRoots, compareTarget).catch(error => {
-        console.error(`uatu: failed to refresh git review data: ${error instanceof Error ? error.message : String(error)}`);
-        return repositories;
-      });
-
-      if (scope.kind === "file" && !hasDocument(nextRoots, scope.documentId)) {
-        scope = { kind: "folder" };
-      }
-
-      const visibleRoots = applyScope(nextRoots);
-      const nextFingerprint = createStateFingerprint(visibleRoots, nextRepositories, compareTarget);
+      const nextRepositories = await collectAllRepositorySnapshots(nextRoots);
+      const nextFingerprint = createContextFingerprint(nextRoots, nextRepositories);
       const nextUnscopedFingerprint = hashCorpus(fingerprintRoots(nextRoots));
-      const changedDoc = changedId ? findDocument(visibleRoots, changedId) : undefined;
+      const changedDoc = changedId ? findDocument(nextRoots, changedId) : undefined;
       const changedDocumentId =
         changedDoc && changedDoc.kind !== "binary" ? changedId : null;
       // The unscoped fingerprint participates on its own: in a scoped
@@ -242,14 +280,13 @@ export function createWatchSession(
         || changedDocumentId !== null
         || nextUnscopedFingerprint !== unscopedFingerprint;
 
-      roots = visibleRoots;
       unscopedRoots = nextRoots;
-      repositories = nextRepositories;
+      repositoriesByTarget = nextRepositories;
       stateFingerprint = nextFingerprint;
       unscopedFingerprint = nextUnscopedFingerprint;
 
       if (shouldBroadcast) {
-        broadcast(createStatePayload(roots, initialFollow, changedDocumentId, scope, repositories, terminalEnabled, terminalConfig, monoConfig, compareTarget, unscopedFingerprint));
+        broadcast(changedDocumentId);
       }
       metrics?.inc("refresh.completed_total");
       metrics?.set("refresh.last_success_at", Date.now());
@@ -297,64 +334,10 @@ export function createWatchSession(
       }
     }
 
-    if (scope.kind === "file" && eventName === "unlink" && absolutePath === scope.documentId) {
-      scope = { kind: "folder" };
-      scheduleRefresh(null);
-      return;
-    }
-
-    if (scope.kind === "file" && absolutePath !== scope.documentId) {
-      // The pinned view ignores this path, but the *unscoped* corpus must
-      // not: "Search all roots" reads it, and without a refresh a file
-      // created outside the pin would be invisible there until the periodic
-      // reconcile. A null changedId keeps the scoped view quiet — the state
-      // fingerprint covers only visible roots, so nothing broadcasts unless
-      // something the clients can see actually changed.
-      scheduleRefresh(null);
-      return;
-    }
-
     // Eligibility for follow is decided after the upcoming refresh — by then
     // the rescanned roots tell us whether the path is text or binary.
     const changedId = eventName !== "unlink" ? absolutePath : null;
     scheduleRefresh(changedId);
-  };
-
-  const setScope = (next: Scope): Scope => {
-    if (next.kind === "file") {
-      if (scope.kind === "file" && scope.documentId === next.documentId) {
-        return scope;
-      }
-      scope = { kind: "file", documentId: next.documentId };
-    } else {
-      if (scope.kind === "folder") {
-        return scope;
-      }
-      scope = { kind: "folder" };
-    }
-
-    // Apply immediately rather than waiting for the scheduled rescan to do it.
-    // `applyScope` is a pure filter over roots we already hold, so there is no
-    // reason for `getRoots()` to keep reporting the old view in the meantime —
-    // and a reader that acts on the scope right after setting it (project
-    // search does) would otherwise see unscoped results. The refresh below
-    // still runs; it recomputes review data and rebroadcasts.
-    roots = applyScope(unscopedRoots);
-    scheduleRefresh(null);
-    return scope;
-  };
-
-  // Mirrors setScope: server-session view state shared across clients. A change
-  // triggers a recompute + SSE rebroadcast (the compare target is folded into
-  // the state fingerprint, so the broadcast fires even when the two targets
-  // happen to produce identical scores).
-  const setCompareTarget = (next: ReviewCompareTarget): ReviewCompareTarget => {
-    if (compareTarget === next) {
-      return compareTarget;
-    }
-    compareTarget = next;
-    scheduleRefresh(null);
-    return compareTarget;
   };
 
   return {
@@ -392,13 +375,9 @@ export function createWatchSession(
 
       await watcherReady;
       const scanned = await scanRoots(entries, { respectGitignore, matcherCache });
-      repositories = await collectRepositorySnapshots(entries, scanned, compareTarget).catch(error => {
-        console.error(`uatu: failed to initialize git review data: ${error instanceof Error ? error.message : String(error)}`);
-        return [];
-      });
       unscopedRoots = scanned;
-      roots = applyScope(scanned);
-      stateFingerprint = createStateFingerprint(roots, repositories, compareTarget);
+      repositoriesByTarget = await collectAllRepositorySnapshots(scanned);
+      stateFingerprint = createContextFingerprint(scanned, repositoriesByTarget);
       unscopedFingerprint = hashCorpus(fingerprintRoots(scanned));
       reconcileTimer = setInterval(() => {
         metrics?.inc("reconcile.ticks_total");
@@ -418,7 +397,7 @@ export function createWatchSession(
 
       for (const subscriber of subscribers) {
         try {
-          subscriber.close();
+          subscriber.controller.close();
         } catch {
           // The browser may already have closed the SSE stream.
         }
@@ -427,21 +406,14 @@ export function createWatchSession(
       subscribers.clear();
       return watcher ? watcher.close() : Promise.resolve();
     },
-    getRoots() {
-      return roots;
+    getRoots(context: WatchContext = DEFAULT_WATCH_CONTEXT) {
+      return applyScope(unscopedRoots, normalizeContext(context).scope);
     },
     getUnscopedRoots() {
       return unscopedRoots;
     },
-    getScope() {
-      return scope;
-    },
-    getCompareTarget() {
-      return compareTarget;
-    },
-    setCompareTarget,
-    getRepositories() {
-      return repositories;
+    getRepositories(context: WatchContext = DEFAULT_WATCH_CONTEXT) {
+      return repositoriesByTarget[context.compareTarget];
     },
     getTerminalToken() {
       return terminalToken;
@@ -458,18 +430,17 @@ export function createWatchSession(
     _internalWatcher(): NodeJS.EventEmitter | null {
       return watcher;
     },
-    setScope,
-    getStatePayload(changedId: string | null = null) {
-      return createStatePayload(roots, initialFollow, changedId, scope, repositories, terminalEnabled, terminalConfig, monoConfig, compareTarget, unscopedFingerprint);
+    getStatePayload(changedId: string | null = null, context: WatchContext = DEFAULT_WATCH_CONTEXT) {
+      return payloadFor(context, changedId);
     },
-    eventsResponse() {
-      let currentSubscriber: EventController | null = null;
+    eventsResponse(context: WatchContext = DEFAULT_WATCH_CONTEXT) {
+      let currentSubscriber: { controller: EventController; context: WatchContext } | null = null;
 
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
-          currentSubscriber = controller;
-          subscribers.add(controller);
-          controller.enqueue(encoder.encode(`event: state\ndata: ${JSON.stringify(createStatePayload(roots, initialFollow, null, scope, repositories, terminalEnabled, terminalConfig, monoConfig, compareTarget, unscopedFingerprint))}\n\n`));
+          currentSubscriber = { controller, context };
+          subscribers.add(currentSubscriber);
+          controller.enqueue(encoder.encode(`event: state\ndata: ${JSON.stringify(payloadFor(context))}\n\n`));
         },
         cancel() {
           if (currentSubscriber) {
@@ -489,12 +460,11 @@ export function createWatchSession(
     },
   };
 
-  function broadcast(payload: StatePayload) {
-    const message = encoder.encode(`event: state\ndata: ${JSON.stringify(payload)}\n\n`);
-
+  function broadcast(changedId: string | null) {
     for (const subscriber of subscribers) {
       try {
-        subscriber.enqueue(message);
+        const message = encoder.encode(`event: state\ndata: ${JSON.stringify(payloadFor(subscriber.context, changedId))}\n\n`);
+        subscriber.controller.enqueue(message);
       } catch {
         subscribers.delete(subscriber);
       }
@@ -528,12 +498,11 @@ function fingerprintRoots(roots: RootGroup[]): string {
   );
 }
 
-function createStateFingerprint(
+function createContextFingerprint(
   roots: RootGroup[],
-  repositories: RepositoryReviewSnapshot[],
-  compareTarget: ReviewCompareTarget,
+  repositories: Record<ReviewCompareTarget, RepositoryReviewSnapshot[]>,
 ): string {
-  return `${compareTarget}\n${fingerprintRoots(roots)}\n${fingerprintRepositories(repositories)}`;
+  return `${fingerprintRoots(roots)}\nbase:${fingerprintRepositories(repositories.base)}\nlast-commit:${fingerprintRepositories(repositories["last-commit"])}`;
 }
 
 function fingerprintRepositories(repositories: RepositoryReviewSnapshot[]): string {

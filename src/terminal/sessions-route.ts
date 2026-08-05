@@ -5,13 +5,14 @@
 // fetch-fallback style rather than Bun's static route table.
 //
 //   GET    /api/terminal/sessions       → { sessions: TerminalSessionInfo[] }
+//   POST   /api/terminal/sessions       → TerminalSessionInfo
 //   DELETE /api/terminal/sessions/<id>  → 204, or 404 for an unknown id
 //
 // Both are gated by the same credentials as the terminal upgrade. Responses
 // are `no-store`: the inventory is a live view, and a cached 401/200 would
 // confuse the picker after a token rotation.
 
-import { hasValidTerminalCredentials } from "./auth";
+import { hasValidTerminalCredentials, isAllowedOrigin } from "./auth";
 import type { TerminalServer } from "./server";
 
 const SESSIONS_PATH = "/api/terminal/sessions";
@@ -45,7 +46,33 @@ export function handleTerminalSessionsRoute(
     );
   }
 
+  if (path === SESSIONS_PATH && request.method === "POST") {
+    if (!isAllowedOrigin(request.headers.get("origin"), requestUrl)) {
+      return new Response("forbidden origin", { status: 403 });
+    }
+    return request.json()
+      .catch(() => null)
+      .then(async body => {
+        const cols = Number((body as { cols?: unknown } | null)?.cols);
+        const rows = Number((body as { rows?: unknown } | null)?.rows);
+        if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols < 1 || rows < 1 || cols > 1000 || rows > 1000) {
+          return Response.json({ error: "invalid terminal dimensions" }, { status: 400 });
+        }
+        try {
+          return Response.json(await terminalServer.createSession({ cols, rows }), {
+            status: 201,
+            headers: { "cache-control": "no-store" },
+          });
+        } catch {
+          return Response.json({ error: "failed to create terminal" }, { status: 500 });
+        }
+      });
+  }
+
   if (path.startsWith(SESSION_PATH_PREFIX) && request.method === "DELETE") {
+    if (!isAllowedOrigin(request.headers.get("origin"), requestUrl)) {
+      return new Response("forbidden origin", { status: 403 });
+    }
     const id = decodeURIComponent(path.slice(SESSION_PATH_PREFIX.length));
     if (terminalServer.killSession(id)) {
       return new Response(null, { status: 204 });

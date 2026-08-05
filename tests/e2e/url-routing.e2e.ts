@@ -114,12 +114,21 @@ test("follow auto-switch updates the URL via replaceState (back stack does not g
 });
 
 test("direct-link to a doc outside the file-scoped session renders the single-file message", async ({ page, request }) => {
-  // The CLI single-file watch (`uatu watch some-file.md`) puts the session
-  // into file-scope. Hit the /api/scope endpoint directly to simulate that
-  // without restarting the watch session.
-  await request.post("/api/scope", {
-    data: { scope: { kind: "file", documentId: workspacePath("README.md") } },
-  });
+  // Inject one client's explicit request context without mutating the shared
+  // child. Both navigations boot against the same one-file client view.
+  await request.post("/__e2e/reset");
+  await page.addInitScript(documentId => {
+    const originalFetch = window.fetch.bind(window);
+    window.fetch = (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input), window.location.origin);
+      if (url.pathname === "/api/state") {
+        url.searchParams.set("scope", "file");
+        url.searchParams.set("documentId", documentId);
+        input = input instanceof Request ? new Request(url, input) : url;
+      }
+      return originalFetch(input, init);
+    };
+  }, workspacePath("README.md"));
   await page.goto("/");
   await expect(page.locator("#document-count")).toHaveText("1 file");
 

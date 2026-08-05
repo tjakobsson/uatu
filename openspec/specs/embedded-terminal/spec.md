@@ -2,6 +2,24 @@
 
 Define the embedded terminal capability: a dockable panel in the UatuCode UI that hosts one or more `xterm.js`-rendered terminals connected to real PTY shell processes running in the watched repository's working directory, complete with token-gated transport, per-session WebSockets, persistence, theming, dock/display modes, multi-pane splits, and `.uatu.json`-driven font configuration.
 ## Requirements
+### Requirement: Fresh terminal clients receive coherent reconstructed state
+The terminal server SHALL maintain sufficient emulator state for each live PTY to reconstruct a fresh client coherently after detachment or takeover. Reconstruction MUST preserve the visible terminal contents and the control state needed by ordinary shells and supported alternate-screen TUIs, MUST begin at a control-sequence boundary, and MUST replace arbitrary bounded byte-tail replay as the correctness mechanism. Detaching and reconstructing MUST NOT modify the PTY's termios mode on behalf of the foreground process.
+
+#### Scenario: Raw-mode TUI resumes on a fresh client
+- **WHEN** a TUI is running in raw mode and alternate-screen mode and its client disconnects
+- **AND** a fresh client attaches later at different dimensions
+- **THEN** the running process remains alive and in control of its PTY mode
+- **AND** the new terminal displays a coherent TUI screen without normal-buffer scrollback corruption or partial escape-sequence artifacts
+
+#### Scenario: Detached output is represented in reconstruction
+- **WHEN** a PTY emits output while no client is attached
+- **THEN** its server-side terminal state consumes that output
+- **AND** a later reconstruction reflects the resulting current state
+
+#### Scenario: Ordinary shell scrollback reconstructs coherently
+- **WHEN** a detached ordinary shell has produced output and a fresh client attaches
+- **THEN** available bounded scrollback and the current prompt reconstruct without replacement characters or parser artifacts
+
 ### Requirement: Bottom panel hosts an interactive terminal
 The UI SHALL provide a panel that, when visible, hosts one or more `xterm.js`-rendered terminals connected to real PTY shell processes running in the watched repository's working directory. The panel SHALL be hidden by default on first load and SHALL default its dock position to the bottom of the main content area.
 
@@ -118,68 +136,48 @@ The terminal SHALL render text using a dark ANSI 16-color palette that matches t
 - **THEN** the new background color is reflected in the terminal canvas
 
 ### Requirement: Terminal panel is resizable and persistent
-The panel SHALL be resizable via a drag handle on the edge facing the preview (top edge when bottom-docked, left edge when right-docked). When bottom-docked, height is clamped to `[120px, 70% of viewport height]`. When right-docked, width is clamped to `[280px, 60% of viewport width]`. The dock position, the most recent height (for bottom dock) and width (for right dock), the display mode, and the panel's hidden/visible state SHALL persist across reloads via `localStorage` and `sessionStorage`.
+The panel SHALL remain resizable and retain its existing bottom/right clamps, display modes, and responsive fallback. Dock, dimensions, display mode, visibility, split geometry, and pane arrangement SHALL be client presentation state, namespaced by workspace/base path in browser storage or owned by the native client where applicable. These physical values MUST NOT be stored as personal Hub workspace state or applied to another client. Legacy terminal persistence keys SHALL not be migrated when this model is enabled.
 
-#### Scenario: Drag resizes the panel in the active dock orientation
-- **WHEN** the panel is bottom-docked at 240px and the user drags the top resizer up by 100 pixels
-- **THEN** the panel height increases to 340 pixels
-- **AND** every pane's xterm fit addon recomputes the character grid so terminals resize without truncation
+#### Scenario: Drag resizes only the current client
+- **WHEN** a user resizes a terminal panel on one client
+- **THEN** its xterm grids refit and the client stores the new local dimension
+- **AND** another client's terminal geometry is unchanged
 
-#### Scenario: Right-dock width is independently persisted
-- **WHEN** the user resizes a right-docked panel to 420 pixels and reloads
-- **THEN** on reattach the panel renders at 420 pixels wide
-- **AND** the bottom-dock height (if previously set) is preserved unchanged for the next time the user docks to bottom
+#### Scenario: Dock dimensions remain independent locally
+- **WHEN** a client stores bottom height and right width values
+- **THEN** switching docks restores the corresponding local dimension
 
-#### Scenario: Hidden state persists across reload
-- **WHEN** the user hides the panel and reloads the page
-- **THEN** on the next load the panel is hidden and no PTY is spawned
+#### Scenario: Narrow viewport adapts without overwriting preference
+- **WHEN** a locally right-docked terminal enters a narrow viewport
+- **THEN** it falls back to bottom presentation
+- **AND** the local right-dock preference remains available when the viewport widens
 
-#### Scenario: Legacy persistence is migrated on first load after upgrade
-- **WHEN** a returning user has only legacy `uatu:terminal-visible` and `uatu:terminal-height` keys set
-- **THEN** the next load reads those values and writes the new persistence shape (dock=bottom, bottomHeight=<legacy height>)
-- **AND** the user sees the panel at the same height it had before the upgrade
+#### Scenario: Legacy terminal keys are ignored
+- **WHEN** only legacy terminal persistence and reattach-hint keys exist
+- **THEN** the new terminal model starts from current defaults and inventory
 
 ### Requirement: Server exposes a token-gated terminal WebSocket
-The server SHALL expose a single WebSocket upgrade endpoint that proxies bytes between the browser and a real PTY shell process. The upgrade SHALL be rejected unless the request carries a valid per-server-session token, a syntactically valid `sessionId` query parameter (UUID), AND its `Origin` header passes the origin gate. The origin gate SHALL accept an Origin whose hostname is `localhost` or `127.0.0.1` AND whose port equals the port of the request's `Host` header; ports SHALL be compared after default-port normalization (an absent port means 80 for `http` and 443 for `https`). The server's listen port SHALL NOT participate in the comparison, so the gate holds unchanged when the browser reaches the server through a mapped port. A given `sessionId` already in use SHALL be rejected so concurrent PTYs cannot be cross-wired.
+The server SHALL expose a token- and origin-gated WebSocket that attaches to an existing server-created PTY id. The id MUST be syntactically valid and present in the authenticated terminal inventory; the WebSocket upgrade MUST NOT create a PTY as a side effect. An attached PTY SHALL reject a normal attach and SHALL accept only an explicit takeover according to the takeover requirement. Existing mapped-port, base-path, token, cookie, and origin protections SHALL remain in force.
 
-#### Scenario: Valid token, sessionId, and origin succeed
-- **WHEN** the browser sends a WebSocket upgrade to `/api/terminal?t=<valid-token>&sessionId=<fresh-uuid>` with `Origin: http://127.0.0.1:<port>` and `Host: 127.0.0.1:<port>`
-- **THEN** the server upgrades the connection and spawns a PTY associated with that `sessionId`
+#### Scenario: Valid attach succeeds
+- **WHEN** a client upgrades with valid credentials, origin, and an existing detached PTY id
+- **THEN** the WebSocket opens without spawning another PTY
 
-#### Scenario: Port-mapped access succeeds without configuration
-- **WHEN** the server listens on port 4711 inside a container published to host port 4712
-- **AND** the browser sends a WebSocket upgrade with a valid token and fresh `sessionId`, `Origin: http://localhost:4712`, and `Host: localhost:4712`
-- **THEN** the server upgrades the connection and spawns a PTY
+#### Scenario: Unknown PTY is rejected
+- **WHEN** a client upgrades with a well-formed id absent from inventory
+- **THEN** the server responds 404 and creates no PTY
 
-#### Scenario: Page on another localhost port is rejected
-- **WHEN** a page served from `localhost:9999` sends a WebSocket upgrade with a valid token to the server reached at `Host: localhost:4712`, carrying `Origin: http://localhost:9999`
-- **THEN** the server responds with HTTP 403 and does not spawn a PTY
+#### Scenario: Missing or malformed id is rejected
+- **WHEN** an upgrade omits the PTY id or supplies a malformed value
+- **THEN** the server responds 400
 
-#### Scenario: Missing sessionId is rejected
-- **WHEN** the browser sends a WebSocket upgrade to `/api/terminal?t=<valid-token>` with no `sessionId` parameter
-- **THEN** the server responds with HTTP 400 and does not spawn a PTY
+#### Scenario: Attached PTY requires takeover
+- **WHEN** a PTY already has an interactive holder and another normal attach arrives
+- **THEN** the server responds 409 and preserves the current holder
 
-#### Scenario: Malformed sessionId is rejected
-- **WHEN** the browser sends a WebSocket upgrade with `sessionId=not-a-uuid`
-- **THEN** the server responds with HTTP 400 and does not spawn a PTY
-
-#### Scenario: Duplicate sessionId is rejected
-- **WHEN** a `sessionId` is already attached to an active PTY
-- **AND** another upgrade arrives with the same `sessionId` and a valid token
-- **THEN** the server responds with HTTP 409 and does not spawn a second PTY
-
-#### Scenario: Missing token is rejected
-- **WHEN** the browser sends a WebSocket upgrade to `/api/terminal?sessionId=<fresh-uuid>` with no `t` query parameter
-- **THEN** the server responds with HTTP 401 and does not spawn a PTY
-
-#### Scenario: Foreign origin is rejected
-- **WHEN** a client sends a WebSocket upgrade to `/api/terminal?t=<valid-token>&sessionId=<fresh-uuid>` with `Origin: http://attacker.example`
-- **THEN** the server responds with HTTP 403 and does not spawn a PTY
-- **AND** this holds even when the Origin's port equals the Host header's port (a DNS-rebinding origin such as `http://evil.example:4712` against `Host: evil.example:4712` fails the hostname pin)
-
-#### Scenario: Token is unique per server start
-- **WHEN** the server is restarted
-- **THEN** the previous token no longer authenticates terminal upgrades
+#### Scenario: Authentication and origin remain mandatory
+- **WHEN** credentials are missing/invalid or Origin fails the existing gate
+- **THEN** the server rejects the upgrade without exposing inventory or creating a PTY
 
 ### Requirement: Terminal WebSocket URL excludes fragment identifiers
 The browser-side terminal WebSocket URL builder SHALL strip the fragment identifier (`#…`) from the constructed URL before passing it to the `WebSocket` constructor. The fragment from `window.location` MUST NOT be propagated into the WebSocket URL. This applies to every connection attempt: initial attach, reconnect after disconnect, and reattach within the PTY grace window.
@@ -341,29 +339,30 @@ The panel SHALL provide a split control that creates an additional concurrent te
 - **AND** the remaining panes expand to share the freed space
 - **AND** the panel and the other PTYs remain visible
 
-### Requirement: Terminal protocol carries input, output, and resize
-The browser-server protocol on the terminal WebSocket SHALL carry shell input as binary frames written to the PTY's stdin, shell output as binary frames written from the PTY's stdout/stderr, and terminal resize events as small JSON frames of the shape `{"type":"resize","cols":<n>,"rows":<n>}`. Shell output bytes SHALL be forwarded from the PTY to the browser without any UTF-8 decode/re-encode round trip on the server, so that arbitrary multi-byte codepoints split across PTY `read()` chunk boundaries are preserved end-to-end and reach the xterm.js parser intact.
+### Requirement: Terminal protocol carries input, output, resize, and attach readiness
+The terminal WebSocket SHALL carry binary shell input/output and JSON control frames without server UTF-8 transcoding. On every fresh-emulator attach, the client MUST open and fit xterm before sending an attach-ready frame containing positive integer columns and rows. The server MUST ignore input until readiness, MUST establish attachment ownership only after a valid ready frame, MUST apply those dimensions before reconstruction, and MUST send reconstruction before subsequent live output. Later resize frames SHALL continue to resize the active PTY and terminal model.
 
-#### Scenario: Keystrokes reach the shell
-- **WHEN** the user types `echo hi` and presses Enter in the terminal
-- **THEN** within 200 milliseconds the terminal renders a line containing `hi` from the shell's stdout
+#### Scenario: New client dimensions precede reconstruction
+- **WHEN** a 160×50 client detaches and a fresh 90×28 client begins attachment
+- **THEN** the server receives 90×28 readiness before granting ownership or sending reconstruction
+- **AND** the PTY and terminal model use 90×28 for the reconstructed client
 
-#### Scenario: Resize syncs the PTY
-- **WHEN** the panel is resized so xterm-addon-fit reports `cols=120, rows=30`
+#### Scenario: Input before readiness is ignored
+- **WHEN** a socket sends binary input before a valid attach-ready frame
+- **THEN** no bytes reach the PTY
+
+#### Scenario: Keystrokes reach the ready PTY
+- **WHEN** readiness completed and the user types into the terminal
+- **THEN** binary input reaches that PTY and its output returns to that client
+
+#### Scenario: Later resize remains synchronized
+- **WHEN** the active fitted grid changes
 - **THEN** the client sends a resize frame
-- **AND** the server calls the PTY's `resize(120, 30)`
-- **AND** running TUI applications redraw at the new dimensions
+- **AND** both PTY and server terminal model adopt the new dimensions
 
-#### Scenario: Multi-byte UTF-8 split across chunk boundaries renders without replacement characters
-- **WHEN** a PTY emits a sequence containing the 3-byte UTF-8 codepoint `─` (`U+2500`, bytes `E2 94 80`) and the chunk boundary falls between any two of those bytes
-- **THEN** the rendered xterm buffer contains the original `─` character
-- **AND** no `U+FFFD REPLACEMENT CHARACTER` is introduced at the seam
-- **AND** the rendered cell count for the line equals the number of source codepoints (no extra cells from spurious replacements)
-
-#### Scenario: Concurrent terminal sessions do not corrupt each other's output
-- **WHEN** two terminal panes are open in the same browser tab and both PTYs simultaneously emit dense multi-byte output (e.g., box-drawing characters)
-- **THEN** each pane renders only the codepoints emitted by its own PTY
-- **AND** no `U+FFFD` is introduced by partial-codepoint state leaking between sessions
+#### Scenario: Split UTF-8 remains byte-exact
+- **WHEN** a multibyte codepoint spans PTY callback chunks
+- **THEN** server terminal state and browser xterm receive the original byte sequence without `U+FFFD`
 
 ### Requirement: Terminal supports Windows-Terminal-parity clipboard shortcuts
 Each terminal pane SHALL intercept a fixed set of clipboard keyboard shortcuts before `xterm.js` interprets them as PTY keystrokes, using `xterm.js`'s `attachCustomKeyEventHandler` API. The intercepted set and behavior SHALL match Microsoft's Windows Terminal so that users get the same muscle memory inside UatuCode. macOS Cmd-modified shortcuts SHALL remain unchanged from `xterm.js`'s defaults — the handler SHALL NOT alter their behavior.
@@ -457,32 +456,28 @@ When the page is running in `display-mode: standalone` AND `navigator.keyboard.l
 - **AND** each pane's custom key handler is attached independently
 
 ### Requirement: Detached PTY sessions persist until shell exit or server shutdown
-For each `sessionId`, the PTY SHALL be spawned on a successful WebSocket upgrade. When the WebSocket closes without an explicit terminate signal (tab close, browser quit, system sleep, network drop), the server SHALL detach the socket and keep the PTY running, keyed by `sessionId`, with no time limit. A detached session SHALL end only when its shell process exits, when the server shuts down, or when a client explicitly terminates it. A subsequent upgrade carrying the same `sessionId` SHALL reattach to the live PTY and SHALL replay recent output from the bounded replay buffer to seed the new client's canvas.
+Each server-created PTY SHALL remain registered when its WebSocket detaches, with no time limit. It SHALL end only on shell exit, explicit authenticated termination, or child-server shutdown. A subsequent explicit attach SHALL reuse the PTY and reconstruct the client's emulator from maintained terminal state; arbitrary replay-buffer delivery SHALL NOT define restored correctness.
 
-#### Scenario: Browser close leaves the shell running
-- **WHEN** the browser closes a terminal WebSocket without sending the explicit terminate signal
-- **THEN** the PTY process keeps running
-- **AND** the session remains registered under its `sessionId` indefinitely
+#### Scenario: Browser close leaves shell running
+- **WHEN** a WebSocket closes without explicit termination
+- **THEN** the PTY remains in inventory as detached
 
-#### Scenario: Reattach after an arbitrary detachment
-- **WHEN** a session is detached (e.g., the machine slept or the browser was closed)
-- **AND** a new WebSocket upgrade arrives later with the same `sessionId` and a valid token
-- **THEN** the server reuses the existing PTY without spawning a new one
-- **AND** recent output from the replay buffer is delivered to the new client
+#### Scenario: Explicit attach resumes the same PTY
+- **WHEN** a client chooses a detached PTY from inventory and completes readiness
+- **THEN** the existing PTY is attached without spawning another
+- **AND** coherent reconstructed state is delivered
 
 #### Scenario: Explicit terminate kills the PTY
-- **WHEN** an attached client sends the explicit terminate signal for its session
-- **THEN** the PTY receives `SIGHUP`
-- **AND** the session is removed so a later upgrade with the same `sessionId` spawns a fresh PTY
+- **WHEN** an authenticated client terminates a PTY resource
+- **THEN** it receives `SIGHUP` and leaves inventory
 
-#### Scenario: Shell exit while detached removes the session
-- **WHEN** a detached session's shell process exits
-- **THEN** the session is removed from the registry
-- **AND** a later upgrade with the same `sessionId` spawns a fresh PTY
+#### Scenario: Shell exit while detached removes resource
+- **WHEN** a detached PTY's shell exits
+- **THEN** the resource disappears from inventory
 
 #### Scenario: Server shutdown kills all PTYs
-- **WHEN** the uatu server is stopped
-- **THEN** every live PTY — attached or detached — is terminated as part of shutdown
+- **WHEN** the child server stops
+- **THEN** every attached and detached PTY is terminated
 
 ### Requirement: Terminal grid fits within the visible pane
 The terminal character grid SHALL always fit entirely within its pane host's content box: `rows × cellHeight` SHALL NOT exceed the vertical space available inside the pane's padding, and `cols × cellWidth` (plus the scrollbar allowance) SHALL NOT exceed the horizontal space. Grid-size measurements SHALL account for any padding applied around the terminal element so that no character row or column is ever clipped by the pane's overflow bounds. This SHALL hold at any pane size, including sizes produced by dragging the panel or inter-pane resizers to arbitrary pixel positions, in both docks, for single panes and splits.
@@ -502,109 +497,69 @@ The terminal character grid SHALL always fit entirely within its pane host's con
 - **THEN** the fit measurement subtracts that padding before computing rows and columns
 - **AND** the proposed grid changes accordingly rather than overflowing the clip bounds
 
-### Requirement: A sessionId collision resolves to a fresh session, not an auth prompt
-When a terminal WebSocket closes before opening, the client SHALL NOT assume an authentication failure. The client SHALL probe `GET /api/auth`. The server SHALL answer the probe with one of three verdicts: 204 when the request carries valid terminal credentials (auth cookie or `t` query token) AND the requester's effective origin passes the same origin gate as the WebSocket upgrade; 403 when credentials are valid but the effective origin is rejected; 401 when credentials are invalid. The effective origin SHALL be resolved in order: the request's `Origin` header when present; else the client-supplied `X-Uatu-Page-Origin` header (the client SHALL send its page origin in this header when probing, because browsers omit `Origin` on same-origin GETs and a Host-synthesized origin matches `Host` by construction — without it the 403 verdict would be unreachable when an intermediary rewrites `Host`); else synthesized from the request's scheme and `Host` header. The probe and the upgrade gate SHALL share one origin predicate so their verdicts cannot diverge for the same request shape.
-
-The client SHALL map the verdicts to distinct outcomes: on 204 it SHALL treat the failed upgrade as a `sessionId` collision, mint a fresh `sessionId` for the pane, and reconnect; on 403 it SHALL show an origin-rejected notice that names the address mismatch as the cause and SHALL NOT show the paste-token form or claim the server restarted; on 401 it SHALL show the paste-token form. The paste-token form SHALL be shown only for the 401 verdict.
-
-#### Scenario: Second window gets its own shell without a token prompt
-- **WHEN** a second browser window of the same uatu instance opens the terminal while the first window holds the persisted `sessionId`
-- **THEN** the second window's pane connects with a freshly minted `sessionId` and reaches a working shell
-- **AND** no paste-token form is shown
-
-#### Scenario: First window is unaffected by the collision
-- **WHEN** the second window resolves its collision with a fresh session
-- **THEN** the first window's attached session continues uninterrupted
-
-#### Scenario: Genuine auth failure still shows the paste-token form
-- **WHEN** a terminal WebSocket closes before opening
-- **AND** `GET /api/auth` returns 401 (stale cookie after a uatu restart, or a fresh PWA window with no credentials)
-- **THEN** the paste-token form is shown
-
-#### Scenario: Origin rejection produces an honest error, not the paste-token form
-- **WHEN** a terminal WebSocket closes before opening
-- **AND** `GET /api/auth` returns 403 (valid credentials, origin rejected)
-- **THEN** the pane shows an origin-rejected notice explaining that the address the browser is using does not pass the terminal's origin gate
-- **AND** the paste-token form is not shown
-- **AND** the client does not enter a reconnect loop for that pane
-
-#### Scenario: Probe endpoint gates on credentials and origin
-- **WHEN** `GET /api/auth` is requested with a valid auth cookie or a valid `t` query token from a page whose origin passes the origin gate
-- **THEN** the server responds 204
-- **WHEN** it is requested with valid credentials but an effective origin the upgrade gate would reject
-- **THEN** the server responds 403
-- **WHEN** it is requested with no or invalid credentials
-- **THEN** the server responds 401
-
-### Requirement: Pane reattach hints are single-claimant across windows
-Per-pane session records SHALL be owned by the window that created them (per-window storage that survives reload of that window). A shared copy of the records SHALL be kept as restart reattach hints. A window that has its own records SHALL use them. A window with no records SHALL attempt to adopt the shared hints; adoption is arbitrated by the server's duplicate-sessionId rejection — the first claimant adopts, and later windows SHALL fall back to fresh sessions WITHOUT overwriting the shared hints. Shared layout preferences (dock, sizes, display mode) remain shared across windows.
-
-#### Scenario: Reload reattaches a window's own sessions
-- **WHEN** a window with live terminal panes reloads
-- **THEN** it reattaches to the same sessions it held before the reload, regardless of what other windows are doing
-
-#### Scenario: First window after browser restart adopts the hinted sessions
-- **WHEN** the browser restarts and a window opens the terminal with no per-window records
-- **THEN** it adopts the shared hints and reattaches to the still-running PTYs
-
-#### Scenario: A collision loser does not clobber the hints
-- **WHEN** a second window fails to claim a hinted `sessionId` and falls back to a fresh session
-- **THEN** the shared hints still reference the first claimant's sessions
-- **AND** the first window can still reattach to them after its own reload or a browser restart
-
 ### Requirement: Server exposes an authenticated session inventory
-The server SHALL expose `GET /api/terminal/sessions`, gated by the same credentials as the terminal upgrade (auth cookie or `t` query token), returning every live PTY session with: `sessionId`, attachment state (attached/detached), creation time, current dimensions, and a human label (at minimum the shell name; the foreground process name where cheaply obtainable on the platform). The server SHALL also expose `DELETE /api/terminal/sessions/<id>` with the same gate, which SHALL terminate the session's PTY and remove it from the registry. Both endpoints SHALL reject unauthenticated requests with 401 and unknown session ids with 404.
+The server SHALL expose authenticated operations to create, list, and terminate PTY resources. POST creation SHALL generate the PTY id server-side, spawn the configured shell in the workspace, initialize terminal-emulator state at validated dimensions, and return the resource metadata. GET SHALL list attached and detached resources with id, creation time, dimensions, and label. DELETE SHALL terminate a known resource. Unknown ids SHALL return 404 and unauthenticated requests 401.
 
-#### Scenario: Inventory lists attached and detached sessions
-- **WHEN** one window holds an attached session and another session is detached (its window closed)
-- **AND** an authenticated client requests `GET /api/terminal/sessions`
-- **THEN** the response lists both sessions with their attachment states and labels
+#### Scenario: Server creates PTY identity
+- **WHEN** an authenticated client requests a new terminal with valid dimensions
+- **THEN** the server generates the id, spawns one PTY, and returns its inventory record
 
-#### Scenario: Kill removes a detached session
-- **WHEN** an authenticated client sends `DELETE /api/terminal/sessions/<id>` for a detached session
-- **THEN** the PTY receives `SIGHUP` and the session disappears from subsequent inventory responses
+#### Scenario: Inventory lists attached and detached resources
+- **WHEN** live PTYs exist in both states
+- **THEN** GET returns both with attachment state, label, creation time, and dimensions
 
-#### Scenario: Unauthenticated access is refused
-- **WHEN** either endpoint is requested without valid credentials
-- **THEN** the server responds 401 and reveals nothing about sessions
+#### Scenario: Kill removes a resource
+- **WHEN** an authenticated client DELETEs a known PTY
+- **THEN** the process is terminated and subsequent inventory omits it
+
+#### Scenario: Unauthenticated lifecycle access is refused
+- **WHEN** create, list, or terminate is requested without valid credentials
+- **THEN** the server responds 401 and reveals nothing
 
 ### Requirement: A client can attach to any session, taking over attached ones
-The WebSocket upgrade SHALL accept a `takeover=1` query parameter. For a detached session the upgrade behaves as a normal reattach. For an attached session with `takeover=1`, the server SHALL close the current holder's socket with app close code 4410 ("session taken"), attach the new socket, and replay the buffer to it. Without `takeover=1`, an attached session SHALL continue to be refused with 409. A pane whose socket is closed with 4410 SHALL display an "attached in another window" notice with an explicit take-back action; it SHALL NOT be torn down automatically and SHALL NOT re-claim the session without user action.
+A PTY SHALL have at most one interactive client. A detached resource accepts normal attach. An attached resource requires explicit takeover; ownership transfers only after the new client sends valid attach readiness. The previous holder SHALL then receive close code 4410 and show the existing take-back affordance without automatic reconnection. If the prospective new client disconnects before readiness, the current holder SHALL remain attached.
 
-#### Scenario: Takeover moves a live session between windows
-- **WHEN** window 2 attaches to window 1's attached session with `takeover=1`
-- **THEN** window 2's pane shows the session's screen and receives subsequent output
-- **AND** window 1's pane shows the "attached in another window" notice instead of a dead pane
+#### Scenario: Takeover moves a ready session
+- **WHEN** a second client requests takeover and completes readiness
+- **THEN** ownership and active dimensions move to it
+- **AND** the previous holder receives 4410 and parks
 
-#### Scenario: Take-back reverses the takeover
-- **WHEN** the user activates the take-back action on a taken-over pane
-- **THEN** that pane reattaches with `takeover=1` and the other window's pane shows the notice
+#### Scenario: Failed half-attach preserves holder
+- **WHEN** a takeover socket opens but disconnects before readiness
+- **THEN** the original holder remains attached and usable
+
+#### Scenario: Take-back reverses takeover explicitly
+- **WHEN** the parked client activates Take back and completes readiness
+- **THEN** ownership returns and the other holder parks
 
 #### Scenario: No silent ping-pong
-- **WHEN** a pane's session is taken over
-- **THEN** the losing pane makes no automatic reconnection attempt for that session
+- **WHEN** a client loses ownership
+- **THEN** it makes no automatic attachment attempt
 
-#### Scenario: Takeover of a detached session is a plain reattach
-- **WHEN** a client attaches with `takeover=1` to a session with no current holder
-- **THEN** the behavior is identical to the existing reattach path
+#### Scenario: Takeover flag on detached PTY is harmless
+- **WHEN** a client requests takeover of a detached PTY
+- **THEN** it follows the normal attach-ready path
 
 ### Requirement: New panes offer existing sessions instead of silently spawning
-When the terminal panel is about to create a pane (first open with no restorable records, or an explicit new-pane action) and the session inventory contains sessions not already shown in this window, the pane area SHALL offer a picker listing those sessions with their labels and attachment states, offering: attach (using takeover when the session is attached elsewhere), kill, and "new shell". Selecting "new shell" — or the inventory being empty — SHALL spawn a fresh PTY as today. The picker SHALL be skippable without a session choice becoming sticky state.
+When a client has no per-window attachment to restore and terminal inventory contains PTYs not already represented in that window, the panel SHALL list them and require an explicit attach, takeover, terminate, or New shell choice. The user's saved last-active PTY MAY be highlighted but MUST NOT auto-attach or auto-take-over. New shell SHALL create a server resource before attaching. Empty inventory MAY create a new shell directly when the user explicitly opens or splits the terminal panel.
 
-#### Scenario: Orphaned session is recoverable from a new window
-- **WHEN** a window with a running program (e.g. htop) closes for good, orphaning its detached session
-- **AND** a new window opens the terminal panel
-- **THEN** the picker lists the orphaned session with its label
-- **AND** choosing it attaches the pane to the still-running program
+#### Scenario: New client lists an orphan without attaching
+- **WHEN** a detached PTY exists and a different browser opens the terminal panel
+- **THEN** the PTY appears in the picker
+- **AND** it remains detached until selected
 
-#### Scenario: Empty inventory spawns directly
-- **WHEN** the panel opens with no live sessions beyond this window's own
-- **THEN** a fresh shell spawns with no picker interposed
+#### Scenario: Last-active reference only highlights
+- **WHEN** personal state names a live PTY
+- **THEN** the picker may emphasize that row
+- **AND** no attachment occurs without user action
 
-#### Scenario: Kill from the picker
-- **WHEN** the user activates kill on a listed detached session
-- **THEN** the session is terminated via the DELETE endpoint and leaves the list
-- **AND** no pane attaches to it
+#### Scenario: New shell uses server creation
+- **WHEN** the user chooses New shell
+- **THEN** the server creates a PTY id and the pane attaches to that resource
+
+#### Scenario: Picker termination removes resource
+- **WHEN** the user terminates a listed PTY
+- **THEN** DELETE removes it without attaching a pane
 
 ### Requirement: Terminal auth cookie is scoped to the request's Host port
 The terminal auth cookie name SHALL be derived from the port of the request's `Host` header (default-port normalized), e.g. `uatu_term_4712` for a request reaching the server at `localhost:4712`. The server SHALL use this derivation consistently at set time (the `Set-Cookie` issued when a token is promoted to a cookie) and at read time (the WebSocket upgrade gate, the auth probe, and the terminal sessions REST endpoints). The legacy fixed-name `uatu_term` cookie SHALL NOT be read; a client holding only the legacy cookie re-authenticates via the paste-token flow once.

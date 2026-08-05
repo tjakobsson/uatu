@@ -354,7 +354,13 @@ describe("handleTerminalSessionsRoute", () => {
   function stubTerminal(killResult = true): TerminalServer {
     return {
       isAvailable: async () => true,
-      prepareSession: () => ({ kind: "fresh" as const }),
+      createSession: async ({ cols = 80, rows = 24 } = {}) => ({
+        ...stubSessions[0]!,
+        attached: false,
+        cols,
+        rows,
+      }),
+      prepareSession: () => ({ kind: "unknown" as const }),
       listSessions: async () => stubSessions,
       killSession: () => killResult,
       open: async () => undefined,
@@ -365,7 +371,7 @@ describe("handleTerminalSessionsRoute", () => {
   }
   function run(
     path: string,
-    init: { method?: string; cookie?: boolean; query?: string } = {},
+    init: { method?: string; cookie?: boolean; query?: string; origin?: boolean; body?: unknown } = {},
     terminal: TerminalServer | null = stubTerminal(),
   ): Response | Promise<Response> | null {
     const url = new URL(`http://127.0.0.1:4711${path}${init.query ?? ""}`);
@@ -373,7 +379,13 @@ describe("handleTerminalSessionsRoute", () => {
     if (init.cookie) {
       headers.set("Cookie", `${terminalCookieName(url)}=${encodeURIComponent(TOKEN)}`);
     }
-    const request = new Request(url, { method: init.method ?? "GET", headers });
+    if (init.origin) headers.set("Origin", url.origin);
+    if (init.body !== undefined) headers.set("content-type", "application/json");
+    const request = new Request(url, {
+      method: init.method ?? "GET",
+      headers,
+      body: init.body === undefined ? undefined : JSON.stringify(init.body),
+    });
     return handleTerminalSessionsRoute(request, url, terminal, () => TOKEN);
   }
 
@@ -405,19 +417,39 @@ describe("handleTerminalSessionsRoute", () => {
     const ok = (await run(`/api/terminal/sessions/${stubSessions[0]!.id}`, {
       method: "DELETE",
       cookie: true,
+      origin: true,
     })) as Response;
     expect(ok.status).toBe(204);
 
     const missing = (await run("/api/terminal/sessions/22222222-2222-4222-8222-222222222222", {
       method: "DELETE",
       cookie: true,
+      origin: true,
     }, stubTerminal(false))) as Response;
     expect(missing.status).toBe(404);
   });
 
+  it("creates a session with validated dimensions and rejects cross-origin creation", async () => {
+    const created = (await run("/api/terminal/sessions", {
+      method: "POST",
+      cookie: true,
+      origin: true,
+      body: { cols: 100, rows: 30 },
+    })) as Response;
+    expect(created.status).toBe(201);
+    expect(await created.json()).toMatchObject({ attached: false, cols: 100, rows: 30 });
+
+    const forbidden = (await run("/api/terminal/sessions", {
+      method: "POST",
+      cookie: true,
+      body: { cols: 80, rows: 24 },
+    })) as Response;
+    expect(forbidden.status).toBe(403);
+  });
+
   it("answers 405 for unsupported methods and 503 with no terminal server", async () => {
     const wrongMethod = (await run("/api/terminal/sessions", {
-      method: "POST",
+      method: "PUT",
       cookie: true,
     })) as Response;
     expect(wrongMethod.status).toBe(405);

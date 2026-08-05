@@ -15,7 +15,7 @@ const FIELD_OWNERS: Record<string, string> = {
   followEnabled: "src/shell/follow.ts",
   roots: "src/shell/events.ts",
   repositories: "src/shell/events.ts",
-  scope: "src/shell/events.ts",
+  scope: "src/shell/watch-context.ts",
   unscopedFingerprint: "src/shell/events.ts",
   activeSurface: "src/find/active-surface.ts",
   staleHint: "src/shell/stale-hint-mount.ts",

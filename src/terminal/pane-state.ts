@@ -4,7 +4,7 @@
 //
 // Two storage backends are addressed here:
 //   * `localStorage` — long-lived layout/preference state (dock, sizes,
-//     pane list, display mode). Survives reloads AND tab close/reopen.
+//     display mode). Survives reloads AND tab close/reopen.
 //   * `sessionStorage` — per-tab visibility flag, so a long-idle reload in
 //     a different day doesn't auto-spawn a fresh PTY just because the user
 //     happened to have the panel open the day before.
@@ -14,12 +14,8 @@ export const TERMINAL_VISIBLE_KEY = "uatu:terminal-visible";
 // Read once for migration into TERMINAL_STATE_KEY, then ignored on writes.
 export const TERMINAL_HEIGHT_KEY = "uatu:terminal-height";
 export const TERMINAL_STATE_KEY = "uatu:terminal-state";
-// Per-window pane records (`sessionStorage`). The `panes` list inside
-// TERMINAL_STATE_KEY (localStorage) doubles as the shared *restart hints*:
-// a window that has no records of its own (fresh window, browser restart)
-// adopts the hints; a window that lost a sessionId collision keeps its own
-// records here and never writes the hints, so it cannot clobber the
-// claimant window's ability to reattach.
+// Per-window pane records (`sessionStorage`). Server PTY ids never cross into
+// another browser context through presentation storage.
 export const TERMINAL_PANES_KEY = "uatu:terminal-panes";
 
 export const TERMINAL_HEIGHT_MIN = 120;
@@ -41,9 +37,10 @@ export type TerminalDock = "bottom" | "right";
 export type TerminalDisplayMode = "normal" | "minimized" | "fullscreen";
 
 export type TerminalPaneRecord = {
-  // Per-pane sessionId. UUID. Reused across reload — and across browser
-  // restarts — to reattach to the same still-running PTY.
+  // Window-local pane identity, independent of the server resource.
   id: string;
+  // Server-owned PTY resource id reused when this window reloads.
+  sessionId: string;
   // Wall-clock millis when the pane was first opened in this tab; used
   // for stable ordering when restoring multiple panes.
   createdAt: number;
@@ -156,13 +153,15 @@ const PANE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 function coercePane(value: unknown): TerminalPaneRecord | null {
   if (!value || typeof value !== "object") return null;
   const id = (value as { id?: unknown }).id;
+  const sessionId = (value as { sessionId?: unknown }).sessionId;
   const createdAt = (value as { createdAt?: unknown }).createdAt;
   // Reject anything the server would reject with HTTP 400, otherwise a
   // malformed persisted record causes the pane to immediately fail its
   // WS upgrade and surface the (misleading) paste-token form.
   if (typeof id !== "string" || !PANE_ID_RE.test(id)) return null;
+  if (typeof sessionId !== "string" || !PANE_ID_RE.test(sessionId)) return null;
   if (typeof createdAt !== "number" || !Number.isFinite(createdAt)) return null;
-  return { id, createdAt };
+  return { id, sessionId, createdAt };
 }
 
 // Read the canonical panel state from `localStorage`. Falls through three
@@ -202,23 +201,11 @@ export function readTerminalPanelState(
           typeof parsed.rightWidth === "number" && parsed.rightWidth > 0
             ? parsed.rightWidth
             : defaults.rightWidth,
-        panes: Array.isArray(parsed.panes)
-          ? parsed.panes.map(coercePane).filter((p): p is TerminalPaneRecord => p !== null)
-          : defaults.panes,
+        panes: [],
       };
     } catch {
       // Corrupt JSON: treat as missing and fall through to migration / defaults.
     }
-  }
-
-  // Migration: legacy key holds the bottom-dock height.
-  const legacyHeight = readTerminalHeightPreference(storage);
-  if (legacyHeight !== null) {
-    const migrated: TerminalPanelState = { ...defaults, bottomHeight: legacyHeight };
-    if (options.writeOnMigrate !== false) {
-      writeTerminalPanelState(storage, migrated);
-    }
-    return migrated;
   }
 
   return defaults;
@@ -226,21 +213,14 @@ export function readTerminalPanelState(
 
 export function writeTerminalPanelState(storage: StorageLike, state: TerminalPanelState): void {
   try {
-    storage.setItem(TERMINAL_STATE_KEY, JSON.stringify(state));
+    storage.setItem(TERMINAL_STATE_KEY, JSON.stringify({ ...state, panes: [] }));
   } catch {
     // Ignore storage failures.
   }
 }
 
-// This window's own pane records plus its standing relative to the shared
-// restart hints. `hintOwner` is sticky across reloads (it persists with the
-// records): a window that adopted the hints — or created its panes when no
-// hints existed — keeps publishing its records as the hints; a window that
-// lost a sessionId collision is permanently a non-owner so its records can
-// never overwrite the claimant's.
 export type OwnPaneRecords = {
   panes: TerminalPaneRecord[];
-  hintOwner: boolean;
 };
 
 export function readOwnPaneRecords(storage: StorageLike): OwnPaneRecords | null {
@@ -257,7 +237,7 @@ export function readOwnPaneRecords(storage: StorageLike): OwnPaneRecords | null 
       ? parsed.panes.map(coercePane).filter((p): p is TerminalPaneRecord => p !== null)
       : [];
     if (panes.length === 0) return null;
-    return { panes, hintOwner: parsed.hintOwner === true };
+    return { panes };
   } catch {
     return null;
   }
@@ -275,17 +255,12 @@ export function writeOwnPaneRecords(storage: StorageLike, records: OwnPaneRecord
   }
 }
 
-// Boot-time resolution of which pane records this window should try to
-// claim. Own records (this window reloaded) win; otherwise the shared hints
-// from the localStorage panel state are adopted — the server's duplicate-
-// sessionId rejection arbitrates whether the adoption sticks. A window that
-// boots from hints (or from nothing) starts as the prospective hint owner;
-// it is demoted on its first lost collision.
+// Boot-time pane restoration is strictly per-window.
 export function resolveBootPaneRecords(
   sessionStore: StorageLike,
   localState: TerminalPanelState,
 ): OwnPaneRecords {
   const own = readOwnPaneRecords(sessionStore);
   if (own) return own;
-  return { panes: localState.panes, hintOwner: true };
+  return { panes: [] };
 }

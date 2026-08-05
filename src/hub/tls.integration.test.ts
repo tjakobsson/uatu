@@ -10,6 +10,7 @@ import path from "node:path";
 import { LocalProcessBackend } from "./backend";
 import { hashPassword } from "./auth";
 import type { HubConfig } from "./config";
+import { PersonalWorkspaceStateStore } from "./personal-state";
 import { WorkspaceRegistry } from "./registry";
 import { startHubServer } from "./server";
 import { SessionManager } from "./sessions";
@@ -38,8 +39,10 @@ beforeAll(async () => {
   };
   const registry = new WorkspaceRegistry(path.join(tempRoot, "registry.json"));
   await registry.load();
+  const personalState = new PersonalWorkspaceStateStore(path.join(tempRoot, "personal-state.json"));
+  await personalState.load();
   sessions = new SessionManager(registry, { local: new LocalProcessBackend() });
-  server = startHubServer({ config, registry, sessions, signingKey: "tls-test-signing-key-0123456789ab" });
+  server = startHubServer({ config, registry, sessions, personalState, signingKey: "tls-test-signing-key-0123456789ab" });
 }, 30_000);
 
 afterAll(async () => {

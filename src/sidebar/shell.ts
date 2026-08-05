@@ -4,6 +4,7 @@
 // together in the sidebar/ feature folder.
 
 import { appState } from "../shell/state";
+import { presentationLocalStorage } from "../shell/presentation-storage";
 import { computeFilesPaneFilterMembership } from "./tree-view";
 import {
   collectGitStatusEntries,
@@ -163,7 +164,7 @@ export function initSidebarWidth() {
 
 function readSidebarWidthPreference(): number {
   try {
-    const value = Number(window.localStorage.getItem(SIDEBAR_WIDTH_KEY));
+    const value = Number(presentationLocalStorage()?.getItem(SIDEBAR_WIDTH_KEY));
     if (Number.isFinite(value)) {
       return clampSidebarWidth(value);
     }
@@ -182,7 +183,7 @@ function setSidebarWidth(width: number, options: { persist?: boolean } = {}) {
   }
 
   try {
-    window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(nextWidth));
+    presentationLocalStorage()?.setItem(SIDEBAR_WIDTH_KEY, String(nextWidth));
   } catch {
     // Ignore storage failures (private mode, quota, etc.).
   }
@@ -194,7 +195,7 @@ function clampSidebarWidth(width: number): number {
 
 function readCollapsedPreference(): boolean {
   try {
-    return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
+    return presentationLocalStorage()?.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
   } catch {
     return false;
   }
@@ -214,9 +215,9 @@ export function setSidebarCollapsed(collapsed: boolean, options: { persist?: boo
 
   try {
     if (collapsed) {
-      window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, "1");
+      presentationLocalStorage()?.setItem(SIDEBAR_COLLAPSED_KEY, "1");
     } else {
-      window.localStorage.removeItem(SIDEBAR_COLLAPSED_KEY);
+      presentationLocalStorage()?.removeItem(SIDEBAR_COLLAPSED_KEY);
     }
   } catch {
     // Ignore storage failures (private mode, quota, etc.).

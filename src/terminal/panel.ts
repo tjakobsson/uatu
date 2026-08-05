@@ -5,7 +5,7 @@
 // through its named methods so persistence and refit happen consistently.
 
 import { appUrl } from "../shared/app-url";
-import { mountTerminalPanel, type TerminalPanelHandle } from "./client";
+import { mountTerminalPanel, persistTerminalToken, type TerminalPanelHandle } from "./client";
 import { initTerminalKeybar } from "./keybar";
 import { refreshFindTarget } from "../find/find-bar";
 import { registerTerminalFind } from "../find/shortcut";
@@ -31,13 +31,15 @@ import {
   type TerminalPanelState,
   type TerminalPaneRecord,
 } from "./pane-state";
+import { presentationLocalStorage, presentationSessionStorage } from "../shell/presentation-storage";
+import { persistPersonalWorkspaceState } from "../shell/personal-state";
 
 const TERMINAL_TOKEN_KEY_LOCAL = "uatu:terminal-token";
 
 let terminalSetupRan = false;
 
-const sessionStorageRef: StorageLike = window.sessionStorage;
-const localStorageRef: StorageLike = window.localStorage;
+const sessionStorageRef: StorageLike = presentationSessionStorage() ?? window.sessionStorage;
+const localStorageRef: StorageLike = presentationLocalStorage() ?? window.localStorage;
 
 function readTerminalVisiblePreference(): boolean {
   return readTerminalVisiblePreferenceShared(sessionStorageRef);
@@ -149,6 +151,7 @@ type TerminalPaneEntry = {
 export function setupTerminalPanel(
   enabled: boolean,
   config?: { fontFamily?: string; fontSize?: number; clipboard?: TerminalClipboardPolicy },
+  initialLastPtyId?: string,
 ) {
   if (terminalSetupRan) return;
   terminalSetupRan = true;
@@ -190,6 +193,7 @@ export function setupTerminalPanel(
   sidebarRow.removeAttribute("hidden");
 
   const panes = new Map<string, TerminalPaneEntry>();
+  let lastPtyId = initialLastPtyId;
   let activePaneId: string | null = null;
   // A user-initiated panel show that found no pane yet (fresh spawn path):
   // the next pane added takes focus once its terminal opens.
@@ -256,13 +260,9 @@ export function setupTerminalPanel(
   );
   let state: TerminalPanelState = readTerminalPanelState(localStorageRef);
 
-  // Pane records are per-window (sessionStorage); the localStorage state's
-  // `panes` doubles as shared restart hints. A reloading window reclaims its
-  // own sessions; a fresh window adopts the hints. `hintOwner` tracks whether
-  // this window may publish its records as the hints — demoted permanently
-  // on the first lost sessionId collision (see handlePaneCollision).
+  // Pane records are per-window. Long-lived presentation state contains only
+  // geometry, never server PTY references.
   const bootRecords = resolveBootPaneRecords(sessionStorageRef, state);
-  let hintOwner = bootRecords.hintOwner;
   state = { ...state, panes: bootRecords.panes };
 
   // Height/width restore: write the persisted value to the CSS var so the
@@ -282,18 +282,14 @@ export function setupTerminalPanel(
       panes: Array.from(panes.values()).map(entry => entry.record),
     };
     // This window's records always go to its own store.
-    writeOwnPaneRecords(sessionStorageRef, { panes: state.panes, hintOwner });
-    if (hintOwner) {
-      writeTerminalPanelState(localStorageRef, state);
-    } else {
-      // Collision loser: publish layout preferences but preserve the
-      // claimant window's pane hints — overwriting them would orphan its
-      // still-running shells on its next reload.
-      const currentHints = readTerminalPanelState(localStorageRef, {
-        writeOnMigrate: false,
-      }).panes;
-      writeTerminalPanelState(localStorageRef, { ...state, panes: currentHints });
-    }
+    writeOwnPaneRecords(sessionStorageRef, { panes: state.panes });
+    writeTerminalPanelState(localStorageRef, state);
+  }
+
+  function clearLastPty(sessionId: string): void {
+    if (lastPtyId !== sessionId) return;
+    lastPtyId = undefined;
+    persistPersonalWorkspaceState({ lastPtyId: null });
   }
 
   function getToken(): string | null {
@@ -382,6 +378,11 @@ export function setupTerminalPanel(
   function setActivePane(id: string | null) {
     const paneChanged = activePaneId !== id;
     activePaneId = id;
+    const activeSessionId = id === null ? undefined : panes.get(id)?.record.sessionId;
+    if (activeSessionId && activeSessionId !== lastPtyId) {
+      lastPtyId = activeSessionId;
+      persistPersonalWorkspaceState({ lastPtyId: activeSessionId });
+    }
     let activeEntry: TerminalPaneEntry | null = null;
     for (const entry of panes.values()) {
       if (entry.record.id === id) {
@@ -417,17 +418,11 @@ export function setupTerminalPanel(
 
   function buildPaneElement(
     record: TerminalPaneRecord,
-    // `collisionRecovery: false` on replacement panes built by
-    // handlePaneCollision, so a server that keeps refusing upgrades for
-    // non-auth reasons (e.g. terminal disabled) cannot drive an endless
-    // rebuild loop: one recovery per pane. `takeover` when the pane binds
-    // to a session currently attached in another window (picker attach).
-    options: { collisionRecovery?: boolean; takeover?: boolean } = {},
+    options: { takeover?: boolean } = {},
   ): TerminalPaneEntry {
-    const collisionRecovery = options.collisionRecovery !== false;
     const element = document.createElement("div");
     element.className = "terminal-pane";
-    element.dataset.sessionId = record.id;
+    element.dataset.sessionId = record.sessionId;
 
     const host = document.createElement("div");
     host.className = "terminal-pane-host";
@@ -453,7 +448,7 @@ export function setupTerminalPanel(
     const handle = mountTerminalPanel({
       container: host,
       getToken,
-      sessionId: record.id,
+      sessionId: record.sessionId,
       fontFamily: config?.fontFamily,
       fontSize: config?.fontSize,
       clipboardPolicy: config?.clipboard,
@@ -464,10 +459,10 @@ export function setupTerminalPanel(
       onClose: () => {
         if (panes.has(record.id)) removePane(record.id);
       },
-      // Pre-open failure with valid credentials = another window holds this
-      // persisted sessionId. Rebuild with a fresh id instead of showing the
-      // (wrong) paste-token form.
-      onCollision: collisionRecovery ? () => handlePaneCollision(record.id) : undefined,
+      // A valid credential with a refused upgrade means this reference is
+      // stale or attached elsewhere. Reconcile it through inventory so any
+      // takeover remains an explicit user action.
+      onCollision: () => handlePaneUnavailable(record.id),
       takeover: options.takeover === true,
     });
 
@@ -590,14 +585,21 @@ export function setupTerminalPanel(
     });
   }
 
-  function addPane(
+  async function addPane(
     record?: Partial<TerminalPaneRecord>,
     options: { takeover?: boolean } = {},
-  ): TerminalPaneEntry | null {
+  ): Promise<TerminalPaneEntry | null> {
     if (panes.size >= TERMINAL_MAX_PANES) return null;
+    const created = record?.sessionId ? null : await createSessionRemote();
+    if (!record?.sessionId && !created) return null;
+    if (panes.size >= TERMINAL_MAX_PANES || panel!.hasAttribute("hidden")) {
+      if (created) void killSessionRemote(created.id);
+      return null;
+    }
     const id = record?.id ?? crypto.randomUUID();
+    const sessionId = record?.sessionId ?? created!.id;
     const createdAt = record?.createdAt ?? Date.now();
-    const fullRecord: TerminalPaneRecord = { id, createdAt };
+    const fullRecord: TerminalPaneRecord = { id, sessionId, createdAt };
     const entry = buildPaneElement(fullRecord, { takeover: options.takeover });
     panes.set(id, entry);
     rebuildPanesContainer();
@@ -621,10 +623,85 @@ export function setupTerminalPanel(
       const response = await fetch(url, { method: "GET" });
       if (!response.ok) return [];
       const body = (await response.json()) as { sessions?: TerminalSessionInfo[] };
-      return Array.isArray(body.sessions) ? body.sessions : [];
+      const sessions = Array.isArray(body.sessions) ? body.sessions : [];
+      if (lastPtyId && !sessions.some(session => session.id === lastPtyId)) {
+        lastPtyId = undefined;
+        persistPersonalWorkspaceState({ lastPtyId: null });
+      }
+      return sessions;
     } catch {
       return [];
     }
+  }
+
+  async function createSessionRemote(): Promise<TerminalSessionInfo | null> {
+    try {
+      const token = getToken();
+      const url = token
+        ? appUrl(`/api/terminal/sessions?t=${encodeURIComponent(token)}`)
+        : appUrl("/api/terminal/sessions");
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ cols: 80, rows: 24 }),
+      });
+      if (response.status === 401) renderTerminalAuth();
+      return response.ok ? await response.json() as TerminalSessionInfo : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function renderTerminalAuth(): void {
+    if (panesContainer!.querySelector(".terminal-auth")) return;
+    const wrap = document.createElement("div");
+    wrap.className = "terminal-pane terminal-auth";
+    const heading = document.createElement("p");
+    heading.className = "terminal-auth-heading";
+    heading.textContent = "Reconnect to uatu";
+    const help = document.createElement("p");
+    help.className = "terminal-auth-help";
+    help.textContent = "Paste the token printed by `uatu` in your shell to continue.";
+    const form = document.createElement("form");
+    form.className = "terminal-auth-form";
+    const input = document.createElement("input");
+    input.type = "password";
+    input.autocomplete = "off";
+    input.className = "terminal-auth-input";
+    input.placeholder = "paste token";
+    input.setAttribute("aria-label", "uatu terminal token");
+    const submit = document.createElement("button");
+    submit.type = "submit";
+    submit.className = "terminal-auth-submit";
+    submit.textContent = "Connect";
+    const status = document.createElement("p");
+    status.className = "terminal-auth-status";
+    status.setAttribute("aria-live", "polite");
+    form.append(input, submit);
+    wrap.append(heading, help, form, status);
+    panesContainer!.append(wrap);
+    requestAnimationFrame(() => input.focus());
+
+    form.addEventListener("submit", async event => {
+      event.preventDefault();
+      const token = input.value.trim();
+      if (!token) return;
+      submit.disabled = true;
+      status.textContent = "Validating…";
+      if (!await persistTerminalToken(token)) {
+        submit.disabled = false;
+        status.textContent = "Token rejected. Check the value printed by uatu in your shell.";
+        input.select();
+        return;
+      }
+      try {
+        window.sessionStorage.setItem(TERMINAL_TOKEN_KEY_LOCAL, token);
+      } catch {
+        // The HttpOnly cookie is sufficient when sessionStorage is unavailable.
+      }
+      wrap.remove();
+      void addPane();
+    });
   }
 
   async function killSessionRemote(id: string): Promise<boolean> {
@@ -647,11 +724,14 @@ export function setupTerminalPanel(
   // through to a fresh pane, keeping the zero-friction default.
   async function addPaneInteractive(): Promise<void> {
     if (panes.size >= TERMINAL_MAX_PANES) return;
-    const candidates = pickerCandidates(await fetchSessionInventory(), panes.keys());
+    const candidates = pickerCandidates(
+      await fetchSessionInventory(),
+      Array.from(panes.values(), pane => pane.record.sessionId),
+    );
     // The await yields: bail if the panel closed or filled up meanwhile.
     if (panel!.hasAttribute("hidden") || panes.size >= TERMINAL_MAX_PANES) return;
     if (candidates.length === 0) {
-      addPane();
+      await addPane();
       return;
     }
     renderSessionPicker(candidates);
@@ -671,13 +751,15 @@ export function setupTerminalPanel(
     for (const session of candidates) {
       const row = document.createElement("div");
       row.className = "terminal-picker-row";
+      if (session.id === lastPtyId) row.classList.add("is-last-active");
 
       const label = document.createElement("span");
       label.className = "terminal-picker-label";
       label.textContent = session.label;
       const meta = document.createElement("span");
       meta.className = "terminal-picker-meta";
-      meta.textContent = `${session.attached ? "attached elsewhere" : "detached"} · ${formatSessionAge(session.createdAt, Date.now())}`;
+      const lastActive = session.id === lastPtyId ? "last active · " : "";
+      meta.textContent = `${lastActive}${session.attached ? "attached elsewhere" : "detached"} · ${formatSessionAge(session.createdAt, Date.now())}`;
 
       const attach = document.createElement("button");
       attach.type = "button";
@@ -685,7 +767,7 @@ export function setupTerminalPanel(
       attach.textContent = session.attached ? "Take over" : "Attach";
       attach.addEventListener("click", () => {
         dismiss();
-        addPane({ id: session.id, createdAt: Date.now() }, { takeover: session.attached });
+        void addPane({ sessionId: session.id, createdAt: Date.now() }, { takeover: session.attached });
       });
 
       const kill = document.createElement("button");
@@ -697,11 +779,15 @@ export function setupTerminalPanel(
         kill.disabled = true;
         void killSessionRemote(session.id).then(ok => {
           if (ok) {
+            if (lastPtyId === session.id) {
+              lastPtyId = undefined;
+              persistPersonalWorkspaceState({ lastPtyId: null });
+            }
             row.remove();
             if (list.childElementCount === 0) {
               // Nothing left to offer — fall through to a fresh shell.
               dismiss();
-              addPane();
+              void addPane();
             }
           } else {
             kill.disabled = false;
@@ -719,7 +805,7 @@ export function setupTerminalPanel(
     fresh.textContent = "New shell";
     fresh.addEventListener("click", () => {
       dismiss();
-      addPane();
+      void addPane();
     });
 
     wrap.append(heading, list, fresh);
@@ -802,33 +888,21 @@ export function setupTerminalPanel(
     if (accepted && handler) handler();
   }
 
-  // A pane's WebSocket upgrade was refused while this window's credentials
-  // are valid: another window holds the pane's persisted sessionId. Swap in
-  // a rebuilt pane with a fresh id — the other window keeps the session, and
-  // this window stops publishing reattach hints so it can never clobber the
-  // claimant's.
-  function handlePaneCollision(id: string) {
+  // Reconcile a stale or occupied saved reference against live inventory.
+  // The picker requires an explicit takeover when another client owns it.
+  function handlePaneUnavailable(id: string) {
     const entry = panes.get(id);
     if (!entry) return;
-    hintOwner = false;
     try {
       entry.handle.detach();
     } catch {
       // Mount already tore itself down.
     }
     panes.delete(id);
-    const fresh = buildPaneElement(
-      { id: crypto.randomUUID(), createdAt: entry.record.createdAt },
-      { collisionRecovery: false },
-    );
-    panes.set(fresh.record.id, fresh);
     rebuildPanesContainer();
-    fresh.handle.attach();
-    if (activePaneId === id || activePaneId === null) {
-      setActivePane(fresh.record.id);
-    }
+    if (activePaneId === id) activePaneId = null;
     persistState();
-    requestAnimationFrame(() => fitAll());
+    void addPaneInteractive();
   }
 
   function requestClosePane(id: string) {
@@ -850,6 +924,7 @@ export function setupTerminalPanel(
       } catch {
         // Already torn down.
       }
+      if (current) clearLastPty(current.record.sessionId);
       removePane(id);
     });
   }
@@ -862,6 +937,7 @@ export function setupTerminalPanel(
   // non-destructive: it's symmetric with hide, and the user can re-toggle to
   // reattach to the still-live PTYs.
   function closeAllPanes() {
+    const attachedSessionIds = Array.from(panes.values(), pane => pane.record.sessionId);
     for (const id of Array.from(panes.keys())) {
       const entry = panes.get(id);
       if (entry) {
@@ -872,6 +948,10 @@ export function setupTerminalPanel(
         }
       }
       panes.delete(id);
+    }
+    if (attachedSessionIds.some(id => id === lastPtyId)) {
+      lastPtyId = undefined;
+      persistPersonalWorkspaceState({ lastPtyId: null });
     }
     panesContainer!.replaceChildren();
     activePaneId = null;
@@ -895,7 +975,7 @@ export function setupTerminalPanel(
       if (panes.size === 0) {
         if (state.panes.length > 0) {
           for (const record of state.panes.slice(0, TERMINAL_MAX_PANES)) {
-            addPane(record);
+            void addPane(record);
           }
         } else {
           // Nothing to restore: offer existing sessions (orphans, other

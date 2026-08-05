@@ -9,6 +9,7 @@ import { applyStaleHint } from "../shell/stale-hint-mount";
 import { buildCommitPreviewPath } from "../shell/history";
 import { nextStaleHint } from "../shell/stale-hint";
 import { GIT_LOG_LIMIT_KEY, appState, isGitLogLimit } from "../shell/state";
+import { presentationLocalStorage } from "../shell/presentation-storage";
 import { activateCommitPreview } from "../shell/url";
 
 const gitLogElementMaybe = document.querySelector<HTMLDivElement>("#git-log");
@@ -103,7 +104,7 @@ export function capitalize(value: string): string {
 
 export function persistGitLogLimit() {
   try {
-    window.localStorage.setItem(GIT_LOG_LIMIT_KEY, String(appState.gitLogLimit));
+    presentationLocalStorage()?.setItem(GIT_LOG_LIMIT_KEY, String(appState.gitLogLimit));
   } catch {
     // Ignore storage failures (private mode, quota, etc.).
   }

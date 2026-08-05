@@ -3,7 +3,6 @@
 // stale-hint behavior, follow-mode auto-switching, and on-disk-change reloads
 // lives in here, intentionally close to its trigger (the SSE message).
 
-import { appUrl } from "../shared/app-url";
 import { chooseSelectionForFileEvent } from "./follow";
 import { applyProjectIdentity } from "./identity";
 import { findDocumentById, syncStateGeneration } from "./storage";
@@ -19,12 +18,16 @@ import {
   shouldRefreshPreview,
   type StatePayload,
 } from "../shared/types";
-import { adoptCompareTarget } from "../sidebar/change-overview";
 import { setConnectionState } from "./connection";
+import { renderBuildBadge } from "./connection";
+import { appUrl } from "../shared/app-url";
 import { replaceSelection } from "./history";
 import { setSelectedId } from "./selection";
 import { appState } from "./state";
 import { renderCommitPreview } from "./url";
+import { contextualAppUrl, setClientScope } from "./watch-context";
+
+let activeEvents: EventSource | null = null;
 
 // Owner mutator for the server-snapshot triple (`roots`, `repositories`,
 // `scope`). The SSE reducer below is the ongoing writer; the boot path
@@ -32,7 +35,7 @@ import { renderCommitPreview } from "./url";
 export function applyServerSnapshot(payload: StatePayload): void {
   appState.roots = payload.roots;
   appState.repositories = payload.repositories ?? [];
-  appState.scope = payload.scope;
+  setClientScope(payload.scope);
   appState.unscopedFingerprint = payload.unscopedFingerprint ?? null;
   // The Search pane names the scope in effect; it has to hear about changes.
   syncSearchScope();
@@ -46,7 +49,9 @@ export function applyServerSnapshot(payload: StatePayload): void {
 }
 
 export function connectEvents() {
-  const events = new EventSource(appUrl("/api/events"));
+  activeEvents?.close();
+  const events = new EventSource(contextualAppUrl(appUrl("/api/events")));
+  activeEvents = events;
 
   events.addEventListener("open", () => {
     setConnectionState("live", "Online");
@@ -62,17 +67,6 @@ export function connectEvents() {
     const shouldReload = shouldRefreshPreview(previousSelectedId, payload.changedId);
 
     applyServerSnapshot(payload);
-    // The compare target is server-session state shared across clients. If
-    // another tab switched it, adopt the broadcast value so this tab's toggle,
-    // persisted preference, and cached diffs all reflect the shared session —
-    // otherwise we'd show repositories computed for the new target under the
-    // old toggle, with a stale cached diff. (A switch initiated by this tab is
-    // already applied optimistically, so this is a no-op in that case.)
-    const compareTargetChanged =
-      typeof payload.compareTarget === "string" && payload.compareTarget !== appState.compareTarget;
-    if (compareTargetChanged) {
-      adoptCompareTarget(payload.compareTarget);
-    }
     applyMonoConfig(payload.monoConfig);
     syncStateGeneration(payload.generatedAt);
 
@@ -131,12 +125,9 @@ export function connectEvents() {
 
     renderSidebar();
 
-    // An externally-driven compare-target switch must refresh an open Diff
-    // view against the new target (its cached payload was cleared above).
-    const needsDiffReload = compareTargetChanged && appState.viewMode === "diff";
     if (
       appState.selectedId &&
-      (shouldReload || appState.selectedId !== previousSelectedId || needsDiffReload)
+      (shouldReload || appState.selectedId !== previousSelectedId)
     ) {
       if (shouldReload) {
         // The file changed on disk — any cached payload is now stale.
@@ -156,4 +147,17 @@ export function connectEvents() {
       renderEmptyPreview("No document selected", "Waiting for viewable files");
     }
   });
+}
+
+export async function refreshServerStateForContext(): Promise<StatePayload> {
+  const response = await fetch(contextualAppUrl(appUrl("/api/state")));
+  if (!response.ok) throw new Error(`state refresh failed: ${response.status}`);
+  const payload = (await response.json()) as StatePayload;
+  applyServerSnapshot(payload);
+  applyMonoConfig(payload.monoConfig);
+  syncStateGeneration(payload.generatedAt);
+  renderBuildBadge(payload.build);
+  renderSidebar();
+  connectEvents();
+  return payload;
 }

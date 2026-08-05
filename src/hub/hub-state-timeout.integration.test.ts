@@ -9,6 +9,7 @@ import path from "node:path";
 import type { RunningSession, SessionBackend } from "./backend";
 import { createSessionCookieValue, hashPassword } from "./auth";
 import type { HubConfig } from "./config";
+import { PersonalWorkspaceStateStore } from "./personal-state";
 import { WorkspaceRegistry } from "./registry";
 import { startHubServer } from "./server";
 import { SessionManager } from "./sessions";
@@ -32,6 +33,8 @@ beforeAll(async () => {
 
   const registry = new WorkspaceRegistry(path.join(tempRoot, "registry.json"));
   await registry.load();
+  const personalState = new PersonalWorkspaceStateStore(path.join(tempRoot, "personal-state.json"));
+  await personalState.load();
   await registry.register(path.join(tempRoot, "workspaces", "wedged"));
 
   const backend: SessionBackend = {
@@ -55,7 +58,7 @@ beforeAll(async () => {
     stateDir: path.join(tempRoot, "state"),
     local: false,
   };
-  hub = startHubServer({ config, registry, sessions, signingKey: KEY });
+  hub = startHubServer({ config, registry, sessions, personalState, signingKey: KEY });
 });
 
 afterAll(async () => {

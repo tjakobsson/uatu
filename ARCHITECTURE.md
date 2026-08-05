@@ -32,8 +32,8 @@ flowchart LR
 
 Four boundaries to keep in mind:
 
-- **HTTP/SSE between server and SPA.** `/api/state` (initial snapshot), `/api/document` (rendered HTML for a path), `/api/document/diff` (git diff), `/api/events` (SSE feed of state updates), `/api/scope` (POST to pin to a single file), `/api/compare-target` (POST to switch the review-burden lens between `base` and `last-commit`).
-- **Compare target.** The Change Overview measures review burden against the resolved review base by default (`base` — committed + worktree changes vs the merge base, the reviewer's view) but can switch to `last-commit` (staged + unstaged vs `HEAD`, plain-git's working view). Like `scope`, it is server-session state held in `server/watch-session.ts` and shared across clients: a `POST /api/compare-target` recomputes `repositories` and rebroadcasts over SSE, and `/api/document/diff` resolves against the session's current target so per-file diffs stay coherent with the meter. `document/git-base-ref.ts` owns the single `applyCompareTarget` / `compareRefForTarget` mapping that both the meter and the diff consume; the burden readout is anchored with the precise resolved ref (`vs origin/main`, `vs HEAD`).
+- **HTTP/SSE between server and SPA.** `/api/state` supplies the initial snapshot, `/api/document` and `/api/document/diff` render one path, `/api/search` sweeps content, and `/api/events` streams updates. Scope and compare target travel as validated request context on all related requests; there are no process-global mutation endpoints.
+- **Per-client watch context.** The Change Overview measures against `base` (merge-base review view) or `last-commit` (`HEAD` working view). `src/shared/watch-context.ts` serializes the client's scope and compare target, and `server/watch-session.ts` selects the corresponding roots and cached repository snapshot independently for each request and SSE subscriber. Two clients can therefore browse different scopes and comparison lenses through the same child process.
 - **Chokidar between server and the filesystem.** The `WatchSession` debounces, applies the ignore policy, rebuilds the document index, and emits SSE events.
 - **WebSocket between SPA and terminal subsystem.** Authenticated by a cookie set on `POST /api/auth`; multiplexed across multiple PTY panes by `terminal/server.ts`.
 - **A single Bun binary.** No node, no separate frontend bundler — `Bun.serve` serves both the SPA and the API.
@@ -231,6 +231,17 @@ The route table that wires both of these requests is declared exactly once, in `
 
 The SPA's source of truth is `appState`, a module-level mutable singleton in `src/shell/state.ts`. The SSE handler in `src/shell/events.ts` is the only path that mutates `appState` from external events.
 
+State is deliberately split into four lifetimes:
+
+| Lifetime | Examples | Owner / storage |
+|---|---|---|
+| Child session | watched roots, file index, repository snapshots, live PTYs | `server/watch-session.ts` and `terminal/server.ts`; ends when the child stops |
+| Client watch context | scope and compare target used by state, SSE, search, navigation, and diff requests | explicit URL/query context from `shell/watch-context.ts`; never mutates another client |
+| Personal workspace state | selected document, Follow, preview mode, compare target, Files filter, last-active PTY id | Hub store keyed by authenticated user + stable workspace id in `hub/personal-state.ts`; local Hub uses identity `local` |
+| Client presentation | sidebar and preview geometry, terminal dock/splits/pane attachments, transient visibility | base-path-namespaced browser local/session storage in `shell/presentation-storage.ts`; native macOS window/split geometry remains in `UserDefaults` |
+
+Boot loads child state and personal state together. Explicit document, commit, or review URLs win; otherwise semantic personal state resumes; child defaults are last. Semantic owner mutators PATCH fields through `shell/personal-state.ts`. Presentation state never enters the Hub store, and another browser restores semantics without inheriting this browser's dimensions or pane arrangement. A stale document or PTY reference is cleared independently after the current document index or terminal inventory proves it absent.
+
 Every `appState` field has exactly one owning module: direct assignment (`appState.<field> = …`) is allowed only inside the owner, and every other module mutates through the owner's exported mutator (`setSelectedId()`, `setFilesPaneFilter()`, …). Mutators for persisted preferences own the localStorage write, so assignment and persistence can't drift apart. The contract is enforced by `src/shell/state-ownership.test.ts`, which scans `src/` for out-of-owner assignments.
 
 | Field | Owner |
@@ -291,7 +302,8 @@ flowchart LR
   Shell[("user's shell<br/>(zsh / bash / pwsh)")]
 
   Client -- POST /api/auth --> Cookie
-  Client <-- "ws: /api/terminal (cookie-gated)" --> Server
+  Client -- "POST /api/terminal/sessions" --> Server
+  Client <-- "ws: /api/terminal?sessionId=…" --> Server
   Server --> Auth
   Server --> Backend
   Backend --> PTY
@@ -302,9 +314,11 @@ The panel UI (~700 lines in `src/terminal/panel.ts`) handles dock position, spli
 
 Auth is deliberately Host-relative: the origin gate compares the `Origin` header against the request's `Host` (hostname pinned to loopback names), and the auth cookie is named `uatu_term_<host-port>`, so port-mapped access (container publishes, SSH forwards) and multi-instance fleets work with zero configuration. The rationale — including which parts of this design would survive a hosted multi-tenant deployment and which are deliberate localhost scaffolding — is recorded in the `fix-terminal-auth-port-mapping` change's `design.md` (decision D4).
 
-PTY lifetime follows tmux-detach semantics: a WebSocket disconnect (reload, tab close, browser quit, system sleep) detaches the session while the shell keeps running, and reconnecting with the same persisted `sessionId` reattaches to it — a bounded replay buffer repaints the screen. Only the confirmed pane close (close code 4001), a kill via the session inventory, or server shutdown terminates a shell.
+PTY lifetime follows tmux-detach semantics, but PTYs are server-owned resources rather than side effects of WebSocket upgrade. Authenticated `POST /api/terminal/sessions` creates a resource and returns its id. A WebSocket may only attach to an existing id; malformed, unknown, attached, and explicit-takeover cases remain distinct. Disconnecting detaches while the shell keeps running. Only confirmed pane close (close code 4001), inventory deletion, shell exit, or child shutdown terminates it.
 
-Sessions are managed tmux-style: `GET /api/terminal/sessions` lists every live PTY (attached/detached, age, best-effort foreground-process label via a POSIX `ps` adapter), `DELETE /api/terminal/sessions/<id>` kills one, and the WS upgrade's `takeover=1` parameter moves an attached session between windows — the previous holder's pane parks with a "take back" action. The pane-spawn flow offers this inventory (attach / kill / new shell) whenever live sessions exist that the window isn't already showing.
+After upgrade, the client opens xterm, fits it, and sends `attach-ready` with actual dimensions. Until then the server ignores input and does not transfer ownership. Each PTY feeds a bounded `@xterm/headless` model while attached or detached. At readiness the server resizes the PTY/model, serializes coherent normal/alternate-buffer state plus a small private-mode ledger, sends that reconstruction first, then forwards buffered and live output. This replaces arbitrary byte-tail replay and preserves raw-mode TUI state across fresh clients and different viewport sizes. Takeover is transactional: the previous holder receives 4410 only after the replacement is ready; an early failed claimant leaves it attached.
+
+Sessions are managed tmux-style: `GET /api/terminal/sessions` lists every live PTY (attached/detached, age, dimensions, best-effort foreground-process label via a POSIX `ps` adapter), and `DELETE /api/terminal/sessions/<id>` kills one. The picker lists resources not already shown in the window and requires explicit attach, takeover, kill, or new-shell actions. Local pane ids/layout are separate from server PTY ids. The personal last-active id is highlighted but never auto-attached on a new client; actual pane attachments remain base-path-namespaced per-window presentation state.
 
 App-defined WebSocket close codes: `4001` user-terminate (client→server: kill the PTY), `4409` sessionId in use (server→client: upgrade race lost), `4410` session taken (server→client: another window took this session over).
 

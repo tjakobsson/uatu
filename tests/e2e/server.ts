@@ -43,6 +43,7 @@ let activeRespectGitignore = true;
 let activeFollow = true;
 let activeWorkspaceRoot = E2E_WORKSPACE_ROOT;
 let activeEntries: WatchEntry[] = [];
+let personalState: Record<string, unknown> = { version: 1 };
 const terminalEnabled = await terminalBackendAvailable();
 let watchSession = await createSession({ resetWorkspace: true });
 const terminalServer = terminalEnabled
@@ -85,6 +86,7 @@ async function handleE2EReset(request: Request): Promise<Response> {
   activeRespectGitignore =
     typeof body.respectGitignore === "boolean" ? body.respectGitignore : true;
   activeFollow = typeof body.follow === "boolean" ? body.follow : true;
+  personalState = { version: 1 };
 
   const previousWorkspaceRoot = activeWorkspaceRoot;
   activeWorkspaceRoot = E2E_WORKSPACE_ROOT;
@@ -125,6 +127,16 @@ async function handleE2EReset(request: Request): Promise<Response> {
   return Response.json(watchSession.getStatePayload());
 }
 
+async function handleE2EPersonalState(request: Request): Promise<Response> {
+  if (request.method === "GET") return Response.json(personalState);
+  const patch = await request.json() as Record<string, unknown>;
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null) delete personalState[key];
+    else personalState[key] = value;
+  }
+  return Response.json(personalState);
+}
+
 let server: ReturnType<typeof Bun.serve>;
 server = Bun.serve({
   hostname: "127.0.0.1",
@@ -156,6 +168,7 @@ server = Bun.serve({
       },
       getSession: () => watchSession,
       handleE2EReset,
+      handleE2EPersonalState,
     }),
   },
   fetch: (request, srv) => fetchFallback(request, srv),

@@ -46,6 +46,7 @@ function startServer(
       const takeover = url.searchParams.get("takeover") === "1";
       const result = terminal.prepareSession(sessionId, { takeover });
       if (result.kind === "invalid") return new Response("invalid sessionId", { status: 400 });
+      if (result.kind === "unknown") return new Response("unknown sessionId", { status: 404 });
       if (result.kind === "collision") return new Response("sessionId in use", { status: 409 });
       const ok = (srv.upgrade as (req: Request, opts: { data: unknown }) => boolean)(request, {
         data: { sessionId, takeover },
@@ -81,6 +82,34 @@ function decode(data: unknown): string {
     : new TextDecoder().decode(new Uint8Array(data as ArrayBuffer));
 }
 
+const attachmentSnapshots = new WeakMap<WebSocket, string>();
+
+async function createSession(terminal: TerminalServer): Promise<string> {
+  return (await terminal.createSession({ cols: 80, rows: 24 })).id;
+}
+
+function openSocket(port: number, id: string, takeover = false): Promise<WebSocket> {
+  const params = takeover ? `sessionId=${id}&takeover=1` : `sessionId=${id}`;
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/?${params}`);
+  ws.binaryType = "arraybuffer";
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("attach timeout")), 2000);
+    ws.addEventListener("open", () => {
+      ws.send(JSON.stringify({ type: "attach-ready", cols: 80, rows: 24 }));
+    });
+    ws.addEventListener("message", function onSnapshot(event) {
+      clearTimeout(timeout);
+      ws.removeEventListener("message", onSnapshot);
+      attachmentSnapshots.set(ws, decode(event.data));
+      resolve(ws);
+    });
+    ws.addEventListener("error", err => {
+      clearTimeout(timeout);
+      reject(err as unknown as Error);
+    });
+  });
+}
+
 beforeEach(() => {
   if (!backendOk) return;
   ctx = startServer();
@@ -112,9 +141,9 @@ describe("isValidSessionId", () => {
 });
 
 describe("prepareSession (no Bun.serve required)", () => {
-  it("returns 'fresh' for a brand-new id", () => {
+  it("returns 'unknown' for a brand-new id", () => {
     const terminal = createTerminalServer({ cwd: process.cwd() });
-    expect(terminal.prepareSession(freshSessionId())).toEqual({ kind: "fresh" });
+    expect(terminal.prepareSession(freshSessionId())).toEqual({ kind: "unknown" });
   });
 
   it("returns 'invalid' for malformed ids", () => {
@@ -142,22 +171,19 @@ describe.skipIf(!backendOk)("terminal-server PTY round-trip", () => {
     expect(response.status).toBe(400);
   });
 
+  it("rejects an unknown sessionId with HTTP 404", async () => {
+    if (!ctx) throw new Error("ctx not initialized");
+    const response = await fetch(`http://127.0.0.1:${ctx.port}/?sessionId=${freshSessionId()}`, {
+      headers: { Upgrade: "websocket" },
+    });
+    expect(response.status).toBe(404);
+  });
+
   it("rejects a duplicate sessionId with HTTP 409", async () => {
     if (!ctx) throw new Error("ctx not initialized");
-    const id = freshSessionId();
+    const id = await createSession(ctx.terminal);
     // First connection: should succeed and stay open.
-    const ws1 = new WebSocket(`ws://127.0.0.1:${ctx.port}/?sessionId=${id}`);
-    await new Promise<void>((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error("ws1 open timeout")), 1500);
-      ws1.addEventListener("open", () => {
-        clearTimeout(t);
-        resolve();
-      });
-      ws1.addEventListener("error", err => {
-        clearTimeout(t);
-        reject(err as unknown as Error);
-      });
-    });
+    const ws1 = await openSocket(ctx.port, id);
     try {
       // Second upgrade with the same id while the first is live → 409.
       const response = await fetch(`http://127.0.0.1:${ctx.port}/?sessionId=${id}`, {
@@ -171,8 +197,9 @@ describe.skipIf(!backendOk)("terminal-server PTY round-trip", () => {
 
   it("spawns a shell and echoes stdin back", async () => {
     if (!ctx) throw new Error("ctx not initialized");
+    const id = await createSession(ctx.terminal);
     return new Promise<void>((resolve, reject) => {
-      const ws = new WebSocket(`ws://127.0.0.1:${ctx!.port}/?sessionId=${freshSessionId()}`);
+      const ws = new WebSocket(`ws://127.0.0.1:${ctx!.port}/?sessionId=${id}`);
       ws.binaryType = "arraybuffer";
       let received = "";
       const done = (err?: Error) => {
@@ -186,10 +213,13 @@ describe.skipIf(!backendOk)("terminal-server PTY round-trip", () => {
       };
       const timeout = setTimeout(() => done(new Error(`timeout — got: ${received}`)), 4000);
       ws.addEventListener("open", () => {
-        ws.send(new TextEncoder().encode("echo terminal-test-marker\r\n"));
+        ws.send(JSON.stringify({ type: "attach-ready", cols: 80, rows: 24 }));
       });
       ws.addEventListener("message", event => {
         received += decode(event.data);
+        if (!received.includes("terminal-test-marker")) {
+          ws.send(new TextEncoder().encode("echo terminal-test-marker\r\n"));
+        }
         if (received.includes("terminal-test-marker")) {
           clearTimeout(timeout);
           done();
@@ -204,12 +234,12 @@ describe.skipIf(!backendOk)("terminal-server PTY round-trip", () => {
 
   it("multiplexes two concurrent sessions independently", async () => {
     if (!ctx) throw new Error("ctx not initialized");
-    const idA = freshSessionId();
-    const idB = freshSessionId();
-    const wsA = new WebSocket(`ws://127.0.0.1:${ctx.port}/?sessionId=${idA}`);
-    const wsB = new WebSocket(`ws://127.0.0.1:${ctx.port}/?sessionId=${idB}`);
-    wsA.binaryType = "arraybuffer";
-    wsB.binaryType = "arraybuffer";
+    const idA = await createSession(ctx.terminal);
+    const idB = await createSession(ctx.terminal);
+    const [wsA, wsB] = await Promise.all([
+      openSocket(ctx.port, idA),
+      openSocket(ctx.port, idB),
+    ]);
 
     let receivedA = "";
     let receivedB = "";
@@ -226,23 +256,6 @@ describe.skipIf(!backendOk)("terminal-server PTY round-trip", () => {
         if (receivedB.includes("bravo-marker")) resolve();
       });
     });
-
-    await Promise.all([
-      new Promise<void>((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error("wsA open timeout")), 1500);
-        wsA.addEventListener("open", () => {
-          clearTimeout(t);
-          resolve();
-        });
-      }),
-      new Promise<void>((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error("wsB open timeout")), 1500);
-        wsB.addEventListener("open", () => {
-          clearTimeout(t);
-          resolve();
-        });
-      }),
-    ]);
 
     wsA.send(new TextEncoder().encode("echo alpha-marker\r\n"));
     wsB.send(new TextEncoder().encode("echo bravo-marker\r\n"));
@@ -265,18 +278,8 @@ describe.skipIf(!backendOk)("terminal-server PTY round-trip", () => {
 
   it("disposeAll() reaps live PTYs", async () => {
     if (!ctx) throw new Error("ctx not initialized");
-    const ws = new WebSocket(`ws://127.0.0.1:${ctx.port}/?sessionId=${freshSessionId()}`);
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("ws never opened")), 2000);
-      ws.addEventListener("open", () => {
-        clearTimeout(timeout);
-        resolve();
-      });
-      ws.addEventListener("error", err => {
-        clearTimeout(timeout);
-        reject(err as unknown as Error);
-      });
-    });
+    const id = await createSession(ctx.terminal);
+    const ws = await openSocket(ctx.port, id);
 
     const closed = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error("ws never closed after disposeAll")), 3000);
@@ -308,8 +311,9 @@ describe.skipIf(!backendOk)("terminal-server shell selection", () => {
     async () => {
       const local = startServer({ shell: "/bin/sh" });
       try {
+        const id = await createSession(local.terminal);
         await new Promise<void>((resolve, reject) => {
-          const ws = new WebSocket(`ws://127.0.0.1:${local.port}/?sessionId=${freshSessionId()}`);
+          const ws = new WebSocket(`ws://127.0.0.1:${local.port}/?sessionId=${id}`);
           ws.binaryType = "arraybuffer";
           let received = "";
           const done = (err?: Error) => {
@@ -323,12 +327,15 @@ describe.skipIf(!backendOk)("terminal-server shell selection", () => {
           };
           const timeout = setTimeout(() => done(new Error(`timeout — got: ${received}`)), 4000);
           ws.addEventListener("open", () => {
-            // sh expands $SHELL from its inherited env. We expect the host's
-            // ambient value, NOT the spawned /bin/sh — proving non-override.
-            ws.send(new TextEncoder().encode('echo "SHELLIS:$SHELL:END"\r\n'));
+            ws.send(JSON.stringify({ type: "attach-ready", cols: 80, rows: 24 }));
           });
           ws.addEventListener("message", event => {
             received += decode(event.data);
+            if (!received.includes("SHELLIS:")) {
+              // sh expands $SHELL from its inherited env. We expect the host's
+              // ambient value, NOT the spawned /bin/sh — proving non-override.
+              ws.send(new TextEncoder().encode('echo "SHELLIS:$SHELL:END"\r\n'));
+            }
             if (received.includes(`SHELLIS:${hostShell}:END`)) {
               clearTimeout(timeout);
               done();
@@ -358,8 +365,9 @@ describe.skipIf(!backendOk)("terminal-server shell fallback notice", () => {
   it("writes the fallback notice into the session when $SHELL is unset", async () => {
     const local = startServer({ env: {} });
     try {
+      const id = await createSession(local.terminal);
       const notice = await new Promise<string>((resolve, reject) => {
-        const ws = new WebSocket(`ws://127.0.0.1:${local.port}/?sessionId=${freshSessionId()}`);
+        const ws = new WebSocket(`ws://127.0.0.1:${local.port}/?sessionId=${id}`);
         ws.binaryType = "arraybuffer";
         let received = "";
         const timeout = setTimeout(
@@ -378,6 +386,9 @@ describe.skipIf(!backendOk)("terminal-server shell fallback notice", () => {
             resolve(received);
           }
         });
+        ws.addEventListener("open", () => {
+          ws.send(JSON.stringify({ type: "attach-ready", cols: 80, rows: 24 }));
+        });
         ws.addEventListener("error", err => {
           clearTimeout(timeout);
           reject(err as unknown as Error);
@@ -395,11 +406,11 @@ describe.skipIf(!backendOk)("terminal-server shell fallback notice", () => {
 // server's close callback runs asynchronously relative to the client's close
 // event, so a single immediate check would race it. prepareSession doubles as
 // external observability: "collision" = attached, "reattach" = detached with
-// a live PTY, "fresh" = session gone.
+// a live PTY, "unknown" = session gone.
 async function waitForSessionKind(
   terminal: TerminalServer,
   sessionId: string,
-  expected: "fresh" | "reattach",
+  expected: "unknown" | "reattach",
   timeoutMs = 2000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -418,20 +429,9 @@ async function waitForSessionKind(
 describe.skipIf(!backendOk)("terminal-server detached-session persistence", () => {
   it("keeps the PTY alive after a plain disconnect", async () => {
     const local = startServer();
-    const id = freshSessionId();
+    const id = await createSession(local.terminal);
     try {
-      const ws = new WebSocket(`ws://127.0.0.1:${local.port}/?sessionId=${id}`);
-      await new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error("open timeout")), 1500);
-        ws.addEventListener("open", () => {
-          clearTimeout(timeout);
-          resolve();
-        });
-        ws.addEventListener("error", err => {
-          clearTimeout(timeout);
-          reject(err as unknown as Error);
-        });
-      });
+      const ws = await openSocket(local.port, id);
 
       // Confirm shell liveness via an echo round-trip before closing.
       const greeted = new Promise<void>(resolve => {
@@ -466,25 +466,14 @@ describe.skipIf(!backendOk)("terminal-server detached-session persistence", () =
 
   it("kills the PTY when the client closes with the user-terminate code", async () => {
     const local = startServer();
-    const id = freshSessionId();
+    const id = await createSession(local.terminal);
     try {
-      const ws = new WebSocket(`ws://127.0.0.1:${local.port}/?sessionId=${id}`);
-      await new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error("open timeout")), 1500);
-        ws.addEventListener("open", () => {
-          clearTimeout(timeout);
-          resolve();
-        });
-        ws.addEventListener("error", err => {
-          clearTimeout(timeout);
-          reject(err as unknown as Error);
-        });
-      });
+      const ws = await openSocket(local.port, id);
 
       // 4001 = CLOSE_CODE_USER_TERMINATE (confirmed pane close). The session
       // must be removed entirely so the id can be claimed fresh.
       ws.close(4001, "user-close");
-      await waitForSessionKind(local.terminal, id, "fresh");
+      await waitForSessionKind(local.terminal, id, "unknown");
     } finally {
       local.terminal.disposeAll();
       local.server.stop(true);
@@ -493,20 +482,9 @@ describe.skipIf(!backendOk)("terminal-server detached-session persistence", () =
 
   it("removes the session when the shell exits while detached", async () => {
     const local = startServer();
-    const id = freshSessionId();
+    const id = await createSession(local.terminal);
     try {
-      const ws = new WebSocket(`ws://127.0.0.1:${local.port}/?sessionId=${id}`);
-      await new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error("open timeout")), 1500);
-        ws.addEventListener("open", () => {
-          clearTimeout(timeout);
-          resolve();
-        });
-        ws.addEventListener("error", err => {
-          clearTimeout(timeout);
-          reject(err as unknown as Error);
-        });
-      });
+      const ws = await openSocket(local.port, id);
 
       // Replace the shell with a short-lived process, then detach. The PTY
       // exits ~500ms later with nobody attached; the onExit handler must
@@ -514,7 +492,7 @@ describe.skipIf(!backendOk)("terminal-server detached-session persistence", () =
       ws.send(new TextEncoder().encode("exec sleep 0.5\r\n"));
       ws.close();
       await waitForSessionKind(local.terminal, id, "reattach");
-      await waitForSessionKind(local.terminal, id, "fresh", 4000);
+      await waitForSessionKind(local.terminal, id, "unknown", 4000);
     } finally {
       local.terminal.disposeAll();
       local.server.stop(true);
@@ -523,26 +501,15 @@ describe.skipIf(!backendOk)("terminal-server detached-session persistence", () =
 
   it("disposeAll kills detached sessions too", async () => {
     const local = startServer();
-    const id = freshSessionId();
+    const id = await createSession(local.terminal);
     try {
-      const ws = new WebSocket(`ws://127.0.0.1:${local.port}/?sessionId=${id}`);
-      await new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error("open timeout")), 1500);
-        ws.addEventListener("open", () => {
-          clearTimeout(timeout);
-          resolve();
-        });
-        ws.addEventListener("error", err => {
-          clearTimeout(timeout);
-          reject(err as unknown as Error);
-        });
-      });
+      const ws = await openSocket(local.port, id);
 
       ws.close();
       await waitForSessionKind(local.terminal, id, "reattach");
       // Server shutdown path: detached sessions must not outlive disposeAll.
       local.terminal.disposeAll();
-      expect(local.terminal.prepareSession(id)).toEqual({ kind: "fresh" });
+      expect(local.terminal.prepareSession(id)).toEqual({ kind: "unknown" });
     } finally {
       local.terminal.disposeAll();
       local.server.stop(true);
@@ -551,21 +518,14 @@ describe.skipIf(!backendOk)("terminal-server detached-session persistence", () =
 
   it("reattaches to the same PTY when an upgrade arrives after a disconnect", async () => {
     const local = startServer();
-    const id = freshSessionId();
+    const id = await createSession(local.terminal);
     try {
       // First connection: send a marker that the shell will print on exit
       // would lose, but PTY scrollback won't replay either. Instead we test
       // that *after* reattach, the PTY still responds to new input — i.e.,
       // the PTY process didn't die. A `pwd` round-trip before and after
       // is enough to prove the PTY is the same.
-      const ws1 = new WebSocket(`ws://127.0.0.1:${local.port}/?sessionId=${id}`);
-      await new Promise<void>((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error("ws1 open timeout")), 1500);
-        ws1.addEventListener("open", () => {
-          clearTimeout(t);
-          resolve();
-        });
-      });
+      const ws1 = await openSocket(local.port, id);
       // Await the close handshake so the server's close callback has run and
       // detached the socket from the session. Without this, a fast reconnect
       // hits the 'collision' branch in prepareSession because socket !== null
@@ -582,18 +542,7 @@ describe.skipIf(!backendOk)("terminal-server detached-session persistence", () =
       await waitForSessionKind(local.terminal, id, "reattach");
 
       // Reattach to the detached session.
-      const ws2 = new WebSocket(`ws://127.0.0.1:${local.port}/?sessionId=${id}`);
-      await new Promise<void>((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error("ws2 open timeout")), 1500);
-        ws2.addEventListener("open", () => {
-          clearTimeout(t);
-          resolve();
-        });
-        ws2.addEventListener("error", err => {
-          clearTimeout(t);
-          reject(err as unknown as Error);
-        });
-      });
+      const ws2 = await openSocket(local.port, id);
       try {
         // Liveness probe on the reattached PTY.
         const probed = new Promise<void>(resolve => {
@@ -623,26 +572,114 @@ describe.skipIf(!backendOk)("terminal-server detached-session persistence", () =
 
 // Session inventory + takeover semantics (add-terminal-session-manager).
 describe.skipIf(!backendOk)("terminal-server session manager", () => {
-  function openSocket(port: number, id: string, takeover = false): Promise<WebSocket> {
-    const params = takeover ? `sessionId=${id}&takeover=1` : `sessionId=${id}`;
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/?${params}`);
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("open timeout")), 1500);
-      ws.addEventListener("open", () => {
-        clearTimeout(timeout);
-        resolve(ws);
+  it("ignores input and malformed readiness until valid attach-ready dimensions arrive", async () => {
+    const local = startServer();
+    const id = await createSession(local.terminal);
+    try {
+      const ws = new WebSocket(`ws://127.0.0.1:${local.port}/?sessionId=${id}`);
+      ws.binaryType = "arraybuffer";
+      await new Promise<void>((resolve, reject) => {
+        ws.addEventListener("open", () => resolve(), { once: true });
+        ws.addEventListener("error", event => reject(event), { once: true });
       });
-      ws.addEventListener("error", err => {
-        clearTimeout(timeout);
-        reject(err as unknown as Error);
+      ws.send(new TextEncoder().encode("echo SHOULD_NOT_RUN\r\n"));
+      ws.send(JSON.stringify({ type: "attach-ready", cols: 0, rows: 24 }));
+      await new Promise(resolve => setTimeout(resolve, 50));
+      expect(local.terminal.prepareSession(id)).toEqual({ kind: "reattach" });
+
+      const snapshot = new Promise<string>(resolve => {
+        ws.addEventListener("message", event => resolve(decode(event.data)), { once: true });
       });
-    });
-  }
+      ws.send(JSON.stringify({ type: "attach-ready", cols: 90, rows: 30 }));
+      expect(await snapshot).not.toContain("SHOULD_NOT_RUN");
+      expect((await local.terminal.listSessions()).find(session => session.id === id)).toMatchObject({
+        attached: true,
+        cols: 90,
+        rows: 30,
+      });
+
+      ws.send(JSON.stringify({ type: "attach-ready", cols: 120, rows: 40 }));
+      await new Promise(resolve => setTimeout(resolve, 50));
+      expect((await local.terminal.listSessions()).find(session => session.id === id)).toMatchObject({
+        cols: 90,
+        rows: 30,
+      });
+      ws.close();
+    } finally {
+      local.terminal.disposeAll();
+      local.server.stop(true);
+    }
+  }, 6000);
+
+  it("preserves the current holder when a takeover socket closes before readiness", async () => {
+    const local = startServer();
+    const id = await createSession(local.terminal);
+    try {
+      const holder = await openSocket(local.port, id);
+      const claimant = new WebSocket(`ws://127.0.0.1:${local.port}/?sessionId=${id}&takeover=1`);
+      await new Promise<void>((resolve, reject) => {
+        claimant.addEventListener("open", () => resolve(), { once: true });
+        claimant.addEventListener("error", event => reject(event), { once: true });
+      });
+      claimant.close();
+      await new Promise(resolve => setTimeout(resolve, 50));
+      expect(local.terminal.prepareSession(id)).toEqual({ kind: "collision" });
+
+      const response = new Promise<void>(resolve => {
+        holder.addEventListener("message", function onMessage(event) {
+          if (!decode(event.data).includes("holder-alive")) return;
+          holder.removeEventListener("message", onMessage);
+          resolve();
+        });
+      });
+      holder.send(new TextEncoder().encode("echo holder-alive\r\n"));
+      await response;
+      holder.close();
+    } finally {
+      local.terminal.disposeAll();
+      local.server.stop(true);
+    }
+  }, 6000);
+
+  it("reconstructs detached output at new attachment dimensions", async () => {
+    const local = startServer();
+    const id = await createSession(local.terminal);
+    try {
+      const first = await openSocket(local.port, id);
+      first.send(new TextEncoder().encode("sleep 0.1; echo detached-marker\r\n"));
+      first.close();
+      await waitForSessionKind(local.terminal, id, "reattach");
+      await new Promise(resolve => setTimeout(resolve, 250));
+
+      const second = new WebSocket(`ws://127.0.0.1:${local.port}/?sessionId=${id}`);
+      second.binaryType = "arraybuffer";
+      const snapshot = new Promise<string>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("snapshot timeout")), 2000);
+        second.addEventListener("open", () => {
+          second.send(JSON.stringify({ type: "attach-ready", cols: 40, rows: 10 }));
+        });
+        second.addEventListener("message", event => {
+          clearTimeout(timeout);
+          resolve(decode(event.data));
+        }, { once: true });
+      });
+      expect(await snapshot).toContain("detached-marker");
+      expect((await local.terminal.listSessions()).find(session => session.id === id)).toMatchObject({
+        attached: true,
+        cols: 40,
+        rows: 10,
+      });
+      second.close();
+    } finally {
+      local.terminal.disposeAll();
+      local.server.stop(true);
+    }
+  }, 6000);
 
   it("lists sessions with attachment state and kills detached ones", async () => {
     const local = startServer();
-    const idA = freshSessionId();
-    const idB = freshSessionId();
+    const idA = await createSession(local.terminal);
+    const idB = await createSession(local.terminal);
     try {
       const wsA = await openSocket(local.port, idA);
       const wsB = await openSocket(local.port, idB);
@@ -663,7 +700,7 @@ describe.skipIf(!backendOk)("terminal-server session manager", () => {
       expect(local.terminal.killSession(idB)).toBe(false);
       const after = await local.terminal.listSessions();
       expect(after.some(s => s.id === idB)).toBe(false);
-      expect(local.terminal.prepareSession(idB)).toEqual({ kind: "fresh" });
+      expect(local.terminal.prepareSession(idB)).toEqual({ kind: "unknown" });
 
       wsA.close();
     } finally {
@@ -674,7 +711,7 @@ describe.skipIf(!backendOk)("terminal-server session manager", () => {
 
   it("prepareSession distinguishes takeover from collision", async () => {
     const local = startServer();
-    const id = freshSessionId();
+    const id = await createSession(local.terminal);
     try {
       const ws = await openSocket(local.port, id);
       expect(local.terminal.prepareSession(id).kind).toBe("collision");
@@ -687,16 +724,16 @@ describe.skipIf(!backendOk)("terminal-server session manager", () => {
     }
   }, 6000);
 
-  it("a reused sessionId survives the killed predecessor's late exit", async () => {
+  it("a newly created session survives a killed predecessor's late exit", async () => {
     const local = startServer();
-    const id = freshSessionId();
+    let id = await createSession(local.terminal);
     try {
       const ws1 = await openSocket(local.port, id);
-      // Kill eagerly (map entry removed immediately), then claim the same id
-      // for a fresh PTY before the old shell's exit event has fired. The old
-      // PTY's onExit must not delete the new session's registry entry.
+      // Kill eagerly, then create another PTY before the old shell's exit
+      // event has fired. The old PTY's onExit must not delete the new entry.
       expect(local.terminal.killSession(id)).toBe(true);
-      expect(local.terminal.prepareSession(id)).toEqual({ kind: "fresh" });
+      expect(local.terminal.prepareSession(id)).toEqual({ kind: "unknown" });
+      id = await createSession(local.terminal);
       const ws2 = await openSocket(local.port, id);
 
       // Give the killed shell ample time to exit and fire its handler.
@@ -714,7 +751,7 @@ describe.skipIf(!backendOk)("terminal-server session manager", () => {
 
   it("takeover moves the session: loser gets 4410, winner gets the replay and the PTY", async () => {
     const local = startServer();
-    const id = freshSessionId();
+    const id = await createSession(local.terminal);
     try {
       const ws1 = await openSocket(local.port, id);
 
@@ -741,34 +778,99 @@ describe.skipIf(!backendOk)("terminal-server session manager", () => {
 
       // Second client claims with takeover.
       const ws2 = await openSocket(local.port, id, true);
-      const replayed = new Promise<void>(resolve => {
-        ws2.addEventListener("message", function onMsg(event) {
-          if (decode(event.data).includes("takeover-marker")) {
-            ws2.removeEventListener("message", onMsg);
-            resolve();
-          }
-        });
-      });
 
       // Loser is closed with the app-defined "session taken" code.
       expect(await ws1Taken).toBe(4410);
       // Winner received the replayed buffer (the marker) and owns the PTY.
-      await Promise.race([
-        replayed,
-        new Promise<void>((_r, reject) =>
-          setTimeout(() => reject(new Error("replay never reached the new holder")), 2000),
-        ),
-      ]);
+      expect(attachmentSnapshots.get(ws2)).toContain("takeover-marker");
       const listed = await local.terminal.listSessions();
       expect(listed.find(s => s.id === id)?.attached).toBe(true);
 
       // The session survived the swap: still exactly one registry entry.
       expect(listed.filter(s => s.id === id)).toHaveLength(1);
-      ws2.close();
+
+      // The parked holder's explicit "Take back" action is another
+      // transactional takeover of the same server resource.
+      const ws2Taken = new Promise<number>(resolve => {
+        ws2.addEventListener("close", event => resolve(event.code));
+      });
+      const ws3 = await openSocket(local.port, id, true);
+      expect(await ws2Taken).toBe(4410);
+      expect(attachmentSnapshots.get(ws3)).toContain("takeover-marker");
+      ws3.close();
       await waitForSessionKind(local.terminal, id, "reattach");
     } finally {
       local.terminal.disposeAll();
       local.server.stop(true);
     }
   }, 8000);
+
+  it("orders reconstruction before concurrent live output without duplication", async () => {
+    const local = startServer();
+    const id = await createSession(local.terminal);
+    try {
+      const first = await openSocket(local.port, id);
+      const sawBefore = new Promise<void>(resolve => {
+        first.addEventListener("message", function onMessage(event) {
+          if (!decode(event.data).includes("ORDER_BEFORE")) return;
+          first.removeEventListener("message", onMessage);
+          resolve();
+        });
+      });
+      first.send(new TextEncoder().encode("printf ORDER_BEFORE; sleep 0.15; printf ORDER_AFTER\r\n"));
+      await sawBefore;
+
+      const second = await openSocket(local.port, id, true);
+      let received = attachmentSnapshots.get(second) ?? "";
+      second.addEventListener("message", event => {
+        received += decode(event.data);
+      });
+      await new Promise(resolve => setTimeout(resolve, 350));
+      const before = received.indexOf("ORDER_BEFORE");
+      const after = received.indexOf("ORDER_AFTER");
+      expect(before).toBeGreaterThanOrEqual(0);
+      expect(after).toBeGreaterThan(before);
+      expect(received.match(/ORDER_AFTER/g)).toHaveLength(1);
+      second.close();
+    } finally {
+      local.terminal.disposeAll();
+      local.server.stop(true);
+    }
+  }, 8000);
+});
+
+describe.skipIf(!backendOk)("terminal-server installed TUI reconstruction", () => {
+  const applications = [
+    { name: "nvim", command: "nvim --clean -u NONE", quit: "\x1b:q!\r" },
+    { name: "vim", command: "vim -Nu NONE -n", quit: "\x1b:q!\r" },
+    { name: "htop", command: "htop", quit: "q" },
+    { name: "btop", command: "btop", quit: "q" },
+    { name: "lazygit", command: "lazygit", quit: "q" },
+  ];
+
+  for (const application of applications) {
+    it.skipIf(!Bun.which(application.name))(
+      `reconstructs ${application.name}'s alternate screen in a fresh client`,
+      async () => {
+        const local = startServer();
+        const id = await createSession(local.terminal);
+        try {
+          const first = await openSocket(local.port, id);
+          first.send(new TextEncoder().encode(`${application.command}\r\n`));
+          await new Promise(resolve => setTimeout(resolve, 750));
+          first.close();
+          await waitForSessionKind(local.terminal, id, "reattach");
+
+          const second = await openSocket(local.port, id);
+          expect(attachmentSnapshots.get(second)).toContain("\x1b[?1049h");
+          second.send(new TextEncoder().encode(application.quit));
+          second.close(4001, "test-complete");
+        } finally {
+          local.terminal.disposeAll();
+          local.server.stop(true);
+        }
+      },
+      8000,
+    );
+  }
 });

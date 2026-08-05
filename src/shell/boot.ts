@@ -14,17 +14,24 @@ import { setupTerminalPanel } from "../terminal/panel";
 import { applyMonoConfig } from "../mono/apply";
 import { initColorSchemeTracking } from "./theme";
 import { setFilesPaneFilter, syncFilesPaneFilterControl } from "../sidebar/files-filter";
+import { adoptCompareTarget } from "../sidebar/change-overview";
 import { setPaneState } from "../sidebar/panes";
 import { setFollowEnabled, syncFollowToggle } from "./follow";
 import type { StatePayload } from "../shared/types";
+import { applyViewMode } from "../preview/view-mode";
 import { renderBuildBadge } from "./connection";
 import { applyServerSnapshot, connectEvents } from "./events";
 import { replaceSelection, scrollToFragment } from "./history";
 import {
   appState,
-  readFilesPaneFilterPreference,
   readPaneState,
 } from "./state";
+import {
+  enablePersonalStatePersistence,
+  loadPersonalWorkspaceState,
+  persistPersonalWorkspaceState,
+} from "./personal-state";
+import { contextualAppUrl } from "./watch-context";
 import { setPreviewMode, setSelectedId } from "./selection";
 import {
   commitPreviewParamsFromUrl,
@@ -47,37 +54,27 @@ export async function loadInitialState() {
   // the tree view subscribe on their own).
   initColorSchemeTracking();
 
-  const response = await fetch(appUrl("/api/state"));
-  const payload = (await response.json()) as StatePayload;
+  const [response, personalState] = await Promise.all([
+    fetch(appUrl("/api/state")),
+    loadPersonalWorkspaceState(),
+  ]);
+  let payload = (await response.json()) as StatePayload;
+
+  adoptCompareTarget(personalState.compareTarget ?? "base");
+  if (personalState.previewMode) applyViewMode(personalState.previewMode);
+  if (payload.compareTarget !== appState.compareTarget) {
+    const contextualResponse = await fetch(contextualAppUrl(appUrl("/api/state")));
+    if (contextualResponse.ok) payload = (await contextualResponse.json()) as StatePayload;
+  }
 
   applyServerSnapshot(payload);
-  // Reconcile the persisted compare-target preference (read into appState at
-  // module load) with the server session, which starts at the default. This is
-  // AWAITED: the initial loadDocument() below may fetch /api/document/diff,
-  // which resolves against the server's current target. If we let the POST run
-  // fire-and-forget, that diff could be fetched against the stale default and
-  // cached — and the later SSE rebroadcast would NOT clear it, because
-  // appState.compareTarget already equals the persisted value (so the reducer
-  // sees no change). Awaiting flips the server target first; the recompute +
-  // SSE rebroadcast then delivers the matching snapshots.
-  if (appState.compareTarget !== payload.compareTarget) {
-    try {
-      await fetch(appUrl("/api/compare-target"), {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ target: appState.compareTarget }),
-      });
-    } catch {
-      // Best-effort; the server keeps the default and the toggle still works.
-    }
-  }
   syncStateGeneration(payload.generatedAt);
   renderBuildBadge(payload.build);
   applyMonoConfig(payload.monoConfig);
-  setupTerminalPanel(payload.terminal === "enabled", payload.terminalConfig);
+  setupTerminalPanel(payload.terminal === "enabled", payload.terminalConfig, personalState.lastPtyId);
 
   setPaneState(readPaneState());
-  setFilesPaneFilter(readFilesPaneFilterPreference());
+  setFilesPaneFilter(personalState.filesFilter ?? "all");
   syncFilesPaneFilterControl();
 
   let directLinkMessage: { title: string; body: string } | null = null;
@@ -85,16 +82,19 @@ export async function loadInitialState() {
   const initialCommitPreview = commitPreviewParamsFromUrl();
 
   if (initialReviewScoreRepositoryId) {
+    setFollowEnabled(false);
     setSelectedId(null);
     setPreviewMode({ kind: "review-score", repositoryId: initialReviewScoreRepositoryId });
   } else if (initialCommitPreview) {
+    setFollowEnabled(false);
     setSelectedId(null);
     setPreviewMode({ kind: "commit", ...initialCommitPreview });
   } else if (!urlRelativePath) {
-    // Default boot at `/` — honor the CLI follow default (Rule "Follow
-    // defaults to ON" of the follow-mode capability).
-    setFollowEnabled(payload.initialFollow);
-    setSelectedId(payload.defaultDocumentId);
+    setFollowEnabled(personalState.follow ?? payload.initialFollow);
+    const savedDocument = personalState.documentPath
+      ? findDocumentByRelativePath(personalState.documentPath)
+      : null;
+    setSelectedId(savedDocument?.kind !== "binary" ? savedDocument?.id ?? payload.defaultDocumentId : payload.defaultDocumentId);
     setPreviewMode({ kind: "document" });
   } else {
     const requestedDoc = findDocumentByRelativePath(urlRelativePath);
@@ -173,4 +173,13 @@ export async function loadInitialState() {
   }
 
   connectEvents();
+  enablePersonalStatePersistence();
+  const selected = appState.selectedId ? findDocumentById(appState.selectedId) : null;
+  persistPersonalWorkspaceState({
+    ...(selected ? { documentPath: selected.relativePath } : {}),
+    follow: appState.followEnabled,
+    previewMode: appState.viewMode,
+    compareTarget: appState.compareTarget,
+    filesFilter: appState.filesPaneFilter,
+  });
 }
