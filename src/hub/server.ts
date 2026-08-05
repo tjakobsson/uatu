@@ -3,6 +3,7 @@
 // gate provably runs before anything session- or dashboard-shaped executes.
 
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import type { ServerWebSocket } from "bun";
@@ -33,6 +34,7 @@ import {
 import type { WorkspaceRegistry } from "./registry";
 import type { SessionManager } from "./sessions";
 import type { TerminalSessionInfo } from "../terminal/server";
+import { BUILD, formatBuildIdentifier } from "../shared/version";
 
 export type HubDeps = {
   config: HubConfig;
@@ -169,72 +171,70 @@ export function createHubFetchHandler(deps: HubDeps) {
         };
       }),
     );
-    return json(200, { workspaces });
+    // `local` lets clients adapt to the trusted loopback mode — the SPA's
+    // workspace switcher hides its sign-out entry when there is no login.
+    return json(200, { version: formatBuildIdentifier(BUILD), local: config.local, workspaces });
   };
 
-  // GET /api/hub/folders — the direct subfolders of the workspaces root,
-  // each with its git status and registration, so the dashboard offers a
-  // picker instead of a free-text server path.
-  const listFolders = async (): Promise<Response> => {
-    let entries: { name: string; git: boolean; registeredId: string | null; running: boolean }[] = [];
+  // GET /api/hub/browse?path=<abs> — one level of the hub host's directory
+  // tree, for the dashboard's Add Folder drill-down (and the desktop's
+  // clone-destination picker). Directories only, dot-directories hidden,
+  // symlinks not followed (a symlinked dirent is not a directory dirent).
+  // Filesystem visibility here is within the documented trust model: hub
+  // users already hold shell access through the embedded terminal.
+  const browse = async (url: URL): Promise<Response> => {
+    const requested = url.searchParams.get("path") ?? os.homedir();
+    if (!path.isAbsolute(requested)) {
+      return json(400, { error: "path must be absolute" });
+    }
+    const resolved = path.resolve(requested);
+    let dirents;
     try {
-      const dirents = await fs.readdir(config.workspacesDir, { withFileTypes: true });
-      entries = await Promise.all(
-        dirents
-          // Directories only — including dot-prefixed ones, so everything
-          // the creation resolver accepts is also discoverable.
-          .filter(dirent => dirent.isDirectory())
-          .sort((a, b) => a.name.localeCompare(b.name))
-          .map(async dirent => {
-            const folder = path.join(config.workspacesDir, dirent.name);
-            // The root itself is guaranteed non-repo at startup, so a
-            // subfolder is a repository iff it carries its own .git.
-            const git = await Bun.file(path.join(folder, ".git", "HEAD")).exists();
-            const registered = registry.byPath(folder);
-            return {
-              name: dirent.name,
-              git,
-              registeredId: registered?.id ?? null,
-              running: registered ? sessions.isRunning(registered.id) : false,
-            };
-          }),
-      );
+      dirents = await fs.readdir(resolved, { withFileTypes: true });
     } catch {
-      // Unreadable root reads as empty — the dashboard shows the empty state.
+      return json(404, { error: `cannot read directory: ${resolved}` });
     }
-    return json(200, { workspacesDir: config.workspacesDir, folders: entries });
+    const dirs = await Promise.all(
+      dirents
+        .filter(dirent => dirent.isDirectory() && !dirent.name.startsWith("."))
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map(async dirent => {
+          const folder = path.join(resolved, dirent.name);
+          // A repository root carries .git — a directory normally, a file
+          // for linked worktrees. Decoration only; registration re-probes.
+          const git = await fs
+            .stat(path.join(folder, ".git"))
+            .then(() => true)
+            .catch(() => false);
+          const registered = registry.byPath(folder);
+          return { name: dirent.name, git, registeredId: registered?.id ?? null };
+        }),
+    );
+    const parent = path.dirname(resolved);
+    return json(200, { path: resolved, parent: parent === resolved ? null : parent, dirs });
   };
 
-  // Resolves a workspace-creation folder name strictly against the
-  // workspaces root: names only, no separators or dot segments.
-  const resolveWorkspaceFolder = (name: string): string | null => {
-    if (name === "" || name === "." || name === ".." || /[/\\]/.test(name)) {
-      return null;
-    }
-    return path.join(config.workspacesDir, name);
-  };
-
-  // POST /api/hub/workspaces {name, init?} — the desktop launcher's git
-  // preflight, remote: a definitive not-a-repository answer yields a 409
-  // {needsInit:true} the dashboard turns into a confirmation; confirming
-  // re-posts with init:true. Declining posts nothing — no registration.
-  // An indeterminate probe skips the offer and serves; the CLI's own
-  // preflight reports (and --force is never passed).
+  // POST /api/hub/workspaces {path, init?} — registers any absolute folder
+  // path. The git preflight mirrors the desktop launcher's rules: a
+  // definitive not-a-repository answer yields a 409 {needsInit:true} the
+  // client turns into a confirmation; confirming re-posts with init:true.
+  // Declining posts nothing — no registration. An indeterminate probe skips
+  // the offer and serves; the CLI's own preflight reports (and --force is
+  // never passed).
+  // body.start === false registers without starting a session — the
+  // desktop's one-time recents import needs registered-but-stopped entries.
   const createWorkspace = async (request: Request): Promise<Response> => {
-    let body: { name?: unknown; init?: unknown };
+    let body: { path?: unknown; init?: unknown; start?: unknown };
     try {
       body = (await request.json()) as typeof body;
     } catch {
       return json(400, { error: "invalid JSON body" });
     }
-    // The name is used EXACTLY as submitted — the folder listing emits
-    // exact dirent names, and trimming here would break (or worse,
-    // misdirect to a trimmed sibling of) a folder with edge whitespace.
-    const name = typeof body.name === "string" ? body.name : "";
-    const folder = name === "" ? null : resolveWorkspaceFolder(name);
-    if (folder === null) {
-      return json(400, { error: "name must be a folder directly inside the workspaces root" });
+    const requested = typeof body.path === "string" ? body.path : "";
+    if (requested === "" || !path.isAbsolute(requested)) {
+      return json(400, { error: "an absolute folder path is required" });
     }
+    const folder = path.resolve(requested);
     let isDirectory = false;
     try {
       isDirectory = (await fs.stat(folder)).isDirectory();
@@ -242,7 +242,7 @@ export function createHubFetchHandler(deps: HubDeps) {
       isDirectory = false;
     }
     if (!isDirectory) {
-      return json(404, { error: `no such folder in the workspaces root: ${name}` });
+      return json(404, { error: `no such folder: ${folder}` });
     }
 
     const probe = await probeGitRepository(folder);
@@ -257,6 +257,9 @@ export function createHubFetchHandler(deps: HubDeps) {
     }
 
     const entry = await registry.register(folder);
+    if (body.start === false) {
+      return json(200, { id: entry.id, running: false });
+    }
     try {
       await sessions.start(entry.id);
     } catch (error) {
@@ -268,8 +271,10 @@ export function createHubFetchHandler(deps: HubDeps) {
     return json(200, { id: entry.id });
   };
 
+  // POST /api/hub/clone {url, dest} — clones into a browsed destination
+  // directory, then registers and serves the checkout.
   const cloneWorkspace = async (request: Request): Promise<Response> => {
-    let body: { url?: unknown };
+    let body: { url?: unknown; dest?: unknown };
     try {
       body = (await request.json()) as typeof body;
     } catch {
@@ -279,7 +284,11 @@ export function createHubFetchHandler(deps: HubDeps) {
     if (url === "" || cloneTargetName(url) === null) {
       return json(400, { error: "a git clone URL is required" });
     }
-    const cloned = await gitClone(url, config.workspacesDir);
+    const dest = typeof body.dest === "string" ? body.dest : "";
+    if (dest === "" || !path.isAbsolute(dest)) {
+      return json(400, { error: "an absolute destination directory is required" });
+    }
+    const cloned = await gitClone(url, path.resolve(dest));
     if (!cloned.ok) {
       return json(500, { error: `git clone failed: ${cloned.error}` });
     }
@@ -297,11 +306,14 @@ export function createHubFetchHandler(deps: HubDeps) {
     const url = new URL(request.url);
     const pathname = url.pathname;
 
-    // Un-gated: the login flow and the dashboard's static assets.
-    if (pathname === "/login") {
+    // Un-gated: the login flow and the dashboard's static assets. In local
+    // mode there is no login to serve — /login and /logout fall through to
+    // the (always-passing) gate and end at 404, so a local hub never even
+    // hints at a credential surface.
+    if (!config.local && pathname === "/login") {
       return handleLogin(request, server);
     }
-    if (pathname === "/logout" && request.method === "POST") {
+    if (!config.local && pathname === "/logout" && request.method === "POST") {
       if (!isSameOriginRequest(request)) {
         return json(403, { error: "cross-origin request rejected" });
       }
@@ -320,8 +332,12 @@ export function createHubFetchHandler(deps: HubDeps) {
     }
 
     // The gate. Everything below requires an authenticated hub session
-    // belonging to a still-configured user.
-    const session = authenticatedSession(request);
+    // belonging to a still-configured user — except in local mode, where
+    // every request IS the implicit local user (loopback-only bind is
+    // enforced at startup; the trust model is `uatu serve`'s).
+    const session = config.local
+      ? { user: "local", issuedAt: 0 }
+      : authenticatedSession(request);
     if (!session) {
       const wantsHtml = (request.headers.get("accept") ?? "").includes("text/html");
       if (request.method === "GET" && wantsHtml && !pathname.startsWith("/api/")) {
@@ -356,13 +372,13 @@ export function createHubFetchHandler(deps: HubDeps) {
 
     // Dashboard + its APIs.
     if (pathname === "/" && request.method === "GET") {
-      return htmlResponse(dashboardPage());
+      return htmlResponse(dashboardPage({ local: config.local }));
     }
     if (pathname === "/api/hub/state" && request.method === "GET") {
       return hubState();
     }
-    if (pathname === "/api/hub/folders" && request.method === "GET") {
-      return listFolders();
+    if (pathname === "/api/hub/browse" && request.method === "GET") {
+      return browse(url);
     }
 
     // State-changing endpoints: POST-only + same-origin (CSRF).

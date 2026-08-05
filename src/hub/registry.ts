@@ -104,9 +104,15 @@ export class WorkspaceRegistry {
 
   // Registers a folder, returning the existing entry when the folder is
   // already known (its id never changes) or minting a collision-suffixed
-  // slug for a new one.
+  // slug for a new one. Any absolute path is registrable — there is no
+  // workspaces root; existence is checked at the API boundary, so an entry
+  // whose folder later disappears stays registered (surfacing as a failed
+  // start, never a silent forget).
   register(folderPath: string, backend: WorkspaceBackend = "local"): Promise<WorkspaceEntry> {
     return this.enqueueMutation(async () => {
+      if (!path.isAbsolute(folderPath)) {
+        throw new Error(`workspace path must be absolute: ${folderPath}`);
+      }
       const existing = this.byPath(folderPath);
       if (existing) {
         return existing;
@@ -132,31 +138,6 @@ export class WorkspaceRegistry {
         throw error;
       }
       return entry;
-    });
-  }
-
-  // Drops every entry whose folder is not a DIRECT child of the workspaces
-  // root, returning what was removed. The hub calls this at startup so the
-  // registry is confined to the configured root — entries from an earlier
-  // root (or an older hub version that accepted arbitrary paths) disappear
-  // from the dashboard instead of lingering as unreachable ghosts. Only the
-  // registration is dropped; folders on disk are never touched.
-  pruneOutsideRoot(workspacesDir: string): Promise<WorkspaceEntry[]> {
-    return this.enqueueMutation(async () => {
-      const root = path.resolve(workspacesDir);
-      const removed = this.workspaces.filter(entry => path.dirname(path.resolve(entry.path)) !== root);
-      if (removed.length === 0) {
-        return [];
-      }
-      const previous = this.workspaces;
-      this.workspaces = this.workspaces.filter(entry => !removed.includes(entry));
-      try {
-        await this.save();
-      } catch (error) {
-        this.workspaces = previous;
-        throw error;
-      }
-      return removed;
     });
   }
 

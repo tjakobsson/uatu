@@ -10,7 +10,6 @@ import WebKit
 
 struct ContentView: View {
     let windowID: UUID
-    @State private var server = UatuServer()
     @State private var web = WebViewHost()
     @State private var split = BrowserSplit()
     /// Split width is an app-level preference; which windows have the
@@ -23,28 +22,44 @@ struct ContentView: View {
     @State private var browserKeyMonitor: Any?
     @State private var isPickingFolder = false
     /// A picked folder waiting on the "initialize a git repository?"
-    /// decision; non-nil presents the confirmation alert.
+    /// decision (the hub answered needs-init); non-nil presents the alert.
     @State private var pendingGitInitFolder: URL?
-    /// Identifies the latest open(_:) request. The launcher stays
-    /// interactive while a git probe or init runs, so a completion whose
-    /// token no longer matches was superseded by a newer open and must
-    /// discard itself instead of serving (or prompting for) a stale folder.
+    /// Identifies the latest open request. The splash stays interactive
+    /// while the hub registers a folder, so a completion whose token no
+    /// longer matches was superseded by a newer open and must discard
+    /// itself instead of opening (or prompting for) a stale folder.
     @State private var openRequestToken = UUID()
     @State private var nativeWindow: NSWindow?
-    /// The folder served by THIS window. Each window has its own.
-    @State private var folder: URL?
-    /// Recently served folders, newest first, one path per line. Shared
-    /// across windows and shown on the launcher screen.
-    @AppStorage("recentFolders") private var recentFoldersStorage = ""
+
+    /// Window lifecycle: splash → opening → web, with failed reachable from
+    /// anywhere. Windows own no processes — a "page" is a hub URL.
+    enum Phase: Equatable {
+        case splash
+        case opening(String)
+        case web
+        case failed(String)
+    }
+
+    @State private var phase: Phase = .splash
+    /// The page this window is showing or trying to show; drives the
+    /// window title, retry, and local-hub-death detection.
+    @State private var currentPage: HubPage?
+    /// The URL last handed to the web view (for Open in Browser).
+    @State private var currentURL: URL?
+
+    private var localHub: LocalHubController { .shared }
 
     var body: some View {
         Group {
-            switch server.status {
-            case .idle:
-                launcher
-            case .starting:
-                ProgressView("Starting uatu…")
-            case .running:
+            switch phase {
+            case .splash:
+                SplashView(
+                    openPage: { open($0) },
+                    chooseFolder: { isPickingFolder = true }
+                )
+            case .opening(let label):
+                ProgressView(label)
+            case .web:
                 ZStack {
                     HStack(spacing: 0) {
                         // The web view spans the full window frame — the page is
@@ -55,7 +70,12 @@ struct ContentView: View {
                         HostedWebView(host: web)
                             .ignoresSafeArea(edges: .top)
                         if split.isOpen {
+                            // The divider spans the full window frame like its
+                            // neighbors, but its visible hairline must start
+                            // below the covered titlebar strip — un-inset it
+                            // drew a line up through the tab bar.
                             splitDivider
+                                .padding(.top, web.titlebarInset)
                                 .ignoresSafeArea(edges: .top)
                             // The split pane also spans the full window height so
                             // no dead band appears under the transparent titlebar;
@@ -87,14 +107,14 @@ struct ContentView: View {
                         .font(.callout.monospaced())
                         .multilineTextAlignment(.leading)
                 } actions: {
-                    Button("Try Again") { restart() }
+                    Button("Try Again") { retry() }
                         .buttonStyle(.borderedProminent)
-                    Button("Choose Folder…") { isPickingFolder = true }
+                    Button("Back to Splash") { showSplash() }
                 }
             }
         }
         .frame(minWidth: 700, minHeight: 500)
-        .navigationTitle(folderName ?? "UatuCode Desktop")
+        .navigationTitle(pageTitle)
         .focusedSceneValue(\.windowCommands, windowCommands)
         .toolbar {
             ToolbarItemGroup(placement: .navigation) {
@@ -103,13 +123,13 @@ struct ContentView: View {
                 } label: {
                     Label("Back", systemImage: "chevron.backward")
                 }
-                .disabled(!isRunning || !web.canGoBack)
+                .disabled(!hasPage || !web.canGoBack)
                 Button {
                     web.goForward()
                 } label: {
                     Label("Forward", systemImage: "chevron.forward")
                 }
-                .disabled(!isRunning || !web.canGoForward)
+                .disabled(!hasPage || !web.canGoForward)
             }
             // With the window title hidden there is no title area to push
             // trailing items right — without an explicit flexible spacer the
@@ -121,13 +141,13 @@ struct ContentView: View {
                 } label: {
                     Label("Toggle Split Browser", systemImage: "sidebar.trailing")
                 }
-                .disabled(!isRunning)
+                .disabled(!hasPage)
                 .help("Toggle Split Browser (⇧⌘B)")
             }
         }
         .fileImporter(isPresented: $isPickingFolder, allowedContentTypes: [.folder]) { result in
             if case .success(let url) = result {
-                open(url)
+                openLocalFolder(url)
             }
         }
         .alert(
@@ -138,7 +158,7 @@ struct ContentView: View {
             ),
             presenting: pendingGitInitFolder
         ) { url in
-            Button("Initialize Repository") { initializeAndServe(url) }
+            Button("Initialize Repository") { initializeAndOpen(url) }
             Button("Cancel", role: .cancel) { declineInitialization() }
         } message: { url in
             Text("“\(url.lastPathComponent)” isn't inside a git repository. Initialize one to start a new project?")
@@ -152,7 +172,10 @@ struct ContentView: View {
             window.styleMask.insert(.fullSizeContentView)
             window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden
-            server.bind(to: window)
+            // No hairline between the (transparent) titlebar and the
+            // content — with the toolbar floating as glass over the page,
+            // the separator reads as a stray line above the tab bar.
+            window.titlebarSeparatorStyle = .none
             web.bindTitlebarInset(to: window)
             split.hostWindow = window
             NativeTabCoordinator.shared.resolve(windowID: windowID, window: window)
@@ -161,10 +184,13 @@ struct ContentView: View {
                 nativeWindow = window
             }
         })
-        .onChange(of: server.status) { _, newStatus in
-            if case .running(let url) = newStatus {
-                web.load(url)
-            }
+        .onChange(of: localHub.status) { _, newStatus in
+            // The backing hub died out from under a local page: transition
+            // to the failed state (with the hub's output and a relaunch
+            // path) rather than showing a dead web view.
+            guard currentPageIsLocal, phase == .web || isOpening,
+                  case .failed(let message) = newStatus else { return }
+            phase = .failed(message)
         }
         .onChange(of: pageZoom) {
             web.webView.pageZoom = pageZoom
@@ -173,6 +199,13 @@ struct ContentView: View {
             }
         }
         .onAppear {
+            web.onNavigationFailed = { message in
+                // A page whose hub stopped answering (network drop, hub
+                // gone) must not linger as a dead web view.
+                if phase == .web {
+                    phase = .failed("The page could not be loaded.\n\(message)")
+                }
+            }
             // ⌘W / ⌘[ / ⌘] belong to the browser tab only while the split
             // has keyboard focus. Menu items can't express that: NSMenu
             // stops at the FIRST matching key equivalent even when
@@ -278,10 +311,9 @@ struct ContentView: View {
             }
         }
         .onDisappear {
-            // The window is going away: its server was already stopped by
-            // the close hook, so invalidate in-flight preflight/init
-            // completions — a slow probe finishing now would otherwise
-            // spawn a server no window owns (alive until app quit).
+            // The window is going away — sessions belong to the hub and
+            // keep running, but in-flight open completions must not land
+            // in a dead window.
             openRequestToken = UUID()
             pendingGitInitFolder = nil
             if let browserKeyMonitor {
@@ -322,75 +354,17 @@ struct ContentView: View {
         }
     }
 
-    private var launcher: some View {
-        VStack(spacing: 28) {
-            VStack(spacing: 8) {
-                Image("Logo")
-                    .resizable()
-                    .scaledToFit()
-                    .frame(height: 84)
-                Text("UatuCode Desktop")
-                    .font(.largeTitle.bold())
-                Text("Serve a folder with uatu and view it here.")
-                    .foregroundStyle(.secondary)
-            }
-
-            Button("Choose Folder…") { isPickingFolder = true }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-
-            if !recentFolders.isEmpty {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Recent")
-                        .font(.headline)
-                        .padding(.bottom, 6)
-                    ForEach(recentFolders, id: \.path) { url in
-                        Button {
-                            open(url)
-                        } label: {
-                            HStack(spacing: 10) {
-                                Image(systemName: "folder")
-                                    .foregroundStyle(.tint)
-                                VStack(alignment: .leading) {
-                                    Text(url.lastPathComponent)
-                                    Text(url.path)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
-                                        .truncationMode(.middle)
-                                }
-                                Spacer()
-                            }
-                            .padding(.vertical, 5)
-                            .padding(.horizontal, 8)
-                            .contentShape(.rect)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .frame(maxWidth: 420)
-            }
-        }
-        .padding(40)
-    }
-
-    private var recentFolders: [URL] {
-        recentFoldersStorage
-            .split(separator: "\n")
-            .map { URL(fileURLWithPath: String($0)) }
-    }
-
     // Built outside the view body: inlining it pushed the body's expression
     // past what the Swift type-checker will chew through in reasonable time.
     private var windowCommands: WindowCommands {
         WindowCommands(
-            isRunning: isRunning,
-            folderPath: folder?.path,
+            hasPage: hasPage,
+            pageKey: pageTitle,
             nativeWindow: nativeWindow,
             canGoBack: web.canGoBack,
             canGoForward: web.canGoForward,
             chooseFolder: { isPickingFolder = true },
-            openFolder: { open($0) },
+            openLocalWorkspace: { open(.localWorkspace(id: $0)) },
             // nil opens find; a delta steps to the next/previous match.
             //
             // Menu activation does not pass through the key monitor, so the
@@ -423,94 +397,198 @@ struct ContentView: View {
                 }
             },
             openInBrowser: {
-                if case .running(let url) = server.status {
+                if let url = web.webView.url ?? currentURL {
                     NSWorkspace.shared.open(url)
                 }
             }
         )
     }
 
-    private func open(_ url: URL) {
-        // uatu's serve CLI rejects roots outside a git worktree, so probe
-        // first and offer `git init` instead of spawning a doomed child.
-        // An unlaunchable git (nil) falls through to the server, whose own
-        // startup failure reports as it always has.
+    // MARK: - Page opening
+
+    /// Opens a hub page in this window: resolve the hub, start the session
+    /// if needed, inject credentials for remote hubs, then load.
+    private func open(_ page: HubPage) {
         let token = UUID()
         openRequestToken = token
-        // A newer open supersedes an alert still waiting on the previous
-        // request — left up, its Initialize action would capture THIS
-        // token and clobber the new session with the stale folder.
         pendingGitInitFolder = nil
+        currentPage = page
+
+        switch page {
+        case .localDashboard:
+            phase = .opening("Connecting…")
+            Task {
+                guard let base = await localHub.waitForRunning() else { failFromLocalHub(token); return }
+                guard openRequestToken == token else { return }
+                loadWeb(base)
+            }
+
+        case .localWorkspace(let id):
+            phase = .opening("Opening \(id)…")
+            Task {
+                guard let base = await localHub.waitForRunning() else { failFromLocalHub(token); return }
+                do {
+                    try await startIfStopped(api: HubAPI(baseURL: base), id: id)
+                    guard openRequestToken == token else { return }
+                    guard let url = workspaceURL(base: base, id: id) else { return }
+                    loadWeb(url)
+                } catch {
+                    guard openRequestToken == token else { return }
+                    phase = .failed(Self.describe(error))
+                }
+            }
+
+        case .remoteDashboard(let entry):
+            phase = .opening("Connecting to \(entry.name)…")
+            Task {
+                guard let base = entry.url else { phase = .failed("Invalid hub URL."); return }
+                await injectCookie(for: entry)
+                guard openRequestToken == token else { return }
+                loadWeb(base)
+            }
+        }
+    }
+
+    private func loadWeb(_ url: URL) {
+        currentURL = url
+        phase = .web
+        web.load(url)
+    }
+
+    private func startIfStopped(api: HubAPI, id: String) async throws {
+        let state = try await api.state()
+        guard let workspace = state.workspaces.first(where: { $0.id == id }) else {
+            throw HubAPIError.http(404, "unknown workspace: \(id)")
+        }
+        if !workspace.running {
+            try await api.startSession(id: id)
+        }
+    }
+
+    private func workspaceURL(base: URL, id: String) -> URL? {
+        let encoded = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
+        return URL(string: "s/\(encoded)/", relativeTo: base)
+    }
+
+    private func injectCookie(for entry: RemoteHubEntry) async {
+        guard let url = entry.url,
+              let cookie = HubRoster.shared.connection(for: entry).cookie else { return }
+        await HubCookies.inject(value: cookie, for: url)
+    }
+
+    private func failFromLocalHub(_ token: UUID) {
+        guard openRequestToken == token else { return }
+        if case .failed(let message) = localHub.status {
+            phase = .failed(message)
+        } else {
+            phase = .failed("The local hub did not become ready.")
+        }
+    }
+
+    // MARK: - Choose Folder (local hub registration)
+
+    /// Registers a picked folder with the local hub and opens its session.
+    /// The git preflight is the hub's: a needs-init answer becomes the
+    /// confirmation dialog, and confirming re-submits with init requested.
+    /// The current page stays untouched until the open succeeds.
+    private func openLocalFolder(_ url: URL, initRepo: Bool = false) {
+        let token = UUID()
+        openRequestToken = token
+        pendingGitInitFolder = nil
+        if phase == .splash || isFailed {
+            phase = .opening("Starting \(url.lastPathComponent)…")
+        }
         Task {
-            let inWorktree = await Task.detached {
-                GitPreflight.isInsideWorktree(url, environment: UatuServer.loginEnvironment)
-            }.value
-            guard openRequestToken == token else { return }
-            if inWorktree == false {
+            guard let base = await localHub.waitForRunning() else { failFromLocalHub(token); return }
+            do {
+                let id = try await HubAPI(baseURL: base).addWorkspace(path: url.path, initRepo: initRepo)
+                guard openRequestToken == token else { return }
+                currentPage = .localWorkspace(id: id)
+                guard let pageURL = workspaceURL(base: base, id: id) else { return }
+                loadWeb(pageURL)
+                await localHub.refreshState()
+            } catch HubAPIError.needsInit {
+                guard openRequestToken == token else { return }
+                if isOpening { phase = .splash }
                 pendingGitInitFolder = url
-            } else {
-                serve(url)
+            } catch {
+                guard openRequestToken == token else { return }
+                phase = .failed(Self.describe(error))
             }
         }
     }
 
-    /// Records the recent entry and starts the server — the tail of
-    /// `open(_:)` once the git preflight has passed. Declined or failed
-    /// folders never reach this, so only served folders enter recents.
-    private func serve(_ url: URL) {
-        folder = url
-        var paths = recentFoldersStorage.split(separator: "\n").map(String.init)
-        paths.removeAll { $0 == url.path }
-        paths.insert(url.path, at: 0)
-        recentFoldersStorage = paths.prefix(8).joined(separator: "\n")
-        server.start(folder: url)
+    private func initializeAndOpen(_ url: URL) {
+        openLocalFolder(url, initRepo: true)
     }
 
-    /// Cancel on the init alert. A failed window would otherwise stay at
-    /// its dead end, so it resets to the launcher; a running (or starting)
-    /// session is untouched — declining to init some other folder behaves
-    /// like canceling the open dialog, not like closing the session.
+    /// Cancel on the init alert: nothing was registered hub-side, so there
+    /// is nothing to undo. A window with no live page returns to the
+    /// splash; a window showing a session keeps it untouched.
     private func declineInitialization() {
-        if case .failed = server.status {
-            server.stop()
-            folder = nil
+        if phase != .web {
+            phase = .splash
+            currentPage = nil
         }
     }
 
-    private func initializeAndServe(_ url: URL) {
-        let token = openRequestToken
-        Task {
-            let result = await Task.detached {
-                GitPreflight.initializeRepository(at: url, environment: UatuServer.loginEnvironment)
-            }.value
-            guard openRequestToken == token else { return }
-            switch result {
-            case .success:
-                serve(url)
-            case .failure(let error):
-                folder = url
-                server.fail(folder: url, message: "git init failed.\n\(error.message)")
-            }
+    private func retry() {
+        // A dead local hub can't serve the page again — relaunch it first,
+        // then re-open (open() waits for it to come up).
+        if currentPageIsLocal, case .failed = localHub.status {
+            localHub.relaunch()
+        }
+        if let currentPage {
+            open(currentPage)
+        } else {
+            showSplash()
         }
     }
 
-    private var isRunning: Bool {
-        if case .running = server.status { return true }
+    private func showSplash() {
+        phase = .splash
+        currentPage = nil
+        currentURL = nil
+    }
+
+    // MARK: - Derived state
+
+    private var hasPage: Bool { phase == .web }
+
+    private var isOpening: Bool {
+        if case .opening = phase { return true }
         return false
     }
 
-    private var folderName: String? {
-        folder?.lastPathComponent
+    private var isFailed: Bool {
+        if case .failed = phase { return true }
+        return false
     }
 
-    private func restart() {
-        guard let folder else {
-            isPickingFolder = true
-            return
+    private var currentPageIsLocal: Bool {
+        switch currentPage {
+        case .localDashboard, .localWorkspace: return true
+        default: return false
         }
-        // Through open(_:), not server.start, so Try Again after a git-init
-        // failure re-runs the preflight and re-offers initialization.
-        open(folder)
+    }
+
+    private var pageTitle: String {
+        switch currentPage {
+        case .localDashboard: return "This Mac"
+        case .localWorkspace(let id): return id
+        case .remoteDashboard(let entry): return entry.name
+        case nil: return "UatuCode Desktop"
+        }
+    }
+
+    private static func describe(_ error: Error) -> String {
+        switch error {
+        case HubAPIError.unauthorized: return "The hub requires sign-in."
+        case HubAPIError.needsInit: return "The folder is not a git repository."
+        case HubAPIError.unreachable(let detail): return "The hub could not be reached.\n\(detail)"
+        case HubAPIError.http(_, let message): return message.isEmpty ? "The hub reported an error." : message
+        default: return error.localizedDescription
+        }
     }
 }
 
@@ -544,13 +622,13 @@ private final class WindowResolutionView: NSView {
 
 /// Actions of the focused window, exposed to the menu bar commands.
 struct WindowCommands: Equatable {
-    var isRunning: Bool
-    var folderPath: String?
+    var hasPage: Bool
+    var pageKey: String?
     var nativeWindow: NSWindow?
     var canGoBack: Bool
     var canGoForward: Bool
     var chooseFolder: () -> Void
-    var openFolder: (URL) -> Void
+    var openLocalWorkspace: (String) -> Void
     var find: (Int?) -> Void
     var findInFiles: () -> Void
     var reload: () -> Void
@@ -561,8 +639,8 @@ struct WindowCommands: Equatable {
     var openInBrowser: () -> Void
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.isRunning == rhs.isRunning
-            && lhs.folderPath == rhs.folderPath
+        lhs.hasPage == rhs.hasPage
+            && lhs.pageKey == rhs.pageKey
             && lhs.nativeWindow === rhs.nativeWindow
             && lhs.canGoBack == rhs.canGoBack
             && lhs.canGoForward == rhs.canGoForward
@@ -576,14 +654,13 @@ extension FocusedValues {
 struct UatuCodeDesktopCommands: Commands {
     @FocusedValue(\.windowCommands) private var window
     @Environment(\.openWindow) private var openWindow
-    @AppStorage("recentFolders") private var recentFoldersStorage = ""
     @AppStorage(ExternalLinkRouter.systemBrowserDefaultsKey) private var openLinksInSystemBrowser = false
     @AppStorage(PageZoom.defaultsKey) private var pageZoom = 1.0
 
-    private var recentFolders: [URL] {
-        recentFoldersStorage
-            .split(separator: "\n")
-            .map { URL(fileURLWithPath: String($0)) }
+    /// Open Recent lists the local hub's registered workspaces — the hub
+    /// registry replaced the old recents list as the source of truth.
+    private var localWorkspaces: [HubWorkspace] {
+        LocalHubController.shared.lastState?.workspaces ?? []
     }
 
     var body: some Commands {
@@ -595,15 +672,11 @@ struct UatuCodeDesktopCommands: Commands {
                 .keyboardShortcut("o")
                 .disabled(window == nil)
             Menu("Open Recent") {
-                ForEach(recentFolders, id: \.path) { url in
-                    Button(url.lastPathComponent) { window?.openFolder(url) }
-                }
-                if !recentFolders.isEmpty {
-                    Divider()
-                    Button("Clear Menu") { recentFoldersStorage = "" }
+                ForEach(localWorkspaces) { workspace in
+                    Button(workspace.id) { window?.openLocalWorkspace(workspace.id) }
                 }
             }
-            .disabled(window == nil || recentFolders.isEmpty)
+            .disabled(window == nil || localWorkspaces.isEmpty)
         }
         // Find lives in the Edit menu where macOS users look for it. These are
         // discoverability and shortcut advertisement only: the key monitor in
@@ -630,31 +703,31 @@ struct UatuCodeDesktopCommands: Commands {
             Divider()
             Button("Find…") { window?.find(nil) }
                 .keyboardShortcut("f")
-                .disabled(window?.isRunning != true)
+                .disabled(window?.hasPage != true)
             Button("Find in Files…") { window?.findInFiles() }
                 .keyboardShortcut("f", modifiers: [.command, .shift])
-                .disabled(window?.isRunning != true)
+                .disabled(window?.hasPage != true)
             Button("Find Next") { window?.find(1) }
                 .keyboardShortcut("g")
-                .disabled(window?.isRunning != true)
+                .disabled(window?.hasPage != true)
             Button("Find Previous") { window?.find(-1) }
                 .keyboardShortcut("g", modifiers: [.command, .shift])
-                .disabled(window?.isRunning != true)
+                .disabled(window?.hasPage != true)
         }
         CommandGroup(after: .toolbar) {
             Button("Back") { window?.goBack() }
                 .keyboardShortcut("[")
-                .disabled(window?.isRunning != true || window?.canGoBack != true)
+                .disabled(window?.hasPage != true || window?.canGoBack != true)
             Button("Forward") { window?.goForward() }
                 .keyboardShortcut("]")
-                .disabled(window?.isRunning != true || window?.canGoForward != true)
+                .disabled(window?.hasPage != true || window?.canGoForward != true)
             Divider()
             Button("Reload Page") { window?.reload() }
                 .keyboardShortcut("r")
-                .disabled(window?.isRunning != true)
+                .disabled(window?.hasPage != true)
             Button("Open in Browser") { window?.openInBrowser() }
                 .keyboardShortcut("o", modifiers: [.command, .shift])
-                .disabled(window?.isRunning != true)
+                .disabled(window?.hasPage != true)
             Divider()
             Button("Actual Size") {
                 pageZoom = 1.0
@@ -676,7 +749,7 @@ struct UatuCodeDesktopCommands: Commands {
             Divider()
             Button("Toggle Split Browser") { window?.toggleSplitBrowser() }
                 .keyboardShortcut("b", modifiers: [.command, .shift])
-                .disabled(window?.isRunning != true)
+                .disabled(window?.hasPage != true)
             Toggle("Open External Links in System Browser", isOn: $openLinksInSystemBrowser)
             Divider()
         }

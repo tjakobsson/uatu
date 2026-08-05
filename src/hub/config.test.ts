@@ -2,7 +2,14 @@ import { describe, expect, test } from "bun:test";
 import os from "node:os";
 import path from "node:path";
 
-import { DEFAULT_HUB_PORT, defaultHubConfigPath, expandHomePath, isLoopbackHost, parseHubConfig } from "./config";
+import {
+  DEFAULT_HUB_PORT,
+  defaultHubConfigPath,
+  expandHomePath,
+  isLoopbackHost,
+  localHubConfig,
+  parseHubConfig,
+} from "./config";
 
 const USER = { name: "tobias", passwordHash: "$argon2id$fake" };
 
@@ -13,9 +20,8 @@ describe("parseHubConfig", () => {
     expect(config.host).toBe("127.0.0.1");
     expect(config.tls).toBeNull();
     expect(config.users).toEqual([USER]);
-    // Workspaces root defaults to the directory the hub is started in.
-    expect(config.workspacesDir).toBe(process.cwd());
-    expect(parseHubConfig({ users: [USER] }, "/srv/workspaces").workspacesDir).toBe("/srv/workspaces");
+    // File-loaded configs are never local mode.
+    expect(config.local).toBe(false);
   });
 
   test("accepts a full config and expands ~ paths", () => {
@@ -24,13 +30,17 @@ describe("parseHubConfig", () => {
       host: "0.0.0.0",
       tls: { cert: "~/certs/fullchain.pem", key: "~/certs/key.pem" },
       users: [USER],
-      workspacesDir: "~/workspaces",
       stateDir: "~/state",
     });
     expect(config.port).toBe(4433);
     expect(config.tls?.cert).toBe(path.join(os.homedir(), "certs/fullchain.pem"));
-    expect(config.workspacesDir).toBe(path.join(os.homedir(), "workspaces"));
     expect(config.stateDir).toBe(path.join(os.homedir(), "state"));
+  });
+
+  test("rejects the removed workspacesDir key by name", () => {
+    expect(() => parseHubConfig({ users: [USER], workspacesDir: "~/workspaces" })).toThrow(
+      /'workspacesDir' was removed/,
+    );
   });
 
   test("refuses a non-loopback host without TLS", () => {
@@ -52,6 +62,17 @@ describe("parseHubConfig", () => {
     expect(() => parseHubConfig({ port: 0, users: [USER] })).toThrow(/invalid port/);
     expect(() => parseHubConfig({ port: "4700", users: [USER] })).toThrow(/invalid port/);
     expect(() => parseHubConfig({ tls: { cert: "/x.pem" }, users: [USER] })).toThrow(/both cert and key/);
+  });
+});
+
+describe("localHubConfig", () => {
+  test("builds a loopback, userless, TLS-free local-mode config", () => {
+    const config = localHubConfig({ port: 0 });
+    expect(config.local).toBe(true);
+    expect(config.host).toBe("127.0.0.1");
+    expect(config.tls).toBeNull();
+    expect(config.users).toEqual([]);
+    expect(config.port).toBe(0);
   });
 });
 

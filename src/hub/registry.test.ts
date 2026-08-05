@@ -77,20 +77,21 @@ describe("WorkspaceRegistry", () => {
     expect(registry.list()).toHaveLength(0);
   });
 
-  test("pruneOutsideRoot forgets entries not directly inside the workspaces root", async () => {
+  test("arbitrary absolute paths register — there is no workspaces root", async () => {
     const registry = await tempRegistry();
-    await registry.register("/srv/workspaces/keep-me");
-    await registry.register("/srv/workspaces/also-keep");
-    await registry.register("/home/old/place/legacy");
-    // Nested deeper than a direct child is outside too.
-    await registry.register("/srv/workspaces/nested/too-deep");
+    const home = await registry.register("/home/t/src/uatu");
+    const docs = await registry.register("/var/data/notes");
+    const deep = await registry.register("/srv/projects/nested/deep");
+    expect(home.id).toBe("uatu");
+    expect(docs.id).toBe("notes");
+    expect(deep.id).toBe("deep");
+    expect(registry.list()).toHaveLength(3);
+  });
 
-    const removed = await registry.pruneOutsideRoot("/srv/workspaces");
-    expect(removed.map(entry => entry.id).sort()).toEqual(["legacy", "too-deep"]);
-    expect(registry.list().map(entry => entry.id).sort()).toEqual(["also-keep", "keep-me"]);
-
-    // Idempotent; a second prune removes nothing.
-    expect(await registry.pruneOutsideRoot("/srv/workspaces")).toEqual([]);
+  test("relative paths are rejected and leave the registry unchanged", async () => {
+    const registry = await tempRegistry();
+    await expect(registry.register("relative/docs")).rejects.toThrow(/must be absolute/);
+    expect(registry.list()).toEqual([]);
   });
 
   test("a corrupt registry file loads as empty rather than crashing", async () => {

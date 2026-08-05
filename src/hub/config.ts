@@ -6,9 +6,11 @@
 //   "host": "127.0.0.1",
 //   "tls": { "cert": "/path/fullchain.pem", "key": "/path/key.pem" },
 //   "users": [{ "name": "tobias", "passwordHash": "$argon2id$..." }],
-//   "workspacesDir": "~/workspaces",        // default: the hub's cwd
 //   "stateDir": "~/.local/state/uatu-hub"   // optional override
 // }
+//
+// Workspaces are registered by absolute path (via the dashboard's Add
+// Folder browser or the API) — there is no workspaces root.
 
 import os from "node:os";
 import path from "node:path";
@@ -30,14 +32,27 @@ export type HubConfig = {
   host: string;
   tls: HubTlsConfig | null;
   users: HubUser[];
-  // The workspaces root: the directory whose subfolders are this hub's
-  // workspaces and where `git clone` creates new ones. Defaults to the
-  // working directory the hub was started in. Must NOT itself be inside a
-  // git worktree (enforced at startup, not here — parsing stays pure).
-  workspacesDir: string;
   // Optional override for the XDG state dir (registry + signing key).
   stateDir?: string;
+  // Trusted single-user loopback mode (`uatu hub --local`): auth is
+  // bypassed, login routes are absent, and the bind is loopback-only.
+  // Never true for a file-loaded config.
+  local: boolean;
 };
+
+// The config for `uatu hub --local`: loopback bind, no users, no TLS. The
+// desktop app runs the hub this way; trust is the same as `uatu serve` on
+// loopback — any process that can reach 127.0.0.1 already owns the account.
+export function localHubConfig(options: { port: number; stateDir?: string }): HubConfig {
+  return {
+    port: options.port,
+    host: "127.0.0.1",
+    tls: null,
+    users: [],
+    stateDir: options.stateDir,
+    local: true,
+  };
+}
 
 export function defaultHubConfigPath(env: Record<string, string | undefined> = process.env): string {
   const configHome =
@@ -62,7 +77,7 @@ export function isLoopbackHost(host: string): boolean {
 // Parses and validates a hub config object (already JSON-parsed). Throws
 // descriptive errors — hub startup surfaces them verbatim, so each message
 // names the offending field.
-export function parseHubConfig(raw: unknown, defaultWorkspacesDir: string = process.cwd()): HubConfig {
+export function parseHubConfig(raw: unknown): HubConfig {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw new Error("hub config must be a JSON object");
   }
@@ -125,12 +140,13 @@ export function parseHubConfig(raw: unknown, defaultWorkspacesDir: string = proc
     users.push({ name: user.name, passwordHash: user.passwordHash });
   }
 
-  let workspacesDir = defaultWorkspacesDir;
+  // Removed in 0.5.0 (the hub never shipped with it in a release): the hub
+  // no longer has a workspaces root. Name the key so an experimental
+  // edge-build config fails loudly instead of being silently reinterpreted.
   if (record.workspacesDir !== undefined) {
-    if (typeof record.workspacesDir !== "string" || record.workspacesDir.trim() === "") {
-      throw new Error("hub config: workspacesDir must be a non-empty string");
-    }
-    workspacesDir = expandHomePath(record.workspacesDir);
+    throw new Error(
+      "hub config: 'workspacesDir' was removed — workspaces are registered by absolute path (use the dashboard's Add Folder browser); delete the key",
+    );
   }
 
   let stateDir: string | undefined;
@@ -141,7 +157,7 @@ export function parseHubConfig(raw: unknown, defaultWorkspacesDir: string = proc
     stateDir = expandHomePath(record.stateDir);
   }
 
-  return { port, host, tls, users, workspacesDir, stateDir };
+  return { port, host, tls, users, stateDir, local: false };
 }
 
 export async function loadHubConfig(configPath?: string): Promise<HubConfig> {

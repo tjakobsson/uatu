@@ -106,7 +106,9 @@
             aria-label="Switch workspace or open the hub dashboard"
             title="Switch workspace or open the hub dashboard"
           >
-            <span class="indicator-dot is-live" aria-hidden="true"></span>
+            <!-- Liveness is set by hub-nav from real hub state — a cached
+                 page can belong to a stopped session, so no default. -->
+            <span class="indicator-dot" aria-hidden="true"></span>
             <span id="hub-current" class="hub-toggle-label"></span>
             <svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true">
               <path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />

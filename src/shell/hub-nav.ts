@@ -32,6 +32,16 @@ export function workspaceIdFromBasePath(basePath: string): string | null {
   }
 }
 
+// The chip's indicator class for the current workspace. Live only when the
+// hub reports the session running: a stopped session's page can outlive its
+// server (back/forward-cache restores, a stop from the dashboard), and a
+// hard-coded live dot there contradicts both reality and the menu. Unknown
+// (absent from the list, e.g. forgotten) reads as not running.
+export function chipDotClass(workspaces: HubWorkspaceSummary[], currentId: string | null): string {
+  const current = workspaces.find(workspace => workspace.id === currentId);
+  return current?.running ? "indicator-dot is-live" : "indicator-dot";
+}
+
 // Menu order: the current workspace first, then other running sessions,
 // then stopped workspaces, alphabetical within each group.
 export function sortHubWorkspaces(
@@ -45,23 +55,34 @@ export function sortHubWorkspaces(
   return [...workspaces].sort((a, b) => rank(a) - rank(b) || a.id.localeCompare(b.id));
 }
 
-function parseHubState(payload: unknown): HubWorkspaceSummary[] | null {
-  const workspaces = (payload as { workspaces?: unknown } | null)?.workspaces;
+export type HubStateSummary = {
+  workspaces: HubWorkspaceSummary[];
+  // Trusted loopback mode (`uatu hub --local`): no login exists, so no
+  // sign-out entry belongs in the menu.
+  local: boolean;
+};
+
+export function parseHubState(payload: unknown): HubStateSummary | null {
+  const record = payload as { workspaces?: unknown; local?: unknown } | null;
+  const workspaces = record?.workspaces;
   if (!Array.isArray(workspaces)) {
     return null;
   }
-  return workspaces
-    .filter(
-      (entry): entry is { id: string; running: boolean } =>
-        typeof entry === "object" &&
-        entry !== null &&
-        typeof (entry as { id?: unknown }).id === "string" &&
-        typeof (entry as { running?: unknown }).running === "boolean",
-    )
-    .map(({ id, running }) => ({ id, running }));
+  return {
+    local: record?.local === true,
+    workspaces: workspaces
+      .filter(
+        (entry): entry is { id: string; running: boolean } =>
+          typeof entry === "object" &&
+          entry !== null &&
+          typeof (entry as { id?: unknown }).id === "string" &&
+          typeof (entry as { running?: unknown }).running === "boolean",
+      )
+      .map(({ id, running }) => ({ id, running })),
+  };
 }
 
-async function fetchHubWorkspaces(): Promise<HubWorkspaceSummary[] | null> {
+async function fetchHubState(): Promise<HubStateSummary | null> {
   try {
     const response = await fetch("/api/hub/state");
     if (!response.ok) {
@@ -88,6 +109,14 @@ export function initHubNav(): void {
   }
 
   let latest: HubWorkspaceSummary[] = [];
+  let hubIsLocal = false;
+
+  const chipDot = toggle.querySelector<HTMLSpanElement>(".indicator-dot");
+  const updateChipDot = () => {
+    if (chipDot) {
+      chipDot.className = chipDotClass(latest, currentId);
+    }
+  };
 
   const renderMenu = () => {
     menu.replaceChildren();
@@ -129,22 +158,26 @@ export function initHubNav(): void {
       menu.appendChild(item);
     }
 
-    menu.appendChild(Object.assign(document.createElement("hr"), { className: "hub-menu-divider" }));
-    const signOut = document.createElement("a");
-    signOut.className = "hub-menu-item";
-    signOut.href = "/login";
-    const signOutLabel = document.createElement("span");
-    signOutLabel.className = "hub-menu-label";
-    signOutLabel.textContent = "Sign out";
-    signOut.appendChild(signOutLabel);
-    signOut.addEventListener("click", event => {
-      event.preventDefault();
-      // Logout is a POST (CSRF-guarded); follow to the login page after.
-      void fetch("/logout", { method: "POST" }).finally(() => {
-        window.location.href = "/login";
+    // A local hub has no login — its /login and /logout routes don't even
+    // exist — so a sign-out entry would only lead to a 404.
+    if (!hubIsLocal) {
+      menu.appendChild(Object.assign(document.createElement("hr"), { className: "hub-menu-divider" }));
+      const signOut = document.createElement("a");
+      signOut.className = "hub-menu-item";
+      signOut.href = "/login";
+      const signOutLabel = document.createElement("span");
+      signOutLabel.className = "hub-menu-label";
+      signOutLabel.textContent = "Sign out";
+      signOut.appendChild(signOutLabel);
+      signOut.addEventListener("click", event => {
+        event.preventDefault();
+        // Logout is a POST (CSRF-guarded); follow to the login page after.
+        void fetch("/logout", { method: "POST" }).finally(() => {
+          window.location.href = "/login";
+        });
       });
-    });
-    menu.appendChild(signOut);
+      menu.appendChild(signOut);
+    }
   };
 
   const close = () => {
@@ -153,13 +186,31 @@ export function initHubNav(): void {
   };
 
   // One probe decides hub-ness; only a hub origin answers this at the root.
-  void fetchHubWorkspaces().then(workspaces => {
-    if (workspaces === null) {
+  void fetchHubState().then(state => {
+    if (state === null) {
       return;
     }
-    latest = workspaces;
+    latest = state.workspaces;
+    hubIsLocal = state.local;
     label.textContent = currentId;
+    updateChipDot();
     control.hidden = false;
+
+    // A back/forward-cache restore revives this page exactly as it was —
+    // possibly for a session that was stopped in the meantime. Re-fetch so
+    // the chip tells the truth before the user opens the menu.
+    window.addEventListener("pageshow", event => {
+      if (!event.persisted) {
+        return;
+      }
+      void fetchHubState().then(fresh => {
+        if (fresh !== null) {
+          latest = fresh.workspaces;
+          hubIsLocal = fresh.local;
+          updateChipDot();
+        }
+      });
+    });
 
     toggle.addEventListener("click", () => {
       const expanded = toggle.getAttribute("aria-expanded") === "true";
@@ -172,9 +223,11 @@ export function initHubNav(): void {
       menu.hidden = false;
       // Refresh in the background so the open menu reflects sessions
       // started or stopped elsewhere; re-render only while still open.
-      void fetchHubWorkspaces().then(fresh => {
+      void fetchHubState().then(fresh => {
         if (fresh !== null) {
-          latest = fresh;
+          latest = fresh.workspaces;
+          hubIsLocal = fresh.local;
+          updateChipDot();
           if (!menu.hidden) {
             renderMenu();
           }

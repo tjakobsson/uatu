@@ -1,32 +1,12 @@
-# hub-dashboard Specification
+# hub-dashboard — delta for unify-desktop-on-hub
 
-## Purpose
+## REMOVED Requirements
 
-Define the hub's browser surface: an authenticated dashboard that lists running sessions and stopped workspaces with live shell status, offers stop/resume/forget actions, adds workspaces through a server-side directory browser or by cloning a repository, and follows uatu's visual language — plus the in-session workspace switcher that hub-served sessions expose for navigating between the dashboard and sibling workspaces.
+### Requirement: Dashboard creates workspaces from the workspaces root
+**Reason**: The workspaces-root model is removed (hub-service delta); workspaces are registered by absolute path, so "pick a subfolder of the root" no longer describes the flow.
+**Migration**: Replaced by "Dashboard adds folders through a server-side directory browser" below. The git preflight (`409 needsInit` handshake), the clone action, and the no-`--force` rule all carry over into the new requirement.
 
-## Requirements
-
-### Requirement: Dashboard lists sessions and workspaces with live status
-The hub SHALL serve an authenticated dashboard listing running sessions and stopped registered workspaces. Each running session SHALL show its workspace name and path and a live shell summary sourced from the child's terminal session inventory (shell count, attached/detached, best-effort foreground-process label); each stopped workspace SHALL offer resume. Activating a running session SHALL navigate to its `/s/<id>/` URL. The dashboard SHALL be served under the hub origin so it shares the PWA installation with the sessions it links to.
-
-#### Scenario: Running session shows live shell detail
-- **WHEN** a session has two shells, one running a long-lived TUI, and the user opens the dashboard
-- **THEN** the session's row reports the shells and the foreground-process label
-
-#### Scenario: Jump into a session
-- **WHEN** the user activates a running session's entry
-- **THEN** the browser navigates to that session's `/s/<id>/` URL and the SPA loads
-
-#### Scenario: Resume a stopped workspace
-- **WHEN** the user activates resume on a stopped workspace
-- **THEN** the hub starts a session for it via the workspace's backend and the entry becomes running
-
-### Requirement: Dashboard can stop a running session
-The dashboard SHALL offer a stop action per running session that terminates the session's server after an explicit confirmation naming the workspace, since stopping terminates that session's shells. A stop that races an in-flight session start SHALL await the start and then terminate the child, so no session can come alive after its stop was reported.
-
-#### Scenario: Stop requires confirmation
-- **WHEN** the user activates stop on a running session and confirms
-- **THEN** the session's child process is terminated and the workspace moves to the stopped list
+## MODIFIED Requirements
 
 ### Requirement: Dashboard can forget a stopped workspace
 The dashboard SHALL offer a forget action on stopped workspaces that removes the registration only: the folder on disk MUST NOT be touched and SHALL reappear in the directory browser as an unregistered folder. The hub SHALL reject forgetting a workspace whose session is running or still starting, so a forget can never race an in-flight spawn into a live child that the dashboard no longer knows about.
@@ -38,6 +18,24 @@ The dashboard SHALL offer a forget action on stopped workspaces that removes the
 #### Scenario: A running or starting session cannot be forgotten
 - **WHEN** a forget request names a workspace whose session is running or whose start is still in flight
 - **THEN** the hub rejects it and the registration is unchanged
+
+### Requirement: Hub-served sessions expose hub navigation
+When the SPA is served through a hub (a hub-session-shaped base path AND the hub API answering at the origin root), the sidebar header SHALL show a workspace switcher naming the current workspace, whose menu links to the hub dashboard and to every registered workspace (running state indicated; stopped workspaces labeled) and offers a sign-out entry when the hub has a login. In local mode (`--local`) the sign-out entry SHALL be omitted — no login exists and its routes are absent, so the entry could only lead to a 404; the state API SHALL tell clients the hub is local. Outside a hub — plain `uatu serve`, a bare `--base-path` invocation — the affordance MUST stay hidden. (Desktop wrapper sessions are hub sessions and show the switcher.) The hub's brand header SHALL show the logo centered with the wordmark beneath it and no tagline.
+
+#### Scenario: Switching workspaces from inside a session
+- **WHEN** a user inside a hub-served session opens the workspace switcher
+- **THEN** they see the hub dashboard link and the other workspaces with running/stopped state
+- **AND** activating one navigates to that workspace's session URL
+
+#### Scenario: No hub affordance outside a hub
+- **WHEN** the SPA runs under plain `uatu serve` (default base path) or under a base path with no hub answering at the origin root
+- **THEN** the workspace switcher is not shown
+
+#### Scenario: Local mode has no sign-out entry
+- **WHEN** a user opens the workspace switcher in a session served by a `--local` hub
+- **THEN** the menu shows the dashboard link and workspaces but no sign-out entry
+
+## ADDED Requirements
 
 ### Requirement: Dashboard adds folders through a server-side directory browser
 The dashboard SHALL offer workspace registration by browsing the hub host's filesystem, not by typing paths: the hub SHALL expose a directory-listing API that, for a given absolute path (defaulting to the daemon user's home), returns its parent and its child directories — each with its name, whether it is a git repository, and its registered workspace id if any — listing directories only and hiding dot-directories. The dashboard SHALL present this as a drill-down browser ending in an "add this folder" action. Filesystem visibility through the browser is within the documented trust model: hub users already hold shell access through the embedded terminal.
@@ -75,22 +73,6 @@ Registration SHALL submit the browsed absolute path. Adding a non-git folder SHA
 - **THEN** the Add Folder browser and clone form are absent
 - **AND** sessions, workspaces, and their stop/resume/forget actions render as usual
 
-### Requirement: Hub-served sessions expose hub navigation
-When the SPA is served through a hub (a hub-session-shaped base path AND the hub API answering at the origin root), the sidebar header SHALL show a workspace switcher naming the current workspace, whose menu links to the hub dashboard and to every registered workspace (running state indicated; stopped workspaces labeled) and offers a sign-out entry when the hub has a login. In local mode (`--local`) the sign-out entry SHALL be omitted — no login exists and its routes are absent, so the entry could only lead to a 404; the state API SHALL tell clients the hub is local. Outside a hub — plain `uatu serve`, a bare `--base-path` invocation — the affordance MUST stay hidden. (Desktop wrapper sessions are hub sessions and show the switcher.) The hub's brand header SHALL show the logo centered with the wordmark beneath it and no tagline.
-
-#### Scenario: Switching workspaces from inside a session
-- **WHEN** a user inside a hub-served session opens the workspace switcher
-- **THEN** they see the hub dashboard link and the other workspaces with running/stopped state
-- **AND** activating one navigates to that workspace's session URL
-
-#### Scenario: No hub affordance outside a hub
-- **WHEN** the SPA runs under plain `uatu serve` (default base path) or under a base path with no hub answering at the origin root
-- **THEN** the workspace switcher is not shown
-
-#### Scenario: Local mode has no sign-out entry
-- **WHEN** a user opens the workspace switcher in a session served by a `--local` hub
-- **THEN** the menu shows the dashboard link and workspaces but no sign-out entry
-
 ### Requirement: The workspace switcher chip reflects real session state
 The in-session workspace switcher's collapsed chip SHALL show the current workspace's live indicator from hub-reported state, never from an assumption that the viewed session is running: a session page can outlive its server (a stop from the dashboard, a back/forward-cache restore). The chip SHALL update from fresh hub state on page-cache restores and whenever the menu's state refresh completes, so chip and menu can never disagree.
 
@@ -98,17 +80,6 @@ The in-session workspace switcher's collapsed chip SHALL show the current worksp
 - **WHEN** the user stops a session from the dashboard and returns to its page via browser history
 - **THEN** the switcher chip's indicator shows not-running
 - **AND** opening the menu shows the same state
-
-### Requirement: Dashboard and login follow uatu's visual language
-The hub's pages (login, dashboard, session-unavailable) SHALL use uatu's design system, not an ad-hoc theme: the same brand header (inline logo with its dark-scheme retint, wordmark typography), `color-scheme: light dark` with the app's `light-dark()` token palette so both schemes render correctly, the app's sans-serif body font with monospace reserved for paths and code, pane-style section headers, and the app's indicator-dot idiom for live/running state. Fixed single-scheme palettes MUST NOT be used.
-
-#### Scenario: Both color schemes render correctly
-- **WHEN** the dashboard is viewed under a light system scheme and under a dark system scheme
-- **THEN** surfaces, text, and borders adapt via the token palette in both, with no illegible fixed-scheme colors
-
-#### Scenario: The dashboard reads as uatu
-- **WHEN** a user familiar with the uatu SPA opens the dashboard
-- **THEN** the brand header, section headers, typography, and running-state indicators follow the same visual idioms as the SPA's sidebar chrome
 
 ### Requirement: Hub pages respect the desktop titlebar inset
 When served inside UatuCode Desktop's full-height WebView — the wrapper sets a `--titlebar-inset` custom property on the document root for the strip covered by the transparent titlebar and native tab bar — the hub's pages (login, dashboard, stopped-session) SHALL pad their content below the covered strip so nothing renders beneath the native chrome. In a plain browser, where the property is unset, the pages SHALL render unchanged.

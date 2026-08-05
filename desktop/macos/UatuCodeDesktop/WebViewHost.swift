@@ -25,6 +25,11 @@ final class WebViewHost: NSObject {
     /// ExternalLinkRouter; ContentView installs the split-browser routing.
     var routeExternal: ((URL, Bool) -> Void)?
 
+    /// Main-frame navigation failures (host unreachable, TLS refused, the
+    /// backing hub gone). ContentView uses this to move the window into its
+    /// failed state instead of showing a dead web view.
+    var onNavigationFailed: ((String) -> Void)?
+
     let webView: WKWebView
     private var observations: [NSKeyValueObservation] = []
     private var insetObservation: NSKeyValueObservation?
@@ -135,6 +140,45 @@ extension WebViewHost: WKUIDelegate {
         routeOut(navigationAction)
         return nil
     }
+
+    // WKWebView shows NO JavaScript dialogs unless the app provides them —
+    // confirm() silently answers false, which turned the hub dashboard's
+    // confirmation-gated actions (Stop, init-and-serve) into dead buttons.
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptAlertPanelWithMessage message: String,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping () -> Void
+    ) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: "OK")
+        if let window = webView.window {
+            alert.beginSheetModal(for: window) { _ in completionHandler() }
+        } else {
+            alert.runModal()
+            completionHandler()
+        }
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptConfirmPanelWithMessage message: String,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping (Bool) -> Void
+    ) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        if let window = webView.window {
+            alert.beginSheetModal(for: window) { response in
+                completionHandler(response == .alertFirstButtonReturn)
+            }
+        } else {
+            completionHandler(alert.runModal() == .alertFirstButtonReturn)
+        }
+    }
 }
 
 extension WebViewHost: WKNavigationDelegate {
@@ -162,6 +206,25 @@ extension WebViewHost: WKNavigationDelegate {
             return
         }
         decisionHandler(.allow)
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        reportNavigationFailure(error)
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        reportNavigationFailure(error)
+    }
+
+    private func reportNavigationFailure(_ error: Error) {
+        let nsError = error as NSError
+        // Cancellations are routine (rapid navigation, routed-out links) —
+        // only real transport failures should surface. 102 is WebKit's
+        // frame-load-interrupted-by-policy-change, raised by our own
+        // decidePolicyFor cancels.
+        guard !(nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled),
+              !(nsError.domain == "WebKitErrorDomain" && nsError.code == 102) else { return }
+        onNavigationFailed?(nsError.localizedDescription)
     }
 }
 

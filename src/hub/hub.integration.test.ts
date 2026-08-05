@@ -40,8 +40,8 @@ beforeAll(async () => {
     host: "127.0.0.1",
     tls: null,
     users: [{ name: "tobias", passwordHash: await hashPassword("open sesame") }],
-    workspacesDir: path.join(tempRoot, "workspaces"),
     stateDir: path.join(tempRoot, "state"),
+    local: false,
   };
 
   registry = new WorkspaceRegistry(path.join(tempRoot, "registry.json"));
@@ -70,6 +70,13 @@ describe("hub end to end", () => {
     const navigation = await fetch(`${origin}/`, { headers: { accept: "text/html" }, redirect: "manual" });
     expect(navigation.status).toBe(303);
     expect(navigation.headers.get("location")).toContain("/login");
+  });
+
+  test("the login page carries no version string; the dashboard renders it for signed-in users", async () => {
+    const { BUILD, formatBuildIdentifier } = await import("../shared/version");
+    const login = await fetch(`${origin}/login`, { headers: { accept: "text/html" } });
+    expect(login.status).toBe(200);
+    expect(await login.text()).not.toContain(formatBuildIdentifier(BUILD));
   });
 
   test("wrong credentials are rejected without user-existence detail", async () => {
@@ -106,15 +113,32 @@ describe("hub end to end", () => {
     const created = await fetch(`${origin}/api/hub/workspaces`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({ name: "myproject" }),
+      body: JSON.stringify({ path: workspace }),
     });
     expect(created.status).toBe(200);
     expect(((await created.json()) as { id: string }).id).toBe("myproject");
 
     const state = await fetch(`${origin}/api/hub/state`, { headers: { cookie } });
-    const payload = (await state.json()) as { workspaces: { id: string; running: boolean }[] };
+    const payload = (await state.json()) as { version: string; workspaces: { id: string; running: boolean }[] };
     expect(payload.workspaces).toEqual([expect.objectContaining({ id: "myproject", running: true })]);
+    // The authenticated state API reports the hub's uatu version.
+    expect(typeof payload.version).toBe("string");
+    expect(payload.version.length).toBeGreaterThan(0);
   }, 60_000);
+
+  test("the dashboard page ships the version slot and the browser pane", async () => {
+    const dashboard = await fetch(`${origin}/`, { headers: { cookie, accept: "text/html" } });
+    expect(dashboard.status).toBe(200);
+    const html = await dashboard.text();
+    expect(html).toContain('id="hub-version"');
+    expect(html).toContain('id="browser"');
+    expect(html).toContain("Sign out");
+    // The desktop wrapper's covered-chrome contract: pages pad below the
+    // native titlebar/tab bar when the wrapper announces its height.
+    expect(html).toContain("--titlebar-inset");
+    // The started-but-loading gap indicator ships with the page.
+    expect(html).toContain("nav-overlay");
+  });
 
   test("HTTP proxying round-trips /api/state and the shell through the prefix", async () => {
     const state = await fetch(`${origin}/s/myproject/api/state`, { headers: { cookie } });
@@ -251,42 +275,72 @@ describe("hub end to end", () => {
     await new Promise(resolve => setTimeout(resolve, 300));
   }, 30_000);
 
-  test("the folder listing offers workspaces-root subfolders with git status", async () => {
-    const plain = path.join(tempRoot, "workspaces", "plain-folder");
+  test("the directory browser lists child directories with git status and registration", async () => {
+    const browseRoot = path.join(tempRoot, "workspaces");
+    const plain = path.join(browseRoot, "plain-folder");
     execFileSync("mkdir", ["-p", plain]);
-    // Dot-prefixed folders are candidates too — everything the creation
-    // resolver accepts must be discoverable.
-    execFileSync("mkdir", ["-p", path.join(tempRoot, "workspaces", ".dotted")]);
+    // Dot-directories are hidden from the browser.
+    execFileSync("mkdir", ["-p", path.join(browseRoot, ".dotted")]);
 
-    const response = await fetch(`${origin}/api/hub/folders`, { headers: { cookie } });
+    const response = await fetch(`${origin}/api/hub/browse?path=${encodeURIComponent(browseRoot)}`, {
+      headers: { cookie },
+    });
     expect(response.status).toBe(200);
     const payload = (await response.json()) as {
-      workspacesDir: string;
-      folders: { name: string; git: boolean; registeredId: string | null }[];
+      path: string;
+      parent: string | null;
+      dirs: { name: string; git: boolean; registeredId: string | null }[];
     };
-    expect(payload.workspacesDir).toBe(path.join(tempRoot, "workspaces"));
-    const myproject = payload.folders.find(folder => folder.name === "myproject");
+    expect(payload.path).toBe(browseRoot);
+    expect(payload.parent).toBe(tempRoot);
+    const myproject = payload.dirs.find(dir => dir.name === "myproject");
     expect(myproject?.git).toBe(true);
     expect(myproject?.registeredId).toBe("myproject");
-    const plainEntry = payload.folders.find(folder => folder.name === "plain-folder");
+    const plainEntry = payload.dirs.find(dir => dir.name === "plain-folder");
     expect(plainEntry?.git).toBe(false);
     expect(plainEntry?.registeredId).toBeNull();
-    expect(payload.folders.some(folder => folder.name === ".dotted")).toBe(true);
+    expect(payload.dirs.some(dir => dir.name === ".dotted")).toBe(false);
+
+    // A relative path is rejected; an unreadable one is a 404.
+    const relative = await fetch(`${origin}/api/hub/browse?path=relative%2Fplace`, { headers: { cookie } });
+    expect(relative.status).toBe(400);
+    const missing = await fetch(
+      `${origin}/api/hub/browse?path=${encodeURIComponent(path.join(tempRoot, "no-such-dir"))}`,
+      { headers: { cookie } },
+    );
+    expect(missing.status).toBe(404);
   });
 
-  test("creation names are resolved strictly against the workspaces root", async () => {
-    for (const name of ["../outside", "a/b", "..", "."]) {
+  test("start:false registers without starting a session (recents import)", async () => {
+    const imported = path.join(tempRoot, "workspaces", "imported-only");
+    execFileSync("mkdir", ["-p", imported]);
+    execFileSync("git", ["init"], { cwd: imported, stdio: "ignore" });
+
+    const created = await fetch(`${origin}/api/hub/workspaces`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ path: imported, start: false }),
+    });
+    expect(created.status).toBe(200);
+    const payload = (await created.json()) as { id: string; running: boolean };
+    expect(payload.running).toBe(false);
+    expect(registry.byId(payload.id)?.path).toBe(imported);
+    expect(sessions.isRunning(payload.id)).toBe(false);
+  });
+
+  test("registration requires an absolute path to an existing directory", async () => {
+    for (const requested of ["relative/place", "", "docs"]) {
       const response = await fetch(`${origin}/api/hub/workspaces`, {
         method: "POST",
         headers: { "content-type": "application/json", cookie, origin },
-        body: JSON.stringify({ name }),
+        body: JSON.stringify({ path: requested }),
       });
       expect(response.status).toBe(400);
     }
     const missing = await fetch(`${origin}/api/hub/workspaces`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie, origin },
-      body: JSON.stringify({ name: "no-such-folder" }),
+      body: JSON.stringify({ path: path.join(tempRoot, "no-such-folder") }),
     });
     expect(missing.status).toBe(404);
   });
@@ -298,7 +352,7 @@ describe("hub end to end", () => {
     const first = await fetch(`${origin}/api/hub/workspaces`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie, origin },
-      body: JSON.stringify({ name: "plain-folder" }),
+      body: JSON.stringify({ path: plain }),
     });
     expect(first.status).toBe(409);
     expect(((await first.json()) as { needsInit?: boolean }).needsInit).toBe(true);
@@ -308,7 +362,7 @@ describe("hub end to end", () => {
     const confirmed = await fetch(`${origin}/api/hub/workspaces`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie, origin },
-      body: JSON.stringify({ name: "plain-folder", init: true }),
+      body: JSON.stringify({ path: plain, init: true }),
     });
     expect(confirmed.status).toBe(200);
     const id = ((await confirmed.json()) as { id: string }).id;
@@ -334,10 +388,13 @@ describe("hub end to end", () => {
     expect(forgotten.status).toBe(200);
     expect(registry.byId("plain-folder")).toBeUndefined();
 
-    // The folder survives on disk and returns to the unregistered candidates.
-    const folders = await fetch(`${origin}/api/hub/folders`, { headers: { cookie } });
-    const payload = (await folders.json()) as { folders: { name: string; registeredId: string | null }[] };
-    const entry = payload.folders.find(folder => folder.name === "plain-folder");
+    // The folder survives on disk and shows unregistered in the browser.
+    const browse = await fetch(
+      `${origin}/api/hub/browse?path=${encodeURIComponent(path.join(tempRoot, "workspaces"))}`,
+      { headers: { cookie } },
+    );
+    const payload = (await browse.json()) as { dirs: { name: string; registeredId: string | null }[] };
+    const entry = payload.dirs.find(dir => dir.name === "plain-folder");
     expect(entry).toBeDefined();
     expect(entry?.registeredId).toBeNull();
 
@@ -349,8 +406,9 @@ describe("hub end to end", () => {
   });
 
   test("git clone creates, registers, and serves a workspace; failures register nothing", async () => {
-    // A source repo OUTSIDE the workspaces root, cloned into it.
+    // A source repo cloned into a browsed destination directory.
     const source = path.join(tempRoot, "cloneme");
+    const dest = path.join(tempRoot, "checkouts");
     execFileSync("mkdir", ["-p", source]);
     execFileSync("git", ["init"], { cwd: source, stdio: "ignore" });
     await writeFile(path.join(source, "README.md"), "# Clone Me\n");
@@ -358,20 +416,28 @@ describe("hub end to end", () => {
     const cloned = await fetch(`${origin}/api/hub/clone`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie, origin },
-      body: JSON.stringify({ url: source }),
+      body: JSON.stringify({ url: source, dest }),
     });
     expect(cloned.status).toBe(200);
     const id = ((await cloned.json()) as { id: string }).id;
     expect(id).toBe("cloneme");
-    expect(registry.byId(id)?.path).toBe(path.join(tempRoot, "workspaces", "cloneme"));
+    expect(registry.byId(id)?.path).toBe(path.join(dest, "cloneme"));
     const state = await fetch(`${origin}/s/${id}/api/state`, { headers: { cookie } });
     expect(state.status).toBe(200);
     await sessions.stop(id);
 
+    // Clone without a destination is rejected before touching git.
+    const noDest = await fetch(`${origin}/api/hub/clone`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ url: source }),
+    });
+    expect(noDest.status).toBe(400);
+
     const failed = await fetch(`${origin}/api/hub/clone`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie, origin },
-      body: JSON.stringify({ url: path.join(tempRoot, "does-not-exist") }),
+      body: JSON.stringify({ url: path.join(tempRoot, "does-not-exist"), dest }),
     });
     expect(failed.status).toBe(500);
     expect(((await failed.json()) as { error: string }).error).toContain("git clone failed");
@@ -447,14 +513,17 @@ describe("hub end to end", () => {
     execFileSync("mkdir", ["-p", spaced]);
     execFileSync("git", ["init"], { cwd: spaced, stdio: "ignore" });
 
-    const folders = await fetch(`${origin}/api/hub/folders`, { headers: { cookie } });
-    const payload = (await folders.json()) as { folders: { name: string }[] };
-    expect(payload.folders.some(folder => folder.name === " padded ")).toBe(true);
+    const browse = await fetch(
+      `${origin}/api/hub/browse?path=${encodeURIComponent(path.join(tempRoot, "workspaces"))}`,
+      { headers: { cookie } },
+    );
+    const payload = (await browse.json()) as { dirs: { name: string }[] };
+    expect(payload.dirs.some(dir => dir.name === " padded ")).toBe(true);
 
     const created = await fetch(`${origin}/api/hub/workspaces`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie, origin },
-      body: JSON.stringify({ name: " padded " }),
+      body: JSON.stringify({ path: spaced }),
     });
     expect(created.status).toBe(200);
     const id = ((await created.json()) as { id: string }).id;

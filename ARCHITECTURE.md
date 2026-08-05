@@ -105,17 +105,26 @@ Unit tests are colocated with their subjects (`foo.ts` and `foo.test.ts` sit in 
 
 ### Outside `src/`: the desktop wrapper
 
-`desktop/macos/` holds **UatuCode Desktop**, a SwiftUI app that supervises a
-bundled copy of the compiled `uatu` binary — one `uatu serve <folder> --no-open
---exit-on-stdin-close` child per window, its tokened URL loaded in a WebView.
-The wrapper↔CLI contract is deliberately thin:
+`desktop/macos/` holds **UatuCode Desktop**, a SwiftUI app whose windows are
+hub clients. At launch the app spawns a single bundled `uatu hub --local
+--port 0 --exit-on-stdin-close` (`LocalHub.swift`) — a trusted loopback hub
+with no login — and every window/tab is a `WKWebView` pointed at a hub page:
+the local hub's dashboard, a workspace session at `/s/<id>/`, or a configured
+remote hub (`HubRoster.swift`, `HubAPI.swift`; credentials in the Keychain,
+the `uatu_hub` cookie owned natively and injected into the WebView's cookie
+store before navigation). Windows own no processes; sessions belong to the
+hub, so closing a tab leaves its session running and quitting the app
+confirms first when local sessions have live terminal shells (remote
+sessions are unaffected by quit). The wrapper↔CLI contract is deliberately
+thin:
 
 - **URL on stdout** — with a piped (non-TTY) stdout the CLI prints exactly one
-  line, the tokened session URL; the app parses that.
-- **SIGTERM** — clean quit path; the CLI shuts down gracefully.
-- **`--exit-on-stdin-close`** — crash backstop; the app holds the child's stdin
+  line, the hub's base URL; the app parses that.
+- **SIGTERM** — clean quit path; the hub stops its session children and exits.
+- **`--exit-on-stdin-close`** — crash backstop; the app holds the hub's stdin
   pipe for its whole life, so if the app dies without running handlers the
-  server sees EOF and exits itself instead of running orphaned.
+  hub sees EOF and shuts down (children included) instead of running
+  orphaned.
 
 The WebView is a `WKWebView` (`WebViewHost.swift`), not SwiftUI's `WebPage`:
 `WebPage` has no `createWebViewWith` equivalent, so `window.open()` — how
@@ -155,11 +164,11 @@ fails any module that builds a root-relative `/api`/`/assets` URL outside
 the helper.
 
 The consumer of that relocatability is **the hub** (`uatu hub`, `src/hub/`):
-a self-hostable daemon that owns a **workspaces root** (default: its cwd;
-refused if the root is itself inside a git worktree) and a workspace
-registry (stable collision-suffixed slugs; `backend` field reserved for a
-future container/VM backend), starts one loopback-bound `uatu serve` child
-per workspace through
+a self-hostable daemon that keeps a workspace registry of absolute folder
+paths (stable collision-suffixed slugs; folders are added through a
+server-side directory browser or the API — there is no workspaces root;
+`backend` field reserved for a future container/VM backend), starts one
+loopback-bound `uatu serve` child per workspace through
 the `SessionBackend` interface (`hub/backend.ts` — the desktop wrapper's
 spawn contract: URL on stdout, held stdin as orphan backstop, SIGTERM), and
 reverse-proxies HTTP, SSE, and WebSockets under `/s/<id>/` from a single
@@ -168,7 +177,10 @@ TLS-terminating, login-gated port (`hub/proxy.ts`, `hub/auth.ts`,
 browser and validates its Origin, then forwards loopback-shaped
 `Host`/`Origin` headers and brokers the child's session token server-side —
 children keep their localhost security model unchanged and are never
-network-reachable. Operator documentation lives in `docs/SELF-HOSTING.md`;
+network-reachable. `uatu hub --local` is the same daemon in trusted
+single-user mode — loopback-only, no config file, no login routes — which is
+how the desktop app supervises its sessions. Operator documentation lives in
+`docs/SELF-HOSTING.md`;
 the design rationale (single-origin proxy over port-per-session, restart
 semantics, trust model) in `openspec/changes/add-uatu-hub/design.md`.
 
