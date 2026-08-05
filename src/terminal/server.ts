@@ -243,6 +243,11 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
     session.pendingOutput = [];
     try {
       await session.model.resize(cols, rows);
+      // The claimant may disconnect while queued model writes drain. Its
+      // close handler releases the claim, and another socket can claim the
+      // session before this coroutine resumes. Do not mutate that newer
+      // claim's dimensions or output buffer.
+      if (session.pendingClaim !== socket || socket.readyState !== WS_OPEN) return;
       // resize() drains all output queued before this point. Start the live
       // buffer at the serialization boundary so bytes already represented in
       // the snapshot are not sent twice.
