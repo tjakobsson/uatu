@@ -6,7 +6,6 @@
 
 import { appUrl } from "../shared/app-url";
 import type { RepositoryReviewSnapshot } from "../shared/types";
-import { recomputeSelectionInspector } from "../shell/inspector-instance";
 import { clearPreviewType } from "../preview/header";
 import { closeMermaidViewer } from "../preview/mermaid-viewer";
 import { hideViewToggle } from "../preview/view-mode";
@@ -48,5 +47,4 @@ export function renderReviewScoreDetails(repository: RepositoryReviewSnapshot) {
   previewBaseElement.href = new URL(appUrl("/"), window.location.origin).toString();
   previewElement.classList.remove("empty");
   previewElement.innerHTML = buildScoreExplanationHTML(load);
-  recomputeSelectionInspector();
 }

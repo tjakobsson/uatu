@@ -1,7 +1,7 @@
 import { expect, test } from "./fixtures";
 
 import { treeRow } from "./tree-helpers";
-import { standardBeforeEach } from "./fixtures";
+import { showGitLogPane, standardBeforeEach } from "./fixtures";
 
 test.beforeEach(async ({ page, request }) => {
   await standardBeforeEach(page, request);
@@ -17,6 +17,7 @@ test("Git Log commit links support URL history and reloads", async ({ page, requ
   await page.goto("/");
   await expect(page.locator("#preview-path")).toHaveText("README.md");
 
+  await showGitLogPane(page);
   const gitLog = page.locator("#git-log");
   await expect(gitLog).toContainText("add feature doc");
   const featureCommit = gitLog.locator(".commit-log a", { hasText: "add feature doc" });
@@ -61,5 +62,6 @@ test("commit preview URLs show an unavailable state when data is missing", async
   await expect(page.locator("#preview-title")).toHaveText("Commit preview unavailable");
   await expect(page.locator("#preview-path")).toContainText("Repository data is not available for commit deadbeef.");
   await expect(page.locator("#preview")).toHaveClass(/empty/);
+  await showGitLogPane(page);
   await expect(page.locator("#git-log")).toContainText("add feature doc");
 });

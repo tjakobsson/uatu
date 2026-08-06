@@ -1,4 +1,4 @@
-import { expect, test } from "./fixtures";
+import { showGitLogPane, expect, test } from "./fixtures";
 import { promises as fs } from "node:fs";
 
 import { workspacePath } from "./config";
@@ -76,6 +76,7 @@ test("Change Overview and Git Log render git-backed review load with configured 
   await expect(page.locator("#preview-title")).toHaveText("Review burden score");
   await expect.poll(() => new URL(page.url()).searchParams.has("reviewScore")).toBe(true);
 
+  await showGitLogPane(page);
   const gitLog = page.locator("#git-log");
   await expect(gitLog).toContainText("add feature doc");
   await expect(gitLog.locator(".commit-log code").first()).toHaveText(/[0-9a-f]{7,12}/);

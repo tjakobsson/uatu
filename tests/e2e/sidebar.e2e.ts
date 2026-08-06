@@ -141,3 +141,40 @@ test("desktop never renders the phone browse affordance or size steppers", async
   await expect(page.locator("#preview-text-decrease")).toBeHidden();
   await expect(page.locator('[data-pane-id="files"]')).not.toHaveAttribute("data-overlay", "open");
 });
+
+test("declutter defaults: fresh clients hide Git Log; the panes menu no longer lists Selection Inspector", async ({ page }) => {
+  // standardBeforeEach cleared localStorage, so this is a fresh client.
+  await expect(page.locator('[data-pane-id="change-overview"]')).toBeVisible();
+  await expect(page.locator('[data-pane-id="files"]')).toBeVisible();
+  await expect(page.locator('[data-pane-id="git-log"]')).toBeHidden();
+
+  await page.locator("#panels-toggle").click();
+  await expect(page.locator('#panels-menu label:has-text("Git Log")')).toBeVisible();
+  await expect(page.locator('#panels-menu label:has-text("Selection Inspector")')).toHaveCount(0);
+  await page.locator("#panels-toggle").click();
+
+  // The retired pane left no DOM behind.
+  await expect(page.locator('[data-pane-id="selection-inspector"]')).toHaveCount(0);
+});
+
+test("legacy stored pane state with a selection-inspector entry boots cleanly", async ({ page }) => {
+  await page.evaluate(() => {
+    // Plant a pre-removal arrangement under the presentation-storage key
+    // shape: stale selection-inspector entry plus git-log explicitly on.
+    const prefix = `uatu:presentation:v1:${encodeURIComponent("/")}:`;
+    window.localStorage.setItem(
+      `${prefix}uatu:sidebar-panes`,
+      JSON.stringify({
+        "selection-inspector": { visible: true, collapsed: false, height: 160 },
+        "git-log": { visible: true, collapsed: false, height: 140 },
+      }),
+    );
+  });
+  await page.reload();
+
+  // Boot succeeded, the stored git-log visibility is honored, and the stale
+  // entry is inert.
+  await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
+  await expect(page.locator('[data-pane-id="git-log"]')).toBeVisible();
+  await expect(page.locator('[data-pane-id="selection-inspector"]')).toHaveCount(0);
+});

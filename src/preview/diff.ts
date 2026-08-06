@@ -10,7 +10,6 @@ import { findDocumentById } from "../shell/storage";
 import { prepareDiffRender, renderDocumentDiff, type DocumentDiffPayload } from "./diff-view";
 import { createLoadingSignal, type LoadingSignal } from "./loading-signal";
 import { closeMermaidViewer } from "./mermaid-viewer";
-import { recomputeSelectionInspector } from "../shell/inspector-instance";
 import { writeDiffStylePreference, type DiffStyle, type DocumentMeta } from "../shared/types";
 import { appState, safeLocalStorage } from "../shell/state";
 import {
@@ -184,7 +183,6 @@ export async function renderDiffIntoPreview(documentId: string, payload: Documen
   const choicePayload = doc ? renderedDocumentStubFromMeta(doc) : null;
   syncViewToggle(choicePayload);
   syncLayoutChooser(choicePayload);
-  recomputeSelectionInspector();
 }
 
 // One paint-cycle yield. Guarded for non-browser (unit test) environments

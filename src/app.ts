@@ -15,14 +15,12 @@ import { initPreviewTextSize } from "./preview/text-size";
 import { initGitLogClickHandler, initGitLogControls } from "./sidebar/git-log";
 import { initChangeOverviewClickHandler } from "./sidebar/change-overview";
 import { initFilesPaneFilterControls } from "./sidebar/files-filter";
-import { initSelectionInspectorControl } from "./sidebar/selection-inspector-mount";
 import { initFollowToggle } from "./shell/follow";
 import { initActiveSurfaceTracking } from "./find/active-surface";
 import { initFindBar } from "./find/find-bar";
 import { initFindShortcuts, registerProjectSearch } from "./find/shortcut";
 import { initSearchPane, openSearchPane } from "./sidebar/search-pane";
 import { initStaleHintActionHandler } from "./shell/stale-hint-mount";
-import { selectionInspector } from "./shell/inspector-instance";
 
 const appShellElement = document.querySelector<HTMLDivElement>(".app-shell");
 const previewBaseElement = document.querySelector<HTMLBaseElement>("#preview-base");
@@ -56,15 +54,6 @@ const connectionLabelElement = connectionStateElement?.querySelector<HTMLElement
 const buildBadgeElement = document.querySelector<HTMLElement>("#build-badge");
 const sidebarCollapseElement = document.querySelector<HTMLButtonElement>("#sidebar-collapse");
 const sidebarExpandElement = document.querySelector<HTMLButtonElement>("#sidebar-expand");
-const selectionInspectorEmptyElement = document.querySelector<HTMLElement>(
-  "[data-selection-inspector-empty]",
-);
-const selectionInspectorControlElement = document.querySelector<HTMLButtonElement>(
-  "[data-selection-inspector-control]",
-);
-const selectionInspectorStatusElement = document.querySelector<HTMLElement>(
-  "[data-selection-inspector-status]",
-);
 
 if (
   !appShellElement ||
@@ -98,10 +87,7 @@ if (
   !connectionLabelElement ||
   !buildBadgeElement ||
   !sidebarCollapseElement ||
-  !sidebarExpandElement ||
-  !selectionInspectorEmptyElement ||
-  !selectionInspectorControlElement ||
-  !selectionInspectorStatusElement
+  !sidebarExpandElement
 ) {
   throw new Error("uatu UI failed to initialize");
 }
@@ -128,8 +114,6 @@ installMermaidTriggerHandler();
 initViewModeControls();
 initOutline();
 attachAutoStackObserver();
-
-initSelectionInspectorControl(selectionInspector);
 
 // Pull the URL token into sessionStorage and strip it from `location.search`
 // before anything else reads the URL. Pathname/hash are preserved.

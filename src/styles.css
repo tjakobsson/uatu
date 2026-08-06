@@ -2401,55 +2401,6 @@ body.is-resizing-terminal .panel-resizer {
   line-height: 1.45;
 }
 
-.selection-inspector-control[hidden] {
-  display: none;
-}
-
-.selection-inspector-control {
-  display: block;
-  width: 100%;
-  margin: 0;
-  padding: 0.45rem 0.6rem;
-  border: 1px solid var(--border-soft);
-  border-radius: 0.3rem;
-  background: light-dark(#fbfcfd, #161b22);
-  color: var(--text-strong);
-  font-family: var(--mono-font-family);
-  font-size: 0.74rem;
-  line-height: 1.4;
-  text-align: left;
-  cursor: pointer;
-  word-break: break-all;
-  transition: background-color 0.12s ease, border-color 0.12s ease;
-}
-
-.selection-inspector-control[data-state="hint"] {
-  font-family: inherit;
-  font-size: 0.78rem;
-  color: var(--text-subtle);
-  word-break: normal;
-}
-
-.selection-inspector-control:hover {
-  background: var(--surface-muted);
-  border-color: var(--accent);
-}
-
-.selection-inspector-control:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
-.selection-inspector-status {
-  display: block;
-  margin-top: 0.35rem;
-  min-height: 0.9rem;
-  color: var(--accent);
-  font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-}
-
 /* Files pane: the library owns its own virtualized scroll viewport, so the */
 /* pane body must give it an explicit (flex-allocated) height rather than */
 /* the default block layout + overflow:auto used by other panes. */
@@ -2467,6 +2418,16 @@ body.is-resizing-terminal .panel-resizer {
   /* without forcing the pane to grow. */
   flex: 1 1 auto;
   min-height: 0;
+}
+
+/* @pierre/trees writes `display: flex` as an INLINE style on its host,
+   which beats both the UA's `[hidden] { display: none }` and any plain
+   author rule. Without this override, a "hidden" tree keeps participating
+   in flex layout and can absorb pane height and render over the
+   empty-state message whenever the Files pane has spare room. `!important`
+   is deliberate: it is the only way to outrank a third-party inline style. */
+.tree[hidden] {
+  display: none !important;
 }
 
 .tree-empty {

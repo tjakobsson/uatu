@@ -2,7 +2,6 @@
 // is a binary file whose extension is in the viewable allowlist. Extracted
 // from `app.ts` so the preview/ feature folder owns this thin renderer.
 
-import { recomputeSelectionInspector } from "../shell/inspector-instance";
 import { closeMermaidViewer } from "./mermaid-viewer";
 import { escapeHtmlAttribute } from "../shared/html";
 import type { DocumentMeta } from "../shared/types";
@@ -64,5 +63,4 @@ export function renderImagePreview(doc: DocumentMeta): void {
   // like `screenshot#2.png` aren't truncated by the URL parser into a path
   // ending at `screenshot` plus a `#2.png` fragment.
   previewElement.innerHTML = `<div class="image-preview"><img alt="${escapeHtmlAttribute(doc.name)}" src="./${encodeURIComponent(doc.name)}"></div>`;
-  recomputeSelectionInspector();
 }
