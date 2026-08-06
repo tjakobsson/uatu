@@ -39,8 +39,8 @@ src/
 │                   metadata card, code-block decorations
 ├── sidebar/        the left pane — tree-view + tree-config, panes
 │                   shell/render, change-overview, git-log, files-filter,
-│                   selection-inspector, search-pane (⇧⌘F project search:
-│                   pane + result model + open-and-jump)
+│                   files-overlay (phone file browser), search-pane
+│                   (⇧⌘F project search: pane + result model + open-and-jump)
 ├── terminal/       the embedded xterm panel — client + server +
 │                   auth + pty + pane-state + panel UI
 ├── cli/            CLI domain — parse (flags + usage text) and output
