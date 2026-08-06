@@ -14,6 +14,7 @@ import { nextStaleHint } from "../shell/stale-hint";
 import { appState } from "../shell/state";
 import { persistPersonalWorkspaceState } from "../shell/personal-state";
 import { refreshServerStateForContext } from "../shell/events";
+import { revealPreviewSurface } from "../shell/tab-bar";
 import { documentDiffCache, loadDocument } from "../preview/mount";
 import type { FilesPaneFilterMembership, GitStatusForView } from "./tree-view";
 import { baseModeLabel, capitalize } from "./git-log";
@@ -362,6 +363,9 @@ export function initChangeOverviewClickHandler(): void {
       return;
     }
 
+    // A score click is a request to read the breakdown — in touch mode the
+    // Preview surface renders it, so it comes forward.
+    revealPreviewSurface();
     setFollowEnabled(false);
     setSelectedId(null);
     setPreviewMode({ kind: "review-score", repositoryId: repository.id });

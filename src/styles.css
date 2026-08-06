@@ -1213,8 +1213,11 @@ body.is-resizing-terminal .panel-resizer {
 }
 
 /* Right-dock variant: switch the .main-stack to flex-row so the panel sits
-   beside the preview instead of below it. The panel-resizer follows along. */
-.app-shell:has(.terminal-panel[data-dock="right"]:not([hidden])) .main-stack {
+   beside the preview instead of below it. The panel-resizer follows along.
+   Desktop mode only — in touch mode a live panel parked behind another tab
+   must not reshape the Preview surface (`:not` rather than an explicit
+   desktop attribute so the pre-stamp first paint keeps desktop behavior). */
+html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right"]:not([hidden])) .main-stack {
   flex-direction: row;
 }
 
@@ -3774,7 +3777,12 @@ body.is-resizing-terminal .panel-resizer {
     max-height: none;
   }
 
-  .sidebar-pane {
+  /* Desktop-mode stacking only: in touch mode the Files tab renders the
+     stack inside a fixed-height surface where the desktop flex allocation
+     (inline flex-basis from stored pane heights) must keep working — an
+     !important auto basis here would let content-sized panes squeeze the
+     tree. */
+  html:not([data-ui-mode="touch"]) .sidebar-pane {
     flex-basis: auto !important;
     max-height: none;
   }
@@ -4596,11 +4604,14 @@ body.is-resizing-terminal .panel-resizer {
 }
 
 /* ==========================================================================
-   Touch & phone-class support (mobile-experience change).
+   Touch support (mobile-experience + touch-tab-navigation changes).
 
-   "Phone-class" = coarse pointer AND the stacked-layout width (≤900px, the
-   same breakpoint as the app-shell stacking above). iPads in landscape and
-   narrow desktop windows are deliberately not phone-class.
+   LAYOUT keys on the persisted UI mode — `[data-ui-mode="touch"]` on
+   <html>, stamped by shell/ui-mode.ts (coarse-pointer devices, iPhone AND
+   iPad, default to touch; the mode is escapable and persists per device).
+   INPUT affordances (keybar, size steppers) stay keyed on
+   `(pointer: coarse)`: an iPad in desktop mode still has no Ctrl key.
+   The touch-mode surface rules live at the end of this section.
    ========================================================================== */
 
 /* Runtime size steppers (terminal font, preview text): coarse pointers
@@ -4663,107 +4674,267 @@ body.is-resizing-terminal .panel-resizer {
   }
 }
 
-/* Browse affordances default-hidden everywhere; the phone-class media block
-   below reveals them. Styled like the pane's other header controls. */
-.files-browse-open,
-.files-browse-close {
-  display: none;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--border-medium);
-  border-radius: 0.375rem;
-  background: var(--surface);
-  color: var(--text-strong);
-  font-size: 0.72rem;
-  padding: 0.15rem 0.5rem;
-  cursor: pointer;
+/* --------------------------------------------------------------------------
+   Touch mode: the bottom tab bar and the three one-at-a-time surfaces
+   (touch-tab-navigation). The active surface is keyed on the
+   `data-active-tab` attribute stamped on <html> by shell/tab-bar.ts.
+   -------------------------------------------------------------------------- */
+
+:root {
+  --tab-bar-height: 56px;
+  --tab-bar-total: calc(var(--tab-bar-height) + env(safe-area-inset-bottom));
 }
 
-@media (pointer: coarse) and (max-width: 900px) {
-  /* Fullscreen means the whole screen on a phone: fixed to the viewport,
-     dynamic-viewport height (the URL bar collapses; vh overshoots), sized
-     by the visual viewport while the software keyboard is up (panel.ts
-     writes --terminal-visual-height), safe-area padded. */
-  .terminal-panel[data-display="fullscreen"] {
-    position: fixed;
-    inset: 0;
-    /* When iOS pans the visual viewport with the keyboard open, offsetTop
-       goes nonzero — the panel must follow it, not stay pinned to 0, or it
-       extends below the visible region by exactly that offset. */
-    top: var(--terminal-visual-top, 0px);
-    height: var(--terminal-visual-height, 100dvh) !important;
-    width: auto !important;
-    z-index: 40;
-    padding-top: env(safe-area-inset-top);
-    padding-left: env(safe-area-inset-left);
-    padding-right: env(safe-area-inset-right);
-  }
+/* The bar renders in touch mode only. Fixed to the LAYOUT viewport's bottom
+   edge — the iOS software keyboard simply covers it (platform convention)
+   and the space returns where it matters most (terminal input). */
+.touch-tab-bar {
+  display: none;
+}
 
-  .terminal-panel[data-display="fullscreen"] .terminal-panes {
-    padding-bottom: env(safe-area-inset-bottom);
-  }
+html[data-ui-mode="touch"] .touch-tab-bar {
+  display: flex;
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 60;
+  height: var(--tab-bar-total);
+  padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  background: var(--surface-raised);
+  border-top: 1px solid var(--border-soft);
+}
 
-  /* Lock the page while a fullscreen surface covers it; state-derived from
-     the live DOM so there is no imperative lock to leak. */
-  body:has(.terminal-panel[data-display="fullscreen"]:not([hidden])),
-  body:has(.sidebar-pane[data-overlay="open"]) {
-    overflow: hidden;
-  }
+.touch-tab {
+  position: relative;
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.2rem;
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--text-subtle);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
 
-  /* Geometry controls are meaningless at phone widths; stored dock/split
-     state stays intact and reappears on wider viewports. */
-  #terminal-split,
-  #terminal-dock-toggle,
-  #terminal-resizer {
-    display: none !important;
-  }
+.touch-tab[hidden] {
+  display: none;
+}
 
-  /* Phone file browser: the Files pane promoted to a full-viewport overlay.
-     Same pane DOM (tree state is continuous), different geometry. */
-  .sidebar-pane[data-pane-id="files"][data-overlay="open"] {
-    position: fixed;
-    inset: 0;
-    z-index: 35;
-    display: flex;
-    flex-direction: column;
-    margin: 0;
-    background: var(--surface);
-    max-height: none;
-    padding-top: env(safe-area-inset-top);
-    padding-left: env(safe-area-inset-left);
-    padding-right: env(safe-area-inset-right);
-    padding-bottom: env(safe-area-inset-bottom);
-  }
+.touch-tab[aria-selected="true"] {
+  color: var(--accent);
+}
 
-  .sidebar-pane[data-pane-id="files"][data-overlay="open"] > .pane-body {
-    /* A collapsed pane hides its body (`.sidebar-pane.is-collapsed
-       .pane-body { display: none }`); the promoted overlay must always show
-       the tree, so re-assert display here (this selector out-specifies the
-       collapsed rule). Collapse state itself is untouched — dismissing the
-       overlay restores the stacked layout exactly as it was. */
-    display: flex;
-    height: auto;
-    max-height: none;
-    flex: 1 1 auto;
-  }
+.touch-tab-label {
+  font-size: 0.62rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
 
-  .files-browse-open {
+/* Terminal unseen-output dot: PTY output arrived while another tab was
+   active. Cleared on tab activation (terminal/panel.ts). */
+.touch-tab-badge {
+  display: none;
+  position: absolute;
+  top: 0.4rem;
+  right: calc(50% - 1.2rem);
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.touch-tab[data-badge] .touch-tab-badge {
+  display: block;
+}
+
+/* The UI-mode toggle: ONE control for both directions, in the sidebar
+   header — which touch mode renders inside the Files tab — plus a rail
+   variant for the collapsed desktop sidebar. Never in the tab bar (the bar
+   is surface tabs only) and never width-gated: a coarse-pointer device
+   must be able to flip modes from any state, or rotation/collapse strands
+   it. Gated on the mode attribute being stamped so the pre-boot paint
+   shows nothing; the glyph follows the mode it would switch TO. */
+.ui-mode-toggle {
+  display: none;
+}
+
+.mode-glyph {
+  display: none;
+}
+
+html[data-ui-mode="touch"] .mode-glyph-desktop {
+  display: block;
+}
+
+html[data-ui-mode="desktop"] .mode-glyph-touch {
+  display: block;
+}
+
+@media (pointer: coarse) {
+  html[data-ui-mode] #ui-mode-toggle {
     display: inline-flex;
   }
 
-  .sidebar-pane[data-pane-id="files"][data-overlay="open"] .files-browse-open {
-    display: none;
+  html[data-ui-mode="desktop"] #rail-ui-mode-toggle {
+    display: flex;
   }
+}
 
-  /* While promoted, the pane-level collapse/hide actions disappear — the
-     overlay has its own close affordance, and tapping Hide here would set
-     `hidden` while the overlay CSS keeps forcing display, an apparent
-     no-op that later swallows the pane. */
-  .sidebar-pane[data-pane-id="files"][data-overlay="open"] .pane-action {
-    display: none;
-  }
+/* --- The one-surface shell ---------------------------------------------- */
 
-  .sidebar-pane[data-pane-id="files"][data-overlay="open"] .files-browse-close {
-    display: inline-flex;
+/* The Preview tab scrolls the page (stacked-layout convention); the Files
+   and Terminal surfaces are fixed overlays that manage their own scrolling,
+   so the page behind them locks. */
+html[data-ui-mode="touch"] body {
+  overflow: auto;
+}
+
+html[data-ui-mode="touch"]:not([data-active-tab="preview"]) body {
+  overflow: hidden;
+}
+
+html[data-ui-mode="touch"] .app-shell {
+  display: block;
+  height: auto;
+  padding-bottom: var(--tab-bar-total);
+}
+
+/* Chrome with no meaning under tabs: the desktop grid's resizer and rail,
+   the sidebar's collapse control, and the Terminal toggle row (the Terminal
+   tab replaces it). Stored collapse state survives for desktop mode. */
+html[data-ui-mode="touch"] .sidebar-resizer,
+html[data-ui-mode="touch"] .sidebar-rail,
+html[data-ui-mode="touch"] .sidebar-terminal-row,
+html[data-ui-mode="touch"] #sidebar-collapse {
+  display: none !important;
+}
+
+/* Files surface: the whole sidebar pane stack fullscreen above the bar.
+   Same DOM as the desktop sidebar — tree expansion, selection, filter chip,
+   and follow highlighting are continuous across tabs. Out-specifies both
+   the mode-scoped hide below and `.app-shell.is-sidebar-collapsed .sidebar`
+   (a collapsed desktop sidebar must not empty the Files tab). */
+html[data-ui-mode="touch"] .sidebar {
+  display: none;
+}
+
+html[data-ui-mode="touch"][data-active-tab="files"] .sidebar {
+  display: flex;
+  flex-direction: column;
+  position: fixed;
+  inset: 0;
+  bottom: var(--tab-bar-total);
+  z-index: 30;
+  margin: 0;
+  border: 0;
+  overflow: hidden;
+  max-height: none;
+  background: var(--surface);
+  padding: calc(env(safe-area-inset-top) + 0.75rem) calc(env(safe-area-inset-right) + 1.25rem) 0
+    calc(env(safe-area-inset-left) + 1.25rem);
+}
+
+/* Inside the fixed-height Files surface the desktop flex allocation works;
+   neutralize the ≤900px stacked-layout overrides (content-sized panes,
+   45vh body caps) that would otherwise apply on phones. flex-basis needs
+   !important to out-rank the stacked block's own !important. */
+html[data-ui-mode="touch"] .sidebar-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow: hidden;
+}
+
+html[data-ui-mode="touch"] .pane-stack {
+  height: 100%;
+  max-height: none;
+  overflow: hidden;
+}
+
+html[data-ui-mode="touch"] .sidebar-pane {
+  max-height: none;
+}
+
+html[data-ui-mode="touch"] .pane-body {
+  max-height: none;
+}
+
+html[data-ui-mode="touch"] .sidebar-pane[data-pane-id="files"] > .pane-body {
+  height: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* The 6px resizer strip is no touch target; in touch mode it hides and the
+   pane HEADER is the drag surface instead (sidebar/panes.ts wires the
+   header drag on coarse pointers — dragging a header moves the boundary
+   above it). touch-action: none keeps the drag from being swallowed by
+   scroll gestures; headers never scroll themselves, so nothing is lost. */
+html[data-ui-mode="touch"] .pane-resizer {
+  display: none;
+}
+
+@media (pointer: coarse) {
+  .pane-header {
+    touch-action: none;
+    /* The header is a gesture surface (drag-resize, double-tap collapse);
+       a double tap must never start a text selection on the title. */
+    -webkit-user-select: none;
+    user-select: none;
   }
+}
+
+/* Preview surface: the main-stack as-is, hidden while another tab is
+   active. The terminal panel escapes this via position: fixed, so only the
+   preview shell itself swaps out. */
+html[data-ui-mode="touch"]:not([data-active-tab="preview"]) .preview-shell {
+  display: none;
+}
+
+html[data-ui-mode="touch"] .preview-shell {
+  overflow: visible;
+  height: auto;
+}
+
+/* Terminal surface: the panel renders only while its tab is active, and
+   then always fullscreen (panel.ts promotes every stored display mode).
+   Neither the docked strip nor the minimized header strip ever renders in
+   touch mode — the tab is the return affordance. */
+html[data-ui-mode="touch"]:not([data-active-tab="terminal"]) .terminal-panel {
+  display: none;
+}
+
+/* Fullscreen means the visual viewport above the tab bar: fixed, dynamic-
+   viewport height fallback (the URL bar collapses; vh overshoots), sized by
+   the visual viewport while the software keyboard is up (panel.ts writes
+   --terminal-visual-height, already netted of the bar's visible portion),
+   safe-area padded. */
+html[data-ui-mode="touch"] .terminal-panel[data-display="fullscreen"] {
+  position: fixed;
+  inset: 0;
+  /* When iOS pans the visual viewport with the keyboard open, offsetTop
+     goes nonzero — the panel must follow it, not stay pinned to 0, or it
+     extends below the visible region by exactly that offset. */
+  top: var(--terminal-visual-top, 0px);
+  height: var(--terminal-visual-height, calc(100dvh - var(--tab-bar-total))) !important;
+  width: auto !important;
+  z-index: 40;
+  padding-top: env(safe-area-inset-top);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+
+/* Geometry controls are meaningless in touch mode (minimize too — tab
+   switching supersedes it); stored dock/split state stays intact and
+   reappears in desktop mode. */
+html[data-ui-mode="touch"] #terminal-split,
+html[data-ui-mode="touch"] #terminal-dock-toggle,
+html[data-ui-mode="touch"] #terminal-minimize,
+html[data-ui-mode="touch"] #terminal-resizer {
+  display: none !important;
 }

@@ -41,6 +41,7 @@ export function safeLocalStorage(): Storage | null {
 // hosted here.
 export const SIDEBAR_PANES_KEY = "uatu:sidebar-panes";
 export const GIT_LOG_LIMIT_KEY = "uatu:git-log-limit";
+export const ACTIVE_TAB_KEY = "uatu:active-tab";
 
 // Discriminated union describing what the preview pane is showing. Drives
 // the renderer dispatch in `connectEvents` / `loadInitialState`.
@@ -117,6 +118,29 @@ export function readPaneState(
 // state and resolves it before a key ever reaches here.
 export type ActiveSurface = "preview" | "terminal" | "browser";
 
+// Touch-mode tab surfaces (touch-tab-navigation). One surface fills the
+// viewport at a time; `preview` is the first-use default. Persisted per
+// device (presentation storage) so a reload lands where the user left off.
+export type TouchTab = "files" | "preview" | "terminal";
+
+export function isTouchTab(value: unknown): value is TouchTab {
+  return value === "files" || value === "preview" || value === "terminal";
+}
+
+export function readActiveTabPreference(
+  storage: Pick<Storage, "getItem"> | null = safeLocalStorage(),
+): TouchTab {
+  try {
+    const raw = storage?.getItem(ACTIVE_TAB_KEY);
+    if (isTouchTab(raw)) {
+      return raw;
+    }
+  } catch {
+    // Ignore storage failures (private mode, quota, etc.).
+  }
+  return "preview";
+}
+
 // Files-pane filter chip: `all` shows the full tree, `changed` reduces the
 // tree to `reviewLoad.changedFiles ∪ ignoredFiles` plus ancestor directories.
 export type FilesPaneFilter = "all" | "changed";
@@ -179,6 +203,10 @@ export const appState = {
   // and programmatic selection must leave it alone.
   activeSurface: "preview" as ActiveSurface,
   panes: readPaneState(),
+  // Touch mode's active tab surface. Meaningful only while the UI mode is
+  // `touch`; desktop mode ignores it (and CSS keys every surface rule on
+  // the mode attribute). Owned by shell/tab-bar.ts.
+  activeTab: readActiveTabPreference() as TouchTab,
   filesPaneFilter: DEFAULT_FILES_PANE_FILTER as FilesPaneFilter,
   gitLogLimit: readGitLogLimitPreference(),
   // Which lens the Change Overview measures review burden against. Mirrors the

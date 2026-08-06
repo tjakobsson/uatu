@@ -20,13 +20,13 @@ import {
   clampTerminalFontSize,
   clampTerminalHeight as clampTerminalHeightShared,
   clampTerminalWidth as clampTerminalWidthShared,
-  isPhoneClassViewport,
   readTerminalFontSizeOverride,
   readTerminalPanelState,
   readTerminalVisiblePreference as readTerminalVisiblePreferenceShared,
   resolveBootPaneRecords,
   resolveEffectiveDisplayMode,
   resolveTerminalFontSize,
+  terminalActionForTabChange,
   writeOwnPaneRecords,
   writeTerminalFontSizeOverride,
   writeTerminalPanelState,
@@ -41,6 +41,15 @@ import { composeStickyCtrl, createStickyCtrl } from "./sticky-ctrl";
 import { createVisualViewportSizer } from "./visual-viewport";
 import { presentationLocalStorage, presentationSessionStorage } from "../shell/presentation-storage";
 import { persistPersonalWorkspaceState } from "../shell/personal-state";
+import { onUiModeChange, uiMode } from "../shell/ui-mode";
+import {
+  activeTab,
+  onActiveTabChange,
+  setActiveTab,
+  setTerminalTabAvailable,
+  setTerminalTabBadge,
+  tabBarBottomInset,
+} from "../shell/tab-bar";
 
 const TERMINAL_TOKEN_KEY_LOCAL = "uatu:terminal-token";
 
@@ -65,13 +74,16 @@ function clampTerminalWidth(value: number): number {
   return clampTerminalWidthShared(value, window.innerWidth);
 }
 
-// Live phone-class evaluation. matchMedia rather than a boot-time snapshot so
-// device rotation (which crosses the width breakpoint on phones) re-resolves.
-const coarsePointerQuery =
-  typeof window.matchMedia === "function" ? window.matchMedia("(pointer: coarse)") : null;
+// Touch-mode terminal surface: the panel renders fullscreen whenever the
+// Terminal tab is active — the UI mode (not viewport width) is the layout
+// gate, so iPads get the same behavior as phones and the desktop escape
+// restores the stored dock/display.
+function touchModeNow(): boolean {
+  return uiMode() === "touch";
+}
 
-function phoneClassNow(): boolean {
-  return isPhoneClassViewport(coarsePointerQuery?.matches ?? false, window.innerWidth);
+function touchTerminalActive(): boolean {
+  return touchModeNow() && activeTab() === "terminal";
 }
 
 // Pane-scoped toast for OSC 52 bridge events. One toast element per pane;
@@ -173,6 +185,9 @@ export function setupTerminalPanel(
   if (terminalSetupRan) return;
   terminalSetupRan = true;
 
+  // Backend-off sessions have no terminal surface: the touch Terminal tab
+  // hides and an active Terminal tab falls back to Preview.
+  setTerminalTabAvailable(enabled);
   if (!enabled) return;
 
   const panel = document.getElementById("terminal-panel");
@@ -375,19 +390,23 @@ export function setupTerminalPanel(
     dockButton!.setAttribute("title", `Dock to ${target}`);
   }
 
-  // The mode the panel actually renders. On phone-class viewports a stored
-  // `normal` is promoted to fullscreen (the docked strip is unusable there);
-  // the stored preference survives for wider viewports — same pattern as
-  // the right-dock fallback in effectiveDock().
+  // The mode the panel actually renders. While the touch Terminal tab is
+  // active EVERY stored mode is promoted to fullscreen (neither the docked
+  // strip nor the minimized strip ever renders in touch mode); the stored
+  // preference survives for desktop mode — same pattern as the right-dock
+  // fallback in effectiveDock().
   function effectiveDisplayMode(): TerminalDisplayMode {
-    return resolveEffectiveDisplayMode(state.displayMode, phoneClassNow());
+    return resolveEffectiveDisplayMode(state.displayMode, touchTerminalActive());
   }
 
-  // Visible-viewport sizing: while phone-fullscreen the panel tracks
+  // Visible-viewport sizing: while touch-fullscreen the panel tracks
   // window.visualViewport — height (keyboard show/hide) AND offsetTop
   // (viewport pans while the keyboard is up) — so the iOS software keyboard
-  // never covers the prompt line. The CSS fallbacks (100dvh, top: 0) apply
-  // whenever the override custom properties are absent.
+  // never covers the prompt line. The written height is netted of the tab
+  // bar's still-visible portion: keyboard down, the panel ends at the bar's
+  // top edge; keyboard up (covering the bar), the panel takes the whole
+  // space above it. The CSS fallbacks (100dvh − bar, top: 0) apply whenever
+  // the override custom properties are absent.
   const viewportSizer = createVisualViewportSizer({
     viewport: window.visualViewport ?? null,
     onMetrics(metrics) {
@@ -395,7 +414,12 @@ export function setupTerminalPanel(
         panel!.style.removeProperty("--terminal-visual-height");
         panel!.style.removeProperty("--terminal-visual-top");
       } else {
-        panel!.style.setProperty("--terminal-visual-height", `${Math.round(metrics.height)}px`);
+        const occluded = Math.max(0, window.innerHeight - metrics.height - metrics.offsetTop);
+        const barInset = Math.max(0, tabBarBottomInset() - occluded);
+        panel!.style.setProperty(
+          "--terminal-visual-height",
+          `${Math.round(metrics.height - barInset)}px`,
+        );
         panel!.style.setProperty("--terminal-visual-top", `${Math.round(metrics.offsetTop)}px`);
       }
       requestAnimationFrame(() => fitAll());
@@ -404,7 +428,7 @@ export function setupTerminalPanel(
 
   function syncViewportSizer() {
     const active =
-      !panel!.hasAttribute("hidden") && phoneClassNow() && effectiveDisplayMode() === "fullscreen";
+      !panel!.hasAttribute("hidden") && touchTerminalActive() && effectiveDisplayMode() === "fullscreen";
     if (active) {
       viewportSizer.attach();
     } else {
@@ -542,6 +566,13 @@ export function setupTerminalPanel(
       fontSize: currentFontSize,
       clipboardPolicy: config?.clipboard,
       onOsc52Notice: notice => copyToast.show(notice),
+      // Badge the Terminal tab when PTY output arrives while another touch
+      // tab is active; activating the tab clears it (tab-change wiring).
+      onOutput: () => {
+        if (touchModeNow() && activeTab() !== "terminal") {
+          setTerminalTabBadge(true);
+        }
+      },
       // Server-initiated disconnect (shell exited via `exit`, server
       // gone, network drop) → tear the dead pane down automatically.
       // No confirmation modal — there's nothing left to confirm losing.
@@ -1132,11 +1163,24 @@ export function setupTerminalPanel(
       panes.clear();
       panesContainer!.replaceChildren();
       activePaneId = null;
+      // A hidden panel is not a surface: if the Terminal tab was active
+      // (last pane closed, panel × in touch mode), land on Preview rather
+      // than a blank screen. The resulting tab-change sees panelHidden and
+      // is a no-op on pane state.
+      if (touchTerminalActive()) {
+        setActiveTab("preview");
+      }
     }
     if (persist) writeTerminalVisiblePreference(visible);
   }
 
   function toggleVisible() {
+    if (touchModeNow()) {
+      // Hardware-keyboard toggle on a touch device: tabs own terminal
+      // visibility, so Ctrl+` switches surfaces instead of hiding panes.
+      setActiveTab(activeTab() === "terminal" ? "preview" : "terminal");
+      return;
+    }
     const visible = !panel!.hasAttribute("hidden");
     setVisible(!visible, true, true);
   }
@@ -1215,9 +1259,14 @@ export function setupTerminalPanel(
   });
   fullscreenButton.addEventListener("click", () => {
     if (effectiveDisplayMode() === "fullscreen") {
-      // On a phone the docked `normal` strip is the state this promotion
-      // exists to eliminate — leaving fullscreen minimizes instead.
-      setDisplayMode(phoneClassNow() ? "minimized" : "normal");
+      // In touch mode leaving the fullscreen terminal is a tab switch —
+      // the stored display-mode preference stays untouched and every PTY
+      // stays attached. Desktop restores the docked strip.
+      if (touchModeNow()) {
+        setActiveTab("preview");
+      } else {
+        setDisplayMode("normal");
+      }
     } else {
       setDisplayMode("fullscreen");
     }
@@ -1275,7 +1324,11 @@ export function setupTerminalPanel(
         if (effectiveDisplayMode() === "fullscreen") {
           event.preventDefault();
           event.stopPropagation();
-          setDisplayMode(phoneClassNow() ? "minimized" : "normal");
+          if (touchModeNow()) {
+            setActiveTab("preview");
+          } else {
+            setDisplayMode("normal");
+          }
         }
       }
     },
@@ -1335,18 +1388,58 @@ export function setupTerminalPanel(
     document.addEventListener("pointerup", onUp);
   });
 
-  // Re-evaluate the right-dock fallback AND the phone-class fullscreen
-  // promotion on viewport changes (rotation crosses the width breakpoint),
-  // so users who resize mid-session don't get stuck with an unusable layout.
+  // Re-evaluate the right-dock fallback on viewport changes (rotation
+  // crosses the width breakpoint), so users who resize mid-session don't
+  // get stuck with an unusable layout.
   window.addEventListener("resize", () => {
     applyDockToDom();
     applyDisplayModeToDom();
     fitAll();
   });
-  coarsePointerQuery?.addEventListener?.("change", () => {
+
+  // Touch tab switching (touch-tab-navigation). The PTY-preserving contract
+  // lives in terminalActionForTabChange (unit-pinned): leaving the Terminal
+  // tab NEVER routes through setVisible(false) — the surface hides via CSS
+  // only, panes and PTYs stay attached, exactly like minimize.
+  onActiveTabChange(tab => {
+    if (!touchModeNow()) return;
+    if (tab === "terminal") setTerminalTabBadge(false);
+    const action = terminalActionForTabChange(tab === "terminal", panel!.hasAttribute("hidden"));
+    switch (action) {
+      case "show":
+        // Same spawn/reattach path as the desktop toggle.
+        setVisible(true, true, true);
+        break;
+      case "reveal": {
+        // Panes stayed attached while parked; the surface reappears via
+        // CSS. Recompute the display promotion, refit, focus.
+        applyDisplayModeToDom();
+        requestAnimationFrame(() => fitAll());
+        const entry = activePaneId ? panes.get(activePaneId) : undefined;
+        entry?.handle.focus();
+        break;
+      }
+      case "keep-attached":
+        // Minimize semantics without the strip: only the display attribute
+        // and viewport sizer change. No pane teardown of any kind.
+        applyDisplayModeToDom();
+        break;
+      case "none":
+        break;
+    }
+  });
+
+  // Mode flips normalize surface state live: desktop restores the stored
+  // dock/display (the promotion evaporates with the mode), touch re-applies
+  // the active tab's surface. An active Terminal tab with no live panel
+  // falls back to Preview instead of a blank surface.
+  onUiModeChange(() => {
+    if (touchModeNow() && activeTab() === "terminal" && panel!.hasAttribute("hidden")) {
+      setActiveTab("preview");
+    }
     applyDockToDom();
     applyDisplayModeToDom();
-    fitAll();
+    requestAnimationFrame(() => fitAll());
   });
 
   // First paint: apply persisted dock + display mode even before any panes
@@ -1357,5 +1450,10 @@ export function setupTerminalPanel(
   // Restore visibility from the previous session in this tab.
   if (readTerminalVisiblePreference()) {
     setVisible(true, false);
+  } else if (touchTerminalActive()) {
+    // The persisted active tab says Terminal but this browser tab has no
+    // terminal session to restore. Spawning one would violate the
+    // no-auto-spawn boot contract, so land on Preview instead.
+    setActiveTab("preview");
   }
 }

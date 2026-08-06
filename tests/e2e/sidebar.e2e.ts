@@ -134,12 +134,11 @@ test("collapsed rail exposes a Follow toggle driving the same state as the chip"
   await page.locator("#sidebar-expand").click();
 });
 
-test("desktop never renders the phone browse affordance or size steppers", async ({ page }) => {
-  await expect(page.locator("#files-browse-open")).toBeHidden();
-  await expect(page.locator("#files-browse-close")).toBeHidden();
+test("desktop never renders the touch chrome or size steppers", async ({ page }) => {
+  await expect(page.locator("#touch-tab-bar")).toBeHidden();
+  await expect(page.locator("#ui-mode-toggle")).toBeHidden();
   await expect(page.locator("#preview-text-increase")).toBeHidden();
   await expect(page.locator("#preview-text-decrease")).toBeHidden();
-  await expect(page.locator('[data-pane-id="files"]')).not.toHaveAttribute("data-overlay", "open");
 });
 
 test("declutter defaults: fresh clients hide Git Log; the panes menu no longer lists Selection Inspector", async ({ page }) => {

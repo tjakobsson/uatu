@@ -235,6 +235,10 @@ export type MountTerminalOptions = {
   // sticky-Ctrl composition hook. MUST be an identity function when its
   // latch is unarmed; it sits on the path every keystroke travels.
   transformInput?: (data: string) => string;
+  // Fires on every PTY output frame written into xterm. The controller uses
+  // it to badge the Terminal tab when output arrives while another touch
+  // tab is active. Keep it cheap — it sits on the output hot path.
+  onOutput?: () => void;
 };
 
 // Mirror of the server's CLOSE_CODE_USER_TERMINATE (terminal/server.ts).
@@ -469,6 +473,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
         return;
       }
       const bytes = new Uint8Array(event.data as ArrayBuffer);
+      options.onOutput?.();
       if (!protocolReady) {
         term.write(bytes, () => {
           protocolReady = true;

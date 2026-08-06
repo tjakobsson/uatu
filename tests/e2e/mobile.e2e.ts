@@ -1,20 +1,21 @@
-// Phone-class coverage (mobile-experience change): iPhone-shaped viewport
-// with touch + mobile emulation so `(pointer: coarse)` matches and the
-// ≤900px stacked layout applies. Covers the fullscreen terminal promotion,
-// keybar growth, the file-browser overlay, the stacked preview header, and
-// both size steppers. The visualViewport keyboard behavior is unit-tested
-// (visual-viewport.test.ts) and gated on a real device — Playwright cannot
-// emulate the iOS software keyboard.
+// Touch-mode coverage (touch-tab-navigation change): iPhone-shaped viewport
+// with touch + mobile emulation so `(pointer: coarse)` matches and the UI
+// boots into touch mode with the bottom tab bar. Covers the three tab
+// surfaces and their switching semantics, the PTY-preserving terminal tab,
+// the keybar, both size steppers, and the stacked preview header. The
+// visualViewport keyboard behavior is unit-tested (visual-viewport.test.ts)
+// and gated on a real device — Playwright cannot emulate the iOS software
+// keyboard.
 
 import fs from "node:fs/promises";
 
 import { expect, test } from "./fixtures";
-import { standardBeforeEach, waitForPreviewToSettle } from "./fixtures";
+import { waitForPreviewToSettle } from "./fixtures";
 import { treeRow } from "./tree-helpers";
 import { workspacePath } from "./config";
 
 // iPhone 13 Pro portrait. hasTouch + isMobile make Chromium report a coarse
-// pointer, which is what gates every phone-class style and script path.
+// pointer, which is what defaults the UI mode to touch.
 test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
 // Persisted UI state lives in presentation storage, which namespaces keys
@@ -29,9 +30,41 @@ function readStoredValue(page: import("@playwright/test").Page, suffix: string):
   }, suffix);
 }
 
-test.afterEach(async ({ request }) => {
+// Touch-mode variant of the standard boot: the sidebar (tree, follow chip)
+// is only visible inside the Files tab, so baseline assertions that touch
+// it happen there before landing back on Preview.
+async function touchBeforeEach(
+  page: import("@playwright/test").Page,
+  request: import("@playwright/test").APIRequestContext,
+): Promise<void> {
   await request.post("/__e2e/reset");
-});
+  await page.goto("/");
+  await page.evaluate(() => {
+    try {
+      window.localStorage.clear();
+    } catch {
+      // best-effort
+    }
+  });
+  await page.reload();
+  await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
+  await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
+  await expect(page.locator("#document-count")).toHaveText("18 files");
+  await waitForPreviewToSettle(page);
+  await expect(page.locator("#preview-path")).toHaveText("README.md");
+  // Normalize follow to off inside the Files tab (the chip lives in the
+  // sidebar surface); see standardBeforeEach for why this is conditional.
+  await page.locator("#touch-tab-files").click();
+  await expect(treeRow(page, "README.md")).toBeVisible();
+  const pressed = await page.locator("#follow-toggle").getAttribute("aria-pressed");
+  if (pressed === "true") {
+    await page.locator("#follow-toggle").click();
+  }
+  await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
+  await page.locator("#touch-tab-preview").click();
+  await expect(page.locator("html")).toHaveAttribute("data-active-tab", "preview");
+  await page.waitForTimeout(75);
+}
 
 // Terminal-backed tests need the cookie flow from /?t=<token>; mirrors the
 // SHARED_BEFORE in terminal.e2e.ts.
@@ -68,28 +101,197 @@ async function terminalBeforeEach(
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
 }
 
-test.describe("phone terminal", () => {
+test.afterEach(async ({ request }) => {
+  await request.post("/__e2e/reset");
+});
+
+test.describe("touch tab navigation", () => {
+  test.beforeEach(async ({ page, request }) => {
+    await touchBeforeEach(page, request);
+  });
+
+  test("boot lands on Preview with the tab bar visible and no phone escape control", async ({ page }) => {
+    await expect(page.locator("#touch-tab-bar")).toBeVisible();
+    await expect(page.locator("html")).toHaveAttribute("data-active-tab", "preview");
+    await expect(page.locator("#touch-tab-preview")).toHaveAttribute("aria-selected", "true");
+    await expect(page.locator("#touch-tab-files")).toHaveAttribute("aria-selected", "false");
+    await expect(page.locator(".preview-shell")).toBeVisible();
+    // One surface at a time: the sidebar is not rendered on the Preview tab.
+    await expect(page.locator(".sidebar")).toBeHidden();
+    // The bar sits at the viewport's bottom edge.
+    const barBox = await page.locator("#touch-tab-bar").boundingBox();
+    expect(barBox?.width ?? 0).toBeGreaterThanOrEqual(389);
+    expect((barBox?.y ?? 0) + (barBox?.height ?? 0)).toBeGreaterThanOrEqual(843);
+    // The bar carries only the three surface tabs — no mode control.
+    await expect(page.locator("#touch-tab-bar button")).toHaveCount(3);
+    // Desktop-only chrome stays gone in touch mode.
+    await expect(page.locator("#terminal-toggle")).toBeHidden();
+  });
+
+  test("tab switching swaps fullscreen surfaces", async ({ page }) => {
+    await page.locator("#touch-tab-files").click();
+    await expect(page.locator("html")).toHaveAttribute("data-active-tab", "files");
+    await expect(page.locator("#touch-tab-files")).toHaveAttribute("aria-selected", "true");
+    await expect(page.locator(".sidebar")).toBeVisible();
+    await expect(page.locator(".preview-shell")).toBeHidden();
+    // The Files surface fills the viewport above the bar.
+    const sidebarBox = await page.locator(".sidebar").boundingBox();
+    expect(sidebarBox?.width ?? 0).toBeGreaterThanOrEqual(389);
+    expect(sidebarBox?.height ?? 0).toBeGreaterThan(700);
+    // The tree gets real rows, not a one-row sliver.
+    const treeBox = await page.locator("#tree").boundingBox();
+    expect(treeBox?.height ?? 0).toBeGreaterThan(200);
+    await expect(treeRow(page, "README.md")).toBeVisible();
+    // The mode toggle lives in this surface's header, at any width.
+    await expect(page.locator("#ui-mode-toggle")).toBeVisible();
+
+    await page.locator("#touch-tab-preview").click();
+    await expect(page.locator(".preview-shell")).toBeVisible();
+    await expect(page.locator(".sidebar")).toBeHidden();
+  });
+
+  test("a document pick switches to Preview; directory taps and file events do not", async ({ page }) => {
+    await page.locator("#touch-tab-files").click();
+    await expect(treeRow(page, "guides/")).toBeVisible();
+
+    // Directory expand keeps the Files tab active.
+    await treeRow(page, "guides/").click();
+    await expect(page.locator("html")).toHaveAttribute("data-active-tab", "files");
+
+    // A watched-file event (programmatic tree update) must not steal it.
+    await fs.writeFile(workspacePath("guides", "setup.md"), "# Setup\n\nTouched while browsing.\n", "utf8");
+    await page.waitForTimeout(600);
+    await expect(page.locator("html")).toHaveAttribute("data-active-tab", "files");
+    await expect(page.locator(".sidebar")).toBeVisible();
+
+    // Picking a document lands on the Preview tab showing that document.
+    await treeRow(page, "diagram.md").click();
+    await expect(page.locator("html")).toHaveAttribute("data-active-tab", "preview");
+    await waitForPreviewToSettle(page);
+    await expect(page.locator("#preview-path")).toHaveText("diagram.md");
+  });
+
+  test("a search-result click lands on the Preview tab showing the document", async ({ page }) => {
+    await page.locator("#touch-tab-files").click();
+    await page.keyboard.press("ControlOrMeta+Shift+f");
+    await expect(page.locator("#search-query")).toBeVisible();
+    await page.locator("#search-query").fill("Save this file");
+    await expect(page.locator(".search-hit")).toHaveCount(1, { timeout: 10_000 });
+
+    // Opening a result is a Rule A navigation: the Preview surface comes
+    // forward with the picked document — no manual tab switch needed.
+    await page.locator(".search-hit").first().click();
+    await expect(page.locator("html")).toHaveAttribute("data-active-tab", "preview");
+    await expect(page.locator(".preview-shell")).toBeVisible();
+    await waitForPreviewToSettle(page);
+    await expect(page.locator("#preview-path")).toHaveText("guides/setup.md");
+  });
+
+  test("tree state is continuous across tab switches", async ({ page }) => {
+    await page.locator("#touch-tab-files").click();
+    await treeRow(page, "guides/").click();
+    await expect(treeRow(page, "guides/setup.md")).toBeVisible();
+
+    await page.locator("#touch-tab-preview").click();
+    await page.locator("#touch-tab-files").click();
+    // Expansion survived the round-trip — same tree DOM, not a rebuild.
+    await expect(treeRow(page, "guides/setup.md")).toBeVisible();
+  });
+
+  test("dragging a pane header resizes the boundary above it", async ({ page }) => {
+    await page.locator("#touch-tab-files").click();
+    await expect(treeRow(page, "README.md")).toBeVisible();
+
+    const overviewPane = page.locator('[data-pane-id="change-overview"]');
+    const filesHeader = page.locator('[data-pane-id="files"] .pane-header');
+    const startOverview = (await overviewPane.boundingBox())?.height ?? 0;
+    expect(startOverview).toBeGreaterThan(100);
+
+    // Drag the Files header upward: Change Overview shrinks, Files grows.
+    const headerBox = await filesHeader.boundingBox();
+    const startX = (headerBox?.x ?? 0) + 60;
+    const startY = (headerBox?.y ?? 0) + (headerBox?.height ?? 0) / 2;
+    await page.mouse.move(startX, startY);
+    await page.mouse.down();
+    await page.mouse.move(startX, startY - 100, { steps: 8 });
+    await page.mouse.up();
+
+    const endOverview = (await overviewPane.boundingBox())?.height ?? 0;
+    expect(endOverview).toBeLessThan(startOverview - 60);
+
+    // The new allocation persists like a desktop resizer drag.
+    const stored = JSON.parse((await readStoredValue(page, "uatu:sidebar-panes")) ?? "{}");
+    expect(stored["change-overview"]?.height).toBeLessThan(startOverview - 60);
+
+    // Taps on header controls still work despite the drag wiring.
+    await overviewPane.getByRole("button", { name: "Collapse Change Overview" }).click();
+    await expect(overviewPane).toHaveClass(/is-collapsed/);
+    await overviewPane.getByRole("button", { name: "Expand Change Overview" }).click();
+    await expect(overviewPane).not.toHaveClass(/is-collapsed/);
+  });
+
+  test("double-tapping a pane header toggles its collapse", async ({ page }) => {
+    await page.locator("#touch-tab-files").click();
+    await expect(treeRow(page, "README.md")).toBeVisible();
+
+    const overviewPane = page.locator('[data-pane-id="change-overview"]');
+    const header = overviewPane.locator(".pane-header");
+
+    // A single tap changes nothing; wait out the double-tap window so it
+    // cannot pair with the next gesture.
+    await header.click({ position: { x: 60, y: 15 } });
+    await page.waitForTimeout(450);
+    await expect(overviewPane).not.toHaveClass(/is-collapsed/);
+
+    // Double-tap collapses, persisted like the − button.
+    await header.dblclick({ position: { x: 60, y: 15 } });
+    await expect(overviewPane).toHaveClass(/is-collapsed/);
+    const stored = JSON.parse((await readStoredValue(page, "uatu:sidebar-panes")) ?? "{}");
+    expect(stored["change-overview"]?.collapsed).toBe(true);
+
+    // Double-tap again expands.
+    await header.dblclick({ position: { x: 60, y: 15 } });
+    await expect(overviewPane).not.toHaveClass(/is-collapsed/);
+  });
+
+  test("the active tab persists across reload", async ({ page }) => {
+    await page.locator("#touch-tab-files").click();
+    await expect.poll(() => readStoredValue(page, "uatu:active-tab")).toBe("files");
+
+    await page.reload();
+    await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
+    await expect(page.locator("html")).toHaveAttribute("data-active-tab", "files");
+    await expect(page.locator(".sidebar")).toBeVisible();
+    await expect(treeRow(page, "README.md")).toBeVisible();
+  });
+});
+
+test.describe("touch terminal tab", () => {
   test.beforeEach(async ({ page, request }) => {
     await terminalBeforeEach(page, request);
   });
 
-  test("opening the terminal auto-promotes to true fullscreen without touching the stored mode", async ({ page }) => {
-    await page.locator("#terminal-toggle").click();
+  test("activating the Terminal tab lands in true fullscreen without touching the stored mode", async ({ page }) => {
+    await page.locator("#touch-tab-terminal").click();
     const panel = page.locator("#terminal-panel");
     await expect(panel).toHaveAttribute("data-display", "fullscreen");
     await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({ timeout: 5000 });
 
-    // Whole visual viewport: fixed, no sidebar or preview reachable.
+    // Whole viewport above the tab bar: no sidebar or preview reachable.
     const box = await panel.boundingBox();
+    const barBox = await page.locator("#touch-tab-bar").boundingBox();
     expect(box?.width ?? 0).toBeGreaterThanOrEqual(389);
     expect(box?.height ?? 0).toBeGreaterThanOrEqual(700);
+    expect((box?.y ?? 0) + (box?.height ?? 0)).toBeLessThanOrEqual((barBox?.y ?? 0) + 1);
+    await expect(page.locator(".preview-shell")).toBeHidden();
     await expect
       .poll(async () => page.evaluate(() => getComputedStyle(document.body).overflow))
       .toBe("hidden");
 
-    // Geometry controls are meaningless at phone widths.
+    // Geometry controls (and minimize — tabs supersede it) are hidden.
     await expect(page.locator("#terminal-split")).toBeHidden();
     await expect(page.locator("#terminal-dock-toggle")).toBeHidden();
+    await expect(page.locator("#terminal-minimize")).toBeHidden();
 
     // The stored preference is untouched by the promotion.
     await expect
@@ -97,23 +299,76 @@ test.describe("phone terminal", () => {
       .toBe("normal");
   });
 
-  test("leaving fullscreen minimizes instead of docking a strip", async ({ page }) => {
-    await page.locator("#terminal-toggle").click();
+  test("the terminal survives tab round-trips with its PTY attached and output intact", async ({ page }) => {
+    await page.locator("#touch-tab-terminal").click();
     await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({ timeout: 5000 });
+
+    // Touch emulation doesn't reliably deliver the show-path's deferred
+    // focus; land it explicitly before typing (same recipe as terminal.e2e).
+    await page.evaluate(() => {
+      document.querySelector<HTMLTextAreaElement>(".terminal-pane-host .xterm-helper-textarea")?.focus();
+    });
+    await page.keyboard.type('echo "tab-roundtrip-$((6*7))"');
+    await page.keyboard.press("Enter");
+    await expect.poll(async () => {
+      const rows = await page.locator(".terminal-pane-host .xterm-rows > div").allTextContents();
+      return rows.some(text => text.includes("tab-roundtrip-42"));
+    }, { timeout: 5000 }).toBe(true);
+
+    // Switch away: the surface hides, the panel is NOT torn down (no hidden
+    // attribute — minimize semantics), the PTY stays attached.
+    await page.locator("#touch-tab-preview").click();
+    await expect(page.locator("#terminal-panel")).not.toBeVisible();
+    await expect(page.locator("#terminal-panel")).not.toHaveAttribute("hidden", "");
+    await expect(page.locator(".terminal-pane")).toHaveCount(1);
+
+    // Return: same session, accumulated output visible, no auth form.
+    await page.locator("#touch-tab-terminal").click();
+    await expect(page.locator("#terminal-panel")).toHaveAttribute("data-display", "fullscreen");
+    await expect(page.locator(".terminal-auth")).toHaveCount(0);
+    await expect.poll(async () => {
+      const rows = await page.locator(".terminal-pane-host .xterm-rows > div").allTextContents();
+      return rows.some(text => text.includes("tab-roundtrip-42"));
+    }, { timeout: 5000 }).toBe(true);
+  });
+
+  test("leaving fullscreen routes to the Preview tab, never a minimized strip", async ({ page }) => {
+    await page.locator("#touch-tab-terminal").click();
+    await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({ timeout: 5000 });
+
     await page.locator("#terminal-fullscreen").click();
-    const panel = page.locator("#terminal-panel");
-    await expect(panel).toHaveAttribute("data-display", "minimized");
-    // Header-only means header only: the keybar must not stay live against
-    // an invisible PTY.
-    await expect(page.locator("#terminal-keybar")).toBeHidden();
-    // PTY stays attached: restoring shows the same pane, no auth form.
-    await page.locator("#terminal-minimize").click();
-    await expect(panel).toHaveAttribute("data-display", "fullscreen");
+    await expect(page.locator("html")).toHaveAttribute("data-active-tab", "preview");
+    // No strip: the panel is simply not rendered on the Preview tab.
+    await expect(page.locator("#terminal-panel")).not.toBeVisible();
+    await expect(page.locator(".terminal-panel-header")).not.toBeVisible();
+
+    // The PTY survived; the tab is the return affordance.
+    await page.locator("#touch-tab-terminal").click();
+    await expect(page.locator("#terminal-panel")).toHaveAttribute("data-display", "fullscreen");
     await expect(page.locator(".terminal-auth")).toHaveCount(0);
   });
 
+  test("PTY output while another tab is active badges the Terminal tab", async ({ page }) => {
+    await page.locator("#touch-tab-terminal").click();
+    await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({ timeout: 5000 });
+
+    // Kick off delayed output, then leave before it arrives.
+    await page.evaluate(() => {
+      document.querySelector<HTMLTextAreaElement>(".terminal-pane-host .xterm-helper-textarea")?.focus();
+    });
+    await page.keyboard.type("sleep 1 && echo badge-ping");
+    await page.keyboard.press("Enter");
+    await page.locator("#touch-tab-preview").click();
+
+    await expect(page.locator("#touch-tab-terminal")).toHaveAttribute("data-badge", "", { timeout: 5000 });
+
+    // Activating the tab clears the dot.
+    await page.locator("#touch-tab-terminal").click();
+    await expect(page.locator("#touch-tab-terminal")).not.toHaveAttribute("data-badge", "");
+  });
+
   test("keybar shows the grown key set and the sticky Ctrl latch arms and cancels", async ({ page }) => {
-    await page.locator("#terminal-toggle").click();
+    await page.locator("#touch-tab-terminal").click();
     await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({ timeout: 5000 });
 
     const keybar = page.locator("#terminal-keybar");
@@ -131,7 +386,7 @@ test.describe("phone terminal", () => {
   });
 
   test("font stepper applies live and persists a per-device override", async ({ page }) => {
-    await page.locator("#terminal-toggle").click();
+    await page.locator("#touch-tab-terminal").click();
     await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({ timeout: 5000 });
 
     const increase = page.locator("#terminal-font-increase");
@@ -148,75 +403,9 @@ test.describe("phone terminal", () => {
   });
 });
 
-test.describe("phone file navigation", () => {
+test.describe("touch preview chrome", () => {
   test.beforeEach(async ({ page, request }) => {
-    await standardBeforeEach(page, request);
-  });
-
-  test("the stacked tree shows real rows, not a one-row sliver", async ({ page }) => {
-    const treeBox = await page.locator("#tree").boundingBox();
-    expect(treeBox?.height ?? 0).toBeGreaterThan(200);
-    await expect(treeRow(page, "README.md")).toBeVisible();
-    await expect(treeRow(page, "diagram.md")).toBeVisible();
-  });
-
-  test("browse opens a full-screen overlay; directory taps and file events keep it open; a pick dismisses to the preview", async ({ page }) => {
-    const pane = page.locator('[data-pane-id="files"]');
-    await page.locator("#files-browse-open").click();
-    await expect(pane).toHaveAttribute("data-overlay", "open");
-    const box = await pane.boundingBox();
-    expect(box?.width ?? 0).toBeGreaterThanOrEqual(389);
-    expect(box?.height ?? 0).toBeGreaterThanOrEqual(800);
-
-    // The pane-level collapse/hide actions vanish while promoted — the
-    // overlay's own close button is the only dismissal chrome.
-    await expect(pane.getByRole("button", { name: "Hide Files" })).toBeHidden();
-    await expect(pane.getByRole("button", { name: "Collapse Files" })).toBeHidden();
-
-    // Directory expand keeps the browser open.
-    await treeRow(page, "guides/").click();
-    await expect(pane).toHaveAttribute("data-overlay", "open");
-
-    // A watched-file event (programmatic tree update) must not steal it.
-    await fs.writeFile(workspacePath("guides", "setup.md"), "# Setup\n\nTouched while browsing.\n", "utf8");
-    await page.waitForTimeout(600);
-    await expect(pane).toHaveAttribute("data-overlay", "open");
-
-    // Picking a document dismisses to the preview showing that document.
-    await treeRow(page, "diagram.md").click();
-    await expect(pane).not.toHaveAttribute("data-overlay", "open");
-    await waitForPreviewToSettle(page);
-    await expect(page.locator("#preview-path")).toHaveText("diagram.md");
-  });
-
-  test("browsing from a collapsed Files pane still shows the tree", async ({ page }) => {
-    const pane = page.locator('[data-pane-id="files"]');
-    await pane.getByRole("button", { name: "Collapse Files" }).click();
-    await expect(pane).toHaveClass(/is-collapsed/);
-
-    await page.locator("#files-browse-open").click();
-    await expect(pane).toHaveAttribute("data-overlay", "open");
-    await expect(treeRow(page, "README.md")).toBeVisible();
-
-    // Dismissing restores the collapsed stacked state untouched.
-    await page.locator("#files-browse-close").click();
-    await expect(pane).not.toHaveAttribute("data-overlay", "open");
-    await expect(pane).toHaveClass(/is-collapsed/);
-  });
-
-  test("closing without picking restores the stacked layout unchanged", async ({ page }) => {
-    const pane = page.locator('[data-pane-id="files"]');
-    await page.locator("#files-browse-open").click();
-    await expect(pane).toHaveAttribute("data-overlay", "open");
-    await page.locator("#files-browse-close").click();
-    await expect(pane).not.toHaveAttribute("data-overlay", "open");
-    await expect(page.locator("#preview-path")).toHaveText("README.md");
-  });
-});
-
-test.describe("phone preview chrome", () => {
-  test.beforeEach(async ({ page, request }) => {
-    await standardBeforeEach(page, request);
+    await touchBeforeEach(page, request);
   });
 
   test("the header stacks: toolbar below the heading, no horizontal overflow", async ({ page }) => {

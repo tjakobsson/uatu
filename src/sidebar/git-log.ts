@@ -10,6 +10,7 @@ import { buildCommitPreviewPath } from "../shell/history";
 import { nextStaleHint } from "../shell/stale-hint";
 import { GIT_LOG_LIMIT_KEY, appState, isGitLogLimit } from "../shell/state";
 import { presentationLocalStorage } from "../shell/presentation-storage";
+import { revealPreviewSurface } from "../shell/tab-bar";
 import { activateCommitPreview } from "../shell/url";
 
 const gitLogElementMaybe = document.querySelector<HTMLDivElement>("#git-log");
@@ -156,6 +157,9 @@ export function initGitLogClickHandler(): void {
     }
 
     event.preventDefault();
+    // A commit click renders into the preview — bring the touch Preview
+    // surface forward, same as a document pick.
+    revealPreviewSurface();
     applyStaleHint(nextStaleHint(appState.staleHint, { kind: "manual-navigation" }));
     activateCommitPreview({ repositoryId, sha }, { pushHistory: true });
   });

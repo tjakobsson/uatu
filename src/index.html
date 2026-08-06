@@ -72,6 +72,31 @@
               </button>
               <div id="panels-menu" class="panels-menu" hidden></div>
             </div>
+            <!-- UI-mode toggle: coarse-pointer devices only (CSS-gated).
+                 In touch mode this header renders inside the Files tab and
+                 the toggle switches to the desktop layout; in desktop mode
+                 it returns to touch. It lives HERE — never in the tab bar —
+                 so the same control is findable in both modes at any width
+                 and neither mode can strand the device. -->
+            <button
+              id="ui-mode-toggle"
+              class="icon-button ui-mode-toggle"
+              type="button"
+              aria-label="Switch to desktop layout"
+              title="Switch to desktop layout"
+            >
+              <!-- Shown in touch mode: monitor = go to desktop. -->
+              <svg class="mode-glyph mode-glyph-desktop" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                <rect x="1.75" y="2.75" width="12.5" height="8.5" rx="1" fill="none" stroke="currentColor" stroke-width="1.4" />
+                <line x1="5.5" y1="13.75" x2="10.5" y2="13.75" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+                <line x1="8" y1="11.25" x2="8" y2="13.75" stroke="currentColor" stroke-width="1.4" />
+              </svg>
+              <!-- Shown in desktop mode: phone = go to touch. -->
+              <svg class="mode-glyph mode-glyph-touch" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                <rect x="4.5" y="1.75" width="7" height="12.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4" />
+                <line x1="7" y1="12" x2="9" y2="12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+              </svg>
+            </button>
             <button
               id="sidebar-collapse"
               class="icon-button"
@@ -232,23 +257,6 @@
                 </div>
               </div>
               <div class="pane-actions">
-                <!-- Phone-class only (CSS-gated): promote the pane to the
-                     full-screen file browser / dismiss it. Same pane DOM,
-                     so tree state is continuous. -->
-                <button
-                  id="files-browse-open"
-                  class="files-browse-open"
-                  type="button"
-                  aria-label="Browse files full screen"
-                  title="Browse files"
-                >Browse</button>
-                <button
-                  id="files-browse-close"
-                  class="files-browse-close"
-                  type="button"
-                  aria-label="Close file browser"
-                  title="Close"
-                >×</button>
                 <button class="pane-action" type="button" data-pane-collapse="files" aria-label="Collapse Files" title="Collapse pane">−</button>
                 <button class="pane-action" type="button" data-pane-hide="files" aria-label="Hide Files" title="Hide pane">×</button>
               </div>
@@ -333,6 +341,22 @@
               d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8s-2.4 4.5-6.5 4.5S1.5 8 1.5 8Z"
             />
             <circle cx="8" cy="8" r="2" fill="currentColor" />
+          </svg>
+        </button>
+        <!-- UI-mode toggle, collapsed-sidebar variant: the header control
+             disappears with the sidebar, and desktop mode on a coarse-
+             pointer device must NEVER be a trap — one of the two toggles is
+             reachable in every desktop-mode state. -->
+        <button
+          id="rail-ui-mode-toggle"
+          class="rail-button ui-mode-toggle"
+          type="button"
+          aria-label="Switch to touch layout"
+          title="Switch to touch layout"
+        >
+          <svg class="mode-glyph mode-glyph-touch" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+            <rect x="4.5" y="1.75" width="7" height="12.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4" />
+            <line x1="7" y1="12" x2="9" y2="12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
           </svg>
         </button>
         <button
@@ -714,6 +738,75 @@
         </section>
       </div>
     </div>
+
+    <!-- Touch-mode bottom tab bar (touch-tab-navigation): the only
+         navigation chrome in touch mode. Fixed to the layout viewport's
+         bottom edge, safe-area padded; the software keyboard simply covers
+         it (platform convention). Hidden entirely in desktop mode via CSS
+         keyed on data-ui-mode. -->
+    <nav id="touch-tab-bar" class="touch-tab-bar" role="tablist" aria-label="App surfaces">
+      <button
+        id="touch-tab-files"
+        class="touch-tab"
+        type="button"
+        role="tab"
+        data-tab="files"
+        aria-selected="false"
+      >
+        <svg viewBox="0 0 16 16" width="20" height="20" aria-hidden="true">
+          <path
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.3"
+            stroke-linejoin="round"
+            d="M1.75 3.5c0-.55.45-1 1-1h3.5l1.5 1.75h5.5c.55 0 1 .45 1 1v7.25c0 .55-.45 1-1 1H2.75c-.55 0-1-.45-1-1Z"
+          />
+        </svg>
+        <span class="touch-tab-label">Files</span>
+      </button>
+      <button
+        id="touch-tab-preview"
+        class="touch-tab"
+        type="button"
+        role="tab"
+        data-tab="preview"
+        aria-selected="false"
+      >
+        <svg viewBox="0 0 16 16" width="20" height="20" aria-hidden="true">
+          <path
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.3"
+            stroke-linejoin="round"
+            d="M3.5 1.75h6L12.5 4.75v9.5h-9Zm6 0v3h3"
+          />
+          <line x1="5.5" y1="8" x2="10.5" y2="8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+          <line x1="5.5" y1="10.75" x2="10.5" y2="10.75" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+        </svg>
+        <span class="touch-tab-label">Preview</span>
+      </button>
+      <button
+        id="touch-tab-terminal"
+        class="touch-tab"
+        type="button"
+        role="tab"
+        data-tab="terminal"
+        aria-selected="false"
+      >
+        <svg viewBox="0 0 16 16" width="20" height="20" aria-hidden="true">
+          <path
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.3"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            d="M2 3h12v10H2zM4.25 6.25 6.5 8.5l-2.25 2.25M8.5 10.75h3.25"
+          />
+        </svg>
+        <span class="touch-tab-label">Terminal</span>
+        <span class="touch-tab-badge" aria-hidden="true"></span>
+      </button>
+    </nav>
 
     <div
       id="terminal-confirm"
