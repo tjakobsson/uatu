@@ -25,6 +25,20 @@ export function classifySwipeGesture(
   return Math.abs(totalDeltaY) > Math.abs(totalDeltaX) ? "scroll" : "ignore";
 }
 
+// Normalize a WheelEvent's deltaY to CSS pixels so it can feed the same
+// cell-quantized translation as touch. deltaMode: 0 = pixels, 1 = lines
+// (multiply by cell height), 2 = pages (multiply by the viewport height).
+export function wheelDeltaToPixels(
+  deltaY: number,
+  deltaMode: number,
+  cellHeight: number,
+  pageHeight: number,
+): number {
+  if (deltaMode === 1) return deltaY * cellHeight;
+  if (deltaMode === 2) return deltaY * pageHeight;
+  return deltaY;
+}
+
 // Matches wheel semantics: finger moving UP (negative deltaY) pulls content
 // up — the same direction wheel-down scrolls — so it emits arrow-DOWN.
 export type SwipeTranslation = {

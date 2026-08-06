@@ -132,16 +132,24 @@ On coarse-pointer devices the terminal panel header SHALL provide decrease/incre
 - **WHEN** the terminal panel renders on a fine-pointer device
 - **THEN** no font-size controls are shown
 
-### Requirement: Touch scrolling works in both terminal buffers
-On coarse-pointer devices, vertical swipes over a terminal pane SHALL scroll: in the normal buffer, the existing scrollback scrolling stands; in the alternate-screen buffer (full-screen TUIs), vertical swipe distance SHALL be translated into repeated arrow-up/arrow-down key sequences sent to the PTY — quantized by cell height and honoring application cursor-key mode — so TUIs scroll under touch the way wheel alternate-scroll behaves on desktop. Horizontal swipe components SHALL be ignored, and the translation MUST NOT interfere with normal-buffer scrolling or with touch text selection.
+### Requirement: Touch and wheel scrolling work in both terminal buffers
+Vertical scrolling over a terminal pane SHALL reach the right consumer in every buffer. In the normal buffer, the existing scrollback scrolling stands for both wheel and touch. In the alternate-screen buffer (full-screen TUIs): on coarse-pointer devices, vertical swipe distance SHALL be translated into repeated arrow-up/arrow-down key sequences sent to the PTY — quantized by cell height and honoring application cursor-key mode; and for wheel input on any pointer type, when the application has NOT enabled mouse tracking, wheel deltas SHALL be translated the same way (the conventional terminal-emulator alternate-scroll default) instead of scrolling scrollback underneath the TUI. When the application HAS enabled mouse tracking, wheel events SHALL be forwarded as mouse reports per the terminal's protocol handling and MUST NOT additionally produce arrow sequences. Horizontal swipe components SHALL be ignored, and the translation MUST NOT interfere with normal-buffer scrolling or with touch text selection.
 
 #### Scenario: Swiping through a pager on a phone
 - **WHEN** a TUI on the alternate buffer is active and the user swipes up one cell-height over the pane
 - **THEN** one arrow-down sequence (in the form the current cursor-key mode dictates) reaches the PTY
 - **AND** a longer swipe produces proportionally more sequences
 
+#### Scenario: Wheel scrolling a TUI that does not track the mouse
+- **WHEN** a TUI on the alternate buffer without mouse tracking is active and the user scrolls the wheel down one cell-height over the pane
+- **THEN** one arrow-down sequence reaches the PTY and the scrollback does not move
+
+#### Scenario: Wheel in a mouse-tracking TUI takes the protocol path
+- **WHEN** a TUI on the alternate buffer with mouse tracking enabled is active and the user scrolls the wheel
+- **THEN** the wheel is delivered as mouse reports and no synthesized arrow sequences are sent
+
 #### Scenario: Shell scrollback still swipes natively
-- **WHEN** the normal buffer is active and the user swipes over the pane
+- **WHEN** the normal buffer is active and the user swipes or wheels over the pane
 - **THEN** the viewport scrolls the scrollback and no arrow sequences are sent
 
 ### Requirement: Phone-class viewports hide panel geometry controls

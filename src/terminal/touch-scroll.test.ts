@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { classifySwipeGesture, swipeToArrowSequences } from "./touch-scroll";
+import { classifySwipeGesture, swipeToArrowSequences, wheelDeltaToPixels } from "./touch-scroll";
 
 describe("swipeToArrowSequences", () => {
   test("finger up by one cell emits one arrow-down (CSI mode)", () => {
@@ -57,5 +57,20 @@ describe("classifySwipeGesture", () => {
   test("ignores horizontal-dominant and diagonal-equal gestures", () => {
     expect(classifySwipeGesture(15, 3)).toBe("ignore");
     expect(classifySwipeGesture(-9, -9)).toBe("ignore");
+  });
+});
+
+describe("wheelDeltaToPixels", () => {
+  test("pixel mode passes through", () => {
+    expect(wheelDeltaToPixels(34, 0, 17, 500)).toBe(34);
+  });
+
+  test("line mode multiplies by cell height", () => {
+    expect(wheelDeltaToPixels(3, 1, 17, 500)).toBe(51);
+    expect(wheelDeltaToPixels(-2, 1, 17, 500)).toBe(-34);
+  });
+
+  test("page mode multiplies by the viewport height", () => {
+    expect(wheelDeltaToPixels(1, 2, 17, 500)).toBe(500);
   });
 });

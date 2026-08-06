@@ -14,7 +14,12 @@ import {
   type Osc52Notice,
 } from "./clipboard";
 import type { TerminalClipboardPolicy } from "../shared/types";
-import { classifySwipeGesture, swipeToArrowSequences, type SwipeGestureMode } from "./touch-scroll";
+import {
+  classifySwipeGesture,
+  swipeToArrowSequences,
+  wheelDeltaToPixels,
+  type SwipeGestureMode,
+} from "./touch-scroll";
 
 const TERMINAL_TOKEN_KEY = "uatu:terminal-token";
 
@@ -524,14 +529,57 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
       socket.send(encoder.encode(output));
     });
 
+    touchScrollAbort?.abort();
+    touchScrollAbort = new AbortController();
+
+    // Wheel alternate-scroll (all pointer types). xterm.js has no built-in
+    // DECSET 1007 behavior: when a TUI on the alternate buffer has NOT
+    // enabled mouse tracking, wheel events fall through to the viewport and
+    // scroll scrollback — the user sees their prompt history move instead of
+    // the TUI's content. Real terminal emulators default to converting the
+    // wheel into arrow keys in exactly this situation (iTerm's "scroll wheel
+    // sends arrow keys when in alternate screen mode"); mirror that. When
+    // the app DOES track the mouse, xterm forwards wheel reports itself and
+    // this handler stays out of the way.
+    {
+      const { signal } = touchScrollAbort;
+      let wheelCarry = 0;
+      options.container.addEventListener(
+        "wheel",
+        event => {
+          if (!term) return;
+          if (term.buffer.active.type !== "alternate") return;
+          if (term.modes.mouseTrackingMode !== "none") return;
+          const screen = term.element?.querySelector<HTMLElement>(".xterm-screen");
+          const pageHeight = screen?.clientHeight ?? options.container.clientHeight;
+          const cellHeight = pageHeight / Math.max(1, term.rows);
+          // Wheel-down (positive deltaY) scrolls content down = arrow down,
+          // the opposite sign convention from a downward finger drag.
+          const translated = swipeToArrowSequences({
+            deltaY: -wheelDeltaToPixels(event.deltaY, event.deltaMode, cellHeight, pageHeight),
+            cellHeight,
+            applicationCursor: term.modes.applicationCursorKeysMode,
+            carry: wheelCarry,
+          });
+          wheelCarry = translated.carry;
+          if (translated.sequences && protocolReady && socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(encoder.encode(translated.sequences));
+          }
+          // Consume it either way — the viewport scrolling scrollback under
+          // an alternate-screen TUI is the misbehavior being replaced.
+          event.preventDefault();
+          event.stopPropagation();
+        },
+        { signal, passive: false, capture: true },
+      );
+    }
+
     // Alternate-screen touch scrolling (coarse pointers only): TUIs run on
     // the alternate buffer, which has no scrollback for xterm's native touch
     // path to move — swipes hit nothing. Translate vertical swipe distance
     // into arrow-key sequences (touch-scroll.ts), leaving normal-buffer
     // swipes to xterm's own viewport scrolling.
     if (typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches) {
-      touchScrollAbort?.abort();
-      touchScrollAbort = new AbortController();
       const { signal } = touchScrollAbort;
       let touchStartX: number | null = null;
       let touchStartY: number | null = null;
@@ -559,7 +607,6 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
         event => {
           if (!term || lastTouchY === null || touchStartX === null || touchStartY === null) return;
           if (event.touches.length !== 1) return;
-          if (term.buffer.active.type !== "alternate") return;
           // A drag on a live text selection is the user adjusting selection
           // handles — never hijack it into scrolling.
           if (term.hasSelection()) {
@@ -587,6 +634,36 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
           const screen = term.element?.querySelector<HTMLElement>(".xterm-screen");
           const cellHeight =
             (screen?.clientHeight ?? options.container.clientHeight) / Math.max(1, term.rows);
+          // Normal buffer: scroll scrollback "as usual". xterm.js has no
+          // native touch scrolling, so quantize the swipe into scrollLines
+          // ourselves (finger down = reveal earlier output = scroll up).
+          if (term.buffer.active.type !== "alternate") {
+            const total = swipeCarry + deltaY;
+            const cells = Math.trunc(total / cellHeight);
+            swipeCarry = total - cells * cellHeight;
+            if (cells !== 0) term.scrollLines(-cells);
+            event.preventDefault();
+            return;
+          }
+          // Mouse-tracking TUIs (opencode, htop, lazygit) want real wheel
+          // events — xterm converts those into the mouse reports the app
+          // asked for, and the app scrolls its own content. Synthesize one
+          // from the swipe instead of sending arrows, which such apps map
+          // to history/selection navigation.
+          if (term.modes.mouseTrackingMode !== "none") {
+            (screen ?? options.container).dispatchEvent(
+              new WheelEvent("wheel", {
+                deltaY: -deltaY,
+                deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+                clientX: touch.clientX,
+                clientY: touch.clientY,
+                bubbles: true,
+                cancelable: true,
+              }),
+            );
+            event.preventDefault();
+            return;
+          }
           const translated = swipeToArrowSequences({
             deltaY,
             cellHeight,

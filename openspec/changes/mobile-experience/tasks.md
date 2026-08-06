@@ -24,6 +24,7 @@
 - [x] 4.3 Implement the sticky Ctrl latch: keybar button with armed visual state + `aria-pressed`; a pure compose hook in the client input path (`char & 0x1f` on next printable, then release; second tap cancels); identity pass-through when unarmed, colocated unit tests
 - [x] 4.4 Keybar keeps `pointerdown`+`preventDefault` semantics for all new affordances so focus never leaves xterm
 - [x] 4.5 Implement alternate-screen swipe scrolling: a pure translation function (buffer type, swipe delta, cell height, cursor-key mode → arrow sequences) with colocated unit tests, plus a thin touch listener on the pane host active only on coarse-pointer devices; normal-buffer swipes keep xterm's native scrollback scrolling
+- [x] 4.5b Wheel alternate-scroll (all pointer types): xterm.js has no DECSET 1007 default, so wheel over a non-mouse-tracking alternate-buffer TUI scrolled scrollback (prompt history) instead of the TUI; translate wheel deltas through the same arrow-sequence path, gated on `term.modes.mouseTrackingMode === "none"`; pure delta normalization unit-tested, on-device/desktop verification in the manual pass
 - [x] 4.6 Add A−/A+ font-size controls to the terminal panel header (coarse-pointer only): live `options.fontSize` update + refit across panes, per-device persistence with precedence over `.uatu.json` (override cleared when stepped back to the configured value), clamped to the config loader's bounds
 
 ## 5. Phone file navigation
