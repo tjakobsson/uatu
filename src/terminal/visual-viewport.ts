@@ -5,36 +5,49 @@
 // visible region; while phone-fullscreen the panel is sized from it and
 // xterm refits on every change.
 //
+// Both height AND offsetTop matter: when iOS pans the visual viewport while
+// the keyboard is open (e.g. scrolling a bottom-anchored input into view),
+// offsetTop goes nonzero and a fixed panel pinned to top: 0 would extend
+// below the visible region by exactly that offset — resized but still
+// keyboard-obscured. The consumer must position the panel at offsetTop as
+// well as sizing it to height.
+//
 // Kept as a factory over a `VisualViewportLike` so the attach/detach
-// lifecycle and height propagation are unit-testable without a browser.
+// lifecycle and metric propagation are unit-testable without a browser.
 
 export type VisualViewportLike = {
   readonly height: number;
+  readonly offsetTop: number;
   addEventListener(type: "resize" | "scroll", listener: () => void): void;
   removeEventListener(type: "resize" | "scroll", listener: () => void): void;
 };
 
+export type VisualViewportMetrics = {
+  height: number;
+  offsetTop: number;
+};
+
 export type VisualViewportSizer = {
-  // Idempotent. Emits the current height immediately on first attach so the
+  // Idempotent. Emits the current metrics immediately on first attach so the
   // panel is correct before any event fires.
   attach(): void;
-  // Idempotent. Emits null so the consumer clears its override and falls
-  // back to the CSS (dvh) height.
+  // Idempotent. Emits null so the consumer clears its overrides and falls
+  // back to the CSS (dvh, top: 0) geometry.
   detach(): void;
   isAttached(): boolean;
 };
 
 export function createVisualViewportSizer(options: {
   viewport: VisualViewportLike | null;
-  // height in CSS pixels while attached; null on detach (clear override).
-  onHeight(height: number | null): void;
+  // Metrics in CSS pixels while attached; null on detach (clear overrides).
+  onMetrics(metrics: VisualViewportMetrics | null): void;
 }): VisualViewportSizer {
-  const { viewport, onHeight } = options;
+  const { viewport, onMetrics } = options;
   let attached = false;
 
   const emit = () => {
     if (!viewport) return;
-    onHeight(viewport.height);
+    onMetrics({ height: viewport.height, offsetTop: viewport.offsetTop });
   };
 
   return {
@@ -43,7 +56,7 @@ export function createVisualViewportSizer(options: {
       attached = true;
       // Both events matter: iOS fires `resize` for keyboard show/hide and
       // `scroll` when the visual viewport pans while zoomed or while the
-      // keyboard animates.
+      // keyboard animates — the pan is exactly what moves offsetTop.
       viewport.addEventListener("resize", emit);
       viewport.addEventListener("scroll", emit);
       emit();
@@ -53,7 +66,7 @@ export function createVisualViewportSizer(options: {
       attached = false;
       viewport.removeEventListener("resize", emit);
       viewport.removeEventListener("scroll", emit);
-      onHeight(null);
+      onMetrics(null);
     },
     isAttached: () => attached,
   };

@@ -4679,6 +4679,10 @@ body.is-resizing-terminal .panel-resizer {
   .terminal-panel[data-display="fullscreen"] {
     position: fixed;
     inset: 0;
+    /* When iOS pans the visual viewport with the keyboard open, offsetTop
+       goes nonzero — the panel must follow it, not stay pinned to 0, or it
+       extends below the visible region by exactly that offset. */
+    top: var(--terminal-visual-top, 0px);
     height: var(--terminal-visual-height, 100dvh) !important;
     width: auto !important;
     z-index: 40;
@@ -4724,6 +4728,12 @@ body.is-resizing-terminal .panel-resizer {
   }
 
   .sidebar-pane[data-pane-id="files"][data-overlay="open"] > .pane-body {
+    /* A collapsed pane hides its body (`.sidebar-pane.is-collapsed
+       .pane-body { display: none }`); the promoted overlay must always show
+       the tree, so re-assert display here (this selector out-specifies the
+       collapsed rule). Collapse state itself is untouched — dismissing the
+       overlay restores the stacked layout exactly as it was. */
+    display: flex;
     height: auto;
     max-height: none;
     flex: 1 1 auto;

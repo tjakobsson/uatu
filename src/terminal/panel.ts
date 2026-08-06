@@ -383,17 +383,20 @@ export function setupTerminalPanel(
     return resolveEffectiveDisplayMode(state.displayMode, phoneClassNow());
   }
 
-  // Visible-viewport sizing: while phone-fullscreen the panel height tracks
-  // window.visualViewport so the iOS software keyboard never covers the
-  // prompt line. The CSS fallback (100dvh) applies whenever the override
-  // custom property is absent.
+  // Visible-viewport sizing: while phone-fullscreen the panel tracks
+  // window.visualViewport — height (keyboard show/hide) AND offsetTop
+  // (viewport pans while the keyboard is up) — so the iOS software keyboard
+  // never covers the prompt line. The CSS fallbacks (100dvh, top: 0) apply
+  // whenever the override custom properties are absent.
   const viewportSizer = createVisualViewportSizer({
     viewport: window.visualViewport ?? null,
-    onHeight(height) {
-      if (height === null) {
+    onMetrics(metrics) {
+      if (metrics === null) {
         panel!.style.removeProperty("--terminal-visual-height");
+        panel!.style.removeProperty("--terminal-visual-top");
       } else {
-        panel!.style.setProperty("--terminal-visual-height", `${Math.round(height)}px`);
+        panel!.style.setProperty("--terminal-visual-height", `${Math.round(metrics.height)}px`);
+        panel!.style.setProperty("--terminal-visual-top", `${Math.round(metrics.offsetTop)}px`);
       }
       requestAnimationFrame(() => fitAll());
     },

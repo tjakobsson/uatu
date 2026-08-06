@@ -7,6 +7,24 @@
 // Pure function + carry accumulator so sub-cell finger movement between
 // touchmove events is never lost and the translation is fully unit-testable.
 
+// A gesture only becomes a scroll once it moves far enough to have a clear
+// orientation. Before the threshold it is "pending" (leave the event alone);
+// a horizontal-dominant move is "ignore" for the rest of the gesture, so
+// selection-handle drags and horizontal swipes keep their native behavior
+// and small jitter never sends arrow spam.
+export type SwipeGestureMode = "pending" | "scroll" | "ignore";
+
+export const SWIPE_GESTURE_THRESHOLD_PX = 8;
+
+export function classifySwipeGesture(
+  totalDeltaX: number,
+  totalDeltaY: number,
+  threshold: number = SWIPE_GESTURE_THRESHOLD_PX,
+): SwipeGestureMode {
+  if (Math.hypot(totalDeltaX, totalDeltaY) < threshold) return "pending";
+  return Math.abs(totalDeltaY) > Math.abs(totalDeltaX) ? "scroll" : "ignore";
+}
+
 // Matches wheel semantics: finger moving UP (negative deltaY) pulls content
 // up — the same direction wheel-down scrolls — so it emits arrow-DOWN.
 export type SwipeTranslation = {

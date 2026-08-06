@@ -14,7 +14,7 @@ import {
   type Osc52Notice,
 } from "./clipboard";
 import type { TerminalClipboardPolicy } from "../shared/types";
-import { swipeToArrowSequences } from "./touch-scroll";
+import { classifySwipeGesture, swipeToArrowSequences, type SwipeGestureMode } from "./touch-scroll";
 
 const TERMINAL_TOKEN_KEY = "uatu:terminal-token";
 
@@ -529,16 +529,23 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
       touchScrollAbort?.abort();
       touchScrollAbort = new AbortController();
       const { signal } = touchScrollAbort;
+      let touchStartX: number | null = null;
+      let touchStartY: number | null = null;
       let lastTouchY: number | null = null;
+      let gestureMode: SwipeGestureMode = "pending";
       let swipeCarry = 0;
       options.container.addEventListener(
         "touchstart",
         event => {
           if (event.touches.length !== 1) {
-            lastTouchY = null;
+            touchStartX = touchStartY = lastTouchY = null;
+            gestureMode = "ignore";
             return;
           }
-          lastTouchY = event.touches[0]!.clientY;
+          touchStartX = event.touches[0]!.clientX;
+          touchStartY = event.touches[0]!.clientY;
+          lastTouchY = touchStartY;
+          gestureMode = "pending";
           swipeCarry = 0;
         },
         { signal, passive: true },
@@ -546,9 +553,31 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
       options.container.addEventListener(
         "touchmove",
         event => {
-          if (!term || lastTouchY === null || event.touches.length !== 1) return;
+          if (!term || lastTouchY === null || touchStartX === null || touchStartY === null) return;
+          if (event.touches.length !== 1) return;
           if (term.buffer.active.type !== "alternate") return;
-          const currentY = event.touches[0]!.clientY;
+          // A drag on a live text selection is the user adjusting selection
+          // handles — never hijack it into scrolling.
+          if (term.hasSelection()) {
+            gestureMode = "ignore";
+            return;
+          }
+          if (gestureMode === "ignore") return;
+          const touch = event.touches[0]!;
+          if (gestureMode === "pending") {
+            gestureMode = classifySwipeGesture(
+              touch.clientX - touchStartX,
+              touch.clientY - touchStartY,
+            );
+            // Until the gesture commits to vertical, leave the event alone
+            // (and drop the pre-threshold travel — starting the scroll from
+            // here avoids a jump when the gesture resolves).
+            if (gestureMode !== "scroll") {
+              lastTouchY = touch.clientY;
+              return;
+            }
+          }
+          const currentY = touch.clientY;
           const deltaY = currentY - lastTouchY;
           lastTouchY = currentY;
           const screen = term.element?.querySelector<HTMLElement>(".xterm-screen");
@@ -573,7 +602,8 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
       options.container.addEventListener(
         "touchend",
         () => {
-          lastTouchY = null;
+          touchStartX = touchStartY = lastTouchY = null;
+          gestureMode = "pending";
         },
         { signal, passive: true },
       );

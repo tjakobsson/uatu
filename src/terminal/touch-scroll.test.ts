@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { swipeToArrowSequences } from "./touch-scroll";
+import { classifySwipeGesture, swipeToArrowSequences } from "./touch-scroll";
 
 describe("swipeToArrowSequences", () => {
   test("finger up by one cell emits one arrow-down (CSI mode)", () => {
@@ -40,5 +40,22 @@ describe("swipeToArrowSequences", () => {
       sequences: "",
       carry: 0,
     });
+  });
+});
+
+describe("classifySwipeGesture", () => {
+  test("stays pending below the movement threshold", () => {
+    expect(classifySwipeGesture(2, 3)).toBe("pending");
+    expect(classifySwipeGesture(0, -7)).toBe("pending");
+  });
+
+  test("commits to scroll when vertical travel dominates", () => {
+    expect(classifySwipeGesture(1, -12)).toBe("scroll");
+    expect(classifySwipeGesture(-4, 20)).toBe("scroll");
+  });
+
+  test("ignores horizontal-dominant and diagonal-equal gestures", () => {
+    expect(classifySwipeGesture(15, 3)).toBe("ignore");
+    expect(classifySwipeGesture(-9, -9)).toBe("ignore");
   });
 });

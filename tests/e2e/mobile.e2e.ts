@@ -181,6 +181,21 @@ test.describe("phone file navigation", () => {
     await expect(page.locator("#preview-path")).toHaveText("diagram.md");
   });
 
+  test("browsing from a collapsed Files pane still shows the tree", async ({ page }) => {
+    const pane = page.locator('[data-pane-id="files"]');
+    await pane.getByRole("button", { name: "Collapse Files" }).click();
+    await expect(pane).toHaveClass(/is-collapsed/);
+
+    await page.locator("#files-browse-open").click();
+    await expect(pane).toHaveAttribute("data-overlay", "open");
+    await expect(treeRow(page, "README.md")).toBeVisible();
+
+    // Dismissing restores the collapsed stacked state untouched.
+    await page.locator("#files-browse-close").click();
+    await expect(pane).not.toHaveAttribute("data-overlay", "open");
+    await expect(pane).toHaveClass(/is-collapsed/);
+  });
+
   test("closing without picking restores the stacked layout unchanged", async ({ page }) => {
     const pane = page.locator('[data-pane-id="files"]');
     await page.locator("#files-browse-open").click();
