@@ -1146,8 +1146,13 @@ body.is-resizing-terminal .panel-resizer {
 }
 
 /* Minimized: only the header stays visible. PTYs remain attached so output
-   accumulates in xterm scrollback while collapsed. */
-.terminal-panel[data-display="minimized"] .terminal-panes {
+   accumulates in xterm scrollback while collapsed. The touch keybar and the
+   find slot collapse too — a live keybar wired to an invisible PTY (Esc,
+   ^C, paste with no visible effect) is exactly what "header only" forbids.
+   This selector out-specifies the coarse-pointer keybar reveal. */
+.terminal-panel[data-display="minimized"] .terminal-panes,
+.terminal-panel[data-display="minimized"] .terminal-keybar,
+.terminal-panel[data-display="minimized"] .find-slot {
   display: none;
 }
 
@@ -4633,8 +4638,11 @@ body.is-resizing-terminal .panel-resizer {
 /* Preview text-size scale. github-markdown-css pins .markdown-body to an
    absolute 16px, so the scale must land on that base; everything inside is
    em-derived and reflows with it. Set via --preview-text-scale on the
-   #preview element (preview/text-size.ts). */
-.preview.markdown-body {
+   #preview element (preview/text-size.ts). Split layouts nest their own
+   .preview-pane.markdown-body elements which re-pin 16px, so the scale must
+   land on those too (the custom property inherits from #preview). */
+.preview.markdown-body,
+.preview .preview-pane.markdown-body {
   font-size: calc(16px * var(--preview-text-scale, 1));
 }
 
@@ -4744,6 +4752,14 @@ body.is-resizing-terminal .panel-resizer {
   }
 
   .sidebar-pane[data-pane-id="files"][data-overlay="open"] .files-browse-open {
+    display: none;
+  }
+
+  /* While promoted, the pane-level collapse/hide actions disappear — the
+     overlay has its own close affordance, and tapping Hide here would set
+     `hidden` while the overlay CSS keeps forcing display, an apparent
+     no-op that later swallows the pane. */
+  .sidebar-pane[data-pane-id="files"][data-overlay="open"] .pane-action {
     display: none;
   }
 

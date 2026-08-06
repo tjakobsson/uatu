@@ -103,6 +103,9 @@ test.describe("phone terminal", () => {
     await page.locator("#terminal-fullscreen").click();
     const panel = page.locator("#terminal-panel");
     await expect(panel).toHaveAttribute("data-display", "minimized");
+    // Header-only means header only: the keybar must not stay live against
+    // an invisible PTY.
+    await expect(page.locator("#terminal-keybar")).toBeHidden();
     // PTY stays attached: restoring shows the same pane, no auth form.
     await page.locator("#terminal-minimize").click();
     await expect(panel).toHaveAttribute("data-display", "fullscreen");
@@ -164,6 +167,11 @@ test.describe("phone file navigation", () => {
     const box = await pane.boundingBox();
     expect(box?.width ?? 0).toBeGreaterThanOrEqual(389);
     expect(box?.height ?? 0).toBeGreaterThanOrEqual(800);
+
+    // The pane-level collapse/hide actions vanish while promoted — the
+    // overlay's own close button is the only dismissal chrome.
+    await expect(pane.getByRole("button", { name: "Hide Files" })).toBeHidden();
+    await expect(pane.getByRole("button", { name: "Collapse Files" })).toBeHidden();
 
     // Directory expand keeps the browser open.
     await treeRow(page, "guides/").click();
@@ -244,6 +252,15 @@ test.describe("phone preview chrome", () => {
     await page.reload();
     await waitForPreviewToSettle(page);
     expect(await sizeOf()).toBeGreaterThan(initial + 2);
+
+    // Split layouts nest their own .markdown-body panes that re-pin 16px —
+    // the scale must reach them too.
+    await page.locator(".uatu-layout-toolbar [data-layout-value='split-h']").click();
+    const paneSize = await page
+      .locator(".preview-pane-rendered")
+      .evaluate(el => Number.parseFloat(getComputedStyle(el).fontSize));
+    expect(paneSize).toBeGreaterThan(initial + 2);
+    await page.locator(".uatu-layout-toolbar [data-layout-value='single']").click();
 
     // Ride to the ceiling: the control disables at the bound.
     for (let i = 0; i < 6; i += 1) {
