@@ -270,6 +270,10 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
   let takeoverArmed = options.takeover === true;
   // Tears down the alternate-screen touch-scroll listeners with the mount.
   let touchScrollAbort: AbortController | null = null;
+  // Connect-scoped fit-and-publish (it closes over that connection's
+  // lastCols/lastRows and socket); the font-size setter calls it so a grid
+  // change without a container resize still reaches the PTY.
+  let syncPtySize: (() => void) | null = null;
 
   function attach(): void {
     if (attached) return;
@@ -609,6 +613,28 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
       );
     }
 
+    // Refit xterm and, when the grid actually changed, publish the new
+    // cols/rows to the server so the PTY tracks the client. Shared by the
+    // container ResizeObserver below AND the font-size setter — a font
+    // change alters the grid without touching the container, so the
+    // observer alone would leave the PTY rendering for the old dimensions.
+    syncPtySize = () => {
+      if (!term || !fit || !openDone) return;
+      try {
+        fit.fit();
+      } catch {
+        // FitAddon throws if the terminal is hidden (zero rect); benign.
+        return;
+      }
+      if (term.cols !== lastCols || term.rows !== lastRows) {
+        lastCols = term.cols;
+        lastRows = term.rows;
+        if (protocolReady && socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+        }
+      }
+    };
+
     // Re-fit and notify the server whenever the panel height changes.
     // This SAME observer also drives the initial xterm open: the first
     // time the container has a non-zero contentRect, openXtermNow() runs
@@ -628,19 +654,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
         }
         return;
       }
-      try {
-        fit.fit();
-      } catch {
-        // FitAddon throws if the terminal is hidden (zero rect); benign.
-        return;
-      }
-      if (term.cols !== lastCols || term.rows !== lastRows) {
-        lastCols = term.cols;
-        lastRows = term.rows;
-        if (protocolReady && socket && socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
-        }
-      }
+      syncPtySize?.();
     });
     resizeObserver.observe(options.container);
 
@@ -803,6 +817,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     detachInitiated = true;
     touchScrollAbort?.abort();
     touchScrollAbort = null;
+    syncPtySize = null;
     try {
       resizeObserver?.disconnect();
     } catch {
@@ -1000,7 +1015,14 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     setFontSize(px: number) {
       if (!term) return;
       term.options.fontSize = px;
-      fitNow();
+      // The container hasn't changed size, so the ResizeObserver will not
+      // fire — fit AND publish the new grid to the PTY explicitly, or
+      // shells and TUIs keep rendering for the old cols/rows.
+      if (syncPtySize) {
+        syncPtySize();
+      } else {
+        fitNow();
+      }
     },
     sendInput(data: string) {
       if (!protocolReady || !socket || socket.readyState !== WebSocket.OPEN) return;
