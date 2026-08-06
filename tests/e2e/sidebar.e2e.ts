@@ -113,3 +113,31 @@ test("Files-pane header title does not visually overlap the file count", async (
   expect(countRectMin).not.toBeNull();
   expect(titleRectMin!.x + titleRectMin!.width + 4).toBeLessThanOrEqual(countRectMin!.x);
 });
+
+test("collapsed rail exposes a Follow toggle driving the same state as the chip", async ({ page }) => {
+  await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
+
+  await page.locator("#sidebar-collapse").click();
+  const railFollow = page.locator("#rail-follow-toggle");
+  await expect(railFollow).toBeVisible();
+  await expect(railFollow).toHaveAttribute("aria-pressed", "false");
+
+  await railFollow.click();
+  await expect(railFollow).toHaveAttribute("aria-pressed", "true");
+
+  // Expanding shows the chip agreeing with the value set from the rail;
+  // collapsing again keeps the rail in sync.
+  await page.locator("#sidebar-expand").click();
+  await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "true");
+  await page.locator("#sidebar-collapse").click();
+  await expect(railFollow).toHaveAttribute("aria-pressed", "true");
+  await page.locator("#sidebar-expand").click();
+});
+
+test("desktop never renders the phone browse affordance or size steppers", async ({ page }) => {
+  await expect(page.locator("#files-browse-open")).toBeHidden();
+  await expect(page.locator("#files-browse-close")).toBeHidden();
+  await expect(page.locator("#preview-text-increase")).toBeHidden();
+  await expect(page.locator("#preview-text-decrease")).toBeHidden();
+  await expect(page.locator('[data-pane-id="files"]')).not.toHaveAttribute("data-overlay", "open");
+});

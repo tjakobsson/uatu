@@ -14,6 +14,7 @@ import {
   type Osc52Notice,
 } from "./clipboard";
 import type { TerminalClipboardPolicy } from "../shared/types";
+import { swipeToArrowSequences } from "./touch-scroll";
 
 const TERMINAL_TOKEN_KEY = "uatu:terminal-token";
 
@@ -160,6 +161,9 @@ export type TerminalPanelHandle = {
   fit(): void;
   // Move keyboard focus into xterm. No-op when not attached.
   focus(): void;
+  // Live font-size change (touch stepper). Applies to the running xterm and
+  // refits; the PTY connection is untouched. No-op when not attached.
+  setFontSize(px: number): void;
   // Write raw bytes down the PTY exactly as typed input would travel —
   // the touch keybar's path for control sequences (^C, Esc, arrows) that
   // software keyboards cannot produce. No-op when not connected.
@@ -222,6 +226,10 @@ export type MountTerminalOptions = {
   // session held by another window). The mount also re-arms takeover itself
   // when the user activates "Take back" on a parked pane.
   takeover?: boolean;
+  // Applied to every typed-input chunk before it is sent to the PTY — the
+  // sticky-Ctrl composition hook. MUST be an identity function when its
+  // latch is unarmed; it sits on the path every keystroke travels.
+  transformInput?: (data: string) => string;
 };
 
 // Mirror of the server's CLOSE_CODE_USER_TERMINATE (terminal/server.ts).
@@ -260,6 +268,8 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
   // action. Never reset — takeover of a session this mount already owns
   // degrades to a plain reattach, so over-claiming is harmless.
   let takeoverArmed = options.takeover === true;
+  // Tears down the alternate-screen touch-scroll listeners with the mount.
+  let touchScrollAbort: AbortController | null = null;
 
   function attach(): void {
     if (attached) return;
@@ -506,8 +516,68 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     const encoder = new TextEncoder();
     term.onData(data => {
       if (!protocolReady || !socket || socket.readyState !== WebSocket.OPEN) return;
-      socket.send(encoder.encode(data));
+      const output = options.transformInput ? options.transformInput(data) : data;
+      socket.send(encoder.encode(output));
     });
+
+    // Alternate-screen touch scrolling (coarse pointers only): TUIs run on
+    // the alternate buffer, which has no scrollback for xterm's native touch
+    // path to move — swipes hit nothing. Translate vertical swipe distance
+    // into arrow-key sequences (touch-scroll.ts), leaving normal-buffer
+    // swipes to xterm's own viewport scrolling.
+    if (typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches) {
+      touchScrollAbort?.abort();
+      touchScrollAbort = new AbortController();
+      const { signal } = touchScrollAbort;
+      let lastTouchY: number | null = null;
+      let swipeCarry = 0;
+      options.container.addEventListener(
+        "touchstart",
+        event => {
+          if (event.touches.length !== 1) {
+            lastTouchY = null;
+            return;
+          }
+          lastTouchY = event.touches[0]!.clientY;
+          swipeCarry = 0;
+        },
+        { signal, passive: true },
+      );
+      options.container.addEventListener(
+        "touchmove",
+        event => {
+          if (!term || lastTouchY === null || event.touches.length !== 1) return;
+          if (term.buffer.active.type !== "alternate") return;
+          const currentY = event.touches[0]!.clientY;
+          const deltaY = currentY - lastTouchY;
+          lastTouchY = currentY;
+          const screen = term.element?.querySelector<HTMLElement>(".xterm-screen");
+          const cellHeight =
+            (screen?.clientHeight ?? options.container.clientHeight) / Math.max(1, term.rows);
+          const translated = swipeToArrowSequences({
+            deltaY,
+            cellHeight,
+            applicationCursor: term.modes.applicationCursorKeysMode,
+            carry: swipeCarry,
+          });
+          swipeCarry = translated.carry;
+          if (translated.sequences && protocolReady && socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(encoder.encode(translated.sequences));
+          }
+          // The swipe is driving the TUI now — keep the page from
+          // rubber-banding underneath it. Registered passive: false for this.
+          event.preventDefault();
+        },
+        { signal, passive: false },
+      );
+      options.container.addEventListener(
+        "touchend",
+        () => {
+          lastTouchY = null;
+        },
+        { signal, passive: true },
+      );
+    }
 
     // Re-fit and notify the server whenever the panel height changes.
     // This SAME observer also drives the initial xterm open: the first
@@ -701,6 +771,8 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     attached = false;
     delete options.container.dataset.terminalReady;
     detachInitiated = true;
+    touchScrollAbort?.abort();
+    touchScrollAbort = null;
     try {
       resizeObserver?.disconnect();
     } catch {
@@ -895,6 +967,11 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     terminate,
     fit: fitNow,
     focus: focusNow,
+    setFontSize(px: number) {
+      if (!term) return;
+      term.options.fontSize = px;
+      fitNow();
+    },
     sendInput(data: string) {
       if (!protocolReady || !socket || socket.readyState !== WebSocket.OPEN) return;
       socket.send(new TextEncoder().encode(data));

@@ -1,0 +1,37 @@
+// Alternate-screen touch scrolling. xterm's viewport touch-scrolls the
+// normal buffer's scrollback natively, but full-screen TUIs run on the
+// alternate buffer — no scrollback, so swipes hit nothing. This is the
+// touch analogue of wheel alternate-scroll (DECSET 1007): vertical swipe
+// distance, quantized by cell height, becomes repeated arrow-key sequences.
+//
+// Pure function + carry accumulator so sub-cell finger movement between
+// touchmove events is never lost and the translation is fully unit-testable.
+
+// Matches wheel semantics: finger moving UP (negative deltaY) pulls content
+// up — the same direction wheel-down scrolls — so it emits arrow-DOWN.
+export type SwipeTranslation = {
+  sequences: string;
+  // Remaining sub-cell distance to feed into the next call.
+  carry: number;
+};
+
+export function swipeToArrowSequences(options: {
+  // Finger movement since the last event, in CSS pixels (current - previous).
+  deltaY: number;
+  cellHeight: number;
+  // DECCKM: application cursor keys use SS3 (\x1bO_), normal mode CSI (\x1b[_).
+  applicationCursor: boolean;
+  carry: number;
+}): SwipeTranslation {
+  const { deltaY, cellHeight, applicationCursor, carry } = options;
+  if (!(cellHeight > 0)) return { sequences: "", carry: 0 };
+  const total = carry + deltaY;
+  const cells = Math.trunc(total / cellHeight);
+  const nextCarry = total - cells * cellHeight;
+  if (cells === 0) return { sequences: "", carry: nextCarry };
+  const prefix = applicationCursor ? "\x1bO" : "\x1b[";
+  // Finger down (positive delta) = wheel up = arrow up (A); finger up = B.
+  const letter = cells > 0 ? "A" : "B";
+  const sequence = prefix + letter;
+  return { sequences: sequence.repeat(Math.abs(cells)), carry: nextCarry };
+}

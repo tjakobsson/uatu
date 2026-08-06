@@ -2,6 +2,7 @@
 // menu. The pure data shapes (`PaneId`, `PaneState`, `ALL_PANE_DEFS`) live
 // in `shell/state.ts`; this module is the DOM-interaction half.
 
+import { paneParticipatesInStack } from "./pane-stack";
 import { renderSidebar } from "./shell";
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
 import {
@@ -29,6 +30,10 @@ const panelsMenuElement: HTMLDivElement = panelsMenuElementMaybe;
 // pane layout through this instead of assigning directly.
 export function setPaneState(next: PaneState): void {
   appState.panes = next;
+}
+
+function isPromotedPane(element: HTMLElement): boolean {
+  return element.dataset.overlay === "open";
 }
 
 export function initSidebarPanes() {
@@ -157,6 +162,10 @@ export function syncPaneDom() {
     const state = appState.panes[pane.id];
     element.hidden = !state.visible;
     element.classList.toggle("is-collapsed", state.collapsed);
+    if (isPromotedPane(element)) {
+      element.style.removeProperty("flex");
+      continue;
+    }
     if (state.height && !state.collapsed) {
       element.style.flex = `${pane.id === growPaneId ? 1 : 0} 1 ${state.height}px`;
     } else {
@@ -207,7 +216,14 @@ function normalizePaneHeightsToStack() {
       state: appState.panes[pane.id],
     }))
     .filter((pane): pane is { id: PaneId; element: HTMLElement; state: PaneState[PaneId] } =>
-      Boolean(pane.element && pane.state.visible && !pane.state.collapsed),
+      Boolean(
+        pane.element
+        && paneParticipatesInStack({
+          visible: pane.state.visible,
+          collapsed: pane.state.collapsed,
+          promoted: isPromotedPane(pane.element),
+        }),
+      ),
     );
 
   if (visibleExpanded.length === 0) {

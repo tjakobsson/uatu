@@ -21,6 +21,16 @@ import {
   writeTerminalHeightPreference,
   writeTerminalPanelState,
   writeTerminalVisiblePreference,
+  PHONE_CLASS_VIEWPORT_MAX,
+  TERMINAL_FONT_SIZE_KEY,
+  TERMINAL_FONT_SIZE_MAX,
+  TERMINAL_FONT_SIZE_MIN,
+  clampTerminalFontSize,
+  isPhoneClassViewport,
+  readTerminalFontSizeOverride,
+  resolveEffectiveDisplayMode,
+  resolveTerminalFontSize,
+  writeTerminalFontSizeOverride,
   type StorageLike,
 } from "./pane-state";
 
@@ -333,5 +343,70 @@ describe("own pane records (sessionStorage)", () => {
   it("boot resolution with neither store yields no panes", () => {
     const resolved = resolveBootPaneRecords(storage, defaultTerminalPanelState());
     expect(resolved).toEqual({ panes: [] });
+  });
+});
+
+describe("isPhoneClassViewport", () => {
+
+  it("requires BOTH a coarse pointer and a narrow viewport", () => {
+    expect(isPhoneClassViewport(true, 390)).toBe(true);
+    expect(isPhoneClassViewport(true, PHONE_CLASS_VIEWPORT_MAX)).toBe(true);
+    // iPad landscape: coarse but wide.
+    expect(isPhoneClassViewport(true, 1180)).toBe(false);
+    // Narrow desktop window: fine pointer.
+    expect(isPhoneClassViewport(false, 390)).toBe(false);
+  });
+});
+
+describe("resolveEffectiveDisplayMode", () => {
+
+  it("promotes a stored normal to fullscreen on phone-class viewports only", () => {
+    expect(resolveEffectiveDisplayMode("normal", true)).toBe("fullscreen");
+    expect(resolveEffectiveDisplayMode("normal", false)).toBe("normal");
+  });
+
+  it("passes minimized and fullscreen through untouched", () => {
+    expect(resolveEffectiveDisplayMode("minimized", true)).toBe("minimized");
+    expect(resolveEffectiveDisplayMode("fullscreen", true)).toBe("fullscreen");
+    expect(resolveEffectiveDisplayMode("minimized", false)).toBe("minimized");
+    expect(resolveEffectiveDisplayMode("fullscreen", false)).toBe("fullscreen");
+  });
+});
+
+describe("terminal font-size override", () => {
+
+  it("clamps to the config loader's bounds", () => {
+    expect(clampTerminalFontSize(2)).toBe(TERMINAL_FONT_SIZE_MIN);
+    expect(clampTerminalFontSize(99)).toBe(TERMINAL_FONT_SIZE_MAX);
+    expect(clampTerminalFontSize(14.6)).toBe(15);
+  });
+
+  it("round-trips through storage and clears on null", () => {
+    const storage = createMemoryStorage();
+    writeTerminalFontSizeOverride(storage, 16);
+    expect(readTerminalFontSizeOverride(storage)).toBe(16);
+    writeTerminalFontSizeOverride(storage, null);
+    expect(readTerminalFontSizeOverride(storage)).toBe(null);
+    expect(storage.dump()[TERMINAL_FONT_SIZE_KEY]).toBeUndefined();
+  });
+
+  it("rejects garbage and out-of-range stored values", () => {
+    const storage = createMemoryStorage();
+    storage.setItem(TERMINAL_FONT_SIZE_KEY, "enormous");
+    expect(readTerminalFontSizeOverride(storage)).toBe(null);
+    storage.setItem(TERMINAL_FONT_SIZE_KEY, "200");
+    expect(readTerminalFontSizeOverride(storage)).toBe(null);
+  });
+
+  it("resolves override over config over the built-in default", () => {
+    expect(resolveTerminalFontSize(16, 12)).toBe(16);
+    expect(resolveTerminalFontSize(null, 12)).toBe(12);
+    expect(resolveTerminalFontSize(null, undefined)).toBe(13);
+  });
+
+  it("swallows storage failures", () => {
+    const failing = createFailingStorage();
+    expect(readTerminalFontSizeOverride(failing)).toBe(null);
+    expect(() => writeTerminalFontSizeOverride(failing, 15)).not.toThrow();
   });
 });

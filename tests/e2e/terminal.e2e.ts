@@ -546,3 +546,32 @@ test.describe("terminal split", () => {
     expect(afterRight[0]!).toBeGreaterThan(beforeRight[0]! + 30);
   });
 });
+
+test.describe("collapsed-rail terminal toggle (mobile-experience change)", () => {
+  test("the rail toggles the terminal without expanding the sidebar; desktop keeps geometry controls", async ({ page }) => {
+    // Desktop sanity first: geometry controls render on fine pointers.
+    await page.locator("#terminal-toggle").click();
+    await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({ timeout: 5000 });
+    await expect(page.locator("#terminal-split")).toBeVisible();
+    await expect(page.locator("#terminal-dock-toggle")).toBeVisible();
+    await page.keyboard.press("Control+`");
+    await expect(page.locator("#terminal-panel")).toBeHidden();
+
+    // Collapse the sidebar: the rail exposes a Terminal toggle that drives
+    // the same panel state as the sidebar row's control.
+    await page.locator("#sidebar-collapse").click();
+    const railToggle = page.locator("#rail-terminal-toggle");
+    await expect(railToggle).toBeVisible();
+    await expect(railToggle).toHaveAttribute("aria-pressed", "false");
+
+    await railToggle.click();
+    await expect(page.locator("#terminal-panel")).toBeVisible();
+    await expect(railToggle).toHaveAttribute("aria-pressed", "true");
+    // The sidebar stayed collapsed the whole time.
+    await expect(page.locator(".app-shell")).toHaveClass(/is-sidebar-collapsed/);
+
+    // Re-expanding shows the sidebar control agreeing with the rail.
+    await page.locator("#sidebar-expand").click();
+    await expect(page.locator("#terminal-toggle")).toHaveAttribute("aria-pressed", "true");
+  });
+});

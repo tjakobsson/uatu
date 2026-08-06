@@ -29,8 +29,16 @@ if (!followToggleElementMaybe) {
 
 const followToggleElement: HTMLButtonElement = followToggleElementMaybe;
 
+// Collapsed-rail presentation of the same toggle. Chip and rail icon are
+// mutually exclusive (the rail renders only while the sidebar is collapsed),
+// so `followEnabled` keeps a single visible representation at any moment.
+const railFollowToggleElement = document.querySelector<HTMLButtonElement>("#rail-follow-toggle");
+
 export function initFollowToggle(): void {
   followToggleElement.addEventListener("click", () => {
+    applyChipClick();
+  });
+  railFollowToggleElement?.addEventListener("click", () => {
     applyChipClick();
   });
 }
@@ -105,4 +113,9 @@ export function syncFollowToggle(): void {
     : pressed
       ? "Follow the latest changed document"
       : "Click to follow the latest changed document";
+  if (railFollowToggleElement) {
+    railFollowToggleElement.setAttribute("aria-pressed", String(pressed));
+    railFollowToggleElement.disabled = pinned;
+    railFollowToggleElement.title = followToggleElement.title;
+  }
 }
