@@ -6,7 +6,6 @@
 
 import { appUrl } from "../shared/app-url";
 import { escapeHtml } from "../shared/html";
-import { recomputeSelectionInspector } from "../shell/inspector-instance";
 import type { RepositoryReviewSnapshot } from "../shared/types";
 import { clearPreviewType } from "./header";
 import { closeMermaidViewer } from "./mermaid-viewer";
@@ -55,5 +54,4 @@ export function renderCommitMessage(
       <pre>${escapeHtml(commit.message)}</pre>
     </section>
   `;
-  recomputeSelectionInspector();
 }

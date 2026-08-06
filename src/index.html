@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>uatu</title>
     <base id="preview-base" href="/" />
     <meta name="theme-color" content="#0a1c38" />
@@ -232,6 +232,23 @@
                 </div>
               </div>
               <div class="pane-actions">
+                <!-- Phone-class only (CSS-gated): promote the pane to the
+                     full-screen file browser / dismiss it. Same pane DOM,
+                     so tree state is continuous. -->
+                <button
+                  id="files-browse-open"
+                  class="files-browse-open"
+                  type="button"
+                  aria-label="Browse files full screen"
+                  title="Browse files"
+                >Browse</button>
+                <button
+                  id="files-browse-close"
+                  class="files-browse-close"
+                  type="button"
+                  aria-label="Close file browser"
+                  title="Close"
+                >×</button>
                 <button class="pane-action" type="button" data-pane-collapse="files" aria-label="Collapse Files" title="Collapse pane">−</button>
                 <button class="pane-action" type="button" data-pane-hide="files" aria-label="Hide Files" title="Hide pane">×</button>
               </div>
@@ -260,31 +277,6 @@
             <div id="git-log" class="pane-body"></div>
             <div class="pane-resizer" data-pane-resizer="git-log" role="separator" aria-orientation="horizontal" aria-label="Resize Git Log"></div>
           </section>
-          <section class="sidebar-pane" data-pane-id="selection-inspector">
-            <header class="pane-header">
-              <h2>Selection Inspector</h2>
-              <div class="pane-actions">
-                <button class="pane-action" type="button" data-pane-collapse="selection-inspector" aria-label="Collapse Selection Inspector" title="Collapse pane">−</button>
-                <button class="pane-action" type="button" data-pane-hide="selection-inspector" aria-label="Hide Selection Inspector" title="Hide pane">×</button>
-              </div>
-            </header>
-            <div id="selection-inspector" class="pane-body">
-              <p class="pane-empty" data-selection-inspector-empty>No selection</p>
-              <button
-                class="selection-inspector-control"
-                type="button"
-                data-selection-inspector-control
-                data-state="placeholder"
-                hidden
-              ></button>
-              <span
-                class="selection-inspector-status"
-                role="status"
-                aria-live="polite"
-                data-selection-inspector-status
-              ></span>
-            </div>
-          </section>
         </div>
 
         <footer class="sidebar-footer">
@@ -300,24 +292,71 @@
         title="Resize sidebar"
       ></div>
 
-      <button
-        id="sidebar-expand"
-        class="sidebar-rail"
-        type="button"
-        aria-label="Expand sidebar"
-        title="Expand sidebar"
-      >
-        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-          <path
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.6"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            d="M6 3l5 5-5 5"
-          />
-        </svg>
-      </button>
+      <!-- Collapsed-sidebar rail: expand plus Follow / Terminal toggles, so
+           neither capability needs the expanded sidebar or a keyboard
+           shortcut (which touch keyboards cannot produce). The two toggles
+           drive the same state as their expanded-sidebar counterparts. -->
+      <div class="sidebar-rail">
+        <button
+          id="sidebar-expand"
+          class="rail-button"
+          type="button"
+          aria-label="Expand sidebar"
+          title="Expand sidebar"
+        >
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+            <path
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              d="M6 3l5 5-5 5"
+            />
+          </svg>
+        </button>
+        <button
+          id="rail-follow-toggle"
+          class="rail-button"
+          type="button"
+          aria-pressed="false"
+          aria-label="Toggle follow"
+          title="Follow the latest changed document"
+        >
+          <!-- Eye: matches the Follow chip's "watching" metaphor. -->
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+            <path
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.4"
+              stroke-linejoin="round"
+              d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8s-2.4 4.5-6.5 4.5S1.5 8 1.5 8Z"
+            />
+            <circle cx="8" cy="8" r="2" fill="currentColor" />
+          </svg>
+        </button>
+        <button
+          id="rail-terminal-toggle"
+          class="rail-button"
+          type="button"
+          aria-pressed="false"
+          aria-label="Toggle terminal"
+          title="Terminal"
+          hidden
+        >
+          <!-- Prompt glyph: matches the sidebar Terminal row's affordance. -->
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+            <path
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              d="M3 4.5 6.5 8 3 11.5M8 11.5h5"
+            />
+          </svg>
+        </button>
+      </div>
 
       <div class="main-stack">
       <!-- tabindex="-1" makes the scroll container *able* to hold focus so
@@ -439,6 +478,23 @@
                   />
                 </svg>
               </button>
+              <!-- Preview text-size stepper. Coarse-pointer devices only
+                   (CSS-gated): touch browsers have no Cmd+/− and pinch zoom
+                   scales the whole layout instead of reflowing the text. -->
+              <button
+                id="preview-text-decrease"
+                class="action-icon text-size-action"
+                type="button"
+                title="Smaller text"
+                aria-label="Decrease preview text size"
+              >A−</button>
+              <button
+                id="preview-text-increase"
+                class="action-icon text-size-action"
+                type="button"
+                title="Larger text"
+                aria-label="Increase preview text size"
+              >A+</button>
             </div>
           </div>
         </header>
@@ -583,6 +639,23 @@
                   <rect x="3" y="9" width="10" height="3" fill="currentColor"/>
                 </svg>
               </button>
+              <!-- Runtime font-size stepper. Coarse-pointer devices only
+                   (CSS-gated): touch browsers have no zoom shortcuts and no
+                   way to edit .uatu.json mid-session. -->
+              <button
+                id="terminal-font-decrease"
+                class="terminal-panel-button terminal-font-button"
+                type="button"
+                title="Smaller terminal text"
+                aria-label="Decrease terminal font size"
+              >A−</button>
+              <button
+                id="terminal-font-increase"
+                class="terminal-panel-button terminal-font-button"
+                type="button"
+                title="Larger terminal text"
+                aria-label="Increase terminal font size"
+              >A+</button>
               <button
                 id="terminal-minimize"
                 class="terminal-panel-button"

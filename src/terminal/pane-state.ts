@@ -25,6 +25,18 @@ const TERMINAL_WIDTH_MAX_FRACTION = 0.6;
 // Below this viewport width, right-dock collapses back to bottom-dock so the
 // preview isn't squeezed unusable. Preference is preserved for restoration.
 export const TERMINAL_RIGHT_DOCK_VIEWPORT_MIN = 720;
+// Phone-class = coarse pointer AND narrower than the app shell's stacked-
+// layout breakpoint (styles.css @media (max-width: 900px)). iPads in
+// landscape and narrow desktop windows are deliberately NOT phone-class.
+export const PHONE_CLASS_VIEWPORT_MAX = 900;
+// Mirror of TERMINAL_FONT_SIZE_MIN/MAX in terminal/config.ts. Defined as
+// literals on each side — importing the server-side loader would drag
+// node:fs into the browser bundle (same convention as the WS close codes).
+export const TERMINAL_FONT_SIZE_MIN = 8;
+export const TERMINAL_FONT_SIZE_MAX = 32;
+// Per-device runtime font-size override (touch stepper). Wins over the
+// `.uatu.json terminal.fontSize` default; absent = follow config.
+export const TERMINAL_FONT_SIZE_KEY = "uatu:terminal-font-size";
 // Soft cap on splits. The drag-resizer's per-pane minimum (80px) is the real
 // limit on a given viewport; this number is a sanity bound that prevents
 // runaway pane spawning and keeps the persisted-state shape small.
@@ -125,6 +137,67 @@ export function clampTerminalHeight(value: number, viewportHeight: number): numb
 export function clampTerminalWidth(value: number, viewportWidth: number): number {
   const max = Math.max(TERMINAL_WIDTH_MIN, Math.floor(viewportWidth * TERMINAL_WIDTH_MAX_FRACTION));
   return Math.max(TERMINAL_WIDTH_MIN, Math.min(max, Math.round(value)));
+}
+
+// Phone-class predicate over raw inputs so tests need no matchMedia. The
+// caller (panel.ts) feeds it live `(pointer: coarse)` + viewport width.
+export function isPhoneClassViewport(coarsePointer: boolean, viewportWidth: number): boolean {
+  return coarsePointer && viewportWidth <= PHONE_CLASS_VIEWPORT_MAX;
+}
+
+// Effective display mode: on phone-class viewports a stored `normal` is
+// promoted to fullscreen — the 240px docked strip is unusable on a phone —
+// WITHOUT overwriting the stored preference, mirroring the right-dock →
+// bottom-dock fallback. `minimized` and `fullscreen` pass through.
+export function resolveEffectiveDisplayMode(
+  stored: TerminalDisplayMode,
+  phoneClass: boolean,
+): TerminalDisplayMode {
+  if (phoneClass && stored === "normal") return "fullscreen";
+  return stored;
+}
+
+// Clamp a runtime font-size candidate to the same bounds the config loader
+// accepts, so the stepper can never produce a size `.uatu.json` would reject.
+export function clampTerminalFontSize(value: number): number {
+  return Math.max(TERMINAL_FONT_SIZE_MIN, Math.min(TERMINAL_FONT_SIZE_MAX, Math.round(value)));
+}
+
+export function readTerminalFontSizeOverride(storage: StorageLike): number | null {
+  try {
+    const raw = storage.getItem(TERMINAL_FONT_SIZE_KEY);
+    if (!raw) return null;
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed)) return null;
+    if (parsed < TERMINAL_FONT_SIZE_MIN || parsed > TERMINAL_FONT_SIZE_MAX) return null;
+    return Math.round(parsed);
+  } catch {
+    return null;
+  }
+}
+
+// Persist the stepper's value; stepping back to the configured default clears
+// the override (pass null) so a later `.uatu.json` change shows through.
+export function writeTerminalFontSizeOverride(storage: StorageLike, value: number | null): void {
+  try {
+    if (value === null) {
+      storage.removeItem(TERMINAL_FONT_SIZE_KEY);
+    } else {
+      storage.setItem(TERMINAL_FONT_SIZE_KEY, String(clampTerminalFontSize(value)));
+    }
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+// Precedence: per-device override → `.uatu.json` config → built-in 13.
+export function resolveTerminalFontSize(
+  override: number | null,
+  configSize: number | undefined,
+): number {
+  if (override !== null) return clampTerminalFontSize(override);
+  if (configSize !== undefined) return clampTerminalFontSize(configSize);
+  return 13;
 }
 
 export function defaultTerminalPanelState(): TerminalPanelState {

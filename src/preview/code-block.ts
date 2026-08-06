@@ -1,31 +1,15 @@
 // Code-block adornments: line-number gutters and copy buttons for any
-// `<pre><code>` block inside the preview, plus the clipboard / "Copied"
-// confirmation primitives the selection inspector also uses. Extracted from
-// `app.ts` so the rendering-time DOM massaging lives with the rest of the
-// preview pipeline.
+// `<pre><code>` block inside the preview, plus the shared clipboard
+// primitives. Extracted from `app.ts` so the rendering-time DOM massaging
+// lives with the rest of the preview pipeline.
 
 import { splitHighlightedLines } from "./highlight-lines";
-
-const selectionInspectorStatusElementMaybe = document.querySelector<HTMLElement>(
-  "[data-selection-inspector-status]",
-);
-
-if (!selectionInspectorStatusElementMaybe) {
-  throw new Error("uatu UI failed to initialize (preview/code-block)");
-}
-
-// Locally-scoped non-null alias. TypeScript's narrowing from the
-// throw-if-null guard above doesn't survive into function bodies (the
-// hoisted function declarations sit outside the if-block's control-flow
-// scope), so we re-alias to `T` here.
-const selectionInspectorStatusElement: HTMLElement = selectionInspectorStatusElementMaybe;
 
 // Restructure each <pre><code> in the container into one `.uatu-cl` block per
 // source line, carrying its line number in a `data-ln` attribute. The number
 // is rendered via CSS (`.uatu-cl::before { content: attr(data-ln) }`), NOT as
 // a DOM node, so `code.textContent` stays exactly equal to the source — which
-// keeps copy-to-clipboard and the Selection Inspector's offset→line mapping
-// working without changes. Real `\n` text nodes are reinserted between lines
+// keeps copy-to-clipboard working without changes. Real `\n` text nodes are reinserted between lines
 // so that text content is preserved; `<code>` is set to `white-space: normal`
 // in CSS so those separators collapse visually while each `.uatu-cl` keeps
 // `white-space: pre` (or `pre-wrap` when wrapped).
@@ -58,8 +42,8 @@ export function attachLineNumbers(container: HTMLElement) {
       const lineEl = document.createElement("span");
       lineEl.className = "uatu-cl";
       // The line number is drawn from `data-ln` via CSS `::before`, not as a
-      // DOM node, so it stays out of `code.textContent` (copy / Selection
-      // Inspector). Known trade-off vs the old `aria-hidden` gutter span:
+      // DOM node, so it stays out of `code.textContent` (and out of copies).
+      // Known trade-off vs the old `aria-hidden` gutter span:
       // some screen readers announce CSS-generated content, so the number
       // may be read before each line. Accepted for a developer review tool;
       // there is no portable way to `aria-hidden` a pseudo-element's content.
@@ -134,19 +118,6 @@ export function flashCopyButton(button: HTMLButtonElement, label: string, modifi
     button.textContent = "Copy";
     button.classList.remove(modifier);
   }, 1500);
-}
-
-let copyResetTimeoutId: number | null = null;
-
-export function showCopyConfirmation(): void {
-  selectionInspectorStatusElement.textContent = "Copied";
-  if (copyResetTimeoutId !== null) {
-    window.clearTimeout(copyResetTimeoutId);
-  }
-  copyResetTimeoutId = window.setTimeout(() => {
-    selectionInspectorStatusElement.textContent = "";
-    copyResetTimeoutId = null;
-  }, 1000);
 }
 
 export async function copyToClipboard(text: string): Promise<void> {

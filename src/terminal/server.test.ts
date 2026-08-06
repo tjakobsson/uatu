@@ -859,8 +859,29 @@ describe.skipIf(!backendOk)("terminal-server installed TUI reconstruction", () =
         const id = await createSession(local.terminal);
         try {
           const first = await openSocket(local.port, id);
+          // Wait for the TUI to actually enter the alternate screen instead
+          // of sleeping a fixed interval — on loaded CI runners vim can take
+          // well over 750ms to start, which made this assertion sample while
+          // the launch command was still sitting at the shell prompt.
+          const enteredAltScreen = new Promise<void>((resolve, reject) => {
+            const deadline = setTimeout(
+              () => reject(new Error(`${application.name} never entered the alternate screen`)),
+              10_000,
+            );
+            let seen = "";
+            first.addEventListener("message", event => {
+              seen += decode(event.data);
+              if (seen.includes("\x1b[?1049h")) {
+                clearTimeout(deadline);
+                resolve();
+              }
+            });
+          });
           first.send(new TextEncoder().encode(`${application.command}\r\n`));
-          await new Promise(resolve => setTimeout(resolve, 750));
+          await enteredAltScreen;
+          // A short settle so the TUI finishes its first paint and the
+          // reconstruction has a stable frame to rebuild.
+          await new Promise(resolve => setTimeout(resolve, 250));
           first.close();
           await waitForSessionKind(local.terminal, id, "reattach");
 
@@ -873,7 +894,7 @@ describe.skipIf(!backendOk)("terminal-server installed TUI reconstruction", () =
           local.server.stop(true);
         }
       },
-      8000,
+      15_000,
     );
   }
 });

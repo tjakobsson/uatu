@@ -3,7 +3,6 @@
 // Extracted from `app.ts` so the preview/ feature folder owns this thin
 // renderer alongside its sibling `renderImagePreview`.
 
-import { recomputeSelectionInspector } from "../shell/inspector-instance";
 import { closeMermaidViewer } from "./mermaid-viewer";
 import type { DocumentMeta } from "../shared/types";
 import { clearPreviewType, previewPathElement, previewTitleElement } from "./header";
@@ -25,5 +24,4 @@ export function renderBinaryUnavailable(doc: DocumentMeta): void {
   hideViewToggle();
   previewElement.classList.add("empty");
   previewElement.innerHTML = `<p>This file type isn't viewable in uatu.</p>`;
-  recomputeSelectionInspector();
 }

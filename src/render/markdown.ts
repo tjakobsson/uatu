@@ -134,8 +134,8 @@ function highlightSource(source: string, language: string | undefined): Highligh
 // Render an entire file's source as a single `<pre><code>` block. The wrapping
 // `<pre>` carries `class="uatu-source-pre"` to mark it as the *whole-file*
 // source view (as opposed to a fenced code block embedded inside rendered
-// Markdown / AsciiDoc body content). The Selection Inspector pane keys off
-// this class to decide whether a selection has source-aligned line numbers.
+// Markdown / AsciiDoc body content). Consumers like the word-wrap control
+// key off this class to target the whole-file block unambiguously.
 export function renderCodeAsHtml(source: string, language: string | undefined): string {
   if (source.length >= SYNTAX_HIGHLIGHT_BYTES_LIMIT) {
     return `<pre class="uatu-source-pre"><code class="hljs">${escapeHtml(source)}</code></pre>`;

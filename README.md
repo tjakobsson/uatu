@@ -42,7 +42,7 @@ cognitive debt.
 - **Follow switch** for the agent-collab workflow — on = auto-jump to the latest changed file, off = stay on the file you're reading (it still reloads in place when it changes on disk)
 - Side-by-side / stacked split layouts for Source + Rendered
 - Whole-repo browsing with `.uatu.json tree.exclude` and `.gitignore` filtering on top of built-in defaults
-- Sidebar with Change Overview, Files, Git Log, and a Selection Inspector that produces `@path#L<a>-<b>` references — toggle individual panes from the per-pane menu
+- Sidebar with Change Overview, Files, and Git Log — toggle individual panes from the per-pane menu
 - Review burden meter based on git diff size, file spread, and configurable path scoring
 - Git preflight by default (`--force` to bypass for non-git folders); single-file or multi-root scope
 - Embedded terminal panel (real PTY via Bun) toggled with `Ctrl+`` — dark theme, Nerd Font detection, dock to bottom or right, split for two concurrent PTYs

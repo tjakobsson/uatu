@@ -56,7 +56,6 @@ export const ALL_PANE_DEFS = [
   { id: "search", label: "Search" },
   { id: "files", label: "Files" },
   { id: "git-log", label: "Git Log" },
-  { id: "selection-inspector", label: "Selection Inspector" },
 ] as const;
 export type PaneId = (typeof ALL_PANE_DEFS)[number]["id"];
 export type PaneDef = (typeof ALL_PANE_DEFS)[number];
@@ -69,15 +68,24 @@ function defaultPaneState(): PaneState {
     // is empty until you ask it something should not take room from the tree.
     search: { visible: false, collapsed: false, height: 260 },
     files: { visible: true, collapsed: false, height: null },
-    "git-log": { visible: true, collapsed: false, height: 120 },
-    "selection-inspector": { visible: true, collapsed: false, height: 160 },
+    // Hidden by default: the commit log is a sometimes-tool, not a
+    // first-screen need — one toggle away in the panes menu. Stored pane
+    // state always wins, so existing arrangements are untouched.
+    "git-log": { visible: false, collapsed: false, height: 120 },
   };
 }
 
-export function readPaneState(): PaneState {
+// Reads the persisted pane layout, merging stored values over defaults.
+// Stored entries for pane ids that no longer exist (e.g. the retired
+// `selection-inspector`) are ignored: the loop below only ever reads ids
+// from ALL_PANE_DEFS. The storage parameter exists for tests; production
+// callers use the presentation-storage default.
+export function readPaneState(
+  storage: Pick<Storage, "getItem"> | null = safeLocalStorage(),
+): PaneState {
   const fallback = defaultPaneState();
   try {
-    const raw = safeLocalStorage()?.getItem(SIDEBAR_PANES_KEY);
+    const raw = storage?.getItem(SIDEBAR_PANES_KEY);
     if (!raw) {
       return fallback;
     }

@@ -2,6 +2,7 @@
 // selection handler delegates to the `follow-mode` capability (Rule A).
 
 import { applyUserRowClick } from "../shell/follow";
+import { dismissFilesOverlayAfterPick } from "./files-overlay";
 import { TreeView } from "./tree-view";
 
 const treeElementMaybe = document.querySelector<HTMLDivElement>("#tree");
@@ -20,7 +21,13 @@ export function ensureTreeView(): TreeView {
   if (treeView === null) {
     treeView = new TreeView({
       container: treeElement,
-      onSelectDocument: applyUserRowClick,
+      // Real user clicks only (the withProgrammaticUpdate guard suppresses
+      // library-fired callbacks), so the phone file browser dismisses on a
+      // pick but never on follow-driven or file-event tree updates.
+      onSelectDocument: documentId => {
+        dismissFilesOverlayAfterPick();
+        return applyUserRowClick(documentId);
+      },
     });
   }
   return treeView;

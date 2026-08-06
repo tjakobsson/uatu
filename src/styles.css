@@ -251,20 +251,37 @@ body.is-resizing-sidebar {
 .sidebar-rail {
   grid-area: rail;
   display: none;
+  flex-direction: column;
   align-items: center;
-  justify-content: center;
+  gap: 0.4rem;
   width: var(--sidebar-rail-width);
-  border: 0;
   border-right: 1px solid var(--border-soft);
   background: var(--surface);
+  padding: 0.5rem 0;
+}
+
+.rail-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 0.375rem;
+  background: transparent;
   color: var(--text-subtle);
   cursor: pointer;
   padding: 0;
 }
 
-.sidebar-rail:hover {
+.rail-button:hover {
   color: var(--accent);
   background: var(--surface-subtle);
+}
+
+.rail-button[aria-pressed="true"] {
+  color: var(--accent);
+  background: var(--accent-soft);
 }
 
 .app-shell.is-sidebar-collapsed .sidebar-rail {
@@ -1129,8 +1146,13 @@ body.is-resizing-terminal .panel-resizer {
 }
 
 /* Minimized: only the header stays visible. PTYs remain attached so output
-   accumulates in xterm scrollback while collapsed. */
-.terminal-panel[data-display="minimized"] .terminal-panes {
+   accumulates in xterm scrollback while collapsed. The touch keybar and the
+   find slot collapse too — a live keybar wired to an invisible PTY (Esc,
+   ^C, paste with no visible effect) is exactly what "header only" forbids.
+   This selector out-specifies the coarse-pointer keybar reveal. */
+.terminal-panel[data-display="minimized"] .terminal-panes,
+.terminal-panel[data-display="minimized"] .terminal-keybar,
+.terminal-panel[data-display="minimized"] .find-slot {
   display: none;
 }
 
@@ -2384,55 +2406,6 @@ body.is-resizing-terminal .panel-resizer {
   line-height: 1.45;
 }
 
-.selection-inspector-control[hidden] {
-  display: none;
-}
-
-.selection-inspector-control {
-  display: block;
-  width: 100%;
-  margin: 0;
-  padding: 0.45rem 0.6rem;
-  border: 1px solid var(--border-soft);
-  border-radius: 0.3rem;
-  background: light-dark(#fbfcfd, #161b22);
-  color: var(--text-strong);
-  font-family: var(--mono-font-family);
-  font-size: 0.74rem;
-  line-height: 1.4;
-  text-align: left;
-  cursor: pointer;
-  word-break: break-all;
-  transition: background-color 0.12s ease, border-color 0.12s ease;
-}
-
-.selection-inspector-control[data-state="hint"] {
-  font-family: inherit;
-  font-size: 0.78rem;
-  color: var(--text-subtle);
-  word-break: normal;
-}
-
-.selection-inspector-control:hover {
-  background: var(--surface-muted);
-  border-color: var(--accent);
-}
-
-.selection-inspector-control:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
-.selection-inspector-status {
-  display: block;
-  margin-top: 0.35rem;
-  min-height: 0.9rem;
-  color: var(--accent);
-  font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-}
-
 /* Files pane: the library owns its own virtualized scroll viewport, so the */
 /* pane body must give it an explicit (flex-allocated) height rather than */
 /* the default block layout + overflow:auto used by other panes. */
@@ -2450,6 +2423,16 @@ body.is-resizing-terminal .panel-resizer {
   /* without forcing the pane to grow. */
   flex: 1 1 auto;
   min-height: 0;
+}
+
+/* @pierre/trees writes `display: flex` as an INLINE style on its host,
+   which beats both the UA's `[hidden] { display: none }` and any plain
+   author rule. Without this override, a "hidden" tree keeps participating
+   in flex layout and can absorb pane height and render over the
+   empty-state message whenever the Files pane has spare room. `!important`
+   is deliberate: it is the only way to outrank a third-party inline style. */
+.tree[hidden] {
+  display: none !important;
 }
 
 .tree-empty {
@@ -3806,9 +3789,20 @@ body.is-resizing-terminal .panel-resizer {
 
   .sidebar-rail {
     width: 100%;
+    flex-direction: row;
+    justify-content: flex-start;
     border-right: 0;
     border-bottom: 1px solid var(--border-soft);
     padding: 0.5rem;
+  }
+
+  /* The virtualized tree derives its height from allocated flex space, but
+     this stacked layout sizes panes to content — and a virtualized tree has
+     no intrinsic content height, so it collapses to about one row. Give the
+     Files pane body a definite height so the tree gets real rows and
+     scrolls internally. */
+  .sidebar-pane[data-pane-id="files"] > .pane-body {
+    height: 45vh;
   }
 
   .preview-shell {
@@ -4598,5 +4592,178 @@ body.is-resizing-terminal .panel-resizer {
   .view-segment.is-loading {
     animation: none;
     opacity: 0.6;
+  }
+}
+
+/* ==========================================================================
+   Touch & phone-class support (mobile-experience change).
+
+   "Phone-class" = coarse pointer AND the stacked-layout width (≤900px, the
+   same breakpoint as the app-shell stacking above). iPads in landscape and
+   narrow desktop windows are deliberately not phone-class.
+   ========================================================================== */
+
+/* Runtime size steppers (terminal font, preview text): coarse pointers
+   only — desktop has browser zoom and .uatu.json, and its chrome stays
+   clean. Same CSS-owned visibility recipe as the terminal keybar. */
+.terminal-font-button,
+.text-size-action {
+  display: none;
+}
+
+@media (pointer: coarse) {
+  .terminal-font-button {
+    display: inline-flex;
+    width: auto;
+    padding: 0 0.4rem;
+    font-size: 0.68rem;
+    letter-spacing: 0.02em;
+  }
+
+  .text-size-action {
+    display: inline-flex;
+    width: auto;
+    padding: 0 0.4rem;
+    font-size: 0.72rem;
+  }
+}
+
+/* Sticky Ctrl latch: armed state must be visible at a glance. */
+.terminal-keybar-key.is-armed {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+/* Preview text-size scale. github-markdown-css pins .markdown-body to an
+   absolute 16px, so the scale must land on that base; everything inside is
+   em-derived and reflows with it. Set via --preview-text-scale on the
+   #preview element (preview/text-size.ts). Split layouts nest their own
+   .preview-pane.markdown-body elements which re-pin 16px, so the scale must
+   land on those too (the custom property inherits from #preview). */
+.preview.markdown-body,
+.preview .preview-pane.markdown-body {
+  font-size: calc(16px * var(--preview-text-scale, 1));
+}
+
+/* Preview header: below this width one flex row cannot hold the heading and
+   the toolbar (the toolbar is flex-shrink: 0 by design — its segmented
+   labels ARE the control), so the header becomes a column with the toolbar
+   wrapping on its own row. Width-only on purpose: a narrow desktop window
+   crams identically. Sticky positioning and the blur fade are untouched. */
+@media (max-width: 640px) {
+  .preview-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.6rem;
+  }
+
+  .preview-toolbar {
+    flex-wrap: wrap;
+  }
+}
+
+/* Browse affordances default-hidden everywhere; the phone-class media block
+   below reveals them. Styled like the pane's other header controls. */
+.files-browse-open,
+.files-browse-close {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.375rem;
+  background: var(--surface);
+  color: var(--text-strong);
+  font-size: 0.72rem;
+  padding: 0.15rem 0.5rem;
+  cursor: pointer;
+}
+
+@media (pointer: coarse) and (max-width: 900px) {
+  /* Fullscreen means the whole screen on a phone: fixed to the viewport,
+     dynamic-viewport height (the URL bar collapses; vh overshoots), sized
+     by the visual viewport while the software keyboard is up (panel.ts
+     writes --terminal-visual-height), safe-area padded. */
+  .terminal-panel[data-display="fullscreen"] {
+    position: fixed;
+    inset: 0;
+    /* When iOS pans the visual viewport with the keyboard open, offsetTop
+       goes nonzero — the panel must follow it, not stay pinned to 0, or it
+       extends below the visible region by exactly that offset. */
+    top: var(--terminal-visual-top, 0px);
+    height: var(--terminal-visual-height, 100dvh) !important;
+    width: auto !important;
+    z-index: 40;
+    padding-top: env(safe-area-inset-top);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+
+  .terminal-panel[data-display="fullscreen"] .terminal-panes {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  /* Lock the page while a fullscreen surface covers it; state-derived from
+     the live DOM so there is no imperative lock to leak. */
+  body:has(.terminal-panel[data-display="fullscreen"]:not([hidden])),
+  body:has(.sidebar-pane[data-overlay="open"]) {
+    overflow: hidden;
+  }
+
+  /* Geometry controls are meaningless at phone widths; stored dock/split
+     state stays intact and reappears on wider viewports. */
+  #terminal-split,
+  #terminal-dock-toggle,
+  #terminal-resizer {
+    display: none !important;
+  }
+
+  /* Phone file browser: the Files pane promoted to a full-viewport overlay.
+     Same pane DOM (tree state is continuous), different geometry. */
+  .sidebar-pane[data-pane-id="files"][data-overlay="open"] {
+    position: fixed;
+    inset: 0;
+    z-index: 35;
+    display: flex;
+    flex-direction: column;
+    margin: 0;
+    background: var(--surface);
+    max-height: none;
+    padding-top: env(safe-area-inset-top);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .sidebar-pane[data-pane-id="files"][data-overlay="open"] > .pane-body {
+    /* A collapsed pane hides its body (`.sidebar-pane.is-collapsed
+       .pane-body { display: none }`); the promoted overlay must always show
+       the tree, so re-assert display here (this selector out-specifies the
+       collapsed rule). Collapse state itself is untouched — dismissing the
+       overlay restores the stacked layout exactly as it was. */
+    display: flex;
+    height: auto;
+    max-height: none;
+    flex: 1 1 auto;
+  }
+
+  .files-browse-open {
+    display: inline-flex;
+  }
+
+  .sidebar-pane[data-pane-id="files"][data-overlay="open"] .files-browse-open {
+    display: none;
+  }
+
+  /* While promoted, the pane-level collapse/hide actions disappear — the
+     overlay has its own close affordance, and tapping Hide here would set
+     `hidden` while the overlay CSS keeps forcing display, an apparent
+     no-op that later swallows the pane. */
+  .sidebar-pane[data-pane-id="files"][data-overlay="open"] .pane-action {
+    display: none;
+  }
+
+  .sidebar-pane[data-pane-id="files"][data-overlay="open"] .files-browse-close {
+    display: inline-flex;
   }
 }

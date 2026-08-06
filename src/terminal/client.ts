@@ -14,6 +14,12 @@ import {
   type Osc52Notice,
 } from "./clipboard";
 import type { TerminalClipboardPolicy } from "../shared/types";
+import {
+  classifySwipeGesture,
+  swipeToArrowSequences,
+  wheelDeltaToPixels,
+  type SwipeGestureMode,
+} from "./touch-scroll";
 
 const TERMINAL_TOKEN_KEY = "uatu:terminal-token";
 
@@ -160,6 +166,9 @@ export type TerminalPanelHandle = {
   fit(): void;
   // Move keyboard focus into xterm. No-op when not attached.
   focus(): void;
+  // Live font-size change (touch stepper). Applies to the running xterm and
+  // refits; the PTY connection is untouched. No-op when not attached.
+  setFontSize(px: number): void;
   // Write raw bytes down the PTY exactly as typed input would travel —
   // the touch keybar's path for control sequences (^C, Esc, arrows) that
   // software keyboards cannot produce. No-op when not connected.
@@ -222,6 +231,10 @@ export type MountTerminalOptions = {
   // session held by another window). The mount also re-arms takeover itself
   // when the user activates "Take back" on a parked pane.
   takeover?: boolean;
+  // Applied to every typed-input chunk before it is sent to the PTY — the
+  // sticky-Ctrl composition hook. MUST be an identity function when its
+  // latch is unarmed; it sits on the path every keystroke travels.
+  transformInput?: (data: string) => string;
 };
 
 // Mirror of the server's CLOSE_CODE_USER_TERMINATE (terminal/server.ts).
@@ -260,6 +273,12 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
   // action. Never reset — takeover of a session this mount already owns
   // degrades to a plain reattach, so over-claiming is harmless.
   let takeoverArmed = options.takeover === true;
+  // Tears down the alternate-screen touch-scroll listeners with the mount.
+  let touchScrollAbort: AbortController | null = null;
+  // Connect-scoped fit-and-publish (it closes over that connection's
+  // lastCols/lastRows and socket); the font-size setter calls it so a grid
+  // change without a container resize still reaches the PTY.
+  let syncPtySize: (() => void) | null = null;
 
   function attach(): void {
     if (attached) return;
@@ -506,8 +525,192 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     const encoder = new TextEncoder();
     term.onData(data => {
       if (!protocolReady || !socket || socket.readyState !== WebSocket.OPEN) return;
-      socket.send(encoder.encode(data));
+      const output = options.transformInput ? options.transformInput(data) : data;
+      socket.send(encoder.encode(output));
     });
+
+    touchScrollAbort?.abort();
+    touchScrollAbort = new AbortController();
+
+    // Wheel alternate-scroll (all pointer types). xterm.js has no built-in
+    // DECSET 1007 behavior: when a TUI on the alternate buffer has NOT
+    // enabled mouse tracking, wheel events fall through to the viewport and
+    // scroll scrollback — the user sees their prompt history move instead of
+    // the TUI's content. Real terminal emulators default to converting the
+    // wheel into arrow keys in exactly this situation (iTerm's "scroll wheel
+    // sends arrow keys when in alternate screen mode"); mirror that. When
+    // the app DOES track the mouse, xterm forwards wheel reports itself and
+    // this handler stays out of the way.
+    {
+      const { signal } = touchScrollAbort;
+      let wheelCarry = 0;
+      options.container.addEventListener(
+        "wheel",
+        event => {
+          if (!term) return;
+          if (term.buffer.active.type !== "alternate") return;
+          if (term.modes.mouseTrackingMode !== "none") return;
+          const screen = term.element?.querySelector<HTMLElement>(".xterm-screen");
+          const pageHeight = screen?.clientHeight ?? options.container.clientHeight;
+          const cellHeight = pageHeight / Math.max(1, term.rows);
+          // Wheel-down (positive deltaY) scrolls content down = arrow down,
+          // the opposite sign convention from a downward finger drag.
+          const translated = swipeToArrowSequences({
+            deltaY: -wheelDeltaToPixels(event.deltaY, event.deltaMode, cellHeight, pageHeight),
+            cellHeight,
+            applicationCursor: term.modes.applicationCursorKeysMode,
+            carry: wheelCarry,
+          });
+          wheelCarry = translated.carry;
+          if (translated.sequences && protocolReady && socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(encoder.encode(translated.sequences));
+          }
+          // Consume it either way — the viewport scrolling scrollback under
+          // an alternate-screen TUI is the misbehavior being replaced.
+          event.preventDefault();
+          event.stopPropagation();
+        },
+        { signal, passive: false, capture: true },
+      );
+    }
+
+    // Alternate-screen touch scrolling (coarse pointers only): TUIs run on
+    // the alternate buffer, which has no scrollback for xterm's native touch
+    // path to move — swipes hit nothing. Translate vertical swipe distance
+    // into arrow-key sequences (touch-scroll.ts), leaving normal-buffer
+    // swipes to xterm's own viewport scrolling.
+    if (typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches) {
+      const { signal } = touchScrollAbort;
+      let touchStartX: number | null = null;
+      let touchStartY: number | null = null;
+      let lastTouchY: number | null = null;
+      let gestureMode: SwipeGestureMode = "pending";
+      let swipeCarry = 0;
+      options.container.addEventListener(
+        "touchstart",
+        event => {
+          if (event.touches.length !== 1) {
+            touchStartX = touchStartY = lastTouchY = null;
+            gestureMode = "ignore";
+            return;
+          }
+          touchStartX = event.touches[0]!.clientX;
+          touchStartY = event.touches[0]!.clientY;
+          lastTouchY = touchStartY;
+          gestureMode = "pending";
+          swipeCarry = 0;
+        },
+        { signal, passive: true },
+      );
+      options.container.addEventListener(
+        "touchmove",
+        event => {
+          if (!term || lastTouchY === null || touchStartX === null || touchStartY === null) return;
+          if (event.touches.length !== 1) return;
+          // A drag on a live text selection is the user adjusting selection
+          // handles — never hijack it into scrolling.
+          if (term.hasSelection()) {
+            gestureMode = "ignore";
+            return;
+          }
+          if (gestureMode === "ignore") return;
+          const touch = event.touches[0]!;
+          if (gestureMode === "pending") {
+            gestureMode = classifySwipeGesture(
+              touch.clientX - touchStartX,
+              touch.clientY - touchStartY,
+            );
+            // Until the gesture commits to vertical, leave the event alone
+            // (and drop the pre-threshold travel — starting the scroll from
+            // here avoids a jump when the gesture resolves).
+            if (gestureMode !== "scroll") {
+              lastTouchY = touch.clientY;
+              return;
+            }
+          }
+          const currentY = touch.clientY;
+          const deltaY = currentY - lastTouchY;
+          lastTouchY = currentY;
+          const screen = term.element?.querySelector<HTMLElement>(".xterm-screen");
+          const cellHeight =
+            (screen?.clientHeight ?? options.container.clientHeight) / Math.max(1, term.rows);
+          // Normal buffer: scroll scrollback "as usual". xterm.js has no
+          // native touch scrolling, so quantize the swipe into scrollLines
+          // ourselves (finger down = reveal earlier output = scroll up).
+          if (term.buffer.active.type !== "alternate") {
+            const total = swipeCarry + deltaY;
+            const cells = Math.trunc(total / cellHeight);
+            swipeCarry = total - cells * cellHeight;
+            if (cells !== 0) term.scrollLines(-cells);
+            event.preventDefault();
+            return;
+          }
+          // Mouse-tracking TUIs (opencode, htop, lazygit) want real wheel
+          // events — xterm converts those into the mouse reports the app
+          // asked for, and the app scrolls its own content. Synthesize one
+          // from the swipe instead of sending arrows, which such apps map
+          // to history/selection navigation.
+          if (term.modes.mouseTrackingMode !== "none") {
+            (screen ?? options.container).dispatchEvent(
+              new WheelEvent("wheel", {
+                deltaY: -deltaY,
+                deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+                clientX: touch.clientX,
+                clientY: touch.clientY,
+                bubbles: true,
+                cancelable: true,
+              }),
+            );
+            event.preventDefault();
+            return;
+          }
+          const translated = swipeToArrowSequences({
+            deltaY,
+            cellHeight,
+            applicationCursor: term.modes.applicationCursorKeysMode,
+            carry: swipeCarry,
+          });
+          swipeCarry = translated.carry;
+          if (translated.sequences && protocolReady && socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(encoder.encode(translated.sequences));
+          }
+          // The swipe is driving the TUI now — keep the page from
+          // rubber-banding underneath it. Registered passive: false for this.
+          event.preventDefault();
+        },
+        { signal, passive: false },
+      );
+      options.container.addEventListener(
+        "touchend",
+        () => {
+          touchStartX = touchStartY = lastTouchY = null;
+          gestureMode = "pending";
+        },
+        { signal, passive: true },
+      );
+    }
+
+    // Refit xterm and, when the grid actually changed, publish the new
+    // cols/rows to the server so the PTY tracks the client. Shared by the
+    // container ResizeObserver below AND the font-size setter — a font
+    // change alters the grid without touching the container, so the
+    // observer alone would leave the PTY rendering for the old dimensions.
+    syncPtySize = () => {
+      if (!term || !fit || !openDone) return;
+      try {
+        fit.fit();
+      } catch {
+        // FitAddon throws if the terminal is hidden (zero rect); benign.
+        return;
+      }
+      if (term.cols !== lastCols || term.rows !== lastRows) {
+        lastCols = term.cols;
+        lastRows = term.rows;
+        if (protocolReady && socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+        }
+      }
+    };
 
     // Re-fit and notify the server whenever the panel height changes.
     // This SAME observer also drives the initial xterm open: the first
@@ -528,19 +731,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
         }
         return;
       }
-      try {
-        fit.fit();
-      } catch {
-        // FitAddon throws if the terminal is hidden (zero rect); benign.
-        return;
-      }
-      if (term.cols !== lastCols || term.rows !== lastRows) {
-        lastCols = term.cols;
-        lastRows = term.rows;
-        if (protocolReady && socket && socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
-        }
-      }
+      syncPtySize?.();
     });
     resizeObserver.observe(options.container);
 
@@ -701,6 +892,9 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     attached = false;
     delete options.container.dataset.terminalReady;
     detachInitiated = true;
+    touchScrollAbort?.abort();
+    touchScrollAbort = null;
+    syncPtySize = null;
     try {
       resizeObserver?.disconnect();
     } catch {
@@ -895,6 +1089,18 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     terminate,
     fit: fitNow,
     focus: focusNow,
+    setFontSize(px: number) {
+      if (!term) return;
+      term.options.fontSize = px;
+      // The container hasn't changed size, so the ResizeObserver will not
+      // fire — fit AND publish the new grid to the PTY explicitly, or
+      // shells and TUIs keep rendering for the old cols/rows.
+      if (syncPtySize) {
+        syncPtySize();
+      } else {
+        fitNow();
+      }
+    },
     sendInput(data: string) {
       if (!protocolReady || !socket || socket.readyState !== WebSocket.OPEN) return;
       socket.send(new TextEncoder().encode(data));

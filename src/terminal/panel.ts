@@ -17,12 +17,18 @@ import type { TerminalSessionInfo } from "./server";
 import {
   TERMINAL_MAX_PANES,
   TERMINAL_RIGHT_DOCK_VIEWPORT_MIN,
+  clampTerminalFontSize,
   clampTerminalHeight as clampTerminalHeightShared,
   clampTerminalWidth as clampTerminalWidthShared,
+  isPhoneClassViewport,
+  readTerminalFontSizeOverride,
   readTerminalPanelState,
   readTerminalVisiblePreference as readTerminalVisiblePreferenceShared,
   resolveBootPaneRecords,
+  resolveEffectiveDisplayMode,
+  resolveTerminalFontSize,
   writeOwnPaneRecords,
+  writeTerminalFontSizeOverride,
   writeTerminalPanelState,
   writeTerminalVisiblePreference as writeTerminalVisiblePreferenceShared,
   type StorageLike,
@@ -31,6 +37,8 @@ import {
   type TerminalPanelState,
   type TerminalPaneRecord,
 } from "./pane-state";
+import { composeStickyCtrl, createStickyCtrl } from "./sticky-ctrl";
+import { createVisualViewportSizer } from "./visual-viewport";
 import { presentationLocalStorage, presentationSessionStorage } from "../shell/presentation-storage";
 import { persistPersonalWorkspaceState } from "../shell/personal-state";
 
@@ -55,6 +63,15 @@ function clampTerminalHeight(value: number): number {
 
 function clampTerminalWidth(value: number): number {
   return clampTerminalWidthShared(value, window.innerWidth);
+}
+
+// Live phone-class evaluation. matchMedia rather than a boot-time snapshot so
+// device rotation (which crosses the width breakpoint on phones) re-resolves.
+const coarsePointerQuery =
+  typeof window.matchMedia === "function" ? window.matchMedia("(pointer: coarse)") : null;
+
+function phoneClassNow(): boolean {
+  return isPhoneClassViewport(coarsePointerQuery?.matches ?? false, window.innerWidth);
 }
 
 // Pane-scoped toast for OSC 52 bridge events. One toast element per pane;
@@ -189,8 +206,13 @@ export function setupTerminalPanel(
     return;
   }
 
-  // Sidebar control becomes visible once we know the backend is on.
+  // Sidebar control becomes visible once we know the backend is on — and so
+  // does its collapsed-rail counterpart, which drives the same toggle so a
+  // collapsed sidebar (or an iPad with no Ctrl+` available) never locks the
+  // terminal away.
   sidebarRow.removeAttribute("hidden");
+  const railTerminalToggle = document.getElementById("rail-terminal-toggle");
+  railTerminalToggle?.removeAttribute("hidden");
 
   const panes = new Map<string, TerminalPaneEntry>();
   let lastPtyId = initialLastPtyId;
@@ -198,6 +220,10 @@ export function setupTerminalPanel(
   // A user-initiated panel show that found no pane yet (fresh spawn path):
   // the next pane added takes focus once its terminal opens.
   let focusPaneWhenReady = false;
+
+  // Sticky Ctrl latch shared by the keybar's ctrl button (arms it) and every
+  // pane's input path (composes the next keystroke, then releases).
+  const stickyCtrl = createStickyCtrl();
 
   // Touch keybar (visible on coarse pointers only, CSS-gated): control
   // sequences software keyboards can't type, sent to the focused pane.
@@ -214,6 +240,8 @@ export function setupTerminalPanel(
         entry.handle.focus();
         return true;
       },
+      stickyCtrl,
+      readClipboardText: () => navigator.clipboard.readText(),
     });
   }
 
@@ -259,6 +287,28 @@ export function setupTerminalPanel(
     }, () => document.getElementById("terminal-find-slot")),
   );
   let state: TerminalPanelState = readTerminalPanelState(localStorageRef);
+
+  // Runtime font size: per-device override (touch stepper) → `.uatu.json`
+  // → built-in 13. The override is cleared when stepping back onto the
+  // configured default so later config changes show through.
+  let fontOverride = readTerminalFontSizeOverride(localStorageRef);
+  let currentFontSize = resolveTerminalFontSize(fontOverride, config?.fontSize);
+
+  function stepFontSize(delta: number): void {
+    const next = clampTerminalFontSize(currentFontSize + delta);
+    if (next === currentFontSize) return;
+    currentFontSize = next;
+    const configDefault = resolveTerminalFontSize(null, config?.fontSize);
+    fontOverride = next === configDefault ? null : next;
+    writeTerminalFontSizeOverride(localStorageRef, fontOverride);
+    for (const entry of panes.values()) {
+      try {
+        entry.handle.setFontSize(next);
+      } catch {
+        // Pane torn down mid-iteration.
+      }
+    }
+  }
 
   // Pane records are per-window. Long-lived presentation state contains only
   // geometry, never server PTY references.
@@ -325,32 +375,71 @@ export function setupTerminalPanel(
     dockButton!.setAttribute("title", `Dock to ${target}`);
   }
 
+  // The mode the panel actually renders. On phone-class viewports a stored
+  // `normal` is promoted to fullscreen (the docked strip is unusable there);
+  // the stored preference survives for wider viewports — same pattern as
+  // the right-dock fallback in effectiveDock().
+  function effectiveDisplayMode(): TerminalDisplayMode {
+    return resolveEffectiveDisplayMode(state.displayMode, phoneClassNow());
+  }
+
+  // Visible-viewport sizing: while phone-fullscreen the panel tracks
+  // window.visualViewport — height (keyboard show/hide) AND offsetTop
+  // (viewport pans while the keyboard is up) — so the iOS software keyboard
+  // never covers the prompt line. The CSS fallbacks (100dvh, top: 0) apply
+  // whenever the override custom properties are absent.
+  const viewportSizer = createVisualViewportSizer({
+    viewport: window.visualViewport ?? null,
+    onMetrics(metrics) {
+      if (metrics === null) {
+        panel!.style.removeProperty("--terminal-visual-height");
+        panel!.style.removeProperty("--terminal-visual-top");
+      } else {
+        panel!.style.setProperty("--terminal-visual-height", `${Math.round(metrics.height)}px`);
+        panel!.style.setProperty("--terminal-visual-top", `${Math.round(metrics.offsetTop)}px`);
+      }
+      requestAnimationFrame(() => fitAll());
+    },
+  });
+
+  function syncViewportSizer() {
+    const active =
+      !panel!.hasAttribute("hidden") && phoneClassNow() && effectiveDisplayMode() === "fullscreen";
+    if (active) {
+      viewportSizer.attach();
+    } else {
+      viewportSizer.detach();
+    }
+  }
+
   function applyDisplayModeToDom() {
-    panel!.setAttribute("data-display", state.displayMode);
+    const display = effectiveDisplayMode();
+    panel!.setAttribute("data-display", display);
     minimizeButton!.setAttribute(
       "aria-pressed",
-      state.displayMode === "minimized" ? "true" : "false",
+      display === "minimized" ? "true" : "false",
     );
     fullscreenButton!.setAttribute(
       "aria-pressed",
-      state.displayMode === "fullscreen" ? "true" : "false",
+      display === "fullscreen" ? "true" : "false",
     );
     // Sync the accessible labels with the action the button now performs;
     // the visible icon swaps via CSS keyed off [data-display].
-    if (state.displayMode === "minimized") {
+    if (display === "minimized") {
       minimizeButton!.setAttribute("aria-label", "Restore terminal");
       minimizeButton!.setAttribute("title", "Restore terminal");
     } else {
       minimizeButton!.setAttribute("aria-label", "Minimize terminal");
       minimizeButton!.setAttribute("title", "Minimize terminal");
     }
-    if (state.displayMode === "fullscreen") {
+    if (display === "fullscreen") {
       fullscreenButton!.setAttribute("aria-label", "Exit fullscreen");
       fullscreenButton!.setAttribute("title", "Exit fullscreen");
     } else {
       fullscreenButton!.setAttribute("aria-label", "Enter fullscreen");
       fullscreenButton!.setAttribute("title", "Enter fullscreen");
     }
+    syncViewportSizer();
   }
 
   function fitAll() {
@@ -450,7 +539,7 @@ export function setupTerminalPanel(
       getToken,
       sessionId: record.sessionId,
       fontFamily: config?.fontFamily,
-      fontSize: config?.fontSize,
+      fontSize: currentFontSize,
       clipboardPolicy: config?.clipboard,
       onOsc52Notice: notice => copyToast.show(notice),
       // Server-initiated disconnect (shell exited via `exit`, server
@@ -464,6 +553,14 @@ export function setupTerminalPanel(
       // takeover remains an explicit user action.
       onCollision: () => handlePaneUnavailable(record.id),
       takeover: options.takeover === true,
+      // Sticky Ctrl: compose the next single keystroke while the latch is
+      // armed. Identity pass-through when unarmed (composeStickyCtrl's
+      // contract), so ordinary typing never touches this path's behavior.
+      transformInput: data => {
+        const result = composeStickyCtrl(stickyCtrl.isArmed(), data);
+        if (result.composed) stickyCtrl.disarm();
+        return result.output;
+      },
     });
 
     const entry: TerminalPaneEntry = { record, handle, element, hostElement: host, closeButton: close };
@@ -983,6 +1080,7 @@ export function setupTerminalPanel(
       panel!.removeAttribute("hidden");
       resizer!.removeAttribute("hidden");
       toggle!.setAttribute("aria-pressed", "true");
+      railTerminalToggle?.setAttribute("aria-pressed", "true");
       // Restore display mode and dock from persisted state on each show.
       applyDockToDom();
       applyDisplayModeToDom();
@@ -1020,6 +1118,8 @@ export function setupTerminalPanel(
       panel!.setAttribute("hidden", "");
       resizer!.setAttribute("hidden", "");
       toggle!.setAttribute("aria-pressed", "false");
+      railTerminalToggle?.setAttribute("aria-pressed", "false");
+      syncViewportSizer();
       // Detach every pane on hide. The PTYs keep running server-side, so a
       // re-show reattaches to the same sessions — hiding is never destructive.
       for (const entry of panes.values()) {
@@ -1080,6 +1180,17 @@ export function setupTerminalPanel(
   // ------------- Wiring -------------
 
   toggle.addEventListener("click", toggleVisible);
+  railTerminalToggle?.addEventListener("click", toggleVisible);
+
+  // Extra refits around software-keyboard focus transitions: visualViewport
+  // height can lag the keyboard animation, so a fit on focus change closes
+  // the final gap (D4 in the change's design.md).
+  panel.addEventListener("focusin", () => {
+    if (viewportSizer.isAttached()) requestAnimationFrame(() => fitAll());
+  });
+  panel.addEventListener("focusout", () => {
+    if (viewportSizer.isAttached()) requestAnimationFrame(() => fitAll());
+  });
   closeButton.addEventListener("click", () => {
     if (panes.size === 0) {
       setVisible(false);
@@ -1100,11 +1211,23 @@ export function setupTerminalPanel(
     setDock(state.dock === "bottom" ? "right" : "bottom");
   });
   minimizeButton.addEventListener("click", () => {
-    setDisplayMode(state.displayMode === "minimized" ? "normal" : "minimized");
+    setDisplayMode(effectiveDisplayMode() === "minimized" ? "normal" : "minimized");
   });
   fullscreenButton.addEventListener("click", () => {
-    setDisplayMode(state.displayMode === "fullscreen" ? "normal" : "fullscreen");
+    if (effectiveDisplayMode() === "fullscreen") {
+      // On a phone the docked `normal` strip is the state this promotion
+      // exists to eliminate — leaving fullscreen minimizes instead.
+      setDisplayMode(phoneClassNow() ? "minimized" : "normal");
+    } else {
+      setDisplayMode("fullscreen");
+    }
   });
+
+  // Font-size stepper (coarse-pointer only, CSS-gated like the keybar).
+  const fontDecreaseButton = document.getElementById("terminal-font-decrease");
+  const fontIncreaseButton = document.getElementById("terminal-font-increase");
+  fontDecreaseButton?.addEventListener("click", () => stepFontSize(-1));
+  fontIncreaseButton?.addEventListener("click", () => stepFontSize(1));
   modalCancel.addEventListener("click", () => closeConfirmModal(false));
   modalAccept.addEventListener("click", () => closeConfirmModal(true));
   modal.addEventListener("click", event => {
@@ -1149,10 +1272,10 @@ export function setupTerminalPanel(
           closeConfirmModal(false);
           return;
         }
-        if (state.displayMode === "fullscreen") {
+        if (effectiveDisplayMode() === "fullscreen") {
           event.preventDefault();
           event.stopPropagation();
-          setDisplayMode("normal");
+          setDisplayMode(phoneClassNow() ? "minimized" : "normal");
         }
       }
     },
@@ -1212,10 +1335,17 @@ export function setupTerminalPanel(
     document.addEventListener("pointerup", onUp);
   });
 
-  // Re-evaluate the right-dock fallback on viewport changes so users who
-  // narrow the window mid-session don't get stuck with an unusable layout.
+  // Re-evaluate the right-dock fallback AND the phone-class fullscreen
+  // promotion on viewport changes (rotation crosses the width breakpoint),
+  // so users who resize mid-session don't get stuck with an unusable layout.
   window.addEventListener("resize", () => {
     applyDockToDom();
+    applyDisplayModeToDom();
+    fitAll();
+  });
+  coarsePointerQuery?.addEventListener?.("change", () => {
+    applyDockToDom();
+    applyDisplayModeToDom();
     fitAll();
   });
 

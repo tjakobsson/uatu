@@ -5,7 +5,6 @@
 
 import { appUrl } from "../shared/app-url";
 import { contextualAppUrl } from "../shell/watch-context";
-import { recomputeSelectionInspector } from "../shell/inspector-instance";
 import type { DocumentDiffPayload } from "./diff-view";
 import { findDocumentById } from "../shell/storage";
 import { closeMermaidViewer } from "./mermaid-viewer";
@@ -134,7 +133,6 @@ export async function applyDocumentPayload(payload: RenderedDocument): Promise<v
   // The previous document's content (and any selection within it) was just
   // replaced. Re-evaluate so the pane reflects the new state instead of a
   // stale capture from the prior document.
-  recomputeSelectionInspector();
 }
 
 // True for documents that can meaningfully render as both Source and Rendered.
@@ -257,7 +255,7 @@ export async function fetchDocumentView(
 // Mount two payloads as a split layout. The Source pane uses the same
 // source-rendering DOM shape that single Source view uses (whole-file `<pre>`
 // with the distinguishing `uatu-source-pre` class plus the line-number gutter),
-// so Selection Inspector detection logic continues to work without changes.
+// so class-keyed consumers (the word-wrap control) work without changes.
 export async function renderSplitPayloads(
   sourcePayload: RenderedDocument,
   renderedPayload: RenderedDocument,

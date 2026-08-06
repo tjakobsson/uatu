@@ -135,6 +135,17 @@ export async function standardBeforeEach(page: Page, request: APIRequestContext)
   await page.waitForTimeout(75);
 }
 
+// Git Log defaults to hidden (declutter-sidebar-defaults change); tests
+// that assert its contents reveal it through the panes menu first.
+export async function showGitLogPane(page: Page): Promise<void> {
+  const pane = page.locator('[data-pane-id="git-log"]');
+  if (await pane.isVisible()) return;
+  await page.locator("#panels-toggle").click();
+  await page.locator('#panels-menu label:has-text("Git Log") input').check();
+  await page.locator("#panels-toggle").click();
+  await expect(pane).toBeVisible();
+}
+
 export async function waitForPreviewToSettle(page: Page): Promise<void> {
   let previousPath = "";
 

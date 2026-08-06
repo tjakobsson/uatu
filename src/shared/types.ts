@@ -244,8 +244,7 @@ type ModeStorage = {
 // "rendered" runs Markdown / AsciiDoc through their full pipelines, "source"
 // shows the file's verbatim text inside the source-rendering `<pre><code>`
 // path, and "diff" renders the file's git diff against the resolved review
-// base. The Selection Inspector pane only captures line ranges from the
-// "source" view since the other views have no source-position information.
+// base.
 export type ViewMode = "source" | "rendered" | "diff";
 
 export const VIEW_MODE_STORAGE_KEY = "uatu:view-mode";

@@ -5,7 +5,6 @@
 // alongside the other preview body writers.
 
 import { escapeHtml } from "../shared/html";
-import { recomputeSelectionInspector } from "../shell/inspector-instance";
 import { clearPreviewType } from "./header";
 import { closeMermaidViewer } from "./mermaid-viewer";
 import { hideViewToggle } from "./view-mode";
@@ -36,5 +35,4 @@ export function renderEmptyPreview(title: string, body: string) {
   previewElement.innerHTML = `<p>${escapeHtml(body)}</p>`;
   // Any prior selection rooted in document content is now invalid and the
   // preview is no longer in document mode — clear the inspector pane.
-  recomputeSelectionInspector();
 }

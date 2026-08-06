@@ -113,3 +113,68 @@ test("Files-pane header title does not visually overlap the file count", async (
   expect(countRectMin).not.toBeNull();
   expect(titleRectMin!.x + titleRectMin!.width + 4).toBeLessThanOrEqual(countRectMin!.x);
 });
+
+test("collapsed rail exposes a Follow toggle driving the same state as the chip", async ({ page }) => {
+  await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
+
+  await page.locator("#sidebar-collapse").click();
+  const railFollow = page.locator("#rail-follow-toggle");
+  await expect(railFollow).toBeVisible();
+  await expect(railFollow).toHaveAttribute("aria-pressed", "false");
+
+  await railFollow.click();
+  await expect(railFollow).toHaveAttribute("aria-pressed", "true");
+
+  // Expanding shows the chip agreeing with the value set from the rail;
+  // collapsing again keeps the rail in sync.
+  await page.locator("#sidebar-expand").click();
+  await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "true");
+  await page.locator("#sidebar-collapse").click();
+  await expect(railFollow).toHaveAttribute("aria-pressed", "true");
+  await page.locator("#sidebar-expand").click();
+});
+
+test("desktop never renders the phone browse affordance or size steppers", async ({ page }) => {
+  await expect(page.locator("#files-browse-open")).toBeHidden();
+  await expect(page.locator("#files-browse-close")).toBeHidden();
+  await expect(page.locator("#preview-text-increase")).toBeHidden();
+  await expect(page.locator("#preview-text-decrease")).toBeHidden();
+  await expect(page.locator('[data-pane-id="files"]')).not.toHaveAttribute("data-overlay", "open");
+});
+
+test("declutter defaults: fresh clients hide Git Log; the panes menu no longer lists Selection Inspector", async ({ page }) => {
+  // standardBeforeEach cleared localStorage, so this is a fresh client.
+  await expect(page.locator('[data-pane-id="change-overview"]')).toBeVisible();
+  await expect(page.locator('[data-pane-id="files"]')).toBeVisible();
+  await expect(page.locator('[data-pane-id="git-log"]')).toBeHidden();
+
+  await page.locator("#panels-toggle").click();
+  await expect(page.locator('#panels-menu label:has-text("Git Log")')).toBeVisible();
+  await expect(page.locator('#panels-menu label:has-text("Selection Inspector")')).toHaveCount(0);
+  await page.locator("#panels-toggle").click();
+
+  // The retired pane left no DOM behind.
+  await expect(page.locator('[data-pane-id="selection-inspector"]')).toHaveCount(0);
+});
+
+test("legacy stored pane state with a selection-inspector entry boots cleanly", async ({ page }) => {
+  await page.evaluate(() => {
+    // Plant a pre-removal arrangement under the presentation-storage key
+    // shape: stale selection-inspector entry plus git-log explicitly on.
+    const prefix = `uatu:presentation:v1:${encodeURIComponent("/")}:`;
+    window.localStorage.setItem(
+      `${prefix}uatu:sidebar-panes`,
+      JSON.stringify({
+        "selection-inspector": { visible: true, collapsed: false, height: 160 },
+        "git-log": { visible: true, collapsed: false, height: 140 },
+      }),
+    );
+  });
+  await page.reload();
+
+  // Boot succeeded, the stored git-log visibility is honored, and the stale
+  // entry is inert.
+  await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
+  await expect(page.locator('[data-pane-id="git-log"]')).toBeVisible();
+  await expect(page.locator('[data-pane-id="selection-inspector"]')).toHaveCount(0);
+});

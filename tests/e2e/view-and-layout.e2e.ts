@@ -81,8 +81,8 @@ test("Side-by-side layout renders Source left, Rendered right, with both visible
   await expect(page.locator("#preview .preview-pane-rendered")).toBeVisible();
   await expect(page.locator("#preview .preview-split-resizer")).toBeVisible();
 
-  // Source pane carries the distinguishing whole-file <pre> class used by the
-  // Selection Inspector, mirroring single Source view.
+  // Source pane carries the distinguishing whole-file <pre> class,
+  // mirroring single Source view.
   await expect(page.locator("#preview .preview-pane-source pre.uatu-source-pre")).toBeVisible();
 
   // The view chooser stays visible in split so Diff remains reachable —
