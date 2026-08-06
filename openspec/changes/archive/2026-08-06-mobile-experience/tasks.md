@@ -46,7 +46,14 @@
 - [x] 6.4 Extend the existing desktop terminal and sidebar e2e to assert desktop fullscreen still preserves sidebar/topbar, geometry controls remain visible, and the Files pane never renders an overlay affordance
 - [x] 6.5 Add rail-toggle e2e: collapse the sidebar, toggle the terminal and Follow from the rail, assert state matches what the expanded controls report after re-expanding
 - [x] 6.6 Add coarse-pointer e2e for the size controls: terminal font steps persist as a per-device override, preview text-size steps persist across reload and respect bounds. The alternate-buffer swipe translation is covered at the unit level (`touch-scroll.test.ts`) — the e2e harness deliberately avoids PTY round-trips, so no TUI is available to swipe against; on-device behavior is part of the 6.7 manual pass
-- [ ] 6.7 Manual pass on a real iPad (collapsed-rail toggles, keybar with sticky Ctrl and Paste, font steppers, TUI swipe-scrolling in a real pager) and a real iPhone (Safari + installed PWA) for software-keyboard resize, safe-area clearance, Paste permission callout, smart-punctuation input sanity, file-browser feel, and the portrait header; record findings in the change
+- [x] 6.7 Manual pass on a real iPad (collapsed-rail toggles, keybar with sticky Ctrl and Paste, font steppers, TUI swipe-scrolling in a real pager) and a real iPhone (Safari + installed PWA) for software-keyboard resize, safe-area clearance, Paste permission callout, smart-punctuation input sanity, file-browser feel, and the portrait header; record findings in the change
+  - Findings (2026-08-06, live session over uatu hub + Tailscale): iPhone verified —
+    fullscreen terminal promotion, keybar, font steppers, file browser, portrait
+    header, and the full scroll-gesture matrix (plain-shell scrollback, mouse-report
+    scrolling in claude/opencode, arrow translation in non-tracking TUIs; the last
+    two rounds of scroll fixes came directly out of this pass). Not explicitly
+    re-verified and carried as informal follow-ups: iPad collapsed-rail round, Paste
+    permission callout, installed-PWA standalone mode, smart-punctuation input.
 
 Verification beyond the checkboxes: `bun test` and `bun test:e2e` green; the manual
 device pass (6.7) is the release gate for the visualViewport behavior Playwright

@@ -201,14 +201,9 @@ The Diff view SHALL re-fetch the document-diff endpoint and re-render against th
 - **THEN** the system does NOT re-run base-ref resolution
 - **AND** the re-rendered Diff continues to compare against the same base that was resolved at fetch time
 
-### Requirement: Diff view selection is not captured by the Selection Inspector
+### Requirement: Diff view DOM omits the whole-file source distinguishing class
 
-The Diff view SHALL NOT produce `@path#L<a>-<b>` references via the Selection Inspector pane. The whole-file source `<pre>` distinguishing class (used by single Source view and the Source pane of split layouts) MUST NOT appear on Diff-view DOM, so the existing Selection Inspector detection treats Diff selections as non-source. The Selection Inspector's existing hint ("Switch to Source view to capture a line range.") MAY appear when text is selected in Diff view; no Diff-specific hint is required.
-
-#### Scenario: Selecting text in Diff view does not produce a line-range reference
-- **WHEN** the user has the Diff view active for a file
-- **AND** marks a contiguous run of text inside the rendered diff
-- **THEN** the Selection Inspector does not produce an `@path#L<a>-<b>` reference
+The whole-file source `<pre>` distinguishing class (used by single Source view and the Source pane of split layouts) MUST NOT appear on Diff-view DOM, so class-keyed consumers (for example the word-wrap control) never treat Diff content as the whole-file source block.
 
 #### Scenario: Diff view DOM omits the source-pre distinguishing class
 - **WHEN** the Diff view is rendered for any document

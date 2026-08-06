@@ -8,7 +8,7 @@ Define the single-mode Follow behavior in the uatu SPA: a sidebar-header chip ba
 
 ### Requirement: Follow toggle exposes a single session-level boolean
 
-The browser UI SHALL expose a single Follow toggle (the "Follow chip") in the sidebar header that controls one piece of session state — a boolean `followEnabled`. The chip's `aria-pressed` attribute MUST reflect `followEnabled` exactly: `"true"` when Follow is on, `"false"` when off. There SHALL be no other UI-visible representation of Follow's state. The toggle MUST be reachable by mouse and keyboard following the existing chip-control conventions.
+The browser UI SHALL expose a Follow toggle that controls one piece of session state — a boolean `followEnabled`. The toggle has two mutually exclusive presentations: the "Follow chip" in the expanded sidebar header, and an icon control in the collapsed sidebar rail. Exactly one presentation is visible at a time (matching the sidebar's collapsed state), and whichever is visible MUST reflect `followEnabled` exactly via its `aria-pressed` attribute: `"true"` when Follow is on, `"false"` when off. Beyond these two presentations there SHALL be no other UI-visible representation of Follow's state. The toggle MUST be reachable by mouse, touch, and keyboard following the existing chip-control conventions in both presentations.
 
 #### Scenario: Chip aria-pressed mirrors the session state
 - **WHEN** the SPA boots and `followEnabled` is `true`
@@ -21,6 +21,11 @@ The browser UI SHALL expose a single Follow toggle (the "Follow chip") in the si
 - **AND** the user presses Space or Enter
 - **THEN** `followEnabled` toggles
 - **AND** the chip's `aria-pressed` attribute updates to match
+
+#### Scenario: Rail presentation stays in sync with the chip
+- **WHEN** `followEnabled` is toggled via the rail control, and the user then expands the sidebar
+- **THEN** the Follow chip's `aria-pressed` reflects the value set from the rail
+- **AND** collapsing again shows the rail control with the same pressed state
 
 ### Requirement: Follow defines four authoritative session rules
 
