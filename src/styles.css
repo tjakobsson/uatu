@@ -641,6 +641,25 @@ html.uatu-desktop-host
   border-color: var(--accent);
 }
 
+.terminal-keybar[data-selection-mode="true"] {
+  border-bottom-color: var(--accent);
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.terminal-keybar[data-selection-mode="true"] .terminal-keybar-key:disabled {
+  opacity: 0.32;
+  filter: saturate(0);
+  cursor: default;
+}
+
+.terminal-keybar-key.is-selection-done {
+  color: #ffffff;
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+  font-weight: 700;
+}
+
 .panels-menu {
   position: absolute;
   z-index: 5;
@@ -1395,6 +1414,96 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
 
 .terminal-pane-host .xterm-viewport {
   background: transparent !important;
+}
+
+.terminal-transcript {
+  position: relative;
+  z-index: 100;
+  min-height: 100dvh;
+  background: var(--terminal-bg, #0b1220);
+  color: var(--terminal-fg, #e6edf3);
+  user-select: text;
+  -webkit-user-select: text;
+  -webkit-touch-callout: default;
+}
+
+.terminal-transcript-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: calc(env(safe-area-inset-top) + 0.7rem) max(1rem, env(safe-area-inset-right)) 0.7rem
+    max(1rem, env(safe-area-inset-left));
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.terminal-transcript-title {
+  color: #ffffff;
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.terminal-transcript-hint {
+  color: rgba(230, 237, 243, 0.68);
+  font-size: 0.72rem;
+}
+
+.terminal-transcript-text {
+  padding: 1rem max(1rem, env(safe-area-inset-right)) calc(var(--tab-bar-total) + 1.5rem)
+    max(1rem, env(safe-area-inset-left));
+  color: inherit;
+  font-family: var(--terminal-font-family);
+  line-height: 1.35;
+  user-select: text;
+  -webkit-user-select: text;
+  -webkit-touch-callout: default;
+}
+
+.terminal-transcript-line {
+  min-height: 1.35em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.terminal-transcript-nav {
+  position: fixed;
+  z-index: 110;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  display: flex;
+  justify-content: center;
+  min-height: var(--tab-bar-height);
+  padding: 0.4rem max(0.75rem, env(safe-area-inset-right)) calc(0.4rem + env(safe-area-inset-bottom))
+    max(0.75rem, env(safe-area-inset-left));
+  border-top: 1px solid var(--border-soft);
+  background: color-mix(in srgb, var(--surface) 96%, transparent);
+  backdrop-filter: blur(14px);
+}
+
+.terminal-transcript-return {
+  appearance: none;
+  display: grid;
+  grid-template-columns: auto auto;
+  align-items: center;
+  justify-content: center;
+  gap: 0 0.45rem;
+  min-width: 10rem;
+  padding: 0.3rem 1rem;
+  border: 0;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 700;
+}
+
+.terminal-transcript-return-hint {
+  grid-column: 1 / -1;
+  color: var(--text-subtle);
+  font-size: 0.68rem;
+  font-weight: 400;
 }
 
 .terminal-pane-close {
@@ -4937,4 +5046,20 @@ html[data-ui-mode="touch"] #terminal-dock-toggle,
 html[data-ui-mode="touch"] #terminal-minimize,
 html[data-ui-mode="touch"] #terminal-resizer {
   display: none !important;
+}
+
+/* A transcript deliberately leaves the terminal's fixed interaction stack
+   and becomes ordinary document content, matching Preview's iOS selection
+   model. The live app stays mounted at full size but cannot paint or receive
+   input until the transcript's Done action restores it. */
+body.terminal-transcript-open {
+  overflow: auto !important;
+}
+
+body.terminal-transcript-open .app-shell,
+body.terminal-transcript-open .touch-tab-bar {
+  position: fixed !important;
+  inset: 0 !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
 }

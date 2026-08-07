@@ -1,5 +1,5 @@
 import { appUrl } from "../shared/app-url";
-import { Terminal, type ITheme } from "@xterm/xterm";
+import { Terminal, type IBuffer, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 
@@ -176,6 +176,11 @@ export type TerminalPanelHandle = {
   // Paste text through xterm so newline normalization and bracketed-paste
   // mode match native clipboard input. No-op when not connected or empty.
   paste(text: string): void;
+  // Open/close the touch selection sheet for this pane. The snapshot is
+  // static while open so native selection cannot be invalidated by output.
+  showSelectionSheet(): boolean;
+  dismissSelectionSheet(): boolean;
+  isSelectionSheetOpen(): boolean;
   isAttached(): boolean;
   // Scrollback search, driving the pane's own search addon. Reads the buffer
   // and moves xterm's selection only — nothing is written to the PTY, so a
@@ -269,6 +274,22 @@ export function applyTerminalInputTransform(
   return transformInput(data);
 }
 
+export function terminalBufferText(buffer: Pick<IBuffer, "getLine" | "length">): string {
+  const logicalLines: string[] = [];
+  for (let index = 0; index < buffer.length; index += 1) {
+    const line = buffer.getLine(index);
+    if (!line) continue;
+    const text = line.translateToString(true);
+    if (line.isWrapped && logicalLines.length > 0) {
+      logicalLines[logicalLines.length - 1] += text;
+    } else {
+      logicalLines.push(text);
+    }
+  }
+  while (logicalLines.at(-1) === "") logicalLines.pop();
+  return logicalLines.join("\n");
+}
+
 // Mirror of the server's CLOSE_CODE_USER_TERMINATE (terminal/server.ts).
 // Defined as a literal on each side — like the 4409 hijack code — because
 // importing across the client/server boundary would drag the other side's
@@ -308,10 +329,128 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
   let takeoverArmed = options.takeover === true;
   // Tears down the alternate-screen touch-scroll listeners with the mount.
   let touchScrollAbort: AbortController | null = null;
+  let selectionSheet: HTMLElement | null = null;
+  let transcriptPreviousScrollY = 0;
+  let transcriptParkedElements: HTMLElement[] = [];
   // Connect-scoped fit-and-publish (it closes over that connection's
   // lastCols/lastRows and socket); the font-size setter calls it so a grid
   // change without a container resize still reaches the PTY.
   let syncPtySize: (() => void) | null = null;
+
+  function dismissSelectionSheet(restoreFocus = true): boolean {
+    if (!selectionSheet) return false;
+    selectionSheet.remove();
+    selectionSheet = null;
+    document.body.classList.remove("terminal-transcript-open");
+    for (const element of transcriptParkedElements) {
+      element.inert = false;
+      element.removeAttribute("aria-hidden");
+    }
+    transcriptParkedElements = [];
+    window.getSelection()?.removeAllRanges();
+    if (term?.element) {
+      term.element.inert = false;
+      term.element.removeAttribute("aria-hidden");
+    }
+    window.scrollTo(0, transcriptPreviousScrollY);
+    document.dispatchEvent(new Event("uatu:terminal-selection-change"));
+    if (restoreFocus) term?.focus();
+    return true;
+  }
+
+  function showSelectionSheet(): boolean {
+    if (!term?.element) return false;
+    if (selectionSheet) return true;
+
+    const sheet = document.createElement("section");
+    sheet.className = "terminal-transcript";
+    sheet.setAttribute("role", "document");
+    sheet.setAttribute("aria-label", "Terminal transcript");
+
+    const header = document.createElement("header");
+    header.className = "terminal-transcript-header";
+    const title = document.createElement("span");
+    title.className = "terminal-transcript-title";
+    title.textContent = "Terminal transcript";
+    const hint = document.createElement("span");
+    hint.className = "terminal-transcript-hint";
+    hint.textContent = "Long-press text to select and copy";
+    header.append(title, hint);
+
+    const text = document.createElement("article");
+    text.className = "terminal-transcript-text";
+    if (term.options.fontFamily) text.style.fontFamily = term.options.fontFamily;
+    text.style.fontSize = `${term.options.fontSize}px`;
+    for (const value of terminalBufferText(term.buffer.active).split("\n")) {
+      const line = document.createElement("div");
+      line.className = "terminal-transcript-line";
+      if (value) line.textContent = value;
+      else line.append(document.createElement("br"));
+      text.append(line);
+    }
+    sheet.addEventListener("keydown", event => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      dismissSelectionSheet();
+    });
+    const navigation = document.createElement("nav");
+    navigation.className = "terminal-transcript-nav";
+    navigation.setAttribute("aria-label", "Transcript navigation");
+    const done = document.createElement("button");
+    done.type = "button";
+    done.className = "terminal-transcript-return";
+    done.setAttribute("aria-label", "Done selecting terminal text and return to Terminal");
+    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    icon.setAttribute("viewBox", "0 0 16 16");
+    icon.setAttribute("width", "20");
+    icon.setAttribute("height", "20");
+    icon.setAttribute("aria-hidden", "true");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("fill", "none");
+    path.setAttribute("stroke", "currentColor");
+    path.setAttribute("stroke-width", "1.3");
+    path.setAttribute("stroke-linecap", "round");
+    path.setAttribute("stroke-linejoin", "round");
+    path.setAttribute("d", "M2 3h12v10H2zM4.25 6.25 6.5 8.5l-2.25 2.25M8.5 10.75h3.25");
+    icon.append(path);
+    const doneLabel = document.createElement("span");
+    doneLabel.textContent = "Done";
+    const returnLabel = document.createElement("span");
+    returnLabel.className = "terminal-transcript-return-hint";
+    returnLabel.textContent = "Return to Terminal";
+    done.append(icon, doneLabel, returnLabel);
+    done.addEventListener("click", () => dismissSelectionSheet());
+    navigation.append(done);
+    sheet.append(header, text, navigation);
+
+    term.blur();
+    term.element.inert = true;
+    term.element.setAttribute("aria-hidden", "true");
+    transcriptPreviousScrollY = window.scrollY;
+    selectionSheet = sheet;
+    transcriptParkedElements = [
+      document.querySelector<HTMLElement>(".app-shell"),
+      document.querySelector<HTMLElement>(".touch-tab-bar"),
+    ].filter((element): element is HTMLElement => element !== null);
+    for (const element of transcriptParkedElements) {
+      element.inert = true;
+      element.setAttribute("aria-hidden", "true");
+    }
+    document.body.classList.add("terminal-transcript-open");
+    document.body.append(sheet);
+    document.dispatchEvent(new Event("uatu:terminal-selection-change"));
+    const revealLiveEnd = () => {
+      if (selectionSheet !== sheet) return;
+      window.scrollTo(0, document.documentElement.scrollHeight);
+    };
+    requestAnimationFrame(() => {
+      if (selectionSheet !== sheet) return;
+      revealLiveEnd();
+      requestAnimationFrame(revealLiveEnd);
+    });
+    void document.fonts.ready.then(revealLiveEnd);
+    return true;
+  }
 
   function attach(): void {
     if (attached) return;
@@ -328,6 +467,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     if (attached) return;
     detachInitiated = false;
     protocolReady = false;
+    dismissSelectionSheet(false);
     delete options.container.dataset.terminalReady;
 
     term = new Terminal({
@@ -641,8 +781,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
         event => {
           if (!term || lastTouchY === null || touchStartX === null || touchStartY === null) return;
           if (event.touches.length !== 1) return;
-          // A drag on a live text selection is the user adjusting selection
-          // handles — never hijack it into scrolling.
+          // A drag on xterm's selection is not a terminal scroll gesture.
           if (term.hasSelection()) {
             gestureMode = "ignore";
             return;
@@ -929,6 +1068,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     touchScrollAbort?.abort();
     touchScrollAbort = null;
     syncPtySize = null;
+    dismissSelectionSheet(false);
     try {
       resizeObserver?.disconnect();
     } catch {
@@ -1149,6 +1289,9 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
         },
       );
     },
+    showSelectionSheet,
+    dismissSelectionSheet: () => dismissSelectionSheet(),
+    isSelectionSheetOpen: () => selectionSheet !== null,
     isAttached: () => attached,
     search: terminalSearch,
   };

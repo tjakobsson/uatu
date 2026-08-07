@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 
-import { initTerminalKeybar, KEYBAR_ITEMS, KEYBAR_KEYS } from "./keybar";
+import { initTerminalKeybar, KEYBAR_ITEMS, KEYBAR_KEYS, selectionSheetKeyRoute } from "./keybar";
 import { createStickyCtrl } from "./sticky-ctrl";
 
 describe("KEYBAR_KEYS", () => {
@@ -28,9 +28,10 @@ describe("KEYBAR_KEYS", () => {
     }
   });
 
-  test("includes exactly one ctrl latch and one paste action", () => {
+  test("includes exactly one ctrl latch, paste action, and select action", () => {
     expect(KEYBAR_ITEMS.filter(item => item.kind === "ctrl")).toHaveLength(1);
     expect(KEYBAR_ITEMS.filter(item => item.kind === "paste")).toHaveLength(1);
+    expect(KEYBAR_ITEMS.filter(item => item.kind === "select")).toHaveLength(1);
   });
 });
 
@@ -40,6 +41,8 @@ function mountKeybar(overrides: { readClipboardText?: (() => Promise<string>) | 
   const container = document.getElementById("bar") as unknown as HTMLElement;
   const sent: string[] = [];
   const pasted: string[] = [];
+  let selectionSheets = 0;
+  let selectionOpen = false;
   const stickyCtrl = createStickyCtrl();
   initTerminalKeybar({
     container,
@@ -50,6 +53,19 @@ function mountKeybar(overrides: { readClipboardText?: (() => Promise<string>) | 
     pasteToActivePane(text) {
       pasted.push(text);
       return true;
+    },
+    showSelectionSheet() {
+      selectionSheets += 1;
+      selectionOpen = true;
+      return true;
+    },
+    dismissSelectionSheet() {
+      if (!selectionOpen) return false;
+      selectionOpen = false;
+      return true;
+    },
+    isSelectionSheetOpen() {
+      return selectionOpen;
     },
     stickyCtrl,
     readClipboardText:
@@ -76,7 +92,17 @@ function mountKeybar(overrides: { readClipboardText?: (() => Promise<string>) | 
   const cleanup = () => {
     delete (globalThis as { document?: unknown }).document;
   };
-  return { buttons, click, press, pasted, sent, stickyCtrl, cleanup };
+  return {
+    buttons,
+    container,
+    click,
+    press,
+    pasted,
+    sent,
+    stickyCtrl,
+    selectionSheets: () => selectionSheets,
+    cleanup,
+  };
 }
 
 describe("initTerminalKeybar", () => {
@@ -140,6 +166,34 @@ describe("initTerminalKeybar", () => {
     }
   });
 
+  test("select waits for click and toggles to Done while the sheet is open", () => {
+    const mounted = mountKeybar();
+    try {
+      const { event } = mounted.press("select");
+      expect(event.defaultPrevented).toBe(true);
+      expect(mounted.selectionSheets()).toBe(0);
+      mounted.click("select");
+      expect(mounted.selectionSheets()).toBe(1);
+      expect(mounted.sent).toEqual([]);
+      const done = mounted.buttons.find(button => button.textContent === "done")!;
+      expect(done.getAttribute("aria-label")).toBe("Done selecting terminal text");
+      expect(done.getAttribute("aria-pressed")).toBe("true");
+      expect(done.classList.contains("is-selection-done")).toBe(true);
+      expect(mounted.container.dataset.selectionMode).toBe("true");
+      expect(mounted.buttons.find(button => button.textContent === "^C")!.disabled).toBe(true);
+      expect(mounted.buttons.find(button => button.textContent === "paste")!.disabled).toBe(true);
+      expect(mounted.buttons.find(button => button.textContent === "esc")!.disabled).toBe(false);
+      mounted.click("done");
+      expect(done.textContent).toBe("select");
+      expect(done.getAttribute("aria-pressed")).toBe("false");
+      expect(done.classList.contains("is-selection-done")).toBe(false);
+      expect(mounted.container.dataset.selectionMode).toBe("false");
+      expect(mounted.buttons.filter(button => !button.hidden).every(button => !button.disabled)).toBe(true);
+    } finally {
+      mounted.cleanup();
+    }
+  });
+
   test("every clipboard failure form is inert", async () => {
     const cases = [
       mountKeybar({ readClipboardText: null }),
@@ -157,5 +211,17 @@ describe("initTerminalKeybar", () => {
         mounted.cleanup();
       }
     }
+  });
+});
+
+describe("selectionSheetKeyRoute", () => {
+  test("sends every sequence in normal mode", () => {
+    expect(selectionSheetKeyRoute(false, "\x1b")).toBe("send");
+    expect(selectionSheetKeyRoute(false, "\x03")).toBe("send");
+  });
+
+  test("dismisses on Escape and blocks other PTY input in selection mode", () => {
+    expect(selectionSheetKeyRoute(true, "\x1b")).toBe("dismiss");
+    expect(selectionSheetKeyRoute(true, "\x03")).toBe("block");
   });
 });

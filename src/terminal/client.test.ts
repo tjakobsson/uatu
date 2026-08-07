@@ -5,6 +5,7 @@ import {
   buildTerminalWebSocketUrl,
   classifyAuthProbeStatus,
   pasteTerminalInput,
+  terminalBufferText,
 } from "./client";
 import { composeStickyCtrl, createStickyCtrl } from "./sticky-ctrl";
 
@@ -166,5 +167,45 @@ describe("applyTerminalInputTransform", () => {
     expect(stickyCtrl.isArmed()).toBe(true);
     expect(applyTerminalInputTransform("c", transform, false)).toBe("\x03");
     expect(stickyCtrl.isArmed()).toBe(false);
+  });
+});
+
+describe("terminalBufferText", () => {
+  function buffer(lines: Array<{ text: string; wrapped?: boolean }>) {
+    return {
+      length: lines.length,
+      getLine(index: number) {
+        const line = lines[index];
+        if (!line) return undefined;
+        return {
+          isWrapped: line.wrapped ?? false,
+          translateToString: () => line.text,
+        };
+      },
+    } as Parameters<typeof terminalBufferText>[0];
+  }
+
+  it("preserves hard line breaks and interior blank lines", () => {
+    expect(terminalBufferText(buffer([
+      { text: "first" },
+      { text: "" },
+      { text: "third" },
+    ]))).toBe("first\n\nthird");
+  });
+
+  it("joins wrapped rows into their logical line", () => {
+    expect(terminalBufferText(buffer([
+      { text: "long " },
+      { text: "command", wrapped: true },
+      { text: "next" },
+    ]))).toBe("long command\nnext");
+  });
+
+  it("removes trailing empty screen rows", () => {
+    expect(terminalBufferText(buffer([
+      { text: "prompt" },
+      { text: "" },
+      { text: "" },
+    ]))).toBe("prompt");
   });
 });

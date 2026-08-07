@@ -24,7 +24,8 @@ export type KeybarKey = {
 export type KeybarItem =
   | ({ kind: "sequence" } & KeybarKey)
   | { kind: "ctrl"; label: string; ariaLabel: string }
-  | { kind: "paste"; label: string; ariaLabel: string };
+  | { kind: "paste"; label: string; ariaLabel: string }
+  | { kind: "select"; label: string; ariaLabel: string };
 
 // Ordered by tap frequency: interaction keys first, paging cluster next,
 // process-control tail. The row scrolls horizontally when it overflows.
@@ -34,6 +35,7 @@ export const KEYBAR_ITEMS: readonly KeybarItem[] = [
   { kind: "ctrl", label: "ctrl", ariaLabel: "Control modifier" },
   { kind: "sequence", label: "^C", sequence: "\x03", ariaLabel: "Control C" },
   { kind: "paste", label: "paste", ariaLabel: "Paste from clipboard" },
+  { kind: "select", label: "select", ariaLabel: "Select terminal text" },
   { kind: "sequence", label: "←", sequence: "\x1b[D", ariaLabel: "Arrow left" },
   { kind: "sequence", label: "↓", sequence: "\x1b[B", ariaLabel: "Arrow down" },
   { kind: "sequence", label: "↑", sequence: "\x1b[A", ariaLabel: "Arrow up" },
@@ -51,6 +53,14 @@ export const KEYBAR_KEYS: readonly KeybarKey[] = KEYBAR_ITEMS.filter(
   (item): item is { kind: "sequence" } & KeybarKey => item.kind === "sequence",
 ).map(({ kind: _kind, ...key }) => key);
 
+export function selectionSheetKeyRoute(
+  selectionSheetOpen: boolean,
+  sequence: string,
+): "send" | "dismiss" | "block" {
+  if (!selectionSheetOpen) return "send";
+  return sequence === "\x1b" ? "dismiss" : "block";
+}
+
 export type KeybarDeps = {
   container: HTMLElement;
   // Sends a sequence to the focused pane; returns false when no pane can
@@ -58,6 +68,10 @@ export type KeybarDeps = {
   sendToActivePane(sequence: string): boolean;
   // Pastes clipboard text through the focused pane's xterm instance.
   pasteToActivePane(text: string): boolean;
+  // Opens a stable, native-selectable snapshot over the focused pane.
+  showSelectionSheet(): boolean;
+  dismissSelectionSheet(): boolean;
+  isSelectionSheetOpen(): boolean;
   // The panel's latch; the ctrl button toggles it and renders armed state.
   stickyCtrl: StickyCtrlController;
   // Injectable clipboard read for tests. Production passes the Clipboard
@@ -66,12 +80,37 @@ export type KeybarDeps = {
 };
 
 export function initTerminalKeybar(deps: KeybarDeps): void {
+  let selectButton: HTMLButtonElement | null = null;
+  const renderedItems: Array<{ button: HTMLButtonElement; item: KeybarItem }> = [];
+  const syncSelectButton = () => {
+    if (!selectButton) return;
+    const open = deps.isSelectionSheetOpen();
+    selectButton.textContent = open ? "done" : "select";
+    selectButton.setAttribute("aria-label", open ? "Done selecting terminal text" : "Select terminal text");
+    selectButton.setAttribute("aria-pressed", open ? "true" : "false");
+    selectButton.classList.toggle("is-selection-done", open);
+    selectButton.style.background = open ? "var(--accent)" : "";
+    selectButton.style.borderColor = open ? "var(--accent)" : "";
+    selectButton.style.color = open ? "#ffffff" : "";
+    selectButton.style.fontWeight = open ? "700" : "";
+    deps.container.dataset.selectionMode = open ? "true" : "false";
+    deps.container.style.boxShadow = open ? "inset 0 2px 0 var(--accent)" : "";
+    for (const { button, item } of renderedItems) {
+      const isEscape = item.kind === "sequence" && item.sequence === "\x1b";
+      const availableInSelectionMode = item.kind === "select" || isEscape;
+      button.disabled = open && !availableInSelectionMode;
+      button.style.opacity = button.disabled ? "0.3" : "";
+    }
+    if (open) selectButton.scrollIntoView?.({ block: "nearest", inline: "center" });
+  };
+
   for (const item of KEYBAR_ITEMS) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "terminal-keybar-key";
     button.textContent = item.label;
     button.setAttribute("aria-label", item.ariaLabel);
+    renderedItems.push({ button, item });
     if (item.kind === "ctrl") {
       button.setAttribute("aria-pressed", "false");
       button.classList.add("terminal-keybar-ctrl");
@@ -80,17 +119,23 @@ export function initTerminalKeybar(deps: KeybarDeps): void {
         button.classList.toggle("is-armed", armed);
       });
     }
+    if (item.kind === "select") {
+      selectButton = button;
+      syncSelectButton();
+    }
     // Keep focus in xterm on press so the software keyboard stays open.
     button.addEventListener("pointerdown", event => {
       event.preventDefault();
       switch (item.kind) {
         case "sequence":
           deps.sendToActivePane(item.sequence);
+          if (item.sequence === "\x1b") syncSelectButton();
           return;
         case "ctrl":
           deps.stickyCtrl.toggle();
           return;
         case "paste":
+        case "select":
           return;
       }
     });
@@ -112,6 +157,18 @@ export function initTerminalKeybar(deps: KeybarDeps): void {
         }
       });
     }
+    if (item.kind === "select") {
+      button.addEventListener("click", () => {
+        if (deps.isSelectionSheetOpen()) {
+          deps.dismissSelectionSheet();
+        } else {
+          deps.showSelectionSheet();
+        }
+        syncSelectButton();
+      });
+    }
     deps.container.appendChild(button);
   }
+  deps.container.ownerDocument.addEventListener("uatu:terminal-selection-change", syncSelectButton);
+  syncSelectButton();
 }
