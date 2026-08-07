@@ -445,6 +445,14 @@ test.describe("touch terminal tab", () => {
     });
     expect(selected).toEqual({ text: "snapshot-sheet-ready", bodyLevel: true });
 
+    await page.keyboard.press("Escape");
+    await expect(transcript).toHaveCount(0);
+    await expect(page.locator("#touch-tab-terminal")).toHaveAttribute("aria-selected", "true");
+    await expect(page.locator("body")).not.toHaveClass(/terminal-transcript-open/);
+    await expect(terminal).not.toHaveAttribute("inert", "");
+
+    await page.getByRole("button", { name: "Select terminal text" }).click();
+    await expect(transcript).toBeVisible();
     await done.click();
     await expect(transcript).toHaveCount(0);
     await expect(page.locator("body")).not.toHaveClass(/terminal-transcript-open/);

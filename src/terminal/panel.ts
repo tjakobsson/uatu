@@ -1339,6 +1339,13 @@ export function setupTerminalPanel(
       // the main area and the user expects Esc to escape it regardless of
       // exact focus.
       if (event.key === "Escape") {
+        const activeEntry = activePaneId ? panes.get(activePaneId) : undefined;
+        if (activeEntry?.handle.isSelectionSheetOpen()) {
+          event.preventDefault();
+          event.stopPropagation();
+          activeEntry.handle.dismissSelectionSheet();
+          return;
+        }
         if (!modal!.hasAttribute("hidden")) {
           event.preventDefault();
           event.stopPropagation();

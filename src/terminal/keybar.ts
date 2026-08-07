@@ -89,17 +89,11 @@ export function initTerminalKeybar(deps: KeybarDeps): void {
     selectButton.setAttribute("aria-label", open ? "Done selecting terminal text" : "Select terminal text");
     selectButton.setAttribute("aria-pressed", open ? "true" : "false");
     selectButton.classList.toggle("is-selection-done", open);
-    selectButton.style.background = open ? "var(--accent)" : "";
-    selectButton.style.borderColor = open ? "var(--accent)" : "";
-    selectButton.style.color = open ? "#ffffff" : "";
-    selectButton.style.fontWeight = open ? "700" : "";
     deps.container.dataset.selectionMode = open ? "true" : "false";
-    deps.container.style.boxShadow = open ? "inset 0 2px 0 var(--accent)" : "";
     for (const { button, item } of renderedItems) {
       const isEscape = item.kind === "sequence" && item.sequence === "\x1b";
       const availableInSelectionMode = item.kind === "select" || isEscape;
       button.disabled = open && !availableInSelectionMode;
-      button.style.opacity = button.disabled ? "0.3" : "";
     }
     if (open) selectButton.scrollIntoView?.({ block: "nearest", inline: "center" });
   };
