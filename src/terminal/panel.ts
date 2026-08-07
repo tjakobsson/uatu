@@ -26,6 +26,7 @@ import {
   resolveBootPaneRecords,
   resolveEffectiveDisplayMode,
   resolveTerminalFontSize,
+  shouldEscapeExitTerminalFullscreen,
   terminalActionForTabChange,
   writeOwnPaneRecords,
   writeTerminalFontSizeOverride,
@@ -1321,7 +1322,7 @@ export function setupTerminalPanel(
           closeConfirmModal(false);
           return;
         }
-        if (effectiveDisplayMode() === "fullscreen") {
+        if (shouldEscapeExitTerminalFullscreen(state.displayMode, touchModeNow(), activeTab() === "terminal")) {
           event.preventDefault();
           event.stopPropagation();
           if (touchModeNow()) {

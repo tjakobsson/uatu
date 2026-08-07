@@ -42,6 +42,13 @@ function shellOf(): Document {
           </section>
         </div>
       </div>
+      <!-- Outside .app-shell and every surface root, exactly as in
+           index.html — which is why a tap on it resolved to no surface. -->
+      <nav id="touch-tab-bar" class="touch-tab-bar" role="tablist">
+        <button id="touch-tab-files" data-tab="files"><svg id="files-glyph"></svg></button>
+        <button id="touch-tab-preview" data-tab="preview"><svg id="preview-glyph"></svg></button>
+        <button id="touch-tab-terminal" data-tab="terminal"><svg id="terminal-glyph"></svg></button>
+      </nav>
     </body></html>`,
   );
   return document as unknown as Document;
@@ -135,6 +142,50 @@ describe("resolveSurfaceFromTarget", () => {
     expect(resolveSurfaceFromTarget(document.querySelector("#follow-toggle"))).toBe("preview");
     expect(resolveSurfaceFromTarget(document.querySelector("#term-input"))).toBe("terminal");
     expect(resolveSurfaceFromTarget(document.querySelector("#sidebar-resizer"))).toBeNull();
+  });
+});
+
+describe("the touch tab bar claims the surface it activates", () => {
+  // Regression: leaving a parked terminal by tapping Preview changed only
+  // `activeTab`. The bar sits outside every surface root, so `activeSurface`
+  // stayed `terminal` — and because parked PTYs remain attached, the terminal
+  // find engine still reported itself available, so the next ⌘F opened find
+  // over the CSS-hidden terminal instead of the visible document.
+  test("tapping Preview while the terminal is active claims preview", () => {
+    const document = shellOf();
+    setActiveSurface("terminal");
+    noteInteraction(document.querySelector("#touch-tab-preview"));
+    expect(appState.activeSurface).toBe("preview");
+  });
+
+  test("tapping Terminal claims terminal", () => {
+    const document = shellOf();
+    setActiveSurface("preview");
+    noteInteraction(document.querySelector("#touch-tab-terminal"));
+    expect(appState.activeSurface).toBe("terminal");
+  });
+
+  test("tapping Files claims preview — the sidebar directs the document", () => {
+    const document = shellOf();
+    setActiveSurface("terminal");
+    noteInteraction(document.querySelector("#touch-tab-files"));
+    expect(appState.activeSurface).toBe("preview");
+  });
+
+  test("a tap landing on a tab's glyph resolves like the button itself", () => {
+    // Real taps land on the inner <svg>, not the <button>.
+    const document = shellOf();
+    setActiveSurface("terminal");
+    noteInteraction(document.querySelector("#preview-glyph"));
+    expect(appState.activeSurface).toBe("preview");
+  });
+
+  test("the bar's own chrome claims nothing", () => {
+    const document = shellOf();
+    setActiveSurface("terminal");
+    expect(resolveSurfaceFromTarget(document.querySelector("#touch-tab-bar"))).toBeNull();
+    noteInteraction(document.querySelector("#touch-tab-bar"));
+    expect(appState.activeSurface).toBe("terminal");
   });
 });
 

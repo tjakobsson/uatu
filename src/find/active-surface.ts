@@ -86,11 +86,35 @@ export function surfaceForRoot(root: SurfaceRoot | null): ActiveSurface | null {
   }
 }
 
+// The touch tab bar is app chrome living outside every surface root, so a tap
+// on it resolves to no root — yet it is the most explicit statement of where
+// the user is now working that the app has, because touch mode shows exactly
+// one surface and the tab names it. Without this, tapping Preview to leave a
+// parked terminal left `activeSurface` on `terminal`; since parked PTYs stay
+// attached the terminal find engine still reported itself available, so the
+// next ⌘F opened find over the CSS-hidden terminal instead of the document in
+// front of the user. Resolved here, from the button's own declared target, so
+// the claim stays inside this module and rides the existing user-event
+// listeners rather than the tab bar reaching for the setter.
+const TAB_SURFACES: Readonly<Record<string, ActiveSurface>> = {
+  // Files renders the sidebar pane stack, and directing the sidebar is an act
+  // about the document it directs — the same rule `surfaceForRoot` applies.
+  files: "preview",
+  preview: "preview",
+  terminal: "terminal",
+};
+
+function surfaceForTabBarTarget(target: EventTarget | null): ActiveSurface | null {
+  const tab = elementFor(target)?.closest<HTMLElement>("#touch-tab-bar [data-tab]");
+  const name = tab?.dataset.tab;
+  return name === undefined ? null : (TAB_SURFACES[name] ?? null);
+}
+
 // The surface an interaction implies, or null when the interaction was not
 // with a surface at all — in which case the current surface stands rather
 // than being reset to a default.
 export function resolveSurfaceFromTarget(target: EventTarget | null): ActiveSurface | null {
-  return surfaceForRoot(findSurfaceRoot(target));
+  return surfaceForTabBarTarget(target) ?? surfaceForRoot(findSurfaceRoot(target));
 }
 
 export function getActiveSurface(): ActiveSurface {

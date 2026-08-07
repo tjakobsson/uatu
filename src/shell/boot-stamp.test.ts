@@ -19,12 +19,28 @@ import { ACTIVE_TAB_KEY, readActiveTabPreference, type TouchTab } from "./state"
 
 const html = await Bun.file(`${import.meta.dir}/../index.html`).text();
 
-// The only attribute-less <script> in the shell; app.ts's is
-// <script type="module" src="...">.
-const bootStampSource = (() => {
-  const match = html.match(/<script>([\s\S]*?)<\/script>/);
-  if (!match) throw new Error("index.html has no inline boot-stamp script");
-  return match[1]!;
+// Pulled out with a real HTML parser rather than a regex. Matching tags by
+// pattern is exactly what CodeQL's js/bad-tag-filter warns about — the
+// obvious /<script>([\s\S]*?)<\/script>/ silently misses <SCRIPT> and any
+// attribute that appears later — and it would still have to know which of
+// the shell's scripts is which. HTMLRewriter settles both: the boot stamp is
+// the one script with no src, where app.ts's is <script type="module" src>.
+const bootStampSource = await (async () => {
+  const chunks: string[] = [];
+  let capturing = false;
+  const parsed = new HTMLRewriter()
+    .on("script", {
+      element: element => {
+        capturing = element.getAttribute("src") === null;
+      },
+      text: chunk => {
+        if (capturing) chunks.push(chunk.text);
+      },
+    })
+    .transform(new Response(html));
+  await parsed.text();
+  if (chunks.length === 0) throw new Error("index.html has no inline boot-stamp script");
+  return chunks.join("");
 })();
 
 /** Backing map for a Storage the presentation wrapper can write through. */

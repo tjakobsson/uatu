@@ -149,6 +149,30 @@ export function resolveEffectiveDisplayMode(
   return stored;
 }
 
+// Whether an Escape keypress means "leave the fullscreen terminal".
+//
+// The panel's Escape listener is document-level and capture-phase, so it
+// decides for the whole app whether the key is consumed — and it must not
+// consume it on behalf of a terminal nobody can see. That is reachable:
+// `resolveEffectiveDisplayMode` passes the stored mode through whenever the
+// Terminal tab is inactive, so a terminal put into fullscreen in desktop mode
+// still reports `fullscreen` after a switch to touch mode parks it behind
+// Preview or Files with its PTYs attached. Answering from the stored mode
+// alone would swallow every Escape in the app — the preview find bar's
+// included — while the terminal is CSS-hidden.
+export function shouldEscapeExitTerminalFullscreen(
+  stored: TerminalDisplayMode,
+  touchMode: boolean,
+  terminalTabActive: boolean,
+): boolean {
+  // Touch mode renders exactly one surface: the terminal is on screen only as
+  // the active tab, and it is always fullscreen there whatever `stored` says.
+  if (touchMode) return terminalTabActive;
+  // Desktop renders the panel alongside the preview; only a real stored
+  // fullscreen is an Escape-able state.
+  return stored === "fullscreen";
+}
+
 // What the terminal panel does when the active touch tab changes. Pure so
 // the PTY-preserving contract is pinned by unit test:
 //   "show"          — Terminal tab activated with the panel hidden: run the

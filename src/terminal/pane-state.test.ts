@@ -28,6 +28,7 @@ import {
   readTerminalFontSizeOverride,
   resolveEffectiveDisplayMode,
   resolveTerminalFontSize,
+  shouldEscapeExitTerminalFullscreen,
   terminalActionForTabChange,
   writeTerminalFontSizeOverride,
   type StorageLike,
@@ -359,6 +360,35 @@ describe("resolveEffectiveDisplayMode", () => {
     expect(resolveEffectiveDisplayMode("normal", false)).toBe("normal");
     expect(resolveEffectiveDisplayMode("minimized", false)).toBe("minimized");
     expect(resolveEffectiveDisplayMode("fullscreen", false)).toBe("fullscreen");
+  });
+});
+
+describe("shouldEscapeExitTerminalFullscreen", () => {
+  // The panel's Escape listener is document-level and capture-phase, so a
+  // wrong `true` here consumes Escape for the whole app.
+  it("does NOT claim Escape while touch mode parks the terminal behind another tab", () => {
+    // The regression: fullscreen chosen in desktop mode, then a switch to
+    // touch mode with Preview or Files active. The stored mode is still
+    // `fullscreen` and the PTYs are still attached, but the terminal is
+    // CSS-hidden — Escape belongs to the visible surface (the preview find
+    // bar, most obviously).
+    expect(shouldEscapeExitTerminalFullscreen("fullscreen", true, false)).toBe(false);
+    expect(shouldEscapeExitTerminalFullscreen("normal", true, false)).toBe(false);
+    expect(shouldEscapeExitTerminalFullscreen("minimized", true, false)).toBe(false);
+  });
+
+  it("claims Escape for the active touch Terminal tab whatever the stored mode", () => {
+    // Touch mode renders the Terminal tab fullscreen regardless of `stored`,
+    // so Escape is always the way back out to Preview.
+    expect(shouldEscapeExitTerminalFullscreen("normal", true, true)).toBe(true);
+    expect(shouldEscapeExitTerminalFullscreen("minimized", true, true)).toBe(true);
+    expect(shouldEscapeExitTerminalFullscreen("fullscreen", true, true)).toBe(true);
+  });
+
+  it("claims Escape in desktop mode only for a stored fullscreen", () => {
+    expect(shouldEscapeExitTerminalFullscreen("fullscreen", false, false)).toBe(true);
+    expect(shouldEscapeExitTerminalFullscreen("normal", false, false)).toBe(false);
+    expect(shouldEscapeExitTerminalFullscreen("minimized", false, false)).toBe(false);
   });
 });
 
