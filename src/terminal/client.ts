@@ -173,6 +173,9 @@ export type TerminalPanelHandle = {
   // the touch keybar's path for control sequences (^C, Esc, arrows) that
   // software keyboards cannot produce. No-op when not connected.
   sendInput(data: string): void;
+  // Paste text through xterm so newline normalization and bracketed-paste
+  // mode match native clipboard input. No-op when not connected or empty.
+  paste(text: string): void;
   isAttached(): boolean;
   // Scrollback search, driving the pane's own search addon. Reads the buffer
   // and moves xterm's selection only — nothing is written to the PTY, so a
@@ -240,6 +243,16 @@ export type MountTerminalOptions = {
   // tab is active. Keep it cheap — it sits on the output hot path.
   onOutput?: () => void;
 };
+
+export function pasteTerminalInput(
+  term: Pick<Terminal, "paste"> | null,
+  connected: boolean,
+  text: string,
+): boolean {
+  if (!term || !connected || !text) return false;
+  term.paste(text);
+  return true;
+}
 
 // Mirror of the server's CLOSE_CODE_USER_TERMINATE (terminal/server.ts).
 // Defined as a literal on each side — like the 4409 hijack code — because
@@ -1109,6 +1122,13 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     sendInput(data: string) {
       if (!protocolReady || !socket || socket.readyState !== WebSocket.OPEN) return;
       socket.send(new TextEncoder().encode(data));
+    },
+    paste(text: string) {
+      pasteTerminalInput(
+        term,
+        protocolReady && socket?.readyState === WebSocket.OPEN,
+        text,
+      );
     },
     isAttached: () => attached,
     search: terminalSearch,

@@ -7,6 +7,7 @@
 import { appUrl } from "../shared/app-url";
 import { mountTerminalPanel, persistTerminalToken, type TerminalPanelHandle } from "./client";
 import { initTerminalKeybar } from "./keybar";
+import { pasteToActiveTerminal } from "./panel-paste";
 import { refreshFindTarget } from "../find/find-bar";
 import { registerTerminalFind } from "../find/shortcut";
 import { createTerminalEngine, type TerminalSearchTarget } from "../find/terminal-engine";
@@ -255,6 +256,12 @@ export function setupTerminalPanel(
         entry.handle.sendInput(sequence);
         entry.handle.focus();
         return true;
+      },
+      pasteToActivePane(text) {
+        return pasteToActiveTerminal(() => {
+          const entry = activePaneId ? panes.get(activePaneId) : undefined;
+          return entry?.handle ?? null;
+        }, text);
       },
       stickyCtrl,
       readClipboardText: () => navigator.clipboard.readText(),

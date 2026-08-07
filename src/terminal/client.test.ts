@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { buildTerminalWebSocketUrl, classifyAuthProbeStatus } from "./client";
+import { buildTerminalWebSocketUrl, classifyAuthProbeStatus, pasteTerminalInput } from "./client";
 
 describe("buildTerminalWebSocketUrl", () => {
   it("strips a fragment identifier from the page URL", () => {
@@ -99,5 +99,25 @@ describe("classifyAuthProbeStatus", () => {
     expect(classifyAuthProbeStatus(0)).toBe("auth-required");
     expect(classifyAuthProbeStatus(500)).toBe("auth-required");
     expect(classifyAuthProbeStatus(200)).toBe("auth-required");
+  });
+});
+
+describe("pasteTerminalInput", () => {
+  it("uses xterm's semantic paste path when connected", () => {
+    const pasted: string[] = [];
+    const term = { paste: (text: string) => pasted.push(text) };
+
+    expect(pasteTerminalInput(term, true, "one\ntwo")).toBe(true);
+    expect(pasted).toEqual(["one\ntwo"]);
+  });
+
+  it("is inert when disconnected, unmounted, or empty", () => {
+    const pasted: string[] = [];
+    const term = { paste: (text: string) => pasted.push(text) };
+
+    expect(pasteTerminalInput(term, false, "text")).toBe(false);
+    expect(pasteTerminalInput(null, true, "text")).toBe(false);
+    expect(pasteTerminalInput(term, true, "")).toBe(false);
+    expect(pasted).toEqual([]);
   });
 });
