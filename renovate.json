@@ -7,6 +7,20 @@
   ],
   "enabledManagers": ["bun", "github-actions", "npm"],
   "labels": ["dependencies"],
+  "semanticCommitType": "chore",
+  "semanticCommitScope": "deps",
+  "packageRules": [
+    {
+      "matchPackageNames": ["*"],
+      "semanticCommitType": "chore",
+      "semanticCommitScope": "deps"
+    }
+  ],
   "lockFileMaintenance": { "enabled": true },
-  "osvVulnerabilityAlerts": true
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "semanticCommitType": "fix",
+    "semanticCommitScope": "deps"
+  }
 }

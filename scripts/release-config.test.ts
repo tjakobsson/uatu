@@ -50,6 +50,26 @@ describe("Release Please configuration", () => {
     expect(changelog).not.toContain("## Unreleased");
   });
 
+  test("hides routine dependency updates and exposes security remediations", async () => {
+    const renovate = JSON.parse(await read("renovate.json"));
+    const dependencyRule = renovate.packageRules.find(
+      (rule: { matchPackageNames?: string[] }) => rule.matchPackageNames?.includes("*"),
+    );
+
+    expect(renovate.semanticCommitType).toBe("chore");
+    expect(renovate.semanticCommitScope).toBe("deps");
+    expect(dependencyRule).toMatchObject({
+      semanticCommitType: "chore",
+      semanticCommitScope: "deps",
+    });
+    expect(renovate.osvVulnerabilityAlerts).toBe(true);
+    expect(renovate.vulnerabilityAlerts).toMatchObject({
+      enabled: true,
+      semanticCommitType: "fix",
+      semanticCommitScope: "deps",
+    });
+  });
+
   test("runs the pinned action on main with the dedicated token", async () => {
     const workflow = parseYaml(await read(".github/workflows/release-please.yml"));
     const step = workflow.jobs["release-please"].steps[0];
