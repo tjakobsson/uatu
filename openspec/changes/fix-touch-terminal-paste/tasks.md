@@ -15,7 +15,9 @@
 - [x] 3.1 Extend the mobile Playwright suite to grant clipboard permission, seed clipboard text, activate the visible Paste button, and observe exactly one copy of the text reaching the terminal.
 - [x] 3.2 Verify multiline keybar input uses bracketed-paste framing when the shell enables bracketed-paste mode.
 - [ ] 3.3 Run a real-device acceptance pass in iPhone and iPad Safari, checking the permission callout, successful paste, exactly-once input, and that the software keyboard/focus does not collapse; record the result in this change.
-- [ ] 3.4 Verify ordinary iOS touch selection and native Copy while on-device; if broken, file a separate follow-up rather than expanding this change.
+  - Partial findings (2026-08-07, uatu hub over Tailscale HTTPS): keybar Paste succeeded in Safari on an iPhone 13 Pro running iOS 26.6. The iPad pass and the remaining explicit acceptance checks are still required.
+- [x] 3.4 Verify ordinary iOS touch selection and native Copy while on-device; if broken, file a separate follow-up rather than expanding this change.
+  - Finding: terminal output could not be selected and native Copy was unavailable on the iPhone 13 Pro, while Preview selection worked. Tracked separately in GitHub issue #196.
 
 ## 4. Verification
 
