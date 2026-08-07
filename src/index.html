@@ -7,6 +7,38 @@
     <base id="preview-base" href="/" />
     <meta name="theme-color" content="#0a1c38" />
     <link rel="stylesheet" href="./styles.css" />
+    <!-- Pre-paint stamp: restates resolveUiMode (shell/ui-mode.ts) and
+         readActiveTabPreference (shell/state.ts) because only a classic
+         inline script runs before body parse. Rationale and the equivalence
+         tests that keep it from drifting: shell/boot-stamp.test.ts. -->
+    <script>
+      (() => {
+        const base =
+          document.querySelector('meta[name="uatu-base-path"]')?.getAttribute("content") ?? "/";
+        const prefix = `uatu:presentation:v1:${encodeURIComponent(base)}:`;
+        const read = key => {
+          try {
+            return window.localStorage.getItem(prefix + key);
+          } catch {
+            return null;
+          }
+        };
+        const el = document.documentElement;
+        const mode = read("uatu:ui-mode");
+        const coarse =
+          typeof window.matchMedia === "function" &&
+          window.matchMedia("(pointer: coarse)").matches;
+        el.setAttribute(
+          "data-ui-mode",
+          mode === "touch" || mode === "desktop" ? mode : coarse ? "touch" : "desktop",
+        );
+        const tab = read("uatu:active-tab");
+        el.setAttribute(
+          "data-active-tab",
+          tab === "files" || tab === "preview" || tab === "terminal" ? tab : "preview",
+        );
+      })();
+    </script>
   </head>
   <body>
     <div class="app-shell">

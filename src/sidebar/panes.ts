@@ -162,7 +162,20 @@ export function initSidebarPanes() {
         if (dragTarget) {
           normalizePaneHeightsToStack();
         }
-        const pointerId = event.pointerId;
+        // Capture up front, exactly like the resizer above. Touch gets
+        // implicit capture, but a coarse-primary hybrid (touchscreen +
+        // mouse) does not: without this the pointer can leave the header
+        // before any move clears the threshold, sending the rest of the
+        // gesture to another element — the drag never starts and these
+        // listeners leak. The threshold below is purely drag-vs-tap.
+        try {
+          header.setPointerCapture(event.pointerId);
+        } catch {
+          // NotFoundError when the pointer is already gone (or a synthetic
+          // event carries no active pointerId). Losing capture only costs
+          // the hybrid-device fix above — the gesture still works — so this
+          // must not abort the handler before the listeners below register.
+        }
         const startY = event.clientY;
         const prevStartHeight = dragTarget?.pane.getBoundingClientRect().height ?? 0;
         const startHeight = pane.getBoundingClientRect().height;
@@ -181,7 +194,6 @@ export function initSidebarPanes() {
               return;
             }
             dragging = true;
-            header.setPointerCapture(pointerId);
           }
           const prevHeight = Math.max(
             minHeight,
