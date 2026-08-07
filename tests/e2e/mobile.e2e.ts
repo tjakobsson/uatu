@@ -375,7 +375,14 @@ test.describe("touch terminal tab", () => {
 
     const keybar = page.locator("#terminal-keybar");
     await expect(keybar).toBeVisible();
-    for (const label of ["Page up", "Page down", "Home", "End", "Paste from clipboard"]) {
+    for (const label of [
+      "Page up",
+      "Page down",
+      "Home",
+      "End",
+      "Paste from clipboard",
+      "Select terminal text",
+    ]) {
       await expect(keybar.getByRole("button", { name: label })).toBeVisible();
     }
 
@@ -385,6 +392,72 @@ test.describe("touch terminal tab", () => {
     await expect(ctrl).toHaveAttribute("aria-pressed", "true");
     await ctrl.dispatchEvent("pointerdown");
     await expect(ctrl).toHaveAttribute("aria-pressed", "false");
+  });
+
+  test("Select opens a document-level transcript with native text selection and Done restores terminal", async ({ page }) => {
+    await page.locator("#touch-tab-terminal").click();
+    const host = page.locator(".terminal-pane-host").first();
+    const terminal = host.locator(".xterm");
+    await expect(terminal).toBeVisible({ timeout: 5000 });
+    await expect(host).toHaveAttribute("data-terminal-ready", "true", { timeout: 10_000 });
+    await page.evaluate(() => {
+      document.querySelector<HTMLTextAreaElement>(".terminal-pane-host .xterm-helper-textarea")?.focus();
+    });
+    await page.keyboard.type("seq 1 80; printf '%0500d\\n' 0; printf 'snapshot-%s-ready\\n' sheet; sleep 1 && printf 'sheet-%s-marker\\n' later");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => host.locator(".xterm").textContent()).toContain("snapshot-sheet-ready");
+
+    await page.getByRole("button", { name: "Select terminal text" }).click();
+    const transcript = page.locator("body > .terminal-transcript");
+    const text = transcript.locator(".terminal-transcript-text");
+    await expect(transcript).toBeVisible();
+    await expect(page.locator("body")).toHaveClass(/terminal-transcript-open/);
+    await expect(page.locator(".app-shell")).toHaveCSS("visibility", "hidden");
+    await expect(page.locator(".app-shell")).toHaveAttribute("inert", "");
+    await expect(terminal).toHaveAttribute("inert", "");
+    await expect(transcript.locator(".terminal-transcript-header")).toContainText("Long-press text to select and copy");
+    const transcriptNav = transcript.locator(".terminal-transcript-nav");
+    const done = transcript.getByRole("button", { name: "Done selecting terminal text and return to Terminal" });
+    await expect(transcriptNav).toHaveCSS("position", "fixed");
+    await expect(done).toBeVisible();
+    const snapshot = await text.textContent();
+    expect(snapshot).toContain("snapshot-sheet-ready");
+    expect(snapshot).not.toContain("sheet-later-marker");
+    await expect.poll(() => host.locator(".xterm").textContent()).toContain("sheet-later-marker");
+    expect(await text.textContent()).toBe(snapshot);
+    await expect.poll(() => page.evaluate(() => (
+      Math.abs(document.documentElement.scrollHeight - window.innerHeight - window.scrollY) <= 2
+    ))).toBe(true);
+
+    const selected = await transcript.locator(".terminal-transcript-line", { hasText: "snapshot-sheet-ready" }).evaluate(element => {
+      const marker = "snapshot-sheet-ready";
+      const start = element.textContent!.indexOf(marker);
+      const range = document.createRange();
+      range.setStart(element.firstChild!, start);
+      range.setEnd(element.firstChild!, start + marker.length);
+      const selection = window.getSelection()!;
+      selection.removeAllRanges();
+      selection.addRange(range);
+      return {
+        text: selection.toString(),
+        bodyLevel: element.closest(".terminal-transcript")?.parentElement === document.body,
+      };
+    });
+    expect(selected).toEqual({ text: "snapshot-sheet-ready", bodyLevel: true });
+
+    await page.keyboard.press("Escape");
+    await expect(transcript).toHaveCount(0);
+    await expect(page.locator("#touch-tab-terminal")).toHaveAttribute("aria-selected", "true");
+    await expect(page.locator("body")).not.toHaveClass(/terminal-transcript-open/);
+    await expect(terminal).not.toHaveAttribute("inert", "");
+
+    await page.getByRole("button", { name: "Select terminal text" }).click();
+    await expect(transcript).toBeVisible();
+    await done.click();
+    await expect(transcript).toHaveCount(0);
+    await expect(page.locator("body")).not.toHaveClass(/terminal-transcript-open/);
+    await expect(terminal).not.toHaveAttribute("inert", "");
+    await expect(page.getByRole("button", { name: "Select terminal text" })).toHaveAttribute("aria-pressed", "false");
   });
 
   test("keybar Paste sends multiline clipboard text exactly once through bracketed paste", async ({ page }) => {

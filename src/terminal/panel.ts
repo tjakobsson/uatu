@@ -6,7 +6,7 @@
 
 import { appUrl } from "../shared/app-url";
 import { mountTerminalPanel, persistTerminalToken, type TerminalPanelHandle } from "./client";
-import { initTerminalKeybar } from "./keybar";
+import { initTerminalKeybar, selectionSheetKeyRoute } from "./keybar";
 import { pasteToActiveTerminal } from "./panel-paste";
 import { refreshFindTarget } from "../find/find-bar";
 import { registerTerminalFind } from "../find/shortcut";
@@ -253,6 +253,9 @@ export function setupTerminalPanel(
         if (!entry || !entry.handle.isAttached()) {
           return false;
         }
+        const route = selectionSheetKeyRoute(entry.handle.isSelectionSheetOpen(), sequence);
+        if (route === "dismiss") return entry.handle.dismissSelectionSheet();
+        if (route === "block") return false;
         entry.handle.sendInput(sequence);
         entry.handle.focus();
         return true;
@@ -260,8 +263,21 @@ export function setupTerminalPanel(
       pasteToActivePane(text) {
         return pasteToActiveTerminal(() => {
           const entry = activePaneId ? panes.get(activePaneId) : undefined;
+          if (entry?.handle.isSelectionSheetOpen()) return null;
           return entry?.handle ?? null;
         }, text);
+      },
+      showSelectionSheet() {
+        const entry = activePaneId ? panes.get(activePaneId) : undefined;
+        return entry?.handle.showSelectionSheet() ?? false;
+      },
+      dismissSelectionSheet() {
+        const entry = activePaneId ? panes.get(activePaneId) : undefined;
+        return entry?.handle.dismissSelectionSheet() ?? false;
+      },
+      isSelectionSheetOpen() {
+        const entry = activePaneId ? panes.get(activePaneId) : undefined;
+        return entry?.handle.isSelectionSheetOpen() ?? false;
       },
       stickyCtrl,
       readClipboardText: () => navigator.clipboard.readText(),
@@ -1323,6 +1339,13 @@ export function setupTerminalPanel(
       // the main area and the user expects Esc to escape it regardless of
       // exact focus.
       if (event.key === "Escape") {
+        const activeEntry = activePaneId ? panes.get(activePaneId) : undefined;
+        if (activeEntry?.handle.isSelectionSheetOpen()) {
+          event.preventDefault();
+          event.stopPropagation();
+          activeEntry.handle.dismissSelectionSheet();
+          return;
+        }
         if (!modal!.hasAttribute("hidden")) {
           event.preventDefault();
           event.stopPropagation();
