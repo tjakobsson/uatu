@@ -74,9 +74,27 @@ Release behavior:
 | Any type with `!` or `BREAKING CHANGE:` | Breaking change | Major |
 | `chore`, `ci`, `test`, `build`, `refactor`, `docs` | Hidden by default | None by itself |
 
-Use a user-facing type only when users need the change. For example, a runtime
-dependency security fix may be `fix(deps)`, while a routine lockfile refresh is
-`chore(deps)`.
+Use a user-facing type only when users of the latest stable release need the
+change. Public notes describe the stable-to-stable user-visible delta; Git
+history can retain the intermediate work that produced it. Routine dependency
+updates, including runtime dependency updates, are `chore(deps)`. Only an
+update that remediates a known vulnerability is `fix(deps)`, and its summary
+should state the security reason rather than only the version bump.
+
+When a separate PR fixes functionality introduced after the latest stable tag,
+keep the truthful `fix(...)` PR title and squash commit in Git, but add a
+Release Please override to the PR body before merging so the correction does
+not appear as a bug stable users experienced:
+
+```text
+BEGIN_COMMIT_OVERRIDE
+chore(scope): stabilize the unreleased feature before release
+END_COMMIT_OVERRIDE
+```
+
+This override workflow depends on squash merging. A fix for behavior that does
+exist in the latest stable release remains a normal visible `fix(...)` with no
+override.
 
 ## Validation
 

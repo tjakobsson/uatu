@@ -22,10 +22,27 @@ Commits after the latest version tag:
 | `chore`, `ci`, `test`, `build`, `refactor`, `docs` | No release by itself |
 
 Only Features, Bug Fixes, and Performance are visible in public release notes
-by default. Routine dependency, CI, test, documentation, and repository
-maintenance remain in git history without clouding the user-facing changelog.
+by default. The notes describe the user-visible delta from the latest stable
+tag, not every intermediate correction made while developing the next release.
+Routine dependency, CI, test, documentation, and repository maintenance remain
+in git history without clouding the user-facing changelog. Only dependency
+updates that remediate a known vulnerability are visible `fix(deps)` entries.
 Use a `Release-As: X.Y.Z` commit footer only when intentionally overriding the
 derived version.
+
+When a squash-merged `fix` only repairs functionality added after the latest
+stable tag, preserve the truthful commit but add this to the source PR body:
+
+```text
+BEGIN_COMMIT_OVERRIDE
+chore(scope): stabilize the unreleased feature before release
+END_COMMIT_OVERRIDE
+```
+
+Release Please then treats the commit as hidden release metadata without
+rewriting Git history. Add the override before merge when possible. If it is
+added to an already-merged PR, rerun the Release Please workflow manually; an
+edited PR body does not itself push to `main`.
 
 ## Repository prerequisites
 
@@ -49,7 +66,9 @@ should require the normal CI checks on the generated release PR.
 
 1. User-facing Conventional Commits land on `main` through squash-merged PRs.
 2. `.github/workflows/release-please.yml` creates or updates the release PR.
-3. Review the proposed `package.json` version and `CHANGELOG.md`; wait for all
+3. Review the proposed `package.json` version and `CHANGELOG.md` as a
+   stable-to-stable user-facing delta. Correct unwanted entries through commit
+   overrides on their source PRs, rerun Release Please, and wait for all
    required checks.
 4. Merge the release PR when its contents represent the intended release.
 5. Release Please creates `vX.Y.Z` and a draft GitHub Release.
