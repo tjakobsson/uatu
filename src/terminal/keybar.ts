@@ -4,7 +4,7 @@
 // it — undrivable. Sequence keys send raw control sequences straight down
 // the focused pane's PTY via TerminalPanelHandle.sendInput, exactly as
 // typed input travels. Two action buttons go beyond raw sequences: Paste
-// (clipboard read inside the tap gesture) and a single-shot sticky Ctrl
+// (clipboard read from semantic button activation) and a single-shot sticky Ctrl
 // latch (see sticky-ctrl.ts).
 //
 // Visibility is CSS-owned (`@media (pointer: coarse)` in styles.css), so
@@ -56,11 +56,13 @@ export type KeybarDeps = {
   // Sends a sequence to the focused pane; returns false when no pane can
   // receive input (the bar flashes nothing — the tap is simply inert).
   sendToActivePane(sequence: string): boolean;
+  // Pastes clipboard text through the focused pane's xterm instance.
+  pasteToActivePane(text: string): boolean;
   // The panel's latch; the ctrl button toggles it and renders armed state.
   stickyCtrl: StickyCtrlController;
-  // Injectable clipboard read for tests. Production passes
-  // () => navigator.clipboard.readText(). Rejections make the tap inert.
-  readClipboardText(): Promise<string>;
+  // Injectable clipboard read for tests. Production passes the Clipboard
+  // API when available. Every failure form makes the activation inert.
+  readClipboardText?: () => Promise<string>;
 };
 
 export function initTerminalKeybar(deps: KeybarDeps): void {
@@ -78,9 +80,7 @@ export function initTerminalKeybar(deps: KeybarDeps): void {
         button.classList.toggle("is-armed", armed);
       });
     }
-    // pointerdown instead of click, with preventDefault: the tap must not
-    // move focus out of xterm — a focus bounce would dismiss the software
-    // keyboard the user is typing on.
+    // Keep focus in xterm on press so the software keyboard stays open.
     button.addEventListener("pointerdown", event => {
       event.preventDefault();
       switch (item.kind) {
@@ -91,19 +91,27 @@ export function initTerminalKeybar(deps: KeybarDeps): void {
           deps.stickyCtrl.toggle();
           return;
         case "paste":
-          // The read starts inside the user gesture (iOS shows its paste
-          // callout); denial or an empty clipboard leaves the tap inert.
-          deps.readClipboardText().then(
+          return;
+      }
+    });
+    if (item.kind === "paste") {
+      // Non-mouse pointers gain transient user activation on release. Native
+      // button click also covers Enter and Space without a second action path.
+      button.addEventListener("click", () => {
+        try {
+          deps.readClipboardText?.().then(
             text => {
-              if (text) deps.sendToActivePane(text);
+              if (text) deps.pasteToActivePane(text);
             },
             () => {
               // Inert by design.
             },
           );
-          return;
-      }
-    });
+        } catch {
+          // Missing or synchronously failing clipboard access is inert too.
+        }
+      });
+    }
     deps.container.appendChild(button);
   }
 }

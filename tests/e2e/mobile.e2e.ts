@@ -71,7 +71,9 @@ async function touchBeforeEach(
 async function terminalBeforeEach(
   page: import("@playwright/test").Page,
   request: import("@playwright/test").APIRequestContext,
+  context: import("@playwright/test").BrowserContext,
 ): Promise<void> {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await request.post("/__e2e/reset");
   const tokenResp = await request.get("/__e2e/terminal-token");
   const tokenBody = await tokenResp.json();
@@ -267,8 +269,8 @@ test.describe("touch tab navigation", () => {
 });
 
 test.describe("touch terminal tab", () => {
-  test.beforeEach(async ({ page, request }) => {
-    await terminalBeforeEach(page, request);
+  test.beforeEach(async ({ page, request, context }) => {
+    await terminalBeforeEach(page, request, context);
   });
 
   test("activating the Terminal tab lands in true fullscreen without touching the stored mode", async ({ page }) => {
@@ -383,6 +385,42 @@ test.describe("touch terminal tab", () => {
     await expect(ctrl).toHaveAttribute("aria-pressed", "true");
     await ctrl.dispatchEvent("pointerdown");
     await expect(ctrl).toHaveAttribute("aria-pressed", "false");
+  });
+
+  test("keybar Paste sends multiline clipboard text exactly once through bracketed paste", async ({ page }) => {
+    await page.locator("#touch-tab-terminal").click();
+    const host = page.locator(".terminal-pane-host").first();
+    await expect(host.locator(".xterm")).toBeVisible({ timeout: 5000 });
+    await expect(host).toHaveAttribute("data-terminal-ready", "true", { timeout: 10_000 });
+    await page.waitForTimeout(400);
+    await page.evaluate(() => {
+      document.querySelector<HTMLTextAreaElement>(".terminal-pane-host .xterm-helper-textarea")?.focus();
+    });
+
+    // Explicitly enable the terminal mode so this assertion does not depend
+    // on which interactive shell the E2E host happens to use.
+    await page.keyboard.type("printf '\\033[?2004h'; echo bracket-mode-ready");
+    await page.keyboard.press("Enter");
+    await expect(host).toContainText("bracket-mode-ready", { timeout: 5000 });
+
+    const markerName = ".keybar-paste-marker";
+    const markerPath = workspacePath(markerName);
+    const clipboardText =
+      `printf 'first\\n' >> ${markerName}\n` +
+      `printf 'second\\n' >> ${markerName}`;
+    await page.evaluate(text => navigator.clipboard.writeText(text), clipboardText);
+
+    await page.getByRole("button", { name: "Paste from clipboard" }).click();
+    // Bracketed paste holds embedded newlines in the editor until the user
+    // submits. A raw socket write would have created the marker already.
+    await page.waitForTimeout(200);
+    expect(await fs.readFile(markerPath, "utf8").catch(() => null)).toBeNull();
+
+    await page.keyboard.press("Enter");
+    await expect.poll(
+      () => fs.readFile(markerPath, "utf8").catch(() => null),
+      { timeout: 5000 },
+    ).toBe("first\nsecond\n");
   });
 
   test("font stepper applies live and persists a per-device override", async ({ page }) => {

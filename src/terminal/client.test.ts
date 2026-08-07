@@ -1,6 +1,12 @@
 import { describe, expect, it } from "bun:test";
 
-import { buildTerminalWebSocketUrl, classifyAuthProbeStatus } from "./client";
+import {
+  applyTerminalInputTransform,
+  buildTerminalWebSocketUrl,
+  classifyAuthProbeStatus,
+  pasteTerminalInput,
+} from "./client";
+import { composeStickyCtrl, createStickyCtrl } from "./sticky-ctrl";
 
 describe("buildTerminalWebSocketUrl", () => {
   it("strips a fragment identifier from the page URL", () => {
@@ -99,5 +105,66 @@ describe("classifyAuthProbeStatus", () => {
     expect(classifyAuthProbeStatus(0)).toBe("auth-required");
     expect(classifyAuthProbeStatus(500)).toBe("auth-required");
     expect(classifyAuthProbeStatus(200)).toBe("auth-required");
+  });
+});
+
+describe("pasteTerminalInput", () => {
+  it("uses xterm's semantic paste path when connected", () => {
+    const pasted: string[] = [];
+    const activeStates: boolean[] = [];
+    const term = {
+      paste: (text: string) => {
+        expect(activeStates.at(-1)).toBe(true);
+        pasted.push(text);
+      },
+    };
+
+    expect(
+      pasteTerminalInput(term, true, "one\ntwo", active => activeStates.push(active)),
+    ).toBe(true);
+    expect(pasted).toEqual(["one\ntwo"]);
+    expect(activeStates).toEqual([true, false]);
+  });
+
+  it("is inert when disconnected, unmounted, or empty", () => {
+    const pasted: string[] = [];
+    const term = { paste: (text: string) => pasted.push(text) };
+
+    const setActive = () => {
+      throw new Error("must not activate");
+    };
+    expect(pasteTerminalInput(term, false, "text", setActive)).toBe(false);
+    expect(pasteTerminalInput(null, true, "text", setActive)).toBe(false);
+    expect(pasteTerminalInput(term, true, "", setActive)).toBe(false);
+    expect(pasted).toEqual([]);
+  });
+
+  it("restores transform state when xterm paste throws", () => {
+    const activeStates: boolean[] = [];
+    const term = {
+      paste: () => {
+        throw new Error("disposed");
+      },
+    };
+
+    expect(() => pasteTerminalInput(term, true, "c", active => activeStates.push(active))).toThrow();
+    expect(activeStates).toEqual([true, false]);
+  });
+});
+
+describe("applyTerminalInputTransform", () => {
+  it("bypasses sticky-Ctrl composition for semantic paste and preserves the latch", () => {
+    const stickyCtrl = createStickyCtrl();
+    stickyCtrl.toggle();
+    const transform = (data: string) => {
+      const result = composeStickyCtrl(stickyCtrl.isArmed(), data);
+      if (result.composed) stickyCtrl.disarm();
+      return result.output;
+    };
+
+    expect(applyTerminalInputTransform("c", transform, true)).toBe("c");
+    expect(stickyCtrl.isArmed()).toBe(true);
+    expect(applyTerminalInputTransform("c", transform, false)).toBe("\x03");
+    expect(stickyCtrl.isArmed()).toBe(false);
   });
 });

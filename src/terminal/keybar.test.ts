@@ -34,11 +34,12 @@ describe("KEYBAR_KEYS", () => {
   });
 });
 
-function mountKeybar(overrides: { readClipboardText?: () => Promise<string> } = {}) {
+function mountKeybar(overrides: { readClipboardText?: (() => Promise<string>) | null } = {}) {
   const { document, window } = parseHTML("<!doctype html><html><body><div id='bar'></div></body></html>");
   (globalThis as { document?: unknown }).document = document;
   const container = document.getElementById("bar") as unknown as HTMLElement;
   const sent: string[] = [];
+  const pasted: string[] = [];
   const stickyCtrl = createStickyCtrl();
   initTerminalKeybar({
     container,
@@ -46,20 +47,36 @@ function mountKeybar(overrides: { readClipboardText?: () => Promise<string> } = 
       sent.push(sequence);
       return true;
     },
+    pasteToActivePane(text) {
+      pasted.push(text);
+      return true;
+    },
     stickyCtrl,
-    readClipboardText: overrides.readClipboardText ?? (() => Promise.reject(new Error("denied"))),
+    readClipboardText:
+      overrides.readClipboardText === null
+        ? undefined
+        : overrides.readClipboardText ?? (() => Promise.reject(new Error("denied"))),
   });
   const buttons = [...container.querySelectorAll("button")];
-  const press = (label: string) => {
+  const buttonFor = (label: string) => {
     const button = buttons.find(b => b.textContent === label);
     expect(button).toBeDefined();
-    button!.dispatchEvent(new (window as unknown as { Event: typeof Event }).Event("pointerdown"));
     return button!;
+  };
+  const press = (label: string) => {
+    const event = new (window as unknown as { Event: typeof Event }).Event("pointerdown", {
+      cancelable: true,
+    });
+    buttonFor(label).dispatchEvent(event);
+    return { button: buttonFor(label), event };
+  };
+  const click = (label: string) => {
+    buttonFor(label).dispatchEvent(new (window as unknown as { Event: typeof Event }).Event("click"));
   };
   const cleanup = () => {
     delete (globalThis as { document?: unknown }).document;
   };
-  return { buttons, press, sent, stickyCtrl, cleanup };
+  return { buttons, click, press, pasted, sent, stickyCtrl, cleanup };
 }
 
 describe("initTerminalKeybar", () => {
@@ -78,7 +95,7 @@ describe("initTerminalKeybar", () => {
   test("ctrl button toggles the latch and mirrors it via aria-pressed", () => {
     const { press, stickyCtrl, cleanup } = mountKeybar();
     try {
-      const ctrl = press("ctrl");
+      const ctrl = press("ctrl").button;
       expect(stickyCtrl.isArmed()).toBe(true);
       expect(ctrl.getAttribute("aria-pressed")).toBe("true");
       press("ctrl");
@@ -89,35 +106,56 @@ describe("initTerminalKeybar", () => {
     }
   });
 
-  test("paste writes the clipboard text through the pane path", async () => {
-    const { press, sent, cleanup } = mountKeybar({
-      readClipboardText: () => Promise.resolve("ls -la\n"),
+  test("paste waits for click, preserves focus on press, and runs exactly once", async () => {
+    let reads = 0;
+    const { click, press, pasted, sent, cleanup } = mountKeybar({
+      readClipboardText: () => {
+        reads += 1;
+        return Promise.resolve("ls -la\n");
+      },
     });
     try {
-      press("paste");
+      const { event } = press("paste");
+      expect(event.defaultPrevented).toBe(true);
+      expect(reads).toBe(0);
+      expect(pasted).toEqual([]);
+      click("paste");
       await Promise.resolve();
-      expect(sent).toEqual(["ls -la\n"]);
+      expect(reads).toBe(1);
+      expect(pasted).toEqual(["ls -la\n"]);
+      expect(sent).toEqual([]);
     } finally {
       cleanup();
     }
   });
 
-  test("a denied or empty clipboard read is inert", async () => {
-    const denied = mountKeybar();
+  test("semantic keyboard-style click activation uses the same paste path", async () => {
+    const mounted = mountKeybar({ readClipboardText: () => Promise.resolve("pwd") });
     try {
-      denied.press("paste");
+      mounted.click("paste");
       await Promise.resolve();
-      expect(denied.sent).toEqual([]);
+      expect(mounted.pasted).toEqual(["pwd"]);
     } finally {
-      denied.cleanup();
+      mounted.cleanup();
     }
-    const empty = mountKeybar({ readClipboardText: () => Promise.resolve("") });
-    try {
-      empty.press("paste");
-      await Promise.resolve();
-      expect(empty.sent).toEqual([]);
-    } finally {
-      empty.cleanup();
+  });
+
+  test("every clipboard failure form is inert", async () => {
+    const cases = [
+      mountKeybar({ readClipboardText: null }),
+      mountKeybar({ readClipboardText: () => { throw new Error("blocked"); } }),
+      mountKeybar(),
+      mountKeybar({ readClipboardText: () => Promise.resolve("") }),
+    ];
+    for (const mounted of cases) {
+      try {
+        expect(() => mounted.click("paste")).not.toThrow();
+        await Promise.resolve();
+        expect(mounted.pasted).toEqual([]);
+        expect(mounted.sent).toEqual([]);
+      } finally {
+        mounted.cleanup();
+      }
     }
   });
 });

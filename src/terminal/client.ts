@@ -173,6 +173,9 @@ export type TerminalPanelHandle = {
   // the touch keybar's path for control sequences (^C, Esc, arrows) that
   // software keyboards cannot produce. No-op when not connected.
   sendInput(data: string): void;
+  // Paste text through xterm so newline normalization and bracketed-paste
+  // mode match native clipboard input. No-op when not connected or empty.
+  paste(text: string): void;
   isAttached(): boolean;
   // Scrollback search, driving the pane's own search addon. Reads the buffer
   // and moves xterm's selection only — nothing is written to the PTY, so a
@@ -241,6 +244,31 @@ export type MountTerminalOptions = {
   onOutput?: () => void;
 };
 
+export function pasteTerminalInput(
+  term: Pick<Terminal, "paste"> | null,
+  connected: boolean,
+  text: string,
+  setSemanticPasteActive: (active: boolean) => void,
+): boolean {
+  if (!term || !connected || !text) return false;
+  setSemanticPasteActive(true);
+  try {
+    term.paste(text);
+  } finally {
+    setSemanticPasteActive(false);
+  }
+  return true;
+}
+
+export function applyTerminalInputTransform(
+  data: string,
+  transformInput: ((data: string) => string) | undefined,
+  semanticPasteActive: boolean,
+): string {
+  if (semanticPasteActive || !transformInput) return data;
+  return transformInput(data);
+}
+
 // Mirror of the server's CLOSE_CODE_USER_TERMINATE (terminal/server.ts).
 // Defined as a literal on each side — like the 4409 hijack code — because
 // importing across the client/server boundary would drag the other side's
@@ -262,6 +290,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
   let socket: WebSocket | null = null;
   let attached = false;
   let protocolReady = false;
+  let semanticPasteActive = false;
   let resizeObserver: ResizeObserver | null = null;
   // Set to true when the caller invokes `detach()` so the close-event
   // handler can distinguish "the panel hid me" from "the server hung up".
@@ -530,7 +559,7 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     const encoder = new TextEncoder();
     term.onData(data => {
       if (!protocolReady || !socket || socket.readyState !== WebSocket.OPEN) return;
-      const output = options.transformInput ? options.transformInput(data) : data;
+      const output = applyTerminalInputTransform(data, options.transformInput, semanticPasteActive);
       socket.send(encoder.encode(output));
     });
 
@@ -1109,6 +1138,16 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     sendInput(data: string) {
       if (!protocolReady || !socket || socket.readyState !== WebSocket.OPEN) return;
       socket.send(new TextEncoder().encode(data));
+    },
+    paste(text: string) {
+      pasteTerminalInput(
+        term,
+        protocolReady && socket?.readyState === WebSocket.OPEN,
+        text,
+        active => {
+          semanticPasteActive = active;
+        },
+      );
     },
     isAttached: () => attached,
     search: terminalSearch,
