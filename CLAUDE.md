@@ -31,16 +31,19 @@ src/
 │                   the shared find bar and its pluggable engines (preview and
 │                   terminal), text indexing, matching, and highlight painting
 ├── shell/          boot, events, history, url, connection, pwa, follow,
-│                   follow-rules, state, storage, stale-hint — the
-│                   app-wide chrome and the appState singleton
+│                   follow-rules, state, storage, stale-hint, ui-mode
+│                   (per-device touch/desktop mode on <html>), tab-bar
+│                   (touch mode's bottom Files/Preview/Terminal tabs) —
+│                   the app-wide chrome and the appState singleton
 ├── preview/        the right pane — mounting rendered HTML, view-mode
 │                   chooser, layout (split/stacked), diff view,
 │                   mermaid trigger, anchors, image/binary fallbacks,
 │                   metadata card, code-block decorations
 ├── sidebar/        the left pane — tree-view + tree-config, panes
 │                   shell/render, change-overview, git-log, files-filter,
-│                   files-overlay (phone file browser), search-pane
-│                   (⇧⌘F project search: pane + result model + open-and-jump)
+│                   search-pane (⇧⌘F project search: pane + result model +
+│                   open-and-jump); in touch mode the whole pane stack
+│                   renders fullscreen as the Files tab
 ├── terminal/       the embedded xterm panel — client + server +
 │                   auth + pty + pane-state + panel UI
 ├── cli/            CLI domain — parse (flags + usage text) and output

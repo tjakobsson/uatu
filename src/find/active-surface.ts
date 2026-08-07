@@ -10,12 +10,17 @@
 // property can express, so it lives here as one.
 //
 // The other half of the reason is inertness: selection also changes from
-// file-watcher events (follow-mode Rules C/D). Because the only writers are
-// pointer and focus listeners, a background file change cannot relocate the
-// user's working context — there is no code path from the watcher to the
-// setter. `active-surface.test.ts` asserts that structurally.
+// file-watcher events (follow-mode Rules C/D), and a background file change
+// must not relocate the user's working context. The writers are the pointer
+// and focus listeners below, joined by the committed touch-tab change they
+// are bound alongside — and a tab only ever changes from a user action (a tab
+// tap, a Rule A row click, the terminal's own keyboard shortcuts), never from
+// the watcher. `active-surface.test.ts` asserts structurally that no
+// file-event module reaches the setter OR the tab.
 
-import { appState, type ActiveSurface } from "../shell/state";
+import { appState, type ActiveSurface, type TouchTab } from "../shell/state";
+import { onActiveTabChange } from "../shell/tab-bar";
+import { uiMode } from "../shell/ui-mode";
 
 // The surface roots as they exist in the DOM. Sidebar is a root of its own
 // rather than being folded into `preview` by selector, so that the
@@ -93,6 +98,13 @@ export function resolveSurfaceFromTarget(target: EventTarget | null): ActiveSurf
   return surfaceForRoot(findSurfaceRoot(target));
 }
 
+// The surface a touch tab presents once it is the active one.
+export function surfaceForTab(tab: TouchTab): ActiveSurface {
+  // Files renders the sidebar pane stack, and directing the sidebar is an act
+  // about the document it directs — the same rule `surfaceForRoot` applies.
+  return tab === "terminal" ? "terminal" : "preview";
+}
+
 export function getActiveSurface(): ActiveSurface {
   return appState.activeSurface;
 }
@@ -129,4 +141,22 @@ export function initActiveSurfaceTracking(): void {
   };
   document.addEventListener("pointerdown", handle, { capture: true });
   document.addEventListener("focusin", handle, { capture: true });
+
+  // Touch mode presents one surface at a time, so a COMMITTED tab change is
+  // itself the statement of where the user is now working — and the only
+  // reliable one. The tab bar sits outside every surface root, so resolving a
+  // tab tap through the listeners above got it wrong in both directions:
+  // `pointerdown`/`focusin` fire before the bar's click commits (press a tab
+  // and drag off, or merely focus it with a keyboard, and a surface is
+  // claimed that never becomes visible), while the terminal panel changes
+  // tabs from seven call sites of its own — Ctrl/Cmd+`, Escape, leaving
+  // fullscreen, boot fallbacks — that produce no tab-bar event at all and so
+  // left the surface stale. Subscribing to the change covers every path
+  // exactly once. Desktop mode renders all surfaces together, where which tab
+  // is "active" says nothing about where the user is working.
+  onActiveTabChange(tab => {
+    if (uiMode() === "touch") {
+      setActiveSurface(surfaceForTab(tab));
+    }
+  });
 }

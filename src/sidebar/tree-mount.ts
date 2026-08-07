@@ -2,7 +2,6 @@
 // selection handler delegates to the `follow-mode` capability (Rule A).
 
 import { applyUserRowClick } from "../shell/follow";
-import { dismissFilesOverlayAfterPick } from "./files-overlay";
 import { TreeView } from "./tree-view";
 
 const treeElementMaybe = document.querySelector<HTMLDivElement>("#tree");
@@ -22,12 +21,11 @@ export function ensureTreeView(): TreeView {
     treeView = new TreeView({
       container: treeElement,
       // Real user clicks only (the withProgrammaticUpdate guard suppresses
-      // library-fired callbacks), so the phone file browser dismisses on a
-      // pick but never on follow-driven or file-event tree updates.
-      onSelectDocument: documentId => {
-        dismissFilesOverlayAfterPick();
-        return applyUserRowClick(documentId);
-      },
+      // library-fired callbacks). Rule A itself brings the touch Preview
+      // surface forward, so a pick lands on the Preview tab — but follow-
+      // driven and file-event tree updates can never steal the active tab.
+      // Directory taps don't reach this handler at all.
+      onSelectDocument: documentId => applyUserRowClick(documentId),
     });
   }
   return treeView;

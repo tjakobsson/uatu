@@ -32,10 +32,6 @@ export function setPaneState(next: PaneState): void {
   appState.panes = next;
 }
 
-function isPromotedPane(element: HTMLElement): boolean {
-  return element.dataset.overlay === "open";
-}
-
 export function initSidebarPanes() {
   panelsToggleElement.addEventListener("click", () => {
     const expanded = panelsToggleElement.getAttribute("aria-expanded") === "true";
@@ -126,6 +122,128 @@ export function initSidebarPanes() {
     });
   });
 
+  // Coarse pointers: the pane HEADER is the touch surface — the 6px resizer
+  // strip and the small −/+ buttons are no finger targets. Two gestures,
+  // disambiguated by the 8px movement threshold:
+  //   drag       → moves the boundary above the pane (the previous visible
+  //                pane trades height with this one, exactly what that
+  //                pane's own resizer does);
+  //   double-tap → toggles the pane's collapse, same as the − / + button.
+  // Taps on the header's actual controls are excluded up front; headers
+  // carry touch-action: none (styles.css) so neither gesture is swallowed
+  // by a scroll gesture.
+  const coarsePointer =
+    typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
+  if (coarsePointer) {
+    const DOUBLE_TAP_MS = 350;
+    const DOUBLE_TAP_SLOP_PX = 24;
+    document.querySelectorAll<HTMLElement>(".pane-header").forEach(header => {
+      let lastTapAt = 0;
+      let lastTapX = 0;
+      let lastTapY = 0;
+      header.addEventListener("pointerdown", event => {
+        const target = event.target as HTMLElement | null;
+        if (target?.closest("button, select, input, [role='radiogroup']")) {
+          return;
+        }
+        const pane = header.closest<HTMLElement>("[data-pane-id]");
+        const paneId = pane?.dataset.paneId as PaneId | undefined;
+        if (!pane || !paneId || !isPaneId(paneId)) {
+          return;
+        }
+        // The topmost visible pane has no boundary above it to drag, but
+        // its header still takes the double-tap.
+        const prevPane = previousVisiblePane(paneId);
+        const prevPaneId = prevPane?.dataset.paneId as PaneId | undefined;
+        const dragTarget = prevPane && prevPaneId && isPaneId(prevPaneId)
+          ? { pane: prevPane, paneId: prevPaneId }
+          : null;
+
+        if (dragTarget) {
+          normalizePaneHeightsToStack();
+        }
+        // Capture up front, exactly like the resizer above. Touch gets
+        // implicit capture, but a coarse-primary hybrid (touchscreen +
+        // mouse) does not: without this the pointer can leave the header
+        // before any move clears the threshold, sending the rest of the
+        // gesture to another element — the drag never starts and these
+        // listeners leak. The threshold below is purely drag-vs-tap.
+        try {
+          header.setPointerCapture(event.pointerId);
+        } catch {
+          // NotFoundError when the pointer is already gone (or a synthetic
+          // event carries no active pointerId). Losing capture only costs
+          // the hybrid-device fix above — the gesture still works — so this
+          // must not abort the handler before the listeners below register.
+        }
+        const startY = event.clientY;
+        const prevStartHeight = dragTarget?.pane.getBoundingClientRect().height ?? 0;
+        const startHeight = pane.getBoundingClientRect().height;
+        const totalHeight = prevStartHeight + startHeight;
+        const minHeight = 72;
+        const dragThreshold = 8;
+        let dragging = false;
+
+        const onMove = (moveEvent: PointerEvent) => {
+          if (!dragTarget) {
+            return;
+          }
+          const delta = moveEvent.clientY - startY;
+          if (!dragging) {
+            if (Math.abs(delta) < dragThreshold) {
+              return;
+            }
+            dragging = true;
+          }
+          const prevHeight = Math.max(
+            minHeight,
+            Math.min(totalHeight - minHeight, prevStartHeight + delta),
+          );
+          appState.panes[dragTarget.paneId].height = Math.round(prevHeight);
+          appState.panes[paneId].height = Math.round(totalHeight - prevHeight);
+          syncPaneDom();
+        };
+        const onUp = (upEvent: PointerEvent) => {
+          if (dragging) {
+            persistPaneState();
+          } else {
+            // A clean tap. Two of them close together on the same header
+            // toggle collapse — the reachable version of the − / + button.
+            const now = Date.now();
+            const isDoubleTap =
+              now - lastTapAt < DOUBLE_TAP_MS &&
+              Math.hypot(upEvent.clientX - lastTapX, upEvent.clientY - lastTapY) <
+                DOUBLE_TAP_SLOP_PX;
+            if (isDoubleTap) {
+              lastTapAt = 0;
+              appState.panes[paneId].collapsed = !appState.panes[paneId].collapsed;
+              persistPaneState();
+              renderSidebar();
+            } else {
+              lastTapAt = now;
+              lastTapX = upEvent.clientX;
+              lastTapY = upEvent.clientY;
+            }
+          }
+          header.removeEventListener("pointermove", onMove);
+          header.removeEventListener("pointerup", onUp);
+          header.removeEventListener("pointercancel", onCancel);
+        };
+        const onCancel = () => {
+          if (dragging) {
+            persistPaneState();
+          }
+          header.removeEventListener("pointermove", onMove);
+          header.removeEventListener("pointerup", onUp);
+          header.removeEventListener("pointercancel", onCancel);
+        };
+        header.addEventListener("pointermove", onMove);
+        header.addEventListener("pointerup", onUp);
+        header.addEventListener("pointercancel", onCancel);
+      });
+    });
+  }
+
   syncPaneDom();
   renderPanelsMenu();
 }
@@ -133,6 +251,18 @@ export function initSidebarPanes() {
 function nextVisiblePane(paneId: PaneId): HTMLElement | null {
   const index = ALL_PANE_DEFS.findIndex(pane => pane.id === paneId);
   for (const candidate of ALL_PANE_DEFS.slice(index + 1)) {
+    const state = appState.panes[candidate.id];
+    if (!state.visible || state.collapsed) {
+      continue;
+    }
+    return document.querySelector<HTMLElement>(`[data-pane-id="${candidate.id}"]`);
+  }
+  return null;
+}
+
+function previousVisiblePane(paneId: PaneId): HTMLElement | null {
+  const index = ALL_PANE_DEFS.findIndex(pane => pane.id === paneId);
+  for (const candidate of ALL_PANE_DEFS.slice(0, Math.max(0, index)).reverse()) {
     const state = appState.panes[candidate.id];
     if (!state.visible || state.collapsed) {
       continue;
@@ -162,10 +292,6 @@ export function syncPaneDom() {
     const state = appState.panes[pane.id];
     element.hidden = !state.visible;
     element.classList.toggle("is-collapsed", state.collapsed);
-    if (isPromotedPane(element)) {
-      element.style.removeProperty("flex");
-      continue;
-    }
     if (state.height && !state.collapsed) {
       element.style.flex = `${pane.id === growPaneId ? 1 : 0} 1 ${state.height}px`;
     } else {
@@ -221,7 +347,6 @@ function normalizePaneHeightsToStack() {
         && paneParticipatesInStack({
           visible: pane.state.visible,
           collapsed: pane.state.collapsed,
-          promoted: isPromotedPane(pane.element),
         }),
       ),
     );

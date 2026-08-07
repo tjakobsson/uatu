@@ -38,7 +38,7 @@
     "hast-util-to-html": "^9.0.5",
     "highlight.js": "^11.11.1",
     "ignore": "^7.0.6",
-    "mermaid": "^11.16.0",
+    "mermaid": "^11.16.1",
     "micromark": "^4.0.2",
     "micromark-extension-frontmatter": "^2.0.0",
     "micromark-extension-gfm": "^3.0.0",

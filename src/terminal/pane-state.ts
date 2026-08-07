@@ -25,10 +25,6 @@ const TERMINAL_WIDTH_MAX_FRACTION = 0.6;
 // Below this viewport width, right-dock collapses back to bottom-dock so the
 // preview isn't squeezed unusable. Preference is preserved for restoration.
 export const TERMINAL_RIGHT_DOCK_VIEWPORT_MIN = 720;
-// Phone-class = coarse pointer AND narrower than the app shell's stacked-
-// layout breakpoint (styles.css @media (max-width: 900px)). iPads in
-// landscape and narrow desktop windows are deliberately NOT phone-class.
-export const PHONE_CLASS_VIEWPORT_MAX = 900;
 // Mirror of TERMINAL_FONT_SIZE_MIN/MAX in terminal/config.ts. Defined as
 // literals on each side — importing the server-side loader would drag
 // node:fs into the browser bundle (same convention as the WS close codes).
@@ -139,22 +135,63 @@ export function clampTerminalWidth(value: number, viewportWidth: number): number
   return Math.max(TERMINAL_WIDTH_MIN, Math.min(max, Math.round(value)));
 }
 
-// Phone-class predicate over raw inputs so tests need no matchMedia. The
-// caller (panel.ts) feeds it live `(pointer: coarse)` + viewport width.
-export function isPhoneClassViewport(coarsePointer: boolean, viewportWidth: number): boolean {
-  return coarsePointer && viewportWidth <= PHONE_CLASS_VIEWPORT_MAX;
-}
-
-// Effective display mode: on phone-class viewports a stored `normal` is
-// promoted to fullscreen — the 240px docked strip is unusable on a phone —
-// WITHOUT overwriting the stored preference, mirroring the right-dock →
-// bottom-dock fallback. `minimized` and `fullscreen` pass through.
+// Effective display mode: while the Terminal tab is active in touch mode,
+// EVERY stored mode is promoted to fullscreen — neither the docked strip
+// nor the minimized header strip ever renders in touch mode — WITHOUT
+// overwriting the stored preference, mirroring the right-dock →
+// bottom-dock fallback. Outside touch-terminal the stored mode passes
+// through untouched (that's what desktop mode renders).
 export function resolveEffectiveDisplayMode(
   stored: TerminalDisplayMode,
-  phoneClass: boolean,
+  touchTerminalActive: boolean,
 ): TerminalDisplayMode {
-  if (phoneClass && stored === "normal") return "fullscreen";
+  if (touchTerminalActive) return "fullscreen";
   return stored;
+}
+
+// Whether an Escape keypress means "leave the fullscreen terminal".
+//
+// The panel's Escape listener is document-level and capture-phase, so it
+// decides for the whole app whether the key is consumed — and it must not
+// consume it on behalf of a terminal nobody can see. That is reachable:
+// `resolveEffectiveDisplayMode` passes the stored mode through whenever the
+// Terminal tab is inactive, so a terminal put into fullscreen in desktop mode
+// still reports `fullscreen` after a switch to touch mode parks it behind
+// Preview or Files with its PTYs attached. Answering from the stored mode
+// alone would swallow every Escape in the app — the preview find bar's
+// included — while the terminal is CSS-hidden.
+export function shouldEscapeExitTerminalFullscreen(
+  stored: TerminalDisplayMode,
+  touchMode: boolean,
+  terminalTabActive: boolean,
+): boolean {
+  // Touch mode renders exactly one surface: the terminal is on screen only as
+  // the active tab, and it is always fullscreen there whatever `stored` says.
+  if (touchMode) return terminalTabActive;
+  // Desktop renders the panel alongside the preview; only a real stored
+  // fullscreen is an Escape-able state.
+  return stored === "fullscreen";
+}
+
+// What the terminal panel does when the active touch tab changes. Pure so
+// the PTY-preserving contract is pinned by unit test:
+//   "show"          — Terminal tab activated with the panel hidden: run the
+//                     same show path as the desktop toggle (spawn/reattach).
+//   "reveal"        — Terminal tab activated with the panel already live:
+//                     the surface reappears via CSS; xterm needs a refit
+//                     and focus, nothing else.
+//   "keep-attached" — leaving the Terminal tab with live panes: the surface
+//                     hides via CSS ONLY. Minimize semantics — panes and
+//                     PTYs MUST stay attached; never setVisible(false).
+//   "none"          — a switch not involving a live terminal surface.
+export type TerminalTabAction = "show" | "reveal" | "keep-attached" | "none";
+
+export function terminalActionForTabChange(
+  terminalTabActive: boolean,
+  panelHidden: boolean,
+): TerminalTabAction {
+  if (terminalTabActive) return panelHidden ? "show" : "reveal";
+  return panelHidden ? "none" : "keep-attached";
 }
 
 // Clamp a runtime font-size candidate to the same bounds the config loader

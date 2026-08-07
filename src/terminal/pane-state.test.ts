@@ -21,15 +21,15 @@ import {
   writeTerminalHeightPreference,
   writeTerminalPanelState,
   writeTerminalVisiblePreference,
-  PHONE_CLASS_VIEWPORT_MAX,
   TERMINAL_FONT_SIZE_KEY,
   TERMINAL_FONT_SIZE_MAX,
   TERMINAL_FONT_SIZE_MIN,
   clampTerminalFontSize,
-  isPhoneClassViewport,
   readTerminalFontSizeOverride,
   resolveEffectiveDisplayMode,
   resolveTerminalFontSize,
+  shouldEscapeExitTerminalFullscreen,
+  terminalActionForTabChange,
   writeTerminalFontSizeOverride,
   type StorageLike,
 } from "./pane-state";
@@ -346,30 +346,72 @@ describe("own pane records (sessionStorage)", () => {
   });
 });
 
-describe("isPhoneClassViewport", () => {
+describe("resolveEffectiveDisplayMode", () => {
 
-  it("requires BOTH a coarse pointer and a narrow viewport", () => {
-    expect(isPhoneClassViewport(true, 390)).toBe(true);
-    expect(isPhoneClassViewport(true, PHONE_CLASS_VIEWPORT_MAX)).toBe(true);
-    // iPad landscape: coarse but wide.
-    expect(isPhoneClassViewport(true, 1180)).toBe(false);
-    // Narrow desktop window: fine pointer.
-    expect(isPhoneClassViewport(false, 390)).toBe(false);
+  it("promotes EVERY stored mode to fullscreen while the touch Terminal tab is active", () => {
+    // Neither the docked strip nor the minimized header strip may ever
+    // render in touch mode — the tab is the return affordance.
+    expect(resolveEffectiveDisplayMode("normal", true)).toBe("fullscreen");
+    expect(resolveEffectiveDisplayMode("minimized", true)).toBe("fullscreen");
+    expect(resolveEffectiveDisplayMode("fullscreen", true)).toBe("fullscreen");
+  });
+
+  it("passes the stored mode through outside touch-terminal", () => {
+    expect(resolveEffectiveDisplayMode("normal", false)).toBe("normal");
+    expect(resolveEffectiveDisplayMode("minimized", false)).toBe("minimized");
+    expect(resolveEffectiveDisplayMode("fullscreen", false)).toBe("fullscreen");
   });
 });
 
-describe("resolveEffectiveDisplayMode", () => {
-
-  it("promotes a stored normal to fullscreen on phone-class viewports only", () => {
-    expect(resolveEffectiveDisplayMode("normal", true)).toBe("fullscreen");
-    expect(resolveEffectiveDisplayMode("normal", false)).toBe("normal");
+describe("shouldEscapeExitTerminalFullscreen", () => {
+  // The panel's Escape listener is document-level and capture-phase, so a
+  // wrong `true` here consumes Escape for the whole app.
+  it("does NOT claim Escape while touch mode parks the terminal behind another tab", () => {
+    // The regression: fullscreen chosen in desktop mode, then a switch to
+    // touch mode with Preview or Files active. The stored mode is still
+    // `fullscreen` and the PTYs are still attached, but the terminal is
+    // CSS-hidden — Escape belongs to the visible surface (the preview find
+    // bar, most obviously).
+    expect(shouldEscapeExitTerminalFullscreen("fullscreen", true, false)).toBe(false);
+    expect(shouldEscapeExitTerminalFullscreen("normal", true, false)).toBe(false);
+    expect(shouldEscapeExitTerminalFullscreen("minimized", true, false)).toBe(false);
   });
 
-  it("passes minimized and fullscreen through untouched", () => {
-    expect(resolveEffectiveDisplayMode("minimized", true)).toBe("minimized");
-    expect(resolveEffectiveDisplayMode("fullscreen", true)).toBe("fullscreen");
-    expect(resolveEffectiveDisplayMode("minimized", false)).toBe("minimized");
-    expect(resolveEffectiveDisplayMode("fullscreen", false)).toBe("fullscreen");
+  it("claims Escape for the active touch Terminal tab whatever the stored mode", () => {
+    // Touch mode renders the Terminal tab fullscreen regardless of `stored`,
+    // so Escape is always the way back out to Preview.
+    expect(shouldEscapeExitTerminalFullscreen("normal", true, true)).toBe(true);
+    expect(shouldEscapeExitTerminalFullscreen("minimized", true, true)).toBe(true);
+    expect(shouldEscapeExitTerminalFullscreen("fullscreen", true, true)).toBe(true);
+  });
+
+  it("claims Escape in desktop mode only for a stored fullscreen", () => {
+    expect(shouldEscapeExitTerminalFullscreen("fullscreen", false, false)).toBe(true);
+    expect(shouldEscapeExitTerminalFullscreen("normal", false, false)).toBe(false);
+    expect(shouldEscapeExitTerminalFullscreen("minimized", false, false)).toBe(false);
+  });
+});
+
+describe("terminalActionForTabChange", () => {
+
+  it("activating the Terminal tab shows a hidden panel through the toggle path", () => {
+    expect(terminalActionForTabChange(true, true)).toBe("show");
+  });
+
+  it("re-activating with the panel live only reveals (refit + focus)", () => {
+    expect(terminalActionForTabChange(true, false)).toBe("reveal");
+  });
+
+  it("leaving the Terminal tab with live panes NEVER hides destructively", () => {
+    // The PTY-preserving contract: switching away is minimize semantics —
+    // the surface hides via CSS only, panes stay attached. The action for
+    // this path must be "keep-attached", never anything that routes to
+    // setVisible(false)/detach.
+    expect(terminalActionForTabChange(false, false)).toBe("keep-attached");
+  });
+
+  it("switches not involving a live terminal are no-ops", () => {
+    expect(terminalActionForTabChange(false, true)).toBe("none");
   });
 });
 

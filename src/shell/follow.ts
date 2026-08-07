@@ -18,6 +18,7 @@ import { pushSelection } from "./history";
 import { appState } from "./state";
 import { setPreviewMode, setSelectedId } from "./selection";
 import { persistPersonalWorkspaceState } from "./personal-state";
+import { revealPreviewSurface } from "./tab-bar";
 
 export { chooseSelectionForFileEvent };
 
@@ -81,7 +82,14 @@ export function applyChipClick(): void {
 // fires for genuine user clicks — programmatic / library-mount callbacks are
 // suppressed at the TreeView's `duringProgrammaticUpdate` guard, so this
 // function does NOT need to re-check origin.
+//
+// Every Rule A entry point (tree row, search result) is a user asking to
+// READ this document, so the touch Preview surface comes forward here — the
+// one chokepoint — rather than in each caller. Doing it before the load
+// also means the reveal logic downstream (search's match jump) measures a
+// visible surface.
 export function applyUserRowClick(documentId: string): Promise<void> {
+  revealPreviewSurface();
   setFollowEnabled(false);
   setSelectedId(documentId);
   setPreviewMode({ kind: "document" });

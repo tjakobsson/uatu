@@ -24,6 +24,7 @@ const FIELD_OWNERS: Record<string, string> = {
   viewLayout: "src/preview/layout.ts",
   splitRatio: "src/preview/layout.ts",
   diffStyle: "src/preview/diff.ts",
+  activeTab: "src/shell/tab-bar.ts",
   panes: "src/sidebar/panes.ts",
   filesPaneFilter: "src/sidebar/files-filter.ts",
   gitLogLimit: "src/sidebar/git-log.ts",

@@ -10,7 +10,6 @@ import { initOutline } from "./preview/outline";
 import { attachAutoStackObserver } from "./preview/layout";
 import { initSidebarCollapse, initSidebarWidth } from "./sidebar/shell";
 import { initSidebarPanes } from "./sidebar/panes";
-import { initFilesOverlay } from "./sidebar/files-overlay";
 import { initPreviewTextSize } from "./preview/text-size";
 import { initGitLogClickHandler, initGitLogControls } from "./sidebar/git-log";
 import { initChangeOverviewClickHandler } from "./sidebar/change-overview";
@@ -21,6 +20,8 @@ import { initFindBar } from "./find/find-bar";
 import { initFindShortcuts, registerProjectSearch } from "./find/shortcut";
 import { initSearchPane, openSearchPane } from "./sidebar/search-pane";
 import { initStaleHintActionHandler } from "./shell/stale-hint-mount";
+import { initUiMode } from "./shell/ui-mode";
+import { initTabBar } from "./shell/tab-bar";
 
 const appShellElement = document.querySelector<HTMLDivElement>(".app-shell");
 const previewBaseElement = document.querySelector<HTMLBaseElement>("#preview-base");
@@ -92,6 +93,11 @@ if (
   throw new Error("uatu UI failed to initialize");
 }
 
+// Mode + tab chrome first: everything layout-related keys on the
+// data-ui-mode / data-active-tab attributes these two stamp on <html>.
+initUiMode();
+initTabBar();
+
 initActiveSurfaceTracking();
 initFindBar();
 initSearchPane();
@@ -99,7 +105,6 @@ registerProjectSearch(openSearchPane);
 initFindShortcuts();
 initSidebarCollapse();
 initSidebarPanes();
-initFilesOverlay();
 initPreviewTextSize();
 initHubNav();
 initSidebarWidth();
