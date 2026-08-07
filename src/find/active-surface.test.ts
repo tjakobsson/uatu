@@ -10,6 +10,7 @@ import {
   resolveSurfaceFromTarget,
   setActiveSurface,
   surfaceForRoot,
+  surfaceForTab,
 } from "./active-surface";
 
 // The live listener binding is exercised end-to-end in tests/e2e/find.e2e.ts.
@@ -145,47 +146,90 @@ describe("resolveSurfaceFromTarget", () => {
   });
 });
 
-describe("the touch tab bar claims the surface it activates", () => {
-  // Regression: leaving a parked terminal by tapping Preview changed only
-  // `activeTab`. The bar sits outside every surface root, so `activeSurface`
-  // stayed `terminal` — and because parked PTYs remain attached, the terminal
-  // find engine still reported itself available, so the next ⌘F opened find
-  // over the CSS-hidden terminal instead of the visible document.
-  test("tapping Preview while the terminal is active claims preview", () => {
+describe("surfaceForTab", () => {
+  // Touch mode presents one surface at a time, so the active tab decides
+  // where find acts. The claim is made from a committed tab change (wired in
+  // initActiveSurfaceTracking), NOT from a tab-bar DOM event: the bar sits
+  // outside every surface root, `pointerdown`/`focusin` fire before its click
+  // commits, and the terminal panel changes tabs from call sites of its own
+  // (Ctrl/Cmd+`, Escape, leaving fullscreen) that produce no bar event at all.
+  test("the Terminal tab is its own surface", () => {
+    expect(surfaceForTab("terminal")).toBe("terminal");
+  });
+
+  test("Preview is the preview surface", () => {
+    expect(surfaceForTab("preview")).toBe("preview");
+  });
+
+  test("Files is the preview surface — the sidebar directs the document", () => {
+    // Same product rule `surfaceForRoot` applies to the sidebar root.
+    expect(surfaceForTab("files")).toBe("preview");
+  });
+});
+
+describe("the tab bar is not resolved as a surface root", () => {
+  // It is app chrome outside every root; claiming from a tap here is what the
+  // committed-tab-change subscription replaced.
+  test("a tab button resolves to no surface", () => {
+    const document = shellOf();
+    expect(resolveSurfaceFromTarget(document.querySelector("#touch-tab-preview"))).toBeNull();
+    expect(resolveSurfaceFromTarget(document.querySelector("#preview-glyph"))).toBeNull();
+  });
+
+  test("a tap on the bar leaves the current surface standing", () => {
     const document = shellOf();
     setActiveSurface("terminal");
     noteInteraction(document.querySelector("#touch-tab-preview"));
-    expect(appState.activeSurface).toBe("preview");
-  });
-
-  test("tapping Terminal claims terminal", () => {
-    const document = shellOf();
-    setActiveSurface("preview");
-    noteInteraction(document.querySelector("#touch-tab-terminal"));
     expect(appState.activeSurface).toBe("terminal");
   });
+});
 
-  test("tapping Files claims preview — the sidebar directs the document", () => {
-    const document = shellOf();
-    setActiveSurface("terminal");
-    noteInteraction(document.querySelector("#touch-tab-files"));
-    expect(appState.activeSurface).toBe("preview");
-  });
+describe("a committed tab change claims its surface", () => {
+  // This is the half no tab-bar DOM event can cover, and the reason the claim
+  // moved off `pointerdown`: the terminal panel changes tabs from its own call
+  // sites — Ctrl/Cmd+`, Escape, leaving fullscreen, boot fallbacks — none of
+  // which produce a tab-bar event, so the surface used to go stale on every
+  // one of them. Driven through the real `setActiveTab` rather than by calling
+  // the listener directly, so the subscription itself is what's under test.
+  test("switching tabs with no tab-bar event still moves the surface", async () => {
+    const savedDocument = Reflect.get(globalThis, "document");
+    const savedWindow = Reflect.get(globalThis, "window");
+    const store = new Map<string, string>();
+    Reflect.set(globalThis, "document", {
+      documentElement: { setAttribute: () => {} },
+      addEventListener: () => {},
+    });
+    Reflect.set(globalThis, "window", {
+      localStorage: {
+        getItem: (key: string) => store.get(key) ?? null,
+        setItem: (key: string, value: string) => void store.set(key, value),
+        removeItem: (key: string) => void store.delete(key),
+        get length() {
+          return store.size;
+        },
+        key: (index: number) => [...store.keys()][index] ?? null,
+      },
+      // Coarse pointer => touch mode, where the tab decides the surface.
+      matchMedia: () => ({ matches: true }),
+    });
+    try {
+      const { initActiveSurfaceTracking } = await import("./active-surface");
+      const { setActiveTab } = await import("../shell/tab-bar");
+      initActiveSurfaceTracking();
 
-  test("a tap landing on a tab's glyph resolves like the button itself", () => {
-    // Real taps land on the inner <svg>, not the <button>.
-    const document = shellOf();
-    setActiveSurface("terminal");
-    noteInteraction(document.querySelector("#preview-glyph"));
-    expect(appState.activeSurface).toBe("preview");
-  });
+      setActiveTab("terminal");
+      expect(appState.activeSurface).toBe("terminal");
 
-  test("the bar's own chrome claims nothing", () => {
-    const document = shellOf();
-    setActiveSurface("terminal");
-    expect(resolveSurfaceFromTarget(document.querySelector("#touch-tab-bar"))).toBeNull();
-    noteInteraction(document.querySelector("#touch-tab-bar"));
-    expect(appState.activeSurface).toBe("terminal");
+      // The regression: leaving Terminal this way fires no tab-bar event.
+      setActiveTab("preview");
+      expect(appState.activeSurface).toBe("preview");
+
+      setActiveTab("files");
+      expect(appState.activeSurface).toBe("preview");
+    } finally {
+      Reflect.set(globalThis, "document", savedDocument);
+      Reflect.set(globalThis, "window", savedWindow);
+    }
   });
 });
 
@@ -209,6 +253,28 @@ describe("inertness against programmatic selection", () => {
       return contents.includes("setActiveSurface") || contents.includes("noteInteraction");
     });
     expect(offenders).toEqual([]);
+  });
+
+  // A committed touch-tab change now claims its surface too, so the tab is a
+  // second route to the setter and the same modules must not reach it either.
+  test("no file-event module reaches the active tab either", () => {
+    const offenders = SELECTION_MODULES.filter(relative => relative !== "shell/follow.ts").filter(
+      relative => {
+        const contents = readFileSync(path.join(SRC_ROOT, relative), "utf8");
+        return contents.includes("setActiveTab") || contents.includes("revealPreviewSurface");
+      },
+    );
+    expect(offenders).toEqual([]);
+  });
+
+  test("follow.ts reaches the tab exactly once — the Rule A chokepoint", () => {
+    // follow.ts is the one exemption above because it owns BOTH Rule A (user
+    // row click, which legitimately brings the Preview surface forward) and
+    // Rules C/D (file events, which must not). Pinning the call count is what
+    // stops a second call site being added on a watcher path later.
+    const contents = readFileSync(path.join(SRC_ROOT, "shell/follow.ts"), "utf8");
+    expect(contents.match(/revealPreviewSurface\(\)/g) ?? []).toHaveLength(1);
+    expect(contents).not.toContain("setActiveTab");
   });
 
   test("the setter is reachable only from this module's user-event listeners", () => {
