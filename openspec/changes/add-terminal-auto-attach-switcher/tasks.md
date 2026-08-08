@@ -65,6 +65,9 @@
 - [x] 8.6 Honor the sheet's `aria-modal` with a Tab wrap inside it
 - [x] 8.7 Dismiss the switcher when the active touch tab leaves Terminal — the panel stays mounted there by design, so nothing else marked the sheet gone: it kept claiming Escape on Preview, absorbed refreshes into invisible repaints, and reappeared on return
 - [x] 8.8 Replace the `hidden`-attribute checks that stood in for visibility with `terminalSurfaceShowing()`, and gate the switcher's Escape claim on the terminal actually being on screen
+- [x] 8.10 Scope the touch single-pane rule to real PTY panes (`[data-session-id]`) — the paste-token form and origin diagnostic reuse `.terminal-pane` but are never stamped active, so the rule hid them and left a blank Terminal tab with no way to reconnect once credentials expired
+- [x] 8.11 Treat a pane whose session was taken over as not held: it now lists as attached-elsewhere with a working Take over, and its Kill sends a real DELETE instead of quietly dropping the local pane while the session kept running in the other window
+- [x] 8.12 Correct the pane-cap scenario — detached overflow is listed by the touch switcher and attaches when a slot frees; it is not immediately reachable from the desktop chooser at the cap (follow-up, not a regression)
 - [x] 8.9 Correct the unit test that asserted the buggy precedence (an off-tab switcher claiming Escape) and add the desktop-mode counterpart; add the E2E regression, verified to fail against the pre-fix code
 
 Verified by hand on an iPhone through `uatu hub` over Tailscale: auto-attach,

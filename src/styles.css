@@ -5080,8 +5080,14 @@ html[data-ui-mode="touch"] #terminal-resizer {
    action moves between them. Presentation only: every hidden pane keeps its
    PTY attached and its record persisted, and desktop mode renders the whole
    split again. Keyed on `data-active`, which panel.ts already stamps on
-   exactly one pane — no JS decides visibility here. */
-html[data-ui-mode="touch"] .terminal-pane:not([data-active]) {
+   exactly one pane — no JS decides visibility here.
+
+   Scoped to `[data-session-id]`, i.e. real PTY panes. The recovery surfaces
+   (paste-token form, origin-rejected diagnostic) reuse the `.terminal-pane`
+   class for layout but carry no session and are never stamped active — hiding
+   them would leave a blank Terminal tab with no way to reconnect after
+   credentials expire, which is the one moment the user most needs them. */
+html[data-ui-mode="touch"] .terminal-pane[data-session-id]:not([data-active]) {
   display: none;
 }
 

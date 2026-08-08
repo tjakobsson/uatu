@@ -1167,7 +1167,10 @@ export function setupTerminalPanel(
       ? panes.get(activePaneId)?.record.sessionId
       : undefined;
     const rows = buildSwitcherRows(
-      Array.from(panes.values(), entry => ({ sessionId: entry.record.sessionId })),
+      Array.from(panes.values(), entry => ({
+        sessionId: entry.record.sessionId,
+        attached: entry.handle.isAttached(),
+      })),
       inventory,
       activeSessionId,
       lastPtyId,
@@ -1320,19 +1323,27 @@ export function setupTerminalPanel(
   // nobody (or by another window) has no pane to lose, so it is a plain DELETE
   // with the sheet staying open — the same contract as the desktop chooser.
   async function terminateFromSwitcher(sessionId: string): Promise<boolean> {
-    const held = Array.from(panes.values()).find(
+    const pane = Array.from(panes.values()).find(
       entry => entry.record.sessionId === sessionId,
     );
-    if (held) {
+    // Only a pane this window still OWNS goes down the local path.
+    // `requestClosePane` closes an unattached pane silently and without a
+    // DELETE — right for a pane whose shell already exited, but for a session
+    // taken over by another window it would tear down our stale pane and
+    // report success while the session kept running over there.
+    if (pane?.handle.isAttached()) {
       // The confirm modal is the surface now; two stacked sheets on a phone
       // is one too many.
       dismissSwitcher();
-      requestClosePane(held.record.id);
+      requestClosePane(pane.record.id);
       return true;
     }
     const ok = await killSessionRemote(sessionId);
     if (ok) {
       clearLastPty(sessionId);
+      // A parked pane referencing the session we just destroyed has nothing
+      // left to point at.
+      if (pane) removePane(pane.record.id);
       // Refresh the list so the terminated row disappears. A no-op when the
       // user dismissed the sheet while the DELETE was in flight — repainting
       // then would reopen a sheet they already closed.

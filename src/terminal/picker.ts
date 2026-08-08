@@ -93,10 +93,18 @@ export type SwitcherRow = {
   canTakeOver: boolean;
 };
 
-// Panes as the switcher needs to see them: window-local order plus the server
-// resource each one holds.
+// Panes as the switcher needs to see them: window-local order, the server
+// resource each one references, and whether this window still holds it.
+//
+// `attached` is load-bearing. A pane whose session was taken over by another
+// window stays on screen with its take-back notice, but it no longer owns the
+// resource. Treating it as held would label someone else's session "open here",
+// hide the inventory row that offers Take over, and route Kill down the
+// local-pane path — which closes the pane without a DELETE and leaves the
+// session running in the window that actually holds it.
 export type SwitcherPane = {
   sessionId: string;
+  attached: boolean;
 };
 
 // Build the switcher's row model. Attached-here rows come first in pane order
@@ -113,10 +121,15 @@ export function buildSwitcherRows(
   freeSlots: number,
 ): SwitcherRow[] {
   const byId = new Map(inventory.map(session => [session.id, session]));
-  const held = new Set(panes.map(pane => pane.sessionId));
+  // Only panes this window still owns count as held. A parked pane's session
+  // belongs to whoever took it, so it falls through to the inventory rows
+  // below and is offered with an explicit Take over, exactly like any other
+  // session held elsewhere.
+  const ownPanes = panes.filter(pane => pane.attached);
+  const held = new Set(ownPanes.map(pane => pane.sessionId));
   const hasCapacity = freeSlots > 0;
 
-  const mine: SwitcherRow[] = panes.map(pane => {
+  const mine: SwitcherRow[] = ownPanes.map(pane => {
     const session = byId.get(pane.sessionId);
     const visible = pane.sessionId === activeSessionId;
     return {

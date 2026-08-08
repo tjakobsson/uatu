@@ -16,7 +16,7 @@ When a client has no per-window attachment to restore, the panel SHALL attach au
 #### Scenario: Auto-attach stops at the pane cap
 - **WHEN** more detached PTYs exist than the pane cap allows
 - **THEN** the panel attaches up to the cap, oldest first
-- **AND** the remaining PTYs stay detached and reachable from the switcher or the chooser
+- **AND** the remaining PTYs stay detached, listed by the touch switcher with their attach action disabled, and attach on any surface as soon as a pane slot frees
 
 #### Scenario: Sessions held elsewhere are never taken over automatically
 - **WHEN** inventory contains PTYs attached by another window

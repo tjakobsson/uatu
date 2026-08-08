@@ -142,7 +142,7 @@ describe("buildSwitcherRows", () => {
     const free = session({ createdAt: 300, label: "htop" });
     const elsewhere = session({ attached: true, createdAt: 400, label: "ssh" });
     const rows = buildSwitcherRows(
-      [{ sessionId: mineVisible.id }, { sessionId: mineHidden.id }],
+      [{ sessionId: mineVisible.id, attached: true }, { sessionId: mineHidden.id, attached: true }],
       [elsewhere, free, mineHidden, mineVisible],
       mineVisible.id,
       undefined,
@@ -163,7 +163,7 @@ describe("buildSwitcherRows", () => {
     const hidden = session({ createdAt: 200 });
     const free = session({ createdAt: 300 });
     const rows = buildSwitcherRows(
-      [{ sessionId: visible.id }, { sessionId: hidden.id }],
+      [{ sessionId: visible.id, attached: true }, { sessionId: hidden.id, attached: true }],
       [visible, hidden, free],
       visible.id,
       undefined,
@@ -185,7 +185,7 @@ describe("buildSwitcherRows", () => {
     const free = session({ createdAt: 300 });
     const elsewhere = session({ attached: true, createdAt: 400 });
     const rows = buildSwitcherRows(
-      [{ sessionId: visible.id }, { sessionId: hidden.id }],
+      [{ sessionId: visible.id, attached: true }, { sessionId: hidden.id, attached: true }],
       [visible, hidden, free, elsewhere],
       visible.id,
       undefined,
@@ -204,8 +204,45 @@ describe("buildSwitcherRows", () => {
     expect(rows.map(r => r.canSelect)).toEqual([true, true]);
   });
 
+  it("offers Take over for a pane another window took over, not 'open here'", () => {
+    // The pane stays on screen with its take-back notice, but the session
+    // belongs to the window that took it. Listing it as ours would hide the
+    // only affordance that gets it back — and would route Kill down the
+    // local-pane path, which never sends a DELETE.
+    const taken = session({ attached: true, createdAt: 100 });
+    const rows = buildSwitcherRows(
+      [{ sessionId: taken.id, attached: false }],
+      [taken],
+      undefined,
+      undefined,
+      now,
+      8,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      sessionId: taken.id,
+      state: "attached-elsewhere",
+      canSelect: false,
+      canTakeOver: true,
+    });
+  });
+
+  it("does not double-list a parked pane whose session went detached", () => {
+    const parked = session({ attached: false, createdAt: 100 });
+    const rows = buildSwitcherRows(
+      [{ sessionId: parked.id, attached: false }],
+      [parked],
+      undefined,
+      undefined,
+      now,
+      8,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ state: "detached", canSelect: true });
+  });
+
   it("keeps a pane whose session left inventory on the list", () => {
-    const ghost = { sessionId: "77777777-7777-4777-8777-777777777777" };
+    const ghost = { sessionId: "77777777-7777-4777-8777-777777777777", attached: true };
     const rows = buildSwitcherRows([ghost], [], ghost.sessionId, undefined, now, 8);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ state: "visible", label: "shell", age: "" });

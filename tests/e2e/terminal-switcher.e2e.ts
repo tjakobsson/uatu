@@ -227,6 +227,29 @@ test.describe("touch terminal switcher", () => {
     await expect(page.locator(switchKey)).toHaveAttribute("aria-expanded", "false");
   });
 
+  test("the paste-token form stays visible in touch mode", async ({ page, context, request }) => {
+    await bootTouchTerminal(page, request);
+
+    // Strip every credential, the way an expired session looks.
+    await context.clearCookies();
+    await page.evaluate(() => {
+      try {
+        window.sessionStorage.removeItem("uatu:terminal-token");
+      } catch {
+        // best-effort
+      }
+    });
+
+    // The recovery surfaces reuse the `.terminal-pane` class but hold no
+    // session and are never stamped active. A one-pane-at-a-time rule keyed on
+    // `data-active` alone would hide them, leaving a blank Terminal tab at the
+    // one moment the user needs a way back in.
+    await page.locator("#touch-tab-terminal").click();
+    await expect(page.locator(".terminal-auth")).toBeVisible({ timeout: 10000 });
+    await expect(page.locator(".terminal-auth-heading")).toHaveText("Reconnect to uatu");
+    await expect(page.locator(".terminal-auth-input")).toBeVisible();
+  });
+
   test("desktop mode renders every pane again", async ({ page, context, request }) => {
     await bootTouchTerminal(page, request);
     await stageSessions(page, 2);
