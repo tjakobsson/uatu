@@ -4,6 +4,24 @@ Notable user-facing changes to uatu are documented here. Versions follow
 [Semantic Versioning](https://semver.org/) and are generated from Conventional
 Commits by [Release Please](https://github.com/googleapis/release-please).
 
+## [0.5.0](https://github.com/tjakobsson/uatu/compare/v0.4.0...v0.5.0) (2026-08-08)
+
+
+### Features
+
+* **desktop:** unify UatuCode Desktop on the uatu hub ([e67d08f](https://github.com/tjakobsson/uatu/commit/e67d08f1e91dec505f1946e808f490b8a4fd4c92))
+* **hub:** add trusted local mode and path-based workspaces ([e67d08f](https://github.com/tjakobsson/uatu/commit/e67d08f1e91dec505f1946e808f490b8a4fd4c92))
+* **hub:** persist workspace state across clients ([4d7cc34](https://github.com/tjakobsson/uatu/commit/4d7cc340eec62742301ab09b4bcc86e574cff697))
+* **hub:** self-hostable session hub with remote access and base-path serving ([#162](https://github.com/tjakobsson/uatu/issues/162)) ([6e3b155](https://github.com/tjakobsson/uatu/commit/6e3b1551d494931d81f3f43b05af7ed913dd1d0c))
+* **mobile:** make phones and iPads first-class surfaces ([#176](https://github.com/tjakobsson/uatu/issues/176)) ([cb778fd](https://github.com/tjakobsson/uatu/commit/cb778fd53604ac0ecefbcd3c5b6893410903097c))
+* **mobile:** navigate touch devices with a bottom tab bar ([574b75b](https://github.com/tjakobsson/uatu/commit/574b75b5344d036ea805379839aca7b07b24677a))
+* **release:** publish the uatu CLI on the nightly edge channel ([#165](https://github.com/tjakobsson/uatu/issues/165)) ([aeeebef](https://github.com/tjakobsson/uatu/commit/aeeebef13cd260df5f5c8da4c3b3b9a59bb820ef))
+
+
+### Bug Fixes
+
+* **deps:** update Mermaid to address four moderate security advisories ([574b75b](https://github.com/tjakobsson/uatu/commit/574b75b5344d036ea805379839aca7b07b24677a))
+
 ## [0.4.0](https://github.com/tjakobsson/uatu/compare/v0.3.0...v0.4.0) (2026-08-01)
 
 
