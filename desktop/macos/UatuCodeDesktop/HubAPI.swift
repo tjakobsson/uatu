@@ -273,10 +273,22 @@ final class HubCookieWatch: NSObject, WKHTTPCookieStoreObserver {
         guard !started else { return }
         started = true
         self.onDisappear = onDisappear
-        WKWebsiteDataStore.default().httpCookieStore.add(self)
-        // Baseline first, so the app's own startup reads are not mistaken
-        // for cookies that went away.
-        Task { await self.refresh(reporting: false) }
+        Task {
+            // Baseline, then observe, then one reporting sweep against that
+            // baseline.
+            //
+            // Observing first would leave a window in which a clear lands
+            // while `present` is still empty — and an empty baseline compared
+            // against an emptied store reports nothing, silently losing the
+            // sign-out this watch exists to catch. Merely reordering is not
+            // enough either: a clear could still slip between reading the
+            // baseline and attaching the observer. The closing sweep compares
+            // the store as it is NOW against the baseline, so anything that
+            // happened during either gap is reported.
+            await self.refresh(reporting: false)
+            WKWebsiteDataStore.default().httpCookieStore.add(self)
+            await self.refresh()
+        }
     }
 
     /// Drops a host from the baseline, so a clear the app is about to perform

@@ -236,7 +236,15 @@ struct ContentView: View {
                 // web login page is the wrong thing to leave on screen in an
                 // app that owns hub credentials natively — the splash card is
                 // where signing back in lives.
-                guard HubRoster.shared.entry(for: url) != nil, phase == .web || isOpening else { return }
+                //
+                // Same identity check as the sign-out signal above: it must be
+                // THIS window's hub. Another configured hub's login page is
+                // not evidence about this window's session, and acting on one
+                // would let an unrelated origin eject the page the user is on.
+                guard case .remoteDashboard(let shown) = currentPage,
+                      let landed = HubRoster.shared.entry(for: url),
+                      landed.id == shown.id,
+                      phase == .web || isOpening else { return }
                 showSplash()
             }
             // One app-wide watch for hub cookies being cleared, covering the
