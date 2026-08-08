@@ -25,11 +25,16 @@ export type KeybarItem =
   | ({ kind: "sequence" } & KeybarKey)
   | { kind: "ctrl"; label: string; ariaLabel: string }
   | { kind: "paste"; label: string; ariaLabel: string }
-  | { kind: "select"; label: string; ariaLabel: string };
+  | { kind: "select"; label: string; ariaLabel: string }
+  | { kind: "switch"; label: string; ariaLabel: string };
 
 // Ordered by tap frequency: interaction keys first, paging cluster next,
 // process-control tail. The row scrolls horizontally when it overflows.
+// The switch action leads the row and is styled apart from the key pills —
+// it's navigation between terminals, not a key, and the frequency ordering
+// below only ranks keys against each other.
 export const KEYBAR_ITEMS: readonly KeybarItem[] = [
+  { kind: "switch", label: "⇄", ariaLabel: "Switch terminal" },
   { kind: "sequence", label: "esc", sequence: "\x1b", ariaLabel: "Escape" },
   { kind: "sequence", label: "tab", sequence: "\t", ariaLabel: "Tab" },
   { kind: "ctrl", label: "ctrl", ariaLabel: "Control modifier" },
@@ -72,6 +77,13 @@ export type KeybarDeps = {
   showSelectionSheet(): boolean;
   dismissSelectionSheet(): boolean;
   isSelectionSheetOpen(): boolean;
+  // The terminal switcher: touch mode shows one pane at a time, so this is
+  // how the user reaches the others. Toggled from the row; the sheet takes
+  // focus while open, which is the one place a keybar press is allowed to
+  // move focus out of the terminal.
+  openSwitcher(): boolean;
+  dismissSwitcher(): boolean;
+  isSwitcherOpen(): boolean;
   // The panel's latch; the ctrl button toggles it and renders armed state.
   stickyCtrl: StickyCtrlController;
   // Injectable clipboard read for tests. Production passes the Clipboard
@@ -81,7 +93,11 @@ export type KeybarDeps = {
 
 export function initTerminalKeybar(deps: KeybarDeps): void {
   let selectButton: HTMLButtonElement | null = null;
+  let switchButton: HTMLButtonElement | null = null;
   const renderedItems: Array<{ button: HTMLButtonElement; item: KeybarItem }> = [];
+  const syncSwitchButton = () => {
+    switchButton?.setAttribute("aria-expanded", deps.isSwitcherOpen() ? "true" : "false");
+  };
   const syncSelectButton = () => {
     if (!selectButton) return;
     const open = deps.isSelectionSheetOpen();
@@ -117,6 +133,12 @@ export function initTerminalKeybar(deps: KeybarDeps): void {
       selectButton = button;
       syncSelectButton();
     }
+    if (item.kind === "switch") {
+      switchButton = button;
+      button.classList.add("terminal-keybar-switch");
+      button.setAttribute("aria-haspopup", "dialog");
+      syncSwitchButton();
+    }
     // Keep focus in xterm on press so the software keyboard stays open.
     button.addEventListener("pointerdown", event => {
       event.preventDefault();
@@ -130,6 +152,7 @@ export function initTerminalKeybar(deps: KeybarDeps): void {
           return;
         case "paste":
         case "select":
+        case "switch":
           return;
       }
     });
@@ -161,8 +184,23 @@ export function initTerminalKeybar(deps: KeybarDeps): void {
         syncSelectButton();
       });
     }
+    if (item.kind === "switch") {
+      // Toggle, never stack: a second activation closes the sheet rather than
+      // rendering another one over it. Click (not pointerdown) keeps the
+      // action keyboard-operable, same as Paste.
+      button.addEventListener("click", () => {
+        if (deps.isSwitcherOpen()) {
+          deps.dismissSwitcher();
+        } else {
+          deps.openSwitcher();
+        }
+        syncSwitchButton();
+      });
+    }
     deps.container.appendChild(button);
   }
   deps.container.ownerDocument.addEventListener("uatu:terminal-selection-change", syncSelectButton);
+  deps.container.ownerDocument.addEventListener("uatu:terminal-switcher-change", syncSwitchButton);
   syncSelectButton();
+  syncSwitchButton();
 }

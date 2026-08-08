@@ -13,7 +13,15 @@ import { registerTerminalFind } from "../find/shortcut";
 import { createTerminalEngine, type TerminalSearchTarget } from "../find/terminal-engine";
 import type { Osc52Notice } from "./clipboard";
 import type { TerminalClipboardPolicy } from "../shared/types";
-import { formatSessionAge, pickerCandidates } from "./picker";
+import {
+  buildSwitcherRows,
+  formatSessionAge,
+  pickerCandidates,
+  resolveActiveSessionId,
+  resolveSessionPlan,
+  type SwitcherRow,
+  type SwitcherRowState,
+} from "./picker";
 import type { TerminalSessionInfo } from "./server";
 import {
   TERMINAL_MAX_PANES,
@@ -26,8 +34,8 @@ import {
   readTerminalVisiblePreference as readTerminalVisiblePreferenceShared,
   resolveBootPaneRecords,
   resolveEffectiveDisplayMode,
+  resolveTerminalEscapeAction,
   resolveTerminalFontSize,
-  shouldEscapeExitTerminalFullscreen,
   terminalActionForTabChange,
   writeOwnPaneRecords,
   writeTerminalFontSizeOverride,
@@ -54,6 +62,16 @@ import {
 } from "../shell/tab-bar";
 
 const TERMINAL_TOKEN_KEY_LOCAL = "uatu:terminal-token";
+
+// Row subtitles in the touch switcher. "on screen" rather than "attached" for
+// the visible pane: the user is looking at it, and the distinction that
+// matters to them is which terminal they'd land in, not the protocol state.
+const SWITCHER_STATE_COPY: Record<SwitcherRowState, string> = {
+  "visible": "on screen",
+  "attached-here": "open here",
+  "detached": "detached",
+  "attached-elsewhere": "attached elsewhere",
+};
 
 let terminalSetupRan = false;
 
@@ -205,6 +223,9 @@ export function setupTerminalPanel(
   const modal = document.getElementById("terminal-confirm");
   const modalCancel = document.getElementById("terminal-confirm-cancel");
   const modalAccept = document.getElementById("terminal-confirm-accept");
+  // Touch-only surface; a missing element must not take the panel down with
+  // it, so this one is optional unlike the checked set below.
+  const switcherEl = document.getElementById("terminal-switcher");
   if (
     !panel ||
     !panesContainer ||
@@ -237,6 +258,9 @@ export function setupTerminalPanel(
   // A user-initiated panel show that found no pane yet (fresh spawn path):
   // the next pane added takes focus once its terminal opens.
   let focusPaneWhenReady = false;
+  // Suppresses the per-pane refit while a planned batch attaches; the batch
+  // fits once when it finishes.
+  let batchingAttach = false;
 
   // Sticky Ctrl latch shared by the keybar's ctrl button (arms it) and every
   // pane's input path (composes the next keystroke, then releases).
@@ -279,6 +303,9 @@ export function setupTerminalPanel(
         const entry = activePaneId ? panes.get(activePaneId) : undefined;
         return entry?.handle.isSelectionSheetOpen() ?? false;
       },
+      openSwitcher: () => openSwitcher(),
+      dismissSwitcher: () => dismissSwitcher(),
+      isSwitcherOpen: () => isSwitcherOpen(),
       stickyCtrl,
       readClipboardText: () => navigator.clipboard.readText(),
     });
@@ -536,6 +563,12 @@ export function setupTerminalPanel(
     // the whole rebind.
     if (paneChanged) {
       refreshFindTarget("terminal");
+      // Touch mode renders one pane at a time, so the pane this switch just
+      // revealed was `display: none` and measured zero. It has to be refit
+      // before xterm paints, or the first frame lands at the wrong grid. The
+      // now-hidden panes throw out of FitAddon on a zero rect, which fitAll
+      // already swallows per pane.
+      if (touchModeNow()) requestAnimationFrame(() => fitAll());
     }
     // Move keyboard focus into the active pane's xterm so the user can
     // type immediately after a split, restore, or close. requestAnimationFrame
@@ -762,7 +795,9 @@ export function setupTerminalPanel(
       entry.handle.focus();
     }
     persistState();
-    requestAnimationFrame(() => fitAll());
+    // Inside a batch attach the caller fits once at the end — a per-pane fit
+    // would re-measure every earlier pane on every step.
+    if (!batchingAttach) requestAnimationFrame(() => fitAll());
     return entry;
   }
 
@@ -886,24 +921,63 @@ export function setupTerminalPanel(
     }
   }
 
-  // Pane-spawn with the session picker in front: when live sessions exist
-  // that this window isn't showing, offer attach / kill / new-shell instead
-  // of silently minting a fresh PTY — silent spawning is how orphaned
-  // sessions became invisible. Empty (filtered) inventory falls straight
+  // Pane-spawn against live inventory. A detached PTY belongs to nobody, so
+  // every one of them attaches silently — asking about a session no client
+  // owns is friction that buys nothing. What's left needs the user: sessions
+  // held by another window (takeover is destructive to that window) and
+  // detached overflow past the pane cap. Empty inventory falls straight
   // through to a fresh pane, keeping the zero-friction default.
   async function addPaneInteractive(): Promise<void> {
     if (panes.size >= TERMINAL_MAX_PANES) return;
-    const candidates = pickerCandidates(
-      await fetchSessionInventory(),
-      Array.from(panes.values(), pane => pane.record.sessionId),
-    );
+    const inventory = await fetchSessionInventory();
     // The await yields: bail if the panel closed or filled up meanwhile.
     if (panel!.hasAttribute("hidden") || panes.size >= TERMINAL_MAX_PANES) return;
-    if (candidates.length === 0) {
+    const plan = resolveSessionPlan(
+      inventory,
+      Array.from(panes.values(), pane => pane.record.sessionId),
+      TERMINAL_MAX_PANES - panes.size,
+    );
+    if (plan.attach.length > 0) {
+      await attachSessionBatch(plan.attach);
+      return;
+    }
+    if (plan.decide.length === 0) {
       await addPane();
       return;
     }
-    renderSessionPicker(candidates);
+    // Touch mode has no room for two competing session surfaces: the switcher
+    // is the chooser there, and it already lists everything `decide` holds.
+    if (touchModeNow()) {
+      openSwitcher(inventory);
+      return;
+    }
+    renderSessionPicker(plan.decide);
+  }
+
+  // Attach a planned batch, one at a time: `addPane` re-checks the pane cap
+  // and the panel's hidden state on every call and mutates shared DOM through
+  // `rebuildPanesContainer`, so sequencing keeps both invariants without new
+  // locking. Each `addPane` makes its own pane active; the batch's real active
+  // pane is decided once at the end.
+  async function attachSessionBatch(sessions: TerminalSessionInfo[]): Promise<void> {
+    const landed: TerminalSessionInfo[] = [];
+    batchingAttach = true;
+    try {
+      for (const session of sessions) {
+        if (panel!.hasAttribute("hidden") || panes.size >= TERMINAL_MAX_PANES) break;
+        const entry = await addPane({ sessionId: session.id, createdAt: Date.now() });
+        if (entry) landed.push(session);
+      }
+    } finally {
+      batchingAttach = false;
+    }
+    if (landed.length === 0) return;
+    const activeSessionId = resolveActiveSessionId(landed, lastPtyId);
+    const activeEntry = Array.from(panes.values()).find(
+      entry => entry.record.sessionId === activeSessionId,
+    );
+    if (activeEntry) setActivePane(activeEntry.record.id);
+    requestAnimationFrame(() => fitAll());
   }
 
   function renderSessionPicker(candidates: TerminalSessionInfo[]) {
@@ -982,6 +1056,204 @@ export function setupTerminalPanel(
     requestAnimationFrame(() => fresh.focus());
   }
 
+  // ------------- Touch terminal switcher -------------
+  //
+  // Touch mode renders one pane at a time, so this sheet is the only way to
+  // reach the others. It also absorbs everything the desktop chooser does —
+  // attach, take over, terminate, new shell — because a phone has no room for
+  // two competing session surfaces.
+
+  function isSwitcherOpen(): boolean {
+    return switcherEl !== null && !switcherEl.hasAttribute("hidden");
+  }
+
+  function dismissSwitcher(): boolean {
+    if (!switcherEl || !isSwitcherOpen()) return false;
+    switcherEl.setAttribute("hidden", "");
+    switcherEl.replaceChildren();
+    // The keybar button mirrors the sheet's state; every dismissal path
+    // (backdrop, Escape, a chosen row, panel hide) has to announce itself or
+    // `aria-expanded` goes stale.
+    document.dispatchEvent(new Event("uatu:terminal-switcher-change"));
+    // Focus goes back where the user left it: the visible terminal. Without
+    // this the software keyboard stays down after a dismissal that changed
+    // nothing.
+    const entry = activePaneId ? panes.get(activePaneId) : undefined;
+    try {
+      entry?.handle.focus();
+    } catch {
+      // Pane torn down while the sheet was open.
+    }
+    return true;
+  }
+
+  // `known` lets a caller that just read inventory hand it over instead of
+  // paying for a second round trip a moment later.
+  function openSwitcher(known?: TerminalSessionInfo[]): boolean {
+    if (!switcherEl) return false;
+    void renderSwitcher(known);
+    return true;
+  }
+
+  async function renderSwitcher(known?: TerminalSessionInfo[]): Promise<void> {
+    if (!switcherEl) return;
+    const inventory = known ?? await fetchSessionInventory();
+    if (panel!.hasAttribute("hidden")) return;
+    const activeSessionId = activePaneId
+      ? panes.get(activePaneId)?.record.sessionId
+      : undefined;
+    const rows = buildSwitcherRows(
+      Array.from(panes.values(), entry => ({ sessionId: entry.record.sessionId })),
+      inventory,
+      activeSessionId,
+      lastPtyId,
+      Date.now(),
+      TERMINAL_MAX_PANES - panes.size,
+    );
+
+    switcherEl.replaceChildren();
+    switcherEl.removeAttribute("hidden");
+    document.dispatchEvent(new Event("uatu:terminal-switcher-change"));
+
+    const backdrop = document.createElement("div");
+    backdrop.className = "terminal-switcher-backdrop";
+    backdrop.addEventListener("click", () => dismissSwitcher());
+
+    const sheet = document.createElement("div");
+    sheet.className = "terminal-switcher-sheet";
+
+    const heading = document.createElement("p");
+    heading.className = "terminal-switcher-heading";
+    heading.textContent = "Terminals";
+
+    const list = document.createElement("div");
+    list.className = "terminal-switcher-list";
+    for (const row of rows) list.append(buildSwitcherRow(row));
+
+    const atCap = panes.size >= TERMINAL_MAX_PANES;
+    const fresh = document.createElement("button");
+    fresh.type = "button";
+    fresh.className = "terminal-switcher-new";
+    fresh.textContent = "New terminal";
+    if (atCap) {
+      fresh.disabled = true;
+      fresh.title = `Close a terminal first — this window holds the maximum of ${TERMINAL_MAX_PANES}.`;
+    }
+    fresh.addEventListener("click", () => {
+      dismissSwitcher();
+      void addPane();
+    });
+
+    sheet.append(heading, list);
+    if (atCap) {
+      const note = document.createElement("p");
+      note.className = "terminal-switcher-note";
+      note.textContent = `This window holds the maximum of ${TERMINAL_MAX_PANES} terminals. Close one to attach or create another.`;
+      sheet.append(note);
+    }
+    sheet.append(fresh);
+    switcherEl.append(backdrop, sheet);
+    // The sheet takes focus deliberately — it is a context switch, and the
+    // software keyboard going away is the point.
+    requestAnimationFrame(() => {
+      const first = sheet.querySelector<HTMLButtonElement>("button:not(:disabled)");
+      (first ?? fresh).focus();
+    });
+  }
+
+  function buildSwitcherRow(row: SwitcherRow): HTMLElement {
+    const element = document.createElement("div");
+    element.className = "terminal-switcher-row";
+    element.dataset.sessionId = row.sessionId;
+    element.dataset.state = row.state;
+    if (row.state === "visible") element.dataset.current = "true";
+    if (row.lastActive) element.classList.add("is-last-active");
+
+    const select = document.createElement("button");
+    select.type = "button";
+    select.className = "terminal-switcher-select";
+    select.disabled = !row.canSelect;
+
+    const label = document.createElement("span");
+    label.className = "terminal-switcher-label";
+    label.textContent = row.label;
+
+    const meta = document.createElement("span");
+    meta.className = "terminal-switcher-meta";
+    const lastActive = row.lastActive ? "last active · " : "";
+    meta.textContent = `${lastActive}${SWITCHER_STATE_COPY[row.state]}${row.age ? ` · ${row.age}` : ""}`;
+
+    select.append(label, meta);
+    select.addEventListener("click", () => {
+      if (!row.canSelect) return;
+      const held = Array.from(panes.values()).find(
+        entry => entry.record.sessionId === row.sessionId,
+      );
+      dismissSwitcher();
+      if (held) {
+        setActivePane(held.record.id);
+        return;
+      }
+      void addPane({ sessionId: row.sessionId, createdAt: Date.now() });
+    });
+    element.append(select);
+
+    if (row.state === "attached-elsewhere") {
+      const takeOver = document.createElement("button");
+      takeOver.type = "button";
+      takeOver.className = "terminal-switcher-takeover";
+      takeOver.textContent = "Take over";
+      takeOver.setAttribute("aria-label", `Take over ${row.label}`);
+      takeOver.disabled = !row.canTakeOver;
+      takeOver.addEventListener("click", () => {
+        dismissSwitcher();
+        void addPane({ sessionId: row.sessionId, createdAt: Date.now() }, { takeover: true });
+      });
+      element.append(takeOver);
+    }
+
+    const kill = document.createElement("button");
+    kill.type = "button";
+    kill.className = "terminal-switcher-kill";
+    kill.textContent = "Kill";
+    kill.setAttribute("aria-label", `Kill session ${row.label}`);
+    kill.addEventListener("click", () => {
+      kill.disabled = true;
+      void terminateFromSwitcher(row.sessionId).then(ok => {
+        if (!ok) kill.disabled = false;
+      });
+    });
+    element.append(kill);
+
+    return element;
+  }
+
+  // Terminating from the switcher covers sessions this window holds as well as
+  // ones it doesn't, and the two are genuinely different actions. A held
+  // session is a terminal the user can see: it goes through `requestClosePane`,
+  // which confirms the loss, terminates the PTY, hands the visible slot to a
+  // surviving pane, and closes the panel when there is none. A session held by
+  // nobody (or by another window) has no pane to lose, so it is a plain DELETE
+  // with the sheet staying open — the same contract as the desktop chooser.
+  async function terminateFromSwitcher(sessionId: string): Promise<boolean> {
+    const held = Array.from(panes.values()).find(
+      entry => entry.record.sessionId === sessionId,
+    );
+    if (held) {
+      // The confirm modal is the surface now; two stacked sheets on a phone
+      // is one too many.
+      dismissSwitcher();
+      requestClosePane(held.record.id);
+      return true;
+    }
+    const ok = await killSessionRemote(sessionId);
+    if (ok) {
+      clearLastPty(sessionId);
+      void renderSwitcher();
+    }
+    return ok;
+  }
+
   function removePane(id: string) {
     const entry = panes.get(id);
     if (!entry) return;
@@ -1058,7 +1330,14 @@ export function setupTerminalPanel(
   }
 
   // Reconcile a stale or occupied saved reference against live inventory.
-  // The picker requires an explicit takeover when another client owns it.
+  // Takeover stays an explicit user action throughout.
+  //
+  // The reconcile is self-limiting: inventory's `attached` flag and the
+  // upgrade gate's collision check read the same holder state server-side, so
+  // the session that just refused this window comes back from the GET as
+  // attached-elsewhere and lands in the decision set rather than being
+  // auto-attached into the same collision. If the winner released it in the
+  // meantime, re-attaching is the right answer anyway.
   function handlePaneUnavailable(id: string) {
     const entry = panes.get(id);
     if (!entry) return;
@@ -1187,6 +1466,7 @@ export function setupTerminalPanel(
       panes.clear();
       panesContainer!.replaceChildren();
       activePaneId = null;
+      dismissSwitcher();
       // A hidden panel is not a surface: if the Terminal tab was active
       // (last pane closed, panel × in touch mode), land on Preview rather
       // than a blank screen. The resulting tab-change sees panelHidden and
@@ -1340,26 +1620,34 @@ export function setupTerminalPanel(
       // exact focus.
       if (event.key === "Escape") {
         const activeEntry = activePaneId ? panes.get(activePaneId) : undefined;
-        if (activeEntry?.handle.isSelectionSheetOpen()) {
-          event.preventDefault();
-          event.stopPropagation();
-          activeEntry.handle.dismissSelectionSheet();
-          return;
-        }
-        if (!modal!.hasAttribute("hidden")) {
-          event.preventDefault();
-          event.stopPropagation();
-          closeConfirmModal(false);
-          return;
-        }
-        if (shouldEscapeExitTerminalFullscreen(state.displayMode, touchModeNow(), activeTab() === "terminal")) {
-          event.preventDefault();
-          event.stopPropagation();
-          if (touchModeNow()) {
-            setActiveTab("preview");
-          } else {
-            setDisplayMode("normal");
-          }
+        const action = resolveTerminalEscapeAction({
+          switcherOpen: isSwitcherOpen(),
+          selectionSheetOpen: activeEntry?.handle.isSelectionSheetOpen() ?? false,
+          confirmModalOpen: !modal!.hasAttribute("hidden"),
+          storedDisplayMode: state.displayMode,
+          touchMode: touchModeNow(),
+          terminalTabActive: activeTab() === "terminal",
+        });
+        if (action === "pass-through") return;
+        event.preventDefault();
+        event.stopPropagation();
+        switch (action) {
+          case "dismiss-switcher":
+            dismissSwitcher();
+            return;
+          case "dismiss-selection":
+            activeEntry?.handle.dismissSelectionSheet();
+            return;
+          case "cancel-modal":
+            closeConfirmModal(false);
+            return;
+          case "exit-fullscreen":
+            if (touchModeNow()) {
+              setActiveTab("preview");
+            } else {
+              setDisplayMode("normal");
+            }
+            return;
         }
       }
     },

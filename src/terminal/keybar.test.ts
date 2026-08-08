@@ -28,10 +28,15 @@ describe("KEYBAR_KEYS", () => {
     }
   });
 
-  test("includes exactly one ctrl latch, paste action, and select action", () => {
+  test("includes exactly one ctrl latch, paste action, select action, and switch action", () => {
     expect(KEYBAR_ITEMS.filter(item => item.kind === "ctrl")).toHaveLength(1);
     expect(KEYBAR_ITEMS.filter(item => item.kind === "paste")).toHaveLength(1);
     expect(KEYBAR_ITEMS.filter(item => item.kind === "select")).toHaveLength(1);
+    expect(KEYBAR_ITEMS.filter(item => item.kind === "switch")).toHaveLength(1);
+  });
+
+  test("leads the row with the switch action", () => {
+    expect(KEYBAR_ITEMS[0]!.kind).toBe("switch");
   });
 });
 
@@ -43,6 +48,8 @@ function mountKeybar(overrides: { readClipboardText?: (() => Promise<string>) | 
   const pasted: string[] = [];
   let selectionSheets = 0;
   let selectionOpen = false;
+  let switcherOpens = 0;
+  let switcherOpen = false;
   const stickyCtrl = createStickyCtrl();
   initTerminalKeybar({
     container,
@@ -66,6 +73,19 @@ function mountKeybar(overrides: { readClipboardText?: (() => Promise<string>) | 
     },
     isSelectionSheetOpen() {
       return selectionOpen;
+    },
+    openSwitcher() {
+      switcherOpens += 1;
+      switcherOpen = true;
+      return true;
+    },
+    dismissSwitcher() {
+      if (!switcherOpen) return false;
+      switcherOpen = false;
+      return true;
+    },
+    isSwitcherOpen() {
+      return switcherOpen;
     },
     stickyCtrl,
     readClipboardText:
@@ -101,6 +121,8 @@ function mountKeybar(overrides: { readClipboardText?: (() => Promise<string>) | 
     sent,
     stickyCtrl,
     selectionSheets: () => selectionSheets,
+    switcherOpens: () => switcherOpens,
+    isSwitcherOpen: () => switcherOpen,
     cleanup,
   };
 }
@@ -189,6 +211,51 @@ describe("initTerminalKeybar", () => {
       expect(done.classList.contains("is-selection-done")).toBe(false);
       expect(mounted.container.dataset.selectionMode).toBe("false");
       expect(mounted.buttons.filter(button => !button.hidden).every(button => !button.disabled)).toBe(true);
+    } finally {
+      mounted.cleanup();
+    }
+  });
+
+  test("switch opens the switcher on click and mirrors it via aria-expanded", () => {
+    const mounted = mountKeybar();
+    try {
+      const { event, button } = mounted.press("⇄");
+      // Press preserves terminal focus and does nothing else; the sheet opens
+      // from the release-time activation, same as paste.
+      expect(event.defaultPrevented).toBe(true);
+      expect(mounted.switcherOpens()).toBe(0);
+      expect(button.getAttribute("aria-expanded")).toBe("false");
+      mounted.click("⇄");
+      expect(mounted.switcherOpens()).toBe(1);
+      expect(mounted.isSwitcherOpen()).toBe(true);
+      expect(button.getAttribute("aria-expanded")).toBe("true");
+      expect(mounted.sent).toEqual([]);
+    } finally {
+      mounted.cleanup();
+    }
+  });
+
+  test("switch toggles the sheet closed instead of opening a second one", () => {
+    const mounted = mountKeybar();
+    try {
+      mounted.click("⇄");
+      mounted.click("⇄");
+      expect(mounted.switcherOpens()).toBe(1);
+      expect(mounted.isSwitcherOpen()).toBe(false);
+      expect(mounted.buttons.find(b => b.textContent === "⇄")!.getAttribute("aria-expanded"))
+        .toBe("false");
+    } finally {
+      mounted.cleanup();
+    }
+  });
+
+  test("switch is unavailable while the selection transcript is open", () => {
+    const mounted = mountKeybar();
+    try {
+      mounted.click("select");
+      expect(mounted.buttons.find(b => b.textContent === "⇄")!.disabled).toBe(true);
+      mounted.click("done");
+      expect(mounted.buttons.find(b => b.textContent === "⇄")!.disabled).toBe(false);
     } finally {
       mounted.cleanup();
     }

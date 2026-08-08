@@ -1,8 +1,10 @@
 import { expect, test } from "./fixtures";
 
-// Coverage for add-terminal-session-manager: the session inventory, the
-// pane-spawn picker, attach-with-takeover (close code 4410 parks the losing
-// pane with a take-back action), and kill-from-picker.
+// Coverage for add-terminal-session-manager and add-terminal-auto-attach-
+// switcher: the session inventory, auto-attach of detached PTYs, the chooser
+// that remains for sessions held by another window, attach-with-takeover
+// (close code 4410 parks the losing pane with a take-back action), and
+// kill-from-chooser.
 
 async function bootWithTerminalCookie(
   page: import("@playwright/test").Page,
@@ -60,7 +62,7 @@ async function typeLine(page: import("@playwright/test").Page, line: string): Pr
 }
 
 test.describe("terminal session manager", () => {
-  test("orphaned session is recoverable via the split picker; kill removes entries", async ({
+  test("an orphaned session is auto-attached on split, with its shell state intact", async ({
     page,
     context,
     request,
@@ -107,16 +109,11 @@ test.describe("terminal session manager", () => {
     });
     await page2.close();
 
-    // Window 1 splits: the picker lists the orphaned session (its own pane
-    // is filtered out).
+    // Window 1 splits: the orphan belongs to nobody, so it attaches straight
+    // into the new pane — no chooser, because there is nothing to choose.
     await page.locator("#terminal-split").click();
-    await expect(page.locator(".terminal-picker")).toBeVisible({ timeout: 5000 });
-    await expect(page.locator(".terminal-picker-row")).toHaveCount(1);
-    await expect(page.locator(".terminal-picker-meta")).toContainText("detached");
-
-    // Attach: the new pane is the orphaned shell, state intact.
-    await page.locator(".terminal-picker-attach").click();
-    await expect(page.locator(".terminal-pane-host")).toHaveCount(2);
+    await expect(page.locator(".terminal-pane-host")).toHaveCount(2, { timeout: 5000 });
+    await expect(page.locator(".terminal-picker")).toHaveCount(0);
     const secondPane = page.locator(".terminal-pane-host").nth(1);
     await expect(secondPane.locator(".xterm")).toBeVisible({ timeout: 5000 });
     await expect(secondPane).toHaveAttribute("data-terminal-ready", "true", { timeout: 5000 });
@@ -190,7 +187,7 @@ test.describe("terminal session manager", () => {
     await page2.close();
   });
 
-  test("kill from the picker removes the session; empty inventory skips the picker", async ({
+  test("kill from the chooser removes the session; nothing left to decide skips it", async ({
     page,
     context,
     request,
@@ -199,8 +196,9 @@ test.describe("terminal session manager", () => {
     await openTerminal(page);
     await waitForPrompt(page);
 
-    // Explicitly create and orphan a second session. Wait for its prompt so
-    // closing the page cannot race resource creation.
+    // A second window holds its own session. Left OPEN, so that session stays
+    // attached — which is what keeps the chooser in play: auto-attach only
+    // claims sessions nobody holds.
     const page2 = await context.newPage();
     await page2.goto("/");
     await page2.locator("#terminal-toggle").click();
@@ -220,13 +218,14 @@ test.describe("terminal session manager", () => {
         { timeout: 5000 },
       )
       .toBe(true);
-    await page2.close();
 
-    // Split → picker lists the orphan → kill it → picker falls through to a
-    // fresh shell automatically (nothing left to offer).
+    // Split → the only candidate is window 2's session, which needs a
+    // decision → kill it → nothing left to decide, so the chooser falls
+    // through to a fresh shell automatically.
     await page.locator("#terminal-split").click();
     await expect(page.locator(".terminal-picker")).toBeVisible({ timeout: 5000 });
     await expect(page.locator(".terminal-picker-row")).toHaveCount(1);
+    await expect(page.locator(".terminal-picker-meta")).toContainText("attached elsewhere");
     await page.locator(".terminal-picker-kill").click();
     await expect(page.locator(".terminal-picker")).toHaveCount(0, { timeout: 5000 });
     await expect(page.locator(".terminal-pane-host")).toHaveCount(2);
@@ -234,9 +233,97 @@ test.describe("terminal session manager", () => {
     // The inventory no longer contains the killed session: only this
     // window's two panes remain. `context.request` shares the browser's
     // HttpOnly auth cookie (the standalone `request` fixture does not).
-    const inventory = await context.request.get("/api/terminal/sessions");
-    expect(inventory.status()).toBe(200);
-    const body = await inventory.json();
-    expect(body.sessions).toHaveLength(2);
+    await expect
+      .poll(
+        async () => {
+          const inventory = await context.request.get("/api/terminal/sessions");
+          const body = await inventory.json();
+          return body.sessions.length;
+        },
+        { timeout: 5000 },
+      )
+      .toBe(2);
+
+    await page2.close();
+  });
+
+  test("every detached session attaches when a fresh window opens the terminal", async ({
+    page,
+    context,
+    request,
+  }) => {
+    await bootWithTerminalCookie(page, request);
+
+    // Stage three detached PTYs through the inventory API — resources that
+    // exist server-side with no client holding any of them, exactly the state
+    // a closed window leaves behind. Issued from inside the page so they
+    // carry the browser's Origin and auth cookie, which that surface demands.
+    const created = await page.evaluate(async () => {
+      const ids: string[] = [];
+      for (let index = 0; index < 3; index += 1) {
+        const response = await fetch("/api/terminal/sessions", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ cols: 80, rows: 24 }),
+        });
+        if (!response.ok) throw new Error(`session create failed: ${response.status}`);
+        ids.push(((await response.json()) as { id: string }).id);
+        // `createdAt` has millisecond resolution and orders both the attach
+        // sequence and the "newest wins" active-pane rule. Space the
+        // creations so the ordering under test is never a tie.
+        await new Promise(resolve => setTimeout(resolve, 5));
+      }
+      return ids;
+    });
+
+    // A window that has nothing of its own to restore attaches all of them,
+    // and never stops to ask.
+    await page.locator("#terminal-toggle").click();
+    await expect(page.locator(".terminal-pane-host")).toHaveCount(3, { timeout: 10000 });
+    await expect(page.locator(".terminal-picker")).toHaveCount(0);
+
+    // Every pane is a live attachment to one of the staged resources.
+    const attachedIds = await page.evaluate(() =>
+      [...document.querySelectorAll(".terminal-pane")].map(
+        pane => (pane as HTMLElement).dataset.sessionId,
+      ),
+    );
+    expect([...attachedIds].sort()).toEqual([...created].sort());
+    for (const host of await page.locator(".terminal-pane-host").all()) {
+      await expect(host).toHaveAttribute("data-terminal-ready", "true", { timeout: 10000 });
+    }
+
+    // Exactly one pane is active, and the newest staged session is it — no
+    // saved last-active reference exists in this fresh window.
+    await expect(page.locator(".terminal-pane[data-active]")).toHaveCount(1);
+    await expect(page.locator(".terminal-pane[data-active]")).toHaveAttribute(
+      "data-session-id",
+      created[created.length - 1]!,
+    );
+  });
+
+  test("a session held by another window is never auto-attached", async ({
+    page,
+    context,
+    request,
+  }) => {
+    await bootWithTerminalCookie(page, request);
+    await openTerminal(page);
+    await waitForPrompt(page);
+
+    // Window 1 holds one session. Window 2 opens with nothing to restore:
+    // there is no detached PTY to claim, so it must ask rather than take.
+    const page2 = await context.newPage();
+    await page2.goto("/");
+    await page2.locator("#terminal-toggle").click();
+    await expect(page2.locator(".terminal-picker")).toBeVisible({ timeout: 5000 });
+    await expect(page2.locator(".terminal-picker-meta")).toContainText("attached elsewhere");
+    await expect(page2.locator(".terminal-pane-host")).toHaveCount(0);
+
+    // Window 1 is undisturbed: still attached, still its own shell.
+    await expect(page.locator(".terminal-taken")).toHaveCount(0);
+    await expect(page.locator(".terminal-pane-host")).toHaveCount(1);
+
+    await page2.close();
   });
 });

@@ -28,6 +28,7 @@ import {
   readTerminalFontSizeOverride,
   resolveEffectiveDisplayMode,
   resolveTerminalFontSize,
+  resolveTerminalEscapeAction,
   shouldEscapeExitTerminalFullscreen,
   terminalActionForTabChange,
   writeTerminalFontSizeOverride,
@@ -389,6 +390,66 @@ describe("shouldEscapeExitTerminalFullscreen", () => {
     expect(shouldEscapeExitTerminalFullscreen("fullscreen", false, false)).toBe(true);
     expect(shouldEscapeExitTerminalFullscreen("normal", false, false)).toBe(false);
     expect(shouldEscapeExitTerminalFullscreen("minimized", false, false)).toBe(false);
+  });
+});
+
+describe("resolveTerminalEscapeAction", () => {
+  // Touch mode with the Terminal tab active: every surface below is reachable
+  // at once, so this base makes the precedence the only variable.
+  const base = {
+    switcherOpen: false,
+    selectionSheetOpen: false,
+    confirmModalOpen: false,
+    storedDisplayMode: "fullscreen" as const,
+    touchMode: true,
+    terminalTabActive: true,
+  };
+
+  it("closes the switcher ahead of every other surface", () => {
+    expect(resolveTerminalEscapeAction({
+      ...base,
+      switcherOpen: true,
+      selectionSheetOpen: true,
+      confirmModalOpen: true,
+    })).toBe("dismiss-switcher");
+  });
+
+  it("closes the selection transcript ahead of the modal and fullscreen", () => {
+    expect(resolveTerminalEscapeAction({
+      ...base,
+      selectionSheetOpen: true,
+      confirmModalOpen: true,
+    })).toBe("dismiss-selection");
+  });
+
+  it("cancels the confirm modal ahead of leaving fullscreen", () => {
+    expect(resolveTerminalEscapeAction({ ...base, confirmModalOpen: true })).toBe("cancel-modal");
+  });
+
+  it("leaves fullscreen once nothing is stacked over the terminal", () => {
+    expect(resolveTerminalEscapeAction(base)).toBe("exit-fullscreen");
+  });
+
+  it("passes Escape through when the terminal is not the visible surface", () => {
+    // The regression guarded by shouldEscapeExitTerminalFullscreen: a stored
+    // fullscreen parked behind another touch tab must not consume Escape for
+    // the whole app.
+    expect(resolveTerminalEscapeAction({ ...base, terminalTabActive: false })).toBe("pass-through");
+    expect(resolveTerminalEscapeAction({
+      ...base,
+      storedDisplayMode: "normal",
+      touchMode: false,
+    })).toBe("pass-through");
+  });
+
+  it("still claims Escape for a parked terminal's own open sheets", () => {
+    // A switcher or transcript opened before the tab switch is still on
+    // screen's worth of state the user needs Escape to dismiss.
+    expect(resolveTerminalEscapeAction({
+      ...base,
+      terminalTabActive: false,
+      switcherOpen: true,
+    })).toBe("dismiss-switcher");
   });
 });
 
