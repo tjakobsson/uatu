@@ -529,9 +529,7 @@ struct ContentView: View {
     }
 
     private func injectCookie(for entry: RemoteHubEntry) async {
-        guard let url = entry.url,
-              let cookie = HubRoster.shared.connection(for: entry).cookie else { return }
-        await HubCookies.inject(value: cookie, for: url)
+        await HubRoster.shared.connection(for: entry).injectCookie()
     }
 
     private func failFromLocalHub(_ token: UUID) {

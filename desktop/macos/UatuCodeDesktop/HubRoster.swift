@@ -305,6 +305,28 @@ final class HubConnection: Identifiable {
         generation == credentialGeneration
     }
 
+    /// Writes the current cookie into the web view's store ahead of a
+    /// navigation to this hub.
+    ///
+    /// The write cannot be cancelled once started, so it is checked afterward
+    /// instead: a sign-out landing while it was suspended would be followed by
+    /// this write, leaving a working bearer token in WebKit's *persistent* jar
+    /// for a hub the user just signed out of — and the hub does not revoke
+    /// server-side, so that token stays usable for its full lifetime. When
+    /// overtaken, the write is undone.
+    ///
+    /// The cookie is only cleared if this hub is still without credentials.
+    /// A sign-out followed by a quick sign-in also changes the generation, and
+    /// there the store legitimately holds the new session's cookie — which
+    /// this cleanup must not delete.
+    func injectCookie() async {
+        guard let url = entry.url, let cookie else { return }
+        let generation = credentialGeneration
+        await HubCookies.inject(value: cookie, for: url)
+        guard !isCurrent(generation), self.cookie == nil else { return }
+        await HubCookies.clear(for: url)
+    }
+
     /// Revokes this hub's credentials after a sign-out observed in a web view.
     ///
     /// Both Keychain items go. Clearing the cookie alone would be cosmetic:
