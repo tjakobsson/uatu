@@ -89,7 +89,7 @@ struct HubAPI {
         var request = URLRequest(url: url)
         request.httpMethod = method
         if let cookie {
-            request.setValue("uatu_hub=\(cookie)", forHTTPHeaderField: "Cookie")
+            request.setValue("\(HubCookies.name)=\(cookie)", forHTTPHeaderField: "Cookie")
         }
         if let body {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -178,10 +178,11 @@ struct HubAPI {
     }
 
     static func cookieValue(fromSetCookie header: String) -> String? {
+        let prefix = "\(HubCookies.name)="
         for part in header.split(separator: ";") {
             let pair = part.trimmingCharacters(in: .whitespaces)
-            if pair.hasPrefix("uatu_hub=") {
-                let value = String(pair.dropFirst("uatu_hub=".count))
+            if pair.hasPrefix(prefix) {
+                let value = String(pair.dropFirst(prefix.count))
                 return value.isEmpty ? nil : value
             }
         }
@@ -196,11 +197,16 @@ struct HubAPI {
 /// native layer is the single writer — the web view never mints or refreshes
 /// the cookie on its own.
 enum HubCookies {
+    /// The hub's session cookie name, spelled once: `inject`, `clear`, and
+    /// the disappearance watch must agree on it or revocation silently
+    /// misses.
+    static let name = "uatu_hub"
+
     @MainActor
     static func inject(value: String, for hubURL: URL) async {
         guard let host = hubURL.host else { return }
         var properties: [HTTPCookiePropertyKey: Any] = [
-            .name: "uatu_hub",
+            .name: name,
             .value: value,
             .domain: host,
             .path: "/",
@@ -215,6 +221,127 @@ enum HubCookies {
         }
         guard let cookie = HTTPCookie(properties: properties) else { return }
         await WKWebsiteDataStore.default().httpCookieStore.setCookie(cookie)
+    }
+
+    /// Removes a hub's session cookie from the web view's store — `inject`'s
+    /// counterpart, used when the app revokes a hub's credentials. Without
+    /// it the injected copy would outlive the Keychain one and re-authenticate
+    /// the next navigation to that hub.
+    /// - Parameter stillWanted: re-checked after the store snapshot and before
+    ///   each delete. Deletion matches on name/domain/path, not value, so a
+    ///   clear overtaken by a sign-in would delete the *replacement* cookie
+    ///   the new session just installed — leaving the user signed in natively
+    ///   but unauthenticated in the web view.
+    @MainActor
+    static func clear(for hubURL: URL, stillWanted: () -> Bool = { true }) async {
+        guard let host = hubURL.host else { return }
+        let store = WKWebsiteDataStore.default().httpCookieStore
+        let cookies = await store.allCookies()
+        for cookie in cookies where cookie.name == name && matches(cookie, host: host) {
+            guard stillWanted() else { return }
+            await store.deleteCookie(cookie)
+        }
+    }
+
+    /// Host comparison for stored cookies. `inject` writes a bare host, but a
+    /// cookie that came from the server carries the domain the server set,
+    /// which may lead with a dot.
+    static func matches(_ cookie: HTTPCookie, host: String) -> Bool {
+        normalizedDomain(cookie).caseInsensitiveCompare(host) == .orderedSame
+    }
+
+    static func normalizedDomain(_ cookie: HTTPCookie) -> String {
+        let domain = cookie.domain.hasPrefix(".") ? String(cookie.domain.dropFirst()) : cookie.domain
+        return domain.lowercased()
+    }
+}
+
+/// Watches the shared web-view cookie store and reports a hub session cookie
+/// *disappearing* for a host.
+///
+/// This is the version-independent half of sign-out detection: a hub older
+/// than this app signs out from the in-session switcher with a background
+/// request, which the navigation delegate cannot see — but the hub's
+/// `Max-Age=0` response still lands here.
+///
+/// A disappearance is safe to read as a deliberate clear because `inject`
+/// sets no expiry: the injected copy is a session cookie with no natural
+/// expiry event in the store. Server-side lifetime expiry surfaces as a 401
+/// on the next request instead, and keeps its silent-re-login handling.
+@MainActor
+final class HubCookieWatch: NSObject, WKHTTPCookieStoreObserver {
+    /// Hosts that held a hub cookie at the last observation. A disappearance
+    /// only means something against a host we saw holding one.
+    private var present: Set<String> = []
+    private var onDisappear: ((String) -> Void)?
+    private var started = false
+    /// Bumped whenever the baseline is adjusted out of band, so a refresh that
+    /// started earlier cannot write its stale snapshot over it.
+    private var baselineGeneration = 0
+
+    func start(onDisappear: @escaping (String) -> Void) {
+        guard !started else { return }
+        started = true
+        self.onDisappear = onDisappear
+        Task {
+            // Baseline, then observe, then one reporting sweep against that
+            // baseline.
+            //
+            // Observing first would leave a window in which a clear lands
+            // while `present` is still empty — and an empty baseline compared
+            // against an emptied store reports nothing, silently losing the
+            // sign-out this watch exists to catch. Merely reordering is not
+            // enough either: a clear could still slip between reading the
+            // baseline and attaching the observer. The closing sweep compares
+            // the store as it is NOW against the baseline, so anything that
+            // happened during either gap is reported.
+            await self.refresh(reporting: false)
+            WKWebsiteDataStore.default().httpCookieStore.add(self)
+            await self.refresh()
+        }
+    }
+
+    /// Drops a host from the baseline, so a clear the app is about to perform
+    /// itself reads as no change rather than as a fresh sign-out signal.
+    ///
+    /// Revocation calls `HubCookies.clear`, which changes the store and would
+    /// otherwise echo straight back here as a second sign-out for the hub just
+    /// revoked. That echo is not merely redundant: it arrives two async hops
+    /// later, so a user who signs back in before it lands would have the
+    /// credentials they just entered deleted by it.
+    func forget(host: String) {
+        present.remove(host.lowercased())
+        // Invalidate refreshes already in flight. One suspended in
+        // `allCookies()` would resume holding a pre-clear snapshot and write
+        // the host straight back into the baseline, undoing this suppression —
+        // after which the app's own clear reports as a disappearance again.
+        baselineGeneration &+= 1
+    }
+
+    func refresh(reporting: Bool = true) async {
+        let generation = baselineGeneration
+        let cookies = await WKWebsiteDataStore.default().httpCookieStore.allCookies()
+        // Discarding a stale refresh loses nothing: whatever changed the store
+        // scheduled its own refresh, which will run with a current snapshot.
+        guard generation == baselineGeneration else { return }
+        let holding = Set(
+            cookies
+                .filter { $0.name == HubCookies.name }
+                .map { HubCookies.normalizedDomain($0) }
+        )
+        let gone = present.subtracting(holding)
+        present = holding
+        guard reporting else { return }
+        for host in gone {
+            onDisappear?(host)
+        }
+    }
+
+    nonisolated func cookiesDidChange(in cookieStore: WKHTTPCookieStore) {
+        // WebKit calls its cookie-store observers on the main thread.
+        MainActor.assumeIsolated {
+            _ = Task { await self.refresh() }
+        }
     }
 }
 

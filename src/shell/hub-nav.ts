@@ -55,6 +55,30 @@ export function sortHubWorkspaces(
   return [...workspaces].sort((a, b) => rank(a) - rank(b) || a.id.localeCompare(b.id));
 }
 
+// Whether the switcher offers a sign-out entry. A `--local` hub has no login
+// — its /login and /logout routes don't even exist — so the entry could only
+// lead to a 404.
+export function showsSignOut(hub: { local: boolean }): boolean {
+  return !hub.local;
+}
+
+// Signs out by submitting a real form POST, exactly as the hub dashboard's
+// Sign out does, rather than by firing a background request and replacing the
+// page. Two reasons: a native wrapper that owns hub credentials (UatuCode
+// Desktop keeps them in the Keychain) can observe a navigation but not a
+// background fetch, so this is what lets it revoke its own copies; and the
+// page is never replaced before the request that clears the cookie has
+// actually gone out. Same-origin form posts send Origin, satisfying the hub's
+// CSRF check the same way the dashboard's does.
+export function submitHubSignOut(doc: Document): void {
+  const form = doc.createElement("form");
+  form.method = "post";
+  form.action = "/logout";
+  form.hidden = true;
+  doc.body.appendChild(form);
+  form.submit();
+}
+
 export type HubStateSummary = {
   workspaces: HubWorkspaceSummary[];
   // Trusted loopback mode (`uatu hub --local`): no login exists, so no
@@ -158,9 +182,7 @@ export function initHubNav(): void {
       menu.appendChild(item);
     }
 
-    // A local hub has no login — its /login and /logout routes don't even
-    // exist — so a sign-out entry would only lead to a 404.
-    if (!hubIsLocal) {
+    if (showsSignOut({ local: hubIsLocal })) {
       menu.appendChild(Object.assign(document.createElement("hr"), { className: "hub-menu-divider" }));
       const signOut = document.createElement("a");
       signOut.className = "hub-menu-item";
@@ -171,10 +193,7 @@ export function initHubNav(): void {
       signOut.appendChild(signOutLabel);
       signOut.addEventListener("click", event => {
         event.preventDefault();
-        // Logout is a POST (CSRF-guarded); follow to the login page after.
-        void fetch("/logout", { method: "POST" }).finally(() => {
-          window.location.href = "/login";
-        });
+        submitHubSignOut(document);
       });
       menu.appendChild(signOut);
     }
