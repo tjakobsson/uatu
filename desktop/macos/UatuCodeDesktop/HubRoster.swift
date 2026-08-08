@@ -214,9 +214,12 @@ final class HubConnection: Identifiable {
     let entry: RemoteHubEntry
     private(set) var state: State = .unknown
     private var triedSilentRelogin = false
-    /// Bumped by every sign-out. Work that started in an earlier generation
-    /// may not publish state or write credentials — see `probe()`.
-    private var revocationGeneration = 0
+    /// Bumped whenever the stored credentials change — sign-out and sign-in
+    /// alike. Work that started in an earlier generation may not publish state
+    /// or write credentials; see `probe()`. One counter for both directions
+    /// keeps the rule uniform: a result computed under credentials that no
+    /// longer apply is discarded, whichever way they changed.
+    private var credentialGeneration = 0
 
     nonisolated var id: UUID { entry.id }
 
@@ -239,7 +242,7 @@ final class HubConnection: Identifiable {
         // the pre-revocation cookie still answers 200. Every publish and every
         // Keychain write past an await is therefore gated on the revocation
         // generation this probe started in.
-        let generation = revocationGeneration
+        let generation = credentialGeneration
         var api = HubAPI(baseURL: url, cookie: cookie)
         do {
             let hubState = try await api.state()
@@ -286,9 +289,10 @@ final class HubConnection: Identifiable {
         }
     }
 
-    /// False once a sign-out has happened since `generation` was captured.
+    /// False once the stored credentials changed since `generation` was
+    /// captured.
     private func isCurrent(_ generation: Int) -> Bool {
-        generation == revocationGeneration
+        generation == credentialGeneration
     }
 
     /// Revokes this hub's credentials after a sign-out observed in a web view.
@@ -308,7 +312,7 @@ final class HubConnection: Identifiable {
         // waits on the cookie store to leave the page: windows return to the
         // splash off this state transition, and WebKit's cookie operations
         // suspend for as long as they like.
-        revocationGeneration &+= 1
+        credentialGeneration &+= 1
         HubKeychain.delete(account: entry.passwordAccount)
         HubKeychain.delete(account: entry.cookieAccount)
         triedSilentRelogin = false
@@ -325,6 +329,10 @@ final class HubConnection: Identifiable {
         let cookie = try await HubAPI.login(baseURL: url, name: entry.username, password: password)
         HubKeychain.set(password, account: entry.passwordAccount)
         HubKeychain.set(cookie, account: entry.cookieAccount)
+        // Same bump as sign-out, for the mirror-image race: a probe that
+        // started while this hub was signed out would otherwise resume and
+        // publish `.signedOut` over the session just established.
+        credentialGeneration &+= 1
         triedSilentRelogin = false
         await probe()
     }
