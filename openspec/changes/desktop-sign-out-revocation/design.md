@@ -198,7 +198,8 @@ already revoked simply shows "Sign In…" until the user signs in again.
 ## Open Questions
 
 - **When** should the hub gain real server-side revocation, so logout
-  invalidates the issued cookie rather than only the browser's copy? Out of
+  invalidates the issued cookie rather than only the browser's copy? Filed as
+  https://github.com/tjakobsson/uatu/issues/202 (Future milestone). Out of
   scope here — this change is the point at which the desktop stops papering over
   its absence, and it is the backstop for exactly the class of bug this change
   fixes: a client holding a token copy the hub cannot invalidate. Coarse levers
