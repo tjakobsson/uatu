@@ -206,6 +206,9 @@ final class HubConnection: Identifiable {
     let entry: RemoteHubEntry
     private(set) var state: State = .unknown
     private var triedSilentRelogin = false
+    /// Bumped by every sign-out. Work that started in an earlier generation
+    /// may not publish state or write credentials — see `probe()`.
+    private var revocationGeneration = 0
 
     nonisolated var id: UUID { entry.id }
 
@@ -222,11 +225,21 @@ final class HubConnection: Identifiable {
             state = .unreachable("invalid hub URL")
             return
         }
+        // A sign-out landing mid-probe has to win. The MainActor is reentrant
+        // across awaits, so `signOut()` can run between any two lines below,
+        // and the hub does not revoke server-side — a request that captured
+        // the pre-revocation cookie still answers 200. Every publish and every
+        // Keychain write past an await is therefore gated on the revocation
+        // generation this probe started in.
+        let generation = revocationGeneration
         var api = HubAPI(baseURL: url, cookie: cookie)
         do {
-            state = .connected(try await api.state())
+            let hubState = try await api.state()
+            guard isCurrent(generation) else { return }
+            state = .connected(hubState)
             triedSilentRelogin = false
         } catch HubAPIError.unauthorized {
+            guard isCurrent(generation) else { return }
             // Note for `signOut()`: this password read is also the sign-out
             // latch. Revocation deletes the password, so a signed-out hub
             // takes the `else` path here forever — durably, across restarts,
@@ -234,23 +247,40 @@ final class HubConnection: Identifiable {
             if !triedSilentRelogin, let password = HubKeychain.get(account: entry.passwordAccount) {
                 triedSilentRelogin = true
                 if let fresh = try? await HubAPI.login(baseURL: url, name: entry.username, password: password) {
+                    // The load-bearing guard of the set: a silent re-login
+                    // that was already in flight when the user signed out
+                    // would otherwise write a working cookie back into the
+                    // Keychain that revocation had just deleted — leaving the
+                    // app able to reach a hub the user signed out of, on a
+                    // token the hub will honor for weeks.
+                    guard isCurrent(generation) else { return }
                     HubKeychain.set(fresh, account: entry.cookieAccount)
                     api.cookie = fresh
                     if let hubState = try? await api.state() {
+                        guard isCurrent(generation) else { return }
                         state = .connected(hubState)
                         triedSilentRelogin = false
                         return
                     }
                 }
             }
+            guard isCurrent(generation) else { return }
             state = .signedOut
         } catch HubAPIError.unreachable(let detail) {
+            guard isCurrent(generation) else { return }
             state = .unreachable(detail)
         } catch HubAPIError.http(let status, let message) {
+            guard isCurrent(generation) else { return }
             state = .unreachable("HTTP \(status)\(message.isEmpty ? "" : ": \(message)")")
         } catch {
+            guard isCurrent(generation) else { return }
             state = .unreachable(error.localizedDescription)
         }
+    }
+
+    /// False once a sign-out has happened since `generation` was captured.
+    private func isCurrent(_ generation: Int) -> Bool {
+        generation == revocationGeneration
     }
 
     /// Revokes this hub's credentials after a sign-out observed in a web view.
@@ -270,6 +300,7 @@ final class HubConnection: Identifiable {
         // waits on the cookie store to leave the page: windows return to the
         // splash off this state transition, and WebKit's cookie operations
         // suspend for as long as they like.
+        revocationGeneration &+= 1
         HubKeychain.delete(account: entry.passwordAccount)
         HubKeychain.delete(account: entry.cookieAccount)
         triedSilentRelogin = false

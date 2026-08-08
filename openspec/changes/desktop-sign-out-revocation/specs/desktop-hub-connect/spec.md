@@ -16,6 +16,11 @@ The app SHALL observe a sign-out performed inside a web view against a configure
 - **WHEN** the remote hub is old enough that its switcher signs out without a form navigation
 - **THEN** the cleared hub session cookie is still observed and the credentials are still revoked
 
+#### Scenario: Work in flight during sign-out cannot resurrect the hub
+- **WHEN** a state probe or a silent re-login for a hub is already in flight at the moment the user signs out of it
+- **THEN** its result is discarded rather than published as hub state
+- **AND** a cookie it obtained is not written to the Keychain, so revocation is not undone by a request that started before it
+
 #### Scenario: Revocation survives a restart
 - **WHEN** the user signs out of a remote hub and then quits and relaunches the app
 - **THEN** the hub's card shows sign-in required and no session is restored
