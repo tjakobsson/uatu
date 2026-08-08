@@ -20,6 +20,16 @@ struct RemoteHubEntry: Codable, Equatable, Hashable, Identifiable {
         url?.host ?? urlString
     }
 
+    /// Scheme, host, and port. Sign-out signals resolve against this rather
+    /// than the host alone: two configured hubs may share a host on different
+    /// ports (routine for loopback hubs behind tunnels, and the add flow does
+    /// not forbid it), and revoking by host would destroy one hub's
+    /// credentials while leaving the hub actually signed out of able to
+    /// re-authenticate.
+    var origin: String? {
+        url.flatMap(HubURLValidation.origin)
+    }
+
     var passwordAccount: String { "\(id.uuidString).password" }
     var cookieAccount: String { "\(id.uuidString).cookie" }
 }
@@ -51,6 +61,14 @@ enum HubURLValidation {
             return .failure(.insecureRemote)
         }
         return .success(url)
+    }
+
+    /// A URL's origin, with the scheme's default port made explicit so that
+    /// "https://hub.example/" and "https://hub.example:443/" compare equal.
+    static func origin(of url: URL) -> String? {
+        guard let scheme = url.scheme?.lowercased(), let host = url.host?.lowercased() else { return nil }
+        let port = url.port ?? (scheme == "https" ? 443 : 80)
+        return "\(scheme)://\(host):\(port)"
     }
 }
 
@@ -99,16 +117,25 @@ final class HubRoster {
         return entry
     }
 
-    /// The configured hub a URL belongs to, matched by host. Sign-out signals
-    /// arrive from the web view as bare URLs; only a configured remote hub has
-    /// credentials to revoke, and the local hub has no login at all.
-    func entry(forHost host: String) -> RemoteHubEntry? {
-        hubs.first { $0.host.caseInsensitiveCompare(host) == .orderedSame }
+    /// The configured hub a URL belongs to, matched by full origin. Sign-out
+    /// signals arrive from the web view as bare URLs; only a configured remote
+    /// hub has credentials to revoke, and the local hub has no login at all.
+    func entry(for url: URL) -> RemoteHubEntry? {
+        guard let origin = HubURLValidation.origin(of: url) else { return nil }
+        return hubs.first { $0.origin == origin }
     }
 
-    func entry(for url: URL) -> RemoteHubEntry? {
-        guard let host = url.host else { return nil }
-        return entry(forHost: host)
+    /// The single configured hub on a host — nil when none, and nil when
+    /// several.
+    ///
+    /// Cookies are scoped to a host and carry no port, so two hubs sharing a
+    /// host share one `uatu_hub` jar entry, and its disappearance cannot say
+    /// which of them signed out. Guessing would revoke the wrong hub's
+    /// credentials, which is worse than not revoking: the navigation signal
+    /// still carries the port and stays precise for that setup.
+    func soleEntry(forHost host: String) -> RemoteHubEntry? {
+        let matches = hubs.filter { $0.host.caseInsensitiveCompare(host) == .orderedSame }
+        return matches.count == 1 ? matches.first : nil
     }
 
     /// Revokes a hub's credentials in response to a sign-out observed in a web
@@ -129,7 +156,7 @@ final class HubRoster {
     /// shared, so one watch serves every window.
     func startCookieWatch() {
         cookieWatch.start { [weak self] host in
-            guard let self, let entry = self.entry(forHost: host) else { return }
+            guard let self, let entry = self.soleEntry(forHost: host) else { return }
             self.signOut(entry)
         }
     }
@@ -238,15 +265,18 @@ final class HubConnection: Identifiable {
     /// and re-entering `.signedOut` are all no-ops — because several detection
     /// signals can report the same sign-out.
     func signOut() async {
+        // Order matters. The Keychain deletes and the state publish are
+        // synchronous, so no window can observe a half-revoked hub and none
+        // waits on the cookie store to leave the page: windows return to the
+        // splash off this state transition, and WebKit's cookie operations
+        // suspend for as long as they like.
         HubKeychain.delete(account: entry.passwordAccount)
         HubKeychain.delete(account: entry.cookieAccount)
+        triedSilentRelogin = false
+        state = .signedOut
         if let url = entry.url {
             await HubCookies.clear(for: url)
         }
-        triedSilentRelogin = false
-        // Published now rather than at the next poll: windows showing this hub
-        // watch this state to return to the splash.
-        state = .signedOut
     }
 
     /// Interactive sign-in from the splash's sheet. Stores both secrets and

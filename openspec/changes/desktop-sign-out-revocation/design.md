@@ -131,6 +131,27 @@ realistic cases.
 The observer is scoped to hosts in the roster, so unrelated cookie traffic is
 ignored.
 
+One asymmetry between the two authoritative signals falls out of how cookies
+are scoped, and it decides how each resolves a signal to a roster entry.
+Cookies belong to a **host** and carry no port; navigations carry a full
+**origin**. Two configured hubs may legitimately share a host on different
+ports — routine for loopback hubs behind tunnels, and nothing in the add flow
+forbids it. So:
+
+- The navigation signal resolves by origin (scheme + host + port, with the
+  scheme's default port made explicit), which is exact.
+- The cookie signal resolves by host, and revokes **only when exactly one**
+  configured hub has that host. With several, the disappearance genuinely
+  cannot say which one signed out, and guessing would delete the wrong hub's
+  credentials while leaving the signed-out one able to re-authenticate — the
+  precise inversion of this change's purpose. Declining to revoke is the safe
+  failure: the navigation signal still covers that setup exactly, and only the
+  older-hub `fetch` path loses its net.
+
+Same-host hubs already share one `uatu_hub` jar entry in the web view, so only
+one of them can be authenticated there at a time. That predates this change and
+is left alone.
+
 ### D6 — `HubConnection.state` is the broadcast; each window watches its own hub
 
 Revocation sets `state = .signedOut` synchronously rather than waiting for the
