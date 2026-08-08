@@ -227,6 +227,54 @@ test.describe("touch terminal switcher", () => {
     await expect(page.locator(switchKey)).toHaveAttribute("aria-expanded", "false");
   });
 
+  test("taking a session back replaces the parked pane instead of duplicating it", async ({
+    page,
+    context,
+    request,
+  }) => {
+    await bootTouchTerminal(page, request);
+    const [staged] = await stageSessions(page, 1);
+
+    // Window 1 attaches the session.
+    await page.locator("#touch-tab-terminal").click();
+    await expect(page.locator(".terminal-pane")).toHaveCount(1, { timeout: 10000 });
+    await expect(page.locator(".terminal-pane")).toHaveAttribute("data-session-id", staged!);
+
+    // Window 2 takes it over. Window 1's pane parks with the take-back notice:
+    // it still holds a record, but no longer the resource.
+    const page2 = await context.newPage();
+    await page2.goto("/");
+    await expect(page2.locator("#connection-state .connection-label")).toHaveText("Connected");
+    await page2.locator("#touch-tab-terminal").click();
+    await expect(page2.locator("#terminal-switcher")).toBeVisible({ timeout: 10000 });
+    await page2
+      .locator('.terminal-switcher-row[data-state="attached-elsewhere"] .terminal-switcher-takeover')
+      .click();
+    await expect(page2.locator(".terminal-pane-host .xterm").first()).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(page.locator(".terminal-taken")).toBeVisible({ timeout: 10000 });
+
+    // Window 1 takes it back from its own switcher. The parked pane must be
+    // replaced, not joined: two entries for one session would strand a
+    // pane-cap slot forever and make every session-to-pane lookup ambiguous.
+    await page.locator(switchKey).click();
+    await expect(page.locator("#terminal-switcher")).toBeVisible();
+    await page
+      .locator('.terminal-switcher-row[data-state="attached-elsewhere"] .terminal-switcher-takeover')
+      .click();
+    await expect(page.locator(".terminal-pane-host .xterm").first()).toBeVisible({
+      timeout: 10000,
+    });
+
+    // Exactly one pane, and it is a live attachment rather than the notice.
+    await expect(page.locator(".terminal-pane")).toHaveCount(1);
+    await expect(page.locator(".terminal-taken")).toHaveCount(0);
+    await expect(page.locator(".terminal-pane")).toHaveAttribute("data-session-id", staged!);
+
+    await page2.close();
+  });
+
   test("the paste-token form stays visible in touch mode", async ({ page, context, request }) => {
     await bootTouchTerminal(page, request);
 

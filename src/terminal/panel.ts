@@ -1112,6 +1112,46 @@ export function setupTerminalPanel(
   // attach, take over, terminate, new shell — because a phone has no room for
   // two competing session surfaces.
 
+  // The pane this window still OWNS for a session, if any. Everything that
+  // resolves a session to a pane must go through this rather than scanning
+  // `panes` directly: a parked pane (its session taken over elsewhere) keeps
+  // its record but not the resource, so treating it as ownership means
+  // "switch to it" reveals a dead pane showing the take-back notice instead
+  // of reconnecting.
+  function attachedPaneFor(sessionId: string): TerminalPaneEntry | undefined {
+    return Array.from(panes.values()).find(
+      entry => entry.record.sessionId === sessionId && entry.handle.isAttached(),
+    );
+  }
+
+  // Attach (or take over) a session, replacing any parked pane this window
+  // still holds for it. Without the sweep, re-acquiring a session the window
+  // already has a stale pane for leaves two entries pointing at one resource:
+  // the orphan is never shown again (it is not the active pane), it consumes
+  // a pane-cap slot for good, and every session→pane lookup can resolve to
+  // whichever one happens to iterate first.
+  //
+  // Order matters. The stale pane is removed AFTER the new one lands, because
+  // `removePane` hides the whole panel when the last pane goes — dropping the
+  // orphan first would take the panel down and make the attach that follows
+  // bail on a hidden panel.
+  async function acquireSession(
+    sessionId: string,
+    options: { takeover?: boolean } = {},
+  ): Promise<void> {
+    const entry = await addPane({ sessionId, createdAt: Date.now() }, options);
+    if (!entry) return;
+    for (const stale of Array.from(panes.values())) {
+      if (
+        stale.record.sessionId === sessionId
+        && stale.record.id !== entry.record.id
+        && !stale.handle.isAttached()
+      ) {
+        removePane(stale.record.id);
+      }
+    }
+  }
+
   function isSwitcherOpen(): boolean {
     return switcherOpen;
   }
@@ -1273,15 +1313,13 @@ export function setupTerminalPanel(
     select.append(label, meta);
     select.addEventListener("click", () => {
       if (!row.canSelect) return;
-      const held = Array.from(panes.values()).find(
-        entry => entry.record.sessionId === row.sessionId,
-      );
+      const owned = attachedPaneFor(row.sessionId);
       dismissSwitcher();
-      if (held) {
-        setActivePane(held.record.id);
+      if (owned) {
+        setActivePane(owned.record.id);
         return;
       }
-      void addPane({ sessionId: row.sessionId, createdAt: Date.now() });
+      void acquireSession(row.sessionId);
     });
     element.append(select);
 
@@ -1294,7 +1332,7 @@ export function setupTerminalPanel(
       takeOver.disabled = !row.canTakeOver;
       takeOver.addEventListener("click", () => {
         dismissSwitcher();
-        void addPane({ sessionId: row.sessionId, createdAt: Date.now() }, { takeover: true });
+        void acquireSession(row.sessionId, { takeover: true });
       });
       element.append(takeOver);
     }
@@ -1323,27 +1361,27 @@ export function setupTerminalPanel(
   // nobody (or by another window) has no pane to lose, so it is a plain DELETE
   // with the sheet staying open — the same contract as the desktop chooser.
   async function terminateFromSwitcher(sessionId: string): Promise<boolean> {
-    const pane = Array.from(panes.values()).find(
-      entry => entry.record.sessionId === sessionId,
-    );
     // Only a pane this window still OWNS goes down the local path.
     // `requestClosePane` closes an unattached pane silently and without a
     // DELETE — right for a pane whose shell already exited, but for a session
     // taken over by another window it would tear down our stale pane and
     // report success while the session kept running over there.
-    if (pane?.handle.isAttached()) {
+    const owned = attachedPaneFor(sessionId);
+    if (owned) {
       // The confirm modal is the surface now; two stacked sheets on a phone
       // is one too many.
       dismissSwitcher();
-      requestClosePane(pane.record.id);
+      requestClosePane(owned.record.id);
       return true;
     }
     const ok = await killSessionRemote(sessionId);
     if (ok) {
       clearLastPty(sessionId);
-      // A parked pane referencing the session we just destroyed has nothing
+      // Any parked pane referencing the session we just destroyed has nothing
       // left to point at.
-      if (pane) removePane(pane.record.id);
+      for (const stale of Array.from(panes.values())) {
+        if (stale.record.sessionId === sessionId) removePane(stale.record.id);
+      }
       // Refresh the list so the terminated row disappears. A no-op when the
       // user dismissed the sheet while the DELETE was in flight — repainting
       // then would reopen a sheet they already closed.
