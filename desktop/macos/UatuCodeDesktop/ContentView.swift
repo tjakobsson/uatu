@@ -591,6 +591,12 @@ struct ContentView: View {
     }
 
     private func showSplash() {
+        // Cancels any open still in flight. Opening a remote hub awaits cookie
+        // injection, and a completion landing after this would sail past its
+        // unchanged-token guard and put the window back on the page it was
+        // just taken off — including a hub whose credentials were revoked
+        // mid-open by another window.
+        openRequestToken = UUID()
         phase = .splash
         currentPage = nil
         currentURL = nil

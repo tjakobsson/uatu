@@ -268,6 +268,9 @@ final class HubCookieWatch: NSObject, WKHTTPCookieStoreObserver {
     private var present: Set<String> = []
     private var onDisappear: ((String) -> Void)?
     private var started = false
+    /// Bumped whenever the baseline is adjusted out of band, so a refresh that
+    /// started earlier cannot write its stale snapshot over it.
+    private var baselineGeneration = 0
 
     func start(onDisappear: @escaping (String) -> Void) {
         guard !started else { return }
@@ -301,10 +304,19 @@ final class HubCookieWatch: NSObject, WKHTTPCookieStoreObserver {
     /// credentials they just entered deleted by it.
     func forget(host: String) {
         present.remove(host.lowercased())
+        // Invalidate refreshes already in flight. One suspended in
+        // `allCookies()` would resume holding a pre-clear snapshot and write
+        // the host straight back into the baseline, undoing this suppression —
+        // after which the app's own clear reports as a disappearance again.
+        baselineGeneration &+= 1
     }
 
     func refresh(reporting: Bool = true) async {
+        let generation = baselineGeneration
         let cookies = await WKWebsiteDataStore.default().httpCookieStore.allCookies()
+        // Discarding a stale refresh loses nothing: whatever changed the store
+        // scheduled its own refresh, which will run with a current snapshot.
+        guard generation == baselineGeneration else { return }
         let holding = Set(
             cookies
                 .filter { $0.name == HubCookies.name }
