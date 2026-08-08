@@ -767,6 +767,18 @@
                only on coarse-pointer devices via CSS. -->
           <div id="terminal-keybar" class="terminal-keybar" role="group" aria-label="Terminal keys"></div>
           <div id="terminal-panes" class="terminal-panes" data-orientation="horizontal"></div>
+          <!-- Touch terminal switcher: touch mode renders one pane at a time,
+               so this sheet is how the user reaches the others, attaches a
+               detached session, takes one over, or creates a new terminal.
+               Opened from the keybar; populated by terminal/panel.ts. -->
+          <div
+            id="terminal-switcher"
+            class="terminal-switcher"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Terminals"
+            hidden
+          ></div>
         </section>
       </div>
     </div>

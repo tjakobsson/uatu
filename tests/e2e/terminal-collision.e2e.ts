@@ -1,8 +1,10 @@
 import { expect, test } from "./fixtures";
 
 // Cross-window resource behavior: pane attachments are per-window, while the
-// personal last-active PTY is only an inventory hint. A new window must
-// explicitly choose New shell or Take over; it never auto-attaches.
+// personal last-active PTY is only an inventory hint. A session another window
+// holds is never claimed automatically — only an explicit Take over moves it —
+// and a saved reference that lost its session reconciles into that same
+// decision rather than retrying the attach.
 
 async function bootWithTerminalCookie(
   page: import("@playwright/test").Page,
@@ -122,6 +124,59 @@ test.describe("terminal collision: a second window gets its own session", () => 
     await expect(page.locator(".terminal-pane-host")).toContainText("again_one_ok", {
       timeout: 5000,
     });
+
+    await page2.close();
+  });
+
+  test("a saved reference claimed by another window reconciles once, without re-attaching", async ({
+    page,
+    context,
+    request,
+  }) => {
+    await bootWithTerminalCookie(page, request);
+    await openAndFocusTerminal(page);
+    await waitForPrompt(page);
+    await typeLine(page, "UATU_WIN=one");
+
+    // The session id window 1 holds and has persisted for its own reload.
+    const sessionId = await page.evaluate(
+      () => (document.querySelector(".terminal-pane") as HTMLElement).dataset.sessionId!,
+    );
+
+    // Window 2 takes it over explicitly, so window 1's saved reference now
+    // points at a resource another client holds.
+    const page2 = await context.newPage();
+    await page2.goto("/");
+    await expect(page2.locator("#connection-state .connection-label")).toHaveText("Connected");
+    await page2.locator("#terminal-toggle").click();
+    await expect(page2.locator(".terminal-picker")).toBeVisible({ timeout: 5000 });
+    await page2.locator(".terminal-picker-attach").first().click();
+    await expect(page2.locator(".terminal-pane-host .xterm").first()).toBeVisible({
+      timeout: 5000,
+    });
+
+    // Window 1 reloads onto the stale reference. The upgrade is refused, and
+    // the reconcile must NOT auto-attach it back: inventory reports the
+    // session as held, so it lands on the chooser as a takeover decision.
+    // This is what makes the reconcile self-limiting rather than a loop.
+    await page.evaluate(() => {
+      window.sessionStorage.setItem("uatu:terminal-visible", "1");
+    });
+    await page.reload();
+    await expect(page.locator(".terminal-picker")).toBeVisible({ timeout: 10000 });
+    await expect(page.locator(".terminal-picker-row")).toHaveCount(1);
+    await expect(page.locator(".terminal-picker-meta").first()).toContainText(
+      "attached elsewhere",
+    );
+    await expect(page.locator(".terminal-pane-host")).toHaveCount(0);
+
+    // Window 2 keeps the session throughout — no silent ping-pong.
+    await expect(page2.locator(".terminal-taken")).toHaveCount(0);
+    const inventory = await context.request.get("/api/terminal/sessions");
+    const body = await inventory.json();
+    expect(body.sessions).toHaveLength(1);
+    expect(body.sessions[0].id).toBe(sessionId);
+    expect(body.sessions[0].attached).toBe(true);
 
     await page2.close();
   });
