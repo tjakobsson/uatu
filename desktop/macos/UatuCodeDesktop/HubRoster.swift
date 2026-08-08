@@ -324,7 +324,7 @@ final class HubConnection: Identifiable {
         let generation = credentialGeneration
         await HubCookies.inject(value: cookie, for: url)
         guard !isCurrent(generation), self.cookie == nil else { return }
-        await HubCookies.clear(for: url)
+        await HubCookies.clear(for: url, stillWanted: { self.cookie == nil })
     }
 
     /// Revokes this hub's credentials after a sign-out observed in a web view.
@@ -351,7 +351,11 @@ final class HubConnection: Identifiable {
         state = .signedOut
         revocations &+= 1
         if let url = entry.url {
-            await HubCookies.clear(for: url)
+            // Abandon the clear if a sign-in overtakes it: the new session's
+            // cookie shares this one's name, domain and path, so deleting the
+            // snapshot's entry would delete the replacement.
+            let generation = credentialGeneration
+            await HubCookies.clear(for: url, stillWanted: { self.isCurrent(generation) })
         }
     }
 

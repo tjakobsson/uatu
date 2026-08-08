@@ -227,11 +227,18 @@ enum HubCookies {
     /// counterpart, used when the app revokes a hub's credentials. Without
     /// it the injected copy would outlive the Keychain one and re-authenticate
     /// the next navigation to that hub.
+    /// - Parameter stillWanted: re-checked after the store snapshot and before
+    ///   each delete. Deletion matches on name/domain/path, not value, so a
+    ///   clear overtaken by a sign-in would delete the *replacement* cookie
+    ///   the new session just installed — leaving the user signed in natively
+    ///   but unauthenticated in the web view.
     @MainActor
-    static func clear(for hubURL: URL) async {
+    static func clear(for hubURL: URL, stillWanted: () -> Bool = { true }) async {
         guard let host = hubURL.host else { return }
         let store = WKWebsiteDataStore.default().httpCookieStore
-        for cookie in await store.allCookies() where cookie.name == name && matches(cookie, host: host) {
+        let cookies = await store.allCookies()
+        for cookie in cookies where cookie.name == name && matches(cookie, host: host) {
+            guard stillWanted() else { return }
             await store.deleteCookie(cookie)
         }
     }

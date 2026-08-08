@@ -234,7 +234,15 @@ extension WebViewHost: WKNavigationDelegate {
         // request the hub itself rejected.
         if navigationAction.targetFrame?.isMainFrame == true, let url = navigationAction.request.url {
             if url.path == "/logout", navigationAction.request.httpMethod == "POST" {
-                onHubSignOut?(url)
+                // Same-origin only, mirroring the hub's own CSRF rule. The web
+                // view can follow an ordinary same-frame link to an outside
+                // page, and that page can post a top-level form back to the
+                // hub — a request the hub answers 403. Checking only where the
+                // POST is going would revoke on it; the page making it has to
+                // belong to the hub too.
+                if Self.isSameOrigin(navigationAction.sourceFrame.securityOrigin, as: url) {
+                    onHubSignOut?(url)
+                }
             } else if url.path == "/login" {
                 onHubLoginPage?(url)
             }
@@ -260,6 +268,16 @@ extension WebViewHost: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         reportNavigationFailure(error)
+    }
+
+    /// Scheme, host and port equality, with a security origin's implicit
+    /// default port (reported as 0) resolved the same way the URL's is.
+    private static func isSameOrigin(_ origin: WKSecurityOrigin, as url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(), let host = url.host?.lowercased() else { return false }
+        let defaultPort = scheme == "https" ? 443 : 80
+        return origin.protocol.lowercased() == scheme
+            && origin.host.lowercased() == host
+            && (origin.port == 0 ? defaultPort : origin.port) == (url.port ?? defaultPort)
     }
 
     private func reportNavigationFailure(_ error: Error) {
