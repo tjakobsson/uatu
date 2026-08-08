@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
-import { chipDotClass, parseHubState, sortHubWorkspaces, workspaceIdFromBasePath } from "./hub-nav";
+import {
+  chipDotClass,
+  parseHubState,
+  showsSignOut,
+  sortHubWorkspaces,
+  submitHubSignOut,
+  workspaceIdFromBasePath,
+} from "./hub-nav";
 
 describe("workspaceIdFromBasePath", () => {
   test("extracts the id from a hub-shaped base path", () => {
@@ -69,5 +76,54 @@ describe("parseHubState", () => {
     expect(parseHubState({ workspaces: [] })).toEqual({ local: false, workspaces: [] });
     expect(parseHubState({})).toBeNull();
     expect(parseHubState(null)).toBeNull();
+  });
+});
+
+describe("showsSignOut", () => {
+  test("a hub with a login offers the entry", () => {
+    expect(showsSignOut({ local: false })).toBe(true);
+  });
+
+  test("local mode omits it — the routes do not exist there", () => {
+    expect(showsSignOut({ local: true })).toBe(false);
+  });
+});
+
+describe("submitHubSignOut", () => {
+  // A minimal stand-in for the pieces of Document this touches; the unit
+  // suite runs without a DOM.
+  function fakeDocument() {
+    const form: Record<string, unknown> & { submitted: boolean } = { submitted: false };
+    form.submit = () => {
+      form.submitted = true;
+    };
+    const appended: unknown[] = [];
+    const doc = {
+      createElement: (tag: string) => {
+        form.tag = tag;
+        return form;
+      },
+      body: { appendChild: (node: unknown) => appended.push(node) },
+    };
+    return { doc: doc as unknown as Document, form, appended };
+  }
+
+  test("posts a form to the hub's origin-rooted logout route", () => {
+    const { doc, form } = fakeDocument();
+    submitHubSignOut(doc);
+    expect(form.tag).toBe("form");
+    expect(form.method).toBe("post");
+    // Origin-rooted on purpose: a session lives under /s/<id>/ but the hub's
+    // logout route is at the origin root.
+    expect(form.action).toBe("/logout");
+  });
+
+  test("submits a hidden form attached to the document", () => {
+    const { doc, form, appended } = fakeDocument();
+    submitHubSignOut(doc);
+    // A detached form does not submit, and a visible one would flash.
+    expect(form.hidden).toBe(true);
+    expect(appended).toEqual([form]);
+    expect(form.submitted).toBe(true);
   });
 });

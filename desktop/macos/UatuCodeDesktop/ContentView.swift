@@ -192,6 +192,14 @@ struct ContentView: View {
                   case .failed(let message) = newStatus else { return }
             phase = .failed(message)
         }
+        .onChange(of: remoteHubState) { _, newState in
+            // Revocation is app-wide, so EVERY window showing that hub comes
+            // back to the splash — not just the one the user signed out in.
+            // A sibling window left sitting on a hub the app has forgotten
+            // would be showing a page it can no longer re-authenticate.
+            guard newState == .signedOut, phase == .web || isOpening else { return }
+            showSplash()
+        }
         .onChange(of: pageZoom) {
             web.webView.pageZoom = pageZoom
             for tab in split.tabs {
@@ -206,6 +214,24 @@ struct ContentView: View {
                     phase = .failed("The page could not be loaded.\n\(message)")
                 }
             }
+            // Signing out in the page revokes the hub app-wide. The window's
+            // own return to the splash comes from the .signedOut transition
+            // below, which every window watching this hub sees.
+            web.onHubSignOut = { url in
+                HubRoster.shared.signOut(for: url)
+            }
+            web.onHubLoginPage = { url in
+                // This window's hub session ended. Whatever ended it, a hub's
+                // web login page is the wrong thing to leave on screen in an
+                // app that owns hub credentials natively — the splash card is
+                // where signing back in lives.
+                guard HubRoster.shared.entry(for: url) != nil, phase == .web || isOpening else { return }
+                showSplash()
+            }
+            // One app-wide watch for hub cookies being cleared, covering the
+            // sign-out paths the navigation delegate cannot see. Idempotent,
+            // so every window may call it.
+            HubRoster.shared.startCookieWatch()
             // ⌘W / ⌘[ / ⌘] belong to the browser tab only while the split
             // has keyboard focus. Menu items can't express that: NSMenu
             // stops at the FIRST matching key equivalent even when
@@ -554,6 +580,14 @@ struct ContentView: View {
     // MARK: - Derived state
 
     private var hasPage: Bool { phase == .web }
+
+    /// The connection state of the remote hub this window is showing, if any.
+    /// Reading it during body evaluation is what subscribes the window to that
+    /// connection's changes.
+    private var remoteHubState: HubConnection.State? {
+        guard case .remoteDashboard(let entry) = currentPage else { return nil }
+        return HubRoster.shared.connection(for: entry).state
+    }
 
     private var isOpening: Bool {
         if case .opening = phase { return true }

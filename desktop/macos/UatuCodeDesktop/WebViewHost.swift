@@ -30,6 +30,17 @@ final class WebViewHost: NSObject {
     /// failed state instead of showing a dead web view.
     var onNavigationFailed: ((String) -> Void)?
 
+    /// A sign-out performed in the page: a main-frame POST to a hub's logout
+    /// route. Authoritative — the user asked to sign out — so ContentView
+    /// answers it by revoking that hub's stored credentials.
+    var onHubSignOut: ((URL) -> Void)?
+
+    /// The page landed on a hub's login route. Advisory: the window's session
+    /// is over (a sign-out, an expired cookie, a restarted hub), but unlike
+    /// the signal above it does not by itself mean the user asked to sign
+    /// out — so it returns the window to the splash without revoking.
+    var onHubLoginPage: ((URL) -> Void)?
+
     let webView: WKWebView
     private var observations: [NSKeyValueObservation] = []
     private var insetObservation: NSKeyValueObservation?
@@ -205,7 +216,36 @@ extension WebViewHost: WKNavigationDelegate {
             decisionHandler(.cancel)
             return
         }
+        // Hub session signals. Both are reported and then ALLOWED: the hub
+        // still receives its logout POST (so it clears the browser's cookie,
+        // and gets the chance to act on it should it ever revoke server-side),
+        // and the login page it redirects to is simply superseded when the
+        // window drops back to the splash. Cancelling would keep the web
+        // view's cookie alive for no gain.
+        //
+        // The hub serves both routes at its origin root — a session lives
+        // under /s/<id>/ but its sign-out still posts to /logout — so an
+        // exact path match is the precise test.
+        if let url = navigationAction.request.url {
+            if url.path == "/logout", navigationAction.request.httpMethod == "POST" {
+                onHubSignOut?(url)
+            } else if url.path == "/login" {
+                onHubLoginPage?(url)
+            }
+        }
         decisionHandler(.allow)
+    }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        // The hub reaches its login page by REDIRECT — the gate answers an
+        // unauthenticated page request with a 303, and logout answers with
+        // one too. decidePolicyFor is not guaranteed to run for every
+        // server-redirected request, so the committed URL is the reliable
+        // place to notice we have landed there. Reporting from both is safe:
+        // the handler only returns the window to the splash.
+        if let url = webView.url, url.path == "/login" {
+            onHubLoginPage?(url)
+        }
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
