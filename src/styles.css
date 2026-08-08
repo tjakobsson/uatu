@@ -1191,9 +1191,13 @@ body.is-resizing-terminal .panel-resizer {
    accumulates in xterm scrollback while collapsed. The touch keybar and the
    find slot collapse too — a live keybar wired to an invisible PTY (Esc,
    ^C, paste with no visible effect) is exactly what "header only" forbids.
-   This selector out-specifies the coarse-pointer keybar reveal. */
+   This selector out-specifies the coarse-pointer keybar reveal. The switcher
+   goes with them: it covers the panel's surface, which minimized is only a
+   header strip, so leaving it up would paint a session sheet over the one
+   control the user needs to restore. */
 .terminal-panel[data-display="minimized"] .terminal-panes,
 .terminal-panel[data-display="minimized"] .terminal-keybar,
+.terminal-panel[data-display="minimized"] .terminal-switcher,
 .terminal-panel[data-display="minimized"] .find-slot {
   display: none;
 }

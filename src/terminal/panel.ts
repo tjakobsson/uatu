@@ -258,9 +258,24 @@ export function setupTerminalPanel(
   // A user-initiated panel show that found no pane yet (fresh spawn path):
   // the next pane added takes focus once its terminal opens.
   let focusPaneWhenReady = false;
-  // Suppresses the per-pane refit while a planned batch attaches; the batch
-  // fits once when it finishes.
+  // Suppresses per-pane activation, focus and refit while a planned batch
+  // attaches; the batch performs each once when it finishes.
   let batchingAttach = false;
+  // Whether the touch terminal switcher is up. Tracked here rather than read
+  // off the element because the sheet's content arrives from an async
+  // inventory read: between the tap and the first paint the element is still
+  // hidden, and anything that asked the DOM in that window would be told the
+  // sheet is closed. That gap is what makes a second tap render a second sheet
+  // instead of toggling, and what lets an in-flight refresh reopen a sheet the
+  // user already dismissed.
+  //
+  // Declared with the rest of the panel's state, NOT beside the switcher
+  // functions further down: `initTerminalKeybar` runs during setup and calls
+  // `isSwitcherOpen()` synchronously to seed the switch button's
+  // `aria-expanded`. A `let` declared after that call site is still in its
+  // temporal dead zone when it runs, and the ReferenceError aborts the whole
+  // boot — the panel never mounts and the app hangs at "Connecting".
+  let switcherOpen = false;
 
   // Sticky Ctrl latch shared by the keybar's ctrl button (arms it) and every
   // pane's input path (composes the next keystroke, then releases).
@@ -789,14 +804,18 @@ export function setupTerminalPanel(
     panes.set(id, entry);
     rebuildPanesContainer();
     entry.handle.attach();
-    setActivePane(id);
-    if (focusPaneWhenReady) {
-      focusPaneWhenReady = false;
-      entry.handle.focus();
+    // Inside a batch attach, activation, focus and the refit all belong to the
+    // batch, which performs them once against the pane it picked. Activating
+    // here would also overwrite the saved last-active PTY the batch is about
+    // to consult. See `attachSessionBatch`.
+    if (!batchingAttach) {
+      setActivePane(id);
+      if (focusPaneWhenReady) {
+        focusPaneWhenReady = false;
+        entry.handle.focus();
+      }
     }
     persistState();
-    // Inside a batch attach the caller fits once at the end — a per-pane fit
-    // would re-measure every earlier pane on every step.
     if (!batchingAttach) requestAnimationFrame(() => fitAll());
     return entry;
   }
@@ -957,9 +976,19 @@ export function setupTerminalPanel(
   // Attach a planned batch, one at a time: `addPane` re-checks the pane cap
   // and the panel's hidden state on every call and mutates shared DOM through
   // `rebuildPanesContainer`, so sequencing keeps both invariants without new
-  // locking. Each `addPane` makes its own pane active; the batch's real active
-  // pane is decided once at the end.
+  // locking.
+  //
+  // `batchingAttach` suppresses per-pane activation for the whole loop. That
+  // is not an optimization detail — activating a pane writes `lastPtyId` and
+  // persists it, so letting each attach activate itself would overwrite the
+  // user's saved last-active reference with the last session attached, and
+  // the "last-active wins" rule below would then always resolve to it. The
+  // saved id is snapshotted anyway, so the rule survives even if some future
+  // path activates mid-batch. Suppression also spares N-1 refits, N-1 focus
+  // grabs (each one a software-keyboard flash on touch), and N-1 personal-
+  // state writes.
   async function attachSessionBatch(sessions: TerminalSessionInfo[]): Promise<void> {
+    const savedLastPtyId = lastPtyId;
     const landed: TerminalSessionInfo[] = [];
     batchingAttach = true;
     try {
@@ -972,11 +1001,20 @@ export function setupTerminalPanel(
       batchingAttach = false;
     }
     if (landed.length === 0) return;
-    const activeSessionId = resolveActiveSessionId(landed, lastPtyId);
-    const activeEntry = Array.from(panes.values()).find(
-      entry => entry.record.sessionId === activeSessionId,
-    );
-    if (activeEntry) setActivePane(activeEntry.record.id);
+    const activeSessionId = resolveActiveSessionId(landed, savedLastPtyId);
+    const ordered = Array.from(panes.values());
+    const activeEntry =
+      ordered.find(entry => entry.record.sessionId === activeSessionId) ?? ordered.at(-1);
+    if (activeEntry) {
+      setActivePane(activeEntry.record.id);
+      // A user-initiated show parks its focus intent until a pane exists.
+      // Consume it here rather than in `addPane`, so focus lands on the pane
+      // the batch chose instead of whichever one happened to attach first.
+      if (focusPaneWhenReady) {
+        focusPaneWhenReady = false;
+        activeEntry.handle.focus();
+      }
+    }
     requestAnimationFrame(() => fitAll());
   }
 
@@ -1064,11 +1102,12 @@ export function setupTerminalPanel(
   // two competing session surfaces.
 
   function isSwitcherOpen(): boolean {
-    return switcherEl !== null && !switcherEl.hasAttribute("hidden");
+    return switcherOpen;
   }
 
   function dismissSwitcher(): boolean {
-    if (!switcherEl || !isSwitcherOpen()) return false;
+    if (!switcherEl || !switcherOpen) return false;
+    switcherOpen = false;
     switcherEl.setAttribute("hidden", "");
     switcherEl.replaceChildren();
     // The keybar button mirrors the sheet's state; every dismissal path
@@ -1090,15 +1129,28 @@ export function setupTerminalPanel(
   // `known` lets a caller that just read inventory hand it over instead of
   // paying for a second round trip a moment later.
   function openSwitcher(known?: TerminalSessionInfo[]): boolean {
-    if (!switcherEl) return false;
+    if (!switcherEl || switcherOpen) return false;
+    // Claim the open state before awaiting anything, so a second activation
+    // during the fetch closes the sheet instead of racing another render.
+    switcherOpen = true;
+    document.dispatchEvent(new Event("uatu:terminal-switcher-change"));
     void renderSwitcher(known);
     return true;
   }
 
+  // Paints the sheet's current content. Also called to refresh an open sheet
+  // after a listed session is terminated — never to open one, which is
+  // `openSwitcher`'s job.
   async function renderSwitcher(known?: TerminalSessionInfo[]): Promise<void> {
-    if (!switcherEl) return;
+    if (!switcherEl || !switcherOpen) return;
     const inventory = known ?? await fetchSessionInventory();
-    if (panel!.hasAttribute("hidden")) return;
+    // The await yields. A dismissal or a panel close during the fetch must
+    // win: repainting here would resurrect a sheet the user already closed.
+    if (!switcherOpen) return;
+    if (panel!.hasAttribute("hidden")) {
+      dismissSwitcher();
+      return;
+    }
     const activeSessionId = activePaneId
       ? panes.get(activePaneId)?.record.sessionId
       : undefined;
@@ -1113,7 +1165,6 @@ export function setupTerminalPanel(
 
     switcherEl.replaceChildren();
     switcherEl.removeAttribute("hidden");
-    document.dispatchEvent(new Event("uatu:terminal-switcher-change"));
 
     const backdrop = document.createElement("div");
     backdrop.className = "terminal-switcher-backdrop";
@@ -1152,6 +1203,27 @@ export function setupTerminalPanel(
       sheet.append(note);
     }
     sheet.append(fresh);
+    // The sheet is marked `aria-modal`, which is a promise that the rest of
+    // the app is unreachable while it is up. Keyboard focus has to honor that
+    // promise: without a wrap, Tab walks straight out of the dialog and into
+    // an xterm the user cannot see behind the backdrop. Escape still closes
+    // (the panel's capture-phase handler), so this is never a trap the user
+    // cannot leave.
+    sheet.addEventListener("keydown", event => {
+      if (event.key !== "Tab") return;
+      const focusable = [...sheet.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
+      if (focusable.length === 0) return;
+      const first = focusable[0]!;
+      const last = focusable[focusable.length - 1]!;
+      const active = sheet.ownerDocument.activeElement;
+      if (event.shiftKey && active === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    });
     switcherEl.append(backdrop, sheet);
     // The sheet takes focus deliberately — it is a context switch, and the
     // software keyboard going away is the point.
@@ -1249,6 +1321,9 @@ export function setupTerminalPanel(
     const ok = await killSessionRemote(sessionId);
     if (ok) {
       clearLastPty(sessionId);
+      // Refresh the list so the terminated row disappears. A no-op when the
+      // user dismissed the sheet while the DELETE was in flight — repainting
+      // then would reopen a sheet they already closed.
       void renderSwitcher();
     }
     return ok;
@@ -1509,6 +1584,10 @@ export function setupTerminalPanel(
     persistState();
     applyDisplayModeToDom();
     if (next === "minimized") {
+      // Minimized is a header strip; the sheet has no surface left to cover.
+      // CSS hides it, but the state has to follow or Escape would keep
+      // consuming keys on behalf of a sheet nobody can see.
+      dismissSwitcher();
       // Don't dispose xterm — the PTY stays attached so output that arrives
       // while minimized renders into scrollback as soon as we restore.
       return;

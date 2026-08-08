@@ -55,16 +55,24 @@
 - [x] 7.4 Update the E2E specs that encoded the old always-ask rule (`terminal-session-manager.e2e.ts`), then run `bun test` and `bun test:e2e`
 - [x] 7.5 Validate the change with `openspec validate add-terminal-auto-attach-switcher --strict`
 
-Suite status at the end of implementation: `bunx tsc --noEmit` clean; `bun test`
-1287 pass / 0 fail; every terminal E2E spec passes (13/13 across
-`terminal-session-manager`, `terminal-collision`, `terminal-switcher`). The full
-`bun test:e2e` run reported 5 failures, all in specs this change does not touch
-(`find`, `document-tree`, `change-overview`, `personal-state`). A stashed
-baseline run of those same four specs reproduced `find` and `document-tree`
-failures without any of this change's code, and re-running them on the branch
-leaves only `find` — i.e. pre-existing order- and timing-sensitive tests, not
-regressions from this work. `find.e2e.ts:96` (⌘G stepping) fails identically
-with and without the change and is worth a separate look.
+## 8. Review follow-ups
+
+- [x] 8.1 Stop per-pane activation during a batch attach — activating each pane overwrote the saved `lastPtyId` before `resolveActiveSessionId` read it, so "last-active wins" always degraded to "newest wins"; snapshot the saved id as well
+- [x] 8.2 Add the regression E2E for 8.1 and verify it fails against the pre-fix code
+- [x] 8.3 Track switcher openness in closure state claimed synchronously, and re-check it after every await, so a second tap toggles instead of rendering a second sheet and an in-flight refresh cannot reopen a dismissed sheet
+- [x] 8.4 Declare that flag with the panel's other state — `initTerminalKeybar` reads it during setup, and a `let` declared later in the closure throws a TDZ `ReferenceError` that aborts boot (app hangs at "Connecting")
+- [x] 8.5 Dismiss the switcher when the panel minimizes, in both CSS and state, so Escape cannot consume keys for an invisible sheet
+- [x] 8.6 Honor the sheet's `aria-modal` with a Tab wrap inside it
+
+Suite status after the review follow-ups: `bunx tsc --noEmit` clean; `bun test`
+1287 pass / 0 fail; 37/37 pass across the terminal and touch specs
+(`terminal-session-manager`, `terminal-collision`, `terminal-switcher`, `ipad`,
+`mobile`). The full `bun test:e2e` run reports 286 pass / 2 fail, both in specs
+this change does not touch: `find.e2e.ts:96` (⌘G stepping), which a stashed
+baseline run reproduced without any of this change's code, and
+`change-overview`, which passes on the baseline and in targeted re-runs — i.e.
+pre-existing order- and timing-sensitive tests, not regressions. `find.e2e.ts:96`
+is worth a separate look.
 
 The branch is `feat/terminal-auto-attach-switcher`. Land it through a PR with a
 `feat(terminal):` subject describing the change; auto-attach and the touch

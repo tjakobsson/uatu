@@ -73,13 +73,25 @@ the chooser (desktop) or the switcher (touch); else `addPane()` a fresh shell.
 
 Sequential, not parallel: `addPane` re-checks the cap and the panel's hidden
 state on each call, and `rebuildPanesContainer` mutates shared DOM. Running them
-in order keeps both invariants without new locking. A single `fitAll()` after the
-batch replaces the per-pane one.
+in order keeps both invariants without new locking.
 
 Active pane after a batch: the saved `lastPtyId` when it is among the attached
 set, otherwise the newest attached pane. `lastPtyId` still never *causes* an
 attachment — it only selects among attachments that were going to happen anyway,
 which is what keeps the takeover rule intact.
+
+**The batch must suppress per-pane activation, and that is correctness, not
+tuning.** `setActivePane` writes and persists `lastPtyId`. If each attach
+activates its own pane, the last one attached overwrites the user's saved
+last-active reference *before* the rule above reads it — so "last-active wins"
+silently degrades to "newest wins", always. (Caught in review; the pure
+`resolveActiveSessionId` unit tests passed throughout, because the corruption
+happens in the caller. `terminal-session-manager.e2e.ts` now covers it, and that
+test was verified to fail against the old code.) `batchingAttach` therefore
+suppresses activation, focus, and the refit for the whole loop, and the saved id
+is snapshotted before it starts so the rule survives regardless. Suppression
+also spares N-1 refits, N-1 focus grabs — each a software-keyboard flash on
+touch — and N-1 personal-state writes.
 
 ### D3 — Collision during auto-attach needs no new guard
 
@@ -143,6 +155,22 @@ keybar with the same `env(safe-area-inset-bottom)` treatment.
 It renders on top of the terminal surface with a dismissing backdrop, sized to
 its content and scrollable when the list is long.
 
+**Openness is closure state, not a DOM read.** The sheet's content comes from an
+async inventory read, so between the tap and the first paint the element is still
+hidden — a DOM-derived `isSwitcherOpen()` reports "closed" for that whole window.
+Two bugs live in that gap: a second tap renders a second sheet instead of
+toggling, and a refresh that was in flight when the user dismissed the sheet
+repaints it back into existence. A `switcherOpen` flag claimed synchronously by
+`openSwitcher`, and re-checked after every await, closes both.
+
+That flag must be declared with the panel's other state, **not** beside the
+switcher functions: `initTerminalKeybar` runs during setup and calls
+`isSwitcherOpen()` synchronously to seed `aria-expanded`. A `let` declared
+further down the closure is still in its temporal dead zone at that moment, and
+the ReferenceError propagates out of `setupTerminalPanel` and aborts boot — the
+app hangs at "Connecting" with no terminal at all. This is the TDZ hazard
+`CLAUDE.md` warns about, reachable without any circular import.
+
 ### D6 — The keybar gains a `switch` item kind
 
 `KeybarItem` gains `{ kind: "switch" }`, rendered leftmost and visually
@@ -150,6 +178,11 @@ separated from the key cluster — it is navigation, not a key, and the existing
 order is by tap frequency among *keys*. `KeybarDeps` gains `openSwitcher()`,
 `isSwitcherOpen()`, and `dismissSwitcher()`, mirroring the selection-sheet trio
 already there. The button reports `aria-expanded` and toggles.
+
+The sheet is marked `aria-modal`, which promises the rest of the app is
+unreachable while it is up, so it wraps Tab within its own buttons. Without that
+wrap the promise is a lie: Tab walks straight into an xterm hidden behind the
+backdrop. Escape always closes, so it is never a trap.
 
 Focus is the one place the switch button breaks the keybar's rule that pressing
 a key must never move focus out of the terminal. That rule exists to keep the

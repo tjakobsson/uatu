@@ -302,6 +302,79 @@ test.describe("terminal session manager", () => {
     );
   });
 
+  test("the saved last-active session wins the active pane, even as the oldest", async ({
+    page,
+    context,
+    request,
+  }) => {
+    await bootWithTerminalCookie(page, request);
+
+    // Window opens a shell: that session becomes the saved last-active PTY in
+    // personal state, which is server-side and survives the reload below.
+    await openTerminal(page);
+    await waitForPrompt(page);
+    const firstSessionId = await page.evaluate(
+      () => (document.querySelector(".terminal-pane") as HTMLElement).dataset.sessionId!,
+    );
+
+    // Two NEWER sessions, so "newest wins" and "last-active wins" disagree.
+    const newer = await page.evaluate(async () => {
+      const ids: string[] = [];
+      for (let index = 0; index < 2; index += 1) {
+        const response = await fetch("/api/terminal/sessions", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ cols: 80, rows: 24 }),
+        });
+        if (!response.ok) throw new Error(`session create failed: ${response.status}`);
+        ids.push(((await response.json()) as { id: string }).id);
+        await new Promise(resolve => setTimeout(resolve, 5));
+      }
+      return ids;
+    });
+
+    // Release the first session non-destructively, and wait until the server
+    // agrees it is detached — opening the next window immediately would race
+    // its inventory GET against the server processing the socket close, and
+    // a session still reported as attached is excluded from auto-attach.
+    await page.locator("#terminal-toggle").click();
+    await expect
+      .poll(
+        async () =>
+          page.evaluate(async () => {
+            const response = await fetch("/api/terminal/sessions");
+            const body = (await response.json()) as {
+              sessions: Array<{ attached: boolean }>;
+            };
+            return body.sessions.filter(session => !session.attached).length;
+          }),
+        { timeout: 5000, message: "all three sessions must be detached first" },
+      )
+      .toBe(3);
+
+    // A genuinely fresh window: its own empty sessionStorage, so nothing to
+    // restore and auto-attach runs. The last-active reference lives in
+    // server-side personal state, so it crosses over.
+    const fresh = await context.newPage();
+    await fresh.goto("/");
+    await expect(fresh.locator("#connection-state .connection-label")).toHaveText("Connected");
+    await fresh.locator("#terminal-toggle").click();
+
+    // All three attach — and the pane the user lands in is the one they were
+    // last working in, not the most recently created. Activating a pane
+    // rewrites lastPtyId, so a batch that activates as it goes destroys the
+    // saved reference before it can be read; this is the regression guard.
+    await expect(fresh.locator(".terminal-pane")).toHaveCount(3, { timeout: 10000 });
+    await expect(fresh.locator(".terminal-picker")).toHaveCount(0);
+    await expect(fresh.locator(".terminal-pane[data-active]")).toHaveAttribute(
+      "data-session-id",
+      firstSessionId,
+    );
+    expect(newer).not.toContain(firstSessionId);
+
+    await fresh.close();
+  });
+
   test("a session held by another window is never auto-attached", async ({
     page,
     context,
