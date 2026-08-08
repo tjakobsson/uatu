@@ -213,6 +213,16 @@ final class HubConnection: Identifiable {
 
     let entry: RemoteHubEntry
     private(set) var state: State = .unknown
+    /// Counts revocations of this hub's credentials.
+    ///
+    /// Windows watch THIS to decide whether to leave a hub's page, not
+    /// `.signedOut`. The two are not the same event: concurrent probes of an
+    /// expired cookie can publish `.signedOut` transiently — one probe holds
+    /// the single-attempt flag while it re-logs-in, so a second concurrent one
+    /// skips the attempt and reports signed out — and a silent re-login that
+    /// then succeeds leaves everything working. Ejecting every window on that
+    /// would throw the user off a page that was never in trouble.
+    private(set) var revocations = 0
     private var triedSilentRelogin = false
     /// Bumped whenever the stored credentials change — sign-out and sign-in
     /// alike. Work that started in an earlier generation may not publish state
@@ -317,6 +327,7 @@ final class HubConnection: Identifiable {
         HubKeychain.delete(account: entry.cookieAccount)
         triedSilentRelogin = false
         state = .signedOut
+        revocations &+= 1
         if let url = entry.url {
             await HubCookies.clear(for: url)
         }

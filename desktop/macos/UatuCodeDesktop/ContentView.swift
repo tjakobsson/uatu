@@ -192,12 +192,17 @@ struct ContentView: View {
                   case .failed(let message) = newStatus else { return }
             phase = .failed(message)
         }
-        .onChange(of: remoteHubState) { _, newState in
+        .onChange(of: remoteHubRevocation) { previous, current in
             // Revocation is app-wide, so EVERY window showing that hub comes
             // back to the splash — not just the one the user signed out in.
             // A sibling window left sitting on a hub the app has forgotten
             // would be showing a page it can no longer re-authenticate.
-            guard newState == .signedOut, phase == .web || isOpening else { return }
+            //
+            // Keyed on an actual revocation rather than on `.signedOut`, which
+            // a probe may publish transiently without anything being revoked.
+            guard let previous, let current,
+                  previous.entryID == current.entryID, current.count > previous.count,
+                  phase == .web || isOpening else { return }
             showSplash()
         }
         .onChange(of: pageZoom) {
@@ -241,10 +246,18 @@ struct ContentView: View {
                 // THIS window's hub. Another configured hub's login page is
                 // not evidence about this window's session, and acting on one
                 // would let an unrelated origin eject the page the user is on.
+                //
+                // `.web` only, deliberately. `loadWeb` sets `.web` before the
+                // navigation starts, so a genuine landing on a login page is
+                // always reported in that phase. A report arriving while the
+                // window is `.opening` therefore belongs to a PREVIOUS
+                // navigation — the allowed-through login load whose commit
+                // arrives after the user has already reopened the hub — and
+                // acting on it would cancel the open they just asked for.
                 guard case .remoteDashboard(let shown) = currentPage,
                       let landed = HubRoster.shared.entry(for: url),
                       landed.id == shown.id,
-                      phase == .web || isOpening else { return }
+                      phase == .web else { return }
                 showSplash()
             }
             // One app-wide watch for hub cookies being cleared, covering the
@@ -606,12 +619,18 @@ struct ContentView: View {
 
     private var hasPage: Bool { phase == .web }
 
-    /// The connection state of the remote hub this window is showing, if any.
-    /// Reading it during body evaluation is what subscribes the window to that
-    /// connection's changes.
-    private var remoteHubState: HubConnection.State? {
+    /// Which hub this window is showing and how many times its credentials
+    /// have been revoked. Reading it during body evaluation is what subscribes
+    /// the window to that connection's changes. The hub's id travels with the
+    /// count so that switching pages cannot read as a revocation.
+    private struct HubRevocationMark: Equatable {
+        let entryID: UUID
+        let count: Int
+    }
+
+    private var remoteHubRevocation: HubRevocationMark? {
         guard case .remoteDashboard(let entry) = currentPage else { return nil }
-        return HubRoster.shared.connection(for: entry).state
+        return HubRevocationMark(entryID: entry.id, count: HubRoster.shared.connection(for: entry).revocations)
     }
 
     private var isOpening: Bool {
