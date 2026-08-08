@@ -148,6 +148,14 @@ final class HubRoster {
 
     func signOut(_ entry: RemoteHubEntry) {
         let connection = connection(for: entry)
+        // Revocation clears the web view's cookie itself, and that change
+        // would echo back through the watch as a *second* sign-out for this
+        // hub — arriving two async hops later, by which time the user may
+        // have signed back in, whose fresh credentials it would then delete.
+        // Dropping the host from the baseline first makes the change we are
+        // about to cause read as no change. A hub-initiated clear still
+        // reports normally, which is the signal the watch exists for.
+        cookieWatch.forget(host: entry.host)
         Task { await connection.signOut() }
     }
 

@@ -244,7 +244,8 @@ enum HubCookies {
     }
 
     static func normalizedDomain(_ cookie: HTTPCookie) -> String {
-        cookie.domain.hasPrefix(".") ? String(cookie.domain.dropFirst()) : cookie.domain
+        let domain = cookie.domain.hasPrefix(".") ? String(cookie.domain.dropFirst()) : cookie.domain
+        return domain.lowercased()
     }
 }
 
@@ -276,6 +277,18 @@ final class HubCookieWatch: NSObject, WKHTTPCookieStoreObserver {
         // Baseline first, so the app's own startup reads are not mistaken
         // for cookies that went away.
         Task { await self.refresh(reporting: false) }
+    }
+
+    /// Drops a host from the baseline, so a clear the app is about to perform
+    /// itself reads as no change rather than as a fresh sign-out signal.
+    ///
+    /// Revocation calls `HubCookies.clear`, which changes the store and would
+    /// otherwise echo straight back here as a second sign-out for the hub just
+    /// revoked. That echo is not merely redundant: it arrives two async hops
+    /// later, so a user who signs back in before it lands would have the
+    /// credentials they just entered deleted by it.
+    func forget(host: String) {
+        present.remove(host.lowercased())
     }
 
     func refresh(reporting: Bool = true) async {

@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Signing out inside a web view revokes the desktop's hub credentials
-The app SHALL observe a sign-out performed inside a web view against a configured remote hub and treat it as revocation of that hub's stored credentials. Detection MUST NOT depend on the remote hub's version: the app SHALL treat both a main-frame `POST` navigation to the hub's logout route and the disappearance of the hub session cookie from the web view's cookie store for a configured hub host as a sign-out. On detecting one, the app SHALL delete both the hub's Keychain password and its Keychain session cookie, remove the hub session cookie from the web view's cookie store, and mark the hub signed out immediately rather than at the next poll. Revocation SHALL be idempotent, so multiple signals for one sign-out have the effect of one. The local hub is exempt: it has no login and no sign-out entry.
+The app SHALL observe a sign-out performed inside a web view against a configured remote hub and treat it as revocation of that hub's stored credentials. Detection MUST NOT depend on the remote hub's version: the app SHALL treat both a main-frame `POST` navigation to the hub's logout route and the disappearance of the hub session cookie from the web view's cookie store for a configured hub host as a sign-out. A navigation signal SHALL be honored only when it is a main-frame navigation whose origin is the hub that window is displaying — a page may post a form to any origin, and the hub refuses such cross-origin logouts, so acting on one would revoke credentials for a hub that remains signed in. On detecting a sign-out, the app SHALL delete both the hub's Keychain password and its Keychain session cookie, remove the hub session cookie from the web view's cookie store, and mark the hub signed out immediately rather than at the next poll. Revocation SHALL be idempotent, so multiple signals for one sign-out have the effect of one, and the app's own cookie clearing MUST NOT be re-read as a further sign-out. The local hub is exempt: it has no login and no sign-out entry.
 
 #### Scenario: Sign-out from the hub dashboard revokes credentials
 - **WHEN** a user signs out from a remote hub's dashboard inside the app
@@ -15,6 +15,14 @@ The app SHALL observe a sign-out performed inside a web view against a configure
 #### Scenario: Sign-out on an older hub is still detected
 - **WHEN** the remote hub is old enough that its switcher signs out without a form navigation
 - **THEN** the cleared hub session cookie is still observed and the credentials are still revoked
+
+#### Scenario: A page cannot sign the app out of a different hub
+- **WHEN** a page in a window showing one configured hub posts a logout form to a different configured hub's origin, or does so from a subframe
+- **THEN** no credentials are revoked, because the signal is not a main-frame navigation to the hub that window is displaying
+
+#### Scenario: Re-authenticating immediately after signing out survives
+- **WHEN** the user signs back in to a hub before the store change caused by the app's own cookie clearing has been observed
+- **THEN** the freshly stored credentials are kept, because the app does not read its own clearing as a new sign-out
 
 #### Scenario: Work in flight during sign-out cannot resurrect the hub
 - **WHEN** a state probe or a silent re-login for a hub is already in flight at the moment the user signs out of it

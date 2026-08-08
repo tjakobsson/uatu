@@ -226,7 +226,13 @@ extension WebViewHost: WKNavigationDelegate {
         // The hub serves both routes at its origin root — a session lives
         // under /s/<id>/ but its sign-out still posts to /logout — so an
         // exact path match is the precise test.
-        if let url = navigationAction.request.url {
+        //
+        // Main frame only. A cross-origin form post is something any page can
+        // do — including an iframe, or rendered document content in a repo the
+        // user is reading — and the hub refuses those (its logout is
+        // same-origin-checked). Acting on one would revoke credentials on a
+        // request the hub itself rejected.
+        if navigationAction.targetFrame?.isMainFrame == true, let url = navigationAction.request.url {
             if url.path == "/logout", navigationAction.request.httpMethod == "POST" {
                 onHubSignOut?(url)
             } else if url.path == "/login" {

@@ -218,7 +218,18 @@ struct ContentView: View {
             // own return to the splash comes from the .signedOut transition
             // below, which every window watching this hub sees.
             web.onHubSignOut = { url in
-                HubRoster.shared.signOut(for: url)
+                // Only the hub this window is actually showing may be revoked
+                // by it. A page can post a form to any origin it likes, so
+                // without this a page on one hub could delete another
+                // configured hub's Keychain credentials — on a request that
+                // hub would answer 403, leaving it signed in server-side while
+                // the desktop forgot how to reach it. A window's own sign-out
+                // always targets its own origin, so nothing legitimate needs
+                // the looser form.
+                guard case .remoteDashboard(let shown) = currentPage,
+                      let signedOut = HubRoster.shared.entry(for: url),
+                      signedOut.id == shown.id else { return }
+                HubRoster.shared.signOut(shown)
             }
             web.onHubLoginPage = { url in
                 // This window's hub session ended. Whatever ended it, a hub's
