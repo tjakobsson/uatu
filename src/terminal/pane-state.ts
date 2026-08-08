@@ -198,7 +198,13 @@ export function resolveTerminalEscapeAction(input: {
   touchMode: boolean;
   terminalTabActive: boolean;
 }): TerminalEscapeAction {
-  if (input.switcherOpen) return "dismiss-switcher";
+  // The switcher lives inside the panel, so it is only on screen when the
+  // panel is. In touch mode the panel stays mounted behind another tab with
+  // its PTYs attached, and a sheet left open there is invisible — claiming
+  // Escape for it would steal the key from whatever the user can actually
+  // see, which is the same trap `shouldEscapeExitTerminalFullscreen` avoids.
+  const terminalOnScreen = !input.touchMode || input.terminalTabActive;
+  if (input.switcherOpen && terminalOnScreen) return "dismiss-switcher";
   if (input.selectionSheetOpen) return "dismiss-selection";
   if (input.confirmModalOpen) return "cancel-modal";
   if (

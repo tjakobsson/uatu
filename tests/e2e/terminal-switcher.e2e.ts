@@ -194,6 +194,39 @@ test.describe("touch terminal switcher", () => {
     await expect(page.locator("html")).toHaveAttribute("data-active-tab", "preview");
   });
 
+  test("leaving the Terminal tab closes the switcher and gives Escape back", async ({
+    page,
+    request,
+  }) => {
+    await bootTouchTerminal(page, request);
+    await stageSessions(page, 1);
+
+    await page.locator("#touch-tab-terminal").click();
+    await expect(page.locator(".terminal-pane")).toHaveCount(1, { timeout: 10000 });
+    await page.locator(switchKey).click();
+    await expect(page.locator("#terminal-switcher")).toBeVisible();
+
+    // Switching tabs keeps the panel mounted so the PTYs survive — which is
+    // exactly why the sheet has to be dismissed explicitly. Left open it is
+    // invisible but still live: it would swallow Escape from the surface the
+    // user is actually looking at, and reappear on the way back.
+    await page.locator("#touch-tab-preview").click();
+    await expect(page.locator("html")).toHaveAttribute("data-active-tab", "preview");
+    await expect(page.locator("#terminal-switcher")).toBeHidden();
+
+    // Escape on Preview belongs to Preview: it must not be consumed on behalf
+    // of the terminal, and it must not bounce the user back to another tab.
+    await page.keyboard.press("Escape");
+    await expect(page.locator("html")).toHaveAttribute("data-active-tab", "preview");
+
+    // Returning to the terminal shows the terminal, not the sheet.
+    await page.locator("#touch-tab-terminal").click();
+    await expect(page.locator("html")).toHaveAttribute("data-active-tab", "terminal");
+    await expect(page.locator("#terminal-switcher")).toBeHidden();
+    await expect(page.locator(".terminal-pane")).toHaveCount(1);
+    await expect(page.locator(switchKey)).toHaveAttribute("aria-expanded", "false");
+  });
+
   test("desktop mode renders every pane again", async ({ page, context, request }) => {
     await bootTouchTerminal(page, request);
     await stageSessions(page, 2);

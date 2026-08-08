@@ -442,11 +442,25 @@ describe("resolveTerminalEscapeAction", () => {
     })).toBe("pass-through");
   });
 
-  it("still claims Escape for a parked terminal's own open sheets", () => {
-    // A switcher or transcript opened before the tab switch is still on
-    // screen's worth of state the user needs Escape to dismiss.
+  it("does NOT claim Escape for a switcher parked behind another touch tab", () => {
+    // The regression this guards: touch mode keeps the panel mounted with its
+    // PTYs attached while Preview or Files is active, hidden by CSS with no
+    // `hidden` attribute. A sheet left open there is invisible, so consuming
+    // Escape for it steals the key from the surface the user is looking at —
+    // the preview find bar, most obviously.
     expect(resolveTerminalEscapeAction({
       ...base,
+      terminalTabActive: false,
+      switcherOpen: true,
+    })).toBe("pass-through");
+  });
+
+  it("claims Escape for an open switcher in desktop mode, where there are no tabs", () => {
+    // `terminalTabActive` is meaningless outside touch mode; the panel renders
+    // alongside the preview and an open sheet is genuinely on screen.
+    expect(resolveTerminalEscapeAction({
+      ...base,
+      touchMode: false,
       terminalTabActive: false,
       switcherOpen: true,
     })).toBe("dismiss-switcher");

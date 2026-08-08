@@ -106,6 +106,17 @@ function touchTerminalActive(): boolean {
   return touchModeNow() && activeTab() === "terminal";
 }
 
+// Whether the terminal is a surface the user can actually see right now.
+// A mounted panel is not the same as a visible one: in touch mode the panel
+// deliberately stays mounted with its PTYs attached while another tab is
+// active, hidden by CSS alone with no `hidden` attribute to test. Anything
+// that consumes input on the terminal's behalf, or paints into it, has to ask
+// this rather than the attribute.
+function terminalSurfaceShowing(panel: HTMLElement): boolean {
+  if (panel.hasAttribute("hidden")) return false;
+  return !touchModeNow() || activeTab() === "terminal";
+}
+
 // Pane-scoped toast for OSC 52 bridge events. One toast element per pane;
 // each `show` replaces the previous content (rapid copies coalesce instead of
 // stacking) and re-arms the auto-dismiss timer. All content is set through
@@ -1144,10 +1155,11 @@ export function setupTerminalPanel(
   async function renderSwitcher(known?: TerminalSessionInfo[]): Promise<void> {
     if (!switcherEl || !switcherOpen) return;
     const inventory = known ?? await fetchSessionInventory();
-    // The await yields. A dismissal or a panel close during the fetch must
-    // win: repainting here would resurrect a sheet the user already closed.
+    // The await yields. A dismissal, a panel close, or a tab switch during the
+    // fetch must win: repainting here would resurrect a sheet the user already
+    // closed, or paint one into a surface that is no longer on screen.
     if (!switcherOpen) return;
-    if (panel!.hasAttribute("hidden")) {
+    if (!terminalSurfaceShowing(panel!)) {
       dismissSwitcher();
       return;
     }
@@ -1825,6 +1837,12 @@ export function setupTerminalPanel(
       case "none":
         break;
     }
+    // Leaving the Terminal tab takes the sheet with it. The panel stays
+    // mounted here by design (PTYs must survive the switch), so nothing else
+    // marks the switcher as gone: it would keep claiming Escape from the
+    // Preview find bar, absorb an inventory refresh into an invisible
+    // repaint, and reappear unbidden on the way back.
+    if (tab !== "terminal") dismissSwitcher();
   });
 
   // Mode flips normalize surface state live: desktop restores the stored

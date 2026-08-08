@@ -63,9 +63,16 @@
 - [x] 8.4 Declare that flag with the panel's other state — `initTerminalKeybar` reads it during setup, and a `let` declared later in the closure throws a TDZ `ReferenceError` that aborts boot (app hangs at "Connecting")
 - [x] 8.5 Dismiss the switcher when the panel minimizes, in both CSS and state, so Escape cannot consume keys for an invisible sheet
 - [x] 8.6 Honor the sheet's `aria-modal` with a Tab wrap inside it
+- [x] 8.7 Dismiss the switcher when the active touch tab leaves Terminal — the panel stays mounted there by design, so nothing else marked the sheet gone: it kept claiming Escape on Preview, absorbed refreshes into invisible repaints, and reappeared on return
+- [x] 8.8 Replace the `hidden`-attribute checks that stood in for visibility with `terminalSurfaceShowing()`, and gate the switcher's Escape claim on the terminal actually being on screen
+- [x] 8.9 Correct the unit test that asserted the buggy precedence (an off-tab switcher claiming Escape) and add the desktop-mode counterpart; add the E2E regression, verified to fail against the pre-fix code
+
+Verified by hand on an iPhone through `uatu hub` over Tailscale: auto-attach,
+one-pane-at-a-time rendering, the keybar switch action, and the sheet all behave
+as specced on a real phone.
 
 Suite status after the review follow-ups: `bunx tsc --noEmit` clean; `bun test`
-1287 pass / 0 fail; 37/37 pass across the terminal and touch specs
+1288 pass / 0 fail; 38/38 pass across the terminal and touch specs
 (`terminal-session-manager`, `terminal-collision`, `terminal-switcher`, `ipad`,
 `mobile`). The full `bun test:e2e` run reports 286 pass / 2 fail, both in specs
 this change does not touch: `find.e2e.ts:96` (⌘G stepping), which a stashed

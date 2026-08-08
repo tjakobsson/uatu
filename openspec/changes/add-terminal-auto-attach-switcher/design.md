@@ -204,6 +204,23 @@ The desktop chooser keeps calling `pickerCandidates` unchanged. Sharing one
 renderer across both would force the desktop panel into sheet semantics for no
 gain; sharing the *model* is where the value is.
 
+### D8a — "Mounted" is not "visible", and the switcher must respect that
+
+Touch mode keeps the panel **mounted** while another tab is active — that is the
+PTY-preserving contract (`terminalActionForTabChange` → `keep-attached`). It is
+hidden by the `data-active-tab` CSS rule alone, with no `hidden` attribute to
+test. Anything that asks `panel.hasAttribute("hidden")` to mean "can the user
+see this?" gets the wrong answer for the entire time another tab is up.
+
+An open switcher inherits that trap three ways: it keeps claiming Escape from
+the surface the user is actually looking at, an in-flight inventory refresh
+repaints it invisibly, and it reappears unbidden on the way back to the terminal.
+So: leaving the Terminal tab dismisses it, `terminalSurfaceShowing()` replaces
+the attribute check after every await, and `resolveTerminalEscapeAction` only
+lets the switcher claim Escape when the terminal is genuinely on screen
+(`!touchMode || terminalTabActive`) — the same shape as
+`shouldEscapeExitTerminalFullscreen`, which exists for exactly this reason.
+
 ### D8 — Escape precedence
 
 The panel's document-level capture-phase Escape handler gains one branch ahead of
