@@ -12,7 +12,6 @@ import { refreshFindTarget } from "../find/find-bar";
 import { registerTerminalFind } from "../find/shortcut";
 import { createTerminalEngine, type TerminalSearchTarget } from "../find/terminal-engine";
 import type { Osc52Notice } from "./clipboard";
-import type { TerminalClipboardPolicy } from "../shared/types";
 import {
   buildSwitcherRows,
   formatSessionAge,
@@ -211,7 +210,6 @@ type TerminalPaneEntry = {
 // its named methods so persistence and refit happen consistently.
 export function setupTerminalPanel(
   enabled: boolean,
-  config?: { fontFamily?: string; fontSize?: number; clipboard?: TerminalClipboardPolicy },
   initialLastPtyId?: string,
 ) {
   if (terminalSetupRan) return;
@@ -387,18 +385,17 @@ export function setupTerminalPanel(
   );
   let state: TerminalPanelState = readTerminalPanelState(localStorageRef);
 
-  // Runtime font size: per-device override (touch stepper) → `.uatu.json`
-  // → built-in 13. The override is cleared when stepping back onto the
-  // configured default so later config changes show through.
+  // Runtime font size: per-device override (touch stepper) → built-in 13.
+  // The override is cleared when stepping back onto the default.
   let fontOverride = readTerminalFontSizeOverride(localStorageRef);
-  let currentFontSize = resolveTerminalFontSize(fontOverride, config?.fontSize);
+  let currentFontSize = resolveTerminalFontSize(fontOverride);
 
   function stepFontSize(delta: number): void {
     const next = clampTerminalFontSize(currentFontSize + delta);
     if (next === currentFontSize) return;
     currentFontSize = next;
-    const configDefault = resolveTerminalFontSize(null, config?.fontSize);
-    fontOverride = next === configDefault ? null : next;
+    const defaultSize = resolveTerminalFontSize(null);
+    fontOverride = next === defaultSize ? null : next;
     writeTerminalFontSizeOverride(localStorageRef, fontOverride);
     for (const entry of panes.values()) {
       try {
@@ -652,9 +649,7 @@ export function setupTerminalPanel(
       container: host,
       getToken,
       sessionId: record.sessionId,
-      fontFamily: config?.fontFamily,
       fontSize: currentFontSize,
-      clipboardPolicy: config?.clipboard,
       onOsc52Notice: notice => copyToast.show(notice),
       // Badge the Terminal tab when PTY output arrives while another touch
       // tab is active; activating the tab clears it (tab-change wiring).

@@ -515,10 +515,9 @@ describe("terminal font-size override", () => {
     expect(readTerminalFontSizeOverride(storage)).toBe(null);
   });
 
-  it("resolves override over config over the built-in default", () => {
-    expect(resolveTerminalFontSize(16, 12)).toBe(16);
-    expect(resolveTerminalFontSize(null, 12)).toBe(12);
-    expect(resolveTerminalFontSize(null, undefined)).toBe(13);
+  it("resolves the override over the built-in default", () => {
+    expect(resolveTerminalFontSize(16)).toBe(16);
+    expect(resolveTerminalFontSize(null)).toBe(13);
   });
 
   it("swallows storage failures", () => {

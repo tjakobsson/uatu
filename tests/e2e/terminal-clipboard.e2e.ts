@@ -3,9 +3,9 @@ import { expect, test } from "./fixtures";
 // Real-browser coverage for the OSC 52 clipboard bridge: a program running
 // in the PTY copies by emitting `ESC ] 52 ; c ; <base64> BEL`, and the
 // bridge writes the decoded text to the BROWSER's clipboard (which is the
-// host clipboard when the uatu server runs in a container). Policy matrix
-// lives in the unit suite (src/terminal/clipboard.test.ts); these tests
-// prove the PTY → xterm parser → navigator.clipboard leg end to end.
+// host clipboard when the uatu server runs in a container). Parse/handler
+// coverage lives in the unit suite (src/terminal/clipboard.test.ts); these
+// tests prove the PTY → xterm parser → navigator.clipboard leg end to end.
 
 type Ctx = {
   page: import("@playwright/test").Page;
@@ -13,14 +13,10 @@ type Ctx = {
   context: import("@playwright/test").BrowserContext;
 };
 
-// Same boot as terminal.e2e.ts, parameterized on the `.uatu.json` the reset
-// handler writes before re-loading terminal config.
-async function bootWithConfig(
-  { page, request, context }: Ctx,
-  uatuConfig?: unknown,
-): Promise<void> {
+// Same boot as terminal.e2e.ts.
+async function bootTerminal({ page, request, context }: Ctx): Promise<void> {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
-  await request.post("/__e2e/reset", uatuConfig ? { data: { uatuConfig } } : undefined);
+  await request.post("/__e2e/reset");
   const tokenResp = await request.get("/__e2e/terminal-token");
   const tokenBody = await tokenResp.json();
   if (!tokenBody.enabled) {
@@ -86,8 +82,8 @@ async function emitOsc52(page: Ctx["page"], data: string): Promise<void> {
   await page.keyboard.press("Enter");
 }
 
-test("notify (default): an OSC 52 copy lands on the browser clipboard and shows the toast", async ({ page, request, context }) => {
-  await bootWithConfig({ page, request, context });
+test("an OSC 52 copy lands on the browser clipboard and shows the toast", async ({ page, request, context }) => {
+  await bootTerminal({ page, request, context });
   await openTerminal(page);
   await seedClipboard(page, "sentinel-before");
 
@@ -101,45 +97,8 @@ test("notify (default): an OSC 52 copy lands on the browser clipboard and shows 
   expect(await readClipboard(page)).toBe(payload);
 });
 
-test("off: the sequence is ignored — no toast, clipboard untouched", async ({ page, request, context }) => {
-  await bootWithConfig({ page, request, context }, { terminal: { clipboard: "off" } });
-  await openTerminal(page);
-  await seedClipboard(page, "sentinel-off");
-
-  const encoded = Buffer.from("must_not_copy", "utf8").toString("base64");
-  await emitOsc52(page, encoded);
-
-  // Round-trip marker proves the PTY processed our input past the sequence.
-  const marker = "after_osc52_off";
-  await page.keyboard.type(`echo ${marker}`);
-  await page.keyboard.press("Enter");
-  await expect(page.locator(".terminal-pane-host")).toContainText(marker, { timeout: 5000 });
-
-  await expect(page.locator(".terminal-copy-toast")).toHaveCount(0);
-  expect(await readClipboard(page)).toBe("sentinel-off");
-});
-
-test("confirm: nothing is written until the toast's Copy button is clicked", async ({ page, request, context }) => {
-  await bootWithConfig({ page, request, context }, { terminal: { clipboard: "confirm" } });
-  await openTerminal(page);
-  await seedClipboard(page, "sentinel-confirm");
-
-  const payload = "needs_a_click";
-  await emitOsc52(page, Buffer.from(payload, "utf8").toString("base64"));
-
-  const toast = page.locator(".terminal-copy-toast");
-  await expect(toast).toBeVisible({ timeout: 5000 });
-  await expect(toast).toContainText(`Terminal wants to copy ${payload.length} characters`);
-  // Held, not written.
-  expect(await readClipboard(page)).toBe("sentinel-confirm");
-
-  await toast.locator(".terminal-copy-toast-copy").click();
-  await expect(toast).toContainText(`Copied ${payload.length} characters from terminal`);
-  expect(await readClipboard(page)).toBe(payload);
-});
-
 test("read query: never answered, never touches the clipboard", async ({ page, request, context }) => {
-  await bootWithConfig({ page, request, context });
+  await bootTerminal({ page, request, context });
   await openTerminal(page);
   await seedClipboard(page, "sentinel-query");
 

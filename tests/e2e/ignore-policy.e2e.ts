@@ -11,10 +11,10 @@ test.afterEach(async ({ request }) => {
   await request.post("/__e2e/reset");
 });
 
-test(".uatu.json tree.exclude patterns hide files from the tree", async ({ page, request }) => {
+test(".uatu.json ignore.exclude patterns hide files from the tree", async ({ page, request }) => {
   await request.post("/__e2e/reset", {
     data: {
-      uatuConfig: { tree: { exclude: ["*.lock"] } },
+      uatuConfig: { ignore: { exclude: ["*.lock"] } },
       extras: {
         "bun.lock": "lockfile contents\n",
         "notes.txt": "visible text\n",

@@ -274,12 +274,8 @@ export function writeTerminalFontSizeOverride(storage: StorageLike, value: numbe
 }
 
 // Precedence: per-device override → `.uatu.json` config → built-in 13.
-export function resolveTerminalFontSize(
-  override: number | null,
-  configSize: number | undefined,
-): number {
+export function resolveTerminalFontSize(override: number | null): number {
   if (override !== null) return clampTerminalFontSize(override);
-  if (configSize !== undefined) return clampTerminalFontSize(configSize);
   return 13;
 }
 

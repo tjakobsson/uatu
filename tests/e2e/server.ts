@@ -27,8 +27,6 @@ import { safeGit } from "../../src/document/git-base-ref";
 import { createNavigationFetchHandler, INTERNAL_SHELL_PATH } from "../../src/server/navigation";
 import { resolveWatchRoots, type WatchEntry } from "../../src/server/roots";
 import { createWatchSession } from "../../src/server/watch-session";
-import { loadTerminalConfig } from "../../src/terminal/config";
-import { loadMonoConfig } from "../../src/mono/config";
 import {
   buildFetchFallback,
   buildRoutes,
@@ -266,21 +264,10 @@ async function createSession(options: { resetWorkspace: boolean }) {
     : [activeWorkspaceRoot];
   const entries = await resolveWatchRoots(entryPaths, process.cwd());
   activeEntries = entries;
-  // Mirror cli.ts: `.uatu.json terminal.fontFamily` and `.uatu.json
-  // mono.fontFamily` overrides at the watch root flow through
-  // /api/state.terminalConfig and .monoConfig into the client. The reset
-  // handler may have just written one (see body.uatuConfig), so reload
-  // them every time the session is rebuilt.
-  const terminalConfigResult = terminalEnabled
-    ? await loadTerminalConfig(activeWorkspaceRoot)
-    : { config: {}, warnings: [] };
-  const monoConfigResult = await loadMonoConfig(activeWorkspaceRoot);
   const session = createWatchSession(entries, activeFollow, {
     usePolling: true,
     respectGitignore: activeRespectGitignore,
     terminalEnabled,
-    terminalConfig: terminalConfigResult.config,
-    monoConfig: monoConfigResult.config,
   });
   await session.start();
   return session;

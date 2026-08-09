@@ -1,16 +1,16 @@
 import { expect, test } from "./fixtures";
 
-// Real-browser checks for the bundled-font behavior:
-// 1. The Hack Nerd Font Mono WOFF2 is served by /assets/fonts/ and the
-//    @font-face declaration in styles.css resolves to it (no local install
-//    required — Playwright's Chromium ships without Nerd Fonts).
-// 2. `.uatu.json terminal.fontFamily` still overrides the bundled default
-//    when present (the override path is unchanged from before the bundle).
+// Real-browser checks for the bundled-font behavior: the Hack Nerd Font
+// Mono WOFF2 is served by /assets/fonts/ and the @font-face declaration in
+// styles.css resolves to it (no local install required — Playwright's
+// Chromium ships without Nerd Fonts). `.uatu.json` carries no font
+// configuration; a legacy `terminal` block must leave the payload and the
+// panel untouched.
 //
 // The first three tests are decoupled from the PTY backend so they exercise
 // the static asset infrastructure even on hosts where Bun's PTY probe is
-// unavailable. The override test does need the backend (it opens the panel
-// after a /__e2e/reset that injects a `.uatu.json`).
+// unavailable. The legacy-block test does need the backend (it opens the
+// panel after a /__e2e/reset that injects a `.uatu.json`).
 
 test.describe("bundled-font infrastructure (no PTY needed)", () => {
   test.beforeEach(async ({ page, request }) => {
@@ -52,10 +52,9 @@ test.describe("bundled-font infrastructure (no PTY needed)", () => {
 
   test("--terminal-font-family CSS variable leads with the bundled face", async ({ page }) => {
     // The xterm renderer pulls fontFamily from this CSS variable at attach
-    // time (see src/terminal/client.ts:191). The variable IS readable from
-    // the DOM, so we can verify the contract without depending on xterm's
-    // canvas renderer state — the override path is exercised separately
-    // below via /api/state.terminalConfig.
+    // time (see src/terminal/client.ts). The variable IS readable from the
+    // DOM, so we can verify the contract without depending on xterm's
+    // canvas renderer state.
     const stack = await page.evaluate(() =>
       window.getComputedStyle(document.documentElement).getPropertyValue("--terminal-font-family"),
     );
@@ -66,16 +65,16 @@ test.describe("bundled-font infrastructure (no PTY needed)", () => {
   });
 });
 
-test.describe(".uatu.json terminal.fontFamily override", () => {
+test.describe("legacy .uatu.json terminal block", () => {
   test.afterEach(async ({ request }) => {
     await request.post("/__e2e/reset");
   });
 
-  test("override surfaces through /api/state.terminalConfig", async ({ page, request }) => {
+  test("a legacy terminal block is not read and the panel mounts with the bundled default", async ({ page, request }) => {
     // The reset handler writes .uatu.json before re-creating the watch
-    // session and re-loading terminal config — see tests/e2e/server.ts.
+    // session — see tests/e2e/server.ts.
     await request.post("/__e2e/reset", {
-      data: { uatuConfig: { terminal: { fontFamily: "Courier New, monospace" } } },
+      data: { uatuConfig: { terminal: { fontFamily: "Courier New, monospace", fontSize: 18 } } },
     });
 
     const tokenResp = await request.get("/__e2e/terminal-token");
@@ -86,20 +85,15 @@ test.describe(".uatu.json terminal.fontFamily override", () => {
     await page.goto(`/?t=${encodeURIComponent(tokenBody.token)}`);
     await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
 
-    // /api/state surfaces the override. That's the wire contract — the
-    // server reads `.uatu.json`, validates, and forwards to the client
-    // via terminalConfig.fontFamily; src/terminal/client.ts:191 passes
-    // the explicit option to the xterm constructor in preference to the
-    // CSS variable. The unit suite (src/terminal/config.test.ts) covers
-    // the .uatu.json → terminalConfig leg exhaustively; this test is
-    // the smoke check that the leg is wired end-to-end in a real browser.
+    // The wire contract: /api/state carries no terminalConfig field even
+    // when a legacy block is present in `.uatu.json`.
     const state = await page.evaluate(async () => {
       const response = await fetch("/api/state");
       return response.json();
     });
-    expect(state.terminalConfig?.fontFamily).toBe("Courier New, monospace");
+    expect("terminalConfig" in state).toBe(false);
 
-    // The panel still mounts cleanly with the override in place.
+    // The panel still mounts cleanly with the bundled default.
     await page.evaluate(() => {
       try {
         window.sessionStorage.removeItem("uatu:terminal-visible");

@@ -41,7 +41,7 @@ cognitive debt.
 - **Rendered / Source / Diff** view chooser per document; Diff renders only the active file's changes against the resolved compare base via [`@pierre/diffs`](https://diffs.com/)
 - **Follow switch** for the agent-collab workflow — on = auto-jump to the latest changed file, off = stay on the file you're reading (it still reloads in place when it changes on disk)
 - Side-by-side / stacked split layouts for Source + Rendered
-- Whole-repo browsing with `.uatu.json tree.exclude` and `.gitignore` filtering on top of built-in defaults
+- Whole-repo browsing with `.uatu.json ignore.exclude` and `.gitignore` filtering on top of built-in defaults
 - Sidebar with Change Overview, Files, and Git Log — toggle individual panes from the per-pane menu
 - Git preflight by default (`--force` to bypass for non-git folders); single-file or multi-root scope
 - Embedded terminal panel (real PTY via Bun) toggled with `Ctrl+`` — dark theme, Nerd Font detection, dock to bottom or right, split for two concurrent PTYs
@@ -192,36 +192,25 @@ definitions — is in [docs/SELF-HOSTING.md](./docs/SELF-HOSTING.md).
 
 ## Configuration: `.uatu.json`
 
-Optional repo-root file. All sections are independent and validation errors
-are surfaced in Change Overview rather than aborting the watch session.
+Optional repo-root file carrying content-scoping facts about the
+repository — a single `ignore` block. Validation errors are surfaced in
+Change Overview rather than aborting the watch session.
 
 ```json
 {
-  "tree": {
+  "ignore": {
     "exclude": ["bun.lock", "*.log", "!debug.log"],
     "respectGitignore": true
-  },
-  "mono": {
-    "fontFamily": "JetBrains Mono, monospace"
-  },
-  "terminal": {
-    "fontFamily": "Berkeley Mono, monospace",
-    "fontSize": 14,
-    "clipboard": "notify"
   }
 }
 ```
 
 Every monospace surface in the app — rendered Markdown code blocks,
 AsciiDoc code blocks, the source view, the diff view, the terminal —
-defaults to the bundled **Hack Nerd Font Mono** so prompt icons
-(powerline, devicons, git status, FontAwesome, Material Design, etc.)
-render correctly out of the box in every browser, including Safari
-and the installed PWA, which hide locally-installed fonts from web
-pages. `mono.fontFamily` overrides the default everywhere at once;
-`terminal.fontFamily` further narrows the override to the terminal
-panel only (so you can keep the body of the app in one face and the
-terminal in another).
+uses the bundled **Hack Nerd Font Mono** so prompt icons (powerline,
+devicons, git status, FontAwesome, Material Design, etc.) render
+correctly out of the box in every browser, including Safari and the
+installed PWA, which hide locally-installed fonts from web pages.
 
 The compare base is resolved automatically in order: `origin/HEAD` →
 `origin/main` → `origin/master` → `main` → `master`, then falls back to
@@ -241,7 +230,7 @@ envelope than the rest of uatu:
 - **Per-server token** — 32-byte token minted at startup, required for the WS upgrade. Restarting rotates it; the URL with the token lands in stdout and may persist in logs — treat as a short-lived credential
 - **Origin allowlist** — rejects upgrade unless the `Origin` hostname is `127.0.0.1` or `localhost` AND its port matches the request's `Host` header. Matching against `Host` (not the listen port) means port-mapped setups — a container publishing 4711→4712, an SSH forward — work with zero configuration, while pages served from any *other* localhost port stay blocked. One documented failure mode: a reverse proxy that rewrites the `Host` header makes the browser's `Origin` mismatch it, and the terminal refuses the connection — the pane then shows an explicit "blocked for this address" notice (the `GET /api/auth` probe answers 403: valid credentials, rejected origin) rather than a misleading re-auth prompt
 - **HttpOnly cookie** — `?t=<token>` mints a `uatu_term_<port>` HttpOnly + SameSite=Strict cookie (named for the port the browser used, so several uatu instances on different ports hold independent credentials) so PWA launches re-auth without pasting; rotates with the in-memory token
-- **Write-only OSC 52 clipboard bridge** — TUIs that own the mouse (Claude Code, opencode) copy selections by emitting OSC 52 up the PTY; uatu bridges the sequence to the browser's clipboard, which is the *host* clipboard even when the uatu server runs in a container. Read queries (`ESC ] 52 ; c ; ?`) are never answered, so nothing in the terminal can read your clipboard; decoded payloads are capped at 100 KB. `terminal.clipboard` in `.uatu.json` picks the policy: `notify` (default — write + a "Copied N characters" toast, so a hostile escape sequence can't poison your clipboard silently), `confirm` (a toast with a Copy button; nothing is written without a click), `silent`, or `off`. On browsers that require a user gesture for clipboard writes (Firefox, Safari), a blocked write degrades to the Copy-button toast instead of being lost
+- **Write-only OSC 52 clipboard bridge** — TUIs that own the mouse (Claude Code, opencode) copy selections by emitting OSC 52 up the PTY; uatu bridges the sequence to the browser's clipboard, which is the *host* clipboard even when the uatu server runs in a container. Read queries (`ESC ] 52 ; c ; ?`) are never answered, so nothing in the terminal can read your clipboard; decoded payloads are capped at 100 KB. Every accepted write shows a "Copied N characters" toast, so a hostile escape sequence can't poison your clipboard silently. On browsers that require a user gesture for clipboard writes (Firefox, Safari), a blocked write degrades to a Copy-button toast instead of being lost
 
 **Safari 17+** blocks page-accessible Nerd Fonts (anti-fingerprinting), so
 terminal prompts using Powerline glyphs show TOFU squares there. Chrome /

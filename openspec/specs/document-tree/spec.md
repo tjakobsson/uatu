@@ -38,7 +38,7 @@ Directories in the sidebar tree SHALL render collapsed (closed) by default, matc
 - **AND** any directories that are newly required by reveal (because the selection changed) are added to the expanded set on top of the user's choices
 
 ### Requirement: Display sidebar file count breakdown
-The sidebar SHALL display a file count for the current scope. When the Files-pane filter is `All`, the count SHALL show the total number of files visible in the tree; when the filter is `Changed`, the count SHALL show `N of M files` where N is the number of files visible under the filter (including any temporarily-revealed follow-override row) and M is the total tree size. When the visible set contains binary files, the count SHALL additionally show how many are binary; under filter `Changed`, the binary subcount reflects the visible (filtered) binary count, not the total binary count. The hardcoded directory denylist (e.g. `node_modules/`, `.git/`) MUST NOT contribute to a hidden count and the counter MUST NOT expose a `hidden` segment, since filtering is now configured through a single source of truth (`.uatu.json tree.exclude` plus `.gitignore` honoring) rather than the previous dual-source `.uatuignore` + `.gitignore` model.
+The sidebar SHALL display a file count for the current scope. When the Files-pane filter is `All`, the count SHALL show the total number of files visible in the tree; when the filter is `Changed`, the count SHALL show `N of M files` where N is the number of files visible under the filter (including any temporarily-revealed follow-override row) and M is the total tree size. When the visible set contains binary files, the count SHALL additionally show how many are binary; under filter `Changed`, the binary subcount reflects the visible (filtered) binary count, not the total binary count. The hardcoded directory denylist (e.g. `node_modules/`, `.git/`) MUST NOT contribute to a hidden count and the counter MUST NOT expose a `hidden` segment, since filtering is now configured through a single source of truth (`.uatu.json ignore.exclude` plus `.gitignore` honoring) rather than the previous dual-source `.uatuignore` + `.gitignore` model.
 
 #### Scenario: Counter shows only the total when the tree is uniform
 - **WHEN** the watched roots contain only viewable text and Markdown files
@@ -51,7 +51,7 @@ The sidebar SHALL display a file count for the current scope. When the Files-pan
 - **THEN** the sidebar counter reads `N files · M binary` where M is the number of binary entries in the tree
 
 #### Scenario: Counter never includes a hidden segment
-- **WHEN** the watch root has files filtered by `.uatu.json tree.exclude` or `.gitignore`
+- **WHEN** the watch root has files filtered by `.uatu.json ignore.exclude` or `.gitignore`
 - **THEN** the sidebar counter does NOT include a `· hidden` segment
 - **AND** the counter reflects only the visible total and the binary subcount
 

@@ -13,7 +13,6 @@ import {
   synthesizeCtrlByte,
   type Osc52Notice,
 } from "./clipboard";
-import type { TerminalClipboardPolicy } from "../shared/types";
 import {
   classifySwipeGesture,
   swipeToArrowSequences,
@@ -212,16 +211,11 @@ export type MountTerminalOptions = {
   // browser restart, or a laptop sleep — lets the server hand back the SAME
   // live PTY however long the session was detached.
   sessionId: string;
-  // Optional per-session overrides sourced from `.uatu.json` via /api/state.
-  // Falls back to CSS variable / built-in defaults when omitted.
-  fontFamily?: string;
+  // Runtime font size (touch stepper override or the built-in default).
   fontSize?: number;
-  // OSC 52 bridge policy (`terminal.clipboard` in `.uatu.json`). Defaults to
-  // "notify". Under "off" no OSC 52 handler is registered at all.
-  clipboardPolicy?: TerminalClipboardPolicy;
   // Receives the bridge's UI events (copied / pending / oversized); the panel
-  // renders them as the pane-scoped toast. Required for "confirm" to be
-  // usable — without it pending copies have no surface to land on.
+  // renders them as the pane-scoped toast — including the blocked-write
+  // fallback, whose pending copy needs a surface to land on.
   onOsc52Notice?: (notice: Osc52Notice) => void;
   // Fires when the WebSocket closes for a reason OTHER than `detach()`
   // (shell exited, server gone, connection dropped). Lets the controller
@@ -473,13 +467,10 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     term = new Terminal({
       theme: buildTheme(),
       cursorBlink: true,
-      // Resolution order for fontFamily: explicit option (from .uatu.json
-      // via /api/state) → CSS variable → built-in fallback. Same idea for
-      // fontSize. Keeps user settings in one place but lets CSS own the
-      // default look.
+      // Resolution order for fontFamily: CSS variable → built-in fallback.
+      // CSS owns the default look; there is no config override.
       fontFamily:
-        options.fontFamily
-          || readVar("--terminal-font-family", "")
+        readVar("--terminal-font-family", "")
           || '"SF Mono", Menlo, Consolas, "Liberation Mono", monospace',
       fontSize: options.fontSize ?? 13,
       // 1.0 — anything larger leaves a visible gap between rows that breaks
@@ -525,16 +516,12 @@ export function mountTerminalPanel(options: MountTerminalOptions): TerminalPanel
     // OSC 52 bridge: application-initiated copies (mouse-mode TUIs) reach the
     // host clipboard. `registerOscHandler` is stable public API — no
     // allowProposedApi needed. Write-only by construction; see clipboard.ts.
-    const clipboardPolicy = options.clipboardPolicy ?? "notify";
-    if (clipboardPolicy !== "off") {
-      term.parser.registerOscHandler(
-        52,
-        createOsc52Handler({
-          policy: clipboardPolicy,
-          notify: notice => options.onOsc52Notice?.(notice),
-        }),
-      );
-    }
+    term.parser.registerOscHandler(
+      52,
+      createOsc52Handler({
+        notify: notice => options.onOsc52Notice?.(notice),
+      }),
+    );
     fit = new FitAddon();
     term.loadAddon(fit);
     search = new SearchAddon();

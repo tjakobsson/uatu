@@ -10,7 +10,6 @@ import { loadDocument } from "../preview/mount";
 import { renderEmptyPreview } from "../preview/empty";
 import { renderSidebar } from "../sidebar/shell";
 import { setupTerminalPanel } from "../terminal/panel";
-import { applyMonoConfig } from "../mono/apply";
 import { initColorSchemeTracking } from "./theme";
 import { setFilesPaneFilter, syncFilesPaneFilterControl } from "../sidebar/files-filter";
 import { adoptCompareTarget } from "../sidebar/change-overview";
@@ -69,8 +68,7 @@ export async function loadInitialState() {
   applyServerSnapshot(payload);
   syncStateGeneration(payload.generatedAt);
   renderBuildBadge(payload.build);
-  applyMonoConfig(payload.monoConfig);
-  setupTerminalPanel(payload.terminal === "enabled", payload.terminalConfig, personalState.lastPtyId);
+  setupTerminalPanel(payload.terminal === "enabled", personalState.lastPtyId);
 
   setPaneState(readPaneState());
   setFilesPaneFilter(personalState.filesFilter ?? "all");

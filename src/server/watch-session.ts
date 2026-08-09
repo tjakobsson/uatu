@@ -14,13 +14,11 @@ import {
   hasDocument,
   type BuildSummary,
   type CompareTarget,
-  type MonoConfigPayload,
   type RepositorySnapshot,
   type RootGroup,
   type Scope,
   type StatePayload,
   type TerminalAvailability,
-  type TerminalConfigPayload,
 } from "../shared/types";
 import { BUILD, formatBuildIdentifier } from "../shared/version";
 import {
@@ -54,8 +52,6 @@ export function createStatePayload(
   scope: Scope = { kind: "folder" },
   repositories: RepositorySnapshot[] = [],
   terminalEnabled?: boolean,
-  terminalConfig?: TerminalConfigPayload,
-  monoConfig?: MonoConfigPayload,
   compareTarget: CompareTarget = DEFAULT_COMPARE_TARGET,
   unscopedFingerprint?: string,
 ): StatePayload {
@@ -71,10 +67,6 @@ export function createStatePayload(
     build: BUILD_SUMMARY,
     scope,
     ...(terminalEnabled === undefined ? {} : { terminal: (terminalEnabled ? "enabled" : "disabled") as TerminalAvailability }),
-    ...(terminalEnabled && terminalConfig && (terminalConfig.fontFamily || terminalConfig.fontSize || terminalConfig.clipboard)
-      ? { terminalConfig }
-      : {}),
-    ...(monoConfig && monoConfig.fontFamily ? { monoConfig } : {}),
   };
 }
 
@@ -82,8 +74,6 @@ export type WatchSessionOptions = {
   usePolling?: boolean;
   respectGitignore?: boolean;
   terminalEnabled?: boolean;
-  terminalConfig?: TerminalConfigPayload;
-  monoConfig?: MonoConfigPayload;
   // Optional metrics registry. When provided, the watch session will
   // increment counters for watcher events and refresh lifecycle. Callers
   // construct the registry so it can be shared with the snapshot writer
@@ -113,7 +103,7 @@ function createTerminalToken(): string {
 //      user's `.gitignore` and spreading the heuristic into the watcher
 //      would deepen an existing hack rather than minimize it.
 //   2. Defer to the per-root IgnoreMatcher (built from built-in defaults +
-//      .uatu.json tree.exclude + .gitignore) for everything else.
+//      .uatu.json ignore.exclude + .gitignore) for everything else.
 export function buildWatcherIgnorePredicate(
   dirRoots: string[],
   matcherCache: Map<string, IgnoreMatcher>,
@@ -231,8 +221,6 @@ export function createWatchSession(
 ) {
   const respectGitignore = options.respectGitignore ?? DEFAULT_RESPECT_GITIGNORE;
   const terminalEnabled = options.terminalEnabled ?? false;
-  const terminalConfig: TerminalConfigPayload | undefined = options.terminalConfig;
-  const monoConfig: MonoConfigPayload | undefined = options.monoConfig;
   const terminalToken = createTerminalToken();
   const metrics = options.metrics;
   // The unscoped index holds every viewable doc under the watched roots,
@@ -303,8 +291,6 @@ export function createWatchSession(
       normalized.scope,
       repositoriesByTarget[normalized.compareTarget],
       terminalEnabled,
-      terminalConfig,
-      monoConfig,
       normalized.compareTarget,
       unscopedFingerprint,
     );
@@ -383,8 +369,9 @@ export function createWatchSession(
 
     // A root's `.gitignore` or `.uatu.json` itself just changed — drop the
     // cached matcher so the upcoming scanRoots call rebuilds it from the new
-    // rules. Both files feed the per-root IgnoreMatcher (.uatu.json tree.exclude
-    // and tree.respectGitignore are read via loadTreeConfig in ignore-engine).
+    // rules. Both files feed the per-root IgnoreMatcher (.uatu.json
+    // ignore.exclude and ignore.respectGitignore are read via
+    // loadIgnoreConfig in the ignore engine).
     const baseName = path.basename(absolutePath);
     if (baseName === ".gitignore" || baseName === ".uatu.json") {
       const parentDir = path.dirname(absolutePath);
