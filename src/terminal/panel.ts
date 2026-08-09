@@ -288,6 +288,12 @@ export function setupTerminalPanel(
   // temporal dead zone when it runs, and the ReferenceError aborts the whole
   // boot — the panel never mounts and the app hangs at "Connecting".
   let switcherOpen = false;
+  // Monotonic ticket for renderSwitcher's inventory await. `switcherOpen`
+  // alone cannot tell "still open" from "closed and reopened while the fetch
+  // was in flight": a slow read from an earlier opening — or an older refresh
+  // racing a newer one — would resolve late and repaint stale rows over the
+  // fresh ones. Each render takes a ticket; only the newest may paint.
+  let switcherRenderSeq = 0;
 
   // Sticky Ctrl latch shared by the keybar's ctrl button (arms it) and every
   // pane's input path (composes the next keystroke, then releases).
@@ -1216,6 +1222,7 @@ export function setupTerminalPanel(
   // `openSwitcher`'s job.
   async function renderSwitcher(known?: TerminalSessionInfo[]): Promise<void> {
     if (!switcherEl || !switcherOpen) return;
+    const seq = ++switcherRenderSeq;
     const fetched = known ?? await fetchSessionInventory();
     // A failed read still renders — the user's own panes are worth listing —
     // but `fetched` (null on failure) is what the sweep below consults, so a
@@ -1223,8 +1230,11 @@ export function setupTerminalPanel(
     const inventory = fetched ?? [];
     // The await yields. A dismissal, a panel close, or a tab switch during the
     // fetch must win: repainting here would resurrect a sheet the user already
-    // closed, or paint one into a surface that is no longer on screen.
-    if (!switcherOpen) return;
+    // closed, or paint one into a surface that is no longer on screen. So must
+    // any newer render — `switcherOpen` is true again after a close-and-reopen,
+    // and letting this older read through would paint its stale inventory over
+    // the reopened sheet's fresh one.
+    if (seq !== switcherRenderSeq || !switcherOpen) return;
     if (!terminalSurfaceShowing(panel!)) {
       dismissSwitcher();
       return;

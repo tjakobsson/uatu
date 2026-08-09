@@ -298,6 +298,72 @@ test.describe("touch terminal switcher", () => {
     await expect(page.locator(switchKey)).toHaveAttribute("aria-expanded", "false");
   });
 
+  test("a slow inventory read from an earlier opening never repaints the sheet", async ({
+    page,
+    request,
+  }) => {
+    await bootTouchTerminal(page, request);
+    await stageSessions(page, 1);
+
+    // Chromium merges identical in-flight GETs behind a cache lock, so the
+    // second inventory read would queue behind the held first one and the
+    // responses would arrive in order — hiding the race this test stages
+    // (verified: with the lock in place the stale response lands FIRST and
+    // the fresh render papers over it, passing against un-fixed code). The
+    // merge happens in whichever target issues the network request, and the
+    // pass-through service worker re-issues the page's fetches from its own
+    // target — so bypass the worker AND disable the cache on the page (CDP,
+    // Chromium-only like the whole suite). Out of order is the production
+    // reality anyway: behind the hub's proxy or HTTP/2 nothing guarantees
+    // FIFO responses.
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Network.enable");
+    await cdp.send("Network.setBypassServiceWorker", { bypass: true });
+    await cdp.send("Network.setCacheDisabled", { cacheDisabled: true });
+
+    await page.locator("#touch-tab-terminal").click();
+    await expect(page.locator(".terminal-pane")).toHaveCount(1, { timeout: 10000 });
+
+    // Hold the NEXT inventory read server-side (the pass-through service
+    // worker hides fetches from page.route, so the latency hook lives in the
+    // e2e server). The held response is computed at request time — it will
+    // never know about the session staged below.
+    await request.post("/__e2e/terminal-sessions-delay", { data: { ms: 1500 } });
+
+    // First opening: its read is now in flight, held. Close it again before
+    // anything renders, stage a new session, and reopen: the second opening's
+    // read is fast and paints both rows.
+    await page.locator(switchKey).click();
+    await expect
+      .poll(async () => (await (await request.get("/__e2e/terminal-sessions-delay")).json()).pending, {
+        timeout: 5000,
+        message: "the first opening's inventory read must be the held one",
+      })
+      .toBe(true);
+    await page.locator(switchKey).click();
+    const [fresh] = await stageSessions(page, 1);
+    await page.locator(switchKey).click();
+    await expect(page.locator("#terminal-switcher")).toBeVisible();
+    await expect(page.locator(".terminal-switcher-row")).toHaveCount(2);
+
+    // Wait until the held response has actually been delivered — the moment
+    // the un-guarded code repaints the reopened sheet with the older
+    // inventory, dropping the freshly staged session's row.
+    await expect
+      .poll(async () => (await (await request.get("/__e2e/terminal-sessions-delay")).json()).pending, {
+        timeout: 10000,
+        message: "the delayed inventory response must be delivered",
+      })
+      .toBe(false);
+    // The stale repaint, if it happens, lands one client hop after delivery;
+    // a short settle bounds that window before asserting nothing changed.
+    await page.waitForTimeout(300);
+    await expect(page.locator(".terminal-switcher-row")).toHaveCount(2);
+    await expect(
+      page.locator(`.terminal-switcher-row[data-session-id="${fresh!}"]`),
+    ).toBeVisible();
+  });
+
   test("taking a session back replaces the parked pane instead of duplicating it", async ({
     page,
     context,

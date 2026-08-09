@@ -38,6 +38,16 @@ import {
 import { terminalBackendAvailable } from "../../src/terminal/backend";
 import { createTerminalServer } from "../../src/terminal/server";
 
+// One-shot artificial latency for GET /api/terminal/sessions, armed by tests
+// that need two inventory reads to complete out of order (the switcher's
+// stale-render guard). It has to live server-side: uatu registers a
+// pass-through service worker, and Playwright's page.route never sees fetches
+// a service worker mediates. The handler computes its response BEFORE the
+// delay so the held response reflects the state at request time — that
+// staleness is the point. `pending` stays true until the held response is
+// delivered, so a test can poll for delivery instead of sleeping.
+let terminalSessionsDelay: { ms: number; armed: boolean; pending: boolean } | null = null;
+
 let activeFilePath: string | null = null;
 let activeRespectGitignore = true;
 let activeFollow = true;
@@ -69,6 +79,8 @@ async function handleE2EReset(request: Request): Promise<Response> {
   } catch {
     body = {};
   }
+
+  terminalSessionsDelay = null;
 
   // Kill every PTY session so tests are hermetic: with persistent sessions
   // and the session picker, a shell leaked from a previous test would
@@ -171,7 +183,38 @@ server = Bun.serve({
       handleE2EPersonalState,
     }),
   },
-  fetch: (request, srv) => fetchFallback(request, srv),
+  fetch: async (request, srv) => {
+    const url = new URL(request.url);
+    if (url.pathname === "/__e2e/terminal-sessions-delay") {
+      if (request.method === "POST") {
+        const body = (await request.json()) as { ms?: number };
+        terminalSessionsDelay = {
+          ms: typeof body.ms === "number" ? body.ms : 0,
+          armed: true,
+          pending: false,
+        };
+        return Response.json({ ok: true });
+      }
+      return Response.json({ pending: terminalSessionsDelay?.pending ?? false });
+    }
+    if (
+      terminalSessionsDelay?.armed
+      && request.method === "GET"
+      && url.pathname === "/api/terminal/sessions"
+    ) {
+      // Consume the arming immediately so only THIS read is held — a second
+      // read arriving during the delay must pass through at full speed, or
+      // the out-of-order scenario the test stages collapses back into FIFO.
+      const delay = terminalSessionsDelay;
+      delay.armed = false;
+      delay.pending = true;
+      const response = await fetchFallback(request, srv);
+      await new Promise(resolve => setTimeout(resolve, delay.ms));
+      delay.pending = false;
+      return response;
+    }
+    return fetchFallback(request, srv);
+  },
   websocket: terminalServer
     ? {
         open: socket => {
