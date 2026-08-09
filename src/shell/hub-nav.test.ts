@@ -3,7 +3,6 @@ import { describe, expect, test } from "bun:test";
 import {
   chipDotClass,
   parseHubState,
-  showsSignOut,
   sortHubWorkspaces,
   submitHubSignOut,
   workspaceIdFromBasePath,
@@ -64,28 +63,17 @@ describe("chipDotClass", () => {
 });
 
 describe("parseHubState", () => {
-  test("extracts workspaces and the local-mode flag", () => {
+  test("extracts well-formed workspace entries", () => {
     const state = parseHubState({
-      local: true,
       workspaces: [{ id: "uatu", running: true }, { id: "junk" }],
     });
-    expect(state).toEqual({ local: true, workspaces: [{ id: "uatu", running: true }] });
+    expect(state).toEqual({ workspaces: [{ id: "uatu", running: true }] });
   });
 
-  test("defaults local to false and rejects non-hub payloads", () => {
-    expect(parseHubState({ workspaces: [] })).toEqual({ local: false, workspaces: [] });
+  test("rejects non-hub payloads", () => {
+    expect(parseHubState({ workspaces: [] })).toEqual({ workspaces: [] });
     expect(parseHubState({})).toBeNull();
     expect(parseHubState(null)).toBeNull();
-  });
-});
-
-describe("showsSignOut", () => {
-  test("a hub with a login offers the entry", () => {
-    expect(showsSignOut({ local: false })).toBe(true);
-  });
-
-  test("local mode omits it — the routes do not exist there", () => {
-    expect(showsSignOut({ local: true })).toBe(false);
   });
 });
 

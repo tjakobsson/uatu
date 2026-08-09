@@ -110,80 +110,28 @@ describe("uatu hub process", () => {
   );
 
   test(
-    "--local serves without credentials, hides login, and exits on stdin EOF with its session stopped",
+    "starting without any configured users fails with the bootstrap instructions",
     async () => {
-      tempRoot = await mkdtemp(path.join(os.tmpdir(), "uatu-hub-main-local-"));
-      const workspace = path.join(tempRoot, "myproject");
-      const { execFileSync } = await import("node:child_process");
-      execFileSync("mkdir", ["-p", workspace]);
-      execFileSync("git", ["init"], { cwd: workspace, stdio: "ignore" });
-      await writeFile(path.join(workspace, "README.md"), "# Local\n");
+      tempRoot = await mkdtemp(path.join(os.tmpdir(), "uatu-hub-main-nousers-"));
+      const configPath = path.join(tempRoot, "hub.json");
+      await writeFile(configPath, JSON.stringify({ port: 4796, users: [] }));
 
-      child = spawn("bun", ["run", CLI_PATH, "hub", "--local", "--port", "0", "--exit-on-stdin-close"], {
-        stdio: ["pipe", "pipe", "pipe"],
-        env: { ...process.env, XDG_STATE_HOME: path.join(tempRoot, "state-home") },
+      child = spawn("bun", ["run", CLI_PATH, "hub", "--config", configPath], {
+        stdio: ["ignore", "pipe", "pipe"],
       });
-
-      const url = await new Promise<string>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error("local hub did not print a URL")), 20_000);
-        let buffered = "";
-        child!.stdout!.on("data", (chunk: Buffer) => {
-          buffered += chunk.toString();
-          const match = buffered.match(/https?:\/\/\S+/);
-          if (match) {
-            clearTimeout(timeout);
-            resolve(match[0]);
-          }
-        });
-        child!.on("exit", code => {
-          clearTimeout(timeout);
-          reject(new Error(`local hub exited early (code ${code})`));
-        });
+      let stderr = "";
+      child.stderr!.on("data", (chunk: Buffer) => {
+        stderr += chunk.toString();
       });
-      expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/$/);
-
-      // No credentials anywhere: dashboard and API serve as the implicit
-      // local user, and the login routes do not exist. The local dashboard
-      // also omits the Add Folder browser and sign-out — folder adding is
-      // the desktop app's native picker.
-      const dashboard = await fetch(url, { headers: { accept: "text/html" }, redirect: "manual" });
-      expect(dashboard.status).toBe(200);
-      const dashboardHtml = await dashboard.text();
-      expect(dashboardHtml).not.toContain('id="browser"');
-      expect(dashboardHtml).not.toContain('id="clone-form"');
-      expect(dashboardHtml).not.toContain("Sign out");
-      const state = await fetch(`${url}api/hub/state`);
-      expect(state.status).toBe(200);
-      const statePayload = (await state.json()) as { version: string; local: boolean };
-      expect(statePayload.version.length).toBeGreaterThan(0);
-      // Clients adapt to local mode from this flag (e.g. the workspace
-      // switcher omits its sign-out entry).
-      expect(statePayload.local).toBe(true);
-      const login = await fetch(`${url}login`, { headers: { accept: "text/html" } });
-      expect(login.status).toBe(404);
-      const logout = await fetch(`${url}logout`, { method: "POST" });
-      expect(logout.status).toBe(404);
-
-      // A real session child through the local hub's API.
-      const created = await fetch(`${url}api/hub/workspaces`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ path: workspace }),
-      });
-      expect(created.status).toBe(200);
-      const proxied = await fetch(`${url}s/myproject/api/state`);
-      expect(proxied.status).toBe(200);
-
-      // Supervisor death: stdin EOF must stop the session child and exit
-      // cleanly, exactly like SIGTERM.
-      const exitCode = await new Promise<number | null>(resolve => {
-        child!.on("exit", code => resolve(code));
-        child!.stdin!.end();
-      });
-      expect(exitCode).toBe(0);
+      const exitCode = await new Promise<number | null>(resolve => child!.on("exit", code => resolve(code)));
+      expect(exitCode).toBe(1);
+      // The error names both bootstrap steps: hashing a password and
+      // writing the single-user config.
+      expect(stderr).toContain("hash-password");
+      expect(stderr).toContain("passwordHash");
       child = null;
     },
-    60_000,
+    30_000,
   );
 
   test(

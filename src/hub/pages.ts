@@ -319,17 +319,10 @@ export function loginPage(options: { error?: string; next?: string } = {}): stri
 
 // The dashboard renders client-side from /api/hub/state + /api/hub/browse
 // so live status (shell counts, foreground labels, the hub version, new
-// folders) stays current without a reload. In local mode (the desktop's
-// trusted loopback hub) there is no session to sign out of, and folder
-// adding is the desktop app's native picker — so the sign-out control and
-// the Add Folder browser/clone form are omitted.
-export function dashboardPage(options: { local?: boolean } = {}): string {
-  const signOut = options.local
-    ? ""
-    : `<form class="sign-out" method="post" action="/logout"><button type="submit">Sign out</button></form>\n`;
-  const addFolder = options.local
-    ? ""
-    : `<section class="pane">
+// folders) stays current without a reload.
+export function dashboardPage(): string {
+  const signOut = `<form class="sign-out" method="post" action="/logout"><button type="submit">Sign out</button></form>\n`;
+  const addFolder = `<section class="pane">
   <div class="pane-header"><h2>Add folder</h2><span id="browse-path" class="pane-meta"></span></div>
   <div id="browser"><p class="empty">Loading…</p></div>
   <form class="form-row" id="clone-form" style="border-top: 1px solid var(--border-soft);">
@@ -351,7 +344,11 @@ export function dashboardPage(options: { local?: boolean } = {}): string {
   <div class="pane-header"><h2>Workspaces</h2></div>
   <div id="workspaces"><p class="empty">Loading…</p></div>
 </section>
-${addFolder}<script>
+${addFolder}<section class="pane">
+  <div class="pane-header"><h2>Devices</h2></div>
+  <div id="devices"><p class="empty">Loading…</p></div>
+</section>
+<script>
 const errorEl = document.getElementById("action-error");
 function showError(message) {
   errorEl.textContent = message;
@@ -477,12 +474,9 @@ async function addFolder(folder) {
 
 // The Add Folder browser: one directory level at a time, drill in by name,
 // add the current candidate with its button. Server defaults to the home
-// directory; the resolved path comes back with every listing. Absent in
-// local mode (no #browser element), where the desktop's native picker owns
-// folder adding.
+// directory; the resolved path comes back with every listing.
 let browsePath = null;
 async function loadBrowser() {
-  if (!document.getElementById("browser")) return;
   let listing;
   try {
     const query = browsePath === null ? "" : "?path=" + encodeURIComponent(browsePath);
@@ -610,8 +604,42 @@ async function refresh(force) {
   renderInto(
     document.getElementById("workspaces"),
     rows,
-    "No stopped workspaces${options.local ? "" : " — add a folder below to serve one"}.",
+    "No stopped workspaces — add a folder below to serve one.",
   );
+}
+// The device-session list: every active session of the signed-in user,
+// with per-session revocation. Revoking the current session is sign-out —
+// the server clears the cookie and this page bounces to /login.
+async function loadDevices() {
+  let listing;
+  try {
+    const response = await fetch("/api/hub/sessions");
+    if (!response.ok) return;
+    listing = await response.json();
+  } catch { return; }
+  const rows = listing.sessions.map(s => row({
+    title: s.deviceLabel,
+    chip: s.current ? "this device" : undefined,
+    detail: "signed in " + new Date(s.issuedAt * 1000).toLocaleString(),
+    button: {
+      label: s.current ? "Sign out" : "Revoke",
+      className: "danger",
+      onClick: async button => {
+        showError("");
+        await withBusy(button, "Revoking…", async () => {
+          try {
+            const result = await api("/api/hub/sessions/" + encodeURIComponent(s.handle) + "/revoke");
+            if (result.current) {
+              location.href = "/login";
+              return;
+            }
+            await loadDevices();
+          } catch (error) { showError(error.message); }
+        });
+      },
+    },
+  }));
+  renderInto(document.getElementById("devices"), rows, "No active sessions.");
 }
 const cloneForm = document.getElementById("clone-form");
 if (cloneForm) cloneForm.onsubmit = async event => {
@@ -649,9 +677,11 @@ window.addEventListener("pageshow", event => {
   uiBusy = 0;
   refresh(true);
   loadBrowser();
+  loadDevices();
 });
 refresh();
 loadBrowser();
+loadDevices();
 setInterval(refresh, 5000);
 </script>`,
   );

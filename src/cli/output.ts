@@ -26,6 +26,31 @@ export function formatSessionUrl(port: number, basePath: string, token?: string)
   return basePath === "/" ? origin : `${origin}${basePath}`;
 }
 
+// Direct `uatu serve` is deprecated as a public command — `uatu hub` is the
+// way to run uatu. serve lives on as the internal session child the hub
+// spawns.
+export const SERVE_DEPRECATION_WARNING =
+  "'uatu serve' is deprecated as a public command and will be removed in a future release — run 'uatu hub' instead (see docs/SELF-HOSTING.md)";
+
+// Whether a serve/watch invocation is user-shaped and should see the
+// deprecation line. Internal invocations stay quiet: hub-spawned session
+// children carry --exit-on-stdin-close (the supervising-wrapper contract —
+// the hub controls the child argv), and source runs (`bun run src/cli.ts`,
+// i.e. `bun run dev`) are the repository's own harness, detected the same
+// way the watchdog re-exec detects them.
+export function shouldWarnServeDeprecation(
+  options: { exitOnStdinClose: boolean },
+  scriptPath: string | null = typeof Bun.argv[1] === "string" ? Bun.argv[1] : null,
+): boolean {
+  if (options.exitOnStdinClose) {
+    return false;
+  }
+  if (scriptPath !== null && /\.(ts|js)$/.test(scriptPath)) {
+    return false;
+  }
+  return true;
+}
+
 export function printStartupBanner(
   stream: { isTTY?: boolean; write(chunk: string): unknown } = process.stdout,
 ): void {

@@ -5,8 +5,9 @@ into a session server: it serves a dashboard over one HTTPS port, supervises
 one `uatu serve` child per workspace, and reverse-proxies every session under
 `https://<your-host>/s/<workspace-id>/`. Any browser is a client; an iPad can
 install the hub as a PWA and every session lives inside it, and UatuCode
-Desktop can connect natively — Add Hub… on its splash screen signs in and
-lists the hub's workspaces alongside local ones.
+Desktop is a native hub client — Add Hub… on its splash screen signs in and
+opens the hub's dashboard. The hub is the only front door: `uatu hub` is the
+way to run uatu, and every client authenticates the same way.
 
 This document is the operator runbook: the trust model, the config
 reference, certificate walkthroughs (mkcert and both tailscale shapes), and
@@ -20,6 +21,15 @@ service definitions for systemd and launchd.
   anyone you configure in `users` can read, modify, and execute anything
   that OS user can. Configure only people you would trust with the account
   itself.
+- **Login is required on every interface, loopback included.** There is no
+  trusted local mode: `127.0.0.1` is gated exactly like a remote address,
+  and a hub on your own machine still takes a one-user config and a login.
+- **Sign-out is server-side revocation.** Sessions are records in the hub's
+  state dir, not self-contained tokens: signing out (or revoking a device
+  from the dashboard's Devices pane) kills that session immediately for
+  every client holding it — browser cookie and native app alike. The
+  dashboard lists your active sessions per device so you can revoke a lost
+  or stale one.
 - **Sessions are children of the hub.** If the hub process dies, its
   children exit too (they hold a stdin pipe from the hub and exit on EOF —
   the same orphan backstop the desktop app uses). A `systemctl restart`
@@ -65,7 +75,7 @@ to `$XDG_CONFIG_HOME/uatu/hub.json` (usually `~/.config/uatu/hub.json`):
 | `host` | `127.0.0.1` | Bind address. Non-loopback requires `tls`. |
 | `tls` | none | PEM certificate + private key paths. Omit only for loopback (dev, or behind your own HTTPS proxy). |
 | `users` | — | Required, non-empty. Password hashes only — generate with `uatu hub hash-password`. |
-| `stateDir` | `~/.local/state/uatu-hub` | Workspace registry, personal workspace state, and cookie-signing key (secret-bearing files are created owner-only) |
+| `stateDir` | `~/.local/state/uatu-hub` | Workspace registry, personal workspace state, and the session store (secret-bearing files are created owner-only) |
 
 **Workspaces are folders you add**, anywhere on the machine: the dashboard's
 Add Folder pane is a directory browser (starting at the daemon user's home)
@@ -84,9 +94,10 @@ printf '%s' 'your-password-here' | uatu hub hash-password
 Paste the printed `$argon2id$…` string into `users[].passwordHash`.
 
 State that persists across restarts: the workspace registry (ids are stable —
-`/s/uatu/` today is `/s/uatu/` after any number of restarts), the
-cookie-signing key (logins survive restarts; delete
-`~/.local/state/uatu-hub/hub.key` to force everyone to sign in again), and
+`/s/uatu/` today is `/s/uatu/` after any number of restarts), the session
+store (logins survive restarts; delete
+`~/.local/state/uatu-hub/sessions.json` to force everyone to sign in again,
+or revoke individual devices from the dashboard), and
 `personal-workspace-state.json`. Personal state is isolated by signed-in user
 and workspace and contains semantic resume choices such as document, Follow,
 preview/filter/compare modes, and the last-active PTY reference. Browser layout,
@@ -349,6 +360,7 @@ tail -f /tmp/uatu-hub.log
 - **Stopping a session** from the dashboard terminates its shells — the
   dashboard asks for confirmation naming the workspace.
 - **Login lockout**: five failed attempts per minute per address; wait a
-  minute. Rotate everyone's sessions by deleting `hub.key` in the state dir.
+  minute. Revoke a single device from the dashboard's Devices pane; rotate
+  everyone's sessions by deleting `sessions.json` in the state dir.
 - **Sizing**: each running session is one Bun process (plus a watchdog and
   your shells). A handful of sessions is well within a small homelab box.

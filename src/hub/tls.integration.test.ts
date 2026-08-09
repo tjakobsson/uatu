@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { LocalProcessBackend } from "./backend";
-import { hashPassword } from "./auth";
+import { hashPassword, HubSessionStore } from "./auth";
 import type { HubConfig } from "./config";
 import { PersonalWorkspaceStateStore } from "./personal-state";
 import { WorkspaceRegistry } from "./registry";
@@ -35,14 +35,15 @@ beforeAll(async () => {
     tls: { cert: certPath, key: keyPath },
     users: [{ name: "tobias", passwordHash: await hashPassword("open sesame") }],
     stateDir: path.join(tempRoot, "state"),
-    local: false,
   };
   const registry = new WorkspaceRegistry(path.join(tempRoot, "registry.json"));
   await registry.load();
   const personalState = new PersonalWorkspaceStateStore(path.join(tempRoot, "personal-state.json"));
   await personalState.load();
+  const sessionStore = new HubSessionStore(path.join(tempRoot, "sessions.json"));
+  await sessionStore.load();
   sessions = new SessionManager(registry, { local: new LocalProcessBackend() });
-  server = startHubServer({ config, registry, sessions, personalState, signingKey: "tls-test-signing-key-0123456789ab" });
+  server = startHubServer({ config, registry, sessions, sessionStore, personalState });
 }, 30_000);
 
 afterAll(async () => {
@@ -73,10 +74,9 @@ describe("hub over HTTPS", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ name: "tobias", password: "open sesame" }),
-      redirect: "manual",
       tls: { rejectUnauthorized: false },
     });
-    expect(response.status).toBe(303);
+    expect(response.status).toBe(200);
     const setCookie = response.headers.get("set-cookie") ?? "";
     expect(setCookie).toContain("uatu_hub=");
     expect(setCookie).toContain("Secure");

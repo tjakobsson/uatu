@@ -254,7 +254,7 @@ describe("parseCommand", () => {
   });
 
   test("hub subcommand parses with and without --config", () => {
-    const defaults = { configPath: undefined, local: false, port: undefined, exitOnStdinClose: false };
+    const defaults = { configPath: undefined, port: undefined, exitOnStdinClose: false };
     expect(parseCommand(["hub"])).toEqual({ kind: "hub", options: defaults });
     expect(parseCommand(["hub", "--config", "/etc/uatu/hub.json"])).toEqual({
       kind: "hub",
@@ -266,19 +266,19 @@ describe("parseCommand", () => {
     });
   });
 
-  test("hub --local parses with port and stdin-close flags", () => {
-    expect(parseCommand(["hub", "--local", "--port", "0", "--exit-on-stdin-close"])).toEqual({
+  test("hub parses port and stdin-close flags; --local is gone", () => {
+    expect(parseCommand(["hub", "--port", "0", "--exit-on-stdin-close"])).toEqual({
       kind: "hub",
-      options: { configPath: undefined, local: true, port: 0, exitOnStdinClose: true },
+      options: { configPath: undefined, port: 0, exitOnStdinClose: true },
     });
     expect(parseCommand(["hub", "-p", "4700"])).toEqual({
       kind: "hub",
-      options: { configPath: undefined, local: false, port: 4700, exitOnStdinClose: false },
+      options: { configPath: undefined, port: 4700, exitOnStdinClose: false },
     });
     expect(() => parseCommand(["hub", "--port", "not-a-port"])).toThrow(/invalid port/);
     expect(() => parseCommand(["hub", "--port"])).toThrow(/missing value/);
-    // Local mode needs no config file — the combination is a user mistake.
-    expect(() => parseCommand(["hub", "--local", "--config", "/etc/hub.json"])).toThrow(/--local needs no config/);
+    // The trusted-loopback mode was removed with the single trust model.
+    expect(() => parseCommand(["hub", "--local"])).toThrow(/unknown hub argument/);
   });
 
   test("hub hash-password parses and rejects extra arguments", () => {

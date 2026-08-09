@@ -4,14 +4,13 @@ import os from "node:os";
 import path from "node:path";
 
 import type { SessionBackend } from "./backend";
-import { createSessionCookieValue } from "./auth";
+import { HubSessionStore } from "./auth";
 import type { HubConfig } from "./config";
 import { PersonalWorkspaceStateStore } from "./personal-state";
 import { WorkspaceRegistry } from "./registry";
 import { startHubServer } from "./server";
 import { SessionManager } from "./sessions";
 
-const KEY = "personal-state-integration-key-0123456789";
 const tempDirectories: string[] = [];
 const servers: ReturnType<typeof startHubServer>[] = [];
 
@@ -20,7 +19,7 @@ afterEach(async () => {
   await Promise.all(tempDirectories.splice(0).map(dir => rm(dir, { recursive: true, force: true })));
 });
 
-async function startFixture(local = false) {
+async function startFixture() {
   const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-personal-api-"));
   tempDirectories.push(dir);
   const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
@@ -28,6 +27,8 @@ async function startFixture(local = false) {
   await registry.register("/srv/workspaces/project");
   const personalState = new PersonalWorkspaceStateStore(path.join(dir, "personal.json"));
   await personalState.load();
+  const sessionStore = new HubSessionStore(path.join(dir, "sessions.json"));
+  await sessionStore.load();
   const backend: SessionBackend = {
     start: async () => {
       throw new Error("personal-state requests must not start or contact a child");
@@ -38,41 +39,45 @@ async function startFixture(local = false) {
     port: 0,
     host: "127.0.0.1",
     tls: null,
-    users: local
-      ? []
-      : [
-          { name: "alice", passwordHash: "unused" },
-          { name: "bob", passwordHash: "unused" },
-        ],
-    local,
+    users: [
+      { name: "alice", passwordHash: "unused" },
+      { name: "bob", passwordHash: "unused" },
+    ],
   };
-  const server = startHubServer({ config, registry, sessions, personalState, signingKey: KEY });
+  const server = startHubServer({ config, registry, sessions, sessionStore, personalState });
   servers.push(server);
+  const cookies = new Map<string, string>();
+  const cookie = async (user: string): Promise<string> => {
+    let value = cookies.get(user);
+    if (!value) {
+      value = `uatu_hub=${(await sessionStore.issue(user, "test")).id}`;
+      cookies.set(user, value);
+    }
+    return value;
+  };
   return {
     dir,
     registry,
     personalState,
+    cookie,
     origin: `http://127.0.0.1:${server.port}`,
   };
-}
-
-function cookie(user: string): string {
-  return `uatu_hub=${createSessionCookieValue(user, KEY)}`;
 }
 
 describe("Hub personal workspace state API", () => {
   test("is authenticated, user-isolated, partial, and served while the child is stopped", async () => {
     const fixture = await startFixture();
+    const cookie = fixture.cookie;
     const url = `${fixture.origin}/s/project/api/personal-state`;
     expect((await fetch(url)).status).toBe(401);
 
-    const initial = await fetch(url, { headers: { cookie: cookie("alice") } });
+    const initial = await fetch(url, { headers: { cookie: await cookie("alice") } });
     expect(initial.status).toBe(200);
     expect(await initial.json()).toEqual({ version: 1 });
 
     const patched = await fetch(url, {
       method: "PATCH",
-      headers: { cookie: cookie("alice"), origin: fixture.origin, "content-type": "application/json" },
+      headers: { cookie: await cookie("alice"), origin: fixture.origin, "content-type": "application/json" },
       body: JSON.stringify({ documentPath: "README.md", follow: false }),
     });
     expect(patched.status).toBe(200);
@@ -80,7 +85,7 @@ describe("Hub personal workspace state API", () => {
 
     await fetch(url, {
       method: "PATCH",
-      headers: { cookie: cookie("alice"), origin: fixture.origin, "content-type": "application/json" },
+      headers: { cookie: await cookie("alice"), origin: fixture.origin, "content-type": "application/json" },
       body: JSON.stringify({ filesFilter: "changed" }),
     });
     expect(fixture.personalState.get("alice", "project")).toEqual({
@@ -91,7 +96,7 @@ describe("Hub personal workspace state API", () => {
     });
     expect(fixture.personalState.get("bob", "project")).toEqual({ version: 1 });
 
-    const text = JSON.stringify(await (await fetch(url, { headers: { cookie: cookie("alice") } })).json());
+    const text = JSON.stringify(await (await fetch(url, { headers: { cookie: await cookie("alice") } })).json());
     expect(text).not.toContain("/srv/workspaces/project");
     expect(text).not.toContain("token");
 
@@ -102,10 +107,12 @@ describe("Hub personal workspace state API", () => {
 
   test("rejects foreign origins, malformed data, unknown fields, and unsupported methods", async () => {
     const fixture = await startFixture();
+    const cookie = fixture.cookie;
     const url = `${fixture.origin}/s/project/api/personal-state`;
+    const aliceCookie = await cookie("alice");
     const request = (body: unknown, origin = fixture.origin) => fetch(url, {
       method: "PATCH",
-      headers: { cookie: cookie("alice"), origin, "content-type": "application/json" },
+      headers: { cookie: aliceCookie, origin, "content-type": "application/json" },
       body: JSON.stringify(body),
     });
     expect((await request({ follow: false }, "https://attacker.example")).status).toBe(403);
@@ -114,20 +121,9 @@ describe("Hub personal workspace state API", () => {
     expect((await request({ lastPtyId: "bad" })).status).toBe(400);
     expect(fixture.personalState.get("alice", "project")).toEqual({ version: 1 });
 
-    const method = await fetch(url, { method: "POST", headers: { cookie: cookie("alice"), origin: fixture.origin } });
+    const method = await fetch(url, { method: "POST", headers: { cookie: aliceCookie, origin: fixture.origin } });
     expect(method.status).toBe(405);
     expect(method.headers.get("allow")).toBe("GET, PATCH");
-  });
-
-  test("local mode always owns state as the stable local identity", async () => {
-    const fixture = await startFixture(true);
-    const response = await fetch(`${fixture.origin}/s/project/api/personal-state`, {
-      method: "PATCH",
-      headers: { origin: fixture.origin, "content-type": "application/json" },
-      body: JSON.stringify({ previewMode: "source" }),
-    });
-    expect(response.status).toBe(200);
-    expect(fixture.personalState.get("local", "project")).toEqual({ version: 1, previewMode: "source" });
   });
 
   test("forget removes every user's state along with the stopped registry entry", async () => {
@@ -136,7 +132,7 @@ describe("Hub personal workspace state API", () => {
     await fixture.personalState.patch("bob", "project", { filesFilter: "changed" });
     const response = await fetch(`${fixture.origin}/api/hub/workspaces/project/forget`, {
       method: "POST",
-      headers: { cookie: cookie("alice"), origin: fixture.origin },
+      headers: { cookie: await fixture.cookie("alice"), origin: fixture.origin },
     });
     expect(response.status).toBe(200);
     expect(fixture.registry.byId("project")).toBeUndefined();

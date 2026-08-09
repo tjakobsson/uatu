@@ -104,28 +104,21 @@ src/
 
 Unit tests are colocated with their subjects (`foo.ts` and `foo.test.ts` sit in the same folder). E2E tests live in `tests/e2e/` under feature-named files (`mermaid.e2e.ts`, `sidebar.e2e.ts`, `document-tree.e2e.ts`, etc.); the Playwright `webServer` is `tests/e2e/server.ts`, not in `src/`.
 
-### Outside `src/`: the desktop wrapper
+### Outside `src/`: the desktop client
 
 `desktop/macos/` holds **UatuCode Desktop**, a SwiftUI app whose windows are
-hub clients. At launch the app spawns a single bundled `uatu hub --local
---port 0 --exit-on-stdin-close` (`LocalHub.swift`) — a trusted loopback hub
-with no login — and every window/tab is a `WKWebView` pointed at a hub page:
-the local hub's dashboard, a workspace session at `/s/<id>/`, or a configured
-remote hub (`HubRoster.swift`, `HubAPI.swift`; credentials in the Keychain,
-the `uatu_hub` cookie owned natively and injected into the WebView's cookie
-store before navigation). Windows own no processes; sessions belong to the
-hub, so closing a tab leaves its session running and quitting the app
-confirms first when local sessions have live terminal shells (remote
-sessions are unaffected by quit). The wrapper↔CLI contract is deliberately
-thin:
-
-- **URL on stdout** — with a piped (non-TTY) stdout the CLI prints exactly one
-  line, the hub's base URL; the app parses that.
-- **SIGTERM** — clean quit path; the hub stops its session children and exits.
-- **`--exit-on-stdin-close`** — crash backstop; the app holds the hub's stdin
-  pipe for its whole life, so if the app dies without running handlers the
-  hub sees EOF and shuts down (children included) instead of running
-  orphaned.
+pure hub clients: the app bundles no `uatu` binary, spawns no processes, and
+supervises nothing. Each configured hub (`HubRoster.swift` — which may be
+`http://localhost:<port>` for a hub the user runs on the same Mac) is
+authenticated natively (`HubAPI.swift`): a JSON login yields a session id
+held only in the Keychain, native API calls present it as `Authorization:
+Bearer`, and the id is written into the WebView's cookie store as the
+`uatu_hub` cookie before navigation so web and native surfaces share one
+server-side session. A 401 means the session is dead at the hub (expired or
+revoked — revocation is server-side); the app silently re-logs-in once with
+the Keychain password, then prompts. A sign-out observed in a web view
+discards the hub's Keychain secrets. Sessions belong to hubs, so closing a
+tab or quitting the app never stops anything.
 
 The WebView is a `WKWebView` (`WebViewHost.swift`), not SwiftUI's `WebPage`:
 `WebPage` has no `createWebViewWith` equivalent, so `window.open()` — how
@@ -174,13 +167,21 @@ the `SessionBackend` interface (`hub/backend.ts` — the desktop wrapper's
 spawn contract: URL on stdout, held stdin as orphan backstop, SIGTERM), and
 reverse-proxies HTTP, SSE, and WebSockets under `/s/<id>/` from a single
 TLS-terminating, login-gated port (`hub/proxy.ts`, `hub/auth.ts`,
-`hub/server.ts`). The hub is a trusted intermediary: it authenticates the
-browser and validates its Origin, then forwards loopback-shaped
-`Host`/`Origin` headers and brokers the child's session token server-side —
-children keep their localhost security model unchanged and are never
-network-reachable. `uatu hub --local` is the same daemon in trusted
-single-user mode — loopback-only, no config file, no login routes — which is
-how the desktop app supervises its sessions. Operator documentation lives in
+`hub/server.ts`). Authentication is a server-side session store in the hub's
+state dir: login mints an opaque session id (recorded with user, issue time,
+and a device label), browsers carry it in the `uatu_hub` cookie, native
+clients carry the same id as `Authorization: Bearer`, and both transports
+resolve through one store lookup — so sign-out and the dashboard's
+per-device revocation kill a session everywhere, immediately. Login is
+required on every interface, loopback included; there is no trusted local
+mode. The hub is a trusted intermediary: it authenticates the client and
+validates its Origin (bearer requests are exempt — they carry no ambient
+credential), then forwards loopback-shaped `Host`/`Origin` headers and
+brokers the child's session token server-side — children keep their
+localhost security model unchanged and are never network-reachable. `uatu
+serve` remains the internal session child the hub spawns (its supervisor
+contract: URL on stdout, held stdin as orphan backstop, SIGTERM), but is
+deprecated as a public command. Operator documentation lives in
 `docs/SELF-HOSTING.md`;
 the design rationale (single-origin proxy over port-per-session, restart
 semantics, trust model) in `openspec/changes/add-uatu-hub/design.md`.

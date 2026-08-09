@@ -31,17 +31,6 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: 1.3.14
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Build the uatu binary for embedding
-        run: bun run build
-
       - name: Build UatuCode Desktop (ad-hoc signed)
         run: |
           xcodebuild \
@@ -51,5 +40,11 @@ jobs:
             -derivedDataPath desktop/macos/build \
             build
 
-      - name: Verify the embedded binary runs
-        run: '"desktop/macos/build/Build/Products/Release/UatuCode Desktop.app/Contents/Resources/uatu" --version'
+      - name: Verify no binary is embedded
+        # The app is a pure hub client: its bundle must not carry a uatu
+        # binary, and its build must not depend on the CLI build.
+        run: |
+          if [ -e "desktop/macos/build/Build/Products/Release/UatuCode Desktop.app/Contents/Resources/uatu" ]; then
+            echo "::error::the app bundle contains an embedded uatu binary — the desktop is connect-only"
+            exit 1
+          fi

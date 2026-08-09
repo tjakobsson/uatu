@@ -55,13 +55,6 @@ export function sortHubWorkspaces(
   return [...workspaces].sort((a, b) => rank(a) - rank(b) || a.id.localeCompare(b.id));
 }
 
-// Whether the switcher offers a sign-out entry. A `--local` hub has no login
-// — its /login and /logout routes don't even exist — so the entry could only
-// lead to a 404.
-export function showsSignOut(hub: { local: boolean }): boolean {
-  return !hub.local;
-}
-
 // Signs out by submitting a real form POST, exactly as the hub dashboard's
 // Sign out does, rather than by firing a background request and replacing the
 // page. Two reasons: a native wrapper that owns hub credentials (UatuCode
@@ -81,19 +74,15 @@ export function submitHubSignOut(doc: Document): void {
 
 export type HubStateSummary = {
   workspaces: HubWorkspaceSummary[];
-  // Trusted loopback mode (`uatu hub --local`): no login exists, so no
-  // sign-out entry belongs in the menu.
-  local: boolean;
 };
 
 export function parseHubState(payload: unknown): HubStateSummary | null {
-  const record = payload as { workspaces?: unknown; local?: unknown } | null;
+  const record = payload as { workspaces?: unknown } | null;
   const workspaces = record?.workspaces;
   if (!Array.isArray(workspaces)) {
     return null;
   }
   return {
-    local: record?.local === true,
     workspaces: workspaces
       .filter(
         (entry): entry is { id: string; running: boolean } =>
@@ -133,7 +122,6 @@ export function initHubNav(): void {
   }
 
   let latest: HubWorkspaceSummary[] = [];
-  let hubIsLocal = false;
 
   const chipDot = toggle.querySelector<HTMLSpanElement>(".indicator-dot");
   const updateChipDot = () => {
@@ -182,21 +170,19 @@ export function initHubNav(): void {
       menu.appendChild(item);
     }
 
-    if (showsSignOut({ local: hubIsLocal })) {
-      menu.appendChild(Object.assign(document.createElement("hr"), { className: "hub-menu-divider" }));
-      const signOut = document.createElement("a");
-      signOut.className = "hub-menu-item";
-      signOut.href = "/login";
-      const signOutLabel = document.createElement("span");
-      signOutLabel.className = "hub-menu-label";
-      signOutLabel.textContent = "Sign out";
-      signOut.appendChild(signOutLabel);
-      signOut.addEventListener("click", event => {
-        event.preventDefault();
-        submitHubSignOut(document);
-      });
-      menu.appendChild(signOut);
-    }
+    menu.appendChild(Object.assign(document.createElement("hr"), { className: "hub-menu-divider" }));
+    const signOut = document.createElement("a");
+    signOut.className = "hub-menu-item";
+    signOut.href = "/login";
+    const signOutLabel = document.createElement("span");
+    signOutLabel.className = "hub-menu-label";
+    signOutLabel.textContent = "Sign out";
+    signOut.appendChild(signOutLabel);
+    signOut.addEventListener("click", event => {
+      event.preventDefault();
+      submitHubSignOut(document);
+    });
+    menu.appendChild(signOut);
   };
 
   const close = () => {
@@ -210,7 +196,6 @@ export function initHubNav(): void {
       return;
     }
     latest = state.workspaces;
-    hubIsLocal = state.local;
     label.textContent = currentId;
     updateChipDot();
     control.hidden = false;
@@ -225,7 +210,6 @@ export function initHubNav(): void {
       void fetchHubState().then(fresh => {
         if (fresh !== null) {
           latest = fresh.workspaces;
-          hubIsLocal = fresh.local;
           updateChipDot();
         }
       });
@@ -245,7 +229,6 @@ export function initHubNav(): void {
       void fetchHubState().then(fresh => {
         if (fresh !== null) {
           latest = fresh.workspaces;
-          hubIsLocal = fresh.local;
           updateChipDot();
           if (!menu.hidden) {
             renderMenu();

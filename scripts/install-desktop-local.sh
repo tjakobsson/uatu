@@ -11,10 +11,6 @@ if pgrep -f "/Applications/UatuCode Desktop.app/Contents/MacOS/" > /dev/null; th
   exit 1
 fi
 
-echo "==> Building uatu CLI (bun run build)"
-bun install --frozen-lockfile
-bun run build
-
 base="$(bun -e 'console.log(require("./package.json").version)')"
 version="$base-local.$(git rev-parse --short HEAD)"
 
@@ -24,7 +20,6 @@ xcodebuild \
   -scheme UatuCodeDesktop \
   -configuration Release \
   -derivedDataPath desktop/macos/build-local \
-  UATU_BINARY="$PWD/dist/uatu" \
   MARKETING_VERSION="$version" \
   build
 
