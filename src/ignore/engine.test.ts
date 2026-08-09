@@ -129,7 +129,7 @@ describe("loadIgnoreMatcher", () => {
     expect(ignored(nestedOther)).toBe(false);
   });
 
-  test("malformed .uatu.json falls back to defaults silently (review-load owns parse warnings)", async () => {
+  test("malformed .uatu.json falls back to defaults silently (git-data owns parse warnings)", async () => {
     const rootPath = await makeTempDir();
     await writeFile(path.join(rootPath, ".uatu.json"), "{not json", "utf8");
     const matcher = await loadIgnoreMatcher({ rootPath, respectGitignore: false });

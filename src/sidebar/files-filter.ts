@@ -4,7 +4,7 @@
 // live next to each other. The read/write storage helpers and the
 // per-Mode default map already live in `shell/state.ts`.
 
-import { primaryReviewBaseLabel } from "./change-overview";
+import { primaryCompareBaseLabel } from "./change-overview";
 import { appState, type FilesPaneFilter } from "../shell/state";
 import { persistPersonalWorkspaceState } from "../shell/personal-state";
 import { renderSidebar } from "./shell";
@@ -44,10 +44,10 @@ export function syncFilesPaneFilterControl(): void {
   changedBtn.setAttribute("aria-checked", String(!isAll));
   changedBtn.classList.toggle("is-active", !isAll);
 
-  // Tooltip on the Changed segment names the resolved review base when one is
+  // Tooltip on the Changed segment names the resolved compare base when one is
   // available so reviewers know what "Changed" is measured against. Falls back
-  // to a generic hint when no repository has an available review-load.
-  const baseLabel = primaryReviewBaseLabel();
+  // to a generic hint when no repository has available change data.
+  const baseLabel = primaryCompareBaseLabel();
   changedBtn.title = baseLabel
     ? `Show only files changed vs ${baseLabel}`
     : "Show only changed files";

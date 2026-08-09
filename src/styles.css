@@ -89,8 +89,8 @@
   --success-strong: light-dark(#1a7f37, #3fb950);
   --danger: light-dark(#cf222e, #f85149);
   --attention: light-dark(#bf8700, #d29922);
-  /* Review-load / score chip families (low = green, medium = yellow,
-     high = red), shared by the burden meter, score preview, and hints. */
+  /* Severity chip families (low = green, medium = yellow, high = red),
+     shared by the config-warning and stale-hint surfaces. */
   --score-low-border: light-dark(#b7e4c7, #2ea043);
   --score-low-bg: light-dark(#effaf2, #0f2417);
   --score-medium-border: light-dark(#f0cf7a, #9e6a03);
@@ -104,7 +104,7 @@
   --hunk-header-fg: light-dark(#57606a, #8b949e);
 
   /* Shared monospace face for every mono surface in the app — code blocks,
-     source view, diff view, file paths, build badge, burden meter, etc.
+     source view, diff view, file paths, build badge, etc.
      Default is the bundled Hack Nerd Font Mono (@font-face above): a
      local install short-circuits the network where the browser allows
      it, otherwise the vendored woff2 is fetched. Users override globally
@@ -2594,7 +2594,7 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
   letter-spacing: 0.02em;
 }
 
-.review-repo + .review-repo,
+.overview-repo + .overview-repo,
 .git-log-group + .git-log-group {
   margin-top: 0.85rem;
   padding-top: 0.85rem;
@@ -2606,7 +2606,7 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
    the tab favicon, so the color learned in the tab strip is the color seen
    in the pane. Background is set inline per repository — only the hue
    varies. */
-.review-repo-name .project-marker {
+.repo-name .project-marker {
   display: inline-block;
   max-width: 100%;
   overflow: hidden;
@@ -2620,7 +2620,7 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
   color: #ffffff;
 }
 
-.review-repo h3,
+.overview-repo h3,
 .git-log-group h3 {
   margin: 0 0 0.45rem;
   font-size: 0.82rem;
@@ -2653,34 +2653,9 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
   overflow-wrap: anywhere;
 }
 
-.burden-meter {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  column-gap: 0.5rem;
-  row-gap: 0.2rem;
-  width: 100%;
-  margin: 0.45rem 0;
-  padding: 0.45rem 0.55rem;
-  border-radius: 0.4rem;
-  border: 1px solid var(--border-soft);
-  background: var(--surface-subtle);
-  color: var(--text-strong);
-  cursor: pointer;
-  font: inherit;
-  font-size: 0.78rem;
-  text-align: left;
-}
-
-.burden-meter:hover,
-.burden-meter:focus-visible {
-  outline: 1px solid var(--border-medium);
-  outline-offset: 2px;
-}
-
 /* Compare-target toggle — session-global control above the repo sections.
    Plain-intent labels ("Since base" / "Since last commit"); the precise ref
-   lives in the burden anchor and the base evidence line, not here. */
+   lives in the compare anchor and the base evidence line, not here. */
 .compare-target-control {
   display: flex;
   gap: 2px;
@@ -2729,35 +2704,6 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
   color: var(--text-subtle);
 }
 
-.burden-anchor {
-  grid-column: 1 / -1;
-  min-width: 0;
-  font-size: 0.7rem;
-  color: var(--text-subtle);
-  font-family: var(--mono-font-family);
-  overflow-wrap: anywhere;
-}
-
-.burden-meter strong {
-  font-family: var(--mono-font-family);
-  font-size: 0.9rem;
-}
-
-.burden-meter.is-low {
-  border-color: var(--score-low-border);
-  background: var(--score-low-bg);
-}
-
-.burden-meter.is-medium {
-  border-color: var(--score-medium-border);
-  background: var(--score-medium-bg);
-}
-
-.burden-meter.is-high {
-  border-color: var(--score-high-border);
-  background: var(--score-high-bg);
-}
-
 .config-warning {
   margin: 0.4rem 0;
   padding: 0.4rem 0.5rem;
@@ -2766,12 +2712,6 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
   color: light-dark(#6f4e00, #eac54f);
   font-size: 0.74rem;
   line-height: 1.4;
-}
-
-.ignored-summary {
-  margin: 0.35rem 0;
-  color: var(--text-subtle);
-  font-size: 0.74rem;
 }
 
 .untracked-indicator {
@@ -2784,59 +2724,10 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
   line-height: 1.4;
 }
 
-.score-drivers,
 .commit-log {
   list-style: none;
   margin: 0.55rem 0 0;
   padding: 0;
-}
-
-.score-driver {
-  display: flex;
-  justify-content: space-between;
-  gap: 0.5rem;
-  padding: 0.42rem 0;
-  border-top: 1px solid var(--border-soft);
-  font-size: 0.72rem;
-}
-
-.score-driver:first-child {
-  border-top: 0;
-}
-
-.driver-main {
-  display: grid;
-  gap: 0.12rem;
-  min-width: 0;
-}
-
-.driver-main strong {
-  color: var(--text-strong);
-}
-
-.driver-main span {
-  color: var(--text-subtle);
-}
-
-.driver-files {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.score-driver code {
-  flex-shrink: 0;
-  color: var(--text-strong);
-  font-size: 0.7rem;
-}
-
-.score-driver.is-support code {
-  color: var(--success-strong);
-}
-
-.score-driver.is-risk code,
-.score-driver.is-warning code {
-  color: var(--danger);
 }
 
 .commit-log {
@@ -3079,240 +2970,6 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
   margin: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-}
-
-.score-preview {
-  display: grid;
-  gap: 1rem;
-}
-
-.score-preview header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
-  border-bottom: 1px solid var(--border-soft);
-  padding-bottom: 1rem;
-}
-
-.score-preview-total {
-  min-width: 9rem;
-  padding: 0.75rem 0.9rem;
-  border: 1px solid var(--border-soft);
-  border-radius: 0.5rem;
-  background: var(--surface-subtle);
-}
-
-.score-preview.is-low .score-preview-total {
-  border-color: var(--score-low-border);
-  background: var(--score-low-bg);
-}
-
-.score-preview.is-medium .score-preview-total {
-  border-color: var(--score-medium-border);
-  background: var(--score-medium-bg);
-}
-
-.score-preview.is-high .score-preview-total {
-  border-color: var(--score-high-border);
-  background: var(--score-high-bg);
-}
-
-.score-preview-kicker {
-  margin: 0 0 0.25rem;
-  color: var(--text-subtle);
-  font-size: 0.82rem;
-  font-weight: 700;
-}
-
-.score-preview h1 {
-  margin: 0;
-  color: var(--text-strong);
-  font-family: var(--mono-font-family);
-  font-size: 2.4rem;
-  line-height: 1;
-}
-
-.score-preview h2 {
-  margin: 0.5rem 0 0;
-  color: var(--text-strong);
-  font-size: 1rem;
-}
-
-.score-preview p {
-  margin: 0;
-  color: var(--text-subtle);
-  line-height: 1.55;
-}
-
-.score-preview dl {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0.5rem;
-  margin: 0;
-}
-
-.score-preview dl div {
-  min-width: 5rem;
-  padding: 0.5rem 0.65rem;
-  border: 1px solid var(--border-soft);
-  border-radius: 0.4rem;
-  background: var(--surface-subtle);
-}
-
-.score-preview dl div.is-low {
-  border-color: var(--score-low-border);
-  background: var(--score-low-bg);
-}
-
-.score-preview dl div.is-medium {
-  border-color: var(--score-medium-border);
-  background: var(--score-medium-bg);
-}
-
-.score-preview dl div.is-high {
-  border-color: var(--score-high-border);
-  background: var(--score-high-bg);
-}
-
-.score-preview dt {
-  color: var(--text-subtle);
-  font-size: 0.72rem;
-}
-
-.score-preview dd {
-  margin: 0.1rem 0 0;
-  color: var(--text-strong);
-  font-weight: 700;
-}
-
-.score-preview-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  border: 1px solid var(--border-soft);
-  border-radius: 0.5rem;
-  overflow: visible;
-}
-
-.score-preview-list li {
-  display: flex;
-  position: relative;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 0.65rem 0.75rem;
-  border-top: 1px solid var(--border-soft);
-}
-
-.score-preview-list li:hover,
-.score-preview-list li:focus-within {
-  z-index: 3;
-}
-
-.score-preview-list li:first-child {
-  border-top: 0;
-}
-
-.score-preview-list span {
-  display: grid;
-  gap: 0.18rem;
-  min-width: 0;
-  color: var(--text-subtle);
-}
-
-.score-preview-list strong {
-  color: var(--text-strong);
-}
-
-.score-preview-list .score-driver-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-}
-
-.score-term-help {
-  display: inline-grid;
-  place-items: center;
-  position: relative;
-  width: 1rem;
-  height: 1rem;
-  border: 1px solid var(--border-medium);
-  border-radius: 999px;
-  color: var(--text-subtle);
-  cursor: help;
-  font-size: 0.68rem;
-  font-weight: 700;
-  line-height: 1;
-  user-select: none;
-}
-
-.score-term-help:hover,
-.score-term-help:focus-visible {
-  color: var(--text-strong);
-  background: light-dark(#eef2f5, #21262d);
-  outline: 1px solid var(--border-medium);
-  outline-offset: 2px;
-}
-
-.score-term-tooltip {
-  position: absolute;
-  z-index: 30;
-  left: 50%;
-  bottom: calc(100% + 0.55rem);
-  width: max-content;
-  max-width: min(22rem, 70vw);
-  padding: 0.55rem 0.65rem;
-  border: 1px solid light-dark(rgba(208, 215, 222, 0.85), rgba(48, 54, 61, 0.9));
-  border-radius: 0.45rem;
-  background: light-dark(rgba(255, 255, 255, 0.82), rgba(22, 27, 34, 0.92));
-  box-shadow: 0 12px 30px rgba(31, 35, 40, 0.14);
-  backdrop-filter: blur(18px) saturate(1.2);
-  -webkit-backdrop-filter: blur(18px) saturate(1.2);
-  color: var(--text-subtle);
-  font-size: 0.78rem;
-  font-weight: 500;
-  line-height: 1.45;
-  opacity: 0;
-  pointer-events: none;
-  text-align: left;
-  transform: translate(-50%, 0.25rem);
-  transition: opacity 0.12s ease, transform 0.12s ease;
-  visibility: hidden;
-  white-space: normal;
-}
-
-.score-term-tooltip::after {
-  content: "";
-  position: absolute;
-  left: 50%;
-  top: 100%;
-  width: 0.6rem;
-  height: 0.6rem;
-  border-right: 1px solid light-dark(rgba(208, 215, 222, 0.85), rgba(48, 54, 61, 0.9));
-  border-bottom: 1px solid light-dark(rgba(208, 215, 222, 0.85), rgba(48, 54, 61, 0.9));
-  background: light-dark(rgba(255, 255, 255, 0.82), rgba(22, 27, 34, 0.92));
-  transform: translate(-50%, -50%) rotate(45deg);
-}
-
-.score-term-help:hover .score-term-tooltip,
-.score-term-help:focus-visible .score-term-tooltip,
-.score-term-help:focus-within .score-term-tooltip {
-  opacity: 1;
-  transform: translate(-50%, 0);
-  visibility: visible;
-}
-
-.score-preview-list small {
-  color: var(--text-subtle);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.score-preview-list code {
-  color: var(--text-strong);
-  font-size: 0.78rem;
-  white-space: nowrap;
 }
 
 .preview pre {
@@ -4425,48 +4082,7 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
   inset: -3px;
 }
 
-/* Burden meter — label group and score above the precise compare anchor. */
-.burden-summary {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 0.4rem;
-  min-width: 0;
-}
-
-.burden-headline {
-  font-weight: 500;
-  color: var(--text-strong);
-}
-
-.burden-level {
-  display: inline-block;
-  flex: none;
-  padding: 0.05rem 0.35rem;
-  font-size: 0.66rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  border-radius: 0.3rem;
-  background: light-dark(rgba(36, 41, 47, 0.08), rgba(230, 237, 243, 0.1));
-  color: var(--text-subtle);
-}
-
-.burden-meter.is-low .burden-level {
-  background: light-dark(#c8eed5, #1a4028);
-  color: light-dark(#1a5d34, #8fe3ad);
-}
-
-.burden-meter.is-medium .burden-level {
-  background: light-dark(#f4d99a, #4d3a09);
-  color: light-dark(#6b4900, #eac54f);
-}
-
-.burden-meter.is-high .burden-level {
-  background: light-dark(#ffc8c4, #55201e);
-  color: light-dark(#8b1f1a, #ffa8a3);
-}
-
-/* Stale-content hint strip — shown above the preview header in Review */
+/* Stale-content hint strip — shown above the preview header. */
 .stale-hint {
   display: flex;
   align-items: center;

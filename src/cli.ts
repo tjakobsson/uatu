@@ -41,7 +41,7 @@ import {
   start5sSamplingTick,
   writeSnapshotAtomic,
 } from "./debug/metrics";
-import { setGitMetricsSink } from "./review/load";
+import { setGitMetricsSink } from "./document/git-base-ref";
 import { parseWatchdogArgs, runWatchdog } from "./watchdog/main";
 
 async function main() {

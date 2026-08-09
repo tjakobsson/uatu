@@ -61,7 +61,7 @@ export function setActiveTab(tab: TouchTab): void {
 }
 
 /** A user navigation just changed what the preview shows — a document pick
- *  (tree row, search result), a review-score click, a commit click. In
+ *  (tree row, search result), a commit click. In
  *  touch mode that intent includes SEEING it, so the Preview surface comes
  *  forward; in desktop mode the preview is already visible and this is a
  *  no-op. Programmatic updates (follow Rules C/D, file events) must never

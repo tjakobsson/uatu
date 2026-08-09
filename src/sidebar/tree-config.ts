@@ -1,5 +1,5 @@
 // Loads the optional `tree` block from `.uatu.json`. Lives next to (not inside)
-// `terminal-config.ts` and `review-load.ts` because each block has its own
+// `terminal-config.ts` and `document/git-data.ts` because each block has its own
 // validation rules and the modules read the same file independently — merging
 // them would just create coupling for no payoff.
 
@@ -42,7 +42,7 @@ export async function loadTreeConfig(rootPath: string): Promise<TreeConfigResult
   try {
     parsed = JSON.parse(source);
   } catch {
-    // review-load.ts already surfaces a parse warning; don't double-warn.
+    // document/git-data.ts already surfaces a parse warning; don't double-warn.
     return { config, warnings };
   }
 

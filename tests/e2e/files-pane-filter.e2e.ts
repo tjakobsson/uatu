@@ -1,6 +1,6 @@
 // Behaviors specific to the Files-pane `All ↔ Changed` filter chip. Tests
 // boot git-backed sessions because the chip's "Changed" state is built from
-// review-load, which only reports paths in a git context.
+// the repository change data, which only reports paths in a git context.
 
 import { expect, test, type Page } from "./fixtures";
 
@@ -77,16 +77,17 @@ test("under filter Changed only change-set rows and their ancestors are present"
   await expect(treeRow(page, "diagram.md")).toBeAttached();
 });
 
-test("empty state names the review base when no changes are present under Changed", async ({
+test("empty state names the compare base when no changes are present under Changed", async ({
   page,
   request,
 }) => {
   await bootSession(page, request, {
     git: true,
-    // Pin the review base to HEAD so the diff is empty (the e2e git fixture
-    // is otherwise a feature branch with 13+ commits ahead of main).
-    uatuConfig: { review: { baseRef: "HEAD" } },
   });
+  // Switch the compare lens to last-commit so the change set is empty (the
+  // e2e git fixture is a feature branch with 13+ commits ahead of main, but
+  // its worktree is clean vs HEAD).
+  await page.locator('#change-overview button[data-compare-target="last-commit"]').click();
   await page.locator("#files-pane-filter-changed").click();
   await expect(page.locator("#files-pane-filter-changed")).toHaveAttribute("aria-checked", "true");
   // Tree is hidden; the empty-state message names a base.

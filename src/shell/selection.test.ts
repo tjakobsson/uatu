@@ -20,8 +20,8 @@ describe("selection mutators", () => {
   });
 
   test("setPreviewMode assigns the preview surface", () => {
-    setPreviewMode({ kind: "review-score", repositoryId: "repo-1" });
-    expect(appState.previewMode).toEqual({ kind: "review-score", repositoryId: "repo-1" });
+    setPreviewMode({ kind: "commit", repositoryId: "repo-1", sha: "abc123" });
+    expect(appState.previewMode).toEqual({ kind: "commit", repositoryId: "repo-1", sha: "abc123" });
     setPreviewMode({ kind: "document" });
     expect(appState.previewMode).toEqual({ kind: "document" });
   });

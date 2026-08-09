@@ -1,5 +1,5 @@
 // Owner of the selection pair in appState: which document (or commit /
-// review-score surface) the preview is showing. Every module that moves the
+// commit surface) the preview is showing. Every module that moves the
 // selection goes through these mutators — `appState.selectedId = …` outside
 // this file is a review error (see the module-structure spec's appState
 // field-ownership requirement). Mutators only assign; rendering and history

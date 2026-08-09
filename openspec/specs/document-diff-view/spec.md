@@ -1,55 +1,7 @@
 ## Purpose
 
 Define the Diff view in the preview pane: a third view-mode (alongside Rendered and Source) that renders the active file's git diff against a resolved review base, with intelligent payload shaping, lazy library loading, graceful degradation for non-git/unchanged/binary/large cases, and an in-host Unified / Split layout toggle.
-
 ## Requirements
-
-### Requirement: Diff view renders the active file's git diff against the resolved review base
-
-The preview pane SHALL expose a **Diff** view that renders the git diff of the currently selected file against the base implied by the active compare target. When the compare target is `base`, the base ref SHALL be resolved in the same priority order used by the review-burden meter (configured `review.baseRef` → `origin/HEAD` → `origin/main` → `origin/master` → `main` → `master`), falling back to staged and unstaged worktree changes against `HEAD` when no remote base is resolvable. When the compare target is `last-commit`, the Diff view SHALL compare the selected file against `HEAD` (staged and unstaged worktree changes). The Diff view SHALL render only the hunks for the selected file — never the diff for other files in the repository. The rendered output SHALL be produced by the `@pierre/diffs` library (vanilla-JS entry) for normal-sized diffs, via one of two input shapes:
-
-- **Two-blob path** — when the server payload carries both `oldContents` and `newContents`, the client SHALL feed them to Pierre as `oldFile` / `newFile`. This path enables Pierre's "N unmodified lines" chevrons to interactively expand surrounding context drawn from the blobs.
-- **Patch-only path** — when blobs are absent (the per-blob size cap was exceeded), the client SHALL parse the unified-diff `patch` string via the library's patch-input API and feed Pierre the resulting metadata. The chevrons still render but expansion is bounded by the context git embedded in the patch.
-
-Pierre SHALL NOT be invoked on the normal Source view or Rendered view — its scope is the Diff view only.
-
-#### Scenario: A modified Markdown file shows added and deleted lines against the review base
-- **WHEN** a user selects a Markdown file that has been modified against the resolved review base
-- **AND** the active compare target is `base`
-- **AND** activates the Diff view
-- **THEN** the preview body renders only that file's diff, with added and deleted lines visually distinguished
-
-#### Scenario: A modified source file shows the file's diff
-- **WHEN** a user selects a `.ts` file that has been modified against the resolved review base
-- **AND** the active compare target is `base`
-- **AND** activates the Diff view
-- **THEN** the preview body renders only that file's diff with syntax-aware highlighting
-
-#### Scenario: Diff view follows the last-commit compare target
-- **WHEN** the active compare target is `last-commit`
-- **AND** a user activates the Diff view for a file with both committed-since-base and uncommitted changes
-- **THEN** the rendered diff shows only the file's staged and unstaged changes against `HEAD`
-- **AND** the diff does not include changes already committed between the review base and `HEAD`
-
-#### Scenario: Blob-bearing payload enables expand-context chevrons
-- **WHEN** the diff payload carries both `oldContents` and `newContents`
-- **THEN** the Diff view feeds them to Pierre's two-blob input
-- **AND** the rendered "N unmodified lines" chevrons can be clicked to reveal surrounding unchanged lines drawn from the blob contents
-
-#### Scenario: Patch-only payload still renders with chevrons but expansion is bounded
-- **WHEN** the diff payload carries only the `patch` string (no blobs)
-- **THEN** the Diff view parses the patch and renders via Pierre's metadata input
-- **AND** the rendered "N unmodified lines" chevrons appear but cannot expand beyond the context git embedded in the patch
-
-#### Scenario: The Diff view never renders unrelated files
-- **WHEN** a user activates the Diff view for file A while other files B and C have unrelated changes
-- **THEN** only file A's hunks appear in the preview
-- **AND** files B and C do not appear in the diff output
-
-#### Scenario: Rendered and Source views do not invoke @pierre/diffs
-- **WHEN** a user activates the Rendered or Source view for any document
-- **THEN** the `@pierre/diffs` library is not loaded or invoked for that render
-
 ### Requirement: Diff view is sourced from a dedicated document-diff endpoint
 
 The server SHALL expose `GET /api/document/diff?id=<absolutePath>` returning a JSON payload describing the diff for the given document against the resolved review base. The payload SHALL include the resolved base ref when relevant and one of the following discriminated kinds: `text` (with the unified diff patch string, byte size, added and deleted line counts), `unchanged`, `binary`, or `unsupported-no-git`. The `text` kind MAY additionally include `oldContents` and `newContents` (the full file blobs at the base ref and in the worktree respectively) and `oldPath` (for renamed files) when both blobs fit under a per-blob size cap; the client uses these to drive @pierre/diffs' two-blob input path so the "N unmodified lines" chevrons can expand arbitrary context. When either blob exceeds the per-blob cap, the response SHALL omit both blob fields and the client SHALL fall back to a patch-only render. The endpoint SHALL invoke `git diff` with rename detection enabled (`-M`) so renamed files render as a single hunk pair rather than as an add-delete pair. When `git diff` returns an empty patch for a file that exists on disk but is not tracked, the endpoint SHALL fall back to `git diff --no-index /dev/null <path>` so newly-added files surface as additions rather than as a misleading "unchanged" state. The endpoint MUST NOT 404 on a non-git workspace; instead it returns `unsupported-no-git` so the client can render the muted fallback card. The endpoint MUST validate that the document id resolves to a watched file before running git, mirroring the existing document-rendering endpoint's path-safety posture.
@@ -326,3 +278,50 @@ The document-diff endpoint SHALL cache the resolved review base and review setti
 #### Scenario: A new commit invalidates the cached base
 - **WHEN** `HEAD` changes between two diff requests for the same repository
 - **THEN** the second request re-resolves the review base from scratch
+
+### Requirement: Diff view renders the active file's git diff against the resolved compare base
+
+The preview pane SHALL expose a **Diff** view that renders the git diff of the currently selected file against the base implied by the active compare target. When the compare target is `base`, the base ref SHALL be resolved automatically in priority order (`origin/HEAD` → `origin/main` → `origin/master` → `main` → `master`), falling back to staged and unstaged worktree changes against `HEAD` when no remote base is resolvable. When the compare target is `last-commit`, the Diff view SHALL compare the selected file against `HEAD` (staged and unstaged worktree changes). The Diff view SHALL render only the hunks for the selected file — never the diff for other files in the repository. The rendered output SHALL be produced by the `@pierre/diffs` library (vanilla-JS entry) for normal-sized diffs, via one of two input shapes:
+
+- **Two-blob path** — when the server payload carries both `oldContents` and `newContents`, the client SHALL feed them to Pierre as `oldFile` / `newFile`. This path enables Pierre's "N unmodified lines" chevrons to interactively expand surrounding context drawn from the blobs.
+- **Patch-only path** — when blobs are absent (the per-blob size cap was exceeded), the client SHALL parse the unified-diff `patch` string via the library's patch-input API and feed Pierre the resulting metadata. The chevrons still render but expansion is bounded by the context git embedded in the patch.
+
+Pierre SHALL NOT be invoked on the normal Source view or Rendered view — its scope is the Diff view only.
+
+#### Scenario: A modified Markdown file shows added and deleted lines against the resolved base
+- **WHEN** a user selects a Markdown file that has been modified against the resolved base
+- **AND** the active compare target is `base`
+- **AND** activates the Diff view
+- **THEN** the preview body renders only that file's diff, with added and deleted lines visually distinguished
+
+#### Scenario: A modified source file shows the file's diff
+- **WHEN** a user selects a `.ts` file that has been modified against the resolved base
+- **AND** the active compare target is `base`
+- **AND** activates the Diff view
+- **THEN** the preview body renders only that file's diff with syntax-aware highlighting
+
+#### Scenario: Diff view follows the last-commit compare target
+- **WHEN** the active compare target is `last-commit`
+- **AND** a user activates the Diff view for a file with both committed-since-base and uncommitted changes
+- **THEN** the rendered diff shows only the file's staged and unstaged changes against `HEAD`
+- **AND** the diff does not include changes already committed between the resolved base and `HEAD`
+
+#### Scenario: Blob-bearing payload enables expand-context chevrons
+- **WHEN** the diff payload carries both `oldContents` and `newContents`
+- **THEN** the Diff view feeds them to Pierre's two-blob input
+- **AND** the rendered "N unmodified lines" chevrons can be clicked to reveal surrounding unchanged lines drawn from the blob contents
+
+#### Scenario: Patch-only payload still renders with chevrons but expansion is bounded
+- **WHEN** the diff payload carries only the `patch` string (no blobs)
+- **THEN** the Diff view parses the patch and renders via Pierre's metadata input
+- **AND** the rendered "N unmodified lines" chevrons appear but cannot expand beyond the context git embedded in the patch
+
+#### Scenario: The Diff view never renders unrelated files
+- **WHEN** a user activates the Diff view for file A while other files B and C have unrelated changes
+- **THEN** only file A's hunks appear in the preview
+- **AND** files B and C do not appear in the diff output
+
+#### Scenario: Rendered and Source views do not invoke @pierre/diffs
+- **WHEN** a user activates the Rendered or Source view for any document
+- **THEN** the `@pierre/diffs` library is not loaded or invoked for that render
+

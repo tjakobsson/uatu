@@ -63,7 +63,7 @@ export function renderSidebar() {
   renderChangeOverview();
   renderGitLog();
   schedulePaneHeightNormalization();
-  // Refresh the chip's tooltip every render — `primaryReviewBaseLabel`
+  // Refresh the chip's tooltip every render — `primaryCompareBaseLabel`
   // depends on `appState.repositories` which changes on every refresh.
   syncFilesPaneFilterControl();
 

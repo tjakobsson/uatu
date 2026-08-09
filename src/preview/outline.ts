@@ -472,7 +472,7 @@ export type OutlineDocument = {
 
 // Re-evaluate the action bar and outline for the freshly-rendered document.
 // Called from mount.ts after every render. `doc` is null for non-document
-// previews (commit / review-score / empty), which hide the whole bar.
+// previews (commit / empty), which hide the whole bar.
 export function refreshOutline(doc: OutlineDocument | null): void {
   const isDocKind = doc !== null && (doc.kind === "markdown" || doc.kind === "asciidoc");
   const renderedVisible = doc !== null && doc.view === "rendered";

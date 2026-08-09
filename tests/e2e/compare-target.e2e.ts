@@ -11,7 +11,7 @@ test.afterEach(async ({ request }) => {
   await request.post("/__e2e/reset");
 });
 
-test("compare-target toggle switches the burden lens and persists across reload", async ({ page, request }) => {
+test("compare-target toggle switches the compare lens and persists across reload", async ({ page, request }) => {
   await request.post("/__e2e/reset", {
     data: {
       git: true,
@@ -31,12 +31,12 @@ test("compare-target toggle switches the burden lens and persists across reload"
   await expect(baseButton).toHaveAttribute("aria-pressed", "true");
   await expect(lastButton).toHaveAttribute("aria-pressed", "false");
 
-  const anchor = page.locator("#change-overview .burden-anchor").first();
+  const anchor = page.locator("#change-overview .compare-anchor").first();
   await expect(anchor).toContainText("vs main");
 
-  const meter = page.locator("#change-overview .burden-meter strong").first();
-  const baseScore = Number((await meter.textContent())?.trim());
-  expect(baseScore).toBeGreaterThan(0);
+  // Base lens: the committed branch file carries a change annotation.
+  await revealTreeRow(page, "feature.md");
+  await expect(treeRow(page, "feature.md")).toHaveAttribute("data-item-git-status", "added");
 
   // Switch to the working view.
   await lastButton.click();
@@ -44,16 +44,16 @@ test("compare-target toggle switches the burden lens and persists across reload"
   await expect(baseButton).toHaveAttribute("aria-pressed", "false");
   // Anchor follows the resolved ref precisely.
   await expect(anchor).toContainText("vs HEAD");
-  // Burden recomputes: only the README worktree edit remains, so the score
-  // drops below the full-branch base score.
-  await expect.poll(async () => Number((await meter.textContent())?.trim())).toBeLessThan(baseScore);
+  // Change data recomputes: only the README worktree edit remains vs HEAD, so
+  // the committed branch file loses its annotation.
+  await expect(treeRow(page, "feature.md")).not.toHaveAttribute("data-item-git-status", "added");
 
   // Selection persists across a reload.
   await page.reload();
   await expect(
     page.locator('#change-overview button[data-compare-target="last-commit"]'),
   ).toHaveAttribute("aria-pressed", "true");
-  await expect(page.locator("#change-overview .burden-anchor").first()).toContainText("vs HEAD");
+  await expect(page.locator("#change-overview .compare-anchor").first()).toContainText("vs HEAD");
 });
 
 test("Diff view follows the compare target coherently with the overview", async ({ page, request }) => {

@@ -6,7 +6,7 @@
 
 import { appUrl } from "../shared/app-url";
 import { escapeHtml } from "../shared/html";
-import type { RepositoryReviewSnapshot } from "../shared/types";
+import type { RepositorySnapshot } from "../shared/types";
 import { clearPreviewType } from "./header";
 import { closeMermaidViewer } from "./mermaid-viewer";
 import { hideViewToggle } from "./view-mode";
@@ -35,8 +35,8 @@ const previewBaseElement: HTMLBaseElement = previewBaseElementMaybe;
 const previewElement: HTMLElement = previewElementMaybe;
 
 export function renderCommitMessage(
-  repository: RepositoryReviewSnapshot,
-  commit: RepositoryReviewSnapshot["commitLog"][number],
+  repository: RepositorySnapshot,
+  commit: RepositorySnapshot["commitLog"][number],
 ) {
   closeMermaidViewer();
   previewTitleElement.textContent = commit.subject;

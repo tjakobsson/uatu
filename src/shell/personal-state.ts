@@ -1,5 +1,5 @@
 import { appUrl } from "../shared/app-url";
-import type { ReviewCompareTarget, ViewMode } from "../shared/types";
+import type { CompareTarget, ViewMode } from "../shared/types";
 import type { FilesPaneFilter } from "./state";
 
 export type PersonalWorkspaceState = {
@@ -7,7 +7,7 @@ export type PersonalWorkspaceState = {
   documentPath?: string;
   follow?: boolean;
   previewMode?: ViewMode;
-  compareTarget?: ReviewCompareTarget;
+  compareTarget?: CompareTarget;
   filesFilter?: FilesPaneFilter;
   lastPtyId?: string;
 };
@@ -16,7 +16,7 @@ export type PersonalWorkspaceStatePatch = Partial<{
   documentPath: string | null;
   follow: boolean | null;
   previewMode: ViewMode | null;
-  compareTarget: ReviewCompareTarget | null;
+  compareTarget: CompareTarget | null;
   filesFilter: FilesPaneFilter | null;
   lastPtyId: string | null;
 }>;

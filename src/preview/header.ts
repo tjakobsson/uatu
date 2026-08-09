@@ -44,7 +44,7 @@ export { previewTitleElement, previewPathElement, previewTypeElement, previewBas
 export { outlineToggleButton, copySourceButton };
 
 // Hide the entire action-icon bar. Called when leaving document mode (commit /
-// review-score / empty previews) where neither copy-source nor an outline
+// empty previews) where neither copy-source nor an outline
 // makes sense. The Rendered-view + heading-count gating for the document case
 // lives in `outline.ts`'s refresh, which runs on every document render.
 export function hidePreviewActionBar(): void {

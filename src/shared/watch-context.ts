@@ -1,13 +1,13 @@
 import {
   DEFAULT_COMPARE_TARGET,
-  isReviewCompareTarget,
-  type ReviewCompareTarget,
+  isCompareTarget,
+  type CompareTarget,
   type Scope,
 } from "./types";
 
 export type WatchContext = {
   scope: Scope;
-  compareTarget: ReviewCompareTarget;
+  compareTarget: CompareTarget;
 };
 
 export const DEFAULT_WATCH_CONTEXT: WatchContext = {
@@ -21,7 +21,7 @@ export type WatchContextParseResult =
 
 export function parseWatchContext(params: URLSearchParams): WatchContextParseResult {
   const rawTarget = params.get("compareTarget");
-  if (rawTarget !== null && !isReviewCompareTarget(rawTarget)) {
+  if (rawTarget !== null && !isCompareTarget(rawTarget)) {
     return { error: "invalid compare target" };
   }
   const compareTarget = rawTarget ?? DEFAULT_COMPARE_TARGET;

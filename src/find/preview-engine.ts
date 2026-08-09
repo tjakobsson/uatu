@@ -114,7 +114,7 @@ export function createPreviewEngine(
     // The design originally called for hooking the mount lifecycle directly,
     // assuming one mount point. There are eight — the single and split
     // document paths plus diff, image, binary, empty, commit-message, and the
-    // review-score explanation — and each would have to import find and
+    // commit preview — and each would have to import find and
     // remember to call it. One observer cannot be forgotten by a ninth, and it
     // is connected only while the bar is open.
     watch(onChanged) {

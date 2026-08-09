@@ -16,10 +16,10 @@ describe("buildInPageAnchorUrl", () => {
 
   test("preserves the query string when one is present", () => {
     const url = buildInPageAnchorUrl(
-      { pathname: "/guides/setup.md", search: "?reviewScore=root" },
+      { pathname: "/guides/setup.md", search: "?repository=root" },
       "installation",
     );
-    expect(url).toBe("/guides/setup.md?reviewScore=root#installation");
+    expect(url).toBe("/guides/setup.md?repository=root#installation");
   });
 
   test("percent-encodes fragment ids that contain characters needing encoding", () => {

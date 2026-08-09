@@ -6,7 +6,7 @@ For the user-facing pitch (features, install, usage), see [README.md](./README.m
 
 ## What uatu is
 
-`uatu` is a local Bun-served Progressive Web App that watches a directory of docs and source, previews Markdown and AsciiDoc with Mermaid diagrams, surfaces a review-burden score for code changes, and (where supported) hosts an embedded terminal in the same browser tab. It runs entirely on `localhost` — there is no cloud component — and ships as a single Bun-compiled binary or runs from source.
+`uatu` is a local Bun-served Progressive Web App that watches a directory of docs and source, previews Markdown and AsciiDoc with Mermaid diagrams, surfaces the repository's change context (changed files, diffs, git log), and (where supported) hosts an embedded terminal in the same browser tab. It runs entirely on `localhost` — there is no cloud component — and ships as a single Bun-compiled binary or runs from source.
 
 ## The 30-second map
 
@@ -33,7 +33,7 @@ flowchart LR
 Four boundaries to keep in mind:
 
 - **HTTP/SSE between server and SPA.** `/api/state` supplies the initial snapshot, `/api/document` and `/api/document/diff` render one path, `/api/search` sweeps content, and `/api/events` streams updates. Scope and compare target travel as validated request context on all related requests; there are no process-global mutation endpoints.
-- **Per-client watch context.** The Change Overview measures against `base` (merge-base review view) or `last-commit` (`HEAD` working view). `src/shared/watch-context.ts` serializes the client's scope and compare target, and `server/watch-session.ts` selects the corresponding roots and cached repository snapshot independently for each request and SSE subscriber. Two clients can therefore browse different scopes and comparison lenses through the same child process.
+- **Per-client watch context.** The Change Overview measures against `base` (merge-base reviewer view) or `last-commit` (`HEAD` working view). `src/shared/watch-context.ts` serializes the client's scope and compare target, and `server/watch-session.ts` selects the corresponding roots and cached repository snapshot independently for each request and SSE subscriber. Two clients can therefore browse different scopes and comparison lenses through the same child process.
 - **Chokidar between server and the filesystem.** The `WatchSession` debounces, applies the ignore policy, rebuilds the document index, and emits SSE events.
 - **WebSocket between SPA and terminal subsystem.** Authenticated by a cookie set on `POST /api/auth`; multiplexed across multiple PTY panes by `terminal/server.ts`.
 - **A single Bun binary.** No node, no separate frontend bundler — `Bun.serve` serves both the SPA and the API.
@@ -77,13 +77,14 @@ src/
 │                         watch-session.ts (live-reload engine), roots.ts
 │                         (root resolution + scanning), render-dispatch.ts,
 │                         static-files.ts, navigation.ts, port-probe.ts
-├── document/             Per-document data (not rendering): metadata
-│                         parsing, diff fetcher, text/binary classifier,
-│                         language detection, review-base resolver
+├── document/             Document + repository git data (not rendering):
+│                         metadata parsing, diff fetcher, text/binary
+│                         classifier, language detection, compare-base
+│                         resolver, and the repository-level git sweep
+│                         (changed files, commit log, repo metadata)
 ├── render/               Source → HTML transformation: markdown
 │                         (micromark + GFM + frontmatter), asciidoc
 │                         (@asciidoctor/core), sanitization + mermaid markers
-├── review/               Review-burden score data layer
 ├── ignore/               .gitignore + .uatu.json tree.exclude engine
 ├── hub/                  The self-hostable session hub (`uatu hub`): config,
 │                         XDG state dir, workspace registry, the
@@ -239,7 +240,7 @@ State is deliberately split into four lifetimes:
 | Personal workspace state | selected document, Follow, preview mode, compare target, Files filter, last-active PTY id | Hub store keyed by authenticated user + stable workspace id in `hub/personal-state.ts`; local Hub uses identity `local` |
 | Client presentation | sidebar and preview geometry, terminal dock/splits/pane attachments, transient visibility | base-path-namespaced browser local/session storage in `shell/presentation-storage.ts`; native macOS window/split geometry remains in `UserDefaults` |
 
-Boot loads child state and personal state together. Explicit document, commit, or review URLs win; otherwise semantic personal state resumes; child defaults are last. Semantic owner mutators PATCH fields through `shell/personal-state.ts`. Presentation state never enters the Hub store, and another browser restores semantics without inheriting this browser's dimensions or pane arrangement. A stale document or PTY reference is cleared independently after the current document index or terminal inventory proves it absent.
+Boot loads child state and personal state together. Explicit document or commit URLs win; otherwise semantic personal state resumes; child defaults are last. Semantic owner mutators PATCH fields through `shell/personal-state.ts`. Presentation state never enters the Hub store, and another browser restores semantics without inheriting this browser's dimensions or pane arrangement. A stale document or PTY reference is cleared independently after the current document index or terminal inventory proves it absent.
 
 Every `appState` field has exactly one owning module: direct assignment (`appState.<field> = …`) is allowed only inside the owner, and every other module mutates through the owner's exported mutator (`setSelectedId()`, `setFilesPaneFilter()`, …). Mutators for persisted preferences own the localStorage write, so assignment and persistence can't drift apart. The contract is enforced by `src/shell/state-ownership.test.ts`, which scans `src/` for out-of-owner assignments.
 
