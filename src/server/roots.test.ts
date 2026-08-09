@@ -144,12 +144,12 @@ describe("scanRoots", () => {
     expect(byPath.get("logo.png")).toBe("binary");
   });
 
-  test("respects .uatu.json tree.exclude patterns at the watch root", async () => {
+  test("respects .uatu.json ignore.exclude patterns at the watch root", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-scan-tree-exclude-"));
     tempDirectories.push(tempDirectory);
     await writeFile(
       path.join(tempDirectory, ".uatu.json"),
-      JSON.stringify({ tree: { exclude: ["*.lock"] } }),
+      JSON.stringify({ ignore: { exclude: ["*.lock"] } }),
     );
     await writeFile(path.join(tempDirectory, "README.md"), "# Readme\n");
     await writeFile(path.join(tempDirectory, "bun.lock"), "lockfile contents\n");

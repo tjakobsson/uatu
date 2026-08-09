@@ -3,13 +3,13 @@ import path from "node:path";
 
 import ignore, { type Ignore } from "ignore";
 
-import { loadTreeConfig } from "../sidebar/tree-config";
+import { loadIgnoreConfig } from "./config";
 
 export type IgnoreMatcherOptions = {
   rootPath: string;
   // Session-level CLI decision. When false (user passed --no-gitignore),
   // `.gitignore` is NOT honored regardless of `.uatu.json`. When true (the default),
-  // `.uatu.json tree.respectGitignore: false` can still disable `.gitignore` for this root.
+  // `.uatu.json ignore.respectGitignore: false` can still disable `.gitignore` for this root.
   respectGitignore: boolean;
   isSingleFileRoot?: boolean;
 };
@@ -22,7 +22,7 @@ export type IgnoreMatcher = {
 // Always-on built-in defaults — applied even when `.uatu.json` is absent and
 // even when `.gitignore` is disabled. Mirrors (and is additional to) the
 // server.ts directory-walker `ignoredNames` short-circuit — having these as
-// patterns lets `.uatu.json tree.exclude` `!negation` rules interact predictably
+// patterns lets `.uatu.json ignore.exclude` `!negation` rules interact predictably
 // with them, and ensures static-fallback serving honors them too.
 const BUILT_IN_DEFAULTS: readonly string[] = Object.freeze([
   // Node / JS output
@@ -70,7 +70,7 @@ const BUILT_IN_DEFAULTS: readonly string[] = Object.freeze([
 // Build an ignore matcher for one watched root. Pattern application order:
 //   1. Built-in defaults (always)
 //   2. `.gitignore` (when honored: CLI didn't pass --no-gitignore AND .uatu.json doesn't disable)
-//   3. `.uatu.json tree.exclude` (user-controlled; goes LAST so `!negation` overrides .gitignore)
+//   3. `.uatu.json ignore.exclude` (user-controlled; goes LAST so `!negation` overrides .gitignore)
 export async function loadIgnoreMatcher(options: IgnoreMatcherOptions): Promise<IgnoreMatcher> {
   const { rootPath, respectGitignore: cliRespectGitignore, isSingleFileRoot = false } = options;
   const ig = ignore();
@@ -78,7 +78,7 @@ export async function loadIgnoreMatcher(options: IgnoreMatcherOptions): Promise<
   ig.add([...BUILT_IN_DEFAULTS]);
 
   if (!isSingleFileRoot) {
-    const { config } = await loadTreeConfig(rootPath);
+    const { config } = await loadIgnoreConfig(rootPath);
 
     const respectGitignore = cliRespectGitignore && config.respectGitignore;
     if (respectGitignore) {

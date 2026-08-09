@@ -85,7 +85,8 @@ src/
 ├── render/               Source → HTML transformation: markdown
 │                         (micromark + GFM + frontmatter), asciidoc
 │                         (@asciidoctor/core), sanitization + mermaid markers
-├── ignore/               .gitignore + .uatu.json tree.exclude engine
+├── ignore/               .gitignore + `.uatu.json ignore` engine + the
+│                         file's single config loader
 ├── hub/                  The self-hostable session hub (`uatu hub`): config,
 │                         XDG state dir, workspace registry, the
 │                         SessionBackend seam + local-process backend,
@@ -322,7 +323,7 @@ Sessions are managed tmux-style: `GET /api/terminal/sessions` lists every live P
 
 App-defined WebSocket close codes: `4001` user-terminate (client→server: kill the PTY), `4409` sessionId in use (server→client: upgrade race lost), `4410` session taken (server→client: another window took this session over).
 
-Clipboard crosses the client/server boundary in two directions, both ending at `navigator.clipboard` — which is the **host** clipboard even when the uatu server runs in a container, because the browser is on the host. Paste reads it and forwards down the PTY (`clipboard.ts` shortcut handlers). Copy has two paths: xterm-owned selections go through the Windows-Terminal-parity shortcuts, while mouse-mode TUIs (Claude Code, opencode) emit OSC 52 up the PTY, which `client.ts` bridges via `term.parser.registerOscHandler(52, …)` → `createOsc52Handler` in `clipboard.ts`. The bridge is write-only by construction (read queries get no response — no exfiltration path), caps decoded payloads at 100 KB, and reports every accepted write through a pane-scoped toast in `panel.ts` so clipboard poisoning is always visible. Policy comes from `.uatu.json terminal.clipboard` (`notify` default / `confirm` / `silent` / `off`) and flows to the client through `/api/state.terminalConfig` like the font overrides. A gestureless `writeText` rejection (Firefox/Safari) promotes the toast to its Copy-button form, which performs the write inside the click.
+Clipboard crosses the client/server boundary in two directions, both ending at `navigator.clipboard` — which is the **host** clipboard even when the uatu server runs in a container, because the browser is on the host. Paste reads it and forwards down the PTY (`clipboard.ts` shortcut handlers). Copy has two paths: xterm-owned selections go through the Windows-Terminal-parity shortcuts, while mouse-mode TUIs (Claude Code, opencode) emit OSC 52 up the PTY, which `client.ts` bridges via `term.parser.registerOscHandler(52, …)` → `createOsc52Handler` in `clipboard.ts`. The bridge is write-only by construction (read queries get no response — no exfiltration path), caps decoded payloads at 100 KB, and reports every accepted write through a pane-scoped toast in `panel.ts` so clipboard poisoning is always visible — the notify behavior is fixed, not configurable. A gestureless `writeText` rejection (Firefox/Safari) promotes the toast to its Copy-button form, which performs the write inside the click.
 
 > **Upgrade hazard.** The terminal is constructed with `allowProposedApi: true`
 > because the search addon's decoration options are still proposed API in xterm

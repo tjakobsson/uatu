@@ -533,11 +533,10 @@ describe("createOsc52Handler", () => {
     await Promise.resolve();
   }
 
-  it("notify: writes and reports the copied length", async () => {
+  it("writes and reports the copied length", async () => {
     const { notices, notify } = collect();
     const written: string[] = [];
     const handler = createOsc52Handler({
-      policy: "notify",
       notify,
       writeText: async text => { written.push(text); },
     });
@@ -548,51 +547,22 @@ describe("createOsc52Handler", () => {
     expect(notices).toEqual([{ kind: "copied", chars: 5 }]);
   });
 
-  it("silent: writes without a notice", async () => {
+  it("promotes a rejected write to pending", async () => {
     const { notices, notify } = collect();
-    const written: string[] = [];
     const handler = createOsc52Handler({
-      policy: "silent",
       notify,
-      writeText: async text => { written.push(text); },
+      writeText: async () => { throw new Error("needs user activation"); },
     });
 
-    handler(`c;${b64("quiet")}`);
+    handler(`c;${b64("held")}`);
     await settle();
-    expect(written).toEqual(["quiet"]);
-    expect(notices).toEqual([]);
-  });
-
-  it("confirm: never writes, emits pending with the text", async () => {
-    const { notices, notify } = collect();
-    const writeText = mock(async (_: string) => {});
-    const handler = createOsc52Handler({ policy: "confirm", notify, writeText });
-
-    handler(`c;${b64("check me")}`);
-    await settle();
-    expect(writeText).not.toHaveBeenCalled();
-    expect(notices).toEqual([{ kind: "pending", text: "check me" }]);
-  });
-
-  it("promotes a rejected write to pending (notify and silent)", async () => {
-    for (const policy of ["notify", "silent"] as const) {
-      const { notices, notify } = collect();
-      const handler = createOsc52Handler({
-        policy,
-        notify,
-        writeText: async () => { throw new Error("needs user activation"); },
-      });
-
-      handler(`c;${b64("held")}`);
-      await settle();
-      expect(notices).toEqual([{ kind: "pending", text: "held" }]);
-    }
+    expect(notices).toEqual([{ kind: "pending", text: "held" }]);
   });
 
   it("never answers a query and never touches the clipboard for it", async () => {
     const { notices, notify } = collect();
     const writeText = mock(async (_: string) => {});
-    const handler = createOsc52Handler({ policy: "notify", notify, writeText });
+    const handler = createOsc52Handler({ notify, writeText });
 
     expect(handler("c;?")).toBe(true);
     await settle();
@@ -603,7 +573,7 @@ describe("createOsc52Handler", () => {
   it("drops invalid payloads silently", async () => {
     const { notices, notify } = collect();
     const writeText = mock(async (_: string) => {});
-    const handler = createOsc52Handler({ policy: "notify", notify, writeText });
+    const handler = createOsc52Handler({ notify, writeText });
 
     handler("c;***");
     await settle();
@@ -611,22 +581,16 @@ describe("createOsc52Handler", () => {
     expect(notices).toEqual([]);
   });
 
-  it("reports oversized under notify and confirm, stays quiet under silent", async () => {
+  it("reports an oversized payload without writing", async () => {
     const oversized = `c;${b64("a".repeat(100 * 1024 + 1))}`;
-    for (const [policy, expected] of [
-      ["notify", [{ kind: "oversized" }]],
-      ["confirm", [{ kind: "oversized" }]],
-      ["silent", []],
-    ] as const) {
-      const { notices, notify } = collect();
-      const writeText = mock(async (_: string) => {});
-      const handler = createOsc52Handler({ policy, notify, writeText });
+    const { notices, notify } = collect();
+    const writeText = mock(async (_: string) => {});
+    const handler = createOsc52Handler({ notify, writeText });
 
-      handler(oversized);
-      await settle();
-      expect(writeText).not.toHaveBeenCalled();
-      expect(notices).toEqual(expected as never);
-    }
+    handler(oversized);
+    await settle();
+    expect(writeText).not.toHaveBeenCalled();
+    expect(notices).toEqual([{ kind: "oversized" }]);
   });
 });
 
