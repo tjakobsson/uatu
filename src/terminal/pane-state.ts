@@ -173,6 +173,52 @@ export function shouldEscapeExitTerminalFullscreen(
   return stored === "fullscreen";
 }
 
+// What an Escape keypress means to the terminal panel, resolved in one place
+// so the precedence between its stacked surfaces is pinned by test rather than
+// by the order of if-statements in a listener.
+//
+// Order is innermost-first: the switcher and the selection transcript are
+// sheets the user opened over the terminal, the confirm modal is a question
+// they must answer, and only with all of those closed does Escape mean "leave
+// the fullscreen terminal". Anything else passes through to the rest of the
+// app — the panel's listener is document-level and capture-phase, so it must
+// not consume a key on behalf of a terminal nobody can see.
+export type TerminalEscapeAction =
+  | "dismiss-switcher"
+  | "dismiss-selection"
+  | "cancel-modal"
+  | "exit-fullscreen"
+  | "pass-through";
+
+export function resolveTerminalEscapeAction(input: {
+  switcherOpen: boolean;
+  selectionSheetOpen: boolean;
+  confirmModalOpen: boolean;
+  storedDisplayMode: TerminalDisplayMode;
+  touchMode: boolean;
+  terminalTabActive: boolean;
+}): TerminalEscapeAction {
+  // The switcher lives inside the panel, so it is only on screen when the
+  // panel is. In touch mode the panel stays mounted behind another tab with
+  // its PTYs attached, and a sheet left open there is invisible — claiming
+  // Escape for it would steal the key from whatever the user can actually
+  // see, which is the same trap `shouldEscapeExitTerminalFullscreen` avoids.
+  const terminalOnScreen = !input.touchMode || input.terminalTabActive;
+  if (input.switcherOpen && terminalOnScreen) return "dismiss-switcher";
+  if (input.selectionSheetOpen) return "dismiss-selection";
+  if (input.confirmModalOpen) return "cancel-modal";
+  if (
+    shouldEscapeExitTerminalFullscreen(
+      input.storedDisplayMode,
+      input.touchMode,
+      input.terminalTabActive,
+    )
+  ) {
+    return "exit-fullscreen";
+  }
+  return "pass-through";
+}
+
 // What the terminal panel does when the active touch tab changes. Pure so
 // the PTY-preserving contract is pinned by unit test:
 //   "show"          — Terminal tab activated with the panel hidden: run the

@@ -20,6 +20,191 @@ export function pickerCandidates(
     });
 }
 
+// What the panel does with inventory when it has no per-window panes to
+// restore. `attach` is claimed silently — a detached PTY belongs to nobody, so
+// attaching is non-disruptive and reversible. `decide` needs the user: taking a
+// session from another client is destructive to that client, and detached
+// sessions past the pane cap have nowhere to go.
+export type SessionPlan = {
+  attach: TerminalSessionInfo[];
+  decide: TerminalSessionInfo[];
+};
+
+// Split not-shown inventory into the auto-attach set and the leftovers.
+// `freeSlots` is how many more panes the window can hold; a non-positive value
+// pushes everything into `decide` (nothing can be attached, but the sessions
+// still exist and stay reachable).
+export function resolveSessionPlan(
+  inventory: TerminalSessionInfo[],
+  shownIds: Iterable<string>,
+  freeSlots: number,
+): SessionPlan {
+  const shown = new Set(shownIds);
+  const available = inventory.filter(session => !shown.has(session.id));
+  const detached = available
+    .filter(session => !session.attached)
+    .sort((a, b) => a.createdAt - b.createdAt);
+  const elsewhere = available
+    .filter(session => session.attached)
+    .sort((a, b) => a.createdAt - b.createdAt);
+  const capacity = Math.max(0, freeSlots);
+  return {
+    attach: detached.slice(0, capacity),
+    // Detached overflow first: it's the cheaper choice of the two (plain
+    // attach, no takeover), so it should be the first thing offered.
+    decide: [...detached.slice(capacity), ...elsewhere],
+  };
+}
+
+// Which of a just-attached batch becomes the active pane. The saved last-active
+// PTY wins when it's in the batch; otherwise the newest session does, on the
+// theory that the most recently spawned shell is the one being worked in.
+// This only ever *selects* among sessions that were already going to attach —
+// it never causes an attachment, which is what keeps takeover explicit.
+export function resolveActiveSessionId(
+  attached: TerminalSessionInfo[],
+  lastPtyId: string | undefined,
+): string | undefined {
+  if (attached.length === 0) return undefined;
+  if (lastPtyId && attached.some(session => session.id === lastPtyId)) return lastPtyId;
+  return attached.reduce((newest, session) =>
+    session.createdAt > newest.createdAt ? session : newest,
+  ).id;
+}
+
+// A terminal as the touch switcher shows it. `state` drives both the row's
+// label copy and which actions it offers:
+//   visible            — the pane currently on screen; no switch action needed
+//   attached-here      — this window holds it, hidden behind the visible pane
+//   detached           — nobody holds it; selecting attaches it
+//   attached-elsewhere — another client holds it; only an explicit takeover moves it
+export type SwitcherRowState = "visible" | "attached-here" | "detached" | "attached-elsewhere";
+
+export type SwitcherRow = {
+  sessionId: string;
+  label: string;
+  state: SwitcherRowState;
+  age: string;
+  // Whether this row is the user's saved last-active PTY. Presentation only.
+  lastActive: boolean;
+  // Selecting the row switches to (or attaches) this terminal.
+  canSelect: boolean;
+  // The row needs an explicit takeover before it can be shown.
+  canTakeOver: boolean;
+};
+
+// Panes as the switcher needs to see them: window-local order, the server
+// resource each one references, and whether this window still holds it.
+//
+// `attached` is load-bearing. A pane whose session was taken over by another
+// window stays on screen with its take-back notice, but it no longer owns the
+// resource. Treating it as held would label someone else's session "open here",
+// hide the inventory row that offers Take over, and route Kill down the
+// local-pane path — which closes the pane without a DELETE and leaves the
+// session running in the window that actually holds it.
+export type SwitcherPane = {
+  sessionId: string;
+  attached: boolean;
+};
+
+// Build the switcher's row model. Attached-here rows come first in pane order
+// (the window's own terminals are what the user is switching between), then
+// detached, then attached-elsewhere — the same least-disruptive-first ordering
+// the desktop chooser uses. `freeSlots` gates attach: at the pane cap the
+// window can still switch between what it holds, but it cannot take on more.
+export function buildSwitcherRows(
+  panes: SwitcherPane[],
+  inventory: TerminalSessionInfo[],
+  activeSessionId: string | undefined,
+  lastPtyId: string | undefined,
+  now: number,
+  freeSlots: number,
+): SwitcherRow[] {
+  const byId = new Map(inventory.map(session => [session.id, session]));
+  // Only panes this window still owns count as held. A parked pane's session
+  // belongs to whoever took it, so it falls through to the inventory rows
+  // below and is offered with an explicit Take over, exactly like any other
+  // session held elsewhere.
+  const ownPanes = panes.filter(pane => pane.attached);
+  const held = new Set(ownPanes.map(pane => pane.sessionId));
+  // Sessions this window holds a parked pane for. Reclaiming one REPLACES that
+  // pane rather than adding to the count, so it must not be gated on spare
+  // capacity: at the pane cap a parked pane is otherwise unreclaimable — its
+  // own take-back notice is hidden too whenever it is not the active pane —
+  // and the only way out would be closing an unrelated terminal.
+  const parked = new Set(
+    panes.filter(pane => !pane.attached).map(pane => pane.sessionId),
+  );
+  const hasCapacity = freeSlots > 0;
+  const roomFor = (sessionId: string): boolean => hasCapacity || parked.has(sessionId);
+
+  const mine: SwitcherRow[] = ownPanes.map(pane => {
+    const session = byId.get(pane.sessionId);
+    const visible = pane.sessionId === activeSessionId;
+    return {
+      sessionId: pane.sessionId,
+      // A pane whose session vanished from inventory between the GET and this
+      // render still belongs on the list — it's on screen.
+      label: session?.label ?? "shell",
+      state: visible ? "visible" : "attached-here",
+      age: session ? formatSessionAge(session.createdAt, now) : "",
+      lastActive: pane.sessionId === lastPtyId,
+      canSelect: !visible,
+      canTakeOver: false,
+    };
+  });
+
+  const available = inventory.filter(session => !held.has(session.id));
+  const toRow = (session: TerminalSessionInfo, state: SwitcherRowState): SwitcherRow => ({
+    sessionId: session.id,
+    label: session.label,
+    state,
+    age: formatSessionAge(session.createdAt, now),
+    lastActive: session.id === lastPtyId,
+    canSelect: state === "detached" && roomFor(session.id),
+    canTakeOver: state === "attached-elsewhere" && roomFor(session.id),
+  });
+
+  const detached = available
+    .filter(session => !session.attached)
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .map(session => toRow(session, "detached"));
+  const elsewhere = available
+    .filter(session => session.attached)
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .map(session => toRow(session, "attached-elsewhere"));
+
+  return [...mine, ...detached, ...elsewhere];
+}
+
+// A pane as the sweep needs to see it: its window-local id, the resource it
+// references, and whether it is parked (its session taken over by another
+// client, so this window holds a record but not the resource).
+export type SweepCandidate = {
+  id: string;
+  sessionId: string;
+  parked: boolean;
+};
+
+// Which parked panes reference a session that no longer exists. Such a pane can
+// never come back — no socket remains to be closed, so nothing else notices —
+// and it would sit invisible in touch mode holding a pane-cap slot.
+//
+// `inventory` is null when the read FAILED, and that case returns nothing on
+// purpose. A failed read reports no sessions, which is shape-identical to "all
+// your sessions are gone": sweeping on it would destroy panes whose PTYs are
+// alive and well in another window, and taking the last one closes the panel
+// and drops its persisted record too. Destroying local state requires an
+// authoritative answer, not merely an answer-shaped one.
+export function parkedPanesToSweep(
+  panes: SweepCandidate[],
+  inventory: TerminalSessionInfo[] | null,
+): string[] {
+  if (inventory === null) return [];
+  const live = new Set(inventory.map(session => session.id));
+  return panes.filter(pane => pane.parked && !live.has(pane.sessionId)).map(pane => pane.id);
+}
+
 // Compact age label for picker rows. Coarse on purpose — it orients ("that
 // htop from this morning"), it doesn't measure.
 export function formatSessionAge(createdAt: number, now: number): string {

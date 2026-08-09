@@ -652,6 +652,26 @@ html.uatu-desktop-host
   cursor: default;
 }
 
+/* The switch action is navigation between terminals, not a key. It leads the
+   row and is filled rather than outlined so the eye separates it from the key
+   cluster it sits beside. */
+.terminal-keybar-key.terminal-keybar-switch {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  color: var(--text-strong);
+  background: var(--surface-subtle);
+  border-color: var(--border-medium);
+  box-shadow: 0.35rem 0 0.35rem -0.35rem rgba(0, 0, 0, 0.4);
+  font-size: 0.95rem;
+}
+
+.terminal-keybar-key.terminal-keybar-switch[aria-expanded="true"] {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
 .terminal-keybar-key.is-selection-done {
   color: #ffffff;
   background: var(--accent);
@@ -1146,6 +1166,9 @@ body.is-resizing-terminal .panel-resizer {
   flex-direction: column;
   overflow: hidden;
   color: var(--terminal-fg, #e6edf3);
+  /* Containing block for the terminal switcher sheet, which covers the
+     panel's surface rather than the whole app. */
+  position: relative;
 }
 
 .terminal-panel[data-dock="bottom"] {
@@ -1168,9 +1191,13 @@ body.is-resizing-terminal .panel-resizer {
    accumulates in xterm scrollback while collapsed. The touch keybar and the
    find slot collapse too — a live keybar wired to an invisible PTY (Esc,
    ^C, paste with no visible effect) is exactly what "header only" forbids.
-   This selector out-specifies the coarse-pointer keybar reveal. */
+   This selector out-specifies the coarse-pointer keybar reveal. The switcher
+   goes with them: it covers the panel's surface, which minimized is only a
+   header strip, so leaving it up would paint a session sheet over the one
+   control the user needs to restore. */
 .terminal-panel[data-display="minimized"] .terminal-panes,
 .terminal-panel[data-display="minimized"] .terminal-keybar,
+.terminal-panel[data-display="minimized"] .terminal-switcher,
 .terminal-panel[data-display="minimized"] .find-slot {
   display: none;
 }
@@ -5046,6 +5073,195 @@ html[data-ui-mode="touch"] #terminal-dock-toggle,
 html[data-ui-mode="touch"] #terminal-minimize,
 html[data-ui-mode="touch"] #terminal-resizer {
   display: none !important;
+}
+
+/* One terminal at a time. Splitting a phone four ways renders four unusable
+   slivers, so touch mode shows the active pane alone and the keybar's switch
+   action moves between them. Presentation only: every hidden pane keeps its
+   PTY attached and its record persisted, and desktop mode renders the whole
+   split again. Keyed on `data-active`, which panel.ts already stamps on
+   exactly one pane — no JS decides visibility here.
+
+   Scoped to `[data-session-id]`, i.e. real PTY panes. The recovery surfaces
+   (paste-token form, origin-rejected diagnostic) reuse the `.terminal-pane`
+   class for layout but carry no session and are never stamped active — hiding
+   them would leave a blank Terminal tab with no way to reconnect after
+   credentials expire, which is the one moment the user most needs them.
+
+   Hidden with `visibility`, NOT `display: none`, and stacked at the panel's
+   full size. This is load-bearing, not cosmetic: xterm defers `open()` until a
+   ResizeObserver reports a non-zero rect (client.ts), and the attach-ready
+   handshake waits on that open. A `display: none` pane therefore never
+   completes its attach — the server never records this window as the holder,
+   inventory keeps reporting the session detached, another window can claim it
+   out from under us, and no output flows into the scrollback the switcher
+   promises. Giving every pane a real box keeps "attached" true for all of
+   them, and as a bonus they are already the right size when revealed, so
+   switching needs no refit. `visibility: hidden` means the browser skips
+   painting them regardless. */
+html[data-ui-mode="touch"] .terminal-panes {
+  position: relative;
+}
+
+html[data-ui-mode="touch"] .terminal-pane[data-session-id]:not([data-active]) {
+  position: absolute;
+  inset: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+html[data-ui-mode="touch"] .terminal-pane-resizer {
+  display: none;
+}
+
+/* The active pane owns the whole surface regardless of any flex basis a
+   desktop-mode drag left on it. */
+html[data-ui-mode="touch"] .terminal-pane[data-active] {
+  flex: 1 1 0 !important;
+}
+
+/* Terminal switcher: a sheet over the terminal surface, above the keybar and
+   inside the panel so it inherits terminal theming and clips correctly. */
+.terminal-switcher {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+
+.terminal-switcher[hidden] {
+  display: none;
+}
+
+.terminal-switcher-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.terminal-switcher-sheet {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  max-height: 80%;
+  padding: 0.9rem 1rem calc(0.9rem + env(safe-area-inset-bottom));
+  background: var(--terminal-bg, #0d1117);
+  border-top: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 0.75rem 0.75rem 0 0;
+  color: var(--terminal-fg, #e6edf3);
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.terminal-switcher-heading {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.terminal-switcher-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  overflow-y: auto;
+}
+
+.terminal-switcher-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0.375rem;
+}
+
+.terminal-switcher-row[data-current="true"] {
+  border-color: var(--accent, #0969da);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.terminal-switcher-select {
+  appearance: none;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+  /* Comfortable thumb target; the row is the primary action. */
+  min-height: 2.75rem;
+  padding: 0.35rem 0.4rem;
+  font: inherit;
+  text-align: left;
+  color: inherit;
+  background: none;
+  border: 0;
+  border-radius: 0.25rem;
+  cursor: pointer;
+}
+
+.terminal-switcher-select:disabled {
+  cursor: default;
+}
+
+.terminal-switcher-label {
+  font-family: var(--mono-font-family, monospace);
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.terminal-switcher-meta {
+  color: rgba(230, 237, 243, 0.55);
+  font-size: 0.75rem;
+}
+
+.terminal-switcher-takeover,
+.terminal-switcher-kill,
+.terminal-switcher-new {
+  appearance: none;
+  flex-shrink: 0;
+  min-height: 2.25rem;
+  padding: 0.35rem 0.75rem;
+  font: inherit;
+  font-size: 0.8rem;
+  border: 0;
+  border-radius: 0.25rem;
+  cursor: pointer;
+}
+
+.terminal-switcher-takeover {
+  background: var(--accent, #0969da);
+  color: #ffffff;
+}
+
+.terminal-switcher-kill {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(230, 237, 243, 0.8);
+}
+
+.terminal-switcher-new {
+  align-self: flex-start;
+  min-height: 2.75rem;
+  padding: 0.5rem 0.9rem;
+  font-size: 0.85rem;
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--terminal-fg, #e6edf3);
+}
+
+.terminal-switcher-note {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: rgba(230, 237, 243, 0.6);
+}
+
+.terminal-switcher-takeover:disabled,
+.terminal-switcher-kill:disabled,
+.terminal-switcher-new:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 /* A transcript deliberately leaves the terminal's fixed interaction stack

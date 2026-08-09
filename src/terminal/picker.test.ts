@@ -1,6 +1,13 @@
 import { describe, expect, it } from "bun:test";
 
-import { formatSessionAge, pickerCandidates } from "./picker";
+import {
+  buildSwitcherRows,
+  formatSessionAge,
+  parkedPanesToSweep,
+  pickerCandidates,
+  resolveActiveSessionId,
+  resolveSessionPlan,
+} from "./picker";
 import type { TerminalSessionInfo } from "./server";
 
 function session(overrides: Partial<TerminalSessionInfo>): TerminalSessionInfo {
@@ -37,6 +44,264 @@ describe("pickerCandidates", () => {
     const a = session({});
     expect(pickerCandidates([a], [a.id])).toEqual([]);
     expect(pickerCandidates([], [])).toEqual([]);
+  });
+});
+
+describe("resolveSessionPlan", () => {
+  it("attaches every detached session, oldest first", () => {
+    const newer = session({ createdAt: 900 });
+    const older = session({ createdAt: 100 });
+    const plan = resolveSessionPlan([newer, older], [], 8);
+    expect(plan.attach.map(s => s.id)).toEqual([older.id, newer.id]);
+    expect(plan.decide).toEqual([]);
+  });
+
+  it("never auto-attaches a session held by another client", () => {
+    const elsewhere = session({ attached: true, createdAt: 100 });
+    const free = session({ createdAt: 200 });
+    const plan = resolveSessionPlan([elsewhere, free], [], 8);
+    expect(plan.attach.map(s => s.id)).toEqual([free.id]);
+    expect(plan.decide.map(s => s.id)).toEqual([elsewhere.id]);
+  });
+
+  it("leaves an all-attached-elsewhere inventory entirely to the user", () => {
+    const a = session({ attached: true, createdAt: 100 });
+    const b = session({ attached: true, createdAt: 200 });
+    const plan = resolveSessionPlan([a, b], [], 8);
+    expect(plan.attach).toEqual([]);
+    expect(plan.decide.map(s => s.id)).toEqual([a.id, b.id]);
+  });
+
+  it("truncates the attach set at the free-slot count and defers the overflow", () => {
+    const sessions = [100, 200, 300, 400].map(createdAt => session({ createdAt }));
+    const plan = resolveSessionPlan(sessions, [], 2);
+    expect(plan.attach.map(s => s.createdAt)).toEqual([100, 200]);
+    expect(plan.decide.map(s => s.createdAt)).toEqual([300, 400]);
+  });
+
+  it("attaches nothing when the window is already at its pane cap", () => {
+    const free = session({ createdAt: 100 });
+    const plan = resolveSessionPlan([free], [], 0);
+    expect(plan.attach).toEqual([]);
+    expect(plan.decide.map(s => s.id)).toEqual([free.id]);
+  });
+
+  it("offers detached overflow ahead of sessions needing takeover", () => {
+    const overflow = session({ createdAt: 300 });
+    const elsewhere = session({ attached: true, createdAt: 100 });
+    const attachable = session({ createdAt: 200 });
+    const plan = resolveSessionPlan([overflow, elsewhere, attachable], [], 1);
+    expect(plan.attach.map(s => s.id)).toEqual([attachable.id]);
+    expect(plan.decide.map(s => s.id)).toEqual([overflow.id, elsewhere.id]);
+  });
+
+  it("ignores sessions this window already shows", () => {
+    const shown = session({ createdAt: 100 });
+    const other = session({ createdAt: 200 });
+    const plan = resolveSessionPlan([shown, other], [shown.id], 8);
+    expect(plan.attach.map(s => s.id)).toEqual([other.id]);
+    expect(plan.decide).toEqual([]);
+  });
+
+  it("plans nothing for empty inventory", () => {
+    const plan = resolveSessionPlan([], [], 8);
+    expect(plan.attach).toEqual([]);
+    expect(plan.decide).toEqual([]);
+  });
+});
+
+describe("resolveActiveSessionId", () => {
+  it("prefers the saved last-active session when it is in the batch", () => {
+    const older = session({ createdAt: 100 });
+    const newer = session({ createdAt: 900 });
+    expect(resolveActiveSessionId([older, newer], older.id)).toBe(older.id);
+  });
+
+  it("falls back to the newest session when there is no saved reference", () => {
+    const older = session({ createdAt: 100 });
+    const newer = session({ createdAt: 900 });
+    expect(resolveActiveSessionId([older, newer], undefined)).toBe(newer.id);
+  });
+
+  it("falls back to the newest when the saved reference attached elsewhere", () => {
+    const attached = session({ createdAt: 100 });
+    const held = session({ id: "99999999-9999-4999-8999-999999999999" });
+    expect(resolveActiveSessionId([attached], held.id)).toBe(attached.id);
+  });
+
+  it("selects nothing for an empty batch", () => {
+    expect(resolveActiveSessionId([], "anything")).toBeUndefined();
+  });
+});
+
+describe("buildSwitcherRows", () => {
+  const now = 60 * 60_000;
+
+  it("orders this window's panes first, then detached, then attached elsewhere", () => {
+    const mineVisible = session({ createdAt: 100, label: "zsh" });
+    const mineHidden = session({ createdAt: 200, label: "vim" });
+    const free = session({ createdAt: 300, label: "htop" });
+    const elsewhere = session({ attached: true, createdAt: 400, label: "ssh" });
+    const rows = buildSwitcherRows(
+      [{ sessionId: mineVisible.id, attached: true }, { sessionId: mineHidden.id, attached: true }],
+      [elsewhere, free, mineHidden, mineVisible],
+      mineVisible.id,
+      undefined,
+      now,
+      8,
+    );
+    expect(rows.map(r => r.state)).toEqual([
+      "visible",
+      "attached-here",
+      "detached",
+      "attached-elsewhere",
+    ]);
+    expect(rows.map(r => r.label)).toEqual(["zsh", "vim", "htop", "ssh"]);
+  });
+
+  it("offers selection for every terminal except the visible one", () => {
+    const visible = session({ createdAt: 100 });
+    const hidden = session({ createdAt: 200 });
+    const free = session({ createdAt: 300 });
+    const rows = buildSwitcherRows(
+      [{ sessionId: visible.id, attached: true }, { sessionId: hidden.id, attached: true }],
+      [visible, hidden, free],
+      visible.id,
+      undefined,
+      now,
+      8,
+    );
+    expect(rows.map(r => r.canSelect)).toEqual([false, true, true]);
+  });
+
+  it("requires takeover rather than selection for a session held elsewhere", () => {
+    const elsewhere = session({ attached: true, createdAt: 100 });
+    const [row] = buildSwitcherRows([], [elsewhere], undefined, undefined, now, 8);
+    expect(row).toMatchObject({ state: "attached-elsewhere", canSelect: false, canTakeOver: true });
+  });
+
+  it("disables attach and takeover at the pane cap but keeps switching available", () => {
+    const visible = session({ createdAt: 100 });
+    const hidden = session({ createdAt: 200 });
+    const free = session({ createdAt: 300 });
+    const elsewhere = session({ attached: true, createdAt: 400 });
+    const rows = buildSwitcherRows(
+      [{ sessionId: visible.id, attached: true }, { sessionId: hidden.id, attached: true }],
+      [visible, hidden, free, elsewhere],
+      visible.id,
+      undefined,
+      now,
+      0,
+    );
+    expect(rows.map(r => r.canSelect)).toEqual([false, true, false, false]);
+    expect(rows.map(r => r.canTakeOver)).toEqual([false, false, false, false]);
+  });
+
+  it("marks the saved last-active terminal without changing its actions", () => {
+    const free = session({ createdAt: 100 });
+    const other = session({ createdAt: 200 });
+    const rows = buildSwitcherRows([], [free, other], undefined, free.id, now, 8);
+    expect(rows.map(r => r.lastActive)).toEqual([true, false]);
+    expect(rows.map(r => r.canSelect)).toEqual([true, true]);
+  });
+
+  it("offers Take over for a pane another window took over, not 'open here'", () => {
+    // The pane stays on screen with its take-back notice, but the session
+    // belongs to the window that took it. Listing it as ours would hide the
+    // only affordance that gets it back — and would route Kill down the
+    // local-pane path, which never sends a DELETE.
+    const taken = session({ attached: true, createdAt: 100 });
+    const rows = buildSwitcherRows(
+      [{ sessionId: taken.id, attached: false }],
+      [taken],
+      undefined,
+      undefined,
+      now,
+      8,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      sessionId: taken.id,
+      state: "attached-elsewhere",
+      canSelect: false,
+      canTakeOver: true,
+    });
+  });
+
+  it("allows reclaiming a parked pane at the cap, where replacing costs no slot", () => {
+    // At the cap the parked pane IS the slot the reclaim needs, so gating it
+    // on spare capacity would strand it: in touch mode its own take-back
+    // notice is hidden too whenever it is not the active pane.
+    const taken = session({ attached: true, createdAt: 100 });
+    const other = session({ attached: false, createdAt: 200 });
+    const rows = buildSwitcherRows(
+      [{ sessionId: taken.id, attached: false }],
+      [taken, other],
+      undefined,
+      undefined,
+      now,
+      0,
+    );
+    const takenRow = rows.find(row => row.sessionId === taken.id);
+    expect(takenRow).toMatchObject({ state: "attached-elsewhere", canTakeOver: true });
+    // An unrelated session still costs a slot we do not have.
+    expect(rows.find(row => row.sessionId === other.id)).toMatchObject({ canSelect: false });
+  });
+
+  it("does not double-list a parked pane whose session went detached", () => {
+    const parked = session({ attached: false, createdAt: 100 });
+    const rows = buildSwitcherRows(
+      [{ sessionId: parked.id, attached: false }],
+      [parked],
+      undefined,
+      undefined,
+      now,
+      8,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ state: "detached", canSelect: true });
+  });
+
+  it("keeps a pane whose session left inventory on the list", () => {
+    const ghost = { sessionId: "77777777-7777-4777-8777-777777777777", attached: true };
+    const rows = buildSwitcherRows([ghost], [], ghost.sessionId, undefined, now, 8);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ state: "visible", label: "shell", age: "" });
+  });
+
+  it("labels ages from the session's creation time", () => {
+    const free = session({ createdAt: now - 5 * 60_000 });
+    const [row] = buildSwitcherRows([], [free], undefined, undefined, now, 8);
+    expect(row!.age).toBe("5m ago");
+  });
+
+  it("returns nothing when the window holds no panes and inventory is empty", () => {
+    expect(buildSwitcherRows([], [], undefined, undefined, now, 8)).toEqual([]);
+  });
+});
+
+describe("parkedPanesToSweep", () => {
+  const gone = { id: "pane-1", sessionId: "s-gone", parked: true };
+  const alive = { id: "pane-2", sessionId: "s-alive", parked: true };
+  const mine = { id: "pane-3", sessionId: "s-mine", parked: false };
+
+  it("sweeps a parked pane whose session left inventory", () => {
+    expect(parkedPanesToSweep([gone, alive], [session({ id: "s-alive" })])).toEqual(["pane-1"]);
+  });
+
+  it("never sweeps a pane this window still holds", () => {
+    expect(parkedPanesToSweep([mine], [])).toEqual([]);
+  });
+
+  it("sweeps NOTHING when the inventory read failed", () => {
+    // The dangerous case: a failed read looks exactly like "no sessions
+    // exist". Acting on it would delete panes whose PTYs are alive in another
+    // window, and taking the last one closes the panel and drops its record.
+    expect(parkedPanesToSweep([gone, alive], null)).toEqual([]);
+  });
+
+  it("distinguishes a genuinely empty inventory from a failed read", () => {
+    expect(parkedPanesToSweep([gone, alive], [])).toEqual(["pane-1", "pane-2"]);
   });
 });
 
