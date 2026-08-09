@@ -376,6 +376,75 @@ test.describe("touch terminal switcher", () => {
     await page2.close();
   });
 
+  // The "a failed inventory read must not sweep parked panes" rule is pinned by
+  // `parkedPanesToSweep` in picker.test.ts rather than here. An E2E cannot
+  // reach it: uatu registers a pass-through service worker, and Playwright's
+  // page.route does not intercept fetches a service worker mediates, so the
+  // aborted-request version of this test silently exercised a healthy read and
+  // passed against the bug.
+
+  test("a collision on the active pane never blanks the Terminal tab", async ({
+    page,
+    context,
+    request,
+  }) => {
+    await bootTouchTerminal(page, request);
+    const staged = await stageSessions(page, 2);
+
+    // Window 1 holds both; the newest is the active one.
+    await page.locator("#touch-tab-terminal").click();
+    await expect(page.locator(".terminal-pane")).toHaveCount(2, { timeout: 10000 });
+    await expect(page.locator(".terminal-pane[data-active]")).toHaveAttribute(
+      "data-session-id",
+      staged[1]!,
+    );
+    await expect
+      .poll(
+        async () =>
+          page.evaluate(async () => {
+            const response = await fetch("/api/terminal/sessions");
+            const body = (await response.json()) as {
+              sessions: Array<{ attached: boolean }>;
+            };
+            return body.sessions.filter(session => session.attached).length;
+          }),
+        { timeout: 10000 },
+      )
+      .toBe(2);
+
+    // Window 2 takes the ACTIVE session away, so window 1's collision
+    // reconciliation runs against the pane holding the active slot.
+    const page2 = await context.newPage();
+    await page2.goto("/");
+    await expect(page2.locator("#connection-state .connection-label")).toHaveText("Connected");
+    await page2.locator("#touch-tab-terminal").click();
+    await expect(page2.locator("#terminal-switcher")).toBeVisible({ timeout: 10000 });
+    await page2
+      .locator(`.terminal-switcher-row[data-session-id="${staged[1]!}"] .terminal-switcher-takeover`)
+      .click();
+    await expect(page2.locator(".terminal-pane-host .xterm").first()).toBeVisible({
+      timeout: 10000,
+    });
+
+    // Reload window 1. Restore replays both persisted records; the one window
+    // 2 now holds is refused, which is the collision path — distinct from
+    // being taken over, which parks the pane in place. The refused record is
+    // the one that held the active slot.
+    await page.reload();
+    await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
+
+    // Touch mode shows only the pane carrying data-active, so leaving none
+    // active blanks the tab while a live terminal sits hidden behind it.
+    await expect(page.locator(".terminal-pane[data-active]")).toHaveCount(1, { timeout: 10000 });
+    await expect(page.locator(".terminal-pane[data-active]")).toHaveAttribute(
+      "data-session-id",
+      staged[0]!,
+    );
+    await expect(page.locator(".terminal-pane:visible")).toHaveCount(1);
+
+    await page2.close();
+  });
+
   test("the paste-token form stays visible in touch mode", async ({ page, context, request }) => {
     await bootTouchTerminal(page, request);
 

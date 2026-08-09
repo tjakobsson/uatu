@@ -3,6 +3,7 @@ import { describe, expect, it } from "bun:test";
 import {
   buildSwitcherRows,
   formatSessionAge,
+  parkedPanesToSweep,
   pickerCandidates,
   resolveActiveSessionId,
   resolveSessionPlan,
@@ -276,6 +277,31 @@ describe("buildSwitcherRows", () => {
 
   it("returns nothing when the window holds no panes and inventory is empty", () => {
     expect(buildSwitcherRows([], [], undefined, undefined, now, 8)).toEqual([]);
+  });
+});
+
+describe("parkedPanesToSweep", () => {
+  const gone = { id: "pane-1", sessionId: "s-gone", parked: true };
+  const alive = { id: "pane-2", sessionId: "s-alive", parked: true };
+  const mine = { id: "pane-3", sessionId: "s-mine", parked: false };
+
+  it("sweeps a parked pane whose session left inventory", () => {
+    expect(parkedPanesToSweep([gone, alive], [session({ id: "s-alive" })])).toEqual(["pane-1"]);
+  });
+
+  it("never sweeps a pane this window still holds", () => {
+    expect(parkedPanesToSweep([mine], [])).toEqual([]);
+  });
+
+  it("sweeps NOTHING when the inventory read failed", () => {
+    // The dangerous case: a failed read looks exactly like "no sessions
+    // exist". Acting on it would delete panes whose PTYs are alive in another
+    // window, and taking the last one closes the panel and drops its record.
+    expect(parkedPanesToSweep([gone, alive], null)).toEqual([]);
+  });
+
+  it("distinguishes a genuinely empty inventory from a failed read", () => {
+    expect(parkedPanesToSweep([gone, alive], [])).toEqual(["pane-1", "pane-2"]);
   });
 });
 

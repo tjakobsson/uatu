@@ -16,6 +16,7 @@ import type { TerminalClipboardPolicy } from "../shared/types";
 import {
   buildSwitcherRows,
   formatSessionAge,
+  parkedPanesToSweep,
   pickerCandidates,
   resolveActiveSessionId,
   resolveSessionPlan,
@@ -831,23 +832,29 @@ export function setupTerminalPanel(
     return entry;
   }
 
-  async function fetchSessionInventory(): Promise<TerminalSessionInfo[]> {
+  // `null` means the read FAILED — network error, non-2xx, unparseable body.
+  // That is deliberately distinct from an empty array: "the server says there
+  // are no sessions" and "we could not ask" look identical otherwise, and any
+  // caller that acts destructively on the answer would treat a transient blip
+  // as proof that every session is gone.
+  async function fetchSessionInventory(): Promise<TerminalSessionInfo[] | null> {
     try {
       const token = getToken();
       const url = token
         ? appUrl(`/api/terminal/sessions?t=${encodeURIComponent(token)}`)
         : appUrl("/api/terminal/sessions");
       const response = await fetch(url, { method: "GET" });
-      if (!response.ok) return [];
+      if (!response.ok) return null;
       const body = (await response.json()) as { sessions?: TerminalSessionInfo[] };
-      const sessions = Array.isArray(body.sessions) ? body.sessions : [];
+      if (!Array.isArray(body.sessions)) return null;
+      const sessions = body.sessions;
       if (lastPtyId && !sessions.some(session => session.id === lastPtyId)) {
         lastPtyId = undefined;
         persistPersonalWorkspaceState({ lastPtyId: null });
       }
       return sessions;
     } catch {
-      return [];
+      return null;
     }
   }
 
@@ -959,7 +966,11 @@ export function setupTerminalPanel(
   // through to a fresh pane, keeping the zero-friction default.
   async function addPaneInteractive(): Promise<void> {
     if (panes.size >= TERMINAL_MAX_PANES) return;
-    const inventory = await fetchSessionInventory();
+    // A failed read falls through to the fresh-shell path, as it always has:
+    // the user asked for a terminal and we cannot prove one already exists.
+    // Nothing here is destructive, so the failure needs no special handling
+    // beyond not pretending the empty list is authoritative.
+    const inventory = (await fetchSessionInventory()) ?? [];
     // The await yields: bail if the panel closed or filled up meanwhile.
     if (panel!.hasAttribute("hidden") || panes.size >= TERMINAL_MAX_PANES) return;
     const plan = resolveSessionPlan(
@@ -1205,7 +1216,11 @@ export function setupTerminalPanel(
   // `openSwitcher`'s job.
   async function renderSwitcher(known?: TerminalSessionInfo[]): Promise<void> {
     if (!switcherEl || !switcherOpen) return;
-    const inventory = known ?? await fetchSessionInventory();
+    const fetched = known ?? await fetchSessionInventory();
+    // A failed read still renders — the user's own panes are worth listing —
+    // but `fetched` (null on failure) is what the sweep below consults, so a
+    // blip is never mistaken for authority about what exists.
+    const inventory = fetched ?? [];
     // The await yields. A dismissal, a panel close, or a tab switch during the
     // fetch must win: repainting here would resurrect a sheet the user already
     // closed, or paint one into a surface that is no longer on screen.
@@ -1223,12 +1238,19 @@ export function setupTerminalPanel(
     // the natural place to notice. Matched on the take-back notice rather than
     // on `!isAttached()` alone, so a pane still completing its connection is
     // never swept.
-    const liveSessionIds = new Set(inventory.map(session => session.id));
-    for (const entry of Array.from(panes.values())) {
-      const parkedByTakeover = entry.element.querySelector(".terminal-taken") !== null;
-      if (parkedByTakeover && !liveSessionIds.has(entry.record.sessionId)) {
-        removePane(entry.record.id);
-      }
+    // `parkedPanesToSweep` owns the "is this safe to destroy" decision,
+    // including refusing to act on a failed read. Parked-ness is read from the
+    // take-back notice rather than `!isAttached()` alone, so a pane still
+    // completing its connection is never swept.
+    for (const id of parkedPanesToSweep(
+      Array.from(panes.values(), entry => ({
+        id: entry.record.id,
+        sessionId: entry.record.sessionId,
+        parked: entry.element.querySelector(".terminal-taken") !== null,
+      })),
+      fetched,
+    )) {
+      removePane(id);
     }
     // Emptying the pane map hides the panel, which closes this sheet.
     if (!switcherOpen || !terminalSurfaceShowing(panel!)) {
@@ -1516,7 +1538,17 @@ export function setupTerminalPanel(
     }
     panes.delete(id);
     rebuildPanesContainer();
-    if (activePaneId === id) activePaneId = null;
+    // Hand the active slot to a survivor rather than nulling it. Touch mode
+    // shows the pane carrying `data-active` and hides the rest, so leaving no
+    // pane active blanks the Terminal tab while live terminals sit hidden
+    // behind it — reachable whenever a restore collides on the pane that
+    // happened to be active.
+    if (activePaneId === id) {
+      const survivor = Array.from(panes.values()).sort(
+        (a, b) => a.record.createdAt - b.record.createdAt,
+      )[0];
+      setActivePane(survivor ? survivor.record.id : null);
+    }
     persistState();
     void addPaneInteractive();
   }

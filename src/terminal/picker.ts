@@ -177,6 +177,34 @@ export function buildSwitcherRows(
   return [...mine, ...detached, ...elsewhere];
 }
 
+// A pane as the sweep needs to see it: its window-local id, the resource it
+// references, and whether it is parked (its session taken over by another
+// client, so this window holds a record but not the resource).
+export type SweepCandidate = {
+  id: string;
+  sessionId: string;
+  parked: boolean;
+};
+
+// Which parked panes reference a session that no longer exists. Such a pane can
+// never come back — no socket remains to be closed, so nothing else notices —
+// and it would sit invisible in touch mode holding a pane-cap slot.
+//
+// `inventory` is null when the read FAILED, and that case returns nothing on
+// purpose. A failed read reports no sessions, which is shape-identical to "all
+// your sessions are gone": sweeping on it would destroy panes whose PTYs are
+// alive and well in another window, and taking the last one closes the panel
+// and drops its persisted record too. Destroying local state requires an
+// authoritative answer, not merely an answer-shaped one.
+export function parkedPanesToSweep(
+  panes: SweepCandidate[],
+  inventory: TerminalSessionInfo[] | null,
+): string[] {
+  if (inventory === null) return [];
+  const live = new Set(inventory.map(session => session.id));
+  return panes.filter(pane => pane.parked && !live.has(pane.sessionId)).map(pane => pane.id);
+}
+
 // Compact age label for picker rows. Coarse on purpose — it orients ("that
 // htop from this morning"), it doesn't measure.
 export function formatSessionAge(createdAt: number, now: number): string {
