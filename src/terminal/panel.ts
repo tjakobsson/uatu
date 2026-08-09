@@ -1966,6 +1966,13 @@ export function setupTerminalPanel(
     if (touchModeNow() && activeTab() === "terminal" && panel!.hasAttribute("hidden")) {
       setActiveTab("preview");
     }
+    // A mode flip can hide the terminal without a tab change: the keybar is
+    // coarse-pointer-gated, so an iPad in desktop layout can open the switcher
+    // while the persisted touch tab is Files or Preview, and flipping to touch
+    // then hides the panel by CSS alone — the tab-change dismissal never runs.
+    // Left open, the stale sheet would reappear unbidden on the way back to
+    // the Terminal tab.
+    if (!terminalSurfaceShowing(panel!)) dismissSwitcher();
     applyDockToDom();
     applyDisplayModeToDom();
     requestAnimationFrame(() => fitAll());

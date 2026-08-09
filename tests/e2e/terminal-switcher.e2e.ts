@@ -263,6 +263,41 @@ test.describe("touch terminal switcher", () => {
     await expect(page.locator(switchKey)).toHaveAttribute("aria-expanded", "false");
   });
 
+  test("a mode flip that hides the terminal closes the switcher too", async ({
+    page,
+    request,
+  }) => {
+    await bootTouchTerminal(page, request);
+    await stageSessions(page, 1);
+
+    await page.locator("#touch-tab-terminal").click();
+    await expect(page.locator(".terminal-pane")).toHaveCount(1, { timeout: 10000 });
+
+    // Park the persisted touch tab on Files, then switch to desktop layout.
+    // The keybar is coarse-pointer-gated, not mode-gated, so the switcher is
+    // still reachable from the docked desktop terminal.
+    await page.locator("#touch-tab-files").click();
+    await page.locator("#ui-mode-toggle").click();
+    await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "desktop");
+    await page.locator(switchKey).click();
+    await expect(page.locator("#terminal-switcher")).toBeVisible();
+
+    // The sheet's backdrop covers only the panel, so the sidebar's layout
+    // toggle stays clickable around it. Flipping back to touch hides the
+    // terminal by CSS alone — the persisted tab is Files, so no tab change
+    // fires and nothing else would dismiss the sheet.
+    await page.locator("#ui-mode-toggle").click();
+    await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
+    await expect(page.locator("html")).toHaveAttribute("data-active-tab", "files");
+
+    // Returning to the terminal shows the terminal, not a stale sheet.
+    await page.locator("#touch-tab-terminal").click();
+    await expect(page.locator("html")).toHaveAttribute("data-active-tab", "terminal");
+    await expect(page.locator("#terminal-switcher")).toBeHidden();
+    await expect(page.locator(".terminal-pane:visible")).toHaveCount(1);
+    await expect(page.locator(switchKey)).toHaveAttribute("aria-expanded", "false");
+  });
+
   test("taking a session back replaces the parked pane instead of duplicating it", async ({
     page,
     context,
