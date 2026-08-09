@@ -10,8 +10,11 @@ import {
   attachWatcherCrashGuard,
   buildWatcherIgnorePredicate,
   canSetFileScope,
+  createRefreshScheduler,
   createStatePayload,
   createWatchSession,
+  REFRESH_DEBOUNCE_MS,
+  REFRESH_MAX_WAIT_MS,
 } from "./watch-session";
 
 const tempDirectories: string[] = [];
@@ -282,6 +285,119 @@ describe("watchSession scope", () => {
     } finally {
       await session.stop();
     }
+  });
+});
+
+// A deterministic replacement for Date.now/setTimeout: timers fire in
+// timestamp order as the clock is advanced, with `now` reflecting each
+// timer's due time while its callback runs.
+function createFakeClock() {
+  let now = 0;
+  let nextId = 1;
+  const timers = new Map<number, { at: number; fn: () => void }>();
+
+  return {
+    clock: {
+      now: () => now,
+      setTimer(fn: () => void, delayMs: number) {
+        const id = nextId++;
+        timers.set(id, { at: now + delayMs, fn });
+        return id as unknown as ReturnType<typeof setTimeout>;
+      },
+      clearTimer(timer: ReturnType<typeof setTimeout>) {
+        timers.delete(timer as unknown as number);
+      },
+    },
+    advanceTo(target: number) {
+      for (;;) {
+        const due = [...timers.entries()]
+          .filter(([, timer]) => timer.at <= target)
+          .sort(([, a], [, b]) => a.at - b.at)[0];
+        if (!due) {
+          break;
+        }
+        timers.delete(due[0]);
+        now = due[1].at;
+        due[1].fn();
+      }
+      now = target;
+    },
+  };
+}
+
+describe("createRefreshScheduler", () => {
+  test("a short burst that ends before the debounce elapses fires exactly once", () => {
+    const { clock, advanceTo } = createFakeClock();
+    const fires: Array<{ at: number; changedId: string | null }> = [];
+    const scheduler = createRefreshScheduler(
+      changedId => fires.push({ at: clock.now(), changedId }),
+      clock,
+    );
+
+    for (const at of [0, 100, 200]) {
+      advanceTo(at);
+      scheduler.schedule(`file-${at}`);
+    }
+    advanceTo(1000);
+
+    expect(fires).toEqual([{ at: 200 + REFRESH_DEBOUNCE_MS, changedId: "file-200" }]);
+  });
+
+  test("a sustained sub-debounce event stream refreshes within the max-wait bound", () => {
+    const { clock, advanceTo } = createFakeClock();
+    const fires: Array<{ at: number; changedId: string | null }> = [];
+    const scheduler = createRefreshScheduler(
+      changedId => fires.push({ at: clock.now(), changedId }),
+      clock,
+    );
+
+    // Events every 100 ms for 5 s — each one faster than the 150 ms trailing
+    // debounce, so without the cap no refresh would ever fire mid-stream.
+    let batchStartedAt: number | null = null;
+    const batchStarts: number[] = [];
+    let fired = 0;
+    for (let at = 0; at < 5000; at += 100) {
+      advanceTo(at);
+      if (fires.length > fired) {
+        fired = fires.length;
+        batchStartedAt = null;
+      }
+      if (batchStartedAt === null) {
+        batchStartedAt = at;
+        batchStarts.push(at);
+      }
+      scheduler.schedule(`file-${at}`);
+    }
+    advanceTo(10_000);
+
+    // Two capped refreshes during the churn, one trailing refresh after it.
+    expect(fires.map(fire => fire.at)).toEqual([
+      REFRESH_MAX_WAIT_MS,
+      2 * REFRESH_MAX_WAIT_MS,
+      4900 + REFRESH_DEBOUNCE_MS,
+    ]);
+    // Every refresh lands within the bound of its batch's first event.
+    for (const [index, fire] of fires.entries()) {
+      expect(fire.at - batchStarts[index]!).toBeLessThanOrEqual(REFRESH_MAX_WAIT_MS);
+    }
+    // Last-writer-wins nomination is preserved across the capped fires.
+    expect(fires.map(fire => fire.changedId)).toEqual(["file-1900", "file-3900", "file-4900"]);
+  });
+
+  test("cancel discards the pending timer and nomination", () => {
+    const { clock, advanceTo } = createFakeClock();
+    const fires: Array<string | null> = [];
+    const scheduler = createRefreshScheduler(changedId => fires.push(changedId), clock);
+
+    scheduler.schedule("file-a");
+    scheduler.cancel();
+    advanceTo(10_000);
+    expect(fires).toEqual([]);
+
+    // A schedule after cancel starts a fresh batch with a fresh nomination.
+    scheduler.schedule(null);
+    advanceTo(20_000);
+    expect(fires).toEqual([null]);
   });
 });
 

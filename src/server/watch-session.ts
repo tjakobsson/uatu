@@ -153,6 +153,75 @@ export function attachWatcherCrashGuard(emitter: NodeJS.EventEmitter): void {
   });
 }
 
+export const REFRESH_DEBOUNCE_MS = 150;
+// Upper bound on how long a sustained event stream may defer a refresh. A
+// trailing debounce alone lets sub-150 ms event cadences postpone the rescan
+// indefinitely; the cap guarantees bounded staleness while still letting
+// normal bursts (save storms, git checkout) coalesce. A robustness bound,
+// not a tunable — intentionally not configurable.
+export const REFRESH_MAX_WAIT_MS = 2000;
+
+type RefreshSchedulerClock = {
+  now(): number;
+  setTimer(fn: () => void, delayMs: number): ReturnType<typeof setTimeout>;
+  clearTimer(timer: ReturnType<typeof setTimeout>): void;
+};
+
+const realClock: RefreshSchedulerClock = {
+  now: () => Date.now(),
+  setTimer: (fn, delayMs) => setTimeout(fn, delayMs),
+  clearTimer: timer => clearTimeout(timer),
+};
+
+// Trailing debounce with a max-wait cap. One timer: on every event the timer
+// is re-armed, but its delay is clamped so it never fires later than
+// `batchStartedAt + REFRESH_MAX_WAIT_MS`, where the batch starts at the first
+// event after the previous fire. A parallel max-wait timeout was rejected in
+// design — two timers firing near-simultaneously would need dedup guarding.
+export function createRefreshScheduler(
+  fire: (changedId: string | null) => void,
+  clock: RefreshSchedulerClock = realClock,
+) {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let pendingChangedId: string | null = null;
+  let batchStartedAt: number | null = null;
+
+  return {
+    schedule(changedId: string | null) {
+      if (changedId) {
+        pendingChangedId = changedId;
+      }
+
+      const now = clock.now();
+      if (batchStartedAt === null) {
+        batchStartedAt = now;
+      }
+
+      if (timer) {
+        clock.clearTimer(timer);
+      }
+
+      const deadline = batchStartedAt + REFRESH_MAX_WAIT_MS;
+      const delay = Math.max(0, Math.min(REFRESH_DEBOUNCE_MS, deadline - now));
+      timer = clock.setTimer(() => {
+        timer = null;
+        batchStartedAt = null;
+        const nextChangedId = pendingChangedId;
+        pendingChangedId = null;
+        fire(nextChangedId);
+      }, delay);
+    },
+    cancel() {
+      if (timer) {
+        clock.clearTimer(timer);
+        timer = null;
+      }
+      batchStartedAt = null;
+      pendingChangedId = null;
+    },
+  };
+}
+
 export type WatchSession = ReturnType<typeof createWatchSession>;
 
 export function createWatchSession(
@@ -179,8 +248,6 @@ export function createWatchSession(
     "last-commit": [],
   };
   let reconcileTimer: ReturnType<typeof setInterval> | null = null;
-  let refreshTimer: ReturnType<typeof setTimeout> | null = null;
-  let pendingChangedId: string | null = null;
   const subscribers = new Set<{ controller: EventController; context: WatchContext }>();
   const matcherCache = new Map<string, IgnoreMatcher>();
 
@@ -299,23 +366,15 @@ export function createWatchSession(
     }
   };
 
+  const refreshScheduler = createRefreshScheduler(nextChangedId => {
+    void refresh(nextChangedId).catch(error => {
+      console.error(`uatu: failed to refresh state: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  });
+
   const scheduleRefresh = (changedId: string | null) => {
     metrics?.inc("refresh.scheduled_total");
-    if (changedId) {
-      pendingChangedId = changedId;
-    }
-
-    if (refreshTimer) {
-      clearTimeout(refreshTimer);
-    }
-
-    refreshTimer = setTimeout(() => {
-      const nextChangedId = pendingChangedId;
-      pendingChangedId = null;
-      void refresh(nextChangedId).catch(error => {
-        console.error(`uatu: failed to refresh state: ${error instanceof Error ? error.message : String(error)}`);
-      });
-    }, 150);
+    refreshScheduler.schedule(changedId);
   };
 
   const handleWatcherEvent = (eventName: string, filePath: string) => {
@@ -387,9 +446,7 @@ export function createWatchSession(
       }, 5000);
     },
     stop() {
-      if (refreshTimer) {
-        clearTimeout(refreshTimer);
-      }
+      refreshScheduler.cancel();
 
       if (reconcileTimer) {
         clearInterval(reconcileTimer);
