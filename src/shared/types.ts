@@ -15,7 +15,7 @@ export type RootGroup = {
   path: string;
   docs: DocumentMeta[];
   // Number of files filtered by the user-controlled ignore matcher
-  // (`.uatu.json tree.exclude` and `.gitignore`). Excludes the built-in
+  // (`.uatu.json ignore.exclude` and `.gitignore`). Excludes the built-in
   // directory denylist — those are infrastructure, not user choices, and we
   // never recurse into them so we cannot count their contents anyway.
   hiddenCount: number;
@@ -149,23 +149,6 @@ export type RepositorySnapshot = {
 
 export type TerminalAvailability = "enabled" | "disabled";
 
-// Policy for bridging application-initiated OSC 52 copy sequences to the
-// host clipboard. `notify` writes and shows a toast, `confirm` requires a
-// click on the toast's Copy button, `silent` writes without feedback, `off`
-// leaves OSC 52 unhandled. The bridge is write-only in every mode — clipboard
-// read queries are never answered.
-export type TerminalClipboardPolicy = "notify" | "confirm" | "silent" | "off";
-
-export type TerminalConfigPayload = {
-  fontFamily?: string;
-  fontSize?: number;
-  clipboard?: TerminalClipboardPolicy;
-};
-
-export type MonoConfigPayload = {
-  fontFamily?: string;
-};
-
 export type StatePayload = {
   roots: RootGroup[];
   repositories: RepositorySnapshot[];
@@ -184,8 +167,6 @@ export type StatePayload = {
   // can notice those documents changing.
   unscopedFingerprint?: string;
   terminal?: TerminalAvailability;
-  terminalConfig?: TerminalConfigPayload;
-  monoConfig?: MonoConfigPayload;
 };
 
 type ModeStorage = {

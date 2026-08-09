@@ -6,7 +6,6 @@
 import { chooseSelectionForFileEvent } from "./follow";
 import { applyProjectIdentity } from "./identity";
 import { findDocumentById, syncStateGeneration } from "./storage";
-import { applyMonoConfig } from "../mono/apply";
 import { signalActiveDocumentUpdated } from "../preview/file-facts-strip";
 import { documentDiffCache, forgetDocumentCache, loadDocument } from "../preview/mount";
 import { renderEmptyPreview } from "../preview/empty";
@@ -78,7 +77,6 @@ export function connectEvents() {
       // deleted file pin that this client has already widened away from.
       connectEvents();
     }
-    applyMonoConfig(payload.monoConfig);
     syncStateGeneration(payload.generatedAt);
 
     // A watched file changed, so displayed search results captured line
@@ -154,7 +152,6 @@ export async function refreshServerStateForContext(): Promise<StatePayload> {
   if (!response.ok) throw new Error(`state refresh failed: ${response.status}`);
   const payload = (await response.json()) as StatePayload;
   applyServerSnapshot(payload);
-  applyMonoConfig(payload.monoConfig);
   syncStateGeneration(payload.generatedAt);
   renderBuildBadge(payload.build);
   renderSidebar();

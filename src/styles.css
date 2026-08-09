@@ -37,8 +37,7 @@
    other surface. Each selector below matches the specificity of the
    corresponding rule in github-markdown-css (`.markdown-body code` is
    0,1,1; `.markdown-body pre code` is 0,1,2; etc.), so source order —
-   we sit after the @import — wins each face-off. No !important needed;
-   users override via `.uatu.json mono.fontFamily`. */
+   we sit after the @import — wins each face-off. No !important needed. */
 .markdown-body pre,
 .markdown-body code,
 .markdown-body pre code,
@@ -105,11 +104,10 @@
 
   /* Shared monospace face for every mono surface in the app — code blocks,
      source view, diff view, file paths, build badge, etc.
-     Default is the bundled Hack Nerd Font Mono (@font-face above): a
-     local install short-circuits the network where the browser allows
-     it, otherwise the vendored woff2 is fetched. Users override globally
-     via `.uatu.json mono.fontFamily`; the client writes that value here
-     at boot. */
+     The bundled Hack Nerd Font Mono (@font-face above) is the single
+     source: a local install short-circuits the network where the browser
+     allows it, otherwise the vendored woff2 is fetched. No configuration
+     overrides this variable. */
   --mono-font-family:
     "Hack Nerd Font Mono",
     ui-monospace,
@@ -122,8 +120,7 @@
      hook. The diff renderer lives in a Web Component (`<diffs-container>`)
      with its own shadow DOM and an SF-Mono-style fallback baked in;
      custom properties cascade through the shadow boundary, so setting
-     this here is enough to make the diff body track our shared mono face
-     (and any `.uatu.json mono.fontFamily` override). */
+     this here is enough to make the diff body track our shared mono face. */
   --diffs-font-family: var(--mono-font-family);
 
   /* Embedded terminal palette. The light-on-dark scheme stays consistent
@@ -132,10 +129,8 @@
   --terminal-fg: #e6edf3;
   --terminal-cursor: #e6edf3;
   --terminal-selection-bg: rgba(28, 168, 167, 0.4);
-  /* Terminal font cascade: by default falls through to `--mono-font-family`,
-     so a global `mono.fontFamily` override propagates to the terminal too.
-     The client narrows this back down by writing `terminal.fontFamily` here
-     when set — that's the in-panel override that wins over mono. */
+  /* Terminal font cascade: falls through to `--mono-font-family`, so the
+     terminal tracks the same bundled face as every other mono surface. */
   --terminal-font-family: var(--mono-font-family);
   --terminal-ansi-black: #1f2937;
   --terminal-ansi-red: #f87171;
@@ -4367,8 +4362,8 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
    ========================================================================== */
 
 /* Runtime size steppers (terminal font, preview text): coarse pointers
-   only — desktop has browser zoom and .uatu.json, and its chrome stays
-   clean. Same CSS-owned visibility recipe as the terminal keybar. */
+   only — desktop has browser zoom, and its chrome stays clean. Same
+   CSS-owned visibility recipe as the terminal keybar. */
 .terminal-font-button,
 .text-size-action {
   display: none;

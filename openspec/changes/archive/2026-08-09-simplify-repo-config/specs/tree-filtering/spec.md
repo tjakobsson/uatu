@@ -1,22 +1,6 @@
-# tree-filtering Specification
+# tree-filtering — delta
 
-## Purpose
-TBD - created by syncing change replace-tree-with-pierre. Update Purpose after archive.
-## Requirements
-### Requirement: Apply built-in defaults that hide common build/dependency directories
-The system SHALL maintain a built-in set of default exclude patterns that are applied to every watched root regardless of project configuration. The defaults MUST cover at minimum the directory names `node_modules`, `.git`, `dist`, `build`, `.next`, `.turbo`, `.cache`, `coverage`, and `.DS_Store`. The defaults SHALL apply at any depth (matching the gitignore-compatible directory semantics). The defaults MUST NOT be silently extensible at runtime; changes to the default list are an intentional uatu decision and MUST be encoded in source. User patterns from `.uatu.json ignore.exclude` are additive on top of the defaults — i.e. user patterns can hide additional files, but the defaults always apply.
-
-#### Scenario: `node_modules/` is hidden in a project with no `.uatu.json`
-- **WHEN** the watch root contains `node_modules/` and no `.uatu.json` exists
-- **THEN** the sidebar tree does not list `node_modules/` or any of its descendants
-
-#### Scenario: A nested `.git/` directory is hidden
-- **WHEN** the watch root contains `tools/repos/example/.git/`
-- **THEN** the sidebar tree does not list that nested `.git/` directory
-
-#### Scenario: Defaults still apply when `.uatu.json` is silent on excludes
-- **WHEN** the watch root has a `.uatu.json` whose `ignore.exclude` field is empty or absent
-- **THEN** the built-in defaults still hide `node_modules/`, `dist/`, `build/`, etc.
+## ADDED Requirements
 
 ### Requirement: Apply user-provided patterns from `.uatu.json ignore.exclude`
 The system SHALL read the watch root's `.uatu.json` at session start and apply patterns listed in `ignore.exclude` (a string array of gitignore-compatible patterns) as additional excludes on top of the built-in defaults and `.gitignore`. The patterns MUST support gitignore-compatible syntax including `!` negation. The system SHALL re-read `.uatu.json` when the file changes on disk so edits take effect on the next refresh without requiring the session to be restarted. Patterns in `ignore.exclude` MUST take precedence over patterns inherited from `.gitignore`, mirroring the precedence the retired `.uatuignore` previously had over `.gitignore`. When a watched root is a single file path rather than a directory, `.uatu.json ignore.exclude` SHALL NOT be consulted for that root. Per-directory nested `.uatu.json` files within the watch root SHALL be ignored in this version. Files filtered by `ignore.exclude` MUST NOT appear in the sidebar tree, MUST NOT be eligible to change the active preview under follow mode, and MUST NOT be served by the static-fallback handler.
@@ -81,3 +65,12 @@ The system SHALL honor `.gitignore` at each watch root by default. Two opt-outs 
 - **THEN** the session emits a settings warning naming the file and the field
 - **AND** the session falls back to the default (honor `.gitignore`)
 
+## REMOVED Requirements
+
+### Requirement: Apply user-provided patterns from `.uatu.json tree.exclude`
+**Reason**: Restated over the renamed `ignore` block (`ignore.exclude`); semantics unchanged. A legacy `tree` block is silently unread like any unknown key.
+**Migration**: Rename the `tree` block to `ignore` in `.uatu.json`.
+
+### Requirement: Honor `.gitignore` by default with overrides via `.uatu.json` or CLI
+**Reason**: Restated over the renamed `ignore` block (`ignore.respectGitignore`); semantics unchanged.
+**Migration**: Rename the `tree` block to `ignore` in `.uatu.json`.

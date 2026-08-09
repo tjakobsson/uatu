@@ -75,57 +75,6 @@ When the panel attaches a PTY, the shell SHALL start with its working directory 
 - **AND** the spawned PTY's `SHELL` remains unset — uatu does not synthesize it
 - **AND** a notice naming `$SHELL` and `/bin/sh` is written into the terminal session
 
-### Requirement: Terminal honors `.uatu.json` font configuration
-The server SHALL read the optional `terminal` block from `.uatu.json` at the watch root and surface validated values via `/api/state.terminalConfig`. The browser SHALL apply `terminal.fontFamily` (string) and `terminal.fontSize` (number, 8–32) to the xterm instance when present. Invalid values SHALL be ignored with a warning printed to stderr; the rest of the block remains in effect. The terminal's default font SHALL be `var(--terminal-font-family)`, which falls through to `var(--mono-font-family)` and ultimately to the bundled Hack Nerd Font Mono face when no override is configured — so that both ASCII and Nerd Font icon glyphs render correctly out of the box in every browser (including Safari, which does not expose user-installed system fonts to web pages). A `terminal.fontFamily` value in `.uatu.json` SHALL fully override the terminal's default. When both `mono.fontFamily` and `terminal.fontFamily` are configured, `terminal.fontFamily` is the narrower override that wins inside the terminal panel; `mono.fontFamily` continues to apply to every other monospace surface.
-
-#### Scenario: Override beats the bundled default
-
-- **WHEN** `.uatu.json` contains `{"terminal": {"fontFamily": "FiraCode Nerd Font Mono", "fontSize": 14}}`
-- **AND** the user opens the terminal panel
-- **THEN** `/api/state` returns `{"terminalConfig": {"fontFamily": "FiraCode Nerd Font Mono", "fontSize": 14}}`
-- **AND** the rendered xterm instance uses `FiraCode Nerd Font Mono` (not the bundled Hack Nerd Font Mono)
-
-#### Scenario: Out-of-range fontSize is dropped with a warning
-
-- **WHEN** `.uatu.json` contains `{"terminal": {"fontSize": 9999, "fontFamily": "Hack Nerd Font Mono"}}`
-- **THEN** the server logs a warning about the invalid `fontSize`
-- **AND** `/api/state.terminalConfig` contains `fontFamily` only
-
-#### Scenario: Missing terminal block falls back to the bundled default
-
-- **WHEN** `.uatu.json` has no `terminal` block (or no `.uatu.json` exists)
-- **AND** no `mono.fontFamily` override is configured either
-- **THEN** `/api/state.terminalConfig` is absent
-- **AND** the browser renders the terminal using the bundled Hack Nerd Font Mono face (via `--terminal-font-family` → `--mono-font-family`)
-
-#### Scenario: Bundled default renders in Safari with no local Nerd Font installed
-
-- **WHEN** the user opens the terminal panel in Safari
-- **AND** no `.uatu.json terminal.fontFamily` override is set
-- **AND** the user's machine has no Nerd Font installed
-- **THEN** the terminal renders ASCII glyphs using the bundled Hack Nerd Font Mono face
-- **AND** the terminal renders the Private-Use-Area codepoint `U+E0B0` (powerline right-arrow) using a real glyph (not TOFU)
-
-#### Scenario: Bundled default renders in a clean Chromium profile
-
-- **WHEN** the user opens the terminal panel in a freshly-installed Chromium with no extra fonts
-- **AND** no `.uatu.json terminal.fontFamily` override is set
-- **THEN** the terminal renders ASCII glyphs using the bundled Hack Nerd Font Mono face
-- **AND** the terminal renders Nerd Font icon codepoints using real glyphs (not TOFU)
-
-#### Scenario: terminal.fontFamily wins over mono.fontFamily inside the panel
-
-- **WHEN** `.uatu.json` contains `{"mono": {"fontFamily": "Berkeley Mono, monospace"}, "terminal": {"fontFamily": "JetBrains Mono, monospace"}}`
-- **AND** the user opens the terminal panel
-- **THEN** the xterm instance uses `"JetBrains Mono"` (the narrower override)
-- **AND** code blocks and other non-terminal monospace surfaces use `"Berkeley Mono"`
-
-#### Scenario: Only mono.fontFamily set — terminal inherits from mono
-
-- **WHEN** `.uatu.json` contains `{"mono": {"fontFamily": "Berkeley Mono, monospace"}}` and no `terminal.fontFamily`
-- **AND** the user opens the terminal panel
-- **THEN** the xterm instance uses `"Berkeley Mono"` (inherited via `--terminal-font-family` → `--mono-font-family`)
-
 ### Requirement: Terminal is themed with the uatu ANSI dark palette
 The terminal SHALL render text using a dark ANSI 16-color palette that matches the uatu UI theme out of the box, with no required configuration. The palette SHALL be driven by CSS variables so it can be overridden centrally.
 
@@ -625,12 +574,11 @@ The `Set-Cookie` issued at promotion SHALL additionally carry a `Path` attribute
 - **THEN** each session's cookie is set with its own base path as the `Path` attribute
 - **AND** requests to one session's subtree never carry the other session's cookie
 
-
 ### Requirement: Terminal bridges OSC 52 copy sequences to the host clipboard
-Each terminal pane SHALL register an OSC 52 handler on its `xterm.js` parser (`term.parser.registerOscHandler(52, …)`) that decodes application-initiated copy sequences (`ESC ] 52 ; <selection> ; <base64-data> BEL/ST`) arriving from the PTY and writes the decoded text to the system clipboard via `navigator.clipboard.writeText`, subject to the configured clipboard policy. The bridge SHALL be write-only: when the data field is `?` (a clipboard read query), the handler SHALL NOT emit any response sequence and SHALL NOT read the clipboard. The handler SHALL honor the selection parameters `c`, `p`, and `s` (all targeting the single browser clipboard) and SHALL ignore sequences with other selection parameters, invalid base64 data, or a decoded payload larger than 100 KB. `allowProposedApi` SHALL be `true`, enabled solely because search decorations (`registerDecoration`), which terminal find uses to mark every match, are proposed API in xterm 6 and throw without it. The OSC 52 bridge itself SHALL NOT depend on any proposed API.
+Each terminal pane SHALL register an OSC 52 handler on its `xterm.js` parser (`term.parser.registerOscHandler(52, …)`) that decodes application-initiated copy sequences (`ESC ] 52 ; <selection> ; <base64-data> BEL/ST`) arriving from the PTY and writes the decoded text to the system clipboard via `navigator.clipboard.writeText`. The bridge SHALL be write-only: when the data field is `?` (a clipboard read query), the handler SHALL NOT emit any response sequence and SHALL NOT read the clipboard. The handler SHALL honor the selection parameters `c`, `p`, and `s` (all targeting the single browser clipboard) and SHALL ignore sequences with other selection parameters, invalid base64 data, or a decoded payload larger than 100 KB. `allowProposedApi` SHALL be `true`, enabled solely because search decorations (`registerDecoration`), which terminal find uses to mark every match, are proposed API in xterm 6 and throw without it. The OSC 52 bridge itself SHALL NOT depend on any proposed API.
 
 #### Scenario: TUI select-to-copy reaches the host clipboard
-- **WHEN** a program in the terminal (e.g. a mouse-mode TUI reacting to a selection) emits `ESC ] 52 ; c ; <base64 of "hello"> BEL` and the clipboard policy is `notify` or `silent`
+- **WHEN** a program in the terminal (e.g. a mouse-mode TUI reacting to a selection) emits `ESC ] 52 ; c ; <base64 of "hello"> BEL`
 - **THEN** `navigator.clipboard.writeText("hello")` is invoked
 - **AND** the host clipboard — not any container-local clipboard — receives the text, because the browser executing the write runs on the host
 
@@ -640,7 +588,7 @@ Each terminal pane SHALL register an OSC 52 handler on its `xterm.js` parser (`t
 - **AND** `navigator.clipboard.readText` is not invoked
 
 #### Scenario: Oversized payload is dropped and reported
-- **WHEN** a program emits an OSC 52 sequence whose decoded payload exceeds 100 KB and the clipboard policy is `notify` or `confirm`
+- **WHEN** a program emits an OSC 52 sequence whose decoded payload exceeds 100 KB
 - **THEN** the clipboard is not modified
 - **AND** the pane shows feedback that the copy was rejected for size
 
@@ -650,36 +598,9 @@ Each terminal pane SHALL register an OSC 52 handler on its `xterm.js` parser (`t
 - **AND** no toast is shown
 
 #### Scenario: Blocked silent write degrades to a Copy button
-- **WHEN** the clipboard policy is `notify` or `silent` and `navigator.clipboard.writeText` rejects (e.g. the browser requires user activation)
+- **WHEN** `navigator.clipboard.writeText` rejects (e.g. the browser requires user activation)
 - **THEN** the pane shows a persistent toast with a Copy control
 - **AND** activating the Copy control writes the pending text to the clipboard from within the click gesture
-
-### Requirement: OSC 52 copies are visible and policy-governed via `.uatu.json`
-The `terminal` block of `.uatu.json` SHALL accept an optional `clipboard` key with the values `notify` (default), `confirm`, `silent`, and `off`, validated with the same warn-and-fallback approach as the existing terminal font keys. Under `notify`, an accepted OSC 52 write SHALL show a transient pane-scoped toast reporting that the terminal copied N characters. Under `confirm`, the write SHALL NOT happen automatically; the toast SHALL offer a Copy control and the write SHALL occur only from its activation. Under `silent`, accepted writes SHALL show no toast. Under `off`, the OSC 52 handler SHALL NOT be registered. Rapid successive sequences SHALL coalesce so at most one toast is visible per pane.
-
-#### Scenario: Default policy notifies on copy
-- **WHEN** no `terminal.clipboard` key is configured and a valid OSC 52 copy is accepted
-- **THEN** the text is written to the clipboard
-- **AND** a transient toast in the receiving pane reports the number of characters copied
-
-#### Scenario: Confirm policy requires a user gesture
-- **WHEN** `terminal.clipboard` is `confirm` and a valid OSC 52 copy arrives
-- **THEN** the clipboard is not modified until the user activates the toast's Copy control
-- **AND** activating the control writes the pending text to the clipboard
-
-#### Scenario: Off policy leaves sequences unhandled
-- **WHEN** `terminal.clipboard` is `off` and a program emits an OSC 52 sequence
-- **THEN** no handler processes the sequence beyond xterm.js's default ignore
-- **AND** the clipboard is not modified and no toast is shown
-
-#### Scenario: Invalid policy value warns and falls back
-- **WHEN** `.uatu.json` sets `terminal.clipboard` to an unrecognized value
-- **THEN** a startup warning is surfaced alongside the existing terminal config warnings
-- **AND** the pane behaves as if the policy were `notify`
-
-#### Scenario: Rapid copies coalesce into one toast
-- **WHEN** multiple valid OSC 52 sequences arrive in quick succession under the `notify` policy
-- **THEN** at most one toast is visible in the pane, reflecting the most recent copy
 
 ### Requirement: Focusing a terminal pane makes the terminal the active surface
 
@@ -810,9 +731,8 @@ On coarse-pointer clients, the terminal keybar SHALL provide a Select action tha
 - **THEN** a bottom action bar remains fixed above the safe-area inset
 - **AND** its Done action visually replaces the normal touch navigation until the transcript closes
 
-#### Scenario: Transcript Copy is independent of OSC 52 policy
-- **WHEN** `.uatu.json` configures `terminal.clipboard` as `off`
-- **AND** the user copies selected transcript text through the native platform action
+#### Scenario: Transcript Copy is independent of the OSC 52 bridge
+- **WHEN** the user copies selected transcript text through the native platform action
 - **THEN** the selected text is copied
 - **AND** Uatu emits no OSC 52 toast or PTY input
 
@@ -994,3 +914,47 @@ On coarse-pointer devices the terminal SHALL provide a switcher sheet, opened fr
 #### Scenario: Touch mode never shows the desktop chooser
 - **WHEN** a decision that would render the desktop session chooser arises in touch mode
 - **THEN** the switcher is presented instead
+
+### Requirement: Terminal renders the bundled default font
+The terminal's font SHALL be `var(--terminal-font-family)`, which falls through to `var(--mono-font-family)` and ultimately to the bundled Hack Nerd Font Mono face — so that both ASCII and Nerd Font icon glyphs render correctly out of the box in every browser (including Safari, which does not expose user-installed system fonts to web pages). No repository configuration SHALL override the terminal font or size; `.uatu.json` carries no `terminal` block and `/api/state` carries no `terminalConfig` field.
+
+#### Scenario: Terminal renders the bundled default
+
+- **WHEN** the user opens the terminal panel
+- **THEN** the rendered xterm instance uses the bundled Hack Nerd Font Mono face (via `--terminal-font-family` → `--mono-font-family`)
+
+#### Scenario: Bundled default renders in Safari with no local Nerd Font installed
+
+- **WHEN** the user opens the terminal panel in Safari
+- **AND** the user's machine has no Nerd Font installed
+- **THEN** the terminal renders ASCII glyphs using the bundled Hack Nerd Font Mono face
+- **AND** the terminal renders the Private-Use-Area codepoint `U+E0B0` (powerline right-arrow) using a real glyph (not TOFU)
+
+#### Scenario: Bundled default renders in a clean Chromium profile
+
+- **WHEN** the user opens the terminal panel in a freshly-installed Chromium with no extra fonts
+- **THEN** the terminal renders ASCII and Nerd Font icon glyphs using the bundled face
+
+#### Scenario: A legacy terminal block is not read
+
+- **WHEN** the watch root's `.uatu.json` contains a `terminal` block with `fontFamily` or `fontSize`
+- **THEN** `/api/state` contains no `terminalConfig` field
+- **AND** the terminal renders with the bundled default face and size
+
+### Requirement: OSC 52 copies are always visible
+Accepted OSC 52 writes SHALL always be visible: each write SHALL show a transient pane-scoped toast reporting that the terminal copied N characters. Rapid successive sequences SHALL coalesce so at most one toast is visible per pane. This notify behavior is fixed — no repository configuration selects a different clipboard policy. (A per-user policy choice may return later through hub user settings; it is not configurable from `.uatu.json`.)
+
+#### Scenario: Copy notifies with a toast
+- **WHEN** a valid OSC 52 copy is accepted
+- **THEN** the text is written to the clipboard
+- **AND** a transient toast in the receiving pane reports the number of characters copied
+
+#### Scenario: Rapid copies coalesce into one toast
+- **WHEN** multiple valid OSC 52 sequences arrive in quick succession
+- **THEN** at most one toast is visible in the pane, reflecting the most recent copy
+
+#### Scenario: A legacy clipboard policy key is not read
+- **WHEN** the watch root's `.uatu.json` sets `terminal.clipboard` to any value
+- **THEN** the pane behaves with the fixed notify behavior
+- **AND** no configuration warning is emitted for the unread block
+

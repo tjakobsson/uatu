@@ -31,56 +31,11 @@ describe("createStatePayload", () => {
     expect(payload.scope).toEqual({ kind: "folder" });
   });
 
-  test("includes monoConfig when fontFamily is set", () => {
-    const payload = createStatePayload(
-      [],
-      true,
-      null,
-      { kind: "folder" },
-      [],
-      undefined,
-      undefined,
-      { fontFamily: "Berkeley Mono, monospace" },
-    );
-    expect(payload.monoConfig).toEqual({ fontFamily: "Berkeley Mono, monospace" });
-  });
-
-  test("omits monoConfig when fontFamily is unset", () => {
-    const payload = createStatePayload(
-      [],
-      true,
-      null,
-      { kind: "folder" },
-      [],
-      undefined,
-      undefined,
-      { fontFamily: undefined },
-    );
+  test("carries no config payload fields", () => {
+    // `.uatu.json` no longer carries presentation config; the payload must
+    // not resurrect the retired fields.
+    const payload = createStatePayload([], true, null, { kind: "folder" }, [], true);
     expect("monoConfig" in payload).toBe(false);
-  });
-
-  test("omits monoConfig when no monoConfig argument is passed", () => {
-    const payload = createStatePayload([], true, null, { kind: "folder" }, []);
-    expect("monoConfig" in payload).toBe(false);
-  });
-
-  test("includes terminalConfig when only clipboard is set", () => {
-    // Regression: the payload gate used to check fontFamily/fontSize only,
-    // silently dropping a `.uatu.json` that sets just `terminal.clipboard`.
-    const payload = createStatePayload(
-      [],
-      true,
-      null,
-      { kind: "folder" },
-      [],
-      true,
-      { clipboard: "confirm" },
-    );
-    expect(payload.terminalConfig).toEqual({ clipboard: "confirm" });
-  });
-
-  test("omits terminalConfig when every field is unset", () => {
-    const payload = createStatePayload([], true, null, { kind: "folder" }, [], true, {});
     expect("terminalConfig" in payload).toBe(false);
   });
 });
@@ -194,7 +149,7 @@ describe("watchSession scope", () => {
     const binary = path.join(tempDirectory, "logo.png");
     await writeFile(
       path.join(tempDirectory, ".uatu.json"),
-      JSON.stringify({ tree: { exclude: ["ignored.txt"] } }),
+      JSON.stringify({ ignore: { exclude: ["ignored.txt"] } }),
     );
     await writeFile(readme, "# Readme\n");
     await writeFile(ignored, "ignored\n");
@@ -249,7 +204,7 @@ describe("watchSession scope", () => {
     }
   });
 
-  test("editing .uatu.json tree.exclude at runtime reapplies the new patterns", async () => {
+  test("editing .uatu.json ignore.exclude at runtime reapplies the new patterns", async () => {
     const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-ignore-live-"));
     tempDirectories.push(tempDirectory);
     const readme = path.join(tempDirectory, "README.md");
@@ -257,7 +212,7 @@ describe("watchSession scope", () => {
     const uatuJson = path.join(tempDirectory, ".uatu.json");
     await writeFile(readme, "# Readme\n");
     await writeFile(lockfile, "{}\n");
-    await writeFile(uatuJson, JSON.stringify({ tree: { exclude: [] } }));
+    await writeFile(uatuJson, JSON.stringify({ ignore: { exclude: [] } }));
 
     const session = createWatchSession(
       [{ kind: "dir", absolutePath: tempDirectory }],
@@ -271,13 +226,13 @@ describe("watchSession scope", () => {
         session.getRoots().flatMap(root => root.docs).some(doc => doc.id === lockfile),
       );
 
-      await writeFile(uatuJson, JSON.stringify({ tree: { exclude: ["package-lock.json"] } }));
+      await writeFile(uatuJson, JSON.stringify({ ignore: { exclude: ["package-lock.json"] } }));
       await waitUntil(
         () => session.getRoots().flatMap(root => root.docs).every(doc => doc.id !== lockfile),
         4000,
       );
 
-      await writeFile(uatuJson, JSON.stringify({ tree: { exclude: [] } }));
+      await writeFile(uatuJson, JSON.stringify({ ignore: { exclude: [] } }));
       await waitUntil(
         () => session.getRoots().flatMap(root => root.docs).some(doc => doc.id === lockfile),
         4000,

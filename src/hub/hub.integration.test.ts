@@ -543,8 +543,8 @@ describe("hub end to end", () => {
     expect(manifestBody.start_url).toBe("/s/myproject/");
     expect(manifestBody.scope).toBe("/");
 
-    // The clipboard policy (and the rest of terminal config) rides
-    // /api/state through the proxy like any other session state.
+    // Terminal availability rides /api/state through the proxy like any
+    // other session state.
     const state = await fetch(`${origin}/s/myproject/api/state`, { headers: { cookie } });
     const payload = (await state.json()) as { terminal?: unknown };
     expect(payload).toHaveProperty("terminal");

@@ -213,19 +213,19 @@ export type Osc52Notice =
   | { kind: "pending"; text: string }
   | { kind: "oversized" };
 
-export type Osc52Policy = "notify" | "confirm" | "silent";
-
 // Build the function to register via `term.parser.registerOscHandler(52, …)`.
 // Always returns `true` (sequence consumed) synchronously; clipboard work is
 // fire-and-forget like the shortcut handlers above. There is deliberately no
 // code path here that reads the clipboard or writes a response to the PTY.
+// The notify behavior is fixed: every accepted write surfaces a toast, an
+// oversized payload reports its rejection, and a blocked write degrades to
+// a pending toast whose Copy button performs the write inside its gesture.
 export function createOsc52Handler(options: {
-  policy: Osc52Policy;
   notify: (notice: Osc52Notice) => void;
   // Injectable for tests; defaults to navigator.clipboard.
   writeText?: (text: string) => Promise<void>;
 }): (payload: string) => boolean {
-  const { policy, notify } = options;
+  const { notify } = options;
   const writeText = options.writeText ?? defaultWriteText;
 
   return payload => {
@@ -235,23 +235,18 @@ export function createOsc52Handler(options: {
       case "invalid":
         return true;
       case "oversized":
-        // `silent` opted out of feedback entirely; the others must surface
-        // the rejection so the user knows their copy did NOT happen.
-        if (policy !== "silent") notify({ kind: "oversized" });
+        // Surface the rejection so the user knows their copy did NOT happen.
+        notify({ kind: "oversized" });
         return true;
       case "copy":
-        if (policy === "confirm") {
-          notify({ kind: "pending", text: parsed.text });
-          return true;
-        }
         writeText(parsed.text)
           .then(() => {
-            if (policy === "notify") notify({ kind: "copied", chars: parsed.text.length });
+            notify({ kind: "copied", chars: parsed.text.length });
           })
           .catch(() => {
             // Gestureless writeText is rejected on Firefox/Safari (and on a
-            // blurred document anywhere). Degrade to the confirm-style toast
-            // instead of dropping the copy — even under `silent`.
+            // blurred document anywhere). Degrade to the pending toast
+            // instead of dropping the copy.
             notify({ kind: "pending", text: parsed.text });
           });
         return true;

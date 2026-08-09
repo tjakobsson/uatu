@@ -23,9 +23,6 @@ src/
 │                   app, served at /assets/fonts/, with siblings for
 │                   the upstream license texts)
 │
-├── mono/           bundled-font config and runtime application — the
-│                   `.uatu.json mono.fontFamily` loader plus the helper
-│                   that writes `--mono-font-family` on `<html>` at boot
 ├── find/           ⌘F — active-surface tracking (which surface the user is
 │                   working in, tracked from interaction, NOT from DOM focus),
 │                   the shared find bar and its pluggable engines (preview and
@@ -39,7 +36,7 @@ src/
 │                   chooser, layout (split/stacked), diff view,
 │                   mermaid trigger, anchors, image/binary fallbacks,
 │                   metadata card, code-block decorations
-├── sidebar/        the left pane — tree-view + tree-config, panes
+├── sidebar/        the left pane — tree-view, panes
 │                   shell/render, change-overview, git-log, files-filter,
 │                   search-pane (⇧⌘F project search: pane + result model +
 │                   open-and-jump); in touch mode the whole pane stack
@@ -58,7 +55,8 @@ src/
 │                   sweep: changed files, commit log, repo metadata),
 │                   language detection
 ├── render/         source → HTML (markdown, asciidoc, mermaid sanitization)
-├── ignore/         engine (.uatu.json + --no-gitignore)
+├── ignore/         engine + config (the `.uatu.json ignore` block — the
+│                   file's only block — and --no-gitignore)
 ├── hub/            `uatu hub` — self-hostable session server: config,
 │                   state-dir, registry (stable workspace slugs), backend
 │                   (SessionBackend seam + local-process impl), proxy

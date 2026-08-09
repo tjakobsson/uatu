@@ -32,9 +32,9 @@ describe("loadIgnoreMatcher", () => {
     expect(matcher.shouldIgnore("README.md")).toBe(false);
   });
 
-  test(".uatu.json tree.exclude patterns hide matching files", async () => {
+  test(".uatu.json ignore.exclude patterns hide matching files", async () => {
     const rootPath = await makeTempDir();
-    await writeUatuConfig(rootPath, { tree: { exclude: ["*.lock"] } });
+    await writeUatuConfig(rootPath, { ignore: { exclude: ["*.lock"] } });
     const matcher = await loadIgnoreMatcher({ rootPath, respectGitignore: false });
     expect(matcher.shouldIgnore("bun.lock")).toBe(true);
     expect(matcher.shouldIgnore("README.md")).toBe(false);
@@ -48,28 +48,28 @@ describe("loadIgnoreMatcher", () => {
     expect(matcher.shouldIgnore("README.md")).toBe(false);
   });
 
-  test("CLI --no-gitignore (respectGitignore: false) wins over .uatu.json tree.respectGitignore: true", async () => {
+  test("CLI --no-gitignore (respectGitignore: false) wins over .uatu.json ignore.respectGitignore: true", async () => {
     const rootPath = await makeTempDir();
     await writeFile(path.join(rootPath, ".gitignore"), "*.log\n");
-    await writeUatuConfig(rootPath, { tree: { respectGitignore: true } });
+    await writeUatuConfig(rootPath, { ignore: { respectGitignore: true } });
     const matcher = await loadIgnoreMatcher({ rootPath, respectGitignore: false });
     expect(matcher.shouldIgnore("debug.log")).toBe(false);
   });
 
-  test(".uatu.json tree.respectGitignore: false disables .gitignore when CLI is permissive", async () => {
+  test(".uatu.json ignore.respectGitignore: false disables .gitignore when CLI is permissive", async () => {
     const rootPath = await makeTempDir();
     await writeFile(path.join(rootPath, ".gitignore"), "*.log\n");
-    await writeUatuConfig(rootPath, { tree: { respectGitignore: false } });
+    await writeUatuConfig(rootPath, { ignore: { respectGitignore: false } });
     const matcher = await loadIgnoreMatcher({ rootPath, respectGitignore: true });
     expect(matcher.shouldIgnore("debug.log")).toBe(false);
     // Built-in defaults still apply.
     expect(matcher.shouldIgnore("node_modules/foo.js")).toBe(true);
   });
 
-  test(".uatu.json tree.exclude negation un-excludes something .gitignore excluded", async () => {
+  test(".uatu.json ignore.exclude negation un-excludes something .gitignore excluded", async () => {
     const rootPath = await makeTempDir();
     await writeFile(path.join(rootPath, ".gitignore"), "*.log\n");
-    await writeUatuConfig(rootPath, { tree: { exclude: ["!debug.log"] } });
+    await writeUatuConfig(rootPath, { ignore: { exclude: ["!debug.log"] } });
     const matcher = await loadIgnoreMatcher({ rootPath, respectGitignore: true });
     expect(matcher.shouldIgnore("debug.log")).toBe(false);
     expect(matcher.shouldIgnore("error.log")).toBe(true);
@@ -92,7 +92,7 @@ describe("loadIgnoreMatcher", () => {
   test("isSingleFileRoot skips .gitignore AND .uatu.json (defaults still apply)", async () => {
     const rootPath = await makeTempDir();
     await writeFile(path.join(rootPath, ".gitignore"), "secret.md\n");
-    await writeUatuConfig(rootPath, { tree: { exclude: ["*.log"] } });
+    await writeUatuConfig(rootPath, { ignore: { exclude: ["*.log"] } });
     const matcher = await loadIgnoreMatcher({
       rootPath,
       respectGitignore: true,
@@ -106,7 +106,7 @@ describe("loadIgnoreMatcher", () => {
 
   test("toChokidarIgnored converts absolute paths and never ignores the watched root itself", async () => {
     const rootPath = await makeTempDir();
-    await writeUatuConfig(rootPath, { tree: { exclude: ["*.log"] } });
+    await writeUatuConfig(rootPath, { ignore: { exclude: ["*.log"] } });
     const matcher = await loadIgnoreMatcher({ rootPath, respectGitignore: false });
     const ignored = matcher.toChokidarIgnored();
     expect(ignored(rootPath)).toBe(false);
@@ -118,7 +118,7 @@ describe("loadIgnoreMatcher", () => {
 
   test("toChokidarIgnored normalizes platform path separators to forward slashes", async () => {
     const rootPath = await makeTempDir();
-    await writeUatuConfig(rootPath, { tree: { exclude: ["nested/secret.txt"] } });
+    await writeUatuConfig(rootPath, { ignore: { exclude: ["nested/secret.txt"] } });
     const matcher = await loadIgnoreMatcher({ rootPath, respectGitignore: false });
     const ignored = matcher.toChokidarIgnored();
     // Constructing the path with the platform separator should still match the
