@@ -8,7 +8,7 @@ import path from "node:path";
 
 import { classifyFile } from "../document/classify";
 import { loadIgnoreMatcher, type IgnoreMatcher } from "../ignore/engine";
-import { safeGit } from "../review/load";
+import { safeGit } from "../document/git-base-ref";
 import type { DocumentMeta, RootGroup } from "../shared/types";
 
 export const DEFAULT_RESPECT_GITIGNORE = true;

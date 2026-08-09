@@ -11,7 +11,7 @@
 
 import { FileTree, themeToTreeStyles, type FileTreeDirectoryHandle, type FileTreeItemHandle, type GitStatusEntry, type TreeThemeStyles } from "@pierre/trees";
 
-import type { DocumentMeta, RepositoryReviewSnapshot, RootGroup } from "../shared/types";
+import type { DocumentMeta, RepositorySnapshot, RootGroup } from "../shared/types";
 import { activeColorScheme, onColorSchemeChange, type ColorScheme } from "../shell/theme";
 
 // The library's palette is handed over as inline styles generated for the
@@ -304,7 +304,7 @@ export class TreeView {
     }
   }
 
-  // Push the latest review-load changed-files into the library's git-status API.
+  // Push the latest changed-files list into the library's git-status API.
   // Empty input clears all annotations.
   setGitStatus(entries: readonly GitStatusForView[]): void {
     if (this.tree === null) {
@@ -554,7 +554,7 @@ export function buildPathInputs(roots: readonly RootGroup[]): {
   paths: string[];
   mapping: ReadonlyMap<string, string>;
   // rootPrefix[rootId] = "" (single-root) | "label/" (multi-root). Used by
-  // setGitStatus to translate review-load paths into the tree's path space.
+  // setGitStatus to translate repo-relative paths into the tree's path space.
   rootPrefix: ReadonlyMap<string, string>;
 } {
   const paths: string[] = [];
@@ -589,17 +589,16 @@ export function buildPathInputs(roots: readonly RootGroup[]): {
   return { paths, mapping, rootPrefix };
 }
 
-// Build the per-Mode filter membership from review-load. Sourced from the
-// union of `changedFiles` and `ignoredFiles` — the same set the row
-// annotations source from after `harmonize-untracked-presentation`. Files in
-// `gitIgnoredFiles` are NOT included by design (ambient git policy, not
-// change content). Exported for unit testing.
+// Build the per-Mode filter membership from the repository change data —
+// the changed-files list, the same set the row annotations source from.
+// Files in `gitIgnoredFiles` are NOT included by design (ambient git
+// policy, not change content). Exported for unit testing.
 export function computeFilesPaneFilterMembership(
-  repos: readonly RepositoryReviewSnapshot[],
+  repos: readonly RepositorySnapshot[],
 ): FilesPaneFilterMembership {
   const allowedByRoot = new Map<string, Set<string>>();
   for (const repo of repos) {
-    if (repo.reviewLoad.status !== "available") {
+    if (repo.status !== "available") {
       continue;
     }
     const pathSet = new Set<string>();
@@ -607,10 +606,7 @@ export function computeFilesPaneFilterMembership(
     // which strips them off `doc.relativePath` before comparing. Without
     // matching normalisation here, a stray leading slash from upstream
     // would silently miss the allow-list.
-    for (const entry of repo.reviewLoad.changedFiles) {
-      pathSet.add(entry.path.replace(/^\/+/, ""));
-    }
-    for (const entry of repo.reviewLoad.ignoredFiles) {
+    for (const entry of repo.changedFiles) {
       pathSet.add(entry.path.replace(/^\/+/, ""));
     }
     for (const rootId of repo.watchedRootIds) {

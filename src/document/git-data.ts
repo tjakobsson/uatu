@@ -1,29 +1,27 @@
+// Repository-level git data sweep — changed files vs the resolved compare
+// base, commit log, repository metadata, and the gitignored-files list that
+// feeds tree annotations. This is the data layer behind the Change Overview
+// pane, the Changed filter, the diff view's base, and the git-log pane.
+
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import type {
   ChangedFileSummary,
   CommitLogEntry,
+  CompareBase,
+  CompareTarget,
   RepositoryMetadata,
-  RepositoryReviewSnapshot,
-  ReviewAreaConfig,
-  ReviewBase,
-  ReviewConfiguredArea,
-  ReviewCompareTarget,
-  ReviewLoadResult,
-  ReviewScoreDriver,
-  ReviewSettings,
-  ReviewThresholds,
+  RepositorySnapshot,
   RootGroup,
 } from "../shared/types";
 import { DEFAULT_COMPARE_TARGET } from "../shared/types";
 import type { WatchEntry } from "../server/roots";
-import { applyCompareTarget, resolveReviewBase, safeGit, setGitMetricsSink } from "../document/git-base-ref";
+import { applyCompareTarget, resolveCompareBase, safeGit } from "./git-base-ref";
 
-export { safeGit, setGitMetricsSink } from "../document/git-base-ref";
+export { safeGit, setGitMetricsSink } from "./git-base-ref";
 
 const GIT_MAX_BUFFER = 256 * 1024;
-const DEFAULT_THRESHOLDS: ReviewThresholds = { medium: 35, high: 70 };
 const MAX_COMMITS = 100;
 
 type RepositoryGroup = {
@@ -38,8 +36,8 @@ type RepositoryGroup = {
 export async function collectRepositorySnapshots(
   entries: WatchEntry[],
   roots: RootGroup[],
-  compareTarget: ReviewCompareTarget = DEFAULT_COMPARE_TARGET,
-): Promise<RepositoryReviewSnapshot[]> {
+  compareTarget: CompareTarget = DEFAULT_COMPARE_TARGET,
+): Promise<RepositorySnapshot[]> {
   const groups = await detectRepositoryGroups(entries, roots);
   const rootsById = new Map(roots.map(root => [root.id, root]));
   const snapshots = await Promise.all(
@@ -105,39 +103,22 @@ async function detectRepositoryGroups(
 async function snapshotGroup(
   group: RepositoryGroup,
   roots: readonly RootGroup[],
-  compareTarget: ReviewCompareTarget,
-): Promise<RepositoryReviewSnapshot> {
+  compareTarget: CompareTarget,
+): Promise<RepositorySnapshot> {
   if (group.status !== "git") {
-    const metadata = unavailableMetadata(group, "non-git", group.message);
-    return {
-      id: group.id,
-      rootPath: group.rootPath,
-      label: group.label,
-      watchedRootIds: group.watchedRootIds,
-      metadata,
-      reviewLoad: unavailableReviewLoad("non-git", group.message),
-      commitLog: [],
-    };
+    return unavailableSnapshot(group, "non-git", group.message, unavailableMetadata(group, "non-git", group.message));
   }
 
-  const settingsResult = await loadReviewSettings(group.rootPath);
+  const configWarnings = await collectConfigWarnings(group.rootPath);
   const metadata = await collectMetadata(group);
   if (metadata.status !== "git") {
-    return {
-      id: group.id,
-      rootPath: group.rootPath,
-      label: group.label,
-      watchedRootIds: group.watchedRootIds,
-      metadata,
-      reviewLoad: unavailableReviewLoad("unavailable", metadata.message),
-      commitLog: [],
-    };
+    return unavailableSnapshot(group, "unavailable", metadata.message, metadata);
   }
 
-  const resolvedBase = await resolveReviewBase(group.rootPath, settingsResult.settings.baseRef);
-  // Augment the resolved base with the requested compare target so the result
-  // carries the precise anchor and so collectChangedFiles knows whether to
-  // include the committed merge-base..HEAD range.
+  const resolvedBase = await resolveCompareBase(group.rootPath);
+  // Augment the resolved base with the requested compare target so the
+  // snapshot carries the precise anchor and so collectChangedFiles knows
+  // whether to include the committed merge-base..HEAD range.
   const base = applyCompareTarget(resolvedBase, compareTarget);
   const knownTreePaths = await collectKnownTreePaths(group.rootPath, roots);
   const [changedFiles, commitLog, gitIgnoredFiles] = await Promise.all([
@@ -145,10 +126,6 @@ async function snapshotGroup(
     collectCommitLog(group.rootPath),
     collectGitIgnoredFiles(group.rootPath, knownTreePaths),
   ]);
-  const reviewLoad: ReviewLoadResult = {
-    ...scoreReviewLoad(changedFiles, base, settingsResult.settings, settingsResult.warnings),
-    gitIgnoredFiles,
-  };
 
   return {
     id: group.id,
@@ -156,8 +133,42 @@ async function snapshotGroup(
     label: group.label,
     watchedRootIds: group.watchedRootIds,
     metadata,
-    reviewLoad,
+    status: "available",
+    base,
+    changedFiles,
+    gitIgnoredFiles,
+    configWarnings,
+    message: null,
     commitLog,
+  };
+}
+
+function unavailableSnapshot(
+  group: RepositoryGroup,
+  status: "non-git" | "unavailable",
+  message: string | null,
+  metadata: RepositoryMetadata,
+): RepositorySnapshot {
+  return {
+    id: group.id,
+    rootPath: group.rootPath,
+    label: group.label,
+    watchedRootIds: group.watchedRootIds,
+    metadata,
+    status,
+    base: {
+      mode: status === "non-git" ? "unavailable" : "dirty-worktree-only",
+      ref: null,
+      mergeBase: null,
+      compareTarget: DEFAULT_COMPARE_TARGET,
+      comparedAgainstRef: "HEAD",
+      targetsCollapsed: true,
+    },
+    changedFiles: [],
+    gitIgnoredFiles: [],
+    configWarnings: [],
+    message,
+    commitLog: [],
   };
 }
 
@@ -206,14 +217,38 @@ async function collectMetadata(group: RepositoryGroup): Promise<RepositoryMetada
   };
 }
 
-async function collectChangedFiles(repoRoot: string, base: ReviewBase): Promise<ChangedFileSummary[]> {
+// `.uatu.json` parse warnings surfaced in the Change Overview pane. Only
+// read/parse failures warrant a warning here — block-level validation lives
+// with each block's loader.
+export async function collectConfigWarnings(repoRoot: string): Promise<string[]> {
+  const warnings: string[] = [];
+  const filePath = path.join(repoRoot, ".uatu.json");
+  const source = await fs.readFile(filePath, "utf8").catch(error => {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      warnings.push(`Could not read .uatu.json: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return null;
+  });
+
+  if (source) {
+    try {
+      JSON.parse(source);
+    } catch (error) {
+      warnings.push(`Invalid .uatu.json: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  return warnings;
+}
+
+async function collectChangedFiles(repoRoot: string, base: CompareBase): Promise<ChangedFileSummary[]> {
   const specs: string[][] = [];
   // When the effective comparison is "vs HEAD" — the `last-commit` target, or
   // any target with no resolvable base (collapsed) — use a single `git diff
   // HEAD` pass. This is exactly what `getDocumentDiff` runs, so the overview
   // and the Diff view always agree: a `--cached` + unstaged union would double
-  // a path whose staged and unstaged edits cancel, reporting burden for a file
-  // the Diff view shows as unchanged.
+  // a path whose staged and unstaged edits cancel, reporting a change for a
+  // file the Diff view shows as unchanged.
   if (base.compareTarget === "last-commit" || base.mergeBase === null) {
     specs.push(["HEAD"]);
   } else {
@@ -487,347 +522,4 @@ async function collectCommitLog(repoRoot: string): Promise<CommitLogEntry[]> {
     });
   }
   return commits;
-}
-
-export async function loadReviewSettings(
-  repoRoot: string,
-): Promise<{ settings: ReviewSettings; warnings: string[] }> {
-  const settings: ReviewSettings = {
-    thresholds: DEFAULT_THRESHOLDS,
-    riskAreas: [],
-    supportAreas: [],
-    ignoreAreas: [],
-  };
-  const warnings: string[] = [];
-  const filePath = path.join(repoRoot, ".uatu.json");
-  const source = await fs.readFile(filePath, "utf8").catch(error => {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      warnings.push(`Could not read .uatu.json: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    return null;
-  });
-
-  if (!source) {
-    return { settings, warnings };
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(source);
-  } catch (error) {
-    warnings.push(`Invalid .uatu.json: ${error instanceof Error ? error.message : String(error)}`);
-    return { settings, warnings };
-  }
-
-  const review = isRecord(parsed) ? parsed.review : undefined;
-  if (!isRecord(review)) {
-    return { settings, warnings };
-  }
-
-  if (typeof review.baseRef === "string" && review.baseRef.trim()) {
-    settings.baseRef = review.baseRef.trim();
-  } else if (review.baseRef !== undefined) {
-    warnings.push("Ignored review.baseRef because it must be a non-empty string.");
-  }
-
-  if (isRecord(review.thresholds)) {
-    const medium = asFiniteNumber(review.thresholds.medium);
-    const high = asFiniteNumber(review.thresholds.high);
-    if (medium !== null && high !== null && medium > 0 && high > medium) {
-      settings.thresholds = { medium, high };
-    } else {
-      warnings.push("Ignored review.thresholds because medium/high must be positive numbers and high must exceed medium.");
-    }
-  }
-
-  settings.riskAreas = parseAreas(review.riskAreas, "riskAreas", warnings);
-  settings.supportAreas = parseAreas(review.supportAreas, "supportAreas", warnings);
-  settings.ignoreAreas = parseAreas(review.ignoreAreas, "ignoreAreas", warnings);
-
-  return { settings, warnings };
-}
-
-function parseAreas(value: unknown, fieldName: string, warnings: string[]): ReviewAreaConfig[] {
-  if (value === undefined) {
-    return [];
-  }
-  if (!Array.isArray(value)) {
-    warnings.push(`Ignored review.${fieldName} because it must be an array.`);
-    return [];
-  }
-
-  const areas: ReviewAreaConfig[] = [];
-  value.forEach((entry, index) => {
-    if (!isRecord(entry) || typeof entry.label !== "string" || !Array.isArray(entry.paths)) {
-      warnings.push(`Ignored review.${fieldName}[${index}] because it needs label and paths.`);
-      return;
-    }
-    const paths = entry.paths
-      .filter((candidate): candidate is string => typeof candidate === "string" && candidate.length > 0)
-      .map(pattern => pattern.endsWith("/") ? `${pattern}**` : pattern);
-    if (paths.length === 0) {
-      warnings.push(`Ignored review.${fieldName}[${index}] because it has no valid paths.`);
-      return;
-    }
-
-    areas.push({
-      label: entry.label,
-      paths,
-      score: asFiniteNumber(entry.score) ?? undefined,
-      perFile: asFiniteNumber(entry.perFile) ?? undefined,
-      max: asFiniteNumber(entry.max) ?? undefined,
-      maxDiscount: asFiniteNumber(entry.maxDiscount) ?? undefined,
-    });
-  });
-  return areas;
-}
-
-function scoreReviewLoad(
-  files: ChangedFileSummary[],
-  base: ReviewBase,
-  settings: ReviewSettings,
-  settingsWarnings: string[],
-): ReviewLoadResult {
-  const ignoredMatches = matchAreas(files, settings.ignoreAreas);
-  const ignoredPaths = new Set(ignoredMatches.flatMap(match => match.files));
-  const scoredFiles = files.filter(file => !ignoredPaths.has(file.path));
-  const ignoredFiles = files.filter(file => ignoredPaths.has(file.path));
-  const riskMatches = matchAreas(scoredFiles, settings.riskAreas);
-  const supportMatches = matchAreas(scoredFiles, settings.supportAreas);
-  const configuredAreas: ReviewConfiguredArea[] = [
-    ...buildConfiguredAreas(settings.riskAreas, riskMatches, "risk"),
-    ...buildConfiguredAreas(settings.supportAreas, supportMatches, "support"),
-    ...buildConfiguredAreas(settings.ignoreAreas, ignoredMatches, "ignore"),
-  ];
-  const drivers: ReviewScoreDriver[] = [];
-
-  for (const match of ignoredMatches) {
-    drivers.push({
-      kind: "ignore",
-      label: match.area.label,
-      score: 0,
-      detail: `${match.files.length} file${match.files.length === 1 ? "" : "s"} excluded from scoring`,
-      files: match.files,
-    });
-  }
-
-  const fileCount = scoredFiles.length;
-  const touchedLines = scoredFiles.reduce((sum, file) => sum + file.additions + file.deletions, 0);
-  const hunkCount = scoredFiles.reduce((sum, file) => sum + file.hunks, 0);
-  const directoryCount = new Set(scoredFiles.map(file => firstDirectory(file.path))).size;
-  const renameCount = scoredFiles.filter(file => file.oldPath).length;
-  const dependencyCount = scoredFiles.filter(file => isDependencyOrConfigFile(file.path)).length;
-
-  addMechanicalDriver(drivers, "Changed files", Math.min(30, fileCount * 4), `${fileCount} changed file${fileCount === 1 ? "" : "s"}`, scoredFiles.map(file => file.path));
-  addMechanicalDriver(drivers, "Touched lines", Math.min(35, Math.ceil(touchedLines / 20)), `${touchedLines} added or removed line${touchedLines === 1 ? "" : "s"}`, []);
-  addMechanicalDriver(drivers, "Diff hunks", Math.min(20, hunkCount * 2), `${hunkCount} diff hunk${hunkCount === 1 ? "" : "s"}`, []);
-  addMechanicalDriver(drivers, "Directory spread", Math.min(12, Math.max(0, directoryCount - 1) * 3), `${directoryCount} top-level area${directoryCount === 1 ? "" : "s"}`, []);
-  addMechanicalDriver(drivers, "Renames", Math.min(10, renameCount * 5), `${renameCount} rename or move${renameCount === 1 ? "" : "s"}`, []);
-  addMechanicalDriver(drivers, "Dependency/config files", Math.min(14, dependencyCount * 7), `${dependencyCount} dependency or config file${dependencyCount === 1 ? "" : "s"}`, []);
-
-  addAreaDrivers(drivers, riskMatches, "risk");
-  addAreaDrivers(drivers, supportMatches, "support");
-
-  for (const warning of settingsWarnings) {
-    drivers.push({ kind: "warning", label: "Configuration warning", score: 0, detail: warning, files: [] });
-  }
-
-  const score = Math.max(0, Math.round(drivers.reduce((sum, driver) => sum + driver.score, 0)));
-  const level = score >= settings.thresholds.high ? "high" : score >= settings.thresholds.medium ? "medium" : "low";
-
-  // Gitignored files are not a scoring concern — `snapshotGroup` spreads the
-  // returned value and supplies `gitIgnoredFiles` itself. The field is
-  // declared in the `ReviewLoadResult` shape but populated outside this
-  // function.
-  return {
-    status: "available",
-    score,
-    level,
-    thresholds: settings.thresholds,
-    base,
-    changedFiles: scoredFiles,
-    ignoredFiles,
-    gitIgnoredFiles: [],
-    drivers,
-    configuredAreas,
-    settingsWarnings,
-    message: null,
-  };
-}
-
-function addMechanicalDriver(
-  drivers: ReviewScoreDriver[],
-  label: string,
-  score: number,
-  detail: string,
-  files: string[],
-) {
-  if (score <= 0 && files.length === 0) {
-    return;
-  }
-  drivers.push({ kind: "mechanical", label, score, detail, files });
-}
-
-function addAreaDrivers(
-  drivers: ReviewScoreDriver[],
-  matches: { area: ReviewAreaConfig; files: string[] }[],
-  kind: "risk" | "support",
-) {
-  for (const match of matches) {
-    const score = scoreAreaMatch(match.area, match.files.length, kind);
-    drivers.push({
-      kind,
-      label: match.area.label,
-      score,
-      detail: `${match.files.length} matched file${match.files.length === 1 ? "" : "s"}`,
-      files: match.files,
-    });
-  }
-}
-
-function buildConfiguredAreas(
-  areas: ReviewAreaConfig[],
-  matches: { area: ReviewAreaConfig; files: string[] }[],
-  kind: ReviewConfiguredArea["kind"],
-): ReviewConfiguredArea[] {
-  return areas.map(area => {
-    const match = matches.find(candidate => candidate.area === area);
-    const matchedFiles = match?.files ?? [];
-    return {
-      kind,
-      label: area.label,
-      paths: area.paths,
-      matchedFiles,
-      score: matchedFiles.length > 0 ? scoreAreaMatch(area, matchedFiles.length, kind) : 0,
-    };
-  });
-}
-
-function scoreAreaMatch(
-  area: ReviewAreaConfig,
-  fileCount: number,
-  kind: ReviewConfiguredArea["kind"],
-): number {
-  if (kind === "ignore") {
-    return 0;
-  }
-
-  const baseScore = area.score ?? 0;
-  const perFile = area.perFile ?? 0;
-  let score = baseScore + perFile * fileCount;
-  if (kind === "risk" && area.max !== undefined) {
-    score = Math.min(score, Math.abs(area.max));
-  }
-  if (kind === "support") {
-    const maxDiscount = Math.abs(area.maxDiscount ?? area.max ?? Math.abs(score));
-    score = -Math.min(Math.abs(score), maxDiscount);
-  }
-  return score;
-}
-
-function matchAreas(files: ChangedFileSummary[], areas: ReviewAreaConfig[]) {
-  return areas
-    .map(area => ({
-      area,
-      files: files
-        .filter(file => area.paths.some(pattern => matchPath(pattern, file.path)))
-        .map(file => file.path),
-    }))
-    .filter(match => match.files.length > 0);
-}
-
-export function matchPath(pattern: string, filePath: string): boolean {
-  const normalizedPattern = pattern.split(path.sep).join("/");
-  const normalizedPath = filePath.split(path.sep).join("/");
-  const regex = new RegExp(`^${globToRegex(normalizedPattern)}$`);
-  return regex.test(normalizedPath);
-}
-
-function globToRegex(pattern: string): string {
-  let output = "";
-  for (let index = 0; index < pattern.length; index += 1) {
-    const char = pattern[index]!;
-    const next = pattern[index + 1];
-    if (char === "*" && next === "*") {
-      if (pattern[index + 2] === "/") {
-        output += "(?:.*/)?";
-        index += 2;
-      } else {
-        output += ".*";
-        index += 1;
-      }
-      continue;
-    }
-    if (char === "*") {
-      output += "[^/]*";
-      continue;
-    }
-    if (char === "?") {
-      output += "[^/]";
-      continue;
-    }
-    output += escapeRegex(char);
-  }
-  return output;
-}
-
-function escapeRegex(value: string): string {
-  return value.replace(/[|\\{}()[\]^$+*?.]/g, "\\$&");
-}
-
-function firstDirectory(filePath: string): string {
-  return filePath.includes("/") ? filePath.split("/")[0]! : ".";
-}
-
-function isDependencyOrConfigFile(filePath: string): boolean {
-  const name = path.basename(filePath).toLowerCase();
-  return [
-    "package.json",
-    "bun.lock",
-    "package-lock.json",
-    "pnpm-lock.yaml",
-    "yarn.lock",
-    "cargo.toml",
-    "cargo.lock",
-    "go.mod",
-    "go.sum",
-    "requirements.txt",
-    "pyproject.toml",
-    "dockerfile",
-  ].includes(name) || /\.(config|rc)\.(js|ts|cjs|mjs|json|yaml|yml)$/.test(name);
-}
-
-function unavailableReviewLoad(
-  status: "non-git" | "unavailable",
-  message: string | null,
-): ReviewLoadResult {
-  return {
-    status,
-    score: 0,
-    level: "low",
-    thresholds: DEFAULT_THRESHOLDS,
-    base: {
-      mode: status === "non-git" ? "unavailable" : "dirty-worktree-only",
-      ref: null,
-      mergeBase: null,
-      compareTarget: DEFAULT_COMPARE_TARGET,
-      comparedAgainstRef: "HEAD",
-      targetsCollapsed: true,
-    },
-    changedFiles: [],
-    ignoredFiles: [],
-    gitIgnoredFiles: [],
-    drivers: [],
-    configuredAreas: [],
-    settingsWarnings: [],
-    message,
-  };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function asFiniteNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }

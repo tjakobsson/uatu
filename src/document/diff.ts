@@ -1,10 +1,9 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import { applyCompareTarget, compareRefForTarget, recordGitMetric, resolveReviewBase, safeGit } from "./git-base-ref";
-import { loadReviewSettings } from "../review/load";
+import { applyCompareTarget, compareRefForTarget, recordGitMetric, resolveCompareBase, safeGit } from "./git-base-ref";
 import { DEFAULT_COMPARE_TARGET, findDocument } from "../shared/types";
-import type { ReviewBase, ReviewCompareTarget, ReviewSettings, RootGroup } from "../shared/types";
+import type { CompareBase, CompareTarget, RootGroup } from "../shared/types";
 
 const MAX_DIFF_BUFFER = 4 * 1024 * 1024;
 
@@ -47,27 +46,25 @@ function timePhase<T>(metric: string, work: () => Promise<T>): Promise<T> {
   });
 }
 
-// Per-repo review-context cache. Base resolution (toplevel discovery,
-// settings load, remote-default lookup, ref probes, merge-base) only
-// changes when HEAD moves or config is edited, so warm requests validate
-// with a single `git rev-parse HEAD` probe instead of re-running the
-// chain. The TTL bounds staleness for changes the probe can't see
-// (origin fetches moving the base tip, `.uatu.json` edits).
+// Per-repo compare-context cache. Base resolution (toplevel discovery,
+// remote-default lookup, ref probes, merge-base) only changes when HEAD
+// moves, so warm requests validate with a single `git rev-parse HEAD`
+// probe instead of re-running the chain. The TTL bounds staleness for
+// changes the probe can't see (origin fetches moving the base tip).
 const BASE_CACHE_TTL_MS = 30_000;
 let baseCacheTtlMs = BASE_CACHE_TTL_MS;
 
-type RepoReviewContext = {
+type RepoCompareContext = {
   repoRoot: string;
-  settings: ReviewSettings;
   // Resolved with the default `base` target; per-request compare targets
   // are applied on top via the pure `applyCompareTarget`.
-  resolvedBase: ReviewBase;
+  resolvedBase: CompareBase;
 };
 
 const repoRootByProbeDir = new Map<string, { repoRoot: string | null; expiresAtMs: number }>();
-const contextByRepoRoot = new Map<string, { context: RepoReviewContext; headSha: string; expiresAtMs: number }>();
+const contextByRepoRoot = new Map<string, { context: RepoCompareContext; headSha: string; expiresAtMs: number }>();
 
-async function resolveRepoContext(probeDir: string): Promise<RepoReviewContext | null> {
+async function resolveRepoContext(probeDir: string): Promise<RepoCompareContext | null> {
   const now = Date.now();
 
   let repoRoot: string | null;
@@ -84,8 +81,8 @@ async function resolveRepoContext(probeDir: string): Promise<RepoReviewContext |
   }
 
   // Single validation probe: an unchanged HEAD within the TTL means the
-  // cached settings + resolved base are still good. An unborn HEAD (fresh
-  // repo with no commits) yields an empty sha and always re-resolves.
+  // cached resolved base is still good. An unborn HEAD (fresh repo with
+  // no commits) yields an empty sha and always re-resolves.
   const head = await safeGit(repoRoot, ["rev-parse", "HEAD"]);
   const headSha = head.ok ? head.stdout.trim() : "";
   const cached = contextByRepoRoot.get(repoRoot);
@@ -95,9 +92,8 @@ async function resolveRepoContext(probeDir: string): Promise<RepoReviewContext |
   }
 
   recordGitMetric("diff.base_cache_misses_total");
-  const { settings } = await loadReviewSettings(repoRoot);
-  const resolvedBase = await resolveReviewBase(repoRoot, settings.baseRef);
-  const context: RepoReviewContext = { repoRoot, settings, resolvedBase };
+  const resolvedBase = await resolveCompareBase(repoRoot);
+  const context: RepoCompareContext = { repoRoot, resolvedBase };
   contextByRepoRoot.set(repoRoot, { context, headSha, expiresAtMs: now + baseCacheTtlMs });
   return context;
 }
@@ -112,7 +108,7 @@ function isPureAdditionPatch(patch: string): boolean {
 export async function getDocumentDiff(
   roots: RootGroup[],
   documentId: string,
-  compareTarget: ReviewCompareTarget = DEFAULT_COMPARE_TARGET,
+  compareTarget: CompareTarget = DEFAULT_COMPARE_TARGET,
 ): Promise<DocumentDiffResponse> {
   const document = findDocument(roots, documentId);
   if (!document) {

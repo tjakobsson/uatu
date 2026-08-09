@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { safeGit } from "../review/load";
+import { safeGit } from "../document/git-base-ref";
 import { findNonGitWatchEntries, resolveWatchRoots, scanRoots } from "./roots";
 
 const tempDirectories: string[] = [];

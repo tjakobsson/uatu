@@ -1,14 +1,14 @@
-// URL → app-state resolution for non-document previews (review score and
-// commit preview). Lives in `shell/` because both the boot path and the
-// popstate handler in `history.ts` need to read URL parameters and turn
-// them into preview activations.
+// URL → app-state resolution for non-document previews (commit preview).
+// Lives in `shell/` because both the boot path and the popstate handler in
+// `history.ts` need to read URL parameters and turn them into preview
+// activations.
 
 import { appPathname } from "../shared/app-url";
 import { renderEmptyPreview } from "../preview/empty";
 import { renderSidebar } from "../sidebar/shell";
 import { renderCommitMessage } from "../preview/commit-message";
 import { syncFollowToggle } from "./follow";
-import type { RepositoryReviewSnapshot } from "../shared/types";
+import type { RepositorySnapshot } from "../shared/types";
 import { pushCommitPreview } from "./history";
 import { appState } from "./state";
 import { setPreviewMode, setSelectedId } from "./selection";
@@ -18,16 +18,11 @@ export type CommitPreviewParams = { repositoryId: string; sha: string };
 export type CommitPreviewResolution =
   | {
       kind: "found";
-      repository: RepositoryReviewSnapshot;
-      commit: RepositoryReviewSnapshot["commitLog"][number];
+      repository: RepositorySnapshot;
+      commit: RepositorySnapshot["commitLog"][number];
     }
   | { kind: "missing-repository"; repositoryId: string; sha: string }
-  | { kind: "missing-commit"; repository: RepositoryReviewSnapshot; sha: string };
-
-export function reviewScoreRepositoryIdFromUrl(): string | null {
-  const value = new URL(window.location.href).searchParams.get("reviewScore");
-  return value && value.trim() ? value : null;
-}
+  | { kind: "missing-commit"; repository: RepositorySnapshot; sha: string };
 
 export function commitPreviewParamsFromUrl(): CommitPreviewParams | null {
   const url = new URL(window.location.href);

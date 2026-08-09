@@ -1,7 +1,7 @@
 // Live event stream — opens the /api/events EventSource and dispatches each
-// `state` payload back into the app. The reducer logic for review-mode
-// stale-hint behavior, follow-mode auto-switching, and on-disk-change reloads
-// lives in here, intentionally close to its trigger (the SSE message).
+// `state` payload back into the app. The reducer logic for stale-hint
+// behavior, follow-mode auto-switching, and on-disk-change reloads lives in
+// here, intentionally close to its trigger (the SSE message).
 
 import { chooseSelectionForFileEvent } from "./follow";
 import { applyProjectIdentity } from "./identity";
@@ -10,7 +10,6 @@ import { applyMonoConfig } from "../mono/apply";
 import { signalActiveDocumentUpdated } from "../preview/file-facts-strip";
 import { documentDiffCache, forgetDocumentCache, loadDocument } from "../preview/mount";
 import { renderEmptyPreview } from "../preview/empty";
-import { renderReviewScoreDetails } from "../sidebar/review-score-mount";
 import { renderSidebar } from "../sidebar/shell";
 import { markSearchResultsStale, noteSearchCorpusChange, syncSearchScope } from "../sidebar/search-pane";
 import {
@@ -96,17 +95,6 @@ export function connectEvents() {
 
     // Local snapshot so the discriminant narrowing survives into the closure.
     const previewMode = appState.previewMode;
-    if (previewMode.kind === "review-score") {
-      renderSidebar();
-      const repository = appState.repositories.find(candidate => candidate.id === previewMode.repositoryId);
-      if (repository && repository.reviewLoad.status === "available") {
-        renderReviewScoreDetails(repository);
-      } else {
-        renderEmptyPreview("Review score unavailable", "Repository data is not available for this score view.");
-      }
-      return;
-    }
-
     if (previewMode.kind === "commit") {
       renderSidebar();
       renderCommitPreview(previewMode);

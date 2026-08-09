@@ -92,7 +92,7 @@ describe("loadTreeConfig", () => {
     const result = await loadTreeConfig(workspace);
     expect(result.config.exclude).toEqual([]);
     expect(result.config.respectGitignore).toBe(true);
-    // review-load.ts owns the parse-error warning; this module must not double-warn.
+    // document/git-data.ts owns the parse-error warning; this module must not double-warn.
     expect(result.warnings).toEqual([]);
   });
 

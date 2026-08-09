@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import type { ReviewBase, ReviewCompareTarget } from "../shared/types";
+import type { CompareBase, CompareTarget } from "../shared/types";
 
 const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT_MS = 2500;
@@ -54,14 +54,7 @@ export async function safeGit(
   }
 }
 
-export async function resolveReviewBase(
-  repoRoot: string,
-  configuredBase: string | undefined,
-): Promise<ReviewBase> {
-  if (configuredBase && await refExists(repoRoot, configuredBase)) {
-    return mergeBase(repoRoot, configuredBase, "configured");
-  }
-
+export async function resolveCompareBase(repoRoot: string): Promise<CompareBase> {
   const originHead = await safeGit(repoRoot, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]);
   const remoteDefault = originHead.ok ? originHead.stdout.trim() : "";
   if (remoteDefault && await refExists(repoRoot, remoteDefault)) {
@@ -90,8 +83,8 @@ export async function refExists(repoRoot: string, ref: string): Promise<boolean>
 async function mergeBase(
   repoRoot: string,
   ref: string,
-  mode: ReviewBase["mode"],
-): Promise<ReviewBase> {
+  mode: CompareBase["mode"],
+): Promise<CompareBase> {
   const result = await safeGit(repoRoot, ["merge-base", "--", ref, "HEAD"]);
   const mergeBaseSha = result.ok ? result.stdout.trim() || null : null;
   return applyCompareTarget(
@@ -101,15 +94,15 @@ async function mergeBase(
 }
 
 // Single source of truth mapping a resolved base + a compare target onto the
-// fields the meter and the diff both consume. `last-commit` always measures
-// staged + unstaged changes against HEAD; `base` keeps the resolved-base
-// behavior (falling back to HEAD when no base merge-base exists). Returns a
-// fresh ReviewBase with `compareTarget` / `comparedAgainstRef` /
-// `targetsCollapsed` set for the requested target.
-export function applyCompareTarget(base: ReviewBase, target: ReviewCompareTarget): ReviewBase {
+// fields the changed-files context and the diff both consume. `last-commit`
+// always measures staged + unstaged changes against HEAD; `base` keeps the
+// resolved-base behavior (falling back to HEAD when no base merge-base
+// exists). Returns a fresh CompareBase with `compareTarget` /
+// `comparedAgainstRef` / `targetsCollapsed` set for the requested target.
+export function applyCompareTarget(base: CompareBase, target: CompareTarget): CompareBase {
   const targetsCollapsed = base.mergeBase === null;
   // When collapsed, both targets are really "vs HEAD" regardless of request.
-  const effectiveTarget: ReviewCompareTarget = targetsCollapsed ? "last-commit" : target;
+  const effectiveTarget: CompareTarget = targetsCollapsed ? "last-commit" : target;
   const comparedAgainstRef =
     effectiveTarget === "last-commit" ? "HEAD" : base.ref ?? "HEAD";
   return { ...base, compareTarget: target, comparedAgainstRef, targetsCollapsed };
@@ -118,7 +111,7 @@ export function applyCompareTarget(base: ReviewBase, target: ReviewCompareTarget
 // The literal git ref to diff a single file against for this target.
 // `base` uses the merge-base SHA (so the diff spans committed + worktree
 // changes); `last-commit` and the no-base fallback use HEAD.
-export function compareRefForTarget(base: ReviewBase, target: ReviewCompareTarget): string {
+export function compareRefForTarget(base: CompareBase, target: CompareTarget): string {
   if (target === "last-commit") {
     return "HEAD";
   }

@@ -4,7 +4,7 @@
 // alongside the change-overview pane it shares structure with.
 
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
-import type { RepositoryReviewSnapshot } from "../shared/types";
+import type { RepositorySnapshot } from "../shared/types";
 import { applyStaleHint } from "../shell/stale-hint-mount";
 import { buildCommitPreviewPath } from "../shell/history";
 import { nextStaleHint } from "../shell/stale-hint";
@@ -84,10 +84,8 @@ export function renderGitLog() {
   }).join("");
 }
 
-export function baseModeLabel(mode: RepositoryReviewSnapshot["reviewLoad"]["base"]["mode"]): string {
+export function baseModeLabel(mode: RepositorySnapshot["base"]["mode"]): string {
   switch (mode) {
-    case "configured":
-      return "configured base";
     case "remote-default":
       return "remote default";
     case "fallback":
@@ -97,10 +95,6 @@ export function baseModeLabel(mode: RepositoryReviewSnapshot["reviewLoad"]["base
     case "unavailable":
       return "base unavailable";
   }
-}
-
-export function capitalize(value: string): string {
-  return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 export function persistGitLogLimit() {

@@ -1,7 +1,5 @@
 import { showGitLogPane, expect, test } from "./fixtures";
-import { promises as fs } from "node:fs";
 
-import { workspacePath } from "./config";
 import { revealTreeRow, treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";
 
@@ -13,24 +11,12 @@ test.afterEach(async ({ request }) => {
   await request.post("/__e2e/reset");
 });
 
-test("Change Overview and Git Log render git-backed review load with configured explanations", async ({ page, request }) => {
+test("Change Overview and Git Log render git-backed change context", async ({ page, request }) => {
   await request.post("/__e2e/reset", {
     data: {
       git: true,
-      // Git Log is a Review-mode pane; boot in Review so this test can assert
-      // against it.
-      uatuConfig: {
-        review: {
-          baseRef: "main",
-          thresholds: { medium: 8, high: 20 },
-          riskAreas: [{ label: "Auth", paths: ["src/auth/**"], score: 12, perFile: 1, max: 20 }],
-          supportAreas: [{ label: "Docs", paths: ["**/*.md"], score: -2, maxDiscount: 4 }],
-          ignoreAreas: [{ label: "Generated", paths: ["dist/**"] }],
-        },
-      },
       dirty: {
         "src/auth/session.ts": "export const changed = true;\n",
-        "dist/generated.js": "generated\n",
       },
     },
   });
@@ -38,43 +24,17 @@ test("Change Overview and Git Log render git-backed review load with configured 
 
   const overview = page.locator("#change-overview");
   await expect(overview).toContainText("feature/review-load");
-  await expect(overview).toContainText("configured base");
-  await expect(overview).toContainText("Review burden");
-  await expect(overview).toContainText("Auth");
-  await expect(overview).toContainText("Generated");
-  await expect(overview).toContainText("src/auth/session.ts");
+  await expect(overview).toContainText("dirty");
+  // The resolved base evidence line and the precise compare anchor.
+  await expect(overview).toContainText("fallback base");
+  await expect(overview.locator(".compare-anchor").first()).toHaveText("vs main");
+  // No raw mechanical statistics in the sidebar.
   await expect(overview).not.toContainText("Changed files");
   await expect(overview).not.toContainText("Touched lines");
   await expect(overview).not.toContainText("Diff hunks");
   await expect(overview).not.toContainText("Directory spread");
-
-  await overview.locator("button[title='Show score explanation']").click();
-  await expect(page.locator("#follow-toggle")).toHaveAttribute("aria-pressed", "false");
-  await expect.poll(() => new URL(page.url()).searchParams.has("reviewScore")).toBe(true);
-  await expect(page.locator("#preview-title")).toHaveText("Review burden score");
-  await expect(page.locator("#preview")).toContainText("additive review-burden index");
-  await expect(page.locator("#preview")).toContainText("Mechanical Statistics");
-  await expect(page.locator("#preview")).toContainText("Changed files");
-  await expect(page.locator("#preview h2", { hasText: "Changed Files" })).toHaveCount(0);
-  await expect(page.locator("#preview")).toContainText("High");
-  await expect(page.locator(".score-preview-total")).toHaveCSS("background-color", "rgb(255, 241, 240)");
-  await expect(page.locator(".score-preview dl .is-low")).toHaveCSS("background-color", "rgb(239, 250, 242)");
-  await expect(page.locator(".score-preview dl .is-medium")).toHaveCSS("background-color", "rgb(255, 248, 220)");
-  await expect(page.locator(".score-preview dl .is-high")).toHaveCSS("background-color", "rgb(255, 241, 240)");
-  await expect(page.locator("#preview")).not.toContainText("Commits");
-  const diffHunksHelp = page.locator(".score-term-help", { hasText: "?" }).filter({ has: page.locator(".score-term-tooltip", { hasText: "separate changed spots" }) });
-  await diffHunksHelp.hover();
-  await expect(diffHunksHelp.locator(".score-term-tooltip")).toBeVisible();
-  const directorySpreadHelp = page.locator(".score-term-help", { has: page.locator(".score-term-tooltip", { hasText: "top-level parts of the project" }) });
-  await directorySpreadHelp.hover();
-  await expect(directorySpreadHelp.locator(".score-term-tooltip")).toBeVisible();
-  const scoreUrl = page.url();
-  await page.reload();
-  await expect(page.locator("#preview-title")).toHaveText("Review burden score");
-  expect(page.url()).toBe(scoreUrl);
-  await fs.writeFile(workspacePath("README.md"), "# Uatu\n\nScore view should stay open.\n", "utf8");
-  await expect(page.locator("#preview-title")).toHaveText("Review burden score");
-  await expect.poll(() => new URL(page.url()).searchParams.has("reviewScore")).toBe(true);
+  // No review-burden concepts exist.
+  await expect(overview).not.toContainText("Review burden");
 
   await showGitLogPane(page);
   const gitLog = page.locator("#git-log");
@@ -93,52 +53,6 @@ test("Change Overview and Git Log render git-backed review load with configured 
   await expect.poll(() => new URL(page.url()).searchParams.has("commit")).toBe(true);
   await expect(page.locator("#preview-title")).toHaveText("add feature doc");
   await expect(page.locator("#preview")).toContainText("Full commit message body for review-load hover.");
-});
-
-test("long configured base refs wrap inside the review-burden meter", async ({ page, request }) => {
-  const baseRef = "refs/heads/feature/review-load~12^{commit}^{commit}^{commit}";
-  await request.post("/__e2e/reset", {
-    data: {
-      git: true,
-      uatuConfig: { review: { baseRef } },
-    },
-  });
-  await page.goto("/");
-  await page.evaluate(() => {
-    document.documentElement.style.setProperty("--sidebar-width", "320px");
-  });
-
-  const meter = page.locator("#change-overview .burden-meter").first();
-  const anchor = meter.locator(".burden-anchor");
-  await expect(meter.locator(".burden-headline")).toBeVisible();
-  await expect(meter.locator(".burden-level")).toBeVisible();
-  await expect(meter.locator("strong")).toBeVisible();
-  await expect(anchor).toHaveText(`vs ${baseRef}`);
-
-  // Poll: the pane can re-render (swapping the meter node) between the text
-  // assertion above and this measurement; a detached node measures as all
-  // zeros. Retry until the resolved node is connected and laid out.
-  await expect
-    .poll(() =>
-      meter.evaluate(element => {
-        if (!element.isConnected || element.getBoundingClientRect().width === 0) {
-          return null;
-        }
-        const meterRect = element.getBoundingClientRect();
-        const anchor = element.querySelector<HTMLElement>(".burden-anchor")!;
-        const anchorRect = anchor.getBoundingClientRect();
-        const fontSize = Number.parseFloat(getComputedStyle(anchor).fontSize);
-        const contained = [".burden-headline", ".burden-level", "strong", ".burden-anchor"]
-          .map(selector => element.querySelector<HTMLElement>(selector)!.getBoundingClientRect())
-          .every(rect => rect.left >= meterRect.left && rect.right <= meterRect.right);
-        return {
-          contained,
-          noHorizontalOverflow: element.scrollWidth <= element.clientWidth,
-          anchorWrapped: anchorRect.height > fontSize * 1.5,
-        };
-      }),
-    )
-    .toEqual({ contained: true, noHorizontalOverflow: true, anchorWrapped: true });
 });
 
 test("tree distinguishes untracked rows from added rows via git-status annotations", async ({ page, request }) => {
@@ -194,100 +108,10 @@ test("Change Overview omits the untracked indicator when no untracked files are 
   });
   await page.goto("/");
 
-  // The pane has rendered before we can assert absence: wait for the burden
-  // meter to mount so we know `renderChangeOverview` has fired.
-  await expect(page.locator("#change-overview .burden-meter")).toBeVisible();
+  // The pane has rendered before we can assert absence: wait for the repo
+  // facts to mount so we know `renderChangeOverview` has fired.
+  await expect(page.locator("#change-overview .repo-facts")).toBeVisible();
   await expect(page.locator("#change-overview [data-untracked-indicator]")).toHaveCount(0);
-});
-
-test("Score-explanation preview breaks out the untracked subcount as a factual change-shape input", async ({ page, request }) => {
-  await request.post("/__e2e/reset", {
-    data: {
-      git: true,
-      dirty: {
-        "a-untracked-scratch.md": "# Untracked scratch\n",
-      },
-    },
-  });
-  await page.goto("/");
-
-  await page.locator("#change-overview .burden-meter").first().click();
-  await expect(page.locator("#preview-title")).toHaveText("Review burden score");
-
-  // The new sub-driver lives inside the Mechanical Statistics block.
-  const untrackedRow = page.locator(
-    '#preview .score-preview-list li:has(strong:text-is("Untracked files"))',
-  );
-  await expect(untrackedRow).toBeVisible();
-  await expect(untrackedRow).toContainText("1 file not yet in git");
-  // The score contribution is presentation-only.
-  await expect(untrackedRow.locator("code")).toHaveText("0");
-});
-
-test("Score-explanation preview omits the untracked row when no untracked files are present", async ({ page, request }) => {
-  await request.post("/__e2e/reset", {
-    data: {
-      git: true,
-      // No dirty/untracked writes; the fixture's committed history exercises
-      // the mechanical drivers without touching the untracked category.
-    },
-  });
-  await page.goto("/");
-
-  await page.locator("#change-overview .burden-meter").first().click();
-  await expect(page.locator("#preview-title")).toHaveText("Review burden score");
-
-  await expect(
-    page.locator('#preview .score-preview-list li:has(strong:text-is("Untracked files"))'),
-  ).toHaveCount(0);
-});
-
-test("Tree annotates ignoreAreas-matched untracked files with their git status (score policy is not a visibility policy)", async ({ page, request }) => {
-  await request.post("/__e2e/reset", {
-    data: {
-      git: true,
-      uatuConfig: {
-        review: {
-          ignoreAreas: [{ label: "Scratch", paths: ["a-ignored-*.md"] }],
-        },
-      },
-      dirty: {
-        "a-ignored-scratch.md": "# Ignored untracked\n",
-      },
-    },
-  });
-  await page.goto("/");
-
-  await revealTreeRow(page, "a-ignored-scratch.md");
-  const row = treeRow(page, "a-ignored-scratch.md");
-  await expect(row).toHaveAttribute("data-item-git-status", "untracked");
-});
-
-test("Change Overview untracked indicator renders even when every untracked file is ignored by score policy", async ({ page, request }) => {
-  await request.post("/__e2e/reset", {
-    data: {
-      git: true,
-      uatuConfig: {
-        review: {
-          ignoreAreas: [{ label: "Scratch", paths: ["a-ignored-*.md"] }],
-        },
-      },
-      dirty: {
-        "a-ignored-scratch.md": "# Ignored untracked\n",
-      },
-    },
-  });
-  await page.goto("/");
-
-  await expect(page.locator("#change-overview [data-untracked-indicator]")).toBeVisible();
-  // Score-explanation preview, by contrast, MUST omit the untracked subcount —
-  // ignored files do not contribute to the score, so the score-side breakdown
-  // has nothing to report.
-  await page.locator("#change-overview .burden-meter").first().click();
-  await expect(page.locator("#preview-title")).toHaveText("Review burden score");
-  await expect(
-    page.locator('#preview .score-preview-list li:has(strong:text-is("Untracked files"))'),
-  ).toHaveCount(0);
 });
 
 test("Tree annotates gitignored files with the 'ignored' status (distinct from untracked)", async ({ page, request }) => {
@@ -335,7 +159,8 @@ test("Change Overview displays non-git and invalid settings fallback states", as
   });
   await page.goto("/");
   await expect(page.locator("#change-overview")).toContainText("Invalid .uatu.json");
-  await expect(page.locator("#change-overview")).toContainText("Review burden");
+  // The warning does not suppress the available repository data.
+  await expect(page.locator("#change-overview")).toContainText("feature/review-load");
 });
 
 test("sidebar counter shows the binary subcount when binary files are present", async ({ page, request }) => {

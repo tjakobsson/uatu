@@ -12,7 +12,6 @@ import { applyStaleHint } from "./stale-hint-mount";
 import { findDocumentById, findDocumentByRelativePath } from "./storage";
 import { loadDocument } from "../preview/mount";
 import { renderEmptyPreview } from "../preview/empty";
-import { renderReviewScoreDetails } from "../sidebar/review-score-mount";
 import { renderSidebar } from "../sidebar/shell";
 import { setFollowEnabled, syncFollowToggle } from "./follow";
 import { defaultDocumentId } from "../shared/types";
@@ -22,7 +21,6 @@ import { setPreviewMode, setSelectedId } from "./selection";
 import {
   activateCommitPreview,
   commitPreviewParamsFromUrl,
-  reviewScoreRepositoryIdFromUrl,
 } from "./url";
 
 // Local query for the preview body. We can't import this from `../app`
@@ -51,16 +49,6 @@ export function pushSelection(documentId: string, relativePath: string) {
     return;
   }
   window.history.pushState({ documentId }, "", url);
-}
-
-export function pushReviewScore(repositoryId: string) {
-  const url = new URL(appUrl("/"), window.location.origin);
-  url.searchParams.set("reviewScore", repositoryId);
-  const nextPath = `${url.pathname}${url.search}`;
-  if (window.location.pathname === url.pathname && window.location.search === url.search) {
-    return;
-  }
-  window.history.pushState({ reviewScoreRepositoryId: repositoryId }, "", nextPath);
 }
 
 export function buildCommitPreviewPath(repositoryId: string, sha: string): string {
@@ -157,20 +145,6 @@ export function attachPopstateHandler() {
       syncFollowToggle();
     }
     applyStaleHint(nextStaleHint(appState.staleHint, { kind: "manual-navigation" }));
-
-    const reviewScoreRepositoryId = reviewScoreRepositoryIdFromUrl();
-    if (reviewScoreRepositoryId) {
-      const repository = appState.repositories.find(candidate => candidate.id === reviewScoreRepositoryId);
-      setPreviewMode({ kind: "review-score", repositoryId: reviewScoreRepositoryId });
-      setSelectedId(null);
-      renderSidebar();
-      if (repository) {
-        renderReviewScoreDetails(repository);
-      } else {
-        renderEmptyPreview("Review score unavailable", "Repository data is not available for this score view.");
-      }
-      return;
-    }
 
     const commitPreview = commitPreviewParamsFromUrl();
     if (commitPreview) {

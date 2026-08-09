@@ -71,7 +71,7 @@ describe("loadMonoConfig", () => {
     await fs.writeFile(path.join(workspace, ".uatu.json"), "{ not-json", "utf8");
     const result = await loadMonoConfig(workspace);
     expect(result.config).toEqual({});
-    // Parse warning is owned by review-load.ts — mono-config stays quiet.
+    // Parse warning is owned by document/git-data.ts — mono-config stays quiet.
     expect(result.warnings).toEqual([]);
   });
 });

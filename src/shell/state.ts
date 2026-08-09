@@ -11,14 +11,14 @@
 import {
   DEFAULT_COMPARE_TARGET,
   DEFAULT_VIEW_MODE,
-  isReviewCompareTarget,
+  isCompareTarget,
   readDiffStylePreference,
   readPreviewWrapPreference,
   readSplitRatioPreference,
   readViewLayoutPreference,
   type DiffStyle,
-  type RepositoryReviewSnapshot,
-  type ReviewCompareTarget,
+  type RepositorySnapshot,
+  type CompareTarget,
   type RootGroup,
   type Scope,
   type SplitRatio,
@@ -47,7 +47,6 @@ export const ACTIVE_TAB_KEY = "uatu:active-tab";
 // the renderer dispatch in `connectEvents` / `loadInitialState`.
 export type PreviewMode =
   | { kind: "document" }
-  | { kind: "review-score"; repositoryId: string }
   | { kind: "commit"; repositoryId: string; sha: string }
   | { kind: "empty" };
 
@@ -142,7 +141,7 @@ export function readActiveTabPreference(
 }
 
 // Files-pane filter chip: `all` shows the full tree, `changed` reduces the
-// tree to `reviewLoad.changedFiles ∪ ignoredFiles` plus ancestor directories.
+// tree to the changed-files list plus ancestor directories.
 export type FilesPaneFilter = "all" | "changed";
 
 const DEFAULT_FILES_PANE_FILTER: FilesPaneFilter = "all";
@@ -165,7 +164,7 @@ export function readGitLogLimitPreference(): number {
 
 export const appState = {
   roots: [] as RootGroup[],
-  repositories: [] as RepositoryReviewSnapshot[],
+  repositories: [] as RepositorySnapshot[],
   selectedId: null as string | null,
   previewMode: { kind: "document" } as PreviewMode,
   followEnabled: true,
@@ -209,9 +208,9 @@ export const appState = {
   activeTab: readActiveTabPreference() as TouchTab,
   filesPaneFilter: DEFAULT_FILES_PANE_FILTER as FilesPaneFilter,
   gitLogLimit: readGitLogLimitPreference(),
-  // Which lens the Change Overview measures review burden against. Mirrors the
+  // Which lens the Change Overview measures changes against. Mirrors the
   // server-session value; persisted and reconciled to the server on boot.
-  compareTarget: DEFAULT_COMPARE_TARGET as ReviewCompareTarget,
+  compareTarget: DEFAULT_COMPARE_TARGET as CompareTarget,
 };
 
 export type AppState = typeof appState;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import type { ChangedFileSummary, RepositoryReviewSnapshot, ReviewLoadResult, RootGroup } from "../shared/types";
+import type { ChangedFileSummary, RepositorySnapshot, RootGroup } from "../shared/types";
 import {
   ancestorPaths,
   buildPathInputs,
@@ -329,8 +329,8 @@ describe("computeFilesPaneFilterMembership", () => {
   function makeRepo(overrides: {
     id: string;
     watchedRootIds: string[];
-    reviewLoad: Partial<ReviewLoadResult>;
-  }): RepositoryReviewSnapshot {
+    snapshot: Partial<Pick<RepositorySnapshot, "status" | "changedFiles" | "gitIgnoredFiles">>;
+  }): RepositorySnapshot {
     return {
       id: overrides.id,
       rootPath: `/tmp/${overrides.id}`,
@@ -348,47 +348,37 @@ describe("computeFilesPaneFilterMembership", () => {
         dirty: false,
         message: null,
       },
-      reviewLoad: {
-        status: "available",
-        score: 0,
-        level: "low",
-        thresholds: { medium: 10, high: 25 },
-        base: { mode: "configured", ref: "main", mergeBase: null, compareTarget: "base", comparedAgainstRef: "main", targetsCollapsed: false },
-        changedFiles: [],
-        ignoredFiles: [],
-        gitIgnoredFiles: [],
-        drivers: [],
-        configuredAreas: [],
-        settingsWarnings: [],
-        message: null,
-        ...overrides.reviewLoad,
-      },
+      status: "available",
+      base: { mode: "fallback", ref: "main", mergeBase: null, compareTarget: "base", comparedAgainstRef: "main", targetsCollapsed: false },
+      changedFiles: [],
+      gitIgnoredFiles: [],
+      configWarnings: [],
+      message: null,
       commitLog: [],
+      ...overrides.snapshot,
     };
   }
 
-  it("unions changedFiles and ignoredFiles per repo, keyed by watched-root id", () => {
+  it("collects changedFiles per repo, keyed by watched-root id", () => {
     const repo = makeRepo({
       id: "r1",
       watchedRootIds: ["root-1"],
-      reviewLoad: {
+      snapshot: {
         changedFiles: [makeChange("src/app.ts", "M"), makeChange("README.md", "?")],
-        ignoredFiles: [makeChange("dist/bundle.js", "M")],
       },
     });
     const membership = computeFilesPaneFilterMembership([repo]);
     const set = membership.allowedByRoot.get("root-1");
     expect(set).toBeDefined();
-    expect(set).toEqual(new Set(["src/app.ts", "README.md", "dist/bundle.js"]));
+    expect(set).toEqual(new Set(["src/app.ts", "README.md"]));
   });
 
   it("excludes gitIgnoredFiles from the change set", () => {
     const repo = makeRepo({
       id: "r1",
       watchedRootIds: ["root-1"],
-      reviewLoad: {
+      snapshot: {
         changedFiles: [makeChange("src/app.ts", "M")],
-        ignoredFiles: [],
         gitIgnoredFiles: [".claude/settings.local.json"],
       },
     });
@@ -398,11 +388,11 @@ describe("computeFilesPaneFilterMembership", () => {
     expect(set.has(".claude/settings.local.json")).toBe(false);
   });
 
-  it("skips repositories whose review-load is not available", () => {
+  it("skips repositories whose change data is not available", () => {
     const repo = makeRepo({
       id: "r1",
       watchedRootIds: ["root-1"],
-      reviewLoad: { status: "non-git", changedFiles: [makeChange("README.md", "M")] },
+      snapshot: { status: "non-git", changedFiles: [makeChange("README.md", "M")] },
     });
     const membership = computeFilesPaneFilterMembership([repo]);
     expect(membership.allowedByRoot.size).toBe(0);
@@ -412,9 +402,8 @@ describe("computeFilesPaneFilterMembership", () => {
     const repo = makeRepo({
       id: "r1",
       watchedRootIds: ["root-1"],
-      reviewLoad: {
-        changedFiles: [makeChange("/src/app.ts", "M")],
-        ignoredFiles: [makeChange("/dist/bundle.js", "M")],
+      snapshot: {
+        changedFiles: [makeChange("/src/app.ts", "M"), makeChange("/dist/bundle.js", "M")],
       },
     });
     const membership = computeFilesPaneFilterMembership([repo]);
@@ -428,7 +417,7 @@ describe("computeFilesPaneFilterMembership", () => {
     const repo = makeRepo({
       id: "r1",
       watchedRootIds: ["root-a", "root-b"],
-      reviewLoad: { changedFiles: [makeChange("shared.ts", "M")] },
+      snapshot: { changedFiles: [makeChange("shared.ts", "M")] },
     });
     const membership = computeFilesPaneFilterMembership([repo]);
     expect(membership.allowedByRoot.get("root-a")).toEqual(new Set(["shared.ts"]));

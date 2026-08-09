@@ -116,7 +116,7 @@ describe("loadTerminalConfig", () => {
     await fs.writeFile(path.join(workspace, ".uatu.json"), "{ not-json", "utf8");
     const result = await loadTerminalConfig(workspace);
     expect(result.config).toEqual({});
-    // Parse warning is owned by review-load.ts — terminal-config stays quiet.
+    // Parse warning is owned by document/git-data.ts — terminal-config stays quiet.
     expect(result.warnings).toEqual([]);
   });
 });

@@ -8,7 +8,6 @@ import { appDocumentRelativePath, appUrl } from "../shared/app-url";
 import { findDocumentById, findDocumentByRelativePath, syncStateGeneration } from "./storage";
 import { loadDocument } from "../preview/mount";
 import { renderEmptyPreview } from "../preview/empty";
-import { renderReviewScoreDetails } from "../sidebar/review-score-mount";
 import { renderSidebar } from "../sidebar/shell";
 import { setupTerminalPanel } from "../terminal/panel";
 import { applyMonoConfig } from "../mono/apply";
@@ -36,7 +35,6 @@ import { setPreviewMode, setSelectedId } from "./selection";
 import {
   commitPreviewParamsFromUrl,
   renderCommitPreview,
-  reviewScoreRepositoryIdFromUrl,
 } from "./url";
 
 export async function loadInitialState() {
@@ -80,14 +78,9 @@ export async function loadInitialState() {
 
   let directLinkMessage: { title: string; body: string } | null = null;
   let explicitDocumentPath: string | null = null;
-  const initialReviewScoreRepositoryId = reviewScoreRepositoryIdFromUrl();
   const initialCommitPreview = commitPreviewParamsFromUrl();
 
-  if (initialReviewScoreRepositoryId) {
-    setFollowEnabled(false);
-    setSelectedId(null);
-    setPreviewMode({ kind: "review-score", repositoryId: initialReviewScoreRepositoryId });
-  } else if (initialCommitPreview) {
+  if (initialCommitPreview) {
     setFollowEnabled(false);
     setSelectedId(null);
     setPreviewMode({ kind: "commit", ...initialCommitPreview });
@@ -156,14 +149,7 @@ export async function loadInitialState() {
   // Local snapshot so the discriminant narrowing survives into the closures
   // below (narrowing on a mutable property does not).
   const previewMode = appState.previewMode;
-  if (previewMode.kind === "review-score") {
-    const repository = appState.repositories.find(candidate => candidate.id === previewMode.repositoryId);
-    if (repository && repository.reviewLoad.status === "available") {
-      renderReviewScoreDetails(repository);
-    } else {
-      renderEmptyPreview("Review score unavailable", "Repository data is not available for this score view.");
-    }
-  } else if (previewMode.kind === "commit") {
+  if (previewMode.kind === "commit") {
     renderCommitPreview(previewMode);
   } else if (directLinkMessage) {
     renderEmptyPreview(directLinkMessage.title, directLinkMessage.body);
@@ -184,7 +170,7 @@ export async function loadInitialState() {
   // here could overwrite newer field-level writes from another open client.
   // An explicit route is current user intent, so only its affected fields are
   // persisted for future root arrivals.
-  if (initialReviewScoreRepositoryId || initialCommitPreview || hasExplicitRoute) {
+  if (initialCommitPreview || hasExplicitRoute) {
     persistPersonalWorkspaceState({
       follow: false,
       ...(explicitDocumentPath ? { documentPath: explicitDocumentPath } : {}),

@@ -23,7 +23,7 @@ import { e2ePort, resetE2EWorkspace, workspaceRoot } from "./config";
 // distinct value via env so each worker's server lives in its own dir.
 const E2E_WORKSPACE_ROOT = workspaceRoot();
 const E2E_PORT = e2ePort();
-import { safeGit } from "../../src/review/load";
+import { safeGit } from "../../src/document/git-base-ref";
 import { createNavigationFetchHandler, INTERNAL_SHELL_PATH } from "../../src/server/navigation";
 import { resolveWatchRoots, type WatchEntry } from "../../src/server/roots";
 import { createWatchSession } from "../../src/server/watch-session";

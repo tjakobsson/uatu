@@ -1,7 +1,7 @@
 # CLAUDE.md — agent guidance for uatu
 
 uatu is a local Bun-served PWA that watches a docs tree and previews
-Markdown / AsciiDoc with a review-load score and an embedded terminal.
+Markdown / AsciiDoc with an embedded terminal.
 See `ARCHITECTURE.md` for the deeper picture (runtime, request lifecycle,
 state lifecycle, terminal subsystem, follow-mode rules, how-to-extend
 recipes).
@@ -53,10 +53,11 @@ src/
 │                   (live-reload engine), roots (resolution + scanning),
 │                   search (content sweep over the watched roots),
 │                   render-dispatch, static-files, navigation, port-probe
-├── document/       per-document concerns — metadata, diff, classify,
-│                   git-base-ref, language detection
+├── document/       document + repository git concerns — metadata, diff,
+│                   classify, git-base-ref, git-data (the repository-level
+│                   sweep: changed files, commit log, repo metadata),
+│                   language detection
 ├── render/         source → HTML (markdown, asciidoc, mermaid sanitization)
-├── review/         load — the review-burden score data layer
 ├── ignore/         engine (.uatu.json + --no-gitignore)
 ├── hub/            `uatu hub` — self-hostable session server: config,
 │                   state-dir, registry (stable workspace slugs), backend

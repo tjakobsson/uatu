@@ -58,30 +58,6 @@ export type BuildSummary = {
 
 export type Scope = { kind: "folder" } | { kind: "file"; documentId: string };
 
-export type ReviewBurdenLevel = "low" | "medium" | "high";
-
-export type ReviewThresholds = {
-  medium: number;
-  high: number;
-};
-
-export type ReviewAreaConfig = {
-  label: string;
-  paths: string[];
-  score?: number;
-  perFile?: number;
-  max?: number;
-  maxDiscount?: number;
-};
-
-export type ReviewSettings = {
-  baseRef?: string;
-  thresholds: ReviewThresholds;
-  riskAreas: ReviewAreaConfig[];
-  supportAreas: ReviewAreaConfig[];
-  ignoreAreas: ReviewAreaConfig[];
-};
-
 export type RepositoryMetadata = {
   id: string;
   rootPath: string;
@@ -95,36 +71,35 @@ export type RepositoryMetadata = {
   message: string | null;
 };
 
-export type ReviewBaseMode =
-  | "configured"
+export type CompareBaseMode =
   | "remote-default"
   | "fallback"
   | "dirty-worktree-only"
   | "unavailable";
 
-// What the review burden / diff is measured against. `base` is the resolved
-// review base (merge-base..worktree — the reviewer's view, the default and the
-// product's hero). `last-commit` is plain git: staged + unstaged changes
-// against HEAD (the author's working view).
-export type ReviewCompareTarget = "base" | "last-commit";
+// What the changed-files context / diff is measured against. `base` is the
+// resolved base (merge-base..worktree — the reviewer's view, the default).
+// `last-commit` is plain git: staged + unstaged changes against HEAD (the
+// author's working view).
+export type CompareTarget = "base" | "last-commit";
 
-export const DEFAULT_COMPARE_TARGET: ReviewCompareTarget = "base";
+export const DEFAULT_COMPARE_TARGET: CompareTarget = "base";
 
-export function isReviewCompareTarget(value: unknown): value is ReviewCompareTarget {
+export function isCompareTarget(value: unknown): value is CompareTarget {
   return value === "base" || value === "last-commit";
 }
 
-export type ReviewBase = {
-  mode: ReviewBaseMode;
+export type CompareBase = {
+  mode: CompareBaseMode;
   ref: string | null;
   mergeBase: string | null;
   // Which compare target produced this result.
-  compareTarget: ReviewCompareTarget;
-  // Precise, portable ref the score was actually computed against — the
-  // resolved base ref (e.g. `origin/main`, a configured `origin/develop`) for
-  // the `base` target, or `HEAD` for `last-commit` and the dirty-worktree
-  // fallback. This is the *label* shown in the burden anchor, not the literal
-  // git arg (which is the merge-base SHA for `base`).
+  compareTarget: CompareTarget;
+  // Precise, portable ref the comparison was actually computed against — the
+  // resolved base ref (e.g. `origin/main`) for the `base` target, or `HEAD`
+  // for `last-commit` and the dirty-worktree fallback. This is the *label*
+  // shown as the compare anchor, not the literal git arg (which is the
+  // merge-base SHA for `base`).
   comparedAgainstRef: string;
   // True when no base ref is resolvable, so `base` and `last-commit` describe
   // the same diff and the choice is not meaningful.
@@ -140,42 +115,6 @@ export type ChangedFileSummary = {
   hunks: number;
 };
 
-export type ReviewScoreDriver = {
-  kind: "mechanical" | "risk" | "support" | "ignore" | "warning";
-  label: string;
-  score: number;
-  detail: string;
-  files: string[];
-};
-
-export type ReviewConfiguredArea = {
-  kind: "risk" | "support" | "ignore";
-  label: string;
-  paths: string[];
-  matchedFiles: string[];
-  score: number;
-};
-
-export type ReviewLoadResult = {
-  status: "available" | "non-git" | "unavailable";
-  score: number;
-  level: ReviewBurdenLevel;
-  thresholds: ReviewThresholds;
-  base: ReviewBase;
-  changedFiles: ChangedFileSummary[];
-  ignoredFiles: ChangedFileSummary[];
-  // Repo-root-relative paths of files in the tree that are matched by git's
-  // ignore rules (.gitignore, core.excludesFile, etc.). Pre-filtered server-
-  // side to paths uatu actually displays so we do not ship full ignored sets
-  // (e.g. node_modules contents) over the wire. These files contribute
-  // nothing to the score; their only consumer is tree row annotation.
-  gitIgnoredFiles: string[];
-  drivers: ReviewScoreDriver[];
-  configuredAreas: ReviewConfiguredArea[];
-  settingsWarnings: string[];
-  message: string | null;
-};
-
 export type CommitLogEntry = {
   sha: string;
   subject: string;
@@ -184,13 +123,27 @@ export type CommitLogEntry = {
   relativeTime: string | null;
 };
 
-export type RepositoryReviewSnapshot = {
+export type RepositorySnapshot = {
   id: string;
   rootPath: string;
   label: string;
   watchedRootIds: string[];
   metadata: RepositoryMetadata;
-  reviewLoad: ReviewLoadResult;
+  // Whether change data (base, changedFiles, gitIgnoredFiles) could be
+  // computed for this repository.
+  status: "available" | "non-git" | "unavailable";
+  base: CompareBase;
+  changedFiles: ChangedFileSummary[];
+  // Repo-root-relative paths of files in the tree that are matched by git's
+  // ignore rules (.gitignore, core.excludesFile, etc.). Pre-filtered server-
+  // side to paths uatu actually displays so we do not ship full ignored sets
+  // (e.g. node_modules contents) over the wire. Their only consumer is tree
+  // row annotation.
+  gitIgnoredFiles: string[];
+  // `.uatu.json` parse warnings (read failure, invalid JSON), surfaced in the
+  // Change Overview pane.
+  configWarnings: string[];
+  message: string | null;
   commitLog: CommitLogEntry[];
 };
 
@@ -215,10 +168,10 @@ export type MonoConfigPayload = {
 
 export type StatePayload = {
   roots: RootGroup[];
-  repositories: RepositoryReviewSnapshot[];
+  repositories: RepositorySnapshot[];
   // The server-session compare target the snapshots were computed for. The
   // client reconciles its persisted preference against this on boot.
-  compareTarget: ReviewCompareTarget;
+  compareTarget: CompareTarget;
   initialFollow: boolean;
   defaultDocumentId: string | null;
   changedId: string | null;
@@ -243,7 +196,7 @@ type ModeStorage = {
 // View mode controls how the preview body renders the active document:
 // "rendered" runs Markdown / AsciiDoc through their full pipelines, "source"
 // shows the file's verbatim text inside the source-rendering `<pre><code>`
-// path, and "diff" renders the file's git diff against the resolved review
+// path, and "diff" renders the file's git diff against the resolved compare
 // base.
 export type ViewMode = "source" | "rendered" | "diff";
 

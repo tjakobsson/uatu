@@ -2,8 +2,8 @@
 // inside) `terminal/config.ts` because the mono face is a global UI concern
 // — every monospace surface in the app reads from `--mono-font-family` —
 // not specifically a terminal one. Both modules read the same file
-// independently, matching how `review/load.ts` and `sidebar/tree-config.ts`
-// each own their own slice of `.uatu.json`.
+// independently, matching how `sidebar/tree-config.ts` owns its own slice
+// of `.uatu.json`.
 
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -35,7 +35,7 @@ export async function loadMonoConfig(rootPath: string): Promise<MonoConfigResult
   try {
     parsed = JSON.parse(source);
   } catch {
-    // review-load.ts already surfaces a parse warning; don't double-warn.
+    // document/git-data.ts already surfaces a parse warning; don't double-warn.
     return { config, warnings };
   }
 

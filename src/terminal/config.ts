@@ -1,5 +1,5 @@
 // Loads the optional `terminal` block from `.uatu.json`. Lives next to (not
-// inside) `review-load.ts` because terminal config is global per-uatu-instance
+// inside) `document/git-data.ts` because terminal config is global per-uatu-instance
 // rather than per-repo, and merging the two parsers would just create coupling
 // for no payoff. Both modules read the same file independently.
 
@@ -42,7 +42,7 @@ export async function loadTerminalConfig(rootPath: string): Promise<TerminalConf
   try {
     parsed = JSON.parse(source);
   } catch (error) {
-    // review-load.ts already surfaces a parse warning; don't double-warn.
+    // document/git-data.ts already surfaces a parse warning; don't double-warn.
     return { config, warnings };
   }
 

@@ -38,12 +38,11 @@ cognitive debt.
 - Mermaid diagrams (fenced and `[source,mermaid]`) with a fullscreen pan/zoom viewer
 - Syntax highlighting for source files, plus per-file copy-to-clipboard on every code block
 - Cross-document `.md`/`.adoc` link navigation; live reload over SSE
-- **Rendered / Source / Diff** view chooser per document; Diff renders only the active file's changes against the resolved review base via [`@pierre/diffs`](https://diffs.com/)
+- **Rendered / Source / Diff** view chooser per document; Diff renders only the active file's changes against the resolved compare base via [`@pierre/diffs`](https://diffs.com/)
 - **Follow switch** for the agent-collab workflow — on = auto-jump to the latest changed file, off = stay on the file you're reading (it still reloads in place when it changes on disk)
 - Side-by-side / stacked split layouts for Source + Rendered
 - Whole-repo browsing with `.uatu.json tree.exclude` and `.gitignore` filtering on top of built-in defaults
 - Sidebar with Change Overview, Files, and Git Log — toggle individual panes from the per-pane menu
-- Review burden meter based on git diff size, file spread, and configurable path scoring
 - Git preflight by default (`--force` to bypass for non-git folders); single-file or multi-root scope
 - Embedded terminal panel (real PTY via Bun) toggled with `Ctrl+`` — dark theme, Nerd Font detection, dock to bottom or right, split for two concurrent PTYs
 - Installable as a PWA so TUI editor shortcuts (`Cmd+W`, `Cmd+T`, `Cmd+L`, `Cmd+R`) reach the embedded terminal
@@ -170,7 +169,7 @@ hand.
 HTTPS port serving a login-gated dashboard, one supervised `uatu serve`
 child per workspace, every session reverse-proxied under
 `https://<host>/s/<workspace-id>/`. Sessions keep the full uatu experience —
-live preview, review burden, detachable terminals — reachable from any
+live preview, change overview, detachable terminals — reachable from any
 browser, including an iPad that installs the hub as a PWA.
 
 ```bash
@@ -209,13 +208,6 @@ are surfaced in Change Overview rather than aborting the watch session.
     "fontFamily": "Berkeley Mono, monospace",
     "fontSize": 14,
     "clipboard": "notify"
-  },
-  "review": {
-    "baseRef": "origin/main",
-    "thresholds": { "medium": 35, "high": 70 },
-    "riskAreas":    [{ "label": "Auth",  "paths": ["src/auth/**"],            "score": 25, "perFile":  2, "max": 35 }],
-    "supportAreas": [{ "label": "Tests", "paths": ["**/*.test.ts","tests/**"], "score": -10, "perFile": -1, "maxDiscount": 15 }],
-    "ignoreAreas":  [{ "label": "Generated", "paths": ["dist/**","**/*.generated.ts"] }]
   }
 }
 ```
@@ -231,9 +223,9 @@ pages. `mono.fontFamily` overrides the default everywhere at once;
 panel only (so you can keep the body of the app in one face and the
 terminal in another).
 
-The review base is resolved in order: configured `review.baseRef` →
-`origin/HEAD` → `origin/main` → `origin/master` → `main` → `master`, then
-falls back to staged + unstaged worktree changes against `HEAD`.
+The compare base is resolved automatically in order: `origin/HEAD` →
+`origin/main` → `origin/master` → `main` → `master`, then falls back to
+staged + unstaged worktree changes against `HEAD`.
 
 Files at or above 1 MB render without syntax highlighting to keep the
 browser responsive. Binary files appear with VS Code-style icons and route

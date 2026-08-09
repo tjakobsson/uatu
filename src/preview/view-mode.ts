@@ -144,7 +144,7 @@ export function syncWrapToggle(effectiveMode: ViewMode | null): void {
 }
 
 // Hide the Source/Rendered toggle for non-document previews (commit,
-// review-score, empty). Also clear any split-layout classes so the
+// empty). Also clear any split-layout classes so the
 // preview body resets to a normal flow container for the upcoming
 // non-document content, and tear down the inline layout toolbar.
 export function hideViewToggle(): void {
@@ -155,7 +155,7 @@ export function hideViewToggle(): void {
   previewElement.classList.remove("is-split", "is-split-h", "is-split-v");
   previewElement.removeAttribute("data-auto-stack");
   mountLayoutToolbar(false);
-  // Non-document previews (commit, review-score, empty, binary, image) have no
+  // Non-document previews (commit, empty, binary, image) have no
   // outline and no source to copy — hide the action bar and tear down scroll-spy.
   refreshOutline(null);
 }
@@ -258,7 +258,7 @@ export function initViewModeControls(): void {
 // `requestIdleCallback` is absent in some engines; a generous timeout
 // fallback keeps the behavior without blocking anything.
 export function scheduleDiffPrewarmWhenIdle(): void {
-  if (!appState.repositories.some(repository => repository.reviewLoad.status === "available")) {
+  if (!appState.repositories.some(repository => repository.status === "available")) {
     return;
   }
   const idle = (globalThis as { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => void }).requestIdleCallback;

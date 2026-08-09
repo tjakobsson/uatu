@@ -6,16 +6,16 @@ import path from "node:path";
 import type { ReadableStreamDefaultController } from "node:stream/web";
 
 import { loadIgnoreMatcher, type IgnoreMatcher } from "../ignore/engine";
-import { collectRepositorySnapshots } from "../review/load";
+import { collectRepositorySnapshots } from "../document/git-data";
 import {
   DEFAULT_COMPARE_TARGET,
   defaultDocumentId,
   findDocument,
   hasDocument,
   type BuildSummary,
+  type CompareTarget,
   type MonoConfigPayload,
-  type RepositoryReviewSnapshot,
-  type ReviewCompareTarget,
+  type RepositorySnapshot,
   type RootGroup,
   type Scope,
   type StatePayload,
@@ -52,11 +52,11 @@ export function createStatePayload(
   initialFollow: boolean,
   changedId: string | null = null,
   scope: Scope = { kind: "folder" },
-  repositories: RepositoryReviewSnapshot[] = [],
+  repositories: RepositorySnapshot[] = [],
   terminalEnabled?: boolean,
   terminalConfig?: TerminalConfigPayload,
   monoConfig?: MonoConfigPayload,
-  compareTarget: ReviewCompareTarget = DEFAULT_COMPARE_TARGET,
+  compareTarget: CompareTarget = DEFAULT_COMPARE_TARGET,
   unscopedFingerprint?: string,
 ): StatePayload {
   return {
@@ -243,7 +243,7 @@ export function createWatchSession(
   let unscopedRoots: RootGroup[] = [];
   let stateFingerprint = "";
   let unscopedFingerprint = "";
-  let repositoriesByTarget: Record<ReviewCompareTarget, RepositoryReviewSnapshot[]> = {
+  let repositoriesByTarget: Record<CompareTarget, RepositorySnapshot[]> = {
     base: [],
     "last-commit": [],
   };
@@ -312,15 +312,15 @@ export function createWatchSession(
 
   const collectAllRepositorySnapshots = async (
     nextRoots: RootGroup[],
-  ): Promise<Record<ReviewCompareTarget, RepositoryReviewSnapshot[]>> => {
+  ): Promise<Record<CompareTarget, RepositorySnapshot[]>> => {
     const previous = repositoriesByTarget;
     const [base, lastCommit] = await Promise.all([
       collectRepositorySnapshots(entries, nextRoots, "base").catch(error => {
-        console.error(`uatu: failed to refresh base review data: ${error instanceof Error ? error.message : String(error)}`);
+        console.error(`uatu: failed to refresh base change data: ${error instanceof Error ? error.message : String(error)}`);
         return previous.base;
       }),
       collectRepositorySnapshots(entries, nextRoots, "last-commit").catch(error => {
-        console.error(`uatu: failed to refresh last-commit review data: ${error instanceof Error ? error.message : String(error)}`);
+        console.error(`uatu: failed to refresh last-commit change data: ${error instanceof Error ? error.message : String(error)}`);
         return previous["last-commit"];
       }),
     ]);
@@ -562,19 +562,23 @@ function fingerprintRoots(roots: RootGroup[]): string {
 
 function createContextFingerprint(
   roots: RootGroup[],
-  repositories: Record<ReviewCompareTarget, RepositoryReviewSnapshot[]>,
+  repositories: Record<CompareTarget, RepositorySnapshot[]>,
 ): string {
   return `${fingerprintRoots(roots)}\nbase:${fingerprintRepositories(repositories.base)}\nlast-commit:${fingerprintRepositories(repositories["last-commit"])}`;
 }
 
-function fingerprintRepositories(repositories: RepositoryReviewSnapshot[]): string {
+function fingerprintRepositories(repositories: RepositorySnapshot[]): string {
   return JSON.stringify(
     repositories.map(repository => ({
       id: repository.id,
       rootPath: repository.rootPath,
       watchedRootIds: repository.watchedRootIds,
       metadata: repository.metadata,
-      reviewLoad: repository.reviewLoad,
+      status: repository.status,
+      base: repository.base,
+      changedFiles: repository.changedFiles,
+      gitIgnoredFiles: repository.gitIgnoredFiles,
+      configWarnings: repository.configWarnings,
       commitLog: repository.commitLog.map(commit => ({
         sha: commit.sha,
         subject: commit.subject,
