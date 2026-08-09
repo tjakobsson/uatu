@@ -3,11 +3,12 @@ import { expect, test } from "./fixtures";
 // Real-browser sanity for the PWA install path. The integration tests
 // confirm the assets serve with the right shape; this test confirms that
 // the runtime injection in app.ts wires the manifest into the live DOM
-// and that the service worker registers at site root scope.
+// and that no service worker registers (installability comes from the
+// manifest alone; uatu has nothing useful to do offline).
 //
 // Note: Chrome's "is this installable" heuristic itself isn't asserted
-// here — that's a Chrome-internal decision based on the manifest, the SW,
-// the icons, and user-facing engagement signals. We assert the parts uatu
+// here — that's a Chrome-internal decision based on the manifest, the
+// icons, and user-facing engagement signals. We assert the parts uatu
 // owns; if those are right and Chromium changes its heuristic, we're not
 // the ones who broke.
 
@@ -39,28 +40,17 @@ test.describe("PWA install surface", () => {
     expect(sizes).toContain("512x512");
   });
 
-  test("service worker is reachable at /sw.js with the right headers", async ({ request }) => {
-    const response = await request.get("/sw.js");
-    expect(response.status()).toBe(200);
-    expect(response.headers()["content-type"]).toContain("application/javascript");
-    expect(response.headers()["service-worker-allowed"]).toBe("/");
-    // Cache-Control must NOT cache — when uatu upgrades and ships a new
-    // worker, the new bytes have to reach existing tabs on the next reload.
-    expect(response.headers()["cache-control"]).toContain("no-cache");
-  });
-
-  test("service worker registers and takes control", async ({ page }) => {
-    // app.ts registers `/sw.js` after window.load. Wait for it; the
-    // controller becomes non-null once the SW activates and claims clients.
-    const controllerScript = await page.waitForFunction(
-      () => Boolean(navigator.serviceWorker.controller),
-      undefined,
-      { timeout: 10_000 },
-    );
-    expect(await controllerScript.jsonValue()).toBe(true);
-
-    const scriptUrl = await page.evaluate(() => navigator.serviceWorker.controller?.scriptURL ?? null);
-    expect(scriptUrl).toMatch(/\/sw\.js$/);
+  test("no service worker registers", async ({ page }) => {
+    // Give app.ts's load-time wiring a moment to run, then assert nothing
+    // registered: the pwa-install spec requires installability without a
+    // service worker, and a lingering registration would defeat request
+    // interception in other suites.
+    await page.waitForLoadState("load");
+    const registrations = await page.evaluate(async () => {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      return regs.map(reg => reg.active?.scriptURL ?? reg.scope);
+    });
+    expect(registrations).toEqual([]);
   });
 
   test("icon assets are reachable as PNGs", async ({ request }) => {

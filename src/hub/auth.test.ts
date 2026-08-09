@@ -9,6 +9,7 @@ import {
   isSameOriginRequest,
   LoginRateLimiter,
   readHubSession,
+  safeReturnPath,
   verifyLogin,
   verifyPassword,
   verifySessionCookieValue,
@@ -151,5 +152,34 @@ describe("LoginRateLimiter", () => {
     limiter.recordFailure("5.6.7.8", t0);
     limiter.reset("5.6.7.8");
     expect(limiter.allow("5.6.7.8", t0 + 1)).toBe(true);
+  });
+});
+
+describe("safeReturnPath", () => {
+  test("accepts same-origin absolute paths", () => {
+    expect(safeReturnPath("/s/uatu/")).toBe("/s/uatu/");
+    expect(safeReturnPath("/s/uatu/?scope=file&documentId=%2FREADME.md")).toBe(
+      "/s/uatu/?scope=file&documentId=%2FREADME.md",
+    );
+    expect(safeReturnPath("/")).toBe("/");
+  });
+
+  test("rejects everything that could leave the origin", () => {
+    // Absolute URL with a scheme.
+    expect(safeReturnPath("https://evil.example/")).toBe("/");
+    // Protocol-relative.
+    expect(safeReturnPath("//evil.example/")).toBe("/");
+    // Backslash variants browsers normalize to "//".
+    expect(safeReturnPath("/\\evil.example")).toBe("/");
+    expect(safeReturnPath("\\\\evil.example")).toBe("/");
+    // Header-splitting / whitespace smuggling.
+    expect(safeReturnPath("/ok\nSet-Cookie: x=y")).toBe("/");
+    expect(safeReturnPath("/with space")).toBe("/");
+    // Relative, empty, and non-string shapes.
+    expect(safeReturnPath("relative/path")).toBe("/");
+    expect(safeReturnPath("")).toBe("/");
+    expect(safeReturnPath(null)).toBe("/");
+    expect(safeReturnPath(undefined)).toBe("/");
+    expect(safeReturnPath(42)).toBe("/");
   });
 });

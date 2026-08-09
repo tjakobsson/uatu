@@ -9,10 +9,15 @@ const stubSession = () => {
   throw new Error("session should not be touched by asset routes");
 };
 
-function buildFontTestRoutes(basePath?: string, getSession: () => never = stubSession) {
+function buildFontTestRoutes(
+  basePath?: string,
+  getSession: () => never = stubSession,
+  manifestScope?: "base-path" | "origin",
+) {
   const repoRoot = path.resolve(import.meta.dir, "..", "..");
   return buildRoutes({
     basePath,
+    manifestScope,
     mode: "prod",
     assets: {
       mermaid: path.join(repoRoot, "node_modules/mermaid/dist/mermaid.min.js"),
@@ -20,7 +25,6 @@ function buildFontTestRoutes(basePath?: string, getSession: () => never = stubSe
       icon192: path.join(repoRoot, "src/assets/icon-192.png"),
       icon512: path.join(repoRoot, "src/assets/icon-512.png"),
       manifest: path.join(repoRoot, "src/assets/manifest.webmanifest"),
-      sw: path.join(repoRoot, "src/assets/sw.js"),
       fonts: {
         hackMono: path.join(repoRoot, "src/assets/fonts/HackNerdFontMono-Regular.woff2"),
         hackLicense: path.join(repoRoot, "src/assets/fonts/LICENSE-hack.md"),
@@ -89,16 +93,16 @@ describe("buildRoutes — base-path prefixing", () => {
     const keys = Object.keys(routes);
     expect(keys).toContain("/s/alpha/api/state");
     expect(keys).toContain("/s/alpha/api/events");
-    expect(keys).toContain("/s/alpha/sw.js");
     expect(keys).toContain("/s/alpha/manifest.webmanifest");
     expect(keys).toContain("/s/alpha/debug/metrics");
     expect(keys.every(key => key.startsWith("/s/alpha/"))).toBe(true);
   });
 
-  test("the service worker is allowed to control the base-path scope", () => {
-    const routes = buildFontTestRoutes("/s/alpha/");
-    const sw = routes["/s/alpha/sw.js"] as Response;
-    expect(sw.headers.get("service-worker-allowed")).toBe("/s/alpha/");
+  test("no service worker route exists", () => {
+    // Deleted deliberately: installability comes from the manifest alone,
+    // and uatu has nothing useful to do offline (pwa-install spec).
+    expect(Object.keys(buildFontTestRoutes())).not.toContain("/sw.js");
+    expect(Object.keys(buildFontTestRoutes("/s/alpha/"))).not.toContain("/s/alpha/sw.js");
   });
 
   test("the manifest is rewritten to live under the base path", async () => {
@@ -121,6 +125,23 @@ describe("buildRoutes — base-path prefixing", () => {
     const manifest = (await response.json()) as { start_url: string; scope: string };
     expect(manifest.start_url).toBe("/");
     expect(manifest.scope).toBe("/");
+  });
+
+  test("origin manifest scope widens scope to / while start_url stays relocated", async () => {
+    // Hub mode: the hub owns its origin root, so an installed session
+    // webapp treats the dashboard, login, and sibling sessions as
+    // in-scope — no iOS out-of-scope browser chrome between them.
+    const routes = buildFontTestRoutes("/s/alpha/", stubSession, "origin");
+    const handler = routes["/s/alpha/manifest.webmanifest"] as { GET: () => Promise<Response> };
+    const response = await handler.GET();
+    const manifest = (await response.json()) as {
+      start_url: string;
+      scope: string;
+      icons: { src: string }[];
+    };
+    expect(manifest.scope).toBe("/");
+    expect(manifest.start_url).toBe("/s/alpha/");
+    expect(manifest.icons.every(icon => icon.src.startsWith("/s/alpha/assets/"))).toBe(true);
   });
 });
 

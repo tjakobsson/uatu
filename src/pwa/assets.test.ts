@@ -1,8 +1,9 @@
-// Verifies the PWA assets cli.ts serves: manifest, service worker, icons.
-// Reads them off disk (the same files cli.ts mounts via Bun.file imports)
-// rather than spinning up a server — the routing wrapper just emits raw
-// Bun.file bodies with fixed headers, so the bytes that reach the browser
-// ARE the file contents.
+// Verifies the PWA assets cli.ts serves: manifest and icons. Reads them
+// off disk (the same files cli.ts mounts via Bun.file imports) rather than
+// spinning up a server — the routing wrapper just emits raw Bun.file bodies
+// with fixed headers, so the bytes that reach the browser ARE the file
+// contents. There is deliberately no service worker: installability no
+// longer requires one, and uatu has nothing useful to do offline.
 
 import { describe, expect, it } from "bun:test";
 import { promises as fs } from "node:fs";
@@ -35,24 +36,12 @@ describe("manifest.webmanifest", () => {
   });
 });
 
-describe("sw.js", () => {
-  it("registers a fetch handler (Chromium install criterion)", async () => {
-    const source = await fs.readFile(path.join(ASSETS_DIR, "sw.js"), "utf8");
-    expect(source).toContain('addEventListener("fetch"');
-  });
-
-  it("does NOT cache (matches the design intent)", async () => {
-    const source = await fs.readFile(path.join(ASSETS_DIR, "sw.js"), "utf8");
-    // No caches.match / caches.open / Cache API usage. A grep is enough — if
-    // someone adds caching behind a different name they'll know to update
-    // this test alongside the design.md "no cache" decision.
-    expect(source).not.toMatch(/caches\./);
-  });
-
-  it("calls skipWaiting and clientsClaim so updates take effect immediately", async () => {
-    const source = await fs.readFile(path.join(ASSETS_DIR, "sw.js"), "utf8");
-    expect(source).toContain("skipWaiting");
-    expect(source).toContain("clients.claim");
+describe("service worker absence", () => {
+  it("ships no sw.js asset", async () => {
+    // The pass-through worker existed only for an outdated Chromium install
+    // heuristic; its absence is now the specified behavior (pwa-install:
+    // "installability does not depend on a service worker").
+    await expect(fs.access(path.join(ASSETS_DIR, "sw.js"))).rejects.toThrow();
   });
 });
 

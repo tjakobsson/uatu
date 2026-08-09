@@ -76,6 +76,32 @@ describe("hub end to end", () => {
     expect(navigation.headers.get("location")).toContain("/login");
   });
 
+  test("the hub manifest and icons are reachable without a cookie", async () => {
+    // Install-time fetches may be anonymous (Safari's Add to Home Screen);
+    // a 401 would silently degrade installs. Scope "/" is what keeps the
+    // whole hub origin inside the installed app.
+    const manifest = await fetch(`${origin}/manifest.webmanifest`);
+    expect(manifest.status).toBe(200);
+    expect(manifest.headers.get("content-type")).toContain("application/manifest+json");
+    const body = (await manifest.json()) as Record<string, unknown>;
+    expect(body.name).toBe("UatuCode Hub");
+    expect(body.scope).toBe("/");
+    expect(body.start_url).toBe("/");
+    expect(body.display).toBe("standalone");
+    const icons = body.icons as Array<{ src: string; sizes: string }>;
+    expect(icons.map(icon => icon.sizes)).toEqual(["192x192", "512x512"]);
+    for (const icon of icons) {
+      const response = await fetch(`${origin}${icon.src}`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe("image/png");
+    }
+  });
+
+  test("login and dashboard pages link the hub manifest", async () => {
+    const login = await fetch(`${origin}/login`, { headers: { accept: "text/html" } });
+    expect(await login.text()).toContain('<link rel="manifest" href="/manifest.webmanifest" />');
+  });
+
   test("the login page carries no version string; the dashboard renders it for signed-in users", async () => {
     const { BUILD, formatBuildIdentifier } = await import("../shared/version");
     const login = await fetch(`${origin}/login`, { headers: { accept: "text/html" } });
@@ -111,6 +137,50 @@ describe("hub end to end", () => {
     expect(setCookie).toContain("uatu_hub=");
     expect(setCookie).toContain("HttpOnly");
     cookie = setCookie.split(";")[0]!;
+  });
+
+  test("the dashboard page links the hub manifest", async () => {
+    const dashboard = await fetch(`${origin}/`, { headers: { accept: "text/html", cookie } });
+    expect(dashboard.status).toBe(200);
+    expect(await dashboard.text()).toContain('<link rel="manifest" href="/manifest.webmanifest" />');
+  });
+
+  test("login returns to the gated page that bounced, and never off-origin", async () => {
+    // Gate → login carries the requested path...
+    const bounced = await fetch(`${origin}/s/myproject/`, {
+      headers: { accept: "text/html" },
+      redirect: "manual",
+    });
+    expect(bounced.status).toBe(303);
+    expect(bounced.headers.get("location")).toBe(`/login?next=${encodeURIComponent("/s/myproject/")}`);
+
+    // ...the login page echoes it as a hidden field...
+    const loginPageResponse = await fetch(`${origin}/login?next=%2Fs%2Fmyproject%2F`, {
+      headers: { accept: "text/html" },
+    });
+    expect(await loginPageResponse.text()).toContain('name="next" value="/s/myproject/"');
+
+    // ...and a successful form login lands back on it.
+    const returned = await fetch(`${origin}/login`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ name: "tobias", password: "open sesame", next: "/s/myproject/" }),
+      redirect: "manual",
+    });
+    expect(returned.status).toBe(303);
+    expect(returned.headers.get("location")).toBe("/s/myproject/");
+
+    // A malicious target falls back to the dashboard.
+    for (const evil of ["https://evil.example/", "//evil.example/", "/\\evil.example"]) {
+      const response = await fetch(`${origin}/login`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ name: "tobias", password: "open sesame", next: evil }),
+        redirect: "manual",
+      });
+      expect(response.status).toBe(303);
+      expect(response.headers.get("location")).toBe("/");
+    }
   });
 
   test("workspace creation starts a real session and the dashboard sees it", async () => {
@@ -459,18 +529,19 @@ describe("hub end to end", () => {
     expect(((await failed.json()) as { error: string }).error).toContain("git clone failed");
   }, 60_000);
 
-  test("secure-context plumbing survives the proxy: SW scope, manifest, and state config", async () => {
-    // The service worker must be claimable for exactly this session's scope
-    // once the page is on a secure origin — the headers that authorize that
-    // must transit the hub unaltered.
+  test("secure-context plumbing survives the proxy: manifest and state config", async () => {
+    // Hub-spawned sessions declare the whole hub origin as PWA scope
+    // (--manifest-scope origin) while start_url stays under the prefix,
+    // so an installed webapp treats the dashboard and sibling sessions
+    // as in-app. There is no service worker to plumb — installability
+    // rides the manifest alone.
     const sw = await fetch(`${origin}/s/myproject/sw.js`, { headers: { cookie } });
-    expect(sw.status).toBe(200);
-    expect(sw.headers.get("service-worker-allowed")).toBe("/s/myproject/");
+    expect(sw.status).toBe(404);
 
     const manifest = await fetch(`${origin}/s/myproject/manifest.webmanifest`, { headers: { cookie } });
     const manifestBody = (await manifest.json()) as { start_url: string; scope: string };
     expect(manifestBody.start_url).toBe("/s/myproject/");
-    expect(manifestBody.scope).toBe("/s/myproject/");
+    expect(manifestBody.scope).toBe("/");
 
     // The clipboard policy (and the rest of terminal config) rides
     // /api/state through the proxy like any other session state.

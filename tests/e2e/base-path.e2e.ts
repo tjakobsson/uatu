@@ -139,14 +139,13 @@ test("terminal auth promotes the token to a base-path-scoped cookie", async ({ r
   expect(outside.status()).toBe(404);
 });
 
-test("the manifest and service worker are relocated under the prefix", async ({ request }) => {
+test("the manifest is relocated under the prefix", async ({ request }) => {
+  // Default (base-path) manifest scope: a generic --base-path mount does
+  // not own its origin, so scope stays confined to the prefix. The hub's
+  // origin-scope mode is covered by the routes unit tests.
   const manifestResponse = await request.get(`${origin}${BASE_PATH}manifest.webmanifest`);
   expect(manifestResponse.status()).toBe(200);
   const manifest = (await manifestResponse.json()) as { start_url: string; scope: string };
   expect(manifest.start_url).toBe(BASE_PATH);
   expect(manifest.scope).toBe(BASE_PATH);
-
-  const sw = await request.get(`${origin}${BASE_PATH}sw.js`);
-  expect(sw.status()).toBe(200);
-  expect(sw.headers()["service-worker-allowed"]).toBe(BASE_PATH);
 });

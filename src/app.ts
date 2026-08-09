@@ -1,6 +1,6 @@
 import { captureTerminalToken } from "./terminal/client";
 import { initHubNav } from "./shell/hub-nav";
-import { injectPwaLinks, registerServiceWorker } from "./shell/pwa";
+import { injectPwaLinks } from "./shell/pwa";
 import { attachPopstateHandler } from "./shell/history";
 import { loadInitialState } from "./shell/boot";
 import { installAnchorHandlers } from "./preview/anchors";
@@ -125,7 +125,6 @@ attachAutoStackObserver();
 captureTerminalToken();
 
 injectPwaLinks();
-registerServiceWorker();
 attachPopstateHandler();
 
 void loadInitialState().then(() => {
