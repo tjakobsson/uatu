@@ -213,15 +213,29 @@ final class HubConnection: Identifiable {
             // rejected one means the password changed — prompt.
             if !triedSilentRelogin, let password = HubKeychain.get(account: entry.passwordAccount) {
                 triedSilentRelogin = true
+                // A deliberate sign-out can land while the login request is
+                // in flight (the MainActor is reentrant across awaits, and
+                // the password above was read before the sign-out deleted
+                // it). Writing the freshly minted session back would leave
+                // the app signed in to a hub the user just signed out of —
+                // so the result is gated on the sign-out epoch, and a stale
+                // one is revoked server-side rather than merely dropped.
+                let epoch = signOutEpoch
                 if let fresh = try? await HubAPI.login(baseURL: url, name: entry.username, password: password) {
+                    guard epoch == signOutEpoch else {
+                        await HubAPI(baseURL: url, sessionID: fresh).logout()
+                        return
+                    }
                     HubKeychain.set(fresh, account: entry.sessionAccount)
                     api.sessionID = fresh
                     if let hubState = try? await api.state() {
+                        guard epoch == signOutEpoch else { return }
                         state = .connected(hubState)
                         triedSilentRelogin = false
                         return
                     }
                 }
+                guard epoch == signOutEpoch else { return }
             }
             state = .signedOut
         } catch HubAPIError.unreachable(let detail) {
@@ -257,7 +271,11 @@ final class HubConnection: Identifiable {
         state = .signedOut
         signOutEpoch &+= 1
         if let url = entry.url {
-            await HubCookies.clear(for: url)
+            // Abandon the clear if a sign-in overtakes it: the new session's
+            // cookie shares this one's name, domain, and path, and WebKit
+            // deletes by that tuple — an unguarded clear resuming after a
+            // quick re-sign-in would delete the replacement cookie.
+            await HubCookies.clear(for: url, stillWanted: { self.sessionID == nil })
         }
     }
 

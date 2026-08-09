@@ -373,7 +373,7 @@ export function createHubFetchHandler(deps: HubDeps) {
         await sessionStore.revoke(presented.id);
       }
       if (presented?.transport === "bearer") {
-        return json(200, { revoked: presented !== null });
+        return json(200, { revoked: true });
       }
       return new Response(null, {
         status: 303,

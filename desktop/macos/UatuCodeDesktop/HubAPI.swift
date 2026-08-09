@@ -144,6 +144,14 @@ struct HubAPI {
         return id
     }
 
+    /// Revokes the held session server-side (best-effort). Used to kill a
+    /// session the app minted but decided not to keep — e.g. a silent
+    /// re-login that completed after the user signed out.
+    func logout() async {
+        guard let request = request(path: "logout", method: "POST") else { return }
+        _ = try? await perform(request)
+    }
+
     func startSession(id: String) async throws {
         let encoded = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
         guard let request = request(path: "api/hub/sessions/\(encoded)/start", method: "POST") else {
@@ -228,12 +236,17 @@ enum HubCookies {
     /// Removes a hub's session cookie from the web view's store — hygiene
     /// when the app discards a hub's credentials, so the jar doesn't keep a
     /// (server-side dead) id around.
+    /// - Parameter stillWanted: re-checked after the store snapshot and before
+    ///   each delete. WebKit deletes by name/domain/path, not value, so a
+    ///   clear overtaken by a re-sign-in would otherwise delete the
+    ///   *replacement* cookie the new session just installed.
     @MainActor
-    static func clear(for hubURL: URL) async {
+    static func clear(for hubURL: URL, stillWanted: () -> Bool = { true }) async {
         guard let host = hubURL.host else { return }
         let store = WKWebsiteDataStore.default().httpCookieStore
         let cookies = await store.allCookies()
         for cookie in cookies where cookie.name == name && matches(cookie, host: host) {
+            guard stillWanted() else { return }
             await store.deleteCookie(cookie)
         }
     }

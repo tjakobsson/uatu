@@ -608,8 +608,11 @@ async function refresh(force) {
   );
 }
 // The device-session list: every active session of the signed-in user,
-// with per-session revocation. Revoking the current session is sign-out —
-// the server clears the cookie and this page bounces to /login.
+// with per-session revocation. Revoking the current session IS sign-out and
+// goes through the real /logout form post — not the revoke API — so native
+// wrappers that watch for the logout navigation (UatuCode Desktop discards
+// its Keychain credentials on it) see this sign-out too; a background fetch
+// followed by a location change would be invisible to them.
 async function loadDevices() {
   let listing;
   try {
@@ -621,23 +624,32 @@ async function loadDevices() {
     title: s.deviceLabel,
     chip: s.current ? "this device" : undefined,
     detail: "signed in " + new Date(s.issuedAt * 1000).toLocaleString(),
-    button: {
-      label: s.current ? "Sign out" : "Revoke",
-      className: "danger",
-      onClick: async button => {
-        showError("");
-        await withBusy(button, "Revoking…", async () => {
-          try {
-            const result = await api("/api/hub/sessions/" + encodeURIComponent(s.handle) + "/revoke");
-            if (result.current) {
-              location.href = "/login";
-              return;
-            }
-            await loadDevices();
-          } catch (error) { showError(error.message); }
-        });
-      },
-    },
+    button: s.current
+      ? {
+          label: "Sign out",
+          className: "danger",
+          onClick: () => {
+            const form = document.createElement("form");
+            form.method = "post";
+            form.action = "/logout";
+            form.hidden = true;
+            document.body.appendChild(form);
+            form.submit();
+          },
+        }
+      : {
+          label: "Revoke",
+          className: "danger",
+          onClick: async button => {
+            showError("");
+            await withBusy(button, "Revoking…", async () => {
+              try {
+                await api("/api/hub/sessions/" + encodeURIComponent(s.handle) + "/revoke");
+                await loadDevices();
+              } catch (error) { showError(error.message); }
+            });
+          },
+        },
   }));
   renderInto(document.getElementById("devices"), rows, "No active sessions.");
 }
