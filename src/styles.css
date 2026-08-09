@@ -5086,9 +5086,28 @@ html[data-ui-mode="touch"] #terminal-resizer {
    (paste-token form, origin-rejected diagnostic) reuse the `.terminal-pane`
    class for layout but carry no session and are never stamped active — hiding
    them would leave a blank Terminal tab with no way to reconnect after
-   credentials expire, which is the one moment the user most needs them. */
+   credentials expire, which is the one moment the user most needs them.
+
+   Hidden with `visibility`, NOT `display: none`, and stacked at the panel's
+   full size. This is load-bearing, not cosmetic: xterm defers `open()` until a
+   ResizeObserver reports a non-zero rect (client.ts), and the attach-ready
+   handshake waits on that open. A `display: none` pane therefore never
+   completes its attach — the server never records this window as the holder,
+   inventory keeps reporting the session detached, another window can claim it
+   out from under us, and no output flows into the scrollback the switcher
+   promises. Giving every pane a real box keeps "attached" true for all of
+   them, and as a bonus they are already the right size when revealed, so
+   switching needs no refit. `visibility: hidden` means the browser skips
+   painting them regardless. */
+html[data-ui-mode="touch"] .terminal-panes {
+  position: relative;
+}
+
 html[data-ui-mode="touch"] .terminal-pane[data-session-id]:not([data-active]) {
-  display: none;
+  position: absolute;
+  inset: 0;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 html[data-ui-mode="touch"] .terminal-pane-resizer {

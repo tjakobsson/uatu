@@ -227,6 +227,26 @@ describe("buildSwitcherRows", () => {
     });
   });
 
+  it("allows reclaiming a parked pane at the cap, where replacing costs no slot", () => {
+    // At the cap the parked pane IS the slot the reclaim needs, so gating it
+    // on spare capacity would strand it: in touch mode its own take-back
+    // notice is hidden too whenever it is not the active pane.
+    const taken = session({ attached: true, createdAt: 100 });
+    const other = session({ attached: false, createdAt: 200 });
+    const rows = buildSwitcherRows(
+      [{ sessionId: taken.id, attached: false }],
+      [taken, other],
+      undefined,
+      undefined,
+      now,
+      0,
+    );
+    const takenRow = rows.find(row => row.sessionId === taken.id);
+    expect(takenRow).toMatchObject({ state: "attached-elsewhere", canTakeOver: true });
+    // An unrelated session still costs a slot we do not have.
+    expect(rows.find(row => row.sessionId === other.id)).toMatchObject({ canSelect: false });
+  });
+
   it("does not double-list a parked pane whose session went detached", () => {
     const parked = session({ attached: false, createdAt: 100 });
     const rows = buildSwitcherRows(

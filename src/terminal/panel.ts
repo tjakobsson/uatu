@@ -1139,6 +1139,17 @@ export function setupTerminalPanel(
     sessionId: string,
     options: { takeover?: boolean } = {},
   ): Promise<void> {
+    const parkedFor = (): TerminalPaneEntry[] =>
+      Array.from(panes.values()).filter(
+        entry => entry.record.sessionId === sessionId && !entry.handle.isAttached(),
+      );
+    // At the cap the attach cannot land at all, and the parked pane for this
+    // very session IS the slot it needs — reclaiming replaces it. Free it
+    // first in that case only. Safe: a window at the cap holds eight panes, so
+    // removing one never empties the panel (which would hide it).
+    if (panes.size >= TERMINAL_MAX_PANES) {
+      for (const stale of parkedFor()) removePane(stale.record.id);
+    }
     const entry = await addPane({ sessionId, createdAt: Date.now() }, options);
     if (!entry) return;
     for (const stale of Array.from(panes.values())) {
@@ -1200,6 +1211,27 @@ export function setupTerminalPanel(
     // closed, or paint one into a surface that is no longer on screen.
     if (!switcherOpen) return;
     if (!terminalSurfaceShowing(panel!)) {
+      dismissSwitcher();
+      return;
+    }
+    // Reconcile zombies before listing. A pane parked by a takeover whose
+    // session the other window then terminated can never come back, and
+    // nothing tells us: we hold no socket left to close. It is not attached,
+    // so it earns no row of its own, and its session is gone from inventory,
+    // so it earns none there either — leaving an invisible pane that holds a
+    // pane-cap slot until the window reloads. The switcher's inventory read is
+    // the natural place to notice. Matched on the take-back notice rather than
+    // on `!isAttached()` alone, so a pane still completing its connection is
+    // never swept.
+    const liveSessionIds = new Set(inventory.map(session => session.id));
+    for (const entry of Array.from(panes.values())) {
+      const parkedByTakeover = entry.element.querySelector(".terminal-taken") !== null;
+      if (parkedByTakeover && !liveSessionIds.has(entry.record.sessionId)) {
+        removePane(entry.record.id);
+      }
+    }
+    // Emptying the pane map hides the panel, which closes this sheet.
+    if (!switcherOpen || !terminalSurfaceShowing(panel!)) {
       dismissSwitcher();
       return;
     }

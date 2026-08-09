@@ -108,6 +108,42 @@ test.describe("touch terminal switcher", () => {
     await expect(page.locator(".terminal-pane")).toHaveCount(3);
   });
 
+  test("every auto-attached terminal is genuinely attached, not just the visible one", async ({
+    page,
+    request,
+  }) => {
+    await bootTouchTerminal(page, request);
+    await stageSessions(page, 3);
+
+    await page.locator("#touch-tab-terminal").click();
+    await expect(page.locator(".terminal-pane")).toHaveCount(3, { timeout: 10000 });
+    await expect(page.locator(".terminal-pane:visible")).toHaveCount(1);
+
+    // The server is the only witness that matters. xterm defers open() until a
+    // ResizeObserver reports a non-zero rect, and the attach-ready handshake
+    // waits on that open — so a hidden pane rendered with `display: none`
+    // looks attached locally while the server still lists its session as
+    // detached, free for another window to claim out from under this one.
+    await expect
+      .poll(
+        async () =>
+          page.evaluate(async () => {
+            const response = await fetch("/api/terminal/sessions");
+            const body = (await response.json()) as {
+              sessions: Array<{ attached: boolean }>;
+            };
+            return body.sessions.filter(session => session.attached).length;
+          }),
+        { timeout: 10000, message: "hidden panes must hold their sessions too" },
+      )
+      .toBe(3);
+
+    // And each one is a real terminal, ready to receive output.
+    for (const host of await page.locator(".terminal-pane-host").all()) {
+      await expect(host).toHaveAttribute("data-terminal-ready", "true", { timeout: 10000 });
+    }
+  });
+
   test("creates a new terminal from the switcher", async ({ page, context, request }) => {
     await bootTouchTerminal(page, request);
     await stageSessions(page, 1);
@@ -271,6 +307,71 @@ test.describe("touch terminal switcher", () => {
     await expect(page.locator(".terminal-pane")).toHaveCount(1);
     await expect(page.locator(".terminal-taken")).toHaveCount(0);
     await expect(page.locator(".terminal-pane")).toHaveAttribute("data-session-id", staged!);
+
+    await page2.close();
+  });
+
+  test("a parked pane whose session was killed elsewhere stops occupying a slot", async ({
+    page,
+    context,
+    request,
+  }) => {
+    await bootTouchTerminal(page, request);
+    // Two sessions, so the sweep has something to leave behind: with only the
+    // zombie, emptying the pane map closes the whole panel and the assertion
+    // would say nothing about slots.
+    const staged = await stageSessions(page, 2);
+    const victim = staged[0]!;
+
+    await page.locator("#touch-tab-terminal").click();
+    await expect(page.locator(".terminal-pane")).toHaveCount(2, { timeout: 10000 });
+    // Both attachments must be live before window 2 reads inventory: a pane
+    // exists before its socket does, and a session still reported detached
+    // would be auto-attached by window 2 instead of offered for takeover.
+    await expect
+      .poll(
+        async () =>
+          page.evaluate(async () => {
+            const response = await fetch("/api/terminal/sessions");
+            const body = (await response.json()) as {
+              sessions: Array<{ attached: boolean }>;
+            };
+            return body.sessions.filter(session => session.attached).length;
+          }),
+        { timeout: 10000, message: "window 1 must hold both sessions" },
+      )
+      .toBe(2);
+
+    // Window 2 takes one session over, then destroys it outright.
+    const page2 = await context.newPage();
+    await page2.goto("/");
+    await expect(page2.locator("#connection-state .connection-label")).toHaveText("Connected");
+    await page2.locator("#touch-tab-terminal").click();
+    await expect(page2.locator("#terminal-switcher")).toBeVisible({ timeout: 10000 });
+    await page2
+      .locator(`.terminal-switcher-row[data-session-id="${victim}"] .terminal-switcher-takeover`)
+      .click();
+    await expect(page2.locator(".terminal-pane-host .xterm").first()).toBeVisible({
+      timeout: 10000,
+    });
+    // The parked notice lives in a hidden pane (the victim is not the active
+    // terminal here), so assert it exists rather than that it is on screen.
+    await expect(page.locator(".terminal-taken")).toHaveCount(1, { timeout: 10000 });
+
+    await page2.evaluate(async id => {
+      await fetch(`/api/terminal/sessions/${id}`, { method: "DELETE" });
+    }, victim);
+
+    // Window 1 now holds a pane for a session that no longer exists. Nothing
+    // told it — there is no socket left to close — so without a reconcile it
+    // would sit invisible in touch mode, holding a pane-cap slot until reload.
+    await page.locator(switchKey).click();
+    await expect(page.locator("#terminal-switcher")).toBeVisible();
+    await expect(
+      page.locator(`.terminal-switcher-row[data-session-id="${victim}"]`),
+    ).toHaveCount(0);
+    await expect(page.locator(".terminal-pane")).toHaveCount(1);
+    await expect(page.locator(".terminal-taken")).toHaveCount(0);
 
     await page2.close();
   });

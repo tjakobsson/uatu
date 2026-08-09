@@ -138,10 +138,28 @@ rather than a compromise: a resize is a message to the shell, and a shell whose
 pane nobody is looking at should not be told the screen changed size on every
 switch.
 
-*Alternative considered:* `visibility: hidden` with absolute positioning to keep
-panes measurable and avoid the refit. Rejected — it keeps every hidden xterm
-rendering into a full-size layer on a phone, paying GPU and layout cost for
-pixels nobody sees.
+**Corrected during implementation: `display: none` is not usable here.** xterm
+defers `open()` until a ResizeObserver reports a non-zero rect (the comment at
+`client.ts:549` explains why), and `sendAttachReady` waits on that open. A pane
+that never gets a box therefore never completes its attach handshake — so the
+*server never records this window as the holder*. The consequences are not
+cosmetic: inventory keeps reporting those sessions detached, another window (or
+this window's own auto-attach) can claim them out from under us, and no output
+reaches the scrollback the switcher promises. Only the visible pane was ever
+really attached; every interactive path still worked, because revealing a pane
+gives it a box and it attaches then — which is exactly why manual testing on
+three devices never caught it.
+
+Hidden panes are therefore `position: absolute; inset: 0; visibility: hidden` at
+the panel's full size. `visibility: hidden` means the browser skips painting
+them, so the cost the original rationale worried about is largely avoided, and
+sizing them like the visible pane removes the reveal-refit hazard too — a
+switched-to pane is already the right size. The `setActivePane` refit stays as
+cheap insurance.
+
+The lesson generalizes: "hidden" in a UI sense and "not rendered" in a browser
+sense are different things, and a subsystem that bootstraps off layout will
+silently not bootstrap.
 
 ### D5 — The switcher is a sheet inside the panel, not a document-level surface
 

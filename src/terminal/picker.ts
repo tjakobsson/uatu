@@ -127,7 +127,16 @@ export function buildSwitcherRows(
   // session held elsewhere.
   const ownPanes = panes.filter(pane => pane.attached);
   const held = new Set(ownPanes.map(pane => pane.sessionId));
+  // Sessions this window holds a parked pane for. Reclaiming one REPLACES that
+  // pane rather than adding to the count, so it must not be gated on spare
+  // capacity: at the pane cap a parked pane is otherwise unreclaimable — its
+  // own take-back notice is hidden too whenever it is not the active pane —
+  // and the only way out would be closing an unrelated terminal.
+  const parked = new Set(
+    panes.filter(pane => !pane.attached).map(pane => pane.sessionId),
+  );
   const hasCapacity = freeSlots > 0;
+  const roomFor = (sessionId: string): boolean => hasCapacity || parked.has(sessionId);
 
   const mine: SwitcherRow[] = ownPanes.map(pane => {
     const session = byId.get(pane.sessionId);
@@ -152,8 +161,8 @@ export function buildSwitcherRows(
     state,
     age: formatSessionAge(session.createdAt, now),
     lastActive: session.id === lastPtyId,
-    canSelect: state === "detached" && hasCapacity,
-    canTakeOver: state === "attached-elsewhere" && hasCapacity,
+    canSelect: state === "detached" && roomFor(session.id),
+    canTakeOver: state === "attached-elsewhere" && roomFor(session.id),
   });
 
   const detached = available
