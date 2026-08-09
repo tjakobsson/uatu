@@ -10,7 +10,6 @@ import logoAsset from "./assets/uatu-logo.svg" with { type: "file" };
 import icon192Asset from "./assets/icon-192.png" with { type: "file" };
 import icon512Asset from "./assets/icon-512.png" with { type: "file" };
 import manifestAsset from "./assets/manifest.webmanifest" with { type: "file" };
-import swAsset from "./assets/sw.js" with { type: "file" };
 import hackMonoFontAsset from "./assets/fonts/HackNerdFontMono-Regular.woff2" with { type: "file" };
 import hackLicenseAsset from "./assets/fonts/LICENSE-hack.md" with { type: "file" };
 import nerdFontsLicenseAsset from "./assets/fonts/LICENSE-nerdfonts.txt" with { type: "file" };
@@ -224,7 +223,6 @@ async function runWatch(options: WatchOptions) {
             icon192: icon192Asset,
             icon512: icon512Asset,
             manifest: manifestAsset,
-            sw: swAsset,
             fonts: {
               hackMono: hackMonoFontAsset,
               hackLicense: hackLicenseAsset,
@@ -234,6 +232,7 @@ async function runWatch(options: WatchOptions) {
           },
           getSession: () => watchSession!,
           basePath: options.basePath,
+          manifestScope: options.manifestScope,
           debug: options.debug,
           getMetricsSnapshot: () => metrics.snapshot(),
         }),

@@ -50,7 +50,6 @@ export type RouteAssets = {
   icon192: string;
   icon512: string;
   manifest: string;
-  sw: string;
   // Bundled web fonts. Same `with { type: "file" }` mechanism — the
   // strings here are file paths embedded in the compiled binary, served
   // as woff2 (or plain text for the license/notice siblings).
@@ -71,6 +70,13 @@ type BaseDeps = {
   // Normalized base-path prefix (leading + trailing "/"). Every static
   // route key is served under it; "/" (the default) is the identity.
   basePath?: string;
+  // Who owns the origin. "base-path" (the default) confines the manifest's
+  // `scope` to the base path — right for a generic `--base-path` mount on a
+  // shared domain. "origin" widens `scope` to "/" while start_url and icons
+  // stay relocated: a hub-served session declares the whole hub origin
+  // (dashboard, login, sibling sessions) as in-app, so an installed webapp
+  // never shows iOS's out-of-scope browser chrome navigating between them.
+  manifestScope?: "base-path" | "origin";
 };
 
 export type ProdRouteDeps = BaseDeps & {
@@ -100,6 +106,7 @@ export type BuildRoutesDeps = ProdRouteDeps | E2ERouteDeps;
 export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string> {
   const { assets, getSession } = deps;
   const basePath = deps.basePath ?? "/";
+  const manifestScope = deps.manifestScope ?? "base-path";
   // Static route keys are data to Bun.serve, so prefixing them is enough to
   // move the whole HTTP surface under the base path. (The HTMLBundle route
   // stays a literal at each Bun.serve call site — see RouteAssets.)
@@ -164,7 +171,9 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
                 manifest.start_url = joinBasePath(basePath, manifest.start_url);
               }
               if (typeof manifest.scope === "string") {
-                manifest.scope = joinBasePath(basePath, manifest.scope);
+                // Origin mode: the hub owns its origin root, so the session
+                // app's scope is the whole hub — see BaseDeps.manifestScope.
+                manifest.scope = manifestScope === "origin" ? "/" : joinBasePath(basePath, manifest.scope);
               }
               for (const icon of manifest.icons ?? []) {
                 if (typeof icon.src === "string" && icon.src.startsWith("/")) {
@@ -179,18 +188,6 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
               });
             },
           },
-    [p("/sw.js")]: new Response(Bun.file(assets.sw), {
-      headers: {
-        "content-type": "application/javascript; charset=utf-8",
-        // No-cache: when a uatu upgrade changes the SW logic, the new
-        // worker must reach the user on the next reload instead of
-        // being shadowed by a cached older version.
-        "cache-control": "no-cache",
-        // Allow the worker to control the whole base-path scope even though
-        // it's served from <basePath>sw.js rather than nested deeper.
-        "service-worker-allowed": basePath,
-      },
-    }),
     [p("/assets/fonts/HackNerdFontMono-Regular.woff2")]: new Response(Bun.file(assets.fonts.hackMono), {
       headers: {
         "content-type": "font/woff2",

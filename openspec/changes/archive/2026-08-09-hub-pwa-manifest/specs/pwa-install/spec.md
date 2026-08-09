@@ -1,8 +1,6 @@
-## Purpose
+# pwa-install — delta
 
-Define the Progressive Web App installation capability for UatuCode: a valid web app manifest, raster icons, a stable default port, and the installability criteria needed for Chromium-based browsers to surface their native install affordance — installability comes from the manifest and icons alone.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: App is installable as a Progressive Web App
 The UI SHALL meet Chromium's installability criteria so that Edge, Chrome, and Brave surface their native install affordance ("install app" pill, omnibox icon, or app menu entry) when a user visits the uatu URL, and SHALL do so from a valid manifest alone, without registering a service worker. uatu has no useful offline behavior, so installability MUST NOT depend on offline capability.
@@ -42,38 +40,8 @@ The server SHALL serve `/manifest.webmanifest` with `Content-Type: application/m
 - **WHEN** a client requests `<base>/manifest.webmanifest` from a session served with `--base-path <base>` outside a hub
 - **THEN** the manifest's `scope`, `start_url`, and icon `src` values are all relocated under `<base>`
 
-### Requirement: Server serves PWA icons
-The server SHALL serve raster icons at `/assets/icon-192.png` and `/assets/icon-512.png` derived from the existing `uatu-logo.svg`, with appropriate `Content-Type: image/png` headers and a long `Cache-Control` lifetime.
+## REMOVED Requirements
 
-#### Scenario: 192px icon is reachable
-- **WHEN** a client requests `/assets/icon-192.png`
-- **THEN** the response status is 200
-- **AND** the `Content-Type` header is `image/png`
-- **AND** the response body is a valid PNG image with width and height of 192 pixels
-
-#### Scenario: 512px icon is reachable
-- **WHEN** a client requests `/assets/icon-512.png`
-- **THEN** the response status is 200
-- **AND** the `Content-Type` header is `image/png`
-- **AND** the response body is a valid PNG image with width and height of 512 pixels
-
-### Requirement: Server uses a stable default port
-The server SHALL bind to a stable default port (4711) when no `--port` flag is provided. If the default port is in use, the server SHALL pick the next available port and log the rolled port to stderr. Users SHALL be able to override the default with `--port <n>`, including `--port 0` to opt into ephemeral port behavior.
-
-#### Scenario: Default port is used when free
-- **WHEN** the user runs `uatu watch .` and port 4711 is free
-- **THEN** the server binds to 4711
-- **AND** the printed URL is `http://127.0.0.1:4711`
-
-#### Scenario: Default port rolls when occupied
-- **WHEN** the user runs `uatu watch .` and port 4711 is already in use
-- **THEN** the server binds to a free port above 4711
-- **AND** writes a warning to stderr indicating the rolled port
-
-#### Scenario: Explicit port is honored
-- **WHEN** the user runs `uatu watch . --port 9000`
-- **THEN** the server binds to 9000
-
-#### Scenario: Ephemeral port via --port 0
-- **WHEN** the user runs `uatu watch . --port 0`
-- **THEN** the server binds to a kernel-assigned ephemeral port
+### Requirement: A minimal service worker is registered
+**Reason**: The pass-through worker existed solely to satisfy Chromium's historical install heuristic, which no longer requires a service worker for the install affordance. uatu has nothing useful to do offline, and the worker's only observable effects have been costs: it defeats request interception in E2E tests and is the standing first suspect in every stale-asset investigation.
+**Migration**: None for users — installability is preserved by the manifest alone (verified as an implementation task before deletion). `src/assets/sw.js`, `registerServiceWorker()`, and the `Server-Worker-Allowed` header plumbing are deleted; browsers drop the existing registration when the script disappears (the deletion task confirms no stale registration keeps controlling pages).

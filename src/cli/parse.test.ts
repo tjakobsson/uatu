@@ -220,6 +220,25 @@ describe("parseCommand", () => {
     expect(inline.options.basePath).toBe("/s/uatu/");
   });
 
+  test("manifestScope defaults to base-path and accepts origin", () => {
+    const parsed = parseCommand(["serve"]);
+    if (parsed.kind !== "watch") throw new Error("expected watch");
+    expect(parsed.options.manifestScope).toBe("base-path");
+
+    const spaced = parseCommand(["serve", "--manifest-scope", "origin"]);
+    if (spaced.kind !== "watch") throw new Error("expected watch");
+    expect(spaced.options.manifestScope).toBe("origin");
+
+    const inline = parseCommand(["serve", "--manifest-scope=origin"]);
+    if (inline.kind !== "watch") throw new Error("expected watch");
+    expect(inline.options.manifestScope).toBe("origin");
+  });
+
+  test("--manifest-scope rejects unknown modes", () => {
+    expect(() => parseCommand(["serve", "--manifest-scope", "wide"])).toThrow(/invalid --manifest-scope/);
+    expect(() => parseCommand(["serve", "--manifest-scope"])).toThrow(/missing value/);
+  });
+
   test("--base-path rejects invalid prefixes", () => {
     expect(() => parseCommand(["serve", "--base-path", "relative/path"])).toThrow(/must start with '\/'/);
     expect(() => parseCommand(["serve", "--base-path", "/has space/"])).toThrow(/whitespace or reserved/);

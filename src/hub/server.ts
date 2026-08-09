@@ -9,6 +9,8 @@ import path from "node:path";
 import type { ServerWebSocket } from "bun";
 
 import hubMonoFontAsset from "../assets/fonts/HackNerdFontMono-Regular.woff2" with { type: "file" };
+import hubIcon192Asset from "../assets/icon-192.png" with { type: "file" };
+import hubIcon512Asset from "../assets/icon-512.png" with { type: "file" };
 
 import {
   clientKeyForRateLimit,
@@ -17,6 +19,7 @@ import {
   isSameOriginRequest,
   LoginRateLimiter,
   readHubSession,
+  safeReturnPath,
   verifyLogin,
 } from "./auth";
 import { createSessionCookieValue } from "./auth";
@@ -87,11 +90,14 @@ export function createHubFetchHandler(deps: HubDeps) {
   };
 
   const handleLogin = async (request: Request, server: HubServer): Promise<Response> => {
+    // The validated return-to target, carried by the gate's redirect
+    // (?next=…) and echoed through the form so the POST can honor it.
+    const nextTarget = safeReturnPath(new URL(request.url).searchParams.get("next"));
     if (request.method === "GET") {
       if (authenticatedSession(request)) {
-        return Response.redirect("/", 303);
+        return Response.redirect(nextTarget, 303);
       }
-      return htmlResponse(loginPage());
+      return htmlResponse(loginPage({ next: nextTarget === "/" ? undefined : nextTarget }));
     }
     if (request.method !== "POST") {
       return new Response("method not allowed", { status: 405 });
@@ -110,6 +116,8 @@ export function createHubFetchHandler(deps: HubDeps) {
 
     let name = "";
     let password = "";
+    // Browser form flow only — native JSON logins have no page to return to.
+    let postedNext: string | null = null;
     const contentType = request.headers.get("content-type") ?? "";
     try {
       if (contentType.includes("application/json")) {
@@ -120,6 +128,8 @@ export function createHubFetchHandler(deps: HubDeps) {
         const form = await request.formData();
         name = String(form.get("name") ?? "");
         password = String(form.get("password") ?? "");
+        const rawNext = form.get("next");
+        postedNext = typeof rawNext === "string" && rawNext ? rawNext : null;
       }
     } catch {
       return htmlResponse(loginPage({ error: "malformed login request" }), 400);
@@ -136,7 +146,9 @@ export function createHubFetchHandler(deps: HubDeps) {
     return new Response(null, {
       status: 303,
       headers: {
-        location: "/",
+        // Back to the page the gate bounced from, when a validated target
+        // rode the form; the dashboard otherwise.
+        location: postedNext ? safeReturnPath(postedNext) : nextTarget,
         "set-cookie": formatHubCookie(createSessionCookieValue(user.name, signingKey), {
           secure: secureCookies(request),
         }),
@@ -332,6 +344,42 @@ export function createHubFetchHandler(deps: HubDeps) {
         headers: { "content-type": "font/woff2", "cache-control": "public, max-age=31536000, immutable" },
       });
     }
+    // The hub's own web-app manifest, ungated: install-time fetches may be
+    // anonymous (Safari fetches it when adding to the home screen) and a
+    // 401 would silently degrade installs — the manifest carries only
+    // branding. Scope "/" makes the whole hub origin — login, dashboard,
+    // and every /s/<id>/ session — one installed app, so navigating
+    // between them never shows iOS's out-of-scope browser chrome.
+    if (pathname === "/manifest.webmanifest") {
+      return Response.json(
+        {
+          name: "UatuCode Hub",
+          short_name: "Uatu Hub",
+          description: "Self-hosted hub for UatuCode sessions.",
+          start_url: "/",
+          scope: "/",
+          display: "standalone",
+          background_color: "#ffffff",
+          theme_color: "#0a1c38",
+          icons: [
+            { src: "/hub-assets/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any maskable" },
+            { src: "/hub-assets/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any maskable" },
+          ],
+        },
+        {
+          headers: {
+            "content-type": "application/manifest+json",
+            "cache-control": "public, max-age=3600",
+          },
+        },
+      );
+    }
+    if (pathname === "/hub-assets/icon-192.png" || pathname === "/hub-assets/icon-512.png") {
+      const asset = pathname.endsWith("icon-192.png") ? hubIcon192Asset : hubIcon512Asset;
+      return new Response(Bun.file(asset), {
+        headers: { "content-type": "image/png", "cache-control": "public, max-age=86400" },
+      });
+    }
 
     // The gate. Everything below requires an authenticated hub session
     // belonging to a still-configured user — except in local mode, where
@@ -343,7 +391,13 @@ export function createHubFetchHandler(deps: HubDeps) {
     if (!session) {
       const wantsHtml = (request.headers.get("accept") ?? "").includes("text/html");
       if (request.method === "GET" && wantsHtml && !pathname.startsWith("/api/")) {
-        return Response.redirect("/login", 303);
+        // Carry the originally requested path so a successful sign-in
+        // returns here instead of dumping the user on the dashboard —
+        // critical for installed webapps launching straight into a
+        // session URL. Validated again at login time; "/" is the noise
+        // case not worth carrying.
+        const next = safeReturnPath(pathname + url.search);
+        return Response.redirect(next === "/" ? "/login" : `/login?next=${encodeURIComponent(next)}`, 303);
       }
       return json(401, { error: "authentication required" });
     }

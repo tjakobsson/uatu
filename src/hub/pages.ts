@@ -271,6 +271,8 @@ function page(title: string, body: string): string {
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
 <meta name="theme-color" content="#0d1117" media="(prefers-color-scheme: dark)" />
+<link rel="manifest" href="/manifest.webmanifest" />
+<link rel="icon" type="image/png" sizes="192x192" href="/hub-assets/icon-192.png" />
 <title>${escapeHtml(title)}</title>
 <style>${SHARED_STYLE}</style>
 </head>
@@ -289,15 +291,18 @@ function brandHeader(): string {
 </header>`;
 }
 
-export function loginPage(options: { error?: string } = {}): string {
+export function loginPage(options: { error?: string; next?: string } = {}): string {
   const error = options.error ? `<p class="error-text">${escapeHtml(options.error)}</p>` : "";
+  // Return-to target carried from the gate's redirect; server-validated
+  // (safeReturnPath) before rendering AND again on submit, escaped here.
+  const next = options.next ? `<input type="hidden" name="next" value="${escapeHtml(options.next)}" />` : "";
   return page(
     "UatuCode Hub — Sign in",
     `${brandHeader()}
 <section class="pane" style="max-width: 380px; margin-left: auto; margin-right: auto;">
   <div class="pane-header"><h2>Sign in</h2></div>
   <form method="post" action="/login" style="padding: 1rem; display: flex; flex-direction: column; gap: 0.75rem;">
-    ${error}
+    ${error}${next}
     <label style="display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.78rem; font-weight: 600; color: var(--text-strong);">
       User
       <input type="text" name="name" autocomplete="username" autofocus />

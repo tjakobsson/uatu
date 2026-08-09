@@ -35,8 +35,3 @@ declare module "mermaid/dist/mermaid.min.js" {
   const path: string;
   export default path;
 }
-
-declare module "*/assets/sw.js" {
-  const path: string;
-  export default path;
-}

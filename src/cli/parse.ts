@@ -40,6 +40,11 @@ export type WatchOptions = {
   // to lead and trail with "/" ("/" itself for the default). Non-default
   // values are how the hub mounts a session at /s/<workspace-id>/.
   basePath: string;
+  // Who owns the origin, for the PWA manifest's `scope`. "base-path" (the
+  // default) confines scope to the base path; "origin" widens it to "/" —
+  // passed by the hub, which owns its origin root, so installed webapps
+  // treat the whole hub as in-app.
+  manifestScope: "base-path" | "origin";
 };
 
 export type HubOptions = {
@@ -94,6 +99,7 @@ Options:
   --debug                 Record verbose 1Hz counter history under \$XDG_CACHE_HOME/uatu (or ~/.cache/uatu)
   --exit-on-stdin-close   Shut down when stdin reaches EOF (for supervising wrappers, so a crashed supervisor cannot orphan the server)
   --base-path <PREFIX>    Serve the whole session under an absolute path prefix (default: /)
+  --manifest-scope <MODE> PWA manifest scope: base-path (default) or origin (for hubs, which own their origin root)
   --no-watchdog           Suppress the companion watchdog subprocess (escape hatch — leaves no recovery on freeze)
   --watchdog-timeout <ms> Override the heartbeat staleness threshold (default: 30000)
   -h, --help              Show help
@@ -212,6 +218,7 @@ export function parseCommand(
   let watchdogTimeoutMs: number | undefined;
   let exitOnStdinClose = false;
   let basePath = "/";
+  let manifestScope: "base-path" | "origin" = "base-path";
   const rootPaths: string[] = [];
 
   for (let index = 0; index < rest.length; index += 1) {
@@ -293,6 +300,24 @@ export function parseCommand(
       continue;
     }
 
+    if (arg === "--manifest-scope" || arg.startsWith("--manifest-scope=")) {
+      let value: string | undefined;
+      if (arg === "--manifest-scope") {
+        value = rest[index + 1];
+        if (!value) {
+          throw new Error("missing value for --manifest-scope");
+        }
+        index += 1;
+      } else {
+        value = arg.slice("--manifest-scope=".length);
+      }
+      if (value !== "base-path" && value !== "origin") {
+        throw new Error(`invalid --manifest-scope: ${value} (expected base-path or origin)`);
+      }
+      manifestScope = value;
+      continue;
+    }
+
     if (arg === "--watchdog-timeout" || arg.startsWith("--watchdog-timeout=")) {
       let value: string | undefined;
       if (arg === "--watchdog-timeout") {
@@ -344,6 +369,7 @@ export function parseCommand(
       watchdogTimeoutMs,
       exitOnStdinClose,
       basePath,
+      manifestScope,
     },
   };
 }

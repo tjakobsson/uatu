@@ -140,6 +140,24 @@ export function readHubSession(request: Request, key: string): HubSession | null
   return null;
 }
 
+// Validates a post-login return-to target. Only a same-origin absolute path
+// passes: a single leading "/" (not "//", which browsers treat as
+// protocol-relative), no backslashes (browsers normalize "\" to "/"), no
+// whitespace or control characters (Location-header hygiene). Anything else
+// — including absolute URLs with a scheme — falls back to the dashboard.
+export function safeReturnPath(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0) {
+    return "/";
+  }
+  if (!value.startsWith("/") || value.startsWith("//")) {
+    return "/";
+  }
+  if (value.includes("\\") || /[\s\u0000-\u001f]/.test(value)) {
+    return "/";
+  }
+  return value;
+}
+
 // --- CSRF ------------------------------------------------------------------
 
 // State-changing endpoints are POST-only and, when an Origin header is

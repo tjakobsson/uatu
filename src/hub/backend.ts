@@ -76,6 +76,11 @@ export class LocalProcessBackend implements SessionBackend {
       "0",
       "--base-path",
       basePath,
+      // The hub owns its origin root, so its sessions declare the whole
+      // origin as PWA scope — an installed webapp treats the dashboard,
+      // login, and sibling sessions as in-app (no iOS browser chrome).
+      "--manifest-scope",
+      "origin",
     ];
 
     const child = Bun.spawn(argv, {

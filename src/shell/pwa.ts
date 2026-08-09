@@ -1,9 +1,11 @@
-// Progressive-web-app glue: manifest / icon `<link>` injection and the
-// pass-through service-worker registration. Both are tiny, runtime-side
-// concerns that don't really belong in `app.ts` — moved here so the shell
-// keeps the PWA surface together and the caller controls when each runs.
+// Progressive-web-app glue: manifest / icon `<link>` injection. A tiny,
+// runtime-side concern that doesn't really belong in `app.ts` — moved here
+// so the shell keeps the PWA surface together and the caller controls when
+// it runs. There is deliberately no service worker: uatu has nothing useful
+// to do offline (the server must be running), and modern Chromium surfaces
+// its install affordance from a valid manifest alone.
 
-import { appBasePath, appUrl } from "../shared/app-url";
+import { appUrl } from "../shared/app-url";
 
 // Inject PWA links at runtime rather than declaring them in index.html. Bun's
 // HTML bundler tries to resolve every <link href="..."> as a build-time
@@ -33,19 +35,3 @@ export function injectPwaLinks() {
   }
 }
 
-// Register the pass-through service worker so Edge/Chrome/Brave surface the
-// PWA install affordance. Failures are logged once and otherwise ignored —
-// uatu does not depend on the worker for any feature, only its presence.
-export function registerServiceWorker() {
-  if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-    window.addEventListener("load", () => {
-      // Scope equals the base path so a prefixed session never claims (or
-      // clobbers) its origin's root scope or a sibling session's.
-      navigator.serviceWorker
-        .register(appUrl("/sw.js"), { scope: appBasePath() })
-        .catch(error => {
-          console.warn("uatu: service worker registration failed", error);
-        });
-    });
-  }
-}

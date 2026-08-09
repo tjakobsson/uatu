@@ -9,7 +9,6 @@ import logoAsset from "../../src/assets/uatu-logo.svg" with { type: "file" };
 import icon192Asset from "../../src/assets/icon-192.png" with { type: "file" };
 import icon512Asset from "../../src/assets/icon-512.png" with { type: "file" };
 import manifestAsset from "../../src/assets/manifest.webmanifest" with { type: "file" };
-import swAsset from "../../src/assets/sw.js" with { type: "file" };
 import hackMonoFontAsset from "../../src/assets/fonts/HackNerdFontMono-Regular.woff2" with { type: "file" };
 import hackLicenseAsset from "../../src/assets/fonts/LICENSE-hack.md" with { type: "file" };
 import nerdFontsLicenseAsset from "../../src/assets/fonts/LICENSE-nerdfonts.txt" with { type: "file" };
@@ -170,7 +169,6 @@ server = Bun.serve({
         icon192: icon192Asset,
         icon512: icon512Asset,
         manifest: manifestAsset,
-        sw: swAsset,
         fonts: {
           hackMono: hackMonoFontAsset,
           hackLicense: hackLicenseAsset,

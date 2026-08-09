@@ -49,7 +49,7 @@ src/
 │                         assembly, watchdog spawn, signal handling
 ├── styles.d.ts           CSS module type declarations
 ├── index.html, styles.css, assets/   HTML shell + CSS + bundled assets
-│                         (logo, PWA icons + manifest + sw.js,
+│                         (logo, PWA icons + manifest,
 │                         and `assets/fonts/HackNerdFontMono-Regular.woff2`
 │                         — the default face for *every* monospace surface
 │                         in the app, surfaced via the shared
