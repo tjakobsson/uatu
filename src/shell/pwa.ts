@@ -7,6 +7,7 @@
 // half of this file exists, to clear the workers older versions installed.
 
 import { appBasePath, appUrl } from "../shared/app-url";
+import { joinBasePath } from "../shared/base-path";
 
 // Inject PWA links at runtime rather than declaring them in index.html. Bun's
 // HTML bundler tries to resolve every <link href="..."> as a build-time
@@ -49,11 +50,22 @@ export function injectPwaLinks() {
 // Remove this section once 0.7.0 ships — by then no reachable profile can
 // predate the removal, and what is left is a call that never matches anything.
 
-// The path every uatu worker was registered from. Matched as a suffix so the
-// two registrations that could exist are both recognized: an origin-root one
-// ("/sw.js", from a direct load) and a base-path-mounted one
-// ("/s/<slug>/sw.js", from a hub session).
+// The script every uatu worker was registered from, relative to its scope.
 const LEGACY_WORKER_SCRIPT_PATH = "/sw.js";
+
+// The (scope, script) pairs a uatu registration could actually have. The old
+// call was `register(appUrl("/sw.js"), { scope: appBasePath() })`, so the
+// script was always its own scope's "/sw.js" and never some other directory's
+// — the two halves are pinned together here for the same reason.
+//
+// Two scopes, because two registrations could exist in one profile: an
+// origin-root one from a direct load, and a base-path one from a hub session.
+// A sibling session's scope is deliberately absent: it is another session's to
+// clean, and it does not control this page.
+function legacyRegistrations(basePath: string): Array<{ scope: string; script: string }> {
+  const scopes = new Set(["/", withTrailingSlash(basePath)]);
+  return [...scopes].map(scope => ({ scope, script: joinBasePath(scope, LEGACY_WORKER_SCRIPT_PATH) }));
+}
 
 // The facts about a registration the match is made on. A plain object rather
 // than a ServiceWorkerRegistration so the rule can be tested without a service
@@ -66,11 +78,13 @@ export type LegacyWorkerFacts = {
 
 // Whether a registration is one uatu left behind.
 //
-// Both conditions are required, and the second is what makes this safe. The
-// hub serves several apps' worth of paths from one origin, so "unregister
-// everything at the origin root" would collect a neighbour's worker. Scope
-// alone is not identification; scope plus the script path uatu actually
-// registered is.
+// An EXACT match on both halves, not a scope check plus a script suffix. The
+// hub serves several apps' worth of paths from one origin, so identification
+// has to be tight enough that a neighbour survives — and a neighbour can
+// legitimately look close: a worker served from "/other/sw.js" claims scope
+// "/" with a Service-Worker-Allowed header, which a suffix match on "/sw.js"
+// would have collected. uatu registered from its scope root and nowhere else,
+// so that is what is matched.
 //
 // The origin root counts even for a session under a base path: a worker scoped
 // to "/" controls the session's pages too, so leaving it installed would leave
@@ -84,10 +98,7 @@ export function isLegacyUatuWorker(facts: LegacyWorkerFacts, basePath: string): 
   if (scope === null || script === null) {
     return false;
   }
-  if (scope !== "/" && scope !== withTrailingSlash(basePath)) {
-    return false;
-  }
-  return script.endsWith(LEGACY_WORKER_SCRIPT_PATH);
+  return legacyRegistrations(basePath).some(pair => pair.scope === scope && pair.script === script);
 }
 
 // Unregister service workers left behind by a uatu older than 0.5.0.

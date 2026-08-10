@@ -46,6 +46,21 @@ describe("isLegacyUatuWorker", () => {
     expect(isLegacyUatuWorker(facts("/", "/vendor/nosw.js"), "/")).toBe(false);
   });
 
+  it("leaves a neighbour's sw.js in another directory alone", () => {
+    // A worker served from /other/sw.js can legally claim scope "/" with a
+    // Service-Worker-Allowed header. uatu never registered from any directory
+    // but its own scope root, so this is somebody else's worker — and a
+    // suffix match on "/sw.js" would have taken it.
+    expect(isLegacyUatuWorker(facts("/", "/other/sw.js"), "/")).toBe(false);
+    expect(isLegacyUatuWorker(facts("/s/uatu/", "/s/uatu/nested/sw.js"), "/s/uatu/")).toBe(false);
+  });
+
+  it("requires the script to belong to the scope it was registered for", () => {
+    // The old call was register(appUrl("/sw.js"), { scope: appBasePath() }),
+    // so the two halves were always paired. A mismatched pair is not ours.
+    expect(isLegacyUatuWorker(facts("/", "/s/uatu/sw.js"), "/s/uatu/")).toBe(false);
+  });
+
   it("ignores a registration with no worker attached", () => {
     expect(isLegacyUatuWorker(facts("/", null), "/")).toBe(false);
   });
