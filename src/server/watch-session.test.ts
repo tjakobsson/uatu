@@ -243,7 +243,8 @@ describe("watchSession scope", () => {
   });
 });
 
-// A deterministic replacement for Date.now/setTimeout: timers fire in
+// A deterministic replacement for the scheduler clock (performance.now/
+// setTimeout in production): timers fire in
 // timestamp order as the clock is advanced, with `now` reflecting each
 // timer's due time while its callback runs.
 function createFakeClock() {

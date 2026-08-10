@@ -225,6 +225,44 @@ describe("config warnings and path parsing", () => {
     expect(await collectConfigWarnings(repo)).toEqual([]);
   });
 
+  test("an empty .uatu.json produces a parse warning", async () => {
+    const repo = await mkdtemp(path.join(os.tmpdir(), "uatu-git-data-config-"));
+    tempDirectories.push(repo);
+    await writeFile(path.join(repo, ".uatu.json"), "");
+
+    const warnings = await collectConfigWarnings(repo);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("Invalid .uatu.json");
+  });
+
+  test("ignore shape warnings reach the snapshot's config warnings", async () => {
+    const repo = await createRepo();
+    await writeFile(
+      path.join(repo, ".uatu.json"),
+      JSON.stringify({ ignore: { exclude: "nope", respectGitignore: "true" } }),
+    );
+
+    const snapshots = await collectRepositorySnapshots(
+      [{ kind: "dir", absolutePath: repo }],
+      [{ id: repo, label: "repo", path: repo, docs: [], hiddenCount: 0 }],
+    );
+
+    expect(snapshots[0]?.configWarnings).toEqual([
+      "Ignored .uatu.json ignore.exclude because it must be a string array.",
+      "Ignored .uatu.json ignore.respectGitignore because it must be a boolean.",
+    ]);
+  });
+
+  test("a malformed .uatu.json is reported exactly once", async () => {
+    const repo = await mkdtemp(path.join(os.tmpdir(), "uatu-git-data-config-"));
+    tempDirectories.push(repo);
+    await writeFile(path.join(repo, ".uatu.json"), "{ nope");
+
+    const warnings = await collectConfigWarnings(repo);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("Invalid .uatu.json");
+  });
+
   test("parses brace rename paths with empty sides", () => {
     expect(parseDiffPath("src/{auth/ => }Button.ts")).toEqual({
       path: "src/Button.ts",

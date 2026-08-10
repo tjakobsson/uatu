@@ -87,13 +87,28 @@ describe("loadIgnoreConfig", () => {
     expect(result.warnings).toContain("Ignored .uatu.json ignore because it must be an object.");
   });
 
-  it("silently ignores a malformed .uatu.json", async () => {
+  it("warns on a malformed .uatu.json and falls back to defaults", async () => {
     await fs.writeFile(path.join(workspace, ".uatu.json"), "{not json", "utf8");
     const result = await loadIgnoreConfig(workspace);
     expect(result.config.exclude).toEqual([]);
     expect(result.config.respectGitignore).toBe(true);
-    // document/git-data.ts owns the parse-error warning; this module must not double-warn.
-    expect(result.warnings).toEqual([]);
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]).toContain("Invalid .uatu.json");
+  });
+
+  it("warns on an empty .uatu.json", async () => {
+    await fs.writeFile(path.join(workspace, ".uatu.json"), "", "utf8");
+    const result = await loadIgnoreConfig(workspace);
+    expect(result.config.exclude).toEqual([]);
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]).toContain("Invalid .uatu.json");
+  });
+
+  it("warns on a whitespace-only .uatu.json", async () => {
+    await fs.writeFile(path.join(workspace, ".uatu.json"), "  \n\t\n", "utf8");
+    const result = await loadIgnoreConfig(workspace);
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]).toContain("Invalid .uatu.json");
   });
 
   it("picks up mid-session edits on the next read", async () => {

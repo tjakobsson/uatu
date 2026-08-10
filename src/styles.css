@@ -88,14 +88,9 @@
   --success-strong: light-dark(#1a7f37, #3fb950);
   --danger: light-dark(#cf222e, #f85149);
   --attention: light-dark(#bf8700, #d29922);
-  /* Severity chip families (low = green, medium = yellow, high = red),
-     shared by the config-warning and stale-client-notice surfaces. */
-  --score-low-border: light-dark(#b7e4c7, #2ea043);
-  --score-low-bg: light-dark(#effaf2, #0f2417);
-  --score-medium-border: light-dark(#f0cf7a, #9e6a03);
-  --score-medium-bg: light-dark(#fff8dc, #271d05);
-  --score-high-border: light-dark(#ffb3ad, #da3633);
-  --score-high-bg: light-dark(#fff1f0, #2d1214);
+  /* Warning-toned notice surfaces (config-warning, stale-client notice). */
+  --notice-warn-border: light-dark(#f0cf7a, #9e6a03);
+  --notice-warn-bg: light-dark(#fff8dc, #271d05);
   /* Diff colors. These were previously only var() fallbacks at the usage
      sites; defining them here makes every usage scheme-aware at once. */
   --diff-added-bg: light-dark(#e6ffec, #12261e);
@@ -2703,7 +2698,7 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
   margin: 0.4rem 0;
   padding: 0.4rem 0.5rem;
   border-left: 3px solid var(--attention);
-  background: var(--score-medium-bg);
+  background: var(--notice-warn-bg);
   color: light-dark(#6f4e00, #eac54f);
   font-size: 0.74rem;
   line-height: 1.4;
@@ -4092,8 +4087,8 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
   justify-content: center;
   gap: 0.75rem;
   padding: 0.5rem 1.5rem;
-  background: var(--score-medium-bg);
-  border-top: 1px solid var(--score-medium-border);
+  background: var(--notice-warn-bg);
+  border-top: 1px solid var(--notice-warn-border);
   color: light-dark(#6f4e00, #eac54f);
   font-size: 0.82rem;
 }

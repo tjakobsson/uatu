@@ -18,6 +18,7 @@ import type {
 import { DEFAULT_COMPARE_TARGET } from "../shared/types";
 import type { WatchEntry } from "../server/roots";
 import { applyCompareTarget, resolveCompareBase, safeGit } from "./git-base-ref";
+import { loadIgnoreConfig } from "../ignore/config";
 
 export { safeGit, setGitMetricsSink } from "./git-base-ref";
 
@@ -217,27 +218,12 @@ async function collectMetadata(group: RepositoryGroup): Promise<RepositoryMetada
   };
 }
 
-// `.uatu.json` parse warnings surfaced in the Change Overview pane. Only
-// read/parse failures warrant a warning here — block-level validation lives
-// with each block's loader.
+// `.uatu.json` warnings surfaced in the Change Overview pane. The ignore
+// loader is the single source — read, parse, and shape warnings alike — so
+// one underlying problem is reported once even though the ignore engine
+// reads the file too.
 export async function collectConfigWarnings(repoRoot: string): Promise<string[]> {
-  const warnings: string[] = [];
-  const filePath = path.join(repoRoot, ".uatu.json");
-  const source = await fs.readFile(filePath, "utf8").catch(error => {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      warnings.push(`Could not read .uatu.json: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    return null;
-  });
-
-  if (source) {
-    try {
-      JSON.parse(source);
-    } catch (error) {
-      warnings.push(`Invalid .uatu.json: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
+  const { warnings } = await loadIgnoreConfig(repoRoot);
   return warnings;
 }
 

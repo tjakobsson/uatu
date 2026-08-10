@@ -159,7 +159,9 @@ type RefreshSchedulerClock = {
 };
 
 const realClock: RefreshSchedulerClock = {
-  now: () => Date.now(),
+  // Monotonic on purpose: a wall-clock step backwards during sustained churn
+  // must not stretch `deadline - now` and defer refresh past the max-wait.
+  now: () => performance.now(),
   setTimer: (fn, delayMs) => setTimeout(fn, delayMs),
   clearTimer: timer => clearTimeout(timer),
 };
