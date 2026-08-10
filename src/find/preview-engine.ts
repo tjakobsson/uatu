@@ -1,5 +1,5 @@
 // The find engine for the preview: match over the flattened document text,
-// paint with the Custom Highlight API, scroll the shell.
+// paint with the Custom Highlight API, scroll whatever is scrolling.
 //
 // Holds no DOM references across a content swap. The preview is replaced
 // wholesale on every live reload and view-mode switch, so every run rebuilds
@@ -12,6 +12,8 @@ import {
   revealRange,
 } from "./highlight";
 import type { FindEngine, FindOutcome } from "./engine";
+import { previewScrollRoot } from "../shell/preview-scroll-root";
+import { revealPreviewSurface } from "../shell/tab-bar";
 import { findMatches, nearestSpan, stepIndex, type MatchOptions } from "./matcher";
 import { buildTextIndex, locateSpan, toRange, type TextSpan } from "./text-index";
 
@@ -34,7 +36,10 @@ export function createPreviewEngine(
   const paint = (reveal: boolean): void => {
     paintMatches(ranges, currentIndex);
     if (reveal && currentIndex >= 0) {
-      revealRange(ranges[currentIndex]!, shellElement);
+      // Resolved per call rather than using the captured `shellElement`: the
+      // shell stops being the scroller in touch mode and the stacked layout,
+      // where scrolling it is a silent no-op.
+      revealRange(ranges[currentIndex]!, previewScrollRoot());
     }
   };
 
@@ -97,11 +102,21 @@ export function createPreviewEngine(
       clearHighlights();
     },
 
+    // Touch mode renders only the active tab's surface. Invoking preview find
+    // from the Files tab must bring the preview forward or the bar mounts
+    // where nobody can see it (#191). A no-op in desktop mode, where the
+    // preview is always rendered.
+    revealSurface() {
+      revealPreviewSurface();
+    },
+
     focusSurface() {
       const landing = currentIndex >= 0 ? ranges[currentIndex] ?? null : null;
+      // Focus stays on the shell — it is the focusable surface whether or not
+      // it is the scrolling one — while the reveal targets the real scroller.
       shellElement.focus({ preventScroll: true });
       if (landing) {
-        revealRange(landing, shellElement);
+        revealRange(landing, previewScrollRoot());
       }
     },
 

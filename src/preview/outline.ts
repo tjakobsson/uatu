@@ -17,6 +17,12 @@
 
 import { appUrl } from "../shared/app-url";
 import { contextualAppUrl } from "../shell/watch-context";
+import {
+  previewScrollEventTarget,
+  previewScrollRoot,
+  scrollportRect,
+} from "../shell/preview-scroll-root";
+import { onUiModeChange } from "../shell/ui-mode";
 import { presentationLocalStorage } from "../shell/presentation-storage";
 import type { ViewMode } from "../shared/types";
 import { copyToClipboard } from "./code-block";
@@ -64,6 +70,10 @@ let currentDocId: string | null = null;
 // its bound scroll listener, and a rAF handle so we recompute at most once per
 // frame while scrolling.
 let scrollRootElement: HTMLElement | null = null;
+// Kept separately from the element because they are not the same object when
+// the page is the scroller: scroll events for the viewport scroller fire at
+// the *document*, never at `documentElement`.
+let scrollEventTarget: EventTarget | null = null;
 let scrollListener: (() => void) | null = null;
 let scrollRafId: number | null = null;
 
@@ -341,11 +351,26 @@ function applyFilter(): void {
   }
 }
 
+// Re-point the spy when the effective scroll container has changed underneath
+// it. A no-op while no outline is live, and a no-op when the container is
+// still the same one — so the resize handler this hangs off costs a single
+// computed-style read per event.
+function resyncScrollSpy(): void {
+  if (currentHeadings.length === 0 || scrollRootElement === null) {
+    return;
+  }
+  const root = previewScrollRoot();
+  if (root === scrollRootElement) {
+    return;
+  }
+  attachScrollSpy(root, previewScrollEventTarget());
+}
+
 // Detach the scroll-spy listener (and cancel any pending frame). Called on
 // teardown and before re-attaching to a new scroll container.
 function detachScrollSpy(): void {
-  if (scrollListener && scrollRootElement) {
-    scrollRootElement.removeEventListener("scroll", scrollListener);
+  if (scrollListener && scrollEventTarget) {
+    scrollEventTarget.removeEventListener("scroll", scrollListener);
   }
   if (scrollRafId !== null) {
     window.cancelAnimationFrame(scrollRafId);
@@ -353,6 +378,7 @@ function detachScrollSpy(): void {
   }
   scrollListener = null;
   scrollRootElement = null;
+  scrollEventTarget = null;
 }
 
 // (Re)attach scroll-spy to the element that actually scrolls for the current
@@ -362,9 +388,10 @@ function detachScrollSpy(): void {
 // with no scroll runway left to push them up there — so they could never
 // activate and the highlight stuck on the last heading that did. The
 // position-based scan plus an explicit at-bottom rule fixes that tail.
-function attachScrollSpy(scrollRoot: HTMLElement): void {
+function attachScrollSpy(scrollRoot: HTMLElement, eventTarget: EventTarget): void {
   detachScrollSpy();
   scrollRootElement = scrollRoot;
+  scrollEventTarget = eventTarget;
   scrollListener = () => {
     if (scrollRafId !== null) {
       return;
@@ -374,7 +401,7 @@ function attachScrollSpy(scrollRoot: HTMLElement): void {
       updateActiveHeading();
     });
   };
-  scrollRoot.addEventListener("scroll", scrollListener, { passive: true });
+  eventTarget.addEventListener("scroll", scrollListener, { passive: true });
   // Compute an initial active heading so the highlight is correct before the
   // first scroll event fires.
   updateActiveHeading();
@@ -397,7 +424,11 @@ function updateActiveHeading(): void {
   if (!scrollRoot || currentHeadings.length === 0) {
     return;
   }
-  const rootRect = scrollRoot.getBoundingClientRect();
+  // The SCROLLPORT, not the bounding box. For the viewport scroller the
+  // bounding box has `top: -scrollTop`, which would double-count the offset in
+  // `offsetInContent` below and push every activation point further out of
+  // reach the further down the page the reader is.
+  const rootRect = scrollportRect(scrollRoot);
 
   // The sticky preview-header overlaps the top of the scroll viewport in single
   // layout (the shell scrolls beneath it); in split layout the rendered pane
@@ -449,8 +480,12 @@ function updateActiveHeading(): void {
 }
 
 // Resolve the heading-enumeration root and scroll container for the current
-// layout. In split layout both are the rendered pane; in single layout the
-// headings live directly under #preview and the shell is the scroll container.
+// layout. The headings root is a rendering question — the rendered pane when
+// split, `#preview` otherwise — while the scroll container is the shared
+// question `shell/preview-scroll-root` answers for every caller. This used to
+// answer both itself, and its scroll half was the only place in the codebase
+// that reasoned about the split layout at all; delegating keeps one rule
+// instead of growing a second.
 function resolveRoots(): { headingsRoot: HTMLElement; scrollRoot: HTMLElement } | null {
   const previewElement = document.querySelector<HTMLElement>("#preview");
   const previewShell = document.querySelector<HTMLElement>(".preview-shell");
@@ -458,10 +493,10 @@ function resolveRoots(): { headingsRoot: HTMLElement; scrollRoot: HTMLElement } 
     return null;
   }
   const renderedPane = previewElement.querySelector<HTMLElement>(".preview-pane-rendered");
-  if (renderedPane) {
-    return { headingsRoot: renderedPane, scrollRoot: renderedPane };
-  }
-  return { headingsRoot: previewElement, scrollRoot: previewShell };
+  return {
+    headingsRoot: renderedPane ?? previewElement,
+    scrollRoot: previewScrollRoot(),
+  };
 }
 
 export type OutlineDocument = {
@@ -502,7 +537,7 @@ export function refreshOutline(doc: OutlineDocument | null): void {
   outlineToggleButton.hidden = false;
   buildList(headings);
   applyFilter();
-  attachScrollSpy(roots.scrollRoot);
+  attachScrollSpy(roots.scrollRoot, previewScrollEventTarget());
   // Preserve the open/closed state across remounts (panel stays open if the
   // user had it open); default is closed.
   setOpen(open);
@@ -552,6 +587,15 @@ function flashActionIcon(button: HTMLButtonElement, modifier: string): void {
 // Boot-time wiring for the action bar's click handlers and the global Escape
 // shortcut. Called once by app.ts.
 export function initOutline(): void {
+  // The effective scroll container can change with no document remount and no
+  // scroll event on the container we are currently listening to: switching UI
+  // mode swaps it outright, and crossing the ≤900px stacked breakpoint by
+  // resizing or rotating does the same in desktop mode. Left unhandled, the
+  // spy stays bound to an element that will never fire again and the active
+  // heading freezes.
+  onUiModeChange(() => resyncScrollSpy());
+  window.addEventListener("resize", () => resyncScrollSpy(), { passive: true });
+
   outlineToggleButton.addEventListener("click", () => {
     ensurePanel();
     setOpen(!open);

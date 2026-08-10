@@ -11,6 +11,7 @@ import { closeMermaidViewer } from "./mermaid-viewer";
 import { renderMermaidDiagrams, replaceMermaidCodeBlocks } from "../render/preview";
 import type { FileFacts, ViewMode } from "../shared/types";
 import { appState } from "../shell/state";
+import { previewScrollRoot } from "../shell/preview-scroll-root";
 import { renderBinaryUnavailable } from "./binary";
 import { applyDiffForActiveDocument } from "./diff";
 import { renderEmptyPreview } from "./empty";
@@ -331,7 +332,10 @@ export async function loadDocument(documentId: string) {
     // Reset synchronously *before* fetch + innerHTML swap so the new content
     // paints at the top in a single layout pass. Doing it after the swap can
     // briefly flash the new content at the previous doc's scroll offset.
-    previewShellElement.scrollTo({ top: 0 });
+    // Whichever element scrolls — the shell on desktop, the page in touch mode
+    // and the stacked layout, where scrolling the shell does nothing and the
+    // reader lands mid-document.
+    previewScrollRoot().scrollTo({ top: 0 });
   }
 
   // `loadDocument` always fetches fresh — callers that want the cached

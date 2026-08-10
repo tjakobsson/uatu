@@ -54,6 +54,15 @@
      values track GitHub's dark palette to stay coherent with the vendored
      github-markdown-dark / hljs github-dark imports. */
   color-scheme: light dark;
+
+  /* Top inset a revealed target needs to clear the sticky preview header and
+     its 28px blur-fade falloff, plus breathing room so the target does not
+     land where the frost fades out. Reserved on WHICHEVER element scrolls —
+     `.preview-shell` in the desktop layout, the root scrollport in touch mode
+     and the ≤900px stacked layout, where the shell is `overflow: visible` and
+     the page scrolls. One token, because both selectors are live on a device
+     that switches modes without reloading and they must not drift. */
+  --preview-scroll-inset: 9rem;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   /* Chrome background/foreground. When these change, keep the theme-color
      meta values in src/shell/theme.ts in sync. */
@@ -359,7 +368,7 @@ html.uatu-desktop-host .sidebar-rail {
    header into the covered strip, under the native glass. */
 html.uatu-desktop-host .preview-shell {
   padding-top: var(--titlebar-inset, 0px);
-  scroll-padding-top: calc(9rem + var(--titlebar-inset, 0px));
+  scroll-padding-top: calc(var(--preview-scroll-inset) + var(--titlebar-inset, 0px));
 }
 
 /* Margin, not padding: backgrounds paint through padding, so an inset-padded
@@ -1119,8 +1128,12 @@ h2 {
      ([#id] on tables/listings, [[id]] on paragraphs) alike — across both
      scroll paths (the in-page anchor click handler and the post-load scroll
      after a cross-document reference). A per-element `scroll-margin-top`
-     cannot cover the non-heading cases. */
-  scroll-padding-top: 9rem;
+     cannot cover the non-heading cases.
+
+     Only effective while the shell IS the scroller. Touch mode and the
+     ≤900px stacked layout hand scrolling to the page, and reserve the same
+     inset on the root scrollport instead. */
+  scroll-padding-top: var(--preview-scroll-inset);
 }
 
 /* Drag handle for the terminal panel. Orientation switches with the dock:
@@ -3601,6 +3614,16 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
     padding: 0 1rem 1rem;
   }
 
+  /* Same move as touch mode, and the same larger reservation: the page is the
+     scroller here, so the sticky-header reservation belongs to the root
+     scrollport, and this range of widths is where the header wraps to its
+     145px height. This layout has scrolled the body since long before touch
+     mode existed. */
+  :root {
+    --preview-scroll-inset: 11.5rem;
+    scroll-padding-top: var(--preview-scroll-inset);
+  }
+
   .preview-header {
     padding: 0.85rem 1rem;
     margin: 0 -1rem;
@@ -4638,6 +4661,24 @@ html[data-ui-mode="touch"]:not([data-active-tab="preview"]) .preview-shell {
 html[data-ui-mode="touch"] .preview-shell {
   overflow: visible;
   height: auto;
+}
+
+/* Scrolling moved to the page, so the sticky-header reservation has to move
+   with it: `scroll-padding` belongs to the scroll container, and the shell is
+   no longer one. Set on the root element, which is what propagates to the
+   viewport scrollport. Without this an outline click or an in-page anchor
+   scrolls the heading exactly under the sticky header (#183).
+
+   And the desktop 9rem is not the right number here. The preview header wraps
+   on narrow viewports: measured at 145.06px at 320-430px wide against 111.47px
+   on a 1280px desktop. Desktop's 144px reservation clears its 111px header by
+   ~32px (the 28px blur falloff plus breathing room); 11.5rem = 184px gives the
+   same clearance over the 145px worst case. Too small lands the target under
+   the frosted header — the bug — while too large only lands it slightly lower,
+   so the error is taken in the safe direction. */
+html[data-ui-mode="touch"] {
+  --preview-scroll-inset: 11.5rem;
+  scroll-padding-top: var(--preview-scroll-inset);
 }
 
 /* Terminal surface: the panel renders only while its tab is active, and

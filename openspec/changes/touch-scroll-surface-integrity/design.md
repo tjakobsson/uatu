@@ -80,7 +80,21 @@ Shape:
 export function previewScrollRoot(): HTMLElement
 // The event target that emits `scroll` for that element (see decision 3).
 export function previewScrollEventTarget(): EventTarget
+// The visible box of any scroll container (see decision 2).
+export function scrollportRect(container: HTMLElement): { top; bottom; height }
+// The rule, lifted out of the DOM so it can be tested (see below).
+export function pickScrollRoot<T>(candidates, scrolls): T
 ```
+
+`scrollportRect` was going to live in `find/highlight.ts` beside the arithmetic
+that needs it. It moved here once the outline turned out to need it too — see
+decision 2 — which is the whole argument of this module applied to itself.
+
+`pickScrollRoot` exists because the unit suite's DOM (linkedom) has no
+`getComputedStyle`, no `scrollingElement` and no `clientHeight`. Rather than
+fake all three and end up asserting against the fake, the *rule* is a pure
+function over candidates and a predicate, unit-tested directly; that it is wired
+to the real cascade is left to E2E, which runs a real engine.
 
 Resolved per call, never cached: UI mode switches live, the stacked breakpoint
 crosses on rotation and window resize, and the terminal's right-dock changes the
@@ -121,6 +135,14 @@ This is the single most likely place for a silent regression, because the
 desktop path is unaffected and only device testing exercises the other. It gets
 a direct unit test with a synthetic viewport-shaped container.
 
+**Found during implementation:** `revealRange()` is not the only caller. The
+outline's `updateActiveHeading()` computes each heading's offset in content as
+`headingTop - rootRect.top + scrollTop`, and for the document scroller
+`rootRect.top` is `-scrollTop` — so the offset double-counts the scroll and
+every activation point drifts further out of reach the further down the page
+the reader is. Same rect, second victim. That is why `scrollportRect` ended up
+in the shared module rather than beside the reveal arithmetic.
+
 ### 3. Scroll observation binds to the *event target*, not the element
 
 For the root scroller the `scroll` event is fired at `document` and reaches
@@ -149,6 +171,18 @@ the standard idiom for exactly this sticky-header problem.
 The value is duplicated, not moved, because the two selectors are live
 simultaneously on a device that can switch modes without reloading. It is
 extracted to a custom property so the two cannot drift.
+
+**Found during implementation: the value is also wrong.** 9rem was tuned
+against the desktop header, and the preview header wraps on narrow viewports —
+measured at **145.06px** at 320–430px wide against **111.47px** at 1280px. So
+the 144px reservation cleared the desktop header by ~32px (the 28px blur
+falloff plus breathing room) and fell about 1px SHORT of the touch-mode header
+on its own, landing every jumped-to target underneath the frosted chrome. That
+is the whole of #183 — the scroll-padding was on the wrong element *and* too
+small once it got to the right one. The page-scrolling layouts therefore
+override the property to **11.5rem** (184px), which reproduces desktop's ~32px
+clearance over the 145px worst case. Erring large only lands the target
+slightly lower; erring small is the bug.
 
 The desktop-host variant (`calc(9rem + var(--titlebar-inset, 0px))`) composes
 through the same property. Touch mode never runs inside the desktop host, but
@@ -229,12 +263,12 @@ Rollback is a revert: nothing here is written to disk or to `localStorage`.
 
 ## Open Questions
 
-- **Does the sticky preview header still measure 9rem of clearance in touch
-  mode?** The reservation was tuned against the desktop header plus its 28px
-  blur falloff. Touch mode renders the same header, but if its computed height
-  differs the number should be measured on-device and the custom property given
-  a touch-mode value rather than inheriting the desktop one. Resolve during the
-  device pass.
+- ~~**Does the sticky preview header still measure 9rem of clearance in touch
+  mode?**~~ Resolved, and the answer was no. Measured 145.06px at 320–430px
+  wide against 111.47px at 1280px, so 9rem (144px) was about 1px short of the
+  touch header alone. The page-scrolling layouts now reserve 11.5rem. Measured
+  in Chromium emulation; the device pass confirms it against real Safari, where
+  safe-area insets and font rendering could shift the header height again.
 
 - **Does the bottom tab bar need a matching `scroll-padding-bottom`?**
   `.app-shell` already reserves `--tab-bar-total` as padding, so a revealed

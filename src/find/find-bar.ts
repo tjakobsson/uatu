@@ -196,6 +196,14 @@ function isWithinPreview(node: Node): boolean {
 // the engine and clears the previous one, so one surface's highlights never
 // linger while another is being searched.
 export function openFindBar(target: FindEngine): void {
+  // Before anything is mounted or focused: the bar has to land on a surface
+  // the user can actually see. In touch mode only the active tab renders, so
+  // opening preview find from the Files tab would otherwise mount into a
+  // hidden subtree — with the host's native find already suppressed (#191).
+  // Every entry point goes through here, which is why the call sits here and
+  // not in the keyboard shortcut.
+  target.revealSurface?.();
+
   if (engine !== null && engine !== target) {
     engine.unwatch?.();
     engine.clear();
