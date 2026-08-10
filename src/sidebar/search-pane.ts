@@ -18,6 +18,7 @@ import {
   shouldDispatch,
 } from "./search-model";
 import { renderSidebar, setSidebarCollapsed } from "./shell";
+import { revealFilesSurface } from "../shell/tab-bar";
 import { persistPaneState } from "./panes";
 import { openSearchResult } from "./search-open";
 
@@ -388,7 +389,14 @@ function toggleOption(key: keyof Toggles): void {
 // Other panes' persisted state is left alone — revealing search must not
 // rearrange the sidebar the user set up.
 export function openSearchPane(seed?: string): void {
-  // The whole sidebar first: collapsed, it is `display: none`, and expanding
+  // The Files tab first, in touch mode: only the active tab's surface renders,
+  // so the sidebar is `display: none` whatever its collapsed state. This is
+  // the same argument the `setSidebarCollapsed(false)` below already makes —
+  // touch mode simply added a second way for the sidebar to be hidden, and the
+  // reasoning was never extended to it (#192). It has to come first: `focus()`
+  // on an element inside a `display: none` subtree silently does nothing.
+  revealFilesSurface();
+  // The whole sidebar next: collapsed, it is `display: none`, and expanding
   // only the pane would focus an invisible input — the shortcut would look
   // like it did nothing.
   setSidebarCollapsed(false);

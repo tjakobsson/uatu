@@ -20,6 +20,7 @@ import {
   activateCommitPreview,
   commitPreviewParamsFromUrl,
 } from "./url";
+import { previewScrollRoot } from "./preview-scroll-root";
 
 // Local query for the preview body. We can't import this from `../app`
 // without widening the type to `HTMLElement | null` for consumers — the
@@ -28,7 +29,6 @@ import {
 // non-null directly. The `!` matches the same precondition the shell's
 // other module-load throw-if-null guards enforce.
 const previewElement = document.querySelector<HTMLElement>("#preview")!;
-const previewShellElement = document.querySelector<HTMLElement>(".preview-shell")!;
 
 // Build a same-origin URL for a document. Per-segment percent-encoding mirrors
 // the cross-doc handler's decode: each path segment is encoded individually so
@@ -131,9 +131,11 @@ export function attachPopstateHandler() {
       if (window.location.hash) {
         scrollToFragment(window.location.hash.slice(1));
       } else {
-        // `.preview-shell` is the actual scrollable viewport — `#preview` is
-        // its inner article. Scrolling the article would be a no-op.
-        previewShellElement.scrollTo({ top: 0, behavior: "smooth" });
+        // Whichever element is the actual scrollable viewport — `#preview` is
+        // only the inner article, and `.preview-shell` stops scrolling in
+        // touch mode and the ≤900px stacked layout. Scrolling a non-scroller
+        // is silent, not an error, which is how this class of bug hides.
+        previewScrollRoot().scrollTo({ top: 0, behavior: "smooth" });
       }
       return;
     }

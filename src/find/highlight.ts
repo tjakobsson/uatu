@@ -7,6 +7,8 @@
 // reload. Inserting nodes into it to show a search result would re-enter all
 // of that. Ranges paint over the document without touching it.
 
+import { scrollportRect } from "../shell/preview-scroll-root";
+
 const ALL_MATCHES = "uatu-find-match";
 const CURRENT_MATCH = "uatu-find-current";
 
@@ -129,12 +131,17 @@ const REVEAL_BIAS = 0.4;
 // already is. Ranges have no `scrollIntoView`, and scrolling the nearest
 // element instead would land on the top of a long code block rather than on
 // the match inside it — so the offset is computed from the rects directly.
+//
+// `container` is whatever actually scrolls for the current layout and UI mode
+// (see shell/preview-scroll-root). It used to be `.preview-shell`
+// unconditionally, which is right on desktop and a silent no-op in touch mode
+// and the ≤900px stacked layout, where the page scrolls instead (#181).
 export function revealRange(range: Range, container: HTMLElement): void {
   const rect = range.getBoundingClientRect();
   if (rect.width === 0 && rect.height === 0) {
     return;
   }
-  const view = container.getBoundingClientRect();
+  const view = scrollportRect(container);
   // `scroll-padding-top` on the container reserves room for the sticky
   // preview header; honour it so a revealed match never lands underneath.
   const paddingTop = Number.parseFloat(

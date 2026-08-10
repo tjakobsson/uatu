@@ -72,6 +72,18 @@ export function revealPreviewSurface(): void {
   }
 }
 
+/** The Files counterpart: a user action is about to act on something in the
+ *  sidebar pane stack, so the stack has to be on screen. Project search is the
+ *  case that needs it — `⇧⌘F` focused its query input while
+ *  `html[data-ui-mode="touch"] .sidebar { display: none }` kept the whole
+ *  sidebar hidden, so the shortcut was consumed and looked dead (#192). A
+ *  no-op in desktop mode, where the sidebar is part of the layout. */
+export function revealFilesSurface(): void {
+  if (uiMode() === "touch") {
+    setActiveTab("files");
+  }
+}
+
 /** The vertical space the tab bar occupies at the bottom of the layout
  *  viewport (bar height + safe-area padding), 0 whenever the bar isn't
  *  rendered. The terminal panel subtracts the bar's still-visible portion

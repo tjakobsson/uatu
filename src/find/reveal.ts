@@ -7,6 +7,7 @@
 // without opening the bar or setting a query.
 
 import { clearHighlights, ensureShadowHighlightStyles, paintMatches, revealRange } from "./highlight";
+import { previewScrollRoot } from "../shell/preview-scroll-root";
 import { buildTextIndex, locateSpan, toRange } from "./text-index";
 
 const previewElementMaybe = document.querySelector<HTMLElement>("#preview");
@@ -64,9 +65,15 @@ export function revealExternalMatch(text: string, occurrence = 0, sourceTotal?: 
   // Painted as the current match: there is exactly one, and it is the one the
   // reader asked for.
   paintMatches([range], 0);
-  revealRange(range, previewShellElement);
+  // Resolved per call, not captured at module load: which element scrolls
+  // depends on the layout and UI mode, and both change live. Passing the
+  // shell unconditionally is why a search hit painted but never scrolled in
+  // touch mode (#181).
+  revealRange(range, previewScrollRoot());
   // Focus the document so it is immediately scrollable — the reader came here
-  // to read, not to go back to the sidebar for arrow keys.
+  // to read, not to go back to the sidebar for arrow keys. Focus stays on the
+  // shell even when the page is the scroller: it is the focusable surface, and
+  // a focused non-scroller simply leaves the page's own key handling in place.
   previewShellElement.focus({ preventScroll: true });
   return true;
 }

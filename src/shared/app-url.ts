@@ -1,10 +1,10 @@
 // The client-side URL chokepoint. Every server-relative URL the SPA builds —
 // fetches, EventSource, WebSocket paths, pushState document URLs, asset
-// references, the service-worker registration — goes through appUrl() so the
-// whole app relocates under a base path by changing exactly one value. The
-// value is injected by the server as a <meta name="uatu-base-path"> tag when
-// serving under a prefix (see server/navigation.ts relocateShellHtml);
-// absence means the default "/" and appUrl() is the identity.
+// references — goes through appUrl() so the whole app relocates under a base
+// path by changing exactly one value. The value is injected by the server as a
+// <meta name="uatu-base-path"> tag when serving under a prefix (see
+// server/navigation.ts relocateShellHtml); absence means the default "/" and
+// appUrl() is the identity.
 //
 // A structural test (shared/app-url-discipline.test.ts) enforces that no
 // module bypasses this helper with a root-relative URL literal.

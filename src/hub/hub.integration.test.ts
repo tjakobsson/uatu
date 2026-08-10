@@ -223,7 +223,11 @@ describe("hub end to end", () => {
     const loginPageResponse = await fetch(`${origin}/login?next=%2Fs%2Fmyproject%2F`, {
       headers: { accept: "text/html" },
     });
-    expect(await loginPageResponse.text()).toContain('name="next" value="/s/myproject/"');
+    const loginHtml = await loginPageResponse.text();
+    expect(loginHtml).toContain('name="next" value="/s/myproject/"');
+    // ...and in the form's action too, so a failure that answers before the
+    // body is read can still re-render the form with it.
+    expect(loginHtml).toContain(`action="/login?next=${encodeURIComponent("/s/myproject/")}"`);
 
     // ...and a successful form login lands back on it.
     const returned = await fetch(`${origin}/login`, {
@@ -246,6 +250,80 @@ describe("hub end to end", () => {
       expect(response.status).toBe(303);
       expect(response.headers.get("location")).toBe("/");
     }
+  });
+
+  const FORM = { "content-type": "application/x-www-form-urlencoded" };
+  const gatedLoginUrl = () => `${origin}/login?next=${encodeURIComponent("/s/myproject/")}`;
+
+  test("a wrong password does not lose the requested page", async () => {
+    // One failure only, then a success — which resets the bucket — so this
+    // leaves the shared 127.0.0.1 rate-limit key where it found it.
+    const failed = await fetch(gatedLoginUrl(), {
+      method: "POST",
+      headers: FORM,
+      body: new URLSearchParams({ name: "tobias", password: "wrong", next: "/s/myproject/" }),
+      redirect: "manual",
+    });
+    expect(failed.status).toBe(401);
+    expect(await failed.text()).toContain('name="next" value="/s/myproject/"');
+
+    const retried = await fetch(gatedLoginUrl(), {
+      method: "POST",
+      headers: FORM,
+      body: new URLSearchParams({ name: "tobias", password: "open sesame", next: "/s/myproject/" }),
+      redirect: "manual",
+    });
+    expect(retried.status).toBe(303);
+    expect(retried.headers.get("location")).toBe("/s/myproject/");
+  });
+
+  test("a rate-limited login still carries the requested page", async () => {
+    // The 429 answers BEFORE the body is parsed, so the only place its target
+    // can come from is the URL the form posts to — which is the whole reason
+    // the action carries it. Driven through a forwarded-for hop so it fills
+    // its own rate-limit bucket: the socket is loopback, so the last hop is
+    // the trusted key, and the shared 127.0.0.1 bucket is left alone.
+    const headers = { ...FORM, "x-forwarded-for": "203.0.113.7" };
+    const attempt = () =>
+      fetch(gatedLoginUrl(), {
+        method: "POST",
+        headers,
+        body: new URLSearchParams({ name: "tobias", password: "wrong", next: "/s/myproject/" }),
+        redirect: "manual",
+      });
+
+    for (let i = 0; i < 5; i += 1) {
+      expect((await attempt()).status).toBe(401);
+    }
+    const limited = await attempt();
+    expect(limited.status).toBe(429);
+    const html = await limited.text();
+    expect(html).toContain('name="next" value="/s/myproject/"');
+    expect(html).toContain(`action="/login?next=${encodeURIComponent("/s/myproject/")}"`);
+  });
+
+  test("a failed login does not echo an invalid return-to target", async () => {
+    const failed = await fetch(`${origin}/login`, {
+      method: "POST",
+      headers: FORM,
+      body: new URLSearchParams({ name: "tobias", password: "wrong", next: "https://evil.example/" }),
+      redirect: "manual",
+    });
+    expect(failed.status).toBe(401);
+    const html = await failed.text();
+    expect(html).not.toContain("evil.example");
+    expect(html).not.toContain('name="next"');
+    expect(html).toContain('action="/login"');
+
+    // And the retry that follows lands on the dashboard, not the rejected target.
+    const retried = await fetch(`${origin}/login`, {
+      method: "POST",
+      headers: FORM,
+      body: new URLSearchParams({ name: "tobias", password: "open sesame" }),
+      redirect: "manual",
+    });
+    expect(retried.status).toBe(303);
+    expect(retried.headers.get("location")).toBe("/");
   });
 
   test("workspace creation starts a real session and the dashboard sees it", async () => {

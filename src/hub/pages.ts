@@ -296,12 +296,18 @@ export function loginPage(options: { error?: string; next?: string } = {}): stri
   // Return-to target carried from the gate's redirect; server-validated
   // (safeReturnPath) before rendering AND again on submit, escaped here.
   const next = options.next ? `<input type="hidden" name="next" value="${escapeHtml(options.next)}" />` : "";
+  // The action carries the target as well as the hidden field, because the
+  // POST branches that answer BEFORE the body is read — a cross-origin
+  // rejection, a rate limit — can only see the URL. Without this, a failure
+  // there re-renders a form that has forgotten where the user was going, and
+  // the rate-limit branch is exactly the repeated-wrong-password case.
+  const action = options.next ? `/login?next=${encodeURIComponent(options.next)}` : "/login";
   return page(
     "UatuCode Hub — Sign in",
     `${brandHeader()}
 <section class="pane" style="max-width: 380px; margin-left: auto; margin-right: auto;">
   <div class="pane-header"><h2>Sign in</h2></div>
-  <form method="post" action="/login" style="padding: 1rem; display: flex; flex-direction: column; gap: 0.75rem;">
+  <form method="post" action="${escapeHtml(action)}" style="padding: 1rem; display: flex; flex-direction: column; gap: 0.75rem;">
     ${error}${next}
     <label style="display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.78rem; font-weight: 600; color: var(--text-strong);">
       User

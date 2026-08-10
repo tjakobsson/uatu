@@ -47,6 +47,18 @@ export type FindEngine = {
   // hidden or closed with its panes detached — in which case find must fall
   // through rather than open a bar over nothing.
   isAvailable?(): boolean;
+  // Bring this engine's surface forward, if it is not already showing.
+  //
+  // A surface can be the right target and still be invisible: touch mode
+  // renders only the active tab, so `⌘F` from the Files tab routes to the
+  // preview (correctly — directing the sidebar is an act about the document it
+  // directs), suppresses the host's native find, and then mounts the bar
+  // inside a `display: none` shell. The user is left with neither.
+  //
+  // It lives on the engine rather than at the shortcut because the shortcut is
+  // not the only way in — the host bridge opens the bar too, and so would the
+  // next entry point. The engine that owns a surface owns making it visible.
+  revealSurface?(): void;
   // Called when this engine becomes / stops being the active one.
   setOnOutcome(listener: ((outcome: FindOutcome) => void) | null): void;
   // Start / stop watching for the searched content being replaced underneath
