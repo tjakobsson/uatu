@@ -61,6 +61,23 @@ Four deferred review findings, all post-v0.4.0 (unreleased):
    `--score-medium-*` → `--notice-warn-*`.** Both consumers are
    warning-toned notices, so the name says what the token is for rather
    than where it ranked in a removed scoring scale.
+5. **Warnings are collected per directory watch root** (Codex review
+   finding on the PR): `collectConfigWarnings` previously read the
+   repository top level (`group.rootPath`), but the ignore engine reads
+   each watch root's `.uatu.json` — the files diverge when a root sits
+   below the repo top, and non-git roots never reached the collector at
+   all. `RepositoryGroup` now carries `configRoots` (dir entries only;
+   single-file roots read no config), warnings are collected before the
+   git/non-git branch so `unavailableSnapshot` carries them, and the
+   Change Overview renders warnings in its non-git branch too. A warning
+   from a root below the repo top is prefixed with the root's
+   repo-relative path (realpath-normalized on both sides — `rev-parse
+   --show-toplevel` resolves symlinks like macOS `/var` →
+   `/private/var`, watch entries keep the caller's spelling); a root at
+   the top keeps the byte-identical bare message. A side benefit: the
+   file the collector reads is now inside the watched tree, so its edits
+   trigger a live refresh — the repo-top file, when watching a subdir,
+   never did.
 
 ## Risks / Trade-offs
 

@@ -263,6 +263,67 @@ describe("config warnings and path parsing", () => {
     expect(warnings[0]).toContain("Invalid .uatu.json");
   });
 
+  test("a watch root below the repository top level warns about its own .uatu.json", async () => {
+    const repo = await createRepo();
+    const docs = path.join(repo, "docs");
+    await mkdir(docs);
+    await writeFile(path.join(docs, "guide.md"), "# Guide\n");
+    await writeFile(path.join(docs, ".uatu.json"), "{ nope");
+
+    const snapshots = await collectRepositorySnapshots(
+      [{ kind: "dir", absolutePath: docs }],
+      [{ id: docs, label: "docs", path: docs, docs: [], hiddenCount: 0 }],
+    );
+
+    expect(snapshots[0]?.configWarnings).toHaveLength(1);
+    expect(snapshots[0]?.configWarnings[0]).toStartWith("docs: Invalid .uatu.json");
+  });
+
+  test("a repo-top .uatu.json is not consulted when the watch root sits below it", async () => {
+    const repo = await createRepo();
+    await writeFile(path.join(repo, ".uatu.json"), "{ nope");
+    const docs = path.join(repo, "docs");
+    await mkdir(docs);
+    await writeFile(path.join(docs, "guide.md"), "# Guide\n");
+
+    const snapshots = await collectRepositorySnapshots(
+      [{ kind: "dir", absolutePath: docs }],
+      [{ id: docs, label: "docs", path: docs, docs: [], hiddenCount: 0 }],
+    );
+
+    expect(snapshots[0]?.configWarnings).toEqual([]);
+  });
+
+  test("a non-git watch root still surfaces its config warnings", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-git-data-non-git-config-"));
+    tempDirectories.push(tempDirectory);
+    await writeFile(path.join(tempDirectory, ".uatu.json"), "");
+
+    const snapshots = await collectRepositorySnapshots(
+      [{ kind: "dir", absolutePath: tempDirectory }],
+      [{ id: tempDirectory, label: "notes", path: tempDirectory, docs: [], hiddenCount: 0 }],
+    );
+
+    expect(snapshots[0]?.status).toBe("non-git");
+    expect(snapshots[0]?.configWarnings).toHaveLength(1);
+    expect(snapshots[0]?.configWarnings[0]).toContain("Invalid .uatu.json");
+  });
+
+  test("a single-file watch root reads no ignore config", async () => {
+    const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-git-data-file-root-"));
+    tempDirectories.push(tempDirectory);
+    await writeFile(path.join(tempDirectory, "notes.md"), "# Notes\n");
+    await writeFile(path.join(tempDirectory, ".uatu.json"), "{ nope");
+
+    const file = path.join(tempDirectory, "notes.md");
+    const snapshots = await collectRepositorySnapshots(
+      [{ kind: "file", absolutePath: file, parentDir: tempDirectory }],
+      [{ id: file, label: "notes.md", path: file, docs: [], hiddenCount: 0 }],
+    );
+
+    expect(snapshots[0]?.configWarnings).toEqual([]);
+  });
+
   test("parses brace rename paths with empty sides", () => {
     expect(parseDiffPath("src/{auth/ => }Button.ts")).toEqual({
       path: "src/Button.ts",

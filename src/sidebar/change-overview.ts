@@ -91,10 +91,12 @@ export function renderChangeOverview() {
   const sections = appState.repositories
     .map(repository => {
       const meta = repository.metadata;
+      const warnings = repository.configWarnings.map(warning => `<div class="config-warning">${escapeHtml(warning)}</div>`).join("");
       if (meta.status !== "git" || repository.status !== "available") {
         return `
           <section class="overview-repo">
             ${renderRepositoryName(repository)}
+            ${warnings}
             <p class="pane-empty">${escapeHtml(meta.message ?? repository.message ?? "No git repository is available.")}</p>
           </section>
         `;
@@ -111,7 +113,6 @@ export function renderChangeOverview() {
       // computed against (e.g. `vs origin/main`, `vs HEAD`) so the change set
       // carries its meaning when read away from the toggle.
       const compareAnchor = `vs ${repository.base.comparedAgainstRef}`;
-      const warnings = repository.configWarnings.map(warning => `<div class="config-warning">${escapeHtml(warning)}</div>`).join("");
       const hasUntracked = repository.changedFiles.some(file => file.status.startsWith("?"));
       const untrackedIndicator = hasUntracked
         ? `<div class="untracked-indicator" data-untracked-indicator>Includes untracked files</div>`

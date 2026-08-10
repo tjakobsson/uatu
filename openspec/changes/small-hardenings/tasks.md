@@ -16,10 +16,17 @@
 - [x] 3.1 Delete `--score-low-border`, `--score-low-bg`, `--score-high-border`, `--score-high-bg` from `src/styles.css`.
 - [x] 3.2 Rename `--score-medium-bg`/`--score-medium-border` to `--notice-warn-bg`/`--notice-warn-border` at the definition and both consumers (`.config-warning`, the stale-client notice); verify `grep -- --score- src/styles.css` comes back empty.
 
-## 4. Verification
+## 4. Per-watch-root collection (Codex review finding)
 
-- [x] 4.1 Run `bun test` and confirm the suite passes.
-- [x] 4.2 Manual spot check via `bun run dev`: an empty `.uatu.json` in `testdata/watch-docs` shows a parse warning in the Change Overview, and an `ignore.exclude: "nope"` shows the shape warning; both styled as before.
+- [x] 4.1 Add `configRoots` to `RepositoryGroup` (dir watch roots only) and populate it in group detection for git, shared-repo, and non-git groups.
+- [x] 4.2 Collect warnings across `configRoots` in `collectConfigWarnings` (realpath-normalized repo-relative prefix for roots below the top; exact-duplicate dedup) and before the git/non-git branch in `snapshotGroup`, threading them into `unavailableSnapshot`.
+- [x] 4.3 Render config warnings in the Change Overview's non-git/unavailable branch.
+- [x] 4.4 Tests: subdir watch root warns with prefix, repo-top file not consulted, non-git root warns, single-file root produces no warnings.
+
+## 5. Verification
+
+- [x] 5.1 Run `bun test` and confirm the suite passes.
+- [x] 5.2 Manual spot check via `bun run dev`: an empty `.uatu.json` in `testdata/watch-docs` shows a parse warning in the Change Overview, and an `ignore.exclude: "nope"` shows the shape warning; both styled as before.
 
 All four fixes stabilize unreleased post-v0.4.0 work, so the PR body must
 carry a Release Please override (`chore(cleanup): …`) per the release-note
