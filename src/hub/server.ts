@@ -67,6 +67,13 @@ function htmlResponse(body: string, status = 200): Response {
   });
 }
 
+// The return-to target as the login form should carry it. "/" is the default
+// the form falls back to anyway, so rendering it would only put a redundant
+// value in the markup and the URL.
+function formTarget(target: string): string | undefined {
+  return target === "/" ? undefined : target;
+}
+
 export function createHubFetchHandler(deps: HubDeps) {
   const { config, registry, sessions, sessionStore, personalState } = deps;
   const limiter = new LoginRateLimiter();
@@ -102,17 +109,28 @@ export function createHubFetchHandler(deps: HubDeps) {
 
   const handleLogin = async (request: Request, server: HubServer): Promise<Response> => {
     // The validated return-to target, carried by the gate's redirect
-    // (?next=…) and echoed through the form so the POST can honor it.
+    // (?next=…) and echoed by the form through BOTH its action and a hidden
+    // field, so every branch of the POST — including the ones that answer
+    // before the body is read — can honor it.
     const nextTarget = safeReturnPath(new URL(request.url).searchParams.get("next"));
     if (request.method === "GET") {
       if (authenticatedSession(request)) {
         return Response.redirect(nextTarget, 303);
       }
-      return htmlResponse(loginPage({ next: nextTarget === "/" ? undefined : nextTarget }));
+      return htmlResponse(loginPage({ next: formTarget(nextTarget) }));
     }
     if (request.method !== "POST") {
       return new Response("method not allowed", { status: 405 });
     }
+    // Where this request returns to. Seeded from the URL — the form posts to
+    // /login?next=… precisely so the branches that answer before the body is
+    // read still have it — and narrowed to the posted value once there is one.
+    let returnTarget = nextTarget;
+    // Every HTML failure renders through here. Passing the target at four
+    // separate call sites is how it came to be dropped at all four; one
+    // helper means a branch added later cannot quietly lose it again.
+    const errorPage = (error: string, status: number): Response =>
+      htmlResponse(loginPage({ error, next: formTarget(returnTarget) }), status);
     // JSON logins are the native-client path (no page to render, no
     // Origin header sent) — their failures answer as JSON so a client can
     // distinguish "wrong password" from transport trouble.
@@ -120,7 +138,7 @@ export function createHubFetchHandler(deps: HubDeps) {
     if (!isSameOriginRequest(request)) {
       return isJson
         ? json(403, { error: "cross-origin login rejected" })
-        : htmlResponse(loginPage({ error: "cross-origin login rejected" }), 403);
+        : errorPage("cross-origin login rejected", 403);
     }
 
     const ip = clientKeyForRateLimit(
@@ -130,7 +148,7 @@ export function createHubFetchHandler(deps: HubDeps) {
     if (!limiter.allow(ip)) {
       return isJson
         ? json(429, { error: "too many attempts — wait a minute and try again" })
-        : htmlResponse(loginPage({ error: "too many attempts — wait a minute and try again" }), 429);
+        : errorPage("too many attempts — wait a minute and try again", 429);
     }
 
     let name = "";
@@ -150,11 +168,18 @@ export function createHubFetchHandler(deps: HubDeps) {
         password = String(form.get("password") ?? "");
         const rawNext = form.get("next");
         postedNext = typeof rawNext === "string" && rawNext ? rawNext : null;
+        // The posted value is the more specific statement of intent, so it
+        // wins over the URL's — including when it fails validation, where
+        // narrowing to "/" is the point rather than a fallback to something
+        // the attacker did not supply.
+        if (postedNext) {
+          returnTarget = safeReturnPath(postedNext);
+        }
       }
     } catch {
       return isJson
         ? json(400, { error: "malformed login request" })
-        : htmlResponse(loginPage({ error: "malformed login request" }), 400);
+        : errorPage("malformed login request", 400);
     }
 
     const user = await verifyLogin(config, name, password);
@@ -163,7 +188,7 @@ export function createHubFetchHandler(deps: HubDeps) {
       // Deliberately identical for wrong password and unknown user.
       return isJson
         ? json(401, { error: "invalid credentials" })
-        : htmlResponse(loginPage({ error: "invalid credentials" }), 401);
+        : errorPage("invalid credentials", 401);
     }
     limiter.reset(ip);
 
@@ -185,8 +210,8 @@ export function createHubFetchHandler(deps: HubDeps) {
       status: 303,
       headers: {
         // Back to the page the gate bounced from, when a validated target
-        // rode the form; the dashboard otherwise.
-        location: postedNext ? safeReturnPath(postedNext) : nextTarget,
+        // rode the form or the URL; the dashboard otherwise.
+        location: returnTarget,
         "set-cookie": setCookie,
       },
     });
