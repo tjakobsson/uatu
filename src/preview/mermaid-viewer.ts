@@ -1,9 +1,25 @@
-// Fullscreen Mermaid diagram viewer with pan + wheel-zoom.
+// Fullscreen Mermaid diagram viewer.
+// Mouse: drag-pan, cursor-anchored wheel zoom, double-click to fit.
+// Touch: one-finger pan, two-finger midpoint-anchored pinch, double-tap to fit.
 // Mounted once on document.body so it survives preview re-renders.
 
 const MIN_SCALE = 0.2;
 const MAX_SCALE = 8;
 const WHEEL_ZOOM_RATE = 0.001;
+
+// How much of the scaled diagram must stay inside the viewer after a pan.
+// Not "fully contained" — at high zoom the diagram is deliberately larger
+// than the screen and has to be pannable past its edges. Only the state where
+// nothing at all is on screen is disallowed, because its only recovery was
+// the fit button, which on a phone was itself off-screen.
+const PAN_KEEP_VISIBLE = 48;
+
+// Tap classification. A press that moves further than the slop or lasts
+// longer than the timeout is a pan, not a tap.
+const TAP_MOVE_LIMIT = 12;
+const TAP_MAX_MS = 400;
+const DOUBLE_TAP_MAX_GAP_MS = 300;
+const DOUBLE_TAP_SLOP = 40;
 
 type Transform = { tx: number; ty: number; scale: number };
 
@@ -106,41 +122,190 @@ function createViewer(): ViewerInternals {
     }
   });
 
-  // Pan + wheel-zoom on the viewport.
-  let pointerId: number | null = null;
-  let panStart = { x: 0, y: 0, tx: 0, ty: 0 };
+  // --- Pointer gestures ---------------------------------------------------
+  //
+  // One map of live pointers rather than the single id/origin pair this
+  // started as. The pair was written for a mouse, where a second pointer
+  // cannot exist; on touch, an arriving or departing finger overwrote the pan
+  // origin without re-seeding it and the diagram jumped by the distance
+  // between the fingers.
+  //
+  // The pointer COUNT selects the gesture — 1 pans, 2 pinches, 3+ are ignored
+  // — and every transition between counts re-seeds, which is what makes the
+  // transitions invisible. `syncGesture` is deliberately the only place that
+  // seeds anything, so there is no path that changes the count without
+  // re-seeding.
+  type ActivePointer = { x: number; y: number; downX: number; downY: number; downTime: number };
+  const pointers = new Map<number, ActivePointer>();
+  let panOrigin: { x: number; y: number; tx: number; ty: number } | null = null;
+  let pinch: { startDistance: number; startScale: number } | null = null;
+  // A tap that was ever part of a two-finger gesture is not a tap.
+  let gestureWasMultiTouch = false;
+  let lastTap: { x: number; y: number; time: number } | null = null;
+
+  const livePointers = () => Array.from(pointers.values());
+
+  function syncGesture(): void {
+    const active = livePointers();
+    if (active.length === 2) {
+      // Entering (or continuing) a pinch. Capture the baseline separation and
+      // the scale it starts from, so the gesture is measured against where
+      // the fingers began rather than accumulating per-move rounding.
+      panOrigin = null;
+      gestureWasMultiTouch = true;
+      pinch = {
+        startDistance: Math.max(distanceBetween(active[0]!, active[1]!), 1),
+        startScale: internals.transform.scale,
+      };
+      viewport.classList.remove("is-panning");
+      return;
+    }
+    pinch = null;
+    if (active.length === 1) {
+      // Seeds on 0→1 (a pan beginning) and equally on 2→1 (a finger lifting
+      // out of a pinch). The second case is the one that used to jump: the
+      // survivor resumes from wherever it is now, against the transform as it
+      // now stands, so nothing moves at the transition.
+      const only = active[0]!;
+      panOrigin = { x: only.x, y: only.y, tx: internals.transform.tx, ty: internals.transform.ty };
+      viewport.classList.add("is-panning");
+      return;
+    }
+    panOrigin = null;
+    viewport.classList.remove("is-panning");
+  }
 
   viewport.addEventListener("pointerdown", event => {
     if (event.button !== 0) {
       return;
     }
-    pointerId = event.pointerId;
-    panStart = { x: event.clientX, y: event.clientY, tx: internals.transform.tx, ty: internals.transform.ty };
-    viewport.setPointerCapture(event.pointerId);
-    viewport.classList.add("is-panning");
+    // Third and subsequent fingers are ignored rather than given a meaning.
+    // They are not captured, so their moves never reach the handlers either.
+    if (pointers.size >= 2) {
+      gestureWasMultiTouch = true;
+      return;
+    }
+    pointers.set(event.pointerId, {
+      x: event.clientX,
+      y: event.clientY,
+      downX: event.clientX,
+      downY: event.clientY,
+      downTime: event.timeStamp,
+    });
+    capturePointer(event.pointerId);
+    syncGesture();
   });
+
+  // Capture is an optimization — it keeps moves coming to this element once a
+  // finger leaves its bounds — not a precondition. It throws NotFoundError
+  // when the id is no longer an active pointer, which a release racing the
+  // handler can produce, so a failure here must not abandon the gesture
+  // bookkeeping that follows it.
+  function capturePointer(pointerId: number): void {
+    try {
+      viewport.setPointerCapture(pointerId);
+    } catch {
+      // Uncaptured is still workable; moves arrive while the finger is over
+      // the viewport, which covers the whole dialog.
+    }
+  }
+
+  function releasePointer(pointerId: number): void {
+    try {
+      if (viewport.hasPointerCapture(pointerId)) {
+        viewport.releasePointerCapture(pointerId);
+      }
+    } catch {
+      // Already gone; nothing to release.
+    }
+  }
 
   viewport.addEventListener("pointermove", event => {
-    if (pointerId !== event.pointerId) {
+    const pointer = pointers.get(event.pointerId);
+    if (!pointer) {
       return;
     }
-    internals.transform.tx = panStart.tx + (event.clientX - panStart.x);
-    internals.transform.ty = panStart.ty + (event.clientY - panStart.y);
-    applyTransform(internals);
+    pointer.x = event.clientX;
+    pointer.y = event.clientY;
+
+    const active = livePointers();
+    if (active.length === 2 && pinch) {
+      const [a, b] = active as [ActivePointer, ActivePointer];
+      const distance = Math.max(distanceBetween(a, b), 1);
+      // Scale tracks the ratio of current to initial separation, anchored on
+      // the midpoint between the fingers — the touch counterpart of
+      // cursor-anchored wheel zoom, and the same anchoring math. Anchoring on
+      // the viewport centre instead would slide the content away from the
+      // gesture.
+      const target = clamp(pinch.startScale * (distance / pinch.startDistance), MIN_SCALE, MAX_SCALE);
+      zoomAtPoint(internals, target / internals.transform.scale, (a.x + b.x) / 2, (a.y + b.y) / 2);
+      return;
+    }
+    if (active.length === 1 && panOrigin) {
+      internals.transform.tx = panOrigin.tx + (pointer.x - panOrigin.x);
+      internals.transform.ty = panOrigin.ty + (pointer.y - panOrigin.y);
+      applyTransform(internals);
+    }
   });
 
-  const endPan = (event: PointerEvent) => {
-    if (pointerId !== event.pointerId) {
+  const endPointer = (event: PointerEvent, cancelled: boolean) => {
+    const pointer = pointers.get(event.pointerId);
+    if (!pointer) {
       return;
     }
-    pointerId = null;
-    if (viewport.hasPointerCapture(event.pointerId)) {
-      viewport.releasePointerCapture(event.pointerId);
+    if (!cancelled) {
+      handlePossibleTap(event, pointer);
     }
-    viewport.classList.remove("is-panning");
+    pointers.delete(event.pointerId);
+    releasePointer(event.pointerId);
+    if (pointers.size === 0) {
+      gestureWasMultiTouch = false;
+    }
+    syncGesture();
   };
-  viewport.addEventListener("pointerup", endPan);
-  viewport.addEventListener("pointercancel", endPan);
+  viewport.addEventListener("pointerup", event => endPointer(event, false));
+  viewport.addEventListener("pointercancel", event => endPointer(event, true));
+
+  // The viewer is mounted once and reused for every diagram, so gesture state
+  // has to be dropped at close or it carries into the next open: a pointer
+  // whose `pointerup` never arrived would leave a phantom finger in the map,
+  // and a trailing single tap would pair with the first tap of the next
+  // session into a spurious double-tap.
+  dialog.addEventListener("close", () => {
+    pointers.clear();
+    lastTap = null;
+    gestureWasMultiTouch = false;
+    syncGesture();
+  });
+
+  // Double-tap to fit, detected from tap timing rather than `dblclick`.
+  // `dblclick` synthesis on touch is inconsistent and `touch-action: none` —
+  // which the pan surface needs — interferes with it. Mouse input keeps the
+  // native `dblclick` listener below; two detectors, each reliable for its own
+  // input mode, beat one that is unreliable for half of them.
+  function handlePossibleTap(event: PointerEvent, pointer: ActivePointer): void {
+    if (event.pointerType === "mouse") {
+      return;
+    }
+    if (gestureWasMultiTouch || pointers.size > 1) {
+      return;
+    }
+    const moved = Math.hypot(event.clientX - pointer.downX, event.clientY - pointer.downY);
+    if (moved > TAP_MOVE_LIMIT || event.timeStamp - pointer.downTime > TAP_MAX_MS) {
+      return;
+    }
+    const previous = lastTap;
+    if (
+      previous &&
+      event.timeStamp - previous.time <= DOUBLE_TAP_MAX_GAP_MS &&
+      Math.hypot(event.clientX - previous.x, event.clientY - previous.y) <= DOUBLE_TAP_SLOP
+    ) {
+      lastTap = null;
+      fitToViewport(internals);
+      return;
+    }
+    lastTap = { x: event.clientX, y: event.clientY, time: event.timeStamp };
+  }
 
   viewport.addEventListener(
     "wheel",
@@ -220,8 +385,45 @@ function openViewer(internals: ViewerInternals, options: OpenViewerOptions): voi
 }
 
 function applyTransform(internals: ViewerInternals): void {
+  clampTranslation(internals);
   const { tx, ty, scale } = internals.transform;
   internals.stage.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+}
+
+// Keep at least `PAN_KEEP_VISIBLE` of the scaled stage inside the viewer on
+// each axis. The single choke point for it is `applyTransform`, so every route
+// that moves the diagram — drag, pinch, wheel, toolbar, keyboard — is bounded
+// by construction rather than by remembering to call this.
+//
+// Applies in both input modes on purpose. Two pan models in one viewer would
+// be worse than one slightly stricter one, and on desktop the effect is a
+// small forgiveness improvement rather than a behavior change anyone will
+// notice: a fling that used to lose the diagram now stops at the edge.
+function clampTranslation(internals: ViewerInternals): void {
+  const viewportRect = internals.viewport.getBoundingClientRect();
+  if (viewportRect.width === 0 || viewportRect.height === 0) {
+    return;
+  }
+  // `offsetWidth`/`offsetHeight` are layout dimensions and ignore the
+  // transform, so they give the unscaled stage size without having to divide
+  // the visual rect back out by a scale that is mid-update.
+  const baseWidth = internals.stage.offsetWidth;
+  const baseHeight = internals.stage.offsetHeight;
+  if (baseWidth === 0 || baseHeight === 0) {
+    return;
+  }
+  const scaledWidth = baseWidth * internals.transform.scale;
+  const scaledHeight = baseHeight * internals.transform.scale;
+  // A diagram smaller than the margin can only ever keep its whole self
+  // visible, so the margin shrinks to it rather than producing an empty range.
+  const marginX = Math.min(PAN_KEEP_VISIBLE, scaledWidth, viewportRect.width);
+  const marginY = Math.min(PAN_KEEP_VISIBLE, scaledHeight, viewportRect.height);
+  internals.transform.tx = clamp(internals.transform.tx, marginX - scaledWidth, viewportRect.width - marginX);
+  internals.transform.ty = clamp(internals.transform.ty, marginY - scaledHeight, viewportRect.height - marginY);
+}
+
+function distanceBetween(a: { x: number; y: number }, b: { x: number; y: number }): number {
+  return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
 function resetTransform(internals: ViewerInternals): void {

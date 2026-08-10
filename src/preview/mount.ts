@@ -11,7 +11,7 @@ import { closeMermaidViewer } from "./mermaid-viewer";
 import { renderMermaidDiagrams, replaceMermaidCodeBlocks } from "../render/preview";
 import type { FileFacts, ViewMode } from "../shared/types";
 import { appState } from "../shell/state";
-import { previewScrollRoot } from "../shell/preview-scroll-root";
+import { previewObserverRoot, previewScrollRoot } from "../shell/preview-scroll-root";
 import { renderBinaryUnavailable } from "./binary";
 import { applyDiffForActiveDocument } from "./diff";
 import { renderEmptyPreview } from "./empty";
@@ -185,7 +185,9 @@ export async function renderSinglePayload(payload: RenderedDocument): Promise<vo
   attachMetadataCardToggleListener(previewElement);
   // Installs lazy rendering and resolves on setup — diagrams stream in as
   // they approach the viewport rather than blocking the mount as one batch.
-  await renderMermaidDiagrams(previewElement, currentMermaidThemeInputs());
+  // The renderer does not know what scrolls; we do, so we hand it the
+  // resolver rather than let it guess (#186).
+  await renderMermaidDiagrams(previewElement, currentMermaidThemeInputs(), previewObserverRoot);
   // Source rendering — for text/source files always, and for markdown /
   // asciidoc when the user is in Source view — needs the line-number gutter
   // so the inspector pane can produce accurate `@path#L<a>-<b>` references.
@@ -294,7 +296,7 @@ export async function renderSplitPayloads(
   attachMetadataCardToggleListener(renderedPane);
   // Lazy install (resolves on setup, diagrams stream in) — see the
   // single-pane call above.
-  await renderMermaidDiagrams(renderedPane, currentMermaidThemeInputs());
+  await renderMermaidDiagrams(renderedPane, currentMermaidThemeInputs(), previewObserverRoot);
   attachLineNumbers(sourcePane);
   applySourceWrap(sourcePane, appState.wrap);
   attachCopyButtons(sourcePane);

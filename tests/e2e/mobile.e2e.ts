@@ -571,3 +571,252 @@ test.describe("touch preview chrome", () => {
     await expect(decrease).toBeEnabled();
   });
 });
+
+test.describe("touch mermaid viewer", () => {
+  test.beforeEach(async ({ page, request }) => {
+    await touchBeforeEach(page, request);
+  });
+
+  // Open `diagram.md` and its rendered diagram in the fullscreen viewer.
+  async function openViewer(page: import("@playwright/test").Page): Promise<void> {
+    await page.locator("#touch-tab-files").click();
+    await treeRow(page, "diagram.md").click();
+    await page.locator("#touch-tab-preview").click();
+    const trigger = page.locator("#preview .mermaid-trigger");
+    await expect(trigger).toBeVisible();
+    await trigger.tap();
+    await expect(page.locator("dialog.mermaid-viewer")).toHaveAttribute("open", "");
+    // Let the deferred fit-to-viewport RAF settle before measuring.
+    await page.waitForTimeout(120);
+  }
+
+  function stageTransform(page: import("@playwright/test").Page): Promise<string> {
+    return page.locator(".mermaid-viewer-stage").evaluate(el => (el as HTMLElement).style.transform);
+  }
+
+  function stageScale(page: import("@playwright/test").Page): Promise<number> {
+    return page.evaluate(() => {
+      const stage = document.querySelector<HTMLElement>(".mermaid-viewer-stage");
+      const match = stage?.style.transform.match(/scale\(([\d.]+)\)/);
+      return match ? Number.parseFloat(match[1]!) : Number.NaN;
+    });
+  }
+
+  // Playwright has no pinch primitive; drive the pointer events the viewer
+  // actually listens to. `isPrimary` matters — the second finger is not.
+  async function dispatchPointer(
+    page: import("@playwright/test").Page,
+    type: "pointerdown" | "pointermove" | "pointerup",
+    pointerId: number,
+    x: number,
+    y: number,
+  ): Promise<void> {
+    await page.evaluate(
+      ({ type, pointerId, x, y }) => {
+        const viewport = document.querySelector<HTMLElement>(".mermaid-viewer-viewport");
+        if (!viewport) throw new Error("no viewer viewport");
+        viewport.dispatchEvent(
+          new PointerEvent(type, {
+            pointerId,
+            pointerType: "touch",
+            isPrimary: pointerId === 1,
+            clientX: x,
+            clientY: y,
+            button: 0,
+            buttons: type === "pointerup" ? 0 : 1,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      },
+      { type, pointerId, x, y },
+    );
+  }
+
+  test("the close control sits inside the visible viewport and closes by touch", async ({ page }) => {
+    // #187: the dialog was sized in `100vh`, which on iOS is the viewport with
+    // browser chrome retracted — the toolbar, and with it the only close
+    // control, sat below the visible fold behind the URL bar.
+    await openViewer(page);
+
+    const geometry = await page.evaluate(() => {
+      const close = document.querySelector<HTMLElement>(".mermaid-viewer-close");
+      const dialog = document.querySelector<HTMLElement>("dialog.mermaid-viewer");
+      if (!close || !dialog) return null;
+      const rect = close.getBoundingClientRect();
+      return {
+        rect: { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right, width: rect.width, height: rect.height },
+        visualHeight: window.visualViewport?.height ?? window.innerHeight,
+        visualWidth: window.visualViewport?.width ?? window.innerWidth,
+        dialogHeight: dialog.getBoundingClientRect().height,
+      };
+    });
+    expect(geometry).not.toBeNull();
+
+    // Fully within the visible viewport on both axes.
+    expect(geometry!.rect.top).toBeGreaterThanOrEqual(0);
+    expect(geometry!.rect.bottom).toBeLessThanOrEqual(geometry!.visualHeight);
+    expect(geometry!.rect.left).toBeGreaterThanOrEqual(0);
+    expect(geometry!.rect.right).toBeLessThanOrEqual(geometry!.visualWidth);
+    // The dialog itself is sized to the visible viewport, not beyond it.
+    expect(geometry!.dialogHeight).toBeLessThanOrEqual(geometry!.visualHeight + 1);
+    // 44px minimum touch target under a coarse pointer.
+    expect(geometry!.rect.height).toBeGreaterThanOrEqual(44);
+    expect(geometry!.rect.width).toBeGreaterThanOrEqual(44);
+
+    await page.locator(".mermaid-viewer-close").tap();
+    await expect(page.locator("dialog.mermaid-viewer")).not.toHaveAttribute("open", "");
+  });
+
+  test("two-finger pinch zooms the diagram", async ({ page }) => {
+    await openViewer(page);
+    const before = await stageScale(page);
+    expect(Number.isFinite(before)).toBe(true);
+
+    // Two fingers land 60px apart and spread to 240px: a 4x separation ratio.
+    await dispatchPointer(page, "pointerdown", 1, 165, 400);
+    await dispatchPointer(page, "pointerdown", 2, 225, 400);
+    await dispatchPointer(page, "pointermove", 1, 75, 400);
+    await dispatchPointer(page, "pointermove", 2, 315, 400);
+
+    const zoomed = await stageScale(page);
+    expect(zoomed).toBeGreaterThan(before * 2);
+
+    // Pinching back in shrinks it again — the gesture is measured against the
+    // separation the fingers started at, not accumulated per move.
+    await dispatchPointer(page, "pointermove", 1, 180, 400);
+    await dispatchPointer(page, "pointermove", 2, 210, 400);
+    expect(await stageScale(page)).toBeLessThan(zoomed);
+
+    await dispatchPointer(page, "pointerup", 1, 180, 400);
+    await dispatchPointer(page, "pointerup", 2, 210, 400);
+  });
+
+  test("a second finger landing and lifting does not displace the diagram", async ({ page }) => {
+    // The bug the pointer Map replaced: unconditional pointerdown bookkeeping
+    // overwrote the pan origin, so a finger arriving mid-pan (or leaving
+    // mid-pinch) jumped the diagram by the distance between the fingers.
+    await openViewer(page);
+
+    await dispatchPointer(page, "pointerdown", 1, 200, 400);
+    await dispatchPointer(page, "pointermove", 1, 230, 430);
+    const afterPan = await stageTransform(page);
+
+    // Second finger lands — no movement of either finger, so nothing should move.
+    await dispatchPointer(page, "pointerdown", 2, 300, 500);
+    expect(await stageTransform(page)).toBe(afterPan);
+
+    // …and lifts again. Still nothing should move.
+    await dispatchPointer(page, "pointerup", 2, 300, 500);
+    expect(await stageTransform(page)).toBe(afterPan);
+
+    // The surviving finger resumes panning from where it is, not from where
+    // the pan originally started.
+    await dispatchPointer(page, "pointermove", 1, 240, 440);
+    const resumed = await stageTransform(page);
+    expect(resumed).not.toBe(afterPan);
+
+    const delta = await page.evaluate(
+      ({ before, after }) => {
+        const parse = (t: string) => {
+          const m = t.match(/translate\((-?[\d.]+)px,\s*(-?[\d.]+)px\)/);
+          return m ? { x: Number.parseFloat(m[1]!), y: Number.parseFloat(m[2]!) } : null;
+        };
+        const a = parse(before);
+        const b = parse(after);
+        if (!a || !b) return null;
+        return { dx: b.x - a.x, dy: b.y - a.y };
+      },
+      { before: afterPan, after: resumed },
+    );
+    // Exactly the 10px the finger moved — no jump folded in.
+    expect(delta).not.toBeNull();
+    expect(Math.abs(delta!.dx - 10)).toBeLessThan(1.5);
+    expect(Math.abs(delta!.dy - 10)).toBeLessThan(1.5);
+
+    await dispatchPointer(page, "pointerup", 1, 240, 440);
+  });
+
+  test("double-tap fits the diagram to the screen", async ({ page }) => {
+    await openViewer(page);
+    const fitted = await stageTransform(page);
+
+    // Move it away from the fitted position.
+    await dispatchPointer(page, "pointerdown", 1, 200, 400);
+    await dispatchPointer(page, "pointermove", 1, 260, 460);
+    await dispatchPointer(page, "pointerup", 1, 260, 460);
+    expect(await stageTransform(page)).not.toBe(fitted);
+
+    // Two quick taps in the same place: back to fit.
+    for (const id of [2, 3]) {
+      await dispatchPointer(page, "pointerdown", id, 200, 400);
+      await dispatchPointer(page, "pointerup", id, 200, 400);
+    }
+    await expect.poll(() => stageTransform(page)).toBe(fitted);
+  });
+
+  test("panning cannot move the diagram entirely off-screen", async ({ page }) => {
+    await openViewer(page);
+
+    // Fling far past the edge in one direction, repeatedly.
+    for (let pass = 0; pass < 4; pass += 1) {
+      await dispatchPointer(page, "pointerdown", 10 + pass, 200, 400);
+      await dispatchPointer(page, "pointermove", 10 + pass, 2000, 3000);
+      await dispatchPointer(page, "pointerup", 10 + pass, 2000, 3000);
+    }
+
+    const overlap = await page.evaluate(() => {
+      const stage = document.querySelector<HTMLElement>(".mermaid-viewer-stage");
+      const viewport = document.querySelector<HTMLElement>(".mermaid-viewer-viewport");
+      if (!stage || !viewport) return null;
+      const s = stage.getBoundingClientRect();
+      const v = viewport.getBoundingClientRect();
+      return {
+        x: Math.min(s.right, v.right) - Math.max(s.left, v.left),
+        y: Math.min(s.bottom, v.bottom) - Math.max(s.top, v.top),
+      };
+    });
+    expect(overlap).not.toBeNull();
+    // Part of the diagram is still on screen on both axes — no recovery
+    // control needed, which matters because that control used to be the
+    // unreachable one.
+    expect(overlap!.x).toBeGreaterThan(0);
+    expect(overlap!.y).toBeGreaterThan(0);
+
+    // …and the same in the opposite direction.
+    for (let pass = 0; pass < 4; pass += 1) {
+      await dispatchPointer(page, "pointerdown", 20 + pass, 200, 400);
+      await dispatchPointer(page, "pointermove", 20 + pass, -2000, -3000);
+      await dispatchPointer(page, "pointerup", 20 + pass, -2000, -3000);
+    }
+    const reverse = await page.evaluate(() => {
+      const stage = document.querySelector<HTMLElement>(".mermaid-viewer-stage");
+      const viewport = document.querySelector<HTMLElement>(".mermaid-viewer-viewport");
+      if (!stage || !viewport) return null;
+      const s = stage.getBoundingClientRect();
+      const v = viewport.getBoundingClientRect();
+      return {
+        x: Math.min(s.right, v.right) - Math.max(s.left, v.left),
+        y: Math.min(s.bottom, v.bottom) - Math.max(s.top, v.top),
+      };
+    });
+    expect(reverse!.x).toBeGreaterThan(0);
+    expect(reverse!.y).toBeGreaterThan(0);
+  });
+
+  test("a downward pan never dismisses the viewer", async ({ page }) => {
+    // Dismissal is exactly the close button and Escape. The whole surface is
+    // a one-finger pan target, so a downward drag already means "move the
+    // diagram up" — no swipe-to-dismiss is layered on top of it.
+    await openViewer(page);
+    const dialog = page.locator("dialog.mermaid-viewer");
+
+    for (const speed of [40, 400]) {
+      await dispatchPointer(page, "pointerdown", 30 + speed, 195, 200);
+      await dispatchPointer(page, "pointermove", 30 + speed, 195, 200 + speed);
+      await dispatchPointer(page, "pointermove", 30 + speed, 195, 200 + speed * 2);
+      await dispatchPointer(page, "pointerup", 30 + speed, 195, 200 + speed * 2);
+      await expect(dialog).toHaveAttribute("open", "");
+    }
+  });
+});

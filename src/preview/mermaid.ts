@@ -3,8 +3,13 @@
 // the rest of the preview/ rendering pipeline.
 
 import { ensureMermaidViewer } from "./mermaid-viewer";
-import { rerenderMermaidDiagrams, type MermaidThemeInputs } from "../render/preview";
+import {
+  reobserveMermaidDiagrams,
+  rerenderMermaidDiagrams,
+  type MermaidThemeInputs,
+} from "../render/preview";
 import { activeColorScheme, onColorSchemeChange } from "../shell/theme";
+import { onUiModeChange } from "../shell/ui-mode";
 
 const previewElementMaybe = document.querySelector<HTMLElement>("#preview");
 
@@ -46,6 +51,23 @@ export function currentMermaidThemeInputs(): MermaidThemeInputs {
 // flipping back reuses earlier SVGs.
 onColorSchemeChange(() => {
   void rerenderMermaidDiagrams(currentMermaidThemeInputs());
+});
+
+// A mode flip moves scrolling between the preview shell and the page, but an
+// IntersectionObserver's root is fixed at construction — the live observer
+// stays bound to the region that was effective at mount. Rebuild it, for the
+// diagrams that have not rendered yet.
+//
+// Not `rerenderMermaidDiagrams`: that path is for a theme change and resets
+// every diagram to its source to force a re-render. Nothing about the theme
+// changed here, so already-rendered diagrams would flash for no gain.
+//
+// Deferred by a frame because the mode switch restyles the layout in the same
+// task, and the resolver reads computed styles — asking before the cascade has
+// settled would resolve against the outgoing layout. `setUiMode` fires its own
+// resize on the next frame for the same reason.
+onUiModeChange(() => {
+  requestAnimationFrame(() => reobserveMermaidDiagrams());
 });
 
 export function handleMermaidTriggerClick(event: MouseEvent): void {

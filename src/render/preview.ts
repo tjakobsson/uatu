@@ -14,6 +14,11 @@ export type MermaidThemeInputs = {
 
 const DEFAULT_THEME_INPUTS: MermaidThemeInputs = { theme: "default" };
 
+// Supplied by the caller that knows the layout. `null` means the implicit
+// viewport root — the correct answer whenever the page is what scrolls, and
+// the only one available in a non-browser DOM.
+export type ObserverRootResolver = () => Element | null;
+
 // Lazy-rendering machinery (see openspec/specs/mermaid-rendering — "Mermaid
 // diagrams render lazily"). Diagrams render when they approach the viewport
 // instead of all at mount: on a 42-diagram benchmark document the eager
@@ -38,9 +43,23 @@ let draining = false;
 // re-render targets this rather than threading the container through the
 // theme subscription (mounts always reinstall, so "last" is "current").
 let lastInstallContainer: ParentNode | null = null;
+// Stored as a resolver, not a resolved value: both the theme-flip reinstall
+// and the mode-switch re-observation run without the caller present, and both
+// need the root as it is *now*. A value captured at mount would freeze the
+// layout the document happened to be mounted in.
+let lastObserverRootResolver: ObserverRootResolver | null = null;
+// The theme inputs the current install was made with, so re-observation can
+// rebuild queue entries identically. Distinct from `lastThemeInputs`, which
+// tracks what mermaid itself was last initialized with.
+let lastInstallThemeInputs: MermaidThemeInputs = DEFAULT_THEME_INPUTS;
 
 type QueueEntry = { node: HTMLElement; generation: number; themeInputs: MermaidThemeInputs };
 const renderQueue: QueueEntry[] = [];
+// Nodes with a live queue entry or a render in progress. Membership outlives
+// the queue entry itself — a node is removed only once its render settles —
+// because re-observation must not hand the drain loop a second entry for work
+// already under way.
+const queuedNodes = new Set<HTMLElement>();
 
 // Rendered-SVG reuse across mounts: key is theme inputs + trimmed diagram
 // source, value is the normalized SVG markup (pre-trigger-wrap). A Map is
@@ -52,14 +71,22 @@ const renderedSvgCache = new Map<string, string>();
 // Resolves once observation is set up — NOT when all diagrams are rendered;
 // diagrams stream in as they approach the viewport. Callers that need
 // completion (tests) await `__drainMermaidQueueForTests()`.
+//
+// `resolveObserverRoot` answers "what region should a diagram be measured
+// against?" — see the note on `installObserver` for why this module no longer
+// derives that answer itself. Omitting it means the implicit viewport root,
+// which is what a non-browser DOM gets.
 export async function renderMermaidDiagrams(
   container: ParentNode,
   themeInputs: MermaidThemeInputs = DEFAULT_THEME_INPUTS,
+  resolveObserverRoot?: ObserverRootResolver,
 ): Promise<void> {
   const generation = ++renderGeneration;
   activeObserver?.disconnect();
   activeObserver = null;
   lastInstallContainer = container;
+  lastObserverRootResolver = resolveObserverRoot ?? null;
+  lastInstallThemeInputs = themeInputs;
 
   const nodes = Array.from(container.querySelectorAll<HTMLElement>(".mermaid"));
   if (nodes.length === 0) {
@@ -74,30 +101,7 @@ export async function renderMermaidDiagrams(
     node.classList.add(PENDING_CLASS);
   }
 
-  const Observer = (globalThis as { IntersectionObserver?: typeof IntersectionObserver }).IntersectionObserver;
-  if (typeof Observer === "function") {
-    // Generous ahead-of-viewport margin: diagrams normally finish rendering
-    // before they scroll into actual view, so pop-in and placeholder-height
-    // layout shift stay off-screen.
-    //
-    // The root MUST be the nearest scrollable ancestor (`.preview-shell`
-    // in single view, the rendered pane in split view), not the default
-    // viewport: with an implicit root, ancestor clipping by the nested
-    // scroller still applies and rootMargin would expand only the viewport
-    // rect — leaving the margin inert and diagrams un-queued until they
-    // are already visible.
-    const observer = new Observer(entries => {
-      for (const entry of entries) {
-        if (!entry.isIntersecting) continue;
-        observer.unobserve(entry.target);
-        enqueueDiagram({ node: entry.target as HTMLElement, generation, themeInputs });
-      }
-    }, { root: nearestScrollRoot(container), rootMargin: OBSERVER_ROOT_MARGIN });
-    activeObserver = observer;
-    for (const node of nodes) {
-      observer.observe(node);
-    }
-  } else {
+  if (!installObserver(nodes, generation, themeInputs)) {
     // No viewport observation available (non-browser DOM, ancient engine):
     // still render everything, but through the yielding queue so a large
     // batch never blocks as one unit.
@@ -107,36 +111,89 @@ export async function renderMermaidDiagrams(
   }
 }
 
-// Walk up from the container to the nearest overflow-scrolling ancestor —
-// the element whose scrollport actually clips the diagrams. Returns null
-// (the viewport) when none exists or when getComputedStyle is unavailable
-// (non-browser DOM), which degrades to the pre-fix behavior: rendering on
-// visibility rather than ahead of it.
-function nearestScrollRoot(container: ParentNode): Element | null {
-  const getStyle = (globalThis as { getComputedStyle?: (el: Element) => CSSStyleDeclaration }).getComputedStyle;
-  if (typeof getStyle !== "function") {
-    return null;
+// Build the observer over `nodes` against a freshly resolved root. Returns
+// false when the environment has no IntersectionObserver, so the caller can
+// fall back to rendering everything.
+//
+// The root is injected rather than derived. This module used to walk up from
+// the container looking for a computed overflow of `auto|scroll|overlay`,
+// which is a different question from "what actually scrolls" and answers it
+// wrongly wherever the page is the scroller: `<body>` carries `overflow: auto`
+// in touch mode and in the ≤900px stacked layout, but it is `height: 100%` and
+// its overflow propagates to the viewport. Picking it yields a one-screenful
+// root pinned to the document origin, which clips every diagram below the
+// first screen out of observation permanently — they never intersect at any
+// scroll position, so they never render at all (#186). Layout is not this
+// module's knowledge to hold; `preview/mount.ts` supplies it from the single
+// resolver in `shell/preview-scroll-root.ts`.
+function installObserver(
+  nodes: HTMLElement[],
+  generation: number,
+  themeInputs: MermaidThemeInputs,
+): boolean {
+  const Observer = (globalThis as { IntersectionObserver?: typeof IntersectionObserver })
+    .IntersectionObserver;
+  if (typeof Observer !== "function") {
+    return false;
   }
-  // `instanceof Element` needs the Element global, which non-browser DOM
-  // environments may not install — duck-type on nodeType instead.
-  let element: Element | null =
-    (container as { nodeType?: number }).nodeType === 1 ? (container as Element) : null;
-  while (element) {
-    try {
-      const style = getStyle(element);
-      if (/(auto|scroll|overlay)/.test(`${style.overflowY} ${style.overflow}`)) {
-        return element;
-      }
-    } catch {
-      return null;
+  // Generous ahead-of-viewport margin: diagrams normally finish rendering
+  // before they scroll into actual view, so pop-in and placeholder-height
+  // layout shift stay off-screen. The margin expands whatever the root
+  // clips, so it is only meaningful once the root is the right region.
+  const observer = new Observer(entries => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      observer.unobserve(entry.target);
+      enqueueDiagram({ node: entry.target as HTMLElement, generation, themeInputs });
     }
-    element = element.parentElement;
+  }, { root: lastObserverRootResolver?.() ?? null, rootMargin: OBSERVER_ROOT_MARGIN });
+  activeObserver = observer;
+  for (const node of nodes) {
+    observer.observe(node);
   }
-  return null;
+  return true;
+}
+
+// Rebuild observation against the currently effective root, for diagrams that
+// have not rendered yet.
+//
+// An observer's root is fixed at construction — there is no way to retarget a
+// live one — so a UI-mode switch that moves scrolling from the shell to the
+// page leaves the existing observer bound to a region that no longer clips
+// anything relevant. Disconnecting and rebuilding is the only mechanism the
+// API offers.
+//
+// Deliberately NOT the theme-flip path: that restores each node's stashed
+// source and clears `data-processed` to force a re-render, which is right when
+// the theme changed and wrong here. The theme has not changed, so a rendered
+// diagram has nothing to gain and a visible flash to lose. Only nodes still
+// carrying the pending class are re-observed, which also keeps a node already
+// in flight in the queue from being enqueued a second time: `enqueueDiagram`
+// runs on intersection, and the pending class is cleared when the render
+// completes, but an in-flight node was already `unobserve`d by the callback
+// that queued it and is not in `nodes` here — it is only re-observed if it is
+// still pending, and re-observing a still-pending in-flight node is harmless
+// because the generation is unchanged and the queue entry it already has does
+// the work.
+export function reobserveMermaidDiagrams(): void {
+  const container = lastInstallContainer;
+  if (!container) {
+    return;
+  }
+  const pending = Array.from(
+    container.querySelectorAll<HTMLElement>(`.mermaid.${PENDING_CLASS}`),
+  ).filter(node => !queuedNodes.has(node));
+  activeObserver?.disconnect();
+  activeObserver = null;
+  if (pending.length === 0) {
+    return;
+  }
+  installObserver(pending, renderGeneration, lastInstallThemeInputs);
 }
 
 function enqueueDiagram(entry: QueueEntry): void {
   renderQueue.push(entry);
+  queuedNodes.add(entry.node);
   void drainRenderQueue();
 }
 
@@ -146,10 +203,18 @@ async function drainRenderQueue(): Promise<void> {
   try {
     while (renderQueue.length > 0) {
       const entry = renderQueue.shift();
-      if (!entry || entry.generation !== renderGeneration) {
+      if (!entry) {
         continue;
       }
-      await renderSingleDiagram(entry.node, entry.themeInputs, entry.generation);
+      if (entry.generation !== renderGeneration) {
+        queuedNodes.delete(entry.node);
+        continue;
+      }
+      try {
+        await renderSingleDiagram(entry.node, entry.themeInputs, entry.generation);
+      } finally {
+        queuedNodes.delete(entry.node);
+      }
       // One diagram per pass: yield to the paint cycle so the page stays
       // responsive while a long run of diagrams renders.
       await nextAnimationFrame();
@@ -359,10 +424,13 @@ export function __resetMermaidStateForTests(): void {
   mermaidLoadPromise = null;
   renderGeneration = 0;
   renderQueue.length = 0;
+  queuedNodes.clear();
   renderedSvgCache.clear();
   activeObserver?.disconnect();
   activeObserver = null;
   lastInstallContainer = null;
+  lastObserverRootResolver = null;
+  lastInstallThemeInputs = DEFAULT_THEME_INPUTS;
 }
 
 // Re-render the active preview's diagrams with new theme inputs (the
@@ -370,11 +438,15 @@ export function __resetMermaidStateForTests(): void {
 // diagram's stashed source — rendering destroyed the node content — then
 // reinstalls lazy rendering over the same container, so off-screen
 // diagrams stay lazy and theme-keyed cache hits skip the renderer.
+//
+// Reinstalls with the stashed *resolver*, so the new observer is built
+// against the layout in force now rather than the one captured at mount.
 export async function rerenderMermaidDiagrams(themeInputs: MermaidThemeInputs): Promise<void> {
   const container = lastInstallContainer;
   if (!container) {
     return;
   }
+  const resolveObserverRoot = lastObserverRootResolver ?? undefined;
   for (const node of Array.from(container.querySelectorAll<HTMLElement>(".mermaid"))) {
     const source = node.dataset.mermaidSource;
     if (source !== undefined) {
@@ -384,7 +456,7 @@ export async function rerenderMermaidDiagrams(themeInputs: MermaidThemeInputs): 
       node.removeAttribute("data-processed");
     }
   }
-  await renderMermaidDiagrams(container, themeInputs);
+  await renderMermaidDiagrams(container, themeInputs, resolveObserverRoot);
 }
 
 async function getMermaidRuntime(): Promise<MermaidRuntime | null> {
