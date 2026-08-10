@@ -2,10 +2,8 @@
 
 ## Purpose
 
-Define the uatu hub daemon: a long-running service that keeps a persistent workspace registry (absolute paths, stable session ids), starts and stops `uatu serve` sessions through a pluggable session backend, and reverse-proxies all session traffic (HTTP, SSE, WebSocket) under `/s/<id>/` prefixes behind hub-terminated TLS — so one authenticated origin fronts many loopback-bound sessions — plus a trusted loopback local mode for the desktop wrapper and a self-hosting runbook covering real certificate and startup paths.
-
+Define the uatu hub daemon: a long-running service that keeps a persistent workspace registry (absolute paths, stable session ids), starts and stops `uatu serve` sessions through a pluggable session backend, and reverse-proxies all session traffic (HTTP, SSE, WebSocket) under `/s/<id>/` prefixes behind hub-terminated TLS — so one authenticated origin fronts many loopback-bound sessions — plus a self-hosting runbook covering real certificate and startup paths.
 ## Requirements
-
 ### Requirement: Hub durably stores personal workspace state
 The Hub SHALL persist personal workspace-state records in its state directory separately from the workspace registry and project files. Records SHALL be keyed by authenticated user and stable workspace id, SHALL use serialized atomic writes, and SHALL survive Hub and child-session restarts. Forgetting a workspace SHALL remove personal state for that workspace for every user.
 
@@ -35,7 +33,7 @@ The `uatu` binary SHALL provide a `hub` subcommand that starts a long-running da
 #### Scenario: Hub starts from a config file
 - **WHEN** `uatu hub --config <path>` starts with a valid configuration
 - **THEN** the daemon listens on the configured port and serves the dashboard
-- **AND** its registry and signing key live in the state directory with owner-only permissions
+- **AND** its registry and session store live in the state directory with owner-only permissions
 
 #### Scenario: Graceful shutdown stops children
 - **WHEN** the hub receives SIGTERM while sessions are running
@@ -44,18 +42,6 @@ The `uatu` binary SHALL provide a `hub` subcommand that starts a long-running da
 #### Scenario: A configuration with the removed workspacesDir key fails startup
 - **WHEN** `uatu hub` starts with a configuration file containing `workspacesDir`
 - **THEN** startup fails with an error naming the removed key
-
-### Requirement: The hub provides a trusted local mode
-The `hub` subcommand SHALL accept a `--local` flag that runs the hub as a single-user loopback service: the hub SHALL bind a loopback address only, SHALL NOT require a configuration file or configured users, and SHALL treat every request as an implicit authenticated local user (per the hub-auth local-mode requirement). `--local` combined with a non-loopback host SHALL fail startup with a descriptive error. In local mode the hub SHALL support `--port 0` (ephemeral port) and SHALL print its base URL as the first line on standard output so a supervising process can parse it, matching the `uatu serve` contract.
-
-#### Scenario: Local mode starts without configuration
-- **WHEN** `uatu hub --local --port 0` starts on a machine with no hub configuration file
-- **THEN** the hub listens on an ephemeral loopback port and prints its URL as the first stdout line
-- **AND** the dashboard and APIs are served without any login
-
-#### Scenario: Local mode refuses non-loopback binds
-- **WHEN** `uatu hub --local` is started with a non-loopback host
-- **THEN** startup fails with an error explaining that local mode is loopback-only
 
 ### Requirement: The hub exits when its standard input closes
 The `hub` subcommand SHALL accept `--exit-on-stdin-close`: when set, the hub SHALL hold its standard input open and, on EOF, perform the same graceful shutdown as SIGTERM (stop every running session, then exit). This is the orphan backstop for supervising processes that die without signaling, matching the contract `uatu serve` already provides.
@@ -88,7 +74,7 @@ Registry persistence SHALL be serialized and atomic — concurrent mutations may
 ### Requirement: Sessions are started and stopped through a session backend interface
 The hub SHALL manage session processes exclusively through a backend interface whose contract is: given a workspace descriptor and a base path, start a session and return a loopback HTTP endpoint plus the child's session token; and stop a previously started session. Hub components (proxy, dashboard, auth) MUST NOT depend on how the endpoint is produced. The shipped `local` backend SHALL spawn `uatu serve <folder> --no-open --exit-on-stdin-close --base-path /s/<id>/`, parse the tokened URL from the child's first stdout line, hold the child's stdin open for its lifetime, and stop the session via SIGTERM.
 
-#### Scenario: Local backend spawns the desktop-proven contract
+#### Scenario: Local backend spawns the session-child contract
 - **WHEN** the hub starts a session for a registered workspace
 - **THEN** a `uatu serve` child starts with `--no-open --exit-on-stdin-close` and the workspace's base path
 - **AND** the hub records the loopback endpoint parsed from the child's stdout
@@ -148,3 +134,4 @@ The self-hosting runbook SHALL provide complete, copy-pasteable walkthroughs for
 #### Scenario: Tailscale user fronts the hub with tailscale serve
 - **WHEN** an operator follows the runbook's `tailscale serve` walkthrough
 - **THEN** they end with the hub listening plain-HTTP on loopback and `tailscale serve` terminating HTTPS in front of it
+

@@ -1,9 +1,7 @@
-# hub-auth Specification
+# hub-auth — delta
 
-## Purpose
+## MODIFIED Requirements
 
-Define the hub's authentication and access-control model: a login gate in front of the dashboard and every proxied session on every interface, server-side session records (one opaque id over cookie and bearer transports, revocable immediately) with configured users and memory-hard password hashes, sign-out as server-side revocation, server-side brokering of child session tokens so users never handle them, CSRF protection on state-changing endpoints, and an explicitly documented trust model (all hub users share the daemon's OS user).
-## Requirements
 ### Requirement: Hub access requires an authenticated user
 The hub SHALL authenticate every client before serving the dashboard, any dashboard API, or any proxied session route, on every interface including loopback. Unauthenticated requests SHALL receive the login page (for navigations) or 401 (for API and WebSocket requests) and MUST NOT reach a child session. When a navigation is redirected to the login page, the hub SHALL carry the originally requested path as a return-to parameter, and a successful login SHALL redirect to that path when — and only when — it validates as a same-origin absolute path (begins with a single `/`, carries no scheme or authority); any absent or invalid return-to target SHALL fall back to the dashboard (`/`). The hub configuration SHALL define users as a list of entries containing a user name and a password hash produced by a memory-hard algorithm (`Bun.password` defaults); plaintext passwords MUST NOT be stored. A single-entry list SHALL be fully supported as the expected initial configuration. Starting the hub without any configured users SHALL fail with an error that explains how to create the initial user entry.
 
@@ -48,13 +46,6 @@ The hub SHALL provide a logout action — a POST endpoint guarded by the same-or
 - **WHEN** a POST to the logout endpoint arrives with an `Origin` of another site
 - **THEN** the hub rejects it and the session is not revoked
 
-### Requirement: Child session tokens are brokered by the hub and never exposed to users
-The hub SHALL capture each child's per-session token when the backend starts the session and SHALL satisfy the child's token expectations server-side during proxying. The token MUST NOT appear in any URL, page, or response the hub sends to a browser, and users MUST NOT need the paste-token flow for hub-proxied sessions.
-
-#### Scenario: Jump-in works without a token in the URL
-- **WHEN** an authenticated user opens `/s/uatu/` from the dashboard
-- **THEN** the session loads and the terminal authenticates without any token appearing in the browser-visible URL
-
 ### Requirement: State-changing hub endpoints are CSRF-protected
 Every state-changing hub endpoint (login excepted for the credential POST itself, session start/stop, workspace create/clone/init, session revocation) SHALL require a POST request. For cookie-authenticated requests the hub SHALL verify that the request's `Origin` header, when present, matches the hub's own origin, in addition to the `SameSite=Lax` cookie attribute. Bearer-authenticated requests are exempt from the Origin check: a bearer credential is attached explicitly by the client and cannot be ridden by a cross-site page.
 
@@ -72,6 +63,8 @@ The self-hosting runbook SHALL state that hub authentication decides who may ent
 #### Scenario: Operator can learn the trust boundary before exposing the hub
 - **WHEN** an operator reads the self-hosting runbook
 - **THEN** they find explicit statements that login is required on every interface, that revocation is server-side, and that hub users share the daemon's OS user with no per-user isolation
+
+## ADDED Requirements
 
 ### Requirement: Hub sessions are server-side records with one id over two transports
 The hub SHALL issue each login as a server-side session record persisted in its state directory: an opaque, unguessable session id mapped to the authenticated user, issue time, and a device label, stored owner-only and written atomically. Browsers SHALL carry the session id in an `HttpOnly; SameSite=Lax` cookie, marked `Secure` whenever the browser-facing connection is HTTPS — the hub terminating TLS itself, or a fronting proxy reporting `X-Forwarded-Proto: https` (the header can only add the attribute, never remove it). Native clients SHALL carry the same kind of session id as an `Authorization: Bearer` credential; both transports resolve through the same store. A presented id that is unknown, revoked, expired past the session max age, or whose user is no longer present in the configuration SHALL be treated as absent. Restarting the hub SHALL NOT invalidate sessions (the store persists); deleting the store SHALL invalidate all sessions. Session ids MUST NOT appear in URLs.
@@ -107,3 +100,16 @@ The login endpoint SHALL accept an `application/json` body (`{name, password}`, 
 - **WHEN** a native client calls the state API with a revoked or unknown bearer id
 - **THEN** the hub responds 401 with a JSON body, not an HTML page or redirect
 
+## REMOVED Requirements
+
+### Requirement: Hub sessions are signed cookies carrying the user identity
+**Reason**: Replaced by the server-side session store ("Hub sessions are server-side records with one id over two transports"): a stateless signed cookie can never be revoked before it expires, which is the gap this change closes. The HMAC signing key and its state-dir file are deleted.
+**Migration**: All outstanding cookies invalidate once; every user re-logs-in. There is no dual-verify compatibility path.
+
+### Requirement: Native clients can authenticate without a browser
+**Reason**: Restated as "Native clients authenticate with the session id as a bearer credential": the JSON login now returns the session id in the response body and native clients present it as `Authorization: Bearer` instead of owning a cookie jar.
+**Migration**: Native clients read `sessionId` from the JSON login response and send it as a bearer header.
+
+### Requirement: Local mode bypasses authentication on loopback
+**Reason**: The trusted-loopback trust model is eliminated; the hub has exactly one authentication model on every interface. The implicit `local` identity and the absent `/login`/`/logout` routes go with it.
+**Migration**: Localhost users create a single-user hub configuration (the no-users startup error explains how) and log in once; personal workspace state owned by the `local` identity is dropped without migration.

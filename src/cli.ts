@@ -17,7 +17,13 @@ import fontNoticesAsset from "./assets/fonts/NOTICES.md" with { type: "file" };
 import index from "./index.html";
 import { parseCommand, usageText, versionText, type WatchOptions } from "./cli/parse";
 import { runHashPassword, runHub } from "./hub/main";
-import { formatSessionUrl, printIndexingStatus, printStartupBanner } from "./cli/output";
+import {
+  formatSessionUrl,
+  printIndexingStatus,
+  printStartupBanner,
+  SERVE_DEPRECATION_WARNING,
+  shouldWarnServeDeprecation,
+} from "./cli/output";
 import { createNavigationFetchHandler, INTERNAL_SHELL_PATH, openBrowser } from "./server/navigation";
 import { findNonGitWatchEntries, resolveWatchRoots, type WatchEntry } from "./server/roots";
 import { createWatchSession } from "./server/watch-session";
@@ -97,6 +103,12 @@ async function main() {
 }
 
 async function runWatch(options: WatchOptions) {
+  // stderr only, so piped-stdout consumers capturing the URL line are
+  // unaffected; behavior is otherwise identical to before.
+  if (shouldWarnServeDeprecation(options)) {
+    console.error(`uatu: ${SERVE_DEPRECATION_WARNING}`);
+  }
+
   // Diagnostic plumbing comes before any heavy startup work — the cache dir
   // and the metrics registry are needed by createWatchSession and by the
   // watchdog spawn. Failures in this layer must never fail the watch session.

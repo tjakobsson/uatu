@@ -138,8 +138,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
   desktop-macos:
-    # Builds UatuCode Desktop for both architectures, embedding the darwin
-    # binaries the release job just uploaded. Signing and notarization are
+    # Builds UatuCode Desktop for both architectures — a pure hub client
+    # with no embedded CLI. Signing and notarization are
     # gated on the Developer ID secrets: with them, signed+stapled app
     # archives join the release and SHA256SUMS; without them (pre-Apple-
     # enrollment) ad-hoc builds land as workflow artifacts only — an
@@ -181,17 +181,6 @@ jobs:
             fi
           fi
 
-      - name: Download darwin binaries from the release
-        # unzip -d creates only the last path component; dist/ is gitignored
-        # and absent on a fresh checkout, so the parents must exist first.
-        run: |
-          gh release download "$GITHUB_REF_NAME" --pattern "uatu-darwin-*.zip"
-          mkdir -p dist/darwin-arm64 dist/darwin-x64
-          unzip -o uatu-darwin-arm64.zip -d dist/darwin-arm64
-          unzip -o uatu-darwin-x64.zip -d dist/darwin-x64
-        env:
-          GH_TOKEN: ${{ github.token }}
-
       - name: Build UatuCode Desktop for both architectures
         run: |
           version="${GITHUB_REF_NAME#v}"
@@ -203,7 +192,6 @@ jobs:
               -configuration Release \
               -derivedDataPath "desktop/macos/build-$arch" \
               ARCHS="$xcode_arch" ONLY_ACTIVE_ARCH=NO \
-              UATU_BINARY="$PWD/dist/darwin-$arch/uatu" \
               MARKETING_VERSION="$version" \
               build
           done

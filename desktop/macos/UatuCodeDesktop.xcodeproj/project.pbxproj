@@ -55,7 +55,6 @@
 				AA0000000000000000000007 /* Sources */,
 				AA0000000000000000000008 /* Frameworks */,
 				AA0000000000000000000009 /* Resources */,
-				AA0000000000000000000010 /* Embed uatu */,
 			);
 			buildRules = (
 			);
@@ -114,29 +113,6 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
-
-/* Begin PBXShellScriptBuildPhase section */
-		AA0000000000000000000010 /* Embed uatu */ = {
-			isa = PBXShellScriptBuildPhase;
-			alwaysOutOfDate = 1;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputFileListPaths = (
-			);
-			inputPaths = (
-			);
-			name = "Embed uatu";
-			outputFileListPaths = (
-			);
-			outputPaths = (
-				"$(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/uatu",
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "# Embed the uatu CLI binary the app supervises at runtime. There is no\n# PATH fallback in the app, so a missing binary must fail the build.\nUATU_SRC=\"${UATU_BINARY:-${SRCROOT}/../../dist/uatu}\"\nif [ ! -x \"${UATU_SRC}\" ]; then\n  echo \"error: uatu binary not found at ${UATU_SRC} — run 'bun run build' at the repo root, or point UATU_BINARY at a binary\" >&2\n  exit 1\nfi\nmkdir -p \"${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}\"\ncp -f \"${UATU_SRC}\" \"${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/uatu\"\n";
-		};
-/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		AA0000000000000000000007 /* Sources */ = {

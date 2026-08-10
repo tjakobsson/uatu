@@ -50,11 +50,7 @@ export type WatchOptions = {
 export type HubOptions = {
   // Path to the hub config file; undefined means the loader's default
   // location ($XDG_CONFIG_HOME/uatu/hub.json or ~/.config/uatu/hub.json).
-  // Ignored in local mode, which needs no config.
   configPath?: string;
-  // Trusted single-user loopback mode (no config, no auth) — how the
-  // desktop app runs its hub.
-  local: boolean;
   // Overrides the listen port; 0 requests an ephemeral port.
   port?: number;
   // Shut down when stdin reaches EOF (supervising-wrapper orphan backstop).
@@ -75,7 +71,7 @@ export function usageText(build: BuildInfo = BUILD): string {
 
 Usage:
   uatu [serve] [PATH...] [--force] [--no-open] [--no-follow] [--no-gitignore] [--port <PORT>] [--debug]
-  uatu hub [--config <PATH>] [--local] [--port <PORT>] [--exit-on-stdin-close]
+  uatu hub [--config <PATH>] [--port <PORT>] [--exit-on-stdin-close]
   uatu hub hash-password
   uatu --help
   uatu --version
@@ -83,12 +79,11 @@ Usage:
 The 'serve' command is the default: 'uatu docs' and 'uatu serve docs' are
 equivalent. 'uatu watch' is a deprecated alias for 'uatu serve'.
 
-The 'hub' command runs the self-hostable session hub: a daemon that serves a
-dashboard, supervises one 'uatu serve' child per workspace, and reverse-
-proxies each session under /s/<workspace-id>/. 'hub --local' runs a trusted
-single-user hub on loopback with no config file and no login (how the
-desktop app supervises its sessions). 'hub hash-password' reads a password
-from stdin and prints the hash for the config's users list.
+The 'hub' command runs uatu: a daemon that serves a dashboard, supervises
+one session child per workspace, and reverse-proxies each session under
+/s/<workspace-id>/. Every interface requires login against the config's
+users list — 'hub hash-password' reads a password from stdin and prints
+the hash for a user entry.
 
 Options:
   --no-open               Do not open a browser automatically
@@ -122,7 +117,6 @@ function parseHubCommand(rest: string[]): ParsedCommand {
   }
 
   let configPath: string | undefined;
-  let local = false;
   let port: number | undefined;
   let exitOnStdinClose = false;
   for (let index = 0; index < rest.length; index += 1) {
@@ -142,10 +136,6 @@ function parseHubCommand(rest: string[]): ParsedCommand {
         value = arg.slice("--config=".length);
       }
       configPath = value;
-      continue;
-    }
-    if (arg === "--local") {
-      local = true;
       continue;
     }
     if (arg === "--exit-on-stdin-close") {
@@ -172,11 +162,7 @@ function parseHubCommand(rest: string[]): ParsedCommand {
     }
     throw new Error(`unknown hub argument: ${arg}`);
   }
-  if (local && configPath !== undefined) {
-    throw new Error("hub --local needs no config file — drop --config or --local");
-  }
-
-  return { kind: "hub", options: { configPath, local, port, exitOnStdinClose } };
+  return { kind: "hub", options: { configPath, port, exitOnStdinClose } };
 }
 
 export function parseCommand(

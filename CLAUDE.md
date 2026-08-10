@@ -60,8 +60,9 @@ src/
 ├── hub/            `uatu hub` — self-hostable session server: config,
 │                   state-dir, registry (stable workspace slugs), backend
 │                   (SessionBackend seam + local-process impl), proxy
-│                   (HTTP/SSE/WS + token brokering), auth (users + signed
-│                   cookie + rate limit + CSRF), pages, server, main
+│                   (HTTP/SSE/WS + token brokering), auth (users + the
+│                   server-side session store, one id over cookie/bearer
+│                   transports + rate limit + CSRF), pages, server, main
 ├── watchdog/       main + capture — heartbeat-driven hang recovery
 ├── debug/          cache + metrics + the heartbeat integration test
 ├── pwa/            PWA install affordance (asset references only)
@@ -69,12 +70,12 @@ src/
 ```
 
 Outside `src/`: `desktop/macos/` is **UatuCode Desktop**, the SwiftUI macOS
-wrapper (Xcode project `UatuCodeDesktop`). It spawns the bundled `uatu serve
-<folder> --no-open --exit-on-stdin-close` per window and loads the tokened
-URL from stdout in a WebView; the wrapper↔CLI contract (URL on stdout,
-SIGTERM, stdin-EOF backstop) is documented in `ARCHITECTURE.md`. Its CI is
-path-filtered (`.github/workflows/desktop-ci.yml`); local builds need
-`bun run build` first (the app embeds `dist/uatu`, no PATH fallback).
+hub client (Xcode project `UatuCodeDesktop`). It is connect-only: no
+embedded binary, no process supervision — it logs in to configured hubs
+(session id in the Keychain, presented as `Authorization: Bearer` natively
+and injected as the hub cookie for WebViews; see `ARCHITECTURE.md`). Its CI
+is path-filtered (`.github/workflows/desktop-ci.yml`); it builds with plain
+`xcodebuild`, no CLI build required.
 
 ## Conventions
 

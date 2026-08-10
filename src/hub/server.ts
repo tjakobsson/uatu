@@ -18,11 +18,13 @@ import {
   formatHubCookieClear,
   isSameOriginRequest,
   LoginRateLimiter,
-  readHubSession,
+  readPresentedSession,
   safeReturnPath,
+  sanitizeDeviceLabel,
+  sessionHandle,
   verifyLogin,
+  type HubSessionStore,
 } from "./auth";
-import { createSessionCookieValue } from "./auth";
 import type { HubConfig } from "./config";
 import { cloneTargetName, gitClone, gitInit, probeGitRepository } from "./git";
 import { dashboardPage, loginPage, stoppedSessionPage } from "./pages";
@@ -44,7 +46,7 @@ export type HubDeps = {
   config: HubConfig;
   registry: WorkspaceRegistry;
   sessions: SessionManager;
-  signingKey: string;
+  sessionStore: HubSessionStore;
   personalState: PersonalWorkspaceStateStore;
 };
 
@@ -54,8 +56,8 @@ type HubServer = UpgradableServer & {
 
 const SESSION_PATH = /^\/s\/([^/]+)(\/|$)/;
 
-function json(status: number, body: unknown): Response {
-  return Response.json(body, { status });
+function json(status: number, body: unknown, headers?: Record<string, string>): Response {
+  return Response.json(body, { status, headers });
 }
 
 function htmlResponse(body: string, status = 200): Response {
@@ -66,7 +68,7 @@ function htmlResponse(body: string, status = 200): Response {
 }
 
 export function createHubFetchHandler(deps: HubDeps) {
-  const { config, registry, sessions, signingKey, personalState } = deps;
+  const { config, registry, sessions, sessionStore, personalState } = deps;
   const limiter = new LoginRateLimiter();
 
   // Whether the browser-facing connection is HTTPS: either the hub
@@ -78,16 +80,25 @@ export function createHubFetchHandler(deps: HubDeps) {
     config.tls !== null ||
     (request.headers.get("x-forwarded-proto") ?? "").toLowerCase().includes("https");
 
-  // The gate's verdict: a structurally valid, unexpired, correctly signed
-  // cookie AND a user that still exists in the config. Removing a user
-  // from the config (plus a restart) revokes their outstanding cookies —
-  // without this, only rotating the signing key would.
+  // The gate's verdict: a presented session id — cookie or bearer, one
+  // verification path — that resolves in the store (known, unrevoked,
+  // unexpired) AND belongs to a user that still exists in the config.
+  // Removing a user from the config (plus a restart) kills their
+  // outstanding sessions even without explicit revocation.
   const authenticatedSession = (request: Request) => {
-    const session = readHubSession(request, signingKey);
-    if (!session) return null;
-    if (!config.users.some(user => user.name === session.user)) return null;
-    return session;
+    const presented = readPresentedSession(request);
+    if (!presented) return null;
+    const record = sessionStore.resolve(presented.id);
+    if (!record) return null;
+    if (!config.users.some(user => user.name === record.user)) return null;
+    return { user: record.user, sessionId: record.id, transport: presented.transport };
   };
+
+  // CSRF: cookie-authenticated state changes need the same-origin check; a
+  // bearer credential is attached explicitly by the client and cannot be
+  // ridden by a cross-site page.
+  const csrfOk = (request: Request, transport: "cookie" | "bearer"): boolean =>
+    transport === "bearer" || isSameOriginRequest(request);
 
   const handleLogin = async (request: Request, server: HubServer): Promise<Response> => {
     // The validated return-to target, carried by the gate's redirect
@@ -102,8 +113,14 @@ export function createHubFetchHandler(deps: HubDeps) {
     if (request.method !== "POST") {
       return new Response("method not allowed", { status: 405 });
     }
+    // JSON logins are the native-client path (no page to render, no
+    // Origin header sent) — their failures answer as JSON so a client can
+    // distinguish "wrong password" from transport trouble.
+    const isJson = (request.headers.get("content-type") ?? "").includes("application/json");
     if (!isSameOriginRequest(request)) {
-      return htmlResponse(loginPage({ error: "cross-origin login rejected" }), 403);
+      return isJson
+        ? json(403, { error: "cross-origin login rejected" })
+        : htmlResponse(loginPage({ error: "cross-origin login rejected" }), 403);
     }
 
     const ip = clientKeyForRateLimit(
@@ -111,19 +128,22 @@ export function createHubFetchHandler(deps: HubDeps) {
       request.headers.get("x-forwarded-for"),
     );
     if (!limiter.allow(ip)) {
-      return htmlResponse(loginPage({ error: "too many attempts — wait a minute and try again" }), 429);
+      return isJson
+        ? json(429, { error: "too many attempts — wait a minute and try again" })
+        : htmlResponse(loginPage({ error: "too many attempts — wait a minute and try again" }), 429);
     }
 
     let name = "";
     let password = "";
+    let requestedLabel: unknown;
     // Browser form flow only — native JSON logins have no page to return to.
     let postedNext: string | null = null;
-    const contentType = request.headers.get("content-type") ?? "";
     try {
-      if (contentType.includes("application/json")) {
-        const body = (await request.json()) as { name?: unknown; password?: unknown };
+      if (isJson) {
+        const body = (await request.json()) as { name?: unknown; password?: unknown; deviceLabel?: unknown };
         name = typeof body.name === "string" ? body.name : "";
         password = typeof body.password === "string" ? body.password : "";
+        requestedLabel = body.deviceLabel;
       } else {
         const form = await request.formData();
         name = String(form.get("name") ?? "");
@@ -132,26 +152,42 @@ export function createHubFetchHandler(deps: HubDeps) {
         postedNext = typeof rawNext === "string" && rawNext ? rawNext : null;
       }
     } catch {
-      return htmlResponse(loginPage({ error: "malformed login request" }), 400);
+      return isJson
+        ? json(400, { error: "malformed login request" })
+        : htmlResponse(loginPage({ error: "malformed login request" }), 400);
     }
 
     const user = await verifyLogin(config, name, password);
     if (!user) {
       limiter.recordFailure(ip);
       // Deliberately identical for wrong password and unknown user.
-      return htmlResponse(loginPage({ error: "invalid credentials" }), 401);
+      return isJson
+        ? json(401, { error: "invalid credentials" })
+        : htmlResponse(loginPage({ error: "invalid credentials" }), 401);
     }
     limiter.reset(ip);
 
+    const record = await sessionStore.issue(
+      user.name,
+      sanitizeDeviceLabel(requestedLabel, request.headers.get("user-agent")),
+    );
+    const setCookie = formatHubCookie(record.id, { secure: secureCookies(request) });
+    if (isJson) {
+      // The session id doubles as the bearer credential for native
+      // clients; the cookie is set too so a web view sharing the client's
+      // cookie jar is signed in at once.
+      return Response.json(
+        { sessionId: record.id, user: user.name },
+        { status: 200, headers: { "set-cookie": setCookie } },
+      );
+    }
     return new Response(null, {
       status: 303,
       headers: {
         // Back to the page the gate bounced from, when a validated target
         // rode the form; the dashboard otherwise.
         location: postedNext ? safeReturnPath(postedNext) : nextTarget,
-        "set-cookie": formatHubCookie(createSessionCookieValue(user.name, signingKey), {
-          secure: secureCookies(request),
-        }),
+        "set-cookie": setCookie,
       },
     });
   };
@@ -185,9 +221,7 @@ export function createHubFetchHandler(deps: HubDeps) {
         };
       }),
     );
-    // `local` lets clients adapt to the trusted loopback mode — the SPA's
-    // workspace switcher hides its sign-out entry when there is no login.
-    return json(200, { version: formatBuildIdentifier(BUILD), local: config.local, workspaces });
+    return json(200, { version: formatBuildIdentifier(BUILD), workspaces });
   };
 
   // GET /api/hub/browse?path=<abs> — one level of the hub host's directory
@@ -320,16 +354,26 @@ export function createHubFetchHandler(deps: HubDeps) {
     const url = new URL(request.url);
     const pathname = url.pathname;
 
-    // Un-gated: the login flow and the dashboard's static assets. In local
-    // mode there is no login to serve — /login and /logout fall through to
-    // the (always-passing) gate and end at 404, so a local hub never even
-    // hints at a credential surface.
-    if (!config.local && pathname === "/login") {
+    // Un-gated: the login flow and the dashboard's static assets.
+    if (pathname === "/login") {
       return handleLogin(request, server);
     }
-    if (!config.local && pathname === "/logout" && request.method === "POST") {
-      if (!isSameOriginRequest(request)) {
+    if (pathname === "/logout" && request.method === "POST") {
+      const presented = readPresentedSession(request);
+      // Cross-origin logout (a cookie-riding forced sign-out) is refused
+      // before anything is revoked; an explicit bearer credential cannot
+      // be cross-site-ridden and needs no Origin.
+      if (presented?.transport !== "bearer" && !isSameOriginRequest(request)) {
         return json(403, { error: "cross-origin request rejected" });
+      }
+      // Server-side revocation: the presented session dies for every
+      // transport immediately. An absent or already-dead id still clears
+      // the cookie — logout is idempotent.
+      if (presented) {
+        await sessionStore.revoke(presented.id);
+      }
+      if (presented?.transport === "bearer") {
+        return json(200, { revoked: true });
       }
       return new Response(null, {
         status: 303,
@@ -382,12 +426,9 @@ export function createHubFetchHandler(deps: HubDeps) {
     }
 
     // The gate. Everything below requires an authenticated hub session
-    // belonging to a still-configured user — except in local mode, where
-    // every request IS the implicit local user (loopback-only bind is
-    // enforced at startup; the trust model is `uatu serve`'s).
-    const session = config.local
-      ? { user: "local", issuedAt: 0 }
-      : authenticatedSession(request);
+    // belonging to a still-configured user — on every interface, loopback
+    // included.
+    const session = authenticatedSession(request);
     if (!session) {
       const wantsHtml = (request.headers.get("accept") ?? "").includes("text/html");
       if (request.method === "GET" && wantsHtml && !pathname.startsWith("/api/")) {
@@ -412,7 +453,7 @@ export function createHubFetchHandler(deps: HubDeps) {
     // absent Origin (same-origin GETs, non-browser clients) passes.
     const sessionMatch = SESSION_PATH.exec(pathname);
     if (sessionMatch) {
-      if (!isSameOriginRequest(request)) {
+      if (!csrfOk(request, session.transport)) {
         return json(403, { error: "cross-origin request rejected" });
       }
       let workspaceId: string;
@@ -468,7 +509,7 @@ export function createHubFetchHandler(deps: HubDeps) {
 
     // Dashboard + its APIs.
     if (pathname === "/" && request.method === "GET") {
-      return htmlResponse(dashboardPage({ local: config.local }));
+      return htmlResponse(dashboardPage());
     }
     if (pathname === "/api/hub/state" && request.method === "GET") {
       return hubState();
@@ -476,14 +517,47 @@ export function createHubFetchHandler(deps: HubDeps) {
     if (pathname === "/api/hub/browse" && request.method === "GET") {
       return browse(url);
     }
+    // The device-session list: the signed-in user's active sessions, with
+    // per-session revocation handles. Handles are id prefixes — never the
+    // full id, which is a live credential the page has no business holding.
+    if (pathname === "/api/hub/sessions" && request.method === "GET") {
+      return json(200, {
+        sessions: sessionStore.listForUser(session.user).map(record => ({
+          handle: sessionHandle(record),
+          deviceLabel: record.deviceLabel,
+          issuedAt: record.issuedAt,
+          current: record.id === session.sessionId,
+        })),
+      });
+    }
 
-    // State-changing endpoints: POST-only + same-origin (CSRF).
+    // State-changing endpoints: POST-only + same-origin (CSRF) for
+    // cookie-authenticated requests; bearer requests carry no ambient
+    // credential and skip the Origin check.
     if (pathname.startsWith("/api/hub/")) {
       if (request.method !== "POST") {
         return json(405, { error: "method not allowed" });
       }
-      if (!isSameOriginRequest(request)) {
+      if (!csrfOk(request, session.transport)) {
         return json(403, { error: "cross-origin request rejected" });
+      }
+      // Revoke one of the current user's sessions by handle. Revoking the
+      // session serving this request behaves as sign-out: the response
+      // clears the cookie and the client lands on /login.
+      const revoke = /^\/api\/hub\/sessions\/([^/]+)\/revoke$/.exec(pathname);
+      if (revoke) {
+        const record = sessionStore.findByHandle(session.user, decodeURIComponent(revoke[1]!));
+        if (!record) {
+          return json(404, { error: "unknown session" });
+        }
+        await sessionStore.revoke(record.id);
+        const current = record.id === session.sessionId;
+        if (current && session.transport === "cookie") {
+          return json(200, { revoked: true, current }, {
+            "set-cookie": formatHubCookieClear({ secure: secureCookies(request) }),
+          });
+        }
+        return json(200, { revoked: true, current });
       }
       if (pathname === "/api/hub/workspaces") {
         return createWorkspace(request);

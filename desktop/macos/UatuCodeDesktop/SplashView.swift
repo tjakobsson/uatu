@@ -5,31 +5,26 @@
 
 import SwiftUI
 
-/// A page a window can show — every window is a client of some hub.
-/// Workspace pages exist only for the local hub (Choose Folder and the
-/// Open Recent menu); remote workspaces are reached through their hub's
-/// dashboard, never natively.
+/// A page a window can show — every window is a client of some hub, and a
+/// page is that hub's dashboard (workspaces and sessions are reached from
+/// there, never natively).
 enum HubPage: Equatable {
-    case localDashboard
-    case localWorkspace(id: String)
-    case remoteDashboard(RemoteHubEntry)
+    case dashboard(RemoteHubEntry)
 }
 
 /// The hub splash: the window's no-page state, for choosing and configuring
-/// hubs only. One card per hub — "This Mac" first (captioned with its
-/// app-bound lifetime), then each configured remote hub with live
-/// reachability/auth state. Cards deliberately do NOT list workspaces: each
-/// hub's own dashboard is the single workspace surface, so dashboard
-/// improvements reach the desktop without a native duplicate drifting
-/// alongside. Hub state polls only while a splash is visible.
+/// hubs only. One card per configured hub with live reachability/auth
+/// state. Cards deliberately do NOT list workspaces: each hub's own
+/// dashboard is the single workspace surface, so dashboard improvements
+/// reach the desktop without a native duplicate drifting alongside. Hub
+/// state polls only while a splash is visible. With no hubs configured the
+/// splash explains the model: uatu runs as a hub this app connects to.
 struct SplashView: View {
     var openPage: (HubPage) -> Void
-    var chooseFolder: () -> Void
 
     @State private var showAddHub = false
     @State private var signInTarget: HubConnection?
 
-    private var localHub: LocalHubController { .shared }
     private var roster: HubRoster { .shared }
 
     var body: some View {
@@ -42,16 +37,14 @@ struct SplashView: View {
                         .frame(height: 84)
                     Text("UatuCode Desktop")
                         .font(.largeTitle.bold())
-                    Text("Open a workspace on this Mac or on a hub.")
+                    Text("Connect to a hub to open its workspaces.")
                         .foregroundStyle(.secondary)
                 }
 
-                Button("Choose Folder…") { chooseFolder() }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-
                 VStack(spacing: 14) {
-                    localCard
+                    if roster.hubs.isEmpty {
+                        firstRunExplainer
+                    }
                     ForEach(roster.hubs) { entry in
                         RemoteHubCard(
                             entry: entry,
@@ -60,7 +53,13 @@ struct SplashView: View {
                             signIn: { signInTarget = roster.connection(for: entry) }
                         )
                     }
-                    Button("Add Hub…") { showAddHub = true }
+                    if roster.hubs.isEmpty {
+                        Button("Add Hub…") { showAddHub = true }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.large)
+                    } else {
+                        Button("Add Hub…") { showAddHub = true }
+                    }
                 }
                 .frame(maxWidth: 460)
             }
@@ -83,8 +82,29 @@ struct SplashView: View {
         }
     }
 
+    /// First-run copy: the app connects to a running `uatu hub` — on this
+    /// Mac or a machine elsewhere — and does not run one itself.
+    private var firstRunExplainer: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("uatu runs as a hub this app connects to", systemImage: "server.rack")
+                .font(.headline)
+            Text(
+                """
+                Start one in a terminal with `uatu hub` — on this Mac \
+                (add it as http://localhost:4700) or on a machine you own — \
+                then add it here and sign in. Workspaces and sessions live \
+                on the hub and keep running when this app quits.
+                """
+            )
+            .font(.callout)
+            .foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 10))
+    }
+
     private func refreshAll() async {
-        await localHub.refreshState()
         await withTaskGroup(of: Void.self) { group in
             for entry in roster.hubs {
                 let connection = roster.connection(for: entry)
@@ -92,59 +112,6 @@ struct SplashView: View {
                     await connection.probe()
                 }
             }
-        }
-    }
-
-    // MARK: - This Mac
-
-    @ViewBuilder
-    private var localCard: some View {
-        HubCardShell {
-            Button {
-                openPage(.localDashboard)
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "desktopcomputer")
-                        .foregroundStyle(.tint)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("This Mac").font(.headline)
-                        // The lifetime asymmetry, stated where the mental
-                        // model forms: local sessions live only while the
-                        // app runs; remote ones don't care.
-                        Text("Runs while UatuCode is open")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    localStatusDetail
-                }
-                .contentShape(.rect)
-            }
-            .buttonStyle(.plain)
-            .disabled(localHub.baseURL == nil)
-        } rows: {
-            switch localHub.status {
-            case .failed(let message):
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(message)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(6)
-                    Button("Relaunch Hub") { localHub.relaunch() }
-                }
-                .padding(.top, 6)
-            case .starting:
-                ProgressView().controlSize(.small).padding(.top, 6)
-            case .running:
-                EmptyView()
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var localStatusDetail: some View {
-        if case .running = localHub.status, let state = localHub.lastState {
-            HubCardSummary(state: state)
         }
     }
 }
@@ -184,7 +151,7 @@ private struct HubCardSummary: View {
     }
 }
 
-// MARK: - Remote hub card
+// MARK: - Hub card
 
 private struct RemoteHubCard: View {
     let entry: RemoteHubEntry
@@ -198,7 +165,7 @@ private struct RemoteHubCard: View {
     var body: some View {
         HubCardShell {
             Button {
-                openPage(.remoteDashboard(entry))
+                openPage(.dashboard(entry))
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "server.rack")
@@ -321,9 +288,9 @@ private struct AddHubSheet: View {
             Task {
                 defer { busy = false }
                 do {
-                    let cookie = try await HubAPI.login(baseURL: url, name: username, password: password)
+                    let sessionID = try await HubAPI.login(baseURL: url, name: username, password: password)
                     let entry = HubRoster.shared.add(
-                        name: name, url: url, username: username, password: password, cookie: cookie
+                        name: name, url: url, username: username, password: password, sessionID: sessionID
                     )
                     await HubRoster.shared.connection(for: entry).probe()
                     dismiss()

@@ -3,7 +3,6 @@
 ## Purpose
 
 Define the CLI startup surface of uatu under the canonical `serve` verb: how a session is started (positional paths, git preflight, `--force`, `--no-gitignore`), the bare-invocation default, the deprecated `watch` alias's transition behavior, browser/follow startup behavior, and the diagnostic startup flags. Supersedes the retired `watch-cli-startup` capability (archived with change `rename-watch-to-serve`).
-
 ## Requirements
 ### Requirement: Start a local document serve session
 The system SHALL provide a `uatu serve [PATH...]` command that accepts zero or more positional paths. Each path MAY be either a directory (served as a root group) or a non-binary file (served as a single-file root). When no paths are provided, the system MUST use the current working directory as the only served root. An invocation whose first argument is not a recognized command or flag — including a bare `uatu` with no arguments — MUST behave exactly as `uatu serve` with those arguments. Paths that resolve to binary files MUST be rejected with a clear error before the server or watcher starts. Paths that do not exist on disk MUST also be rejected with a clear error before the server or watcher starts. By default, every served path MUST be inside a git worktree; paths outside a git worktree MUST be rejected with a clear error before the server or watcher starts. The command SHALL accept a `--force` flag that permits non-git paths anyway and prints a warning that indexing may be slow. Starting the command SHALL launch a local browser UI server and print its URL to standard output after the initial session is ready. When standard output is a TTY, the command SHALL show an indexing status while initial indexing is in progress, then replace it with the ASCII `uatu` logo with the tagline "I observe. I follow. I render." above the URL once startup is ready. When standard output is not a TTY, the command SHALL omit both the indexing status and ASCII logo so only the URL is printed to standard output. The command SHALL accept a `--no-gitignore` flag that disables `.gitignore` filtering for the session. Startup error messages SHALL use serve-session vocabulary (e.g. "root does not exist"), not watch-session vocabulary.
@@ -200,3 +199,16 @@ supervising wrapper processes so a crashed supervisor cannot orphan the server.
 #### Scenario: Omitted flag preserves today's output
 - **WHEN** `uatu serve <folder>` runs without `--base-path`
 - **THEN** startup output and the session URL are identical to behavior before this flag existed
+
+### Requirement: Bare serve invocation warns of deprecation
+A user-invoked `uatu serve` (or the `watch` alias) SHALL print a single stderr line stating that serve is deprecated as a public command, that `uatu hub` is the way to run uatu, and that direct serve will be removed in a future release. The warning MUST NOT change exit codes or any serve behavior, and it MUST NOT appear for hub-spawned session children or for the repository's dev/e2e harness invocations (the hub controls the child argv and suppresses it).
+
+#### Scenario: Bare invocation warns once
+- **WHEN** a user runs `uatu serve docs/` from a terminal
+- **THEN** stderr contains one deprecation line naming `uatu hub`
+- **AND** the session starts and behaves exactly as before
+
+#### Scenario: Hub-spawned children stay quiet
+- **WHEN** the hub starts a workspace session through its backend
+- **THEN** the child's output contains no deprecation warning
+

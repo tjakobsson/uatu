@@ -1,22 +1,38 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 import {
   clientKeyForRateLimit,
-  createSessionCookieValue,
+  deriveDeviceLabel,
   formatHubCookie,
   hashPassword,
   HUB_COOKIE_NAME,
+  HUB_SESSION_MAX_AGE,
+  HubSessionStore,
   isSameOriginRequest,
   LoginRateLimiter,
-  readHubSession,
+  readPresentedSession,
   safeReturnPath,
+  sanitizeDeviceLabel,
+  sessionHandle,
   verifyLogin,
   verifyPassword,
-  verifySessionCookieValue,
 } from "./auth";
 import { parseHubConfig } from "./config";
 
-const KEY = "test-signing-key-0123456789abcdef";
+const tempDirectories: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(tempDirectories.splice(0).map(dir => rm(dir, { recursive: true, force: true })));
+});
+
+async function tempStorePath(): Promise<string> {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-hub-sessions-"));
+  tempDirectories.push(dir);
+  return path.join(dir, "sessions.json");
+}
 
 describe("password hashing", () => {
   test("hash → verify round-trips and rejects the wrong password", async () => {
@@ -41,52 +57,157 @@ describe("verifyLogin", () => {
   });
 });
 
-describe("session cookie", () => {
-  test("sign → verify round-trips the user identity", () => {
-    const value = createSessionCookieValue("tobias", KEY, 1_700_000_000);
-    const session = verifySessionCookieValue(value, KEY, 1_700_000_100);
-    expect(session).toEqual({ user: "tobias", issuedAt: 1_700_000_000 });
-  });
-
-  test("tampered payloads and signatures are rejected", () => {
-    const now = Math.floor(Date.now() / 1000);
-    const value = createSessionCookieValue("tobias", KEY, now);
-    const [payload, signature] = value.split(".") as [string, string];
-    const forgedPayload = Buffer.from(JSON.stringify({ user: "root", iat: 1 }), "utf8").toString("base64url");
-    expect(verifySessionCookieValue(`${forgedPayload}.${signature}`, KEY)).toBeNull();
-    expect(verifySessionCookieValue(`${payload}.AAAA`, KEY)).toBeNull();
-    expect(verifySessionCookieValue("garbage", KEY)).toBeNull();
-    expect(verifySessionCookieValue(value, "other-key-other-key-other-key-oth")).toBeNull();
-  });
-
-  test("expired and future-dated cookies are rejected server-side", () => {
+describe("HubSessionStore", () => {
+  test("issue → resolve round-trips; unknown, revoked, and expired read as absent", async () => {
+    const store = new HubSessionStore(await tempStorePath());
+    await store.load();
     const now = 1_700_000_000;
-    const fresh = createSessionCookieValue("tobias", KEY, now);
-    // Just inside the lifetime: valid.
-    expect(verifySessionCookieValue(fresh, KEY, now + 60 * 60 * 24 * 30 - 1)?.user).toBe("tobias");
-    // Past the lifetime: Max-Age is advisory to browsers; the server is not.
-    expect(verifySessionCookieValue(fresh, KEY, now + 60 * 60 * 24 * 30 + 1)).toBeNull();
-    // Future-dated beyond clock skew: forged-looking, rejected.
-    expect(verifySessionCookieValue(createSessionCookieValue("tobias", KEY, now + 3600), KEY, now)).toBeNull();
-    // Small skew tolerated.
-    expect(verifySessionCookieValue(createSessionCookieValue("tobias", KEY, now + 60), KEY, now)?.user).toBe("tobias");
+    const record = await store.issue("tobias", "Safari on macOS", now);
+    expect(record.id.length).toBeGreaterThanOrEqual(32);
+    expect(store.resolve(record.id, now + 60)).toEqual(record);
+    // Unknown id.
+    expect(store.resolve("no-such-id", now)).toBeNull();
+    // Expired past the max age — the store enforces the lifetime, not the
+    // browser's Max-Age.
+    expect(store.resolve(record.id, now + HUB_SESSION_MAX_AGE + 1)).toBeNull();
+    // Revoked — immediately dead.
+    expect(await store.revoke(record.id, now + 120)).toBe(true);
+    expect(store.resolve(record.id, now + 121)).toBeNull();
+    // Double revocation is a no-op.
+    expect(await store.revoke(record.id)).toBe(false);
   });
 
-  test("verification survives a signer restart with the same key", () => {
-    // Same key, fresh call — nothing in-memory is required to verify.
-    const value = createSessionCookieValue("tobias", KEY);
-    expect(verifySessionCookieValue(value, KEY)?.user).toBe("tobias");
+  test("sessions survive a restart via the persisted file", async () => {
+    const filePath = await tempStorePath();
+    const store = new HubSessionStore(filePath);
+    await store.load();
+    const record = await store.issue("tobias", "Safari on macOS");
+
+    const reloaded = new HubSessionStore(filePath);
+    await reloaded.load();
+    expect(reloaded.resolve(record.id)?.user).toBe("tobias");
+    // Revocation persists too.
+    await reloaded.revoke(record.id);
+    const again = new HubSessionStore(filePath);
+    await again.load();
+    expect(again.resolve(record.id)).toBeNull();
   });
 
-  test("readHubSession parses the cookie header", () => {
-    const value = createSessionCookieValue("tobias", KEY);
+  test("the store file is owner-only and written atomically", async () => {
+    const filePath = await tempStorePath();
+    const store = new HubSessionStore(filePath);
+    await store.load();
+    await store.issue("tobias", "device");
+    expect(((await stat(filePath)).mode & 0o777)).toBe(0o600);
+    // No temp files left behind.
+    const { readdir } = await import("node:fs/promises");
+    const siblings = await readdir(path.dirname(filePath));
+    expect(siblings.filter(name => name.endsWith(".tmp"))).toEqual([]);
+  });
+
+  test("a missing or corrupt file means no sessions, and login recreates it", async () => {
+    const filePath = await tempStorePath();
+    const missing = new HubSessionStore(filePath);
+    await missing.load();
+    expect(missing.listForUser("tobias")).toEqual([]);
+
+    await writeFile(filePath, "{ not json", { mode: 0o600 });
+    const corrupt = new HubSessionStore(filePath);
+    await corrupt.load();
+    expect(corrupt.listForUser("tobias")).toEqual([]);
+    const record = await corrupt.issue("tobias", "device");
+    expect(corrupt.resolve(record.id)?.user).toBe("tobias");
+    expect(JSON.parse(await readFile(filePath, "utf8")).sessions).toHaveLength(1);
+  });
+
+  test("expired records are compacted out of the persisted file", async () => {
+    const filePath = await tempStorePath();
+    const store = new HubSessionStore(filePath);
+    await store.load();
+    const longDead = Math.floor(Date.now() / 1000) - HUB_SESSION_MAX_AGE - 60;
+    await store.issue("tobias", "old device", longDead);
+    const fresh = await store.issue("tobias", "new device");
+    const persisted = JSON.parse(await readFile(filePath, "utf8")) as { sessions: { id: string }[] };
+    expect(persisted.sessions.map(record => record.id)).toEqual([fresh.id]);
+  });
+
+  test("listForUser returns only that user's active sessions, newest first", async () => {
+    const store = new HubSessionStore(await tempStorePath());
+    await store.load();
+    const now = 1_700_000_000;
+    const older = await store.issue("tobias", "laptop", now);
+    const newer = await store.issue("tobias", "phone", now + 100);
+    const other = await store.issue("alice", "tablet", now + 50);
+    const revoked = await store.issue("tobias", "gone", now + 10);
+    await store.revoke(revoked.id);
+    expect(store.listForUser("tobias", now + 200).map(record => record.id)).toEqual([newer.id, older.id]);
+    expect(store.listForUser("alice", now + 200).map(record => record.id)).toEqual([other.id]);
+  });
+
+  test("findByHandle needs a full-length, unique, same-user prefix", async () => {
+    const store = new HubSessionStore(await tempStorePath());
+    await store.load();
+    const record = await store.issue("tobias", "laptop");
+    const handle = sessionHandle(record);
+    expect(store.findByHandle("tobias", handle)?.id).toBe(record.id);
+    // Too-short prefixes never match — a lucky guess must not revoke.
+    expect(store.findByHandle("tobias", handle.slice(0, 4))).toBeNull();
+    // Another user cannot address this session.
+    expect(store.findByHandle("alice", handle)).toBeNull();
+  });
+});
+
+describe("readPresentedSession", () => {
+  test("reads the cookie transport", () => {
     const request = new Request("http://hub/", {
-      headers: { cookie: `other=1; ${HUB_COOKIE_NAME}=${value}; more=2` },
+      headers: { cookie: `other=1; ${HUB_COOKIE_NAME}=abc123; more=2` },
     });
-    expect(readHubSession(request, KEY)?.user).toBe("tobias");
-    expect(readHubSession(new Request("http://hub/"), KEY)).toBeNull();
+    expect(readPresentedSession(request)).toEqual({ id: "abc123", transport: "cookie" });
+    expect(readPresentedSession(new Request("http://hub/"))).toBeNull();
   });
 
+  test("reads the bearer transport, which wins over a cookie", () => {
+    const request = new Request("http://hub/", {
+      headers: { authorization: "Bearer tok-1", cookie: `${HUB_COOKIE_NAME}=tok-2` },
+    });
+    expect(readPresentedSession(request)).toEqual({ id: "tok-1", transport: "bearer" });
+    // Non-bearer Authorization schemes fall through to the cookie.
+    const basic = new Request("http://hub/", {
+      headers: { authorization: "Basic dXNlcjpwdw==", cookie: `${HUB_COOKIE_NAME}=tok-2` },
+    });
+    expect(readPresentedSession(basic)).toEqual({ id: "tok-2", transport: "cookie" });
+  });
+});
+
+describe("device labels", () => {
+  test("derives a readable label from common user agents", () => {
+    expect(
+      deriveDeviceLabel(
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+      ),
+    ).toBe("Safari on macOS");
+    expect(
+      deriveDeviceLabel(
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+      ),
+    ).toBe("Safari on iPhone");
+    expect(deriveDeviceLabel("UatuCode Desktop/1.2")).toBe("UatuCode Desktop");
+    expect(deriveDeviceLabel(null)).toBe("unknown device");
+    expect(deriveDeviceLabel("")).toBe("unknown device");
+  });
+
+  test("sanitizeDeviceLabel prefers a clean explicit label and falls back to the UA", () => {
+    expect(sanitizeDeviceLabel("My MacBook", null)).toBe("My MacBook");
+    // Control characters are stripped; an effectively empty label falls back.
+    expect(sanitizeDeviceLabel("a\u0000b", null)).toBe("ab");
+    expect(sanitizeDeviceLabel("   ", "UatuCode Desktop/1.2")).toBe("UatuCode Desktop");
+    expect(sanitizeDeviceLabel(42, null)).toBe("unknown device");
+    // Overlong labels are capped.
+    expect(sanitizeDeviceLabel("x".repeat(200), null).length).toBeLessThanOrEqual(64);
+  });
+});
+
+describe("cookie formatting", () => {
   test("formatHubCookie sets the hardening attributes", () => {
     const secure = formatHubCookie("v", { secure: true });
     expect(secure).toContain("HttpOnly");

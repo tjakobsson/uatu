@@ -58,16 +58,17 @@ brew upgrade uatu        # stay current
 
 ### UatuCode Desktop (macOS)
 
-A native macOS app that wraps the CLI: pick a folder (or reopen a recent
-one) and it runs its own bundled `uatu serve` per window, showing the
-usual browser UI in place. Requires macOS 26 or later.
+A native macOS app that connects to hubs: add a hub (a remote box, or
+`http://localhost:4700` for one on your own machine), sign in once, and
+every window is a native view onto that hub's dashboard and sessions.
+Requires macOS 26 or later.
 
 ```bash
 brew install tjakobsson/tap/uatu-desktop
 ```
 
-The app is a companion, not a replacement — the CLI and browser workflow
-above works exactly the same with or without it. Desktop source lives in
+The app is a client, not a server — it runs no sessions of its own, so
+quitting it never stops anything. Desktop source lives in
 [`desktop/macos/`](desktop/macos/).
 
 ### Edge channel (nightly)
@@ -133,13 +134,19 @@ everything else works. Release binaries are darwin/linux only for now.
 
 ## Usage
 
+**`uatu hub` is the way to run uatu** — see [the hub section](#the-hub-how-you-run-uatu-uatu-hub)
+below. Direct `uatu serve` still works but is deprecated as a public
+command and prints a one-line warning; it lives on as the internal session
+child the hub spawns, and will be removed as a public command in a future
+release.
+
 ```bash
 uatu [serve] [PATH...] [--force] [--no-open] [--no-follow] [--no-gitignore] [--port <PORT>] [--debug]
 ```
 
 `serve` is the default command — `uatu docs` and `uatu serve docs` are
 equivalent, and a bare `uatu` serves the current directory. `uatu watch`
-remains as a deprecated alias for one release and prints a warning.
+is a deprecated alias for `serve`.
 
 ```bash
 uatu serve .
@@ -163,27 +170,30 @@ prefix (default `/`). It exists for supervisors that mount several sessions
 under one origin — most notably the hub below — and is rarely useful by
 hand.
 
-## The hub: remote sessions (`uatu hub`)
+## The hub: how you run uatu (`uatu hub`)
 
-`uatu hub` runs a self-hostable session server on a machine you own: one
-HTTPS port serving a login-gated dashboard, one supervised `uatu serve`
+`uatu hub` runs the session server — on your own machine or one you own
+elsewhere: one port serving a login-gated dashboard, one supervised session
 child per workspace, every session reverse-proxied under
-`https://<host>/s/<workspace-id>/`. Sessions keep the full uatu experience —
+`<host>/s/<workspace-id>/`. Sessions keep the full uatu experience —
 live preview, change overview, detachable terminals — reachable from any
-browser, including an iPad that installs the hub as a PWA.
+browser (including an iPad that installs the hub as a PWA) and from
+UatuCode Desktop.
 
 ```bash
 printf '%s' 'a-password' | uatu hub hash-password   # → paste into hub.json
 uatu hub --config ~/.config/uatu/hub.json
 ```
 
-The hub owns a **workspaces root** (default: the folder you start it in —
-it must contain repositories, not be one). The dashboard lists running
-sessions with live shell detail, resumes stopped workspaces, offers the
-root's subfolders to serve (with a `git init` offer for non-repos), and
-clones new repositories into the root. Terminal sessions detach and
-reattach across connectivity blips — a shell (or an agent running in it)
-keeps working while your train is in a tunnel.
+Login is required on every interface, localhost included — the config needs
+at least one user (starting without one prints the exact bootstrap steps).
+Sessions are server-side records: signing out, or revoking a device from
+the dashboard's Devices pane, kills that session immediately for every
+client holding it. Workspaces are folders you add from the dashboard's
+directory browser (with a `git init` offer for non-repos) or clone into a
+browsed destination. Terminal sessions detach and reattach across
+connectivity blips — a shell (or an agent running in it) keeps working
+while your train is in a tunnel.
 
 The full operator guide — trust model (hub users share the daemon's OS
 user; no isolation), config reference, certificate walkthroughs (mkcert,

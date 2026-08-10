@@ -3,35 +3,13 @@
 ## Purpose
 
 Define how UatuCode Desktop is built and shipped: where the app source lives in the uatu repository, how release builds produce per-architecture app archives embedding the matching `uatu` binary, how signing and notarization are gated on credential availability, how the Homebrew tap publishes a `uatu-desktop` cask for signed releases, and how desktop changes are validated in CI.
-
 ## Requirements
-
-### Requirement: Desktop app source lives in-tree under desktop/macos
-The UatuCode Desktop Xcode project and Swift sources SHALL live in the uatu
-repository under `desktop/macos/`, using `UatuCodeDesktop` target/scheme names,
-product name "UatuCode Desktop", and bundle identifier
-`se.coll8.uatucode.desktop`. A local build MUST embed a `uatu` binary resolved
-from a configurable location defaulting to the repo's `dist/uatu`, and MUST fail
-with a clear message when no binary is present — the app has no PATH-installed
-fallback.
-
-#### Scenario: Local development build
-- **WHEN** a developer runs `bun run build` and then builds the Xcode project
-- **THEN** the resulting app bundle contains the freshly built `uatu` binary in its resources
-
-#### Scenario: Missing binary fails the build
-- **WHEN** the Xcode project is built with no `uatu` binary at the configured location
-- **THEN** the build fails with a message telling the developer to build or point at one
-
 ### Requirement: Release workflow builds per-architecture desktop apps
-The tag-triggered release workflow SHALL include a macOS job that builds the
-desktop app twice — once per architecture (`arm64`, `x64`) — each embedding the
-matching `uatu-darwin-<arch>` binary produced earlier in the same workflow run.
-App archives SHALL be zips named `UatuCode-Desktop-<arch>.zip`.
+The tag-triggered release workflow SHALL include a macOS job that builds the desktop app twice — once per architecture (`arm64`, `x64`) — with no embedded `uatu` binary. App archives SHALL be zips named `UatuCode-Desktop-<arch>.zip`.
 
 #### Scenario: Tag push builds both app variants
 - **WHEN** a release tag is pushed
-- **THEN** the workflow produces an arm64 app embedding `uatu-darwin-arm64` and an x64 app embedding `uatu-darwin-x64`
+- **THEN** the workflow produces arm64 and x64 apps, neither containing an embedded `uatu` binary
 
 ### Requirement: Signing and notarization are gated on credential availability
 When Developer ID signing secrets are configured, the release job MUST codesign
@@ -59,8 +37,7 @@ the GitHub release.
 
 #### Scenario: Notarized app passes Gatekeeper
 - **WHEN** a user downloads a signed release archive and launches the app
-- **THEN** Gatekeeper accepts the app without an override
-- **AND** the embedded uatu binary starts and serves normally under the hardened runtime
+- **THEN** Gatekeeper accepts the app without an override and it runs normally under the hardened runtime
 
 ### Requirement: Homebrew tap publishes a uatu-desktop cask for signed releases
 The tap-update automation SHALL generate `Casks/uatu-desktop.rb` in
@@ -156,7 +133,7 @@ The tap automation SHALL generate `Casks/uatu-desktop@edge.rb` in `tjakobsson/ho
 - **THEN** `Casks/uatu-desktop.rb` is unchanged
 
 ### Requirement: A local install script builds and installs the working tree
-A macOS script at `scripts/install-desktop-local.sh` SHALL build the CLI (`bun run build`), build a Release app embedding it with a `<base>-local.<shortsha>` version, and install it into `/Applications`, refusing to replace a currently running copy.
+A macOS script at `scripts/install-desktop-local.sh` SHALL build a Release app from the working tree with a `<base>-local.<shortsha>` version and install it into `/Applications`, refusing to replace a currently running copy. The script SHALL NOT build or embed the CLI.
 
 #### Scenario: Local dogfood install
 
@@ -167,3 +144,11 @@ A macOS script at `scripts/install-desktop-local.sh` SHALL build the CLI (`bun r
 
 - **WHEN** the installed app is running during install
 - **THEN** the script aborts with a message instead of replacing it
+
+### Requirement: Desktop app source lives in-tree and builds without the CLI
+The UatuCode Desktop Xcode project and Swift sources SHALL live in the uatu repository under `desktop/macos/`, using `UatuCodeDesktop` target/scheme names, product name "UatuCode Desktop", and bundle identifier `se.coll8.uatucode.desktop`. The app SHALL NOT embed a `uatu` binary: it is a pure hub client, and its build SHALL NOT depend on the CLI build.
+
+#### Scenario: Local development build
+- **WHEN** a developer builds the Xcode project without having run `bun run build`
+- **THEN** the build succeeds and the resulting app bundle contains no `uatu` binary
+

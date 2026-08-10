@@ -6,7 +6,7 @@ TBD - define durable semantic workspace state shared across a user's clients whi
 ## Requirements
 
 ### Requirement: Hub persists personal semantic state per user and workspace
-The Hub SHALL persist a versioned personal workspace-state record keyed by authenticated user identity and stable workspace id. The record SHALL support the last document path, Follow preference, preview mode, compare target, Files filter, and last-active PTY id. It SHALL survive Hub and child-session restarts until the workspace is forgotten or the state is explicitly cleared. Remote mode SHALL use the authenticated username; local mode SHALL use the stable implicit identity `local`.
+The Hub SHALL persist a versioned personal workspace-state record keyed by authenticated user identity and stable workspace id. The record SHALL support the last document path, Follow preference, preview mode, compare target, Files filter, and last-active PTY id. It SHALL survive Hub and child-session restarts until the workspace is forgotten or the state is explicitly cleared. Records are keyed by the authenticated username.
 
 #### Scenario: State follows a user to another browser
 - **WHEN** an authenticated user changes semantic workspace state in one browser
@@ -18,10 +18,6 @@ The Hub SHALL persist a versioned personal workspace-state record keyed by authe
 - **WHEN** the Hub and workspace child stop after personal state has been saved
 - **AND** the Hub restarts and the workspace is opened again
 - **THEN** the saved personal state remains available
-
-#### Scenario: Local Desktop has stable personal state
-- **WHEN** macOS Desktop opens a workspace through `uatu hub --local`
-- **THEN** personal state is read and written under the stable `local` identity
 
 ### Requirement: Hub exposes a validated personal-state API
 The Hub SHALL expose authenticated read and partial-update operations for the current user's state under a workspace prefix. Updates MUST accept only known fields with valid enum, boolean, relative-path, or PTY-id values, MUST be same-origin/CSRF protected, and MUST persist serialized mutations atomically. A request MUST NOT select another username. Missing records SHALL return an empty versioned state rather than an error.

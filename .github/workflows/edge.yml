@@ -114,10 +114,9 @@ jobs:
 
       - name: Cross-compile all CLI targets
         if: steps.guard.outputs.changed == 'true'
-        # Same four targets as stable releases; the darwin binaries do
-        # double duty as the desktop app's embedded CLI. --version stamps
-        # the edge version so `uatu --version` identifies an edge build and
-        # the uatu-edge formula's self-test passes.
+        # Same four targets as stable releases. --version stamps the edge
+        # version so `uatu --version` identifies an edge build and the
+        # uatu-edge formula's self-test passes.
         run: |
           for target in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
             bun run scripts/build.ts --target="bun-$target" --outfile="dist/$target/uatu" \
@@ -161,7 +160,6 @@ jobs:
               -configuration Release \
               -derivedDataPath "desktop/macos/build-$arch" \
               ARCHS="$xcode_arch" ONLY_ACTIVE_ARCH=NO \
-              UATU_BINARY="$PWD/dist/darwin-$arch/uatu" \
               MARKETING_VERSION="${{ steps.version.outputs.version }}" \
               build
           done

@@ -3,9 +3,7 @@
 ## Purpose
 
 Define the hub's browser surface: an authenticated dashboard that lists running sessions and stopped workspaces with live shell status, offers stop/resume/forget actions, adds workspaces through a server-side directory browser or by cloning a repository, and follows uatu's visual language — plus the in-session workspace switcher that hub-served sessions expose for navigating between the dashboard and sibling workspaces.
-
 ## Requirements
-
 ### Requirement: Dashboard lists sessions and workspaces with live status
 The hub SHALL serve an authenticated dashboard listing running sessions and stopped registered workspaces. Each running session SHALL show its workspace name and path and a live shell summary sourced from the child's terminal session inventory (shell count, attached/detached, best-effort foreground-process label); each stopped workspace SHALL offer resume. Activating a running session SHALL navigate to its `/s/<id>/` URL. The dashboard SHALL be served under the hub origin so it shares the PWA installation with the sessions it links to.
 
@@ -42,8 +40,6 @@ The dashboard SHALL offer a forget action on stopped workspaces that removes the
 ### Requirement: Dashboard adds folders through a server-side directory browser
 The dashboard SHALL offer workspace registration by browsing the hub host's filesystem, not by typing paths: the hub SHALL expose a directory-listing API that, for a given absolute path (defaulting to the daemon user's home), returns its parent and its child directories — each with its name, whether it is a git repository, and its registered workspace id if any — listing directories only and hiding dot-directories. The dashboard SHALL present this as a drill-down browser ending in an "add this folder" action. Filesystem visibility through the browser is within the documented trust model: hub users already hold shell access through the embedded terminal.
 
-In local mode (`--local`, the desktop's trusted loopback hub) the dashboard SHALL omit the directory browser and the clone form: the desktop app owns folder adding there through the native folder picker, and a web facsimile of it would be a worse duplicate. Registration through the API is unaffected.
-
 Registration SHALL submit the browsed absolute path. Adding a non-git folder SHALL apply the git preflight: the hub probes with `git rev-parse --show-toplevel` and, when the probe definitively reports no repository, answers with a needs-initialization response so the client can confirm and resubmit with initialization requested; on decline the folder MUST NOT be registered or served. When the probe fails for any other reason the hub SHALL skip the offer and start the session, letting the CLI's own git preflight report. The dashboard SHALL additionally offer `git clone <url>` with a browsed destination directory, registering and serving the resulting folder; clone SHALL rely on the daemon user's ambient git credentials and the hub MUST NOT store credentials. The hub MUST NOT pass `--force` to the server.
 
 #### Scenario: Browsing to and adding a folder
@@ -70,13 +66,8 @@ Registration SHALL submit the browsed absolute path. Adding a non-git folder SHA
 - **WHEN** `git clone` or `git init` exits non-zero
 - **THEN** the dashboard shows the git error output and no workspace is registered
 
-#### Scenario: Local mode hides the browser
-- **WHEN** the dashboard is served by a `--local` hub
-- **THEN** the Add Folder browser and clone form are absent
-- **AND** sessions, workspaces, and their stop/resume/forget actions render as usual
-
 ### Requirement: Hub-served sessions expose hub navigation
-When the SPA is served through a hub (a hub-session-shaped base path AND the hub API answering at the origin root), the sidebar header SHALL show a workspace switcher naming the current workspace, whose menu links to the hub dashboard and to every registered workspace (running state indicated; stopped workspaces labeled) and offers a sign-out entry when the hub has a login. In local mode (`--local`) the sign-out entry SHALL be omitted — no login exists and its routes are absent, so the entry could only lead to a 404; the state API SHALL tell clients the hub is local. Outside a hub — plain `uatu serve`, a bare `--base-path` invocation — the affordance MUST stay hidden. (Desktop wrapper sessions are hub sessions and show the switcher.) The hub's brand header SHALL show the logo centered with the wordmark beneath it and no tagline.
+When the SPA is served through a hub (a hub-session-shaped base path AND the hub API answering at the origin root), the sidebar header SHALL show a workspace switcher naming the current workspace, whose menu links to the hub dashboard and to every registered workspace (running state indicated; stopped workspaces labeled) and offers a sign-out entry. Outside a hub — plain `uatu serve`, a bare `--base-path` invocation — the affordance MUST stay hidden. (Desktop sessions are hub sessions and show the switcher.) The hub's brand header SHALL show the logo centered with the wordmark beneath it and no tagline.
 
 #### Scenario: Switching workspaces from inside a session
 - **WHEN** a user inside a hub-served session opens the workspace switcher
@@ -86,10 +77,6 @@ When the SPA is served through a hub (a hub-session-shaped base path AND the hub
 #### Scenario: No hub affordance outside a hub
 - **WHEN** the SPA runs under plain `uatu serve` (default base path) or under a base path with no hub answering at the origin root
 - **THEN** the workspace switcher is not shown
-
-#### Scenario: Local mode has no sign-out entry
-- **WHEN** a user opens the workspace switcher in a session served by a `--local` hub
-- **THEN** the menu shows the dashboard link and workspaces but no sign-out entry
 
 ### Requirement: The workspace switcher chip reflects real session state
 The in-session workspace switcher's collapsed chip SHALL show the current workspace's live indicator from hub-reported state, never from an assumption that the viewed session is running: a session page can outlive its server (a stop from the dashboard, a back/forward-cache restore). The chip SHALL update from fresh hub state on page-cache restores and whenever the menu's state refresh completes, so chip and menu can never disagree.
@@ -145,7 +132,7 @@ The hub's state API SHALL include the hub's uatu version, and the dashboard SHAL
 The hub SHALL serve a web-app manifest at its origin (`/manifest.webmanifest`) declaring `name`/`short_name` branding for the hub, `display: "standalone"`, `start_url: "/"`, `scope: "/"`, and 192x192 plus 512x512 PNG icons, and the login and dashboard pages SHALL link it from `<head>`. The manifest and its icons SHALL be served without authentication, since install-time fetches may be anonymous and the manifest carries only branding. An app installed from a hub page SHALL keep the entire hub origin — login, dashboard, and every `/s/<id>/` session — inside its scope so no in-app browser chrome appears while navigating between them.
 
 #### Scenario: Hub manifest is reachable without a session
-- **WHEN** an unauthenticated client requests `/manifest.webmanifest` on a non-local hub
+- **WHEN** an unauthenticated client requests `/manifest.webmanifest`
 - **THEN** the response is 200 with `Content-Type: application/manifest+json`
 - **AND** the JSON declares `scope: "/"`, `start_url: "/"`, and `display: "standalone"`
 
@@ -156,3 +143,20 @@ The hub SHALL serve a web-app manifest at its origin (`/manifest.webmanifest`) d
 #### Scenario: Installed hub app stays standalone across sign-in
 - **WHEN** a user installs the hub from the dashboard on iOS, later launches it signed out, signs in, and opens a workspace session
 - **THEN** every page in that flow renders standalone, with no in-app browser bars
+
+### Requirement: Dashboard lists and revokes device sessions
+The dashboard SHALL show the signed-in user's active sessions — device label, issue time, and which one is the current session — and SHALL offer a revoke action per session. Revoking SHALL take effect server-side immediately for every transport; revoking the current session behaves as sign-out. Revocation SHALL be a POST guarded like other state-changing endpoints.
+
+#### Scenario: Another device's session is revoked
+- **WHEN** a user revokes a listed session belonging to another device
+- **THEN** that device's next request is treated as unauthenticated
+- **AND** the current browser session remains signed in
+
+#### Scenario: The current session is marked
+- **WHEN** the sessions list renders
+- **THEN** the session serving the request is visibly identified as the current one
+
+#### Scenario: Revoking the current session signs out
+- **WHEN** a user revokes the session marked as current
+- **THEN** the response clears the cookie and lands on the login page
+

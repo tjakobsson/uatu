@@ -5,7 +5,6 @@
 
 import AppKit
 import SwiftUI
-import UniformTypeIdentifiers
 import WebKit
 
 struct ContentView: View {
@@ -20,19 +19,15 @@ struct ContentView: View {
     @AppStorage(PageZoom.defaultsKey) private var pageZoom = 1.0
     @State private var splitDragBaseWidth: Double?
     @State private var browserKeyMonitor: Any?
-    @State private var isPickingFolder = false
-    /// A picked folder waiting on the "initialize a git repository?"
-    /// decision (the hub answered needs-init); non-nil presents the alert.
-    @State private var pendingGitInitFolder: URL?
-    /// Identifies the latest open request. The splash stays interactive
-    /// while the hub registers a folder, so a completion whose token no
-    /// longer matches was superseded by a newer open and must discard
-    /// itself instead of opening (or prompting for) a stale folder.
+    /// Identifies the latest open request. A completion whose token no
+    /// longer matches was superseded by a newer open (or a return to the
+    /// splash) and must discard itself instead of loading a stale page.
     @State private var openRequestToken = UUID()
     @State private var nativeWindow: NSWindow?
 
-    /// Window lifecycle: splash → opening → web, with failed reachable from
-    /// anywhere. Windows own no processes — a "page" is a hub URL.
+    /// Window lifecycle: splash → connecting (opening) → open (web), with
+    /// failed reachable from anywhere. Windows own no processes — a "page"
+    /// is a hub URL.
     enum Phase: Equatable {
         case splash
         case opening(String)
@@ -47,16 +42,11 @@ struct ContentView: View {
     /// The URL last handed to the web view (for Open in Browser).
     @State private var currentURL: URL?
 
-    private var localHub: LocalHubController { .shared }
-
     var body: some View {
         Group {
             switch phase {
             case .splash:
-                SplashView(
-                    openPage: { open($0) },
-                    chooseFolder: { isPickingFolder = true }
-                )
+                SplashView(openPage: { open($0) })
             case .opening(let label):
                 ProgressView(label)
             case .web:
@@ -145,24 +135,6 @@ struct ContentView: View {
                 .help("Toggle Split Browser (⇧⌘B)")
             }
         }
-        .fileImporter(isPresented: $isPickingFolder, allowedContentTypes: [.folder]) { result in
-            if case .success(let url) = result {
-                openLocalFolder(url)
-            }
-        }
-        .alert(
-            "Not a Git Repository",
-            isPresented: Binding(
-                get: { pendingGitInitFolder != nil },
-                set: { if !$0 { pendingGitInitFolder = nil } }
-            ),
-            presenting: pendingGitInitFolder
-        ) { url in
-            Button("Initialize Repository") { initializeAndOpen(url) }
-            Button("Cancel", role: .cancel) { declineInitialization() }
-        } message: { url in
-            Text("“\(url.lastPathComponent)” isn't inside a git repository. Initialize one to start a new project?")
-        }
         .background(WindowResolver { window in
             window.tabbingIdentifier = "se.coll8.uatucode.desktop.main"
             // Safari-style full-height content: the content view spans the
@@ -184,24 +156,17 @@ struct ContentView: View {
                 nativeWindow = window
             }
         })
-        .onChange(of: localHub.status) { _, newStatus in
-            // The backing hub died out from under a local page: transition
-            // to the failed state (with the hub's output and a relaunch
-            // path) rather than showing a dead web view.
-            guard currentPageIsLocal, phase == .web || isOpening,
-                  case .failed(let message) = newStatus else { return }
-            phase = .failed(message)
-        }
-        .onChange(of: remoteHubRevocation) { previous, current in
-            // Revocation is app-wide, so EVERY window showing that hub comes
+        .onChange(of: hubSignOutMark) { previous, current in
+            // A sign-out is app-wide, so EVERY window showing that hub comes
             // back to the splash — not just the one the user signed out in.
             // A sibling window left sitting on a hub the app has forgotten
             // would be showing a page it can no longer re-authenticate.
             //
-            // Keyed on an actual revocation rather than on `.signedOut`, which
-            // a probe may publish transiently without anything being revoked.
+            // Keyed on the connection's sign-out epoch rather than on
+            // `.signedOut`, which a probe may publish transiently while a
+            // silent re-login is about to recover.
             guard let previous, let current,
-                  previous.entryID == current.entryID, current.count > previous.count,
+                  previous.entryID == current.entryID, current.epoch > previous.epoch,
                   phase == .web || isOpening else { return }
             showSplash()
         }
@@ -223,15 +188,15 @@ struct ContentView: View {
             // own return to the splash comes from the .signedOut transition
             // below, which every window watching this hub sees.
             web.onHubSignOut = { url in
-                // Only the hub this window is actually showing may be revoked
-                // by it. A page can post a form to any origin it likes, so
-                // without this a page on one hub could delete another
-                // configured hub's Keychain credentials — on a request that
-                // hub would answer 403, leaving it signed in server-side while
-                // the desktop forgot how to reach it. A window's own sign-out
-                // always targets its own origin, so nothing legitimate needs
-                // the looser form.
-                guard case .remoteDashboard(let shown) = currentPage,
+                // The hub revokes the session server-side on this POST; the
+                // app's part is to discard its own copies. Only the hub this
+                // window is actually showing may be signed out by it: a page
+                // can post a form to any origin it likes, so without this a
+                // page on one hub could delete another configured hub's
+                // Keychain credentials. A window's own sign-out always
+                // targets its own origin, so nothing legitimate needs the
+                // looser form.
+                guard case .dashboard(let shown) = currentPage,
                       let signedOut = HubRoster.shared.entry(for: url),
                       signedOut.id == shown.id else { return }
                 HubRoster.shared.signOut(shown)
@@ -254,16 +219,12 @@ struct ContentView: View {
                 // navigation — the allowed-through login load whose commit
                 // arrives after the user has already reopened the hub — and
                 // acting on it would cancel the open they just asked for.
-                guard case .remoteDashboard(let shown) = currentPage,
+                guard case .dashboard(let shown) = currentPage,
                       let landed = HubRoster.shared.entry(for: url),
                       landed.id == shown.id,
                       phase == .web else { return }
                 showSplash()
             }
-            // One app-wide watch for hub cookies being cleared, covering the
-            // sign-out paths the navigation delegate cannot see. Idempotent,
-            // so every window may call it.
-            HubRoster.shared.startCookieWatch()
             // ⌘W / ⌘[ / ⌘] belong to the browser tab only while the split
             // has keyboard focus. Menu items can't express that: NSMenu
             // stops at the FIRST matching key equivalent even when
@@ -373,7 +334,6 @@ struct ContentView: View {
             // keep running, but in-flight open completions must not land
             // in a dead window.
             openRequestToken = UUID()
-            pendingGitInitFolder = nil
             if let browserKeyMonitor {
                 NSEvent.removeMonitor(browserKeyMonitor)
                 self.browserKeyMonitor = nil
@@ -421,8 +381,6 @@ struct ContentView: View {
             nativeWindow: nativeWindow,
             canGoBack: web.canGoBack,
             canGoForward: web.canGoForward,
-            chooseFolder: { isPickingFolder = true },
-            openLocalWorkspace: { open(.localWorkspace(id: $0)) },
             // nil opens find; a delta steps to the next/previous match.
             //
             // Menu activation does not pass through the key monitor, so the
@@ -464,43 +422,19 @@ struct ContentView: View {
 
     // MARK: - Page opening
 
-    /// Opens a hub page in this window: resolve the hub, start the session
-    /// if needed, inject credentials for remote hubs, then load.
+    /// Opens a hub page in this window: write the session id into the web
+    /// view's cookie store, then load the hub's dashboard.
     private func open(_ page: HubPage) {
         let token = UUID()
         openRequestToken = token
-        pendingGitInitFolder = nil
         currentPage = page
 
         switch page {
-        case .localDashboard:
-            phase = .opening("Connecting…")
-            Task {
-                guard let base = await localHub.waitForRunning() else { failFromLocalHub(token); return }
-                guard openRequestToken == token else { return }
-                loadWeb(base)
-            }
-
-        case .localWorkspace(let id):
-            phase = .opening("Opening \(id)…")
-            Task {
-                guard let base = await localHub.waitForRunning() else { failFromLocalHub(token); return }
-                do {
-                    try await startIfStopped(api: HubAPI(baseURL: base), id: id)
-                    guard openRequestToken == token else { return }
-                    guard let url = workspaceURL(base: base, id: id) else { return }
-                    loadWeb(url)
-                } catch {
-                    guard openRequestToken == token else { return }
-                    phase = .failed(Self.describe(error))
-                }
-            }
-
-        case .remoteDashboard(let entry):
+        case .dashboard(let entry):
             phase = .opening("Connecting to \(entry.name)…")
             Task {
                 guard let base = entry.url else { phase = .failed("Invalid hub URL."); return }
-                await injectCookie(for: entry)
+                await HubRoster.shared.connection(for: entry).injectSessionCookie()
                 guard openRequestToken == token else { return }
                 loadWeb(base)
             }
@@ -513,87 +447,7 @@ struct ContentView: View {
         web.load(url)
     }
 
-    private func startIfStopped(api: HubAPI, id: String) async throws {
-        let state = try await api.state()
-        guard let workspace = state.workspaces.first(where: { $0.id == id }) else {
-            throw HubAPIError.http(404, "unknown workspace: \(id)")
-        }
-        if !workspace.running {
-            try await api.startSession(id: id)
-        }
-    }
-
-    private func workspaceURL(base: URL, id: String) -> URL? {
-        let encoded = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
-        return URL(string: "s/\(encoded)/", relativeTo: base)
-    }
-
-    private func injectCookie(for entry: RemoteHubEntry) async {
-        await HubRoster.shared.connection(for: entry).injectCookie()
-    }
-
-    private func failFromLocalHub(_ token: UUID) {
-        guard openRequestToken == token else { return }
-        if case .failed(let message) = localHub.status {
-            phase = .failed(message)
-        } else {
-            phase = .failed("The local hub did not become ready.")
-        }
-    }
-
-    // MARK: - Choose Folder (local hub registration)
-
-    /// Registers a picked folder with the local hub and opens its session.
-    /// The git preflight is the hub's: a needs-init answer becomes the
-    /// confirmation dialog, and confirming re-submits with init requested.
-    /// The current page stays untouched until the open succeeds.
-    private func openLocalFolder(_ url: URL, initRepo: Bool = false) {
-        let token = UUID()
-        openRequestToken = token
-        pendingGitInitFolder = nil
-        if phase == .splash || isFailed {
-            phase = .opening("Starting \(url.lastPathComponent)…")
-        }
-        Task {
-            guard let base = await localHub.waitForRunning() else { failFromLocalHub(token); return }
-            do {
-                let id = try await HubAPI(baseURL: base).addWorkspace(path: url.path, initRepo: initRepo)
-                guard openRequestToken == token else { return }
-                currentPage = .localWorkspace(id: id)
-                guard let pageURL = workspaceURL(base: base, id: id) else { return }
-                loadWeb(pageURL)
-                await localHub.refreshState()
-            } catch HubAPIError.needsInit {
-                guard openRequestToken == token else { return }
-                if isOpening { phase = .splash }
-                pendingGitInitFolder = url
-            } catch {
-                guard openRequestToken == token else { return }
-                phase = .failed(Self.describe(error))
-            }
-        }
-    }
-
-    private func initializeAndOpen(_ url: URL) {
-        openLocalFolder(url, initRepo: true)
-    }
-
-    /// Cancel on the init alert: nothing was registered hub-side, so there
-    /// is nothing to undo. A window with no live page returns to the
-    /// splash; a window showing a session keeps it untouched.
-    private func declineInitialization() {
-        if phase != .web {
-            phase = .splash
-            currentPage = nil
-        }
-    }
-
     private func retry() {
-        // A dead local hub can't serve the page again — relaunch it first,
-        // then re-open (open() waits for it to come up).
-        if currentPageIsLocal, case .failed = localHub.status {
-            localHub.relaunch()
-        }
         if let currentPage {
             open(currentPage)
         } else {
@@ -617,18 +471,18 @@ struct ContentView: View {
 
     private var hasPage: Bool { phase == .web }
 
-    /// Which hub this window is showing and how many times its credentials
-    /// have been revoked. Reading it during body evaluation is what subscribes
-    /// the window to that connection's changes. The hub's id travels with the
-    /// count so that switching pages cannot read as a revocation.
-    private struct HubRevocationMark: Equatable {
+    /// Which hub this window is showing and how many times it has been
+    /// signed out. Reading it during body evaluation is what subscribes the
+    /// window to that connection's changes. The hub's id travels with the
+    /// epoch so that switching pages cannot read as a sign-out.
+    private struct HubSignOutMark: Equatable {
         let entryID: UUID
-        let count: Int
+        let epoch: Int
     }
 
-    private var remoteHubRevocation: HubRevocationMark? {
-        guard case .remoteDashboard(let entry) = currentPage else { return nil }
-        return HubRevocationMark(entryID: entry.id, count: HubRoster.shared.connection(for: entry).revocations)
+    private var hubSignOutMark: HubSignOutMark? {
+        guard case .dashboard(let entry) = currentPage else { return nil }
+        return HubSignOutMark(entryID: entry.id, epoch: HubRoster.shared.connection(for: entry).signOutEpoch)
     }
 
     private var isOpening: Bool {
@@ -636,23 +490,9 @@ struct ContentView: View {
         return false
     }
 
-    private var isFailed: Bool {
-        if case .failed = phase { return true }
-        return false
-    }
-
-    private var currentPageIsLocal: Bool {
-        switch currentPage {
-        case .localDashboard, .localWorkspace: return true
-        default: return false
-        }
-    }
-
     private var pageTitle: String {
         switch currentPage {
-        case .localDashboard: return "This Mac"
-        case .localWorkspace(let id): return id
-        case .remoteDashboard(let entry): return entry.name
+        case .dashboard(let entry): return entry.name
         case nil: return "UatuCode Desktop"
         }
     }
@@ -703,8 +543,6 @@ struct WindowCommands: Equatable {
     var nativeWindow: NSWindow?
     var canGoBack: Bool
     var canGoForward: Bool
-    var chooseFolder: () -> Void
-    var openLocalWorkspace: (String) -> Void
     var find: (Int?) -> Void
     var findInFiles: () -> Void
     var reload: () -> Void
@@ -733,26 +571,10 @@ struct UatuCodeDesktopCommands: Commands {
     @AppStorage(ExternalLinkRouter.systemBrowserDefaultsKey) private var openLinksInSystemBrowser = false
     @AppStorage(PageZoom.defaultsKey) private var pageZoom = 1.0
 
-    /// Open Recent lists the local hub's registered workspaces — the hub
-    /// registry replaced the old recents list as the source of truth.
-    private var localWorkspaces: [HubWorkspace] {
-        LocalHubController.shared.lastState?.workspaces ?? []
-    }
-
     var body: some Commands {
         CommandGroup(after: .newItem) {
             Button("New Tab") { newTab() }
                 .keyboardShortcut("t")
-            Divider()
-            Button("Choose Folder…") { window?.chooseFolder() }
-                .keyboardShortcut("o")
-                .disabled(window == nil)
-            Menu("Open Recent") {
-                ForEach(localWorkspaces) { workspace in
-                    Button(workspace.id) { window?.openLocalWorkspace(workspace.id) }
-                }
-            }
-            .disabled(window == nil || localWorkspaces.isEmpty)
         }
         // Find lives in the Edit menu where macOS users look for it. These are
         // discoverability and shortcut advertisement only: the key monitor in

@@ -5,9 +5,9 @@
 
 import Foundation
 
-/// A configured remote hub. Non-secret fields persist in UserDefaults;
-/// the password and current session cookie live in the Keychain, keyed by
-/// this entry's id.
+/// A configured hub. Non-secret fields persist in UserDefaults; the
+/// password and current session id live in the Keychain, keyed by this
+/// entry's id.
 struct RemoteHubEntry: Codable, Equatable, Hashable, Identifiable {
     var id: UUID
     var name: String
@@ -23,20 +23,22 @@ struct RemoteHubEntry: Codable, Equatable, Hashable, Identifiable {
     /// Scheme, host, and port. Sign-out signals resolve against this rather
     /// than the host alone: two configured hubs may share a host on different
     /// ports (routine for loopback hubs behind tunnels, and the add flow does
-    /// not forbid it), and revoking by host would destroy one hub's
-    /// credentials while leaving the hub actually signed out of able to
-    /// re-authenticate.
+    /// not forbid it), and revoking by host would discard one hub's
+    /// credentials for another hub's sign-out.
     var origin: String? {
         url.flatMap(HubURLValidation.origin)
     }
 
     var passwordAccount: String { "\(id.uuidString).password" }
-    var cookieAccount: String { "\(id.uuidString).cookie" }
+    var sessionAccount: String { "\(id.uuidString).session" }
+    /// Pre-0.5 builds stored the signed cookie under this account; it is
+    /// deleted alongside the current secrets so nothing stale lingers.
+    var legacyCookieAccount: String { "\(id.uuidString).cookie" }
 }
 
 /// Validation for hub URLs: remote hubs must be HTTPS — the hub itself
 /// refuses non-loopback plain HTTP, and so does the app. Plain HTTP is
-/// accepted only for loopback (a hub behind an SSH tunnel, local testing).
+/// accepted only for loopback (a hub on this machine, an SSH tunnel).
 enum HubURLValidation {
     static let loopbackHosts: Set<String> = ["127.0.0.1", "::1", "localhost"]
 
@@ -72,8 +74,8 @@ enum HubURLValidation {
     }
 }
 
-/// The roster of configured remote hubs, shared across windows. Entries
-/// persist across restarts; removing one deletes its Keychain secrets.
+/// The roster of configured hubs, shared across windows. Entries persist
+/// across restarts; removing one deletes its Keychain secrets.
 @MainActor
 @Observable
 final class HubRoster {
@@ -83,7 +85,6 @@ final class HubRoster {
 
     private(set) var hubs: [RemoteHubEntry] = []
     private var connections: [UUID: HubConnection] = [:]
-    private let cookieWatch = HubCookieWatch()
 
     init() {
         if let data = UserDefaults.standard.data(forKey: Self.defaultsKey),
@@ -102,8 +103,8 @@ final class HubRoster {
     }
 
     /// Adds a verified hub: the caller has already logged in successfully
-    /// and holds the fresh cookie. Secrets go straight to the Keychain.
-    func add(name: String, url: URL, username: String, password: String, cookie: String) -> RemoteHubEntry {
+    /// and holds the fresh session id. Secrets go straight to the Keychain.
+    func add(name: String, url: URL, username: String, password: String, sessionID: String) -> RemoteHubEntry {
         let entry = RemoteHubEntry(
             id: UUID(),
             name: name.isEmpty ? (url.host ?? url.absoluteString) : name,
@@ -111,62 +112,23 @@ final class HubRoster {
             username: username
         )
         HubKeychain.set(password, account: entry.passwordAccount)
-        HubKeychain.set(cookie, account: entry.cookieAccount)
+        HubKeychain.set(sessionID, account: entry.sessionAccount)
         hubs.append(entry)
         persist()
         return entry
     }
 
     /// The configured hub a URL belongs to, matched by full origin. Sign-out
-    /// signals arrive from the web view as bare URLs; only a configured remote
-    /// hub has credentials to revoke, and the local hub has no login at all.
+    /// signals arrive from the web view as bare URLs; only a configured hub
+    /// has credentials to discard.
     func entry(for url: URL) -> RemoteHubEntry? {
         guard let origin = HubURLValidation.origin(of: url) else { return nil }
         return hubs.first { $0.origin == origin }
     }
 
-    /// The single configured hub on a host — nil when none, and nil when
-    /// several.
-    ///
-    /// Cookies are scoped to a host and carry no port, so two hubs sharing a
-    /// host share one `uatu_hub` jar entry, and its disappearance cannot say
-    /// which of them signed out. Guessing would revoke the wrong hub's
-    /// credentials, which is worse than not revoking: the navigation signal
-    /// still carries the port and stays precise for that setup.
-    func soleEntry(forHost host: String) -> RemoteHubEntry? {
-        let matches = hubs.filter { $0.host.caseInsensitiveCompare(host) == .orderedSame }
-        return matches.count == 1 ? matches.first : nil
-    }
-
-    /// Revokes a hub's credentials in response to a sign-out observed in a web
-    /// view. A URL naming no configured hub is ignored, so a stray navigation
-    /// (or anything on the local hub) can never revoke.
-    func signOut(for url: URL) {
-        guard let entry = entry(for: url) else { return }
-        signOut(entry)
-    }
-
     func signOut(_ entry: RemoteHubEntry) {
         let connection = connection(for: entry)
-        // Revocation clears the web view's cookie itself, and that change
-        // would echo back through the watch as a *second* sign-out for this
-        // hub — arriving two async hops later, by which time the user may
-        // have signed back in, whose fresh credentials it would then delete.
-        // Dropping the host from the baseline first makes the change we are
-        // about to cause read as no change. A hub-initiated clear still
-        // reports normally, which is the signal the watch exists for.
-        cookieWatch.forget(host: entry.host)
         Task { await connection.signOut() }
-    }
-
-    /// Starts watching the web-view cookie store for hub cookies being
-    /// cleared. Idempotent, and app-wide rather than per-window: the store is
-    /// shared, so one watch serves every window.
-    func startCookieWatch() {
-        cookieWatch.start { [weak self] host in
-            guard let self, let entry = self.soleEntry(forHost: host) else { return }
-            self.signOut(entry)
-        }
     }
 
     func rename(_ entry: RemoteHubEntry, to name: String) {
@@ -179,7 +141,8 @@ final class HubRoster {
         hubs.removeAll { $0.id == entry.id }
         connections.removeValue(forKey: entry.id)
         HubKeychain.delete(account: entry.passwordAccount)
-        HubKeychain.delete(account: entry.cookieAccount)
+        HubKeychain.delete(account: entry.sessionAccount)
+        HubKeychain.delete(account: entry.legacyCookieAccount)
         persist()
     }
 
@@ -198,9 +161,12 @@ final class HubRoster {
 ///                                           Keychain password, then
 ///                                           signedOut until the user acts
 ///
-/// The silent attempt happens at most once per signed-out transition —
-/// the hub rate-limits login failures (5/minute), so the app never retries
-/// on its own.
+/// The hub revokes sessions server-side, which is what keeps this simple: a
+/// 401 always means the session is dead at the source of truth, a silent
+/// re-login either mints a fresh session or fails to the sign-in prompt,
+/// and a stale id lingering anywhere is worthless. The silent attempt
+/// happens at most once per signed-out transition — the hub rate-limits
+/// login failures (5/minute), so the app never retries on its own.
 @MainActor
 @Observable
 final class HubConnection: Identifiable {
@@ -213,23 +179,12 @@ final class HubConnection: Identifiable {
 
     let entry: RemoteHubEntry
     private(set) var state: State = .unknown
-    /// Counts revocations of this hub's credentials.
-    ///
-    /// Windows watch THIS to decide whether to leave a hub's page, not
-    /// `.signedOut`. The two are not the same event: concurrent probes of an
-    /// expired cookie can publish `.signedOut` transiently — one probe holds
-    /// the single-attempt flag while it re-logs-in, so a second concurrent one
-    /// skips the attempt and reports signed out — and a silent re-login that
-    /// then succeeds leaves everything working. Ejecting every window on that
-    /// would throw the user off a page that was never in trouble.
-    private(set) var revocations = 0
+    /// Counts deliberate sign-outs of this hub (observed in a web view, or a
+    /// rejected re-login). Windows showing this hub watch it and return to
+    /// the splash — an app-wide signal, distinct from `.signedOut`, which a
+    /// probe can also publish while a silent re-login is about to recover.
+    private(set) var signOutEpoch = 0
     private var triedSilentRelogin = false
-    /// Bumped whenever the stored credentials change — sign-out and sign-in
-    /// alike. Work that started in an earlier generation may not publish state
-    /// or write credentials; see `probe()`. One counter for both directions
-    /// keeps the rule uniform: a result computed under credentials that no
-    /// longer apply is discarded, whichever way they changed.
-    private var credentialGeneration = 0
 
     nonisolated var id: UUID { entry.id }
 
@@ -237,8 +192,8 @@ final class HubConnection: Identifiable {
         self.entry = entry
     }
 
-    var cookie: String? {
-        HubKeychain.get(account: entry.cookieAccount)
+    var sessionID: String? {
+        HubKeychain.get(account: entry.sessionAccount)
     }
 
     func probe() async {
@@ -246,116 +201,81 @@ final class HubConnection: Identifiable {
             state = .unreachable("invalid hub URL")
             return
         }
-        // A sign-out landing mid-probe has to win. The MainActor is reentrant
-        // across awaits, so `signOut()` can run between any two lines below,
-        // and the hub does not revoke server-side — a request that captured
-        // the pre-revocation cookie still answers 200. Every publish and every
-        // Keychain write past an await is therefore gated on the revocation
-        // generation this probe started in.
-        let generation = credentialGeneration
-        var api = HubAPI(baseURL: url, cookie: cookie)
+        var api = HubAPI(baseURL: url, sessionID: sessionID)
         do {
             let hubState = try await api.state()
-            guard isCurrent(generation) else { return }
             state = .connected(hubState)
             triedSilentRelogin = false
         } catch HubAPIError.unauthorized {
-            guard isCurrent(generation) else { return }
-            // Note for `signOut()`: this password read is also the sign-out
-            // latch. Revocation deletes the password, so a signed-out hub
-            // takes the `else` path here forever — durably, across restarts,
-            // with no separate flag that could drift out of sync with it.
+            // The session is dead server-side (expired, or revoked from
+            // another device's dashboard). One silent re-login with the
+            // stored password recovers without bothering the user; a
+            // rejected one means the password changed — prompt.
             if !triedSilentRelogin, let password = HubKeychain.get(account: entry.passwordAccount) {
                 triedSilentRelogin = true
+                // A deliberate sign-out can land while the login request is
+                // in flight (the MainActor is reentrant across awaits, and
+                // the password above was read before the sign-out deleted
+                // it). Writing the freshly minted session back would leave
+                // the app signed in to a hub the user just signed out of —
+                // so the result is gated on the sign-out epoch, and a stale
+                // one is revoked server-side rather than merely dropped.
+                let epoch = signOutEpoch
                 if let fresh = try? await HubAPI.login(baseURL: url, name: entry.username, password: password) {
-                    // The load-bearing guard of the set: a silent re-login
-                    // that was already in flight when the user signed out
-                    // would otherwise write a working cookie back into the
-                    // Keychain that revocation had just deleted — leaving the
-                    // app able to reach a hub the user signed out of, on a
-                    // token the hub will honor for weeks.
-                    guard isCurrent(generation) else { return }
-                    HubKeychain.set(fresh, account: entry.cookieAccount)
-                    api.cookie = fresh
+                    guard epoch == signOutEpoch else {
+                        await HubAPI(baseURL: url, sessionID: fresh).logout()
+                        return
+                    }
+                    HubKeychain.set(fresh, account: entry.sessionAccount)
+                    api.sessionID = fresh
                     if let hubState = try? await api.state() {
-                        guard isCurrent(generation) else { return }
+                        guard epoch == signOutEpoch else { return }
                         state = .connected(hubState)
                         triedSilentRelogin = false
                         return
                     }
                 }
+                guard epoch == signOutEpoch else { return }
             }
-            guard isCurrent(generation) else { return }
             state = .signedOut
         } catch HubAPIError.unreachable(let detail) {
-            guard isCurrent(generation) else { return }
             state = .unreachable(detail)
         } catch HubAPIError.http(let status, let message) {
-            guard isCurrent(generation) else { return }
             state = .unreachable("HTTP \(status)\(message.isEmpty ? "" : ": \(message)")")
         } catch {
-            guard isCurrent(generation) else { return }
             state = .unreachable(error.localizedDescription)
         }
     }
 
-    /// False once the stored credentials changed since `generation` was
-    /// captured.
-    private func isCurrent(_ generation: Int) -> Bool {
-        generation == credentialGeneration
+    /// Writes the current session id into the web view's cookie store ahead
+    /// of a navigation to this hub, so the page shares the native session.
+    func injectSessionCookie() async {
+        guard let url = entry.url, let sessionID else { return }
+        await HubCookies.inject(value: sessionID, for: url)
     }
 
-    /// Writes the current cookie into the web view's store ahead of a
-    /// navigation to this hub.
+    /// Discards this hub's credentials after a sign-out observed in a web
+    /// view. The hub has already revoked the session server-side (the web
+    /// view's logout POST is what revokes); this forgets the app's copies.
     ///
-    /// The write cannot be cancelled once started, so it is checked afterward
-    /// instead: a sign-out landing while it was suspended would be followed by
-    /// this write, leaving a working bearer token in WebKit's *persistent* jar
-    /// for a hub the user just signed out of — and the hub does not revoke
-    /// server-side, so that token stays usable for its full lifetime. When
-    /// overtaken, the write is undone.
-    ///
-    /// The cookie is only cleared if this hub is still without credentials.
-    /// A sign-out followed by a quick sign-in also changes the generation, and
-    /// there the store legitimately holds the new session's cookie — which
-    /// this cleanup must not delete.
-    func injectCookie() async {
-        guard let url = entry.url, let cookie else { return }
-        let generation = credentialGeneration
-        await HubCookies.inject(value: cookie, for: url)
-        guard !isCurrent(generation), self.cookie == nil else { return }
-        await HubCookies.clear(for: url, stillWanted: { self.cookie == nil })
-    }
-
-    /// Revokes this hub's credentials after a sign-out observed in a web view.
-    ///
-    /// Both Keychain items go. Clearing the cookie alone would be cosmetic:
-    /// `probe()` would mint a fresh one from the stored password on the very
-    /// next poll, so the app would stay signed in to a hub the user just
-    /// signed out of. Deleting the password is therefore not belt-and-braces
-    /// but the latch itself, and `signIn(password:)` is the only way back.
-    ///
-    /// Idempotent — deleting absent Keychain items, clearing an absent cookie,
-    /// and re-entering `.signedOut` are all no-ops — because several detection
-    /// signals can report the same sign-out.
+    /// Both Keychain items go. Deleting the session id alone would be
+    /// cosmetic: `probe()` would mint a fresh session from the stored
+    /// password on the very next poll, so the app would stay signed in to a
+    /// hub the user just signed out of. Deleting the password is the latch,
+    /// and `signIn(password:)` is the only way back.
     func signOut() async {
-        // Order matters. The Keychain deletes and the state publish are
-        // synchronous, so no window can observe a half-revoked hub and none
-        // waits on the cookie store to leave the page: windows return to the
-        // splash off this state transition, and WebKit's cookie operations
-        // suspend for as long as they like.
-        credentialGeneration &+= 1
         HubKeychain.delete(account: entry.passwordAccount)
-        HubKeychain.delete(account: entry.cookieAccount)
+        HubKeychain.delete(account: entry.sessionAccount)
+        HubKeychain.delete(account: entry.legacyCookieAccount)
         triedSilentRelogin = false
         state = .signedOut
-        revocations &+= 1
+        signOutEpoch &+= 1
         if let url = entry.url {
             // Abandon the clear if a sign-in overtakes it: the new session's
-            // cookie shares this one's name, domain and path, so deleting the
-            // snapshot's entry would delete the replacement.
-            let generation = credentialGeneration
-            await HubCookies.clear(for: url, stillWanted: { self.isCurrent(generation) })
+            // cookie shares this one's name, domain, and path, and WebKit
+            // deletes by that tuple — an unguarded clear resuming after a
+            // quick re-sign-in would delete the replacement cookie.
+            await HubCookies.clear(for: url, stillWanted: { self.sessionID == nil })
         }
     }
 
@@ -363,13 +283,9 @@ final class HubConnection: Identifiable {
     /// re-probes on success; throws for the sheet to display.
     func signIn(password: String) async throws {
         guard let url = entry.url else { throw HubAPIError.unreachable("invalid hub URL") }
-        let cookie = try await HubAPI.login(baseURL: url, name: entry.username, password: password)
+        let sessionID = try await HubAPI.login(baseURL: url, name: entry.username, password: password)
         HubKeychain.set(password, account: entry.passwordAccount)
-        HubKeychain.set(cookie, account: entry.cookieAccount)
-        // Same bump as sign-out, for the mirror-image race: a probe that
-        // started while this hub was signed out would otherwise resume and
-        // publish `.signedOut` over the session just established.
-        credentialGeneration &+= 1
+        HubKeychain.set(sessionID, account: entry.sessionAccount)
         triedSilentRelogin = false
         await probe()
     }

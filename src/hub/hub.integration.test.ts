@@ -11,7 +11,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { LocalProcessBackend } from "./backend";
-import { hashPassword } from "./auth";
+import { hashPassword, HubSessionStore } from "./auth";
 import type { HubConfig } from "./config";
 import { PersonalWorkspaceStateStore } from "./personal-state";
 import { WorkspaceRegistry } from "./registry";
@@ -26,9 +26,12 @@ let workspace = "";
 let registry: WorkspaceRegistry;
 let personalState: PersonalWorkspaceStateStore;
 let sessions: SessionManager;
+let sessionStore: HubSessionStore;
+let sessionStorePath = "";
 let server: ReturnType<typeof startHubServer>;
 let origin = "";
 let cookie = "";
+let bearerId = "";
 
 beforeAll(async () => {
   tempRoot = await mkdtemp(path.join(os.tmpdir(), "uatu-hub-int-"));
@@ -43,17 +46,19 @@ beforeAll(async () => {
     tls: null,
     users: [{ name: "tobias", passwordHash: await hashPassword("open sesame") }],
     stateDir: path.join(tempRoot, "state"),
-    local: false,
   };
 
   registry = new WorkspaceRegistry(path.join(tempRoot, "registry.json"));
   await registry.load();
   personalState = new PersonalWorkspaceStateStore(path.join(tempRoot, "personal-state.json"));
   await personalState.load();
+  sessionStorePath = path.join(tempRoot, "sessions.json");
+  sessionStore = new HubSessionStore(sessionStorePath);
+  await sessionStore.load();
   sessions = new SessionManager(registry, {
     local: new LocalProcessBackend({ uatuArgv: ["bun", "run", CLI_PATH] }),
   });
-  server = startHubServer({ config, registry, sessions, personalState, signingKey: "integration-signing-key-0123456789" });
+  server = startHubServer({ config, registry, sessions, sessionStore, personalState });
   origin = `http://127.0.0.1:${server.port}`;
 }, 30_000);
 
@@ -125,18 +130,70 @@ describe("hub end to end", () => {
     expect(await wrongPassword.text()).toBe(await unknownUser.text());
   });
 
-  test("login sets the signed hub cookie", async () => {
+  test("JSON login returns the session id and sets the session cookie", async () => {
     const response = await fetch(`${origin}/login`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: "tobias", password: "open sesame" }),
-      redirect: "manual",
+      body: JSON.stringify({ name: "tobias", password: "open sesame", deviceLabel: "integration test" }),
     });
-    expect(response.status).toBe(303);
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as { sessionId: string; user: string };
+    expect(payload.user).toBe("tobias");
+    expect(payload.sessionId.length).toBeGreaterThanOrEqual(32);
     const setCookie = response.headers.get("set-cookie") ?? "";
-    expect(setCookie).toContain("uatu_hub=");
+    expect(setCookie).toContain(`uatu_hub=${payload.sessionId}`);
     expect(setCookie).toContain("HttpOnly");
     cookie = setCookie.split(";")[0]!;
+    // Session ids never appear in URLs; the id in the body is the bearer
+    // credential for native clients.
+    bearerId = payload.sessionId;
+  });
+
+  test("the same session id resolves identically by cookie and bearer", async () => {
+    const viaCookie = await fetch(`${origin}/api/hub/state`, { headers: { cookie } });
+    const viaBearer = await fetch(`${origin}/api/hub/state`, {
+      headers: { authorization: `Bearer ${bearerId}` },
+    });
+    expect(viaCookie.status).toBe(200);
+    expect(viaBearer.status).toBe(200);
+    // An unknown bearer id is a machine-readable JSON 401, not a redirect.
+    const revokedProbe = await fetch(`${origin}/api/hub/state`, {
+      headers: { authorization: "Bearer not-a-real-session" },
+      redirect: "manual",
+    });
+    expect(revokedProbe.status).toBe(401);
+    expect((revokedProbe.headers.get("content-type") ?? "")).toContain("application/json");
+  });
+
+  test("sessions survive a hub restart via the persisted store", async () => {
+    // A fresh store instance over the same file is what a restarted hub
+    // process would build.
+    const reloaded = new HubSessionStore(sessionStorePath);
+    await reloaded.load();
+    expect(reloaded.resolve(bearerId)?.user).toBe("tobias");
+  });
+
+  test("bearer state-changing requests skip the Origin check; cookie ones keep it", async () => {
+    // A cross-origin POST with only a cookie is CSRF-shaped — refused.
+    const forged = await fetch(`${origin}/api/hub/workspaces`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin: "https://attacker.example" },
+      body: JSON.stringify({ path: "/nowhere" }),
+    });
+    expect(forged.status).toBe(403);
+    // The same request authenticated by bearer carries no ambient
+    // credential — the Origin header is irrelevant.
+    const viaBearer = await fetch(`${origin}/api/hub/workspaces`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${bearerId}`,
+        origin: "https://attacker.example",
+      },
+      body: JSON.stringify({ path: "relative-is-invalid" }),
+    });
+    // 400 (validation) proves it passed the gate and the CSRF layer.
+    expect(viaBearer.status).toBe(400);
   });
 
   test("the dashboard page links the hub manifest", async () => {
@@ -649,13 +706,61 @@ describe("hub end to end", () => {
     expect(await unknown.text()).toContain("No workspace");
   });
 
-  test("a valid cookie for a user removed from the config is rejected", async () => {
-    const { createSessionCookieValue } = await import("./auth");
-    const ghostCookie = `uatu_hub=${createSessionCookieValue("departed-user", "integration-signing-key-0123456789")}`;
+  test("a live session for a user removed from the config is rejected", async () => {
+    const ghost = await sessionStore.issue("departed-user", "old laptop");
+    const ghostCookie = `uatu_hub=${ghost.id}`;
     const response = await fetch(`${origin}/api/hub/state`, { headers: { cookie: ghostCookie } });
     expect(response.status).toBe(401);
     const proxied = await fetch(`${origin}/s/myproject/api/state`, { headers: { cookie: ghostCookie } });
     expect(proxied.status).toBe(401);
+    const viaBearer = await fetch(`${origin}/api/hub/state`, {
+      headers: { authorization: `Bearer ${ghost.id}` },
+    });
+    expect(viaBearer.status).toBe(401);
+  });
+
+  test("the dashboard sessions API lists devices and revokes by handle", async () => {
+    // A second device signs in.
+    const second = await fetch(`${origin}/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "tobias", password: "open sesame", deviceLabel: "other laptop" }),
+    });
+    expect(second.status).toBe(200);
+    const secondId = ((await second.json()) as { sessionId: string }).sessionId;
+
+    const listing = await fetch(`${origin}/api/hub/sessions`, { headers: { cookie } });
+    expect(listing.status).toBe(200);
+    const payload = (await listing.json()) as {
+      sessions: { handle: string; deviceLabel: string; issuedAt: number; current: boolean }[];
+    };
+    const current = payload.sessions.find(entry => entry.current);
+    expect(current?.deviceLabel).toBe("integration test");
+    const other = payload.sessions.find(entry => entry.deviceLabel === "other laptop");
+    expect(other).toBeDefined();
+    expect(other?.current).toBe(false);
+    // Handles are prefixes, never whole ids — the page must not hold live
+    // sibling credentials.
+    expect(other!.handle.length).toBeLessThan(secondId.length);
+    expect(secondId.startsWith(other!.handle)).toBe(true);
+
+    // Revoking the other device kills it for every transport, immediately.
+    const revoke = await fetch(`${origin}/api/hub/sessions/${encodeURIComponent(other!.handle)}/revoke`, {
+      method: "POST",
+      headers: { cookie, origin },
+    });
+    expect(revoke.status).toBe(200);
+    expect(((await revoke.json()) as { current: boolean }).current).toBe(false);
+    const dead = await fetch(`${origin}/api/hub/state`, {
+      headers: { authorization: `Bearer ${secondId}` },
+    });
+    expect(dead.status).toBe(401);
+    // The current session is untouched.
+    expect((await fetch(`${origin}/api/hub/state`, { headers: { cookie } })).status).toBe(200);
+
+    // The dashboard page ships the devices pane.
+    const dashboard = await fetch(`${origin}/`, { headers: { cookie, accept: "text/html" } });
+    expect(await dashboard.text()).toContain('id="devices"');
   });
 
   test("cookies gain Secure when a fronting proxy reports HTTPS", async () => {
@@ -663,9 +768,8 @@ describe("hub end to end", () => {
       method: "POST",
       headers: { "content-type": "application/json", "x-forwarded-proto": "https" },
       body: JSON.stringify({ name: "tobias", password: "open sesame" }),
-      redirect: "manual",
     });
-    expect(response.status).toBe(303);
+    expect(response.status).toBe(200);
     expect(response.headers.get("set-cookie") ?? "").toContain("Secure");
 
     // Plain loopback without a proxy stays un-Secure so local plain-HTTP
@@ -674,12 +778,21 @@ describe("hub end to end", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ name: "tobias", password: "open sesame" }),
-      redirect: "manual",
     });
     expect(plain.headers.get("set-cookie") ?? "").not.toContain("Secure");
   });
 
-  test("logout clears the hub session cookie and re-gates everything", async () => {
+  test("logout revokes the session server-side for every transport", async () => {
+    // Cross-origin logout is refused BEFORE anything is revoked
+    // (cookie-bearing forced sign-out).
+    const forged = await fetch(`${origin}/logout`, {
+      method: "POST",
+      headers: { cookie, origin: "https://attacker.example" },
+      redirect: "manual",
+    });
+    expect(forged.status).toBe(403);
+    expect((await fetch(`${origin}/api/hub/state`, { headers: { cookie } })).status).toBe(200);
+
     const response = await fetch(`${origin}/logout`, {
       method: "POST",
       headers: { cookie, origin },
@@ -691,22 +804,25 @@ describe("hub end to end", () => {
     expect(setCookie).toContain("uatu_hub=;");
     expect(setCookie).toContain("Max-Age=0");
 
-    // A browser honoring that Set-Cookie no longer has credentials.
-    const afterLogout = await fetch(`${origin}/api/hub/state`);
-    expect(afterLogout.status).toBe(401);
-
-    // Cross-origin logout is refused (cookie-bearing CSRF).
-    const forged = await fetch(`${origin}/logout`, {
-      method: "POST",
-      headers: { cookie, origin: "https://attacker.example" },
-      redirect: "manual",
+    // Revocation is server-side: the captured cookie value is dead even if
+    // a client kept a copy, and the same id presented as bearer dies too.
+    const replayed = await fetch(`${origin}/api/hub/state`, { headers: { cookie } });
+    expect(replayed.status).toBe(401);
+    const viaBearer = await fetch(`${origin}/api/hub/state`, {
+      headers: { authorization: `Bearer ${bearerId}` },
     });
-    expect(forged.status).toBe(403);
+    expect(viaBearer.status).toBe(401);
 
-    // Our captured cookie value still verifies (logout is client-side
-    // cookie removal, not key rotation) — keep using it for the tests below.
-    const stillValid = await fetch(`${origin}/api/hub/state`, { headers: { cookie } });
-    expect(stillValid.status).toBe(200);
+    // Re-login for the remaining tests.
+    const relogin = await fetch(`${origin}/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "tobias", password: "open sesame" }),
+    });
+    expect(relogin.status).toBe(200);
+    const payload = (await relogin.json()) as { sessionId: string };
+    cookie = `uatu_hub=${payload.sessionId}`;
+    bearerId = payload.sessionId;
   });
 
   test("resume brings the session back, and stopAll terminates every child", async () => {

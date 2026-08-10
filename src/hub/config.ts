@@ -32,27 +32,9 @@ export type HubConfig = {
   host: string;
   tls: HubTlsConfig | null;
   users: HubUser[];
-  // Optional override for the XDG state dir (registry + signing key).
+  // Optional override for the XDG state dir (registry + session store).
   stateDir?: string;
-  // Trusted single-user loopback mode (`uatu hub --local`): auth is
-  // bypassed, login routes are absent, and the bind is loopback-only.
-  // Never true for a file-loaded config.
-  local: boolean;
 };
-
-// The config for `uatu hub --local`: loopback bind, no users, no TLS. The
-// desktop app runs the hub this way; trust is the same as `uatu serve` on
-// loopback — any process that can reach 127.0.0.1 already owns the account.
-export function localHubConfig(options: { port: number; stateDir?: string }): HubConfig {
-  return {
-    port: options.port,
-    host: "127.0.0.1",
-    tls: null,
-    users: [],
-    stateDir: options.stateDir,
-    local: true,
-  };
-}
 
 export function defaultHubConfigPath(env: Record<string, string | undefined> = process.env): string {
   const configHome =
@@ -121,7 +103,7 @@ export function parseHubConfig(raw: unknown): HubConfig {
   }
 
   if (!Array.isArray(record.users) || record.users.length === 0) {
-    throw new Error("hub config: users must be a non-empty array — run 'uatu hub hash-password' to create an entry");
+    throw new Error(noUsersHelp("hub config: users must be a non-empty array."));
   }
   const users: HubUser[] = [];
   const seenNames = new Set<string>();
@@ -157,14 +139,26 @@ export function parseHubConfig(raw: unknown): HubConfig {
     stateDir = expandHomePath(record.stateDir);
   }
 
-  return { port, host, tls, users, stateDir, local: false };
+  return { port, host, tls, users, stateDir };
+}
+
+// The no-users startup error doubles as the bootstrap instructions: a
+// single-user config is the expected first setup, and this message is the
+// only place a new operator learns the two steps.
+function noUsersHelp(problem: string): string {
+  return [
+    `${problem} The hub requires at least one configured user:`,
+    "  1. run 'uatu hub hash-password' and enter a password",
+    `  2. write the config file (default: ${defaultHubConfigPath()}):`,
+    '     { "users": [{ "name": "<your-name>", "passwordHash": "<hash from step 1>" }] }',
+  ].join("\n");
 }
 
 export async function loadHubConfig(configPath?: string): Promise<HubConfig> {
   const resolved = configPath ? expandHomePath(configPath) : defaultHubConfigPath();
   const file = Bun.file(resolved);
   if (!(await file.exists())) {
-    throw new Error(`hub config not found: ${resolved}`);
+    throw new Error(noUsersHelp(`hub config not found: ${resolved}.`));
   }
   let raw: unknown;
   try {

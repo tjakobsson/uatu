@@ -7,7 +7,6 @@ import {
   defaultHubConfigPath,
   expandHomePath,
   isLoopbackHost,
-  localHubConfig,
   parseHubConfig,
 } from "./config";
 
@@ -20,8 +19,6 @@ describe("parseHubConfig", () => {
     expect(config.host).toBe("127.0.0.1");
     expect(config.tls).toBeNull();
     expect(config.users).toEqual([USER]);
-    // File-loaded configs are never local mode.
-    expect(config.local).toBe(false);
   });
 
   test("accepts a full config and expands ~ paths", () => {
@@ -53,6 +50,10 @@ describe("parseHubConfig", () => {
   test("requires a non-empty users list with names and hashes", () => {
     expect(() => parseHubConfig({})).toThrow(/users must be a non-empty array/);
     expect(() => parseHubConfig({ users: [] })).toThrow(/users must be a non-empty array/);
+    // The no-users error is the bootstrap instructions: it names both
+    // setup steps so a first-run operator is never stranded.
+    expect(() => parseHubConfig({ users: [] })).toThrow(/hash-password/);
+    expect(() => parseHubConfig({ users: [] })).toThrow(/passwordHash/);
     expect(() => parseHubConfig({ users: [{ name: "" }] })).toThrow(/non-empty name/);
     expect(() => parseHubConfig({ users: [{ name: "a" }] })).toThrow(/passwordHash/);
     expect(() => parseHubConfig({ users: [USER, USER] })).toThrow(/duplicate user name/);
@@ -62,17 +63,6 @@ describe("parseHubConfig", () => {
     expect(() => parseHubConfig({ port: 0, users: [USER] })).toThrow(/invalid port/);
     expect(() => parseHubConfig({ port: "4700", users: [USER] })).toThrow(/invalid port/);
     expect(() => parseHubConfig({ tls: { cert: "/x.pem" }, users: [USER] })).toThrow(/both cert and key/);
-  });
-});
-
-describe("localHubConfig", () => {
-  test("builds a loopback, userless, TLS-free local-mode config", () => {
-    const config = localHubConfig({ port: 0 });
-    expect(config.local).toBe(true);
-    expect(config.host).toBe("127.0.0.1");
-    expect(config.tls).toBeNull();
-    expect(config.users).toEqual([]);
-    expect(config.port).toBe(0);
   });
 });
 

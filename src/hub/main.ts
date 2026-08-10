@@ -4,48 +4,39 @@
 // `uatu hub` and `uatu hub hash-password`.
 
 import { LocalProcessBackend } from "./backend";
-import { hashPassword } from "./auth";
-import { isLoopbackHost, loadHubConfig, localHubConfig } from "./config";
+import { hashPassword, HubSessionStore } from "./auth";
+import { loadHubConfig } from "./config";
 import { WorkspaceRegistry } from "./registry";
 import { PersonalWorkspaceStateStore } from "./personal-state";
 import {
   ensureStateDir,
-  loadOrCreateSigningKey,
   personalWorkspaceStatePath,
   registryPath,
   resolveHubStateRoot,
+  sessionsPath,
 } from "./state-dir";
 import { startHubServer } from "./server";
 import { SessionManager } from "./sessions";
 
 export type RunHubOptions = {
   configPath?: string;
-  // `uatu hub --local`: trusted single-user loopback mode, no config file.
-  local?: boolean;
-  // Overrides the port (config or default). `--local --port 0` is how the
-  // desktop app gets an ephemeral port it reads back from stdout.
+  // Overrides the port (config or default); 0 requests an ephemeral port
+  // reported by the printed URL.
   port?: number;
   // Orphan backstop for supervising wrappers, mirroring `uatu serve`.
   exitOnStdinClose?: boolean;
 };
 
 export async function runHub(options: RunHubOptions): Promise<void> {
-  const config = options.local
-    ? localHubConfig({ port: options.port ?? 0 })
-    : await loadHubConfig(options.configPath);
+  const config = await loadHubConfig(options.configPath);
   if (options.port !== undefined) {
     config.port = options.port;
-  }
-  // Local mode is trusted BECAUSE it is unreachable from the network; a
-  // non-loopback bind would be an open shell. localHubConfig hardcodes
-  // loopback, so this guards against future config plumbing, not users.
-  if (config.local && !isLoopbackHost(config.host)) {
-    throw new Error(`hub --local is loopback-only; refusing to bind '${config.host}'`);
   }
 
   const stateRoot = config.stateDir ?? resolveHubStateRoot();
   await ensureStateDir(stateRoot);
-  const signingKey = await loadOrCreateSigningKey(stateRoot);
+  const sessionStore = new HubSessionStore(sessionsPath(stateRoot));
+  await sessionStore.load();
 
   const registry = new WorkspaceRegistry(registryPath(stateRoot));
   await registry.load();
@@ -54,12 +45,12 @@ export async function runHub(options: RunHubOptions): Promise<void> {
   await personalState.recoverPendingForgets(workspaceId => registry.byId(workspaceId) !== undefined);
 
   const sessions = new SessionManager(registry, { local: new LocalProcessBackend() });
-  const server = startHubServer({ config, registry, sessions, signingKey, personalState });
+  const server = startHubServer({ config, registry, sessions, sessionStore, personalState });
 
   const scheme = config.tls ? "https" : "http";
   console.log(`${scheme}://${config.host}:${server.port}/`);
   console.error(
-    `uatu hub${config.local ? " (local mode)" : ""}: state in ${stateRoot}; ${registry.list().length} registered workspace(s)`,
+    `uatu hub: state in ${stateRoot}; ${registry.list().length} registered workspace(s)`,
   );
 
   let shuttingDown = false;

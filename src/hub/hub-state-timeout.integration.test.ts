@@ -7,19 +7,18 @@ import os from "node:os";
 import path from "node:path";
 
 import type { RunningSession, SessionBackend } from "./backend";
-import { createSessionCookieValue, hashPassword } from "./auth";
+import { hashPassword, HubSessionStore } from "./auth";
 import type { HubConfig } from "./config";
 import { PersonalWorkspaceStateStore } from "./personal-state";
 import { WorkspaceRegistry } from "./registry";
 import { startHubServer } from "./server";
 import { SessionManager } from "./sessions";
 
-const KEY = "timeout-test-signing-key-0123456789";
-
 let tempRoot = "";
 let tarpit: ReturnType<typeof Bun.serve> | null = null;
 let hub: ReturnType<typeof startHubServer> | null = null;
 let sessions: SessionManager;
+let sessionStore: HubSessionStore;
 
 beforeAll(async () => {
   tempRoot = await mkdtemp(path.join(os.tmpdir(), "uatu-hub-tarpit-"));
@@ -56,9 +55,10 @@ beforeAll(async () => {
     tls: null,
     users: [{ name: "t", passwordHash: await hashPassword("x") }],
     stateDir: path.join(tempRoot, "state"),
-    local: false,
   };
-  hub = startHubServer({ config, registry, sessions, personalState, signingKey: KEY });
+  sessionStore = new HubSessionStore(path.join(tempRoot, "sessions.json"));
+  await sessionStore.load();
+  hub = startHubServer({ config, registry, sessions, sessionStore, personalState });
 });
 
 afterAll(async () => {
@@ -71,7 +71,7 @@ describe("hub state with a wedged child", () => {
   test(
     "/api/hub/state completes with the shell summary omitted",
     async () => {
-      const cookie = `uatu_hub=${createSessionCookieValue("t", KEY)}`;
+      const cookie = `uatu_hub=${(await sessionStore.issue("t", "test")).id}`;
       const started = Date.now();
       const response = await fetch(`http://127.0.0.1:${hub!.port}/api/hub/state`, {
         headers: { cookie },
