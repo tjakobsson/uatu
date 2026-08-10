@@ -23,7 +23,10 @@ code fences exist in the file but not in the rendered DOM.
 `⇧⌘F` (`Ctrl+Shift+F` on non-Apple platforms) SHALL open project search and focus
 its query input regardless of which surface is active. Unlike `⌘F`, it SHALL NOT
 be routed by the active surface, because the tree is not a surface the user can
-be "in".
+be "in". Opening SHALL reveal the pane however it is currently hidden — a
+collapsed sidebar, a hidden or collapsed pane, or a touch-mode session whose
+active tab is not Files — so that the shortcut never focuses an input inside a
+`display: none` subtree.
 
 #### Scenario: Opening project search from the terminal
 
@@ -39,6 +42,11 @@ be "in".
 
 - **WHEN** the user has hidden the Search pane and presses `⇧⌘F`
 - **THEN** the pane is shown and expanded before its input takes focus
+
+#### Scenario: Search pane is revealed from a non-Files touch tab
+
+- **WHEN** the Preview or Terminal tab is active in touch mode and the user presses `⇧⌘F` on a hardware keyboard
+- **THEN** the Files tab becomes active, showing the Search pane with its query input focused and its results visible
 
 ### Requirement: Search corpus is the watched, non-binary documents
 
