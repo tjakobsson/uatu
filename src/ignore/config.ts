@@ -1,7 +1,9 @@
 // Loads the `ignore` block from `.uatu.json` — the single block the file
 // carries: content-scoping facts about the repository (exclude patterns +
 // gitignore respect). Owned by `src/ignore/` because the ignore engine is
-// its only consumer.
+// the config's only consumer; the returned `warnings` are the single source
+// of `.uatu.json` warnings (read, parse, and shape), surfaced in the Change
+// Overview via `collectConfigWarnings`.
 
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -36,13 +38,15 @@ export async function loadIgnoreConfig(rootPath: string): Promise<IgnoreConfigRe
     return null;
   });
 
-  if (!source) return { config, warnings };
+  // Only absence is silent — an existing-but-empty file falls through to
+  // JSON.parse so it warns like any other malformed content.
+  if (source === null) return { config, warnings };
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(source);
-  } catch {
-    // document/git-data.ts already surfaces a parse warning; don't double-warn.
+  } catch (error) {
+    warnings.push(`Invalid .uatu.json: ${error instanceof Error ? error.message : String(error)}`);
     return { config, warnings };
   }
 

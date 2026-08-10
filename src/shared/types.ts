@@ -144,8 +144,9 @@ export type RepositorySnapshot = {
   // (e.g. node_modules contents) over the wire. Their only consumer is tree
   // row annotation.
   gitIgnoredFiles: string[];
-  // `.uatu.json` parse warnings (read failure, invalid JSON), surfaced in the
-  // Change Overview pane.
+  // `.uatu.json` warnings (read failure, invalid JSON, invalid ignore shapes)
+  // from each directory watch root, surfaced in the Change Overview pane —
+  // also for non-git roots, whose filtering the file still controls.
   configWarnings: string[];
   message: string | null;
   commitLog: CommitLogEntry[];

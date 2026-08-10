@@ -18,6 +18,7 @@ import type {
 import { DEFAULT_COMPARE_TARGET } from "../shared/types";
 import type { WatchEntry } from "../server/roots";
 import { applyCompareTarget, resolveCompareBase, safeGit } from "./git-base-ref";
+import { loadIgnoreConfig } from "../ignore/config";
 
 export { safeGit, setGitMetricsSink } from "./git-base-ref";
 
@@ -29,6 +30,9 @@ type RepositoryGroup = {
   rootPath: string;
   label: string;
   watchedRootIds: string[];
+  // Directory watch roots whose `.uatu.json` the ignore engine reads. File
+  // entries contribute nothing: single-file roots skip ignore config.
+  configRoots: string[];
   status: "git" | "non-git" | "unavailable";
   message: string | null;
 };
@@ -71,6 +75,7 @@ async function detectRepositoryGroups(
         rootPath: probePath,
         label,
         watchedRootIds: [rootId],
+        configRoots: entry.kind === "dir" ? [entry.absolutePath] : [],
         status: "non-git",
         message: "No git repository is available for this watched root.",
       });
@@ -81,6 +86,9 @@ async function detectRepositoryGroups(
     const existing = gitGroups.get(repoRoot);
     if (existing) {
       existing.watchedRootIds.push(rootId);
+      if (entry.kind === "dir") {
+        existing.configRoots.push(entry.absolutePath);
+      }
       continue;
     }
 
@@ -90,6 +98,7 @@ async function detectRepositoryGroups(
       rootPath: repoRoot,
       label,
       watchedRootIds: [rootId],
+      configRoots: entry.kind === "dir" ? [entry.absolutePath] : [],
       status: "git",
       message: null,
     };
@@ -105,14 +114,14 @@ async function snapshotGroup(
   roots: readonly RootGroup[],
   compareTarget: CompareTarget,
 ): Promise<RepositorySnapshot> {
+  const configWarnings = await collectConfigWarnings(group.rootPath, group.configRoots);
   if (group.status !== "git") {
-    return unavailableSnapshot(group, "non-git", group.message, unavailableMetadata(group, "non-git", group.message));
+    return unavailableSnapshot(group, "non-git", group.message, unavailableMetadata(group, "non-git", group.message), configWarnings);
   }
 
-  const configWarnings = await collectConfigWarnings(group.rootPath);
   const metadata = await collectMetadata(group);
   if (metadata.status !== "git") {
-    return unavailableSnapshot(group, "unavailable", metadata.message, metadata);
+    return unavailableSnapshot(group, "unavailable", metadata.message, metadata, configWarnings);
   }
 
   const resolvedBase = await resolveCompareBase(group.rootPath);
@@ -148,6 +157,7 @@ function unavailableSnapshot(
   status: "non-git" | "unavailable",
   message: string | null,
   metadata: RepositoryMetadata,
+  configWarnings: string[],
 ): RepositorySnapshot {
   return {
     id: group.id,
@@ -166,7 +176,7 @@ function unavailableSnapshot(
     },
     changedFiles: [],
     gitIgnoredFiles: [],
-    configWarnings: [],
+    configWarnings,
     message,
     commitLog: [],
   };
@@ -217,27 +227,32 @@ async function collectMetadata(group: RepositoryGroup): Promise<RepositoryMetada
   };
 }
 
-// `.uatu.json` parse warnings surfaced in the Change Overview pane. Only
-// read/parse failures warrant a warning here — block-level validation lives
-// with each block's loader.
-export async function collectConfigWarnings(repoRoot: string): Promise<string[]> {
+// `.uatu.json` warnings surfaced in the Change Overview pane. The ignore
+// loader is the single source — read, parse, and shape warnings alike — and
+// it is read per *directory watch root*, since that is the file that
+// actually controls filtering (the engine never reads the repository top
+// level when a root sits below it). A warning from a root below the top is
+// prefixed with the root's repo-relative path so multiple roots stay
+// distinguishable; a root at the top keeps the bare message.
+export async function collectConfigWarnings(repoRoot: string, configRoots: string[] = [repoRoot]): Promise<string[]> {
+  // Realpath both sides before relativizing — `rev-parse --show-toplevel`
+  // resolves symlinks (`/var` → `/private/var` on macOS) while watch entries
+  // keep the caller's spelling, and a mismatch would inject `../` prefixes.
+  const resolvedRepoRoot = await fs.realpath(repoRoot).catch(() => repoRoot);
+  const resolvedConfigRoots = new Set(
+    await Promise.all(configRoots.map(configRoot => fs.realpath(configRoot).catch(() => configRoot))),
+  );
   const warnings: string[] = [];
-  const filePath = path.join(repoRoot, ".uatu.json");
-  const source = await fs.readFile(filePath, "utf8").catch(error => {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      warnings.push(`Could not read .uatu.json: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    return null;
-  });
-
-  if (source) {
-    try {
-      JSON.parse(source);
-    } catch (error) {
-      warnings.push(`Invalid .uatu.json: ${error instanceof Error ? error.message : String(error)}`);
+  for (const configRoot of resolvedConfigRoots) {
+    const { warnings: rootWarnings } = await loadIgnoreConfig(configRoot);
+    const rel = path.relative(resolvedRepoRoot, configRoot).split(path.sep).join("/");
+    for (const warning of rootWarnings) {
+      const qualified = rel ? `${rel}: ${warning}` : warning;
+      if (!warnings.includes(qualified)) {
+        warnings.push(qualified);
+      }
     }
   }
-
   return warnings;
 }
 
