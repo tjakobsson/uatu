@@ -1,3 +1,14 @@
+> **Archived unverified, superseded by one-trust-model
+> ([#218](https://github.com/tjakobsson/uatu/pull/218)).** That change replaced
+> this one's client-side revocation model (two Keychain secrets,
+> cookie-disappearance detection) with server-side sessions and a single
+> session-id credential, and absorbed the still-true requirements — sign-out
+> revokes and forgets, every window returns to the splash, no silent re-login
+> after revocation — into the main `desktop-hub-connect` spec. The remaining
+> manual passes (5.3–5.6) verify behavior that no longer exists in this form,
+> so this change is archived with `--skip-specs`: syncing its deltas would
+> reintroduce the pre-#218 model and the removed `--local` mode.
+
 ## 1. Revocation Primitives
 
 - [x] 1.1 Add `HubCookies.clear(for:)` in `HubAPI.swift`, deleting the `uatu_hub` cookie for a hub's host from the shared web-view cookie store, alongside the existing `inject`.
