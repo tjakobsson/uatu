@@ -1,6 +1,6 @@
 import { captureTerminalToken } from "./terminal/client";
 import { initHubNav } from "./shell/hub-nav";
-import { injectPwaLinks } from "./shell/pwa";
+import { injectPwaLinks, unregisterLegacyServiceWorkers } from "./shell/pwa";
 import { attachPopstateHandler } from "./shell/history";
 import { loadInitialState } from "./shell/boot";
 import { installAnchorHandlers } from "./preview/anchors";
@@ -117,6 +117,9 @@ attachAutoStackObserver();
 captureTerminalToken();
 
 injectPwaLinks();
+// Nothing waits on this: it is housekeeping for profiles that predate 0.5.0,
+// and it is removed once 0.7.0 ships.
+unregisterLegacyServiceWorkers();
 attachPopstateHandler();
 
 void loadInitialState().then(() => {

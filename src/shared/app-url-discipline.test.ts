@@ -22,6 +22,10 @@ const ALLOWED_FILES = new Set([
   // Hub-level URLs are origin-rooted on purpose: the hub's API lives
   // OUTSIDE the session's base path, so appUrl() must not touch them.
   "src/shell/hub-nav.ts",
+  // The legacy-worker cleanup MATCHES a historical script path rather than
+  // building a URL to request, and it has to match it at the origin root as
+  // well as under the base path — appUrl() can only produce the latter.
+  "src/shell/pwa.ts",
   // Server-side route matching / response construction:
   "src/terminal/sessions-route.ts",
   "src/terminal/auth.ts",
