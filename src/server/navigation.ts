@@ -109,6 +109,16 @@ export function shellCacheKey(hostname: string, port: number, basePath: string):
   return `${hostname}:${port}:${basePath}:${BUILD.commitSha}`;
 }
 
+// Whether a fetched shell body may be cached for the rest of the process.
+// Bun's dev-mode HTML server emits content-addressed /_bun/ asset refs and
+// re-bundles IN-PROCESS when sources change — a cached copy would keep chunk
+// refs the live bundle no longer serves, and no process-lifetime key (commit
+// included) can see that regeneration. The compiled bundle emits /chunk-*
+// refs and is immutable for the process lifetime, so only it is cacheable.
+export function isCacheableShellBody(body: string): boolean {
+  return !body.includes("/_bun/");
+}
+
 // Relocates the bundled shell HTML under a base path. Bun's HTMLBundle emits
 // root-absolute chunk/asset references (src="/chunk-….js"), which a browser
 // that loaded the page at /s/<id>/ would request outside the prefix — so
@@ -187,7 +197,9 @@ export async function spaShellResponse(
     return new Response(`SPA shell unavailable: ${message}`, { status: 502 });
   }
 
-  shellCache.set(key, { body, contentType });
+  if (isCacheableShellBody(body)) {
+    shellCache.set(key, { body, contentType });
+  }
   return new Response(body, {
     headers: {
       "content-type": contentType,

@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { BUNDLE_ASSET_PREFIX, createNavigationFetchHandler, prefersHtmlNavigation, relocateCssUrls, relocateShellHtml, resolveKnownDocument, shellCacheKey, spaShellResponse } from "./navigation";
+import { BUNDLE_ASSET_PREFIX, createNavigationFetchHandler, isCacheableShellBody, prefersHtmlNavigation, relocateCssUrls, relocateShellHtml, resolveKnownDocument, shellCacheKey, spaShellResponse } from "./navigation";
 import { BUILD } from "../shared/version";
 import { resolveWatchRoots, scanRoots } from "./roots";
 import { createWatchSession } from "./watch-session";
@@ -326,6 +326,64 @@ describe("shellCacheKey", () => {
     const key = shellCacheKey("127.0.0.1", 4711, "/s/alpha/");
     expect(key).toContain("127.0.0.1:4711:/s/alpha/");
     expect(key).toContain(BUILD.commitSha);
+  });
+});
+
+describe("shell cache vs in-process rebundling", () => {
+  test("dev-mode shell bodies (/_bun/ refs) are never cacheable; compiled bodies are", () => {
+    expect(isCacheableShellBody(`<script src="/_bun/client/index-00ff.js"></script>`)).toBe(false);
+    expect(isCacheableShellBody(`<script src="${BUNDLE_ASSET_PREFIX}/_bun/client/index-00ff.js"></script>`)).toBe(false);
+    expect(isCacheableShellBody(`<script src="/s/alpha/_bun/client/index-00ff.js"></script>`)).toBe(false);
+    expect(isCacheableShellBody(`<script src="${BUNDLE_ASSET_PREFIX}/chunk-abcd1234.js"></script>`)).toBe(true);
+    expect(isCacheableShellBody(`<script src="/s/alpha/chunk-abcd1234.js"></script>`)).toBe(true);
+  });
+
+  test("a dev-mode shell is re-fetched after an in-process rebundle; a compiled shell is cached", async () => {
+    // Stand-in for Bun's dev-mode HTML server: the internal shell route can
+    // start serving different content-addressed refs WITHOUT the process
+    // (or BUILD.commitSha) changing.
+    let devBody = `<html><head></head><body><script src="/_bun/client/index-aaaa.js"></script></body></html>`;
+    let compiledBody = `<html><head></head><body><script src="/chunk-aaaa1111.js"></script></body></html>`;
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      routes: {
+        "/__uatu/shell": {
+          GET: () =>
+            new Response(devBody, { headers: { "content-type": "text/html; charset=utf-8" } }),
+        },
+      },
+      fetch: () => new Response("nf", { status: 404 }),
+    });
+    const compiledServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      routes: {
+        "/__uatu/shell": {
+          GET: () =>
+            new Response(compiledBody, { headers: { "content-type": "text/html; charset=utf-8" } }),
+        },
+      },
+      fetch: () => new Response("nf", { status: 404 }),
+    });
+    try {
+      const first = await (await spaShellResponse(server)).text();
+      expect(first).toContain("index-aaaa");
+      devBody = devBody.replace("index-aaaa", "index-bbbb");
+      const second = await (await spaShellResponse(server)).text();
+      // The rebundled refs must reach the browser — no process-lifetime cache.
+      expect(second).toContain("index-bbbb");
+
+      const firstCompiled = await (await spaShellResponse(compiledServer)).text();
+      expect(firstCompiled).toContain("chunk-aaaa1111");
+      compiledBody = compiledBody.replace("chunk-aaaa1111", "chunk-bbbb2222");
+      const secondCompiled = await (await spaShellResponse(compiledServer)).text();
+      // Compiled bundles cannot change in-process; the cache serves the copy.
+      expect(secondCompiled).toContain("chunk-aaaa1111");
+    } finally {
+      server.stop(true);
+      compiledServer.stop(true);
+    }
   });
 });
 
