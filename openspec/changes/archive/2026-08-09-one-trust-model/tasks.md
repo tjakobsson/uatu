@@ -22,7 +22,7 @@
 - [x] 3.2 Splash: remove the "This Mac" card, folder picker registration, and recents import; add the no-hubs first-run explainer; window lifecycle states become splash/connecting/open/failed.
 - [x] 3.3 HubAPI moves to bearer: Keychain stores the session id (and password for silent re-login); 401 → one silent re-login then sign-in prompt; replace the #201 generation-guard machinery with the server-revocation flow; web views get the id written as the hub cookie before navigation.
 - [x] 3.4 Remove quit interception/warnings; update `scripts/install-desktop-local.sh` and both CI/release workflows to build without the CLI.
-- [ ] 3.5 Manual acceptance: remote hub + localhost hub in the roster, sign-out revokes across windows and native polls, revoke-from-dashboard bounces the desktop to sign-in.
+- [x] 3.5 Manual acceptance: remote hub + localhost hub in the roster, sign-out revokes across windows and native polls, revoke-from-dashboard bounces the desktop to sign-in.
 
 ## 4. Deprecate public serve
 
