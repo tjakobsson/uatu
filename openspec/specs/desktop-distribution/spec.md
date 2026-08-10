@@ -13,8 +13,8 @@ The tag-triggered release workflow SHALL include a macOS job that builds the des
 
 ### Requirement: Signing and notarization are gated on credential availability
 When Developer ID signing secrets are configured, the release job MUST codesign
-the embedded `uatu` binary (hardened runtime, JIT entitlement) and the app
-bundle, submit for notarization, staple the ticket, attach the signed archives to
+the app bundle (hardened runtime; there is no embedded binary to nested-sign),
+submit for notarization, staple the ticket, attach the signed archives to
 the GitHub release, and include them in the published checksums. It SHALL also
 generate a GitHub build-provenance attestation for each signed archive and
 attach the archive's Sigstore bundle (retrieved from the attestation store) to
