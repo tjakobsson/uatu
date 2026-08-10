@@ -54,6 +54,10 @@ export type BuildSummary = {
   commitShort: string;
   release: boolean;
   identifier: string;
+  // Client/server contract revision (shared/version.ts API_REVISION). The
+  // client-freshness handshake compares it against the client's own embedded
+  // value; a differing revision must be surfaced, never silently ignored.
+  apiRevision: number;
 };
 
 export type Scope = { kind: "folder" } | { kind: "file"; documentId: string };

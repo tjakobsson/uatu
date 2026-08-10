@@ -251,7 +251,6 @@ Every `appState` field has exactly one owning module: direct assignment (`appSta
 | `selectedId`, `previewMode` | `shell/selection.ts` |
 | `followEnabled` | `shell/follow.ts` (the four follow-mode rules) |
 | `roots`, `repositories`, `scope`, `unscopedFingerprint` | `shell/events.ts` (`applyServerSnapshot`) |
-| `staleHint` | `shell/stale-hint-mount.ts` |
 | `viewMode`, `wrap` | `preview/view-mode.ts` |
 | `viewLayout`, `splitRatio` | `preview/layout.ts` |
 | `diffStyle` | `preview/diff.ts` |
@@ -459,6 +458,18 @@ being where the searched text always exists.
 1. Add the route to `src/server/routes.ts` inside the `buildRoutes(deps)` function. Use `deps` for anything the handler needs (the watch session, the metrics snapshot, e2e helpers, etc.) — do not reach into module-level state from inside the handler.
 2. If the route is prod-only or e2e-only, place it inside the appropriate `mode === "prod"` / `mode === "e2e"` branch and add the required dep to the corresponding `ProdRouteDeps` / `E2ERouteDeps` shape.
 3. Both `src/cli.ts` and `tests/e2e/server.ts` will pick up the new route automatically — they each `Bun.serve({ routes: buildRoutes(...) })`.
+
+### Break the client/server API contract
+
+1. If a change renames/reshapes state-payload fields, changes endpoint
+   semantics, or otherwise breaks clients built from an older commit, bump
+   `API_REVISION` in `src/shared/version.ts` in the same change.
+2. That's the whole mechanism: the client-freshness handshake
+   (`src/shell/freshness.ts`) compares the server's `build.apiRevision`
+   (riding every state payload) against the client's embedded value, next to
+   the version/commit comparison that catches every build mismatch anyway.
+   `API_REVISION` only adds intent — "this break was known" — and lets
+   future native clients refuse to run against an incompatible server.
 
 ### Add an e2e test
 

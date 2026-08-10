@@ -24,7 +24,7 @@ import { e2ePort, resetE2EWorkspace, workspaceRoot } from "./config";
 const E2E_WORKSPACE_ROOT = workspaceRoot();
 const E2E_PORT = e2ePort();
 import { safeGit } from "../../src/document/git-base-ref";
-import { createNavigationFetchHandler, INTERNAL_SHELL_PATH } from "../../src/server/navigation";
+import { createNavigationFetchHandler, INTERNAL_SHELL_PATH, spaShellResponse } from "../../src/server/navigation";
 import { resolveWatchRoots, type WatchEntry } from "../../src/server/roots";
 import { createWatchSession } from "../../src/server/watch-session";
 import {
@@ -154,11 +154,11 @@ server = Bun.serve({
   routes: {
     // The HTMLBundle MUST be a literal at this call site (see the matching
     // comment in src/cli.ts) so Bun's bundler can wire up the chunk URLs.
-    // The e2e harness always serves at the default base path, so "/" maps
-    // to it directly; INTERNAL_SHELL_PATH backs spaShellResponse's cache
-    // fetch. The remaining routes come from `buildRoutes`.
+    // INTERNAL_SHELL_PATH backs spaShellResponse's cache fetch; "/" serves
+    // through spaShellResponse like production so the e2e suite exercises
+    // the same no-cache HTML + prefixed bundle-asset flow browsers get.
     [INTERNAL_SHELL_PATH]: index,
-    "/": index,
+    "/": { GET: () => spaShellResponse(server) },
     ...buildRoutes({
       mode: "e2e",
       assets: {

@@ -107,6 +107,14 @@ describe("hub end to end", () => {
     expect(await login.text()).toContain('<link rel="manifest" href="/manifest.webmanifest" />');
   });
 
+  test("hub HTML pages are never cached", async () => {
+    // client-freshness: every HTML entry point revalidates. The login page
+    // is the anonymous one; the dashboard is asserted in the signed-in
+    // proxying test below.
+    const login = await fetch(`${origin}/login`, { headers: { accept: "text/html" } });
+    expect(login.headers.get("cache-control")).toBe("no-store");
+  });
+
   test("the login page carries no version string; the dashboard renders it for signed-in users", async () => {
     const { BUILD, formatBuildIdentifier } = await import("../shared/version");
     const login = await fetch(`${origin}/login`, { headers: { accept: "text/html" } });
@@ -279,9 +287,15 @@ describe("hub end to end", () => {
 
     const shell = await fetch(`${origin}/s/myproject/`, { headers: { cookie, accept: "text/html" } });
     expect(shell.status).toBe(200);
+    // client-freshness: the proxy must preserve the child's no-cache on the
+    // shell HTML, and the hub's own dashboard HTML must revalidate too.
+    expect(shell.headers.get("cache-control")).toBe("no-cache");
     const html = await shell.text();
     expect(html).toContain('name="uatu-base-path"');
     expect(html).toContain("/s/myproject/");
+
+    const dashboard = await fetch(`${origin}/`, { headers: { cookie, accept: "text/html" } });
+    expect(dashboard.headers.get("cache-control")).toBe("no-store");
   });
 
   test("stylesheet assets (the bundled font) resolve through the prefix", async () => {

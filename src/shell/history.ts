@@ -8,14 +8,12 @@
 // must not, by itself, install a global event listener.
 
 import { appDocumentRelativePath, appUrl } from "../shared/app-url";
-import { applyStaleHint } from "./stale-hint-mount";
 import { findDocumentById, findDocumentByRelativePath } from "./storage";
 import { loadDocument } from "../preview/mount";
 import { renderEmptyPreview } from "../preview/empty";
 import { renderSidebar } from "../sidebar/shell";
 import { setFollowEnabled, syncFollowToggle } from "./follow";
 import { defaultDocumentId } from "../shared/types";
-import { nextStaleHint } from "./stale-hint";
 import { appState } from "./state";
 import { setPreviewMode, setSelectedId } from "./selection";
 import {
@@ -144,7 +142,6 @@ export function attachPopstateHandler() {
       setFollowEnabled(false);
       syncFollowToggle();
     }
-    applyStaleHint(nextStaleHint(appState.staleHint, { kind: "manual-navigation" }));
 
     const commitPreview = commitPreviewParamsFromUrl();
     if (commitPreview) {

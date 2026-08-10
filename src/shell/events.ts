@@ -1,9 +1,10 @@
 // Live event stream — opens the /api/events EventSource and dispatches each
-// `state` payload back into the app. The reducer logic for stale-hint
-// behavior, follow-mode auto-switching, and on-disk-change reloads lives in
+// `state` payload back into the app. The reducer logic for build-freshness
+// checking, follow-mode auto-switching, and on-disk-change reloads lives in
 // here, intentionally close to its trigger (the SSE message).
 
 import { chooseSelectionForFileEvent } from "./follow";
+import { checkBuildFreshness } from "./freshness";
 import { applyProjectIdentity } from "./identity";
 import { findDocumentById, syncStateGeneration } from "./storage";
 import { signalActiveDocumentUpdated } from "../preview/file-facts-strip";
@@ -27,6 +28,28 @@ import { contextualAppUrl, setClientScope } from "./watch-context";
 
 let activeEvents: EventSource | null = null;
 
+// Browsers permanently close an EventSource whose automatic retry itself
+// fails — exactly what happens when the server is mid-restart and refuses
+// the connection. A CLOSED source will never fire another event, so left
+// alone the app would sit on "Reconnecting" forever and never observe the
+// restarted server (the client-freshness handshake rides the reconnect's
+// first state payload). This timer re-establishes the stream ourselves.
+const RECONNECT_DELAY_MS = 2000;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleReconnect(source: EventSource) {
+  // A superseded source (scope change already reconnected) must not respawn.
+  if (activeEvents !== source || reconnectTimer !== null) {
+    return;
+  }
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    if (activeEvents === source) {
+      connectEvents();
+    }
+  }, RECONNECT_DELAY_MS);
+}
+
 function scopesEqual(left: StatePayload["scope"], right: StatePayload["scope"]): boolean {
   return left.kind === right.kind
     && (left.kind === "folder" || (right.kind === "file" && left.documentId === right.documentId));
@@ -36,6 +59,9 @@ function scopesEqual(left: StatePayload["scope"], right: StatePayload["scope"]):
 // `scope`). The SSE reducer below is the ongoing writer; the boot path
 // (`shell/boot.ts`) applies its initial /api/state payload through this too.
 export function applyServerSnapshot(payload: StatePayload): void {
+  // Every payload carries the server's build identity — boot and SSE
+  // reconnect both land here, so this is the one freshness chokepoint.
+  checkBuildFreshness(payload.build);
   appState.roots = payload.roots;
   appState.repositories = payload.repositories ?? [];
   setClientScope(payload.scope);
@@ -52,6 +78,13 @@ export function applyServerSnapshot(payload: StatePayload): void {
 }
 
 export function connectEvents() {
+  // A pending reconnect timer belongs to the source being superseded; left
+  // armed it would block scheduling for the new source and then no-op when
+  // it fires (its activeEvents check fails) — stranding a CLOSED stream.
+  if (reconnectTimer !== null) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
   activeEvents?.close();
   const events = new EventSource(contextualAppUrl(appUrl("/api/events")));
   activeEvents = events;
@@ -62,6 +95,9 @@ export function connectEvents() {
 
   events.addEventListener("error", () => {
     setConnectionState("reconnecting", "Reconnecting");
+    if (events.readyState === EventSource.CLOSED) {
+      scheduleReconnect(events);
+    }
   });
 
   events.addEventListener("state", async event => {

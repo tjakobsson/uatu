@@ -5,9 +5,7 @@
 
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
 import type { RepositorySnapshot } from "../shared/types";
-import { applyStaleHint } from "../shell/stale-hint-mount";
 import { buildCommitPreviewPath } from "../shell/history";
-import { nextStaleHint } from "../shell/stale-hint";
 import { GIT_LOG_LIMIT_KEY, appState, isGitLogLimit } from "../shell/state";
 import { presentationLocalStorage } from "../shell/presentation-storage";
 import { revealPreviewSurface } from "../shell/tab-bar";
@@ -154,7 +152,6 @@ export function initGitLogClickHandler(): void {
     // A commit click renders into the preview — bring the touch Preview
     // surface forward, same as a document pick.
     revealPreviewSurface();
-    applyStaleHint(nextStaleHint(appState.staleHint, { kind: "manual-navigation" }));
     activateCommitPreview({ repositoryId, sha }, { pushHistory: true });
   });
 }

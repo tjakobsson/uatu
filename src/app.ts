@@ -19,7 +19,6 @@ import { initActiveSurfaceTracking } from "./find/active-surface";
 import { initFindBar } from "./find/find-bar";
 import { initFindShortcuts, registerProjectSearch } from "./find/shortcut";
 import { initSearchPane, openSearchPane } from "./sidebar/search-pane";
-import { initStaleHintActionHandler } from "./shell/stale-hint-mount";
 import { initUiMode } from "./shell/ui-mode";
 import { initTabBar } from "./shell/tab-bar";
 
@@ -43,9 +42,6 @@ const viewRenderedButton = document.querySelector<HTMLButtonElement>("#view-rend
 const viewSourceButton = document.querySelector<HTMLButtonElement>("#view-source");
 const viewDiffButton = document.querySelector<HTMLButtonElement>("#view-diff");
 const previewShellElement = document.querySelector<HTMLElement>(".preview-shell");
-const staleHintElement = document.querySelector<HTMLDivElement>("#stale-hint");
-const staleHintMessageElement = document.querySelector<HTMLElement>("#stale-hint-message");
-const staleHintActionElement = document.querySelector<HTMLButtonElement>("#stale-hint-action");
 const documentCountElement = document.querySelector<HTMLElement>("#document-count");
 const filesPaneFilterElement = document.querySelector<HTMLDivElement>("#files-pane-filter");
 const filesPaneFilterAllButton = document.querySelector<HTMLButtonElement>("#files-pane-filter-all");
@@ -77,9 +73,6 @@ if (
   !viewSourceButton ||
   !viewDiffButton ||
   !previewShellElement ||
-  !staleHintElement ||
-  !staleHintMessageElement ||
-  !staleHintActionElement ||
   !documentCountElement ||
   !filesPaneFilterElement ||
   !filesPaneFilterAllButton ||
@@ -113,7 +106,6 @@ initGitLogClickHandler();
 initChangeOverviewClickHandler();
 initFilesPaneFilterControls();
 initFollowToggle();
-initStaleHintActionHandler();
 installAnchorHandlers();
 installMermaidTriggerHandler();
 initViewModeControls();

@@ -226,50 +226,6 @@ The preview header SHALL remain pinned to the top of the preview pane while the 
 - **WHEN** the sidebar is collapsed
 - **THEN** the follow and pin controls remain visible in the preview header
 
-### Requirement: Show a stale-content hint in Review when the active file changes on disk
-While the active Mode is **Review**, the system SHALL render a stale-content hint as a strip in the active preview's header when the currently displayed file changes on disk. The hint MUST identify that the file has changed and MUST expose a refresh affordance. Activating the refresh affordance MUST re-render the active preview to the current on-disk content for the same file and MUST clear the hint. Multiple subsequent change events for the same active file while the hint is visible MUST coalesce into a single hint and MUST NOT spawn additional hints. Manual navigation away from the file (selecting a different file in the `Files` pane, opening a commit preview, navigating via URL, switching Mode) MUST clear the hint as a side effect. The hint MUST NOT appear in **Author** Mode. When the currently displayed file is *deleted* on disk while in **Review**, the hint MUST enter a distinct "file no longer exists on disk" state with a close or back affordance instead of refresh; the stale rendered content MUST remain visible until the user acts. The hint MUST NOT alter the indexed sidebar's normal handling of the change.
-
-#### Scenario: Hint appears when the active file changes on disk in Review
-- **WHEN** Mode is **Review** and the currently displayed file changes on disk
-- **THEN** a stale-content hint appears in the active preview's header strip
-- **AND** the rendered content remains the pre-change content
-- **AND** the hint exposes a refresh affordance
-
-#### Scenario: Refresh affordance re-renders the active preview and clears the hint
-- **WHEN** the stale-content hint is visible in **Review** Mode
-- **AND** the user activates the refresh affordance
-- **THEN** the active preview re-renders to the current on-disk content for the same file
-- **AND** the hint is cleared
-
-#### Scenario: Multiple changes coalesce into a single hint
-- **WHEN** the stale-content hint is visible in **Review** Mode for the active file
-- **AND** the active file changes on disk again before the user acts on the hint
-- **THEN** only one stale-content hint remains visible
-- **AND** activating refresh re-renders to the latest on-disk content
-
-#### Scenario: Manual navigation clears the hint
-- **WHEN** the stale-content hint is visible in **Review** Mode
-- **AND** the user navigates to a different file (via the `Files` pane, a `Git Log` commit, or a URL)
-- **THEN** the hint is cleared
-- **AND** the new active preview renders normally
-
-#### Scenario: Switching to Author Mode clears the hint
-- **WHEN** the stale-content hint is visible in **Review** Mode
-- **AND** the user switches Mode to **Author**
-- **THEN** the hint is cleared
-- **AND** the active preview re-renders to the current on-disk content for the same file
-
-#### Scenario: Hint never appears in Author Mode
-- **WHEN** Mode is **Author** and the currently displayed file changes on disk
-- **THEN** no stale-content hint appears
-- **AND** the existing in-place refresh behavior applies
-
-#### Scenario: Active file deleted on disk shows a deleted hint state
-- **WHEN** Mode is **Review** and the currently displayed file is deleted on disk
-- **THEN** the active preview's header strip shows a "file no longer exists on disk" hint state
-- **AND** the hint exposes a close or back affordance instead of a refresh affordance
-- **AND** the previously rendered content remains visible until the user acts on the hint
-
 ### Requirement: Anchors targeting in-document section ids clear the sticky preview header at every depth
 When a reader clicks any anchor whose target is anchored inside the current document, the scroll operation MUST land the visible target content below the bottom edge of the sticky preview header rather than behind it — regardless of the target element's type. This MUST hold whether the matching id sits on a `<h1>`–`<h6>` heading element, on an Asciidoctor section wrapper (`<div class="sect1">` through `<div class="sect5">`), or on a **non-heading block** that carries an explicit id (for example an Asciidoctor `[#id]` block anchor on a table or `[source]` listing, or an inline `[[id]]` anchor on a paragraph). This MUST hold for both in-document scroll paths: the in-page anchor click handler (which scrolls the matching element into view directly) and the post-load scroll applied after an inter-document cross-reference resolves to a fragment in another document.
 
@@ -298,3 +254,4 @@ The preview stylesheet MUST reserve a top inset sufficient to clear the sticky p
 - **WHEN** a reader clicks an inter-document cross-reference into a sibling document at a fragment whose id sits on a non-heading block nested in a deep section (e.g. `xref:other.adoc#block-id[…]`) and the in-app document load completes
 - **THEN** after the post-load scroll the resolved target block's top edge is at or below the bottom edge of the sticky preview header (plus a sub-pixel tolerance)
 - **AND** the target block's leading content is fully readable, not obscured by the frosted-glass band
+
