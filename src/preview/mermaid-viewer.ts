@@ -135,7 +135,21 @@ function createViewer(): ViewerInternals {
   // transitions invisible. `syncGesture` is deliberately the only place that
   // seeds anything, so there is no path that changes the count without
   // re-seeding.
-  type ActivePointer = { x: number; y: number; downX: number; downY: number; downTime: number };
+  // `maxMoved` is the FURTHEST this pointer has been from where it landed, not
+  // its current distance. A drag that wanders off and returns near its origin
+  // before release has the release-point distance of a tap while being nothing
+  // of the sort — panning out and back twice would otherwise read as a
+  // double-tap and snap the diagram to fit, discarding the user's position.
+  // Tap eligibility is lost the moment the limit is crossed and is never
+  // regained.
+  type ActivePointer = {
+    x: number;
+    y: number;
+    downX: number;
+    downY: number;
+    downTime: number;
+    maxMoved: number;
+  };
   const pointers = new Map<number, ActivePointer>();
   let panOrigin: { x: number; y: number; tx: number; ty: number } | null = null;
   let pinch: { startDistance: number; startScale: number } | null = null;
@@ -191,6 +205,7 @@ function createViewer(): ViewerInternals {
       downX: event.clientX,
       downY: event.clientY,
       downTime: event.timeStamp,
+      maxMoved: 0,
     });
     capturePointer(event.pointerId);
     syncGesture();
@@ -227,6 +242,10 @@ function createViewer(): ViewerInternals {
     }
     pointer.x = event.clientX;
     pointer.y = event.clientY;
+    pointer.maxMoved = Math.max(
+      pointer.maxMoved,
+      Math.hypot(pointer.x - pointer.downX, pointer.y - pointer.downY),
+    );
 
     const active = livePointers();
     if (active.length === 2 && pinch) {
@@ -290,7 +309,10 @@ function createViewer(): ViewerInternals {
     if (gestureWasMultiTouch || pointers.size > 1) {
       return;
     }
-    const moved = Math.hypot(event.clientX - pointer.downX, event.clientY - pointer.downY);
+    const moved = Math.max(
+      pointer.maxMoved,
+      Math.hypot(event.clientX - pointer.downX, event.clientY - pointer.downY),
+    );
     if (moved > TAP_MOVE_LIMIT || event.timeStamp - pointer.downTime > TAP_MAX_MS) {
       return;
     }

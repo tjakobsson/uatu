@@ -755,6 +755,35 @@ test.describe("touch mermaid viewer", () => {
     await expect.poll(() => stageTransform(page)).toBe(fitted);
   });
 
+  test("a drag that returns near its start is not a tap", async ({ page }) => {
+    // Tap eligibility is decided by the FURTHEST the pointer travelled, not by
+    // where it happened to be released. Classifying on the release point alone
+    // makes two out-and-back pans read as a double-tap, snapping the diagram
+    // back to fit and discarding the position the user panned to.
+    await openViewer(page);
+    const fitted = await stageTransform(page);
+
+    // Move away from the fitted view so a spurious fit is detectable.
+    await dispatchPointer(page, "pointerdown", 40, 195, 400);
+    await dispatchPointer(page, "pointermove", 40, 255, 460);
+    await dispatchPointer(page, "pointerup", 40, 255, 460);
+    const moved = await stageTransform(page);
+    expect(moved).not.toBe(fitted);
+
+    // Two drags that each wander far out and return to within the tap slop of
+    // where they began.
+    for (const id of [41, 42]) {
+      await dispatchPointer(page, "pointerdown", id, 195, 400);
+      await dispatchPointer(page, "pointermove", id, 340, 400);
+      await dispatchPointer(page, "pointermove", id, 195, 400);
+      await dispatchPointer(page, "pointerup", id, 197, 401);
+    }
+
+    // Neither counted as a tap, so no fit fired — the diagram is wherever the
+    // pans left it, not back at the fitted transform.
+    expect(await stageTransform(page)).not.toBe(fitted);
+  });
+
   test("panning cannot move the diagram entirely off-screen", async ({ page }) => {
     await openViewer(page);
 
