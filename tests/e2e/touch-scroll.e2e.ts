@@ -111,6 +111,41 @@ async function settleScroll(page: import("@playwright/test").Page): Promise<void
   });
 }
 
+// Put a heading just below the top of the viewport, so the scroll spy has
+// unambiguously passed its activation point.
+//
+// Deliberately NOT "scroll to the bottom and expect the last heading". That
+// proxy is unreliable: the page reflows taller as the docked outline reserves
+// its content gutter, so a `scrollTo(scrollHeight)` lands short of the moving
+// maximum and the last heading never crosses the trigger line — which reads as
+// a tracking bug when it is really a measurement race. Positioning relative to
+// the heading itself is immune to document-height drift.
+async function scrollHeadingIntoTriggerZone(
+  page: import("@playwright/test").Page,
+  text: string,
+): Promise<void> {
+  await page.evaluate(async heading => {
+    const find = () =>
+      [...document.querySelectorAll("#preview h1, #preview h2, #preview h3")].find(element =>
+        element.textContent?.includes(heading),
+      );
+    if (!find()) throw new Error(`no heading matching ${heading}`);
+    // Iterate rather than aim once. Scrolling can itself change the layout —
+    // opening the docked outline reserves a content gutter, which re-wraps
+    // prose and moves every heading — so a position computed before the scroll
+    // is stale by the time the scroll lands. Re-aim until the heading is
+    // actually where it needs to be. 8px below the viewport top puts it above
+    // the trigger line, which sits just under the sticky header.
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const top = find()!.getBoundingClientRect().top;
+      if (Math.abs(top - 8) <= 2) return;
+      window.scrollTo({ top: window.scrollY + top - 8 });
+      await new Promise(resolve => requestAnimationFrame(() => resolve(null)));
+    }
+  }, text);
+  await settleScroll(page);
+}
+
 test.beforeEach(async ({ page, request }) => {
   await bootTouch(page, request);
 });
@@ -223,4 +258,116 @@ test("⇧⌘F from the Preview tab brings the Files tab forward with search focu
   await expect(page.locator("html")).toHaveAttribute("data-active-tab", "files");
   await expect(page.locator("#search-query")).toBeVisible();
   await expect(page.locator("#search-query")).toBeFocused();
+});
+
+// --- Device-pass items, mechanised -----------------------------------------
+//
+// tasks.md §7.5 and §7.6 were written as things to eyeball on a phone. Both are
+// really geometry and event wiring, which a browser can assert far more
+// reliably than a person squinting at a 390px screen — so they are pinned here
+// and the device pass only has to confirm, not discover.
+
+test("a revealed target at the end of the document clears the bottom tab bar", async ({ page }) => {
+  // §7.5. Reveals bias toward the top, so the only target that could land under
+  // the fixed tab bar is one in the last screenful, where there is no scroll
+  // runway left to lift it. `.app-shell` reserves `--tab-bar-total` as padding
+  // for exactly this reason; the assertion is that the reservation holds.
+  await openTallDoc(page);
+
+  await page.keyboard.press(FIND);
+  await expect(page.locator("#find-query")).toBeVisible();
+  // The very last paragraph of the document.
+  await page.locator("#find-query").fill("Trailing paragraph 39.");
+  await expect(page.locator("#find-status")).toHaveText("1 of 1");
+  await settleScroll(page);
+
+  const geometry = await page.evaluate(() => {
+    const registry = (CSS as unknown as { highlights: Map<string, Set<Range>> }).highlights;
+    const current = registry.get("uatu-find-current");
+    const range = current ? [...current][0] : null;
+    const bar = document.querySelector("#touch-tab-bar");
+    if (!range || !bar) return null;
+    return { matchBottom: range.getBoundingClientRect().bottom, barTop: bar.getBoundingClientRect().top };
+  });
+  expect(geometry).not.toBeNull();
+  expect(geometry!.matchBottom).toBeLessThanOrEqual(geometry!.barTop);
+});
+
+test("active-heading tracking follows page scrolling in touch mode", async ({ page }) => {
+  // §7.6, first half. The scroll spy used to listen on `.preview-shell`, which
+  // never emits when the page is the scroller — so the highlight froze on
+  // whichever heading was active at mount.
+  await openTallDoc(page);
+  await page.locator("#outline-toggle").click();
+
+  const active = page.locator(".uatu-outline-link.is-active");
+  await expect(active).toHaveText("Tall Document");
+
+  // Scroll the last heading past the trigger line; it must become active.
+  await scrollHeadingIntoTriggerZone(page, "Landing Zone");
+  await expect(active).toHaveText("Landing Zone");
+
+  // ...and back, proving it tracks rather than latching once.
+  await page.evaluate(() => window.scrollTo({ top: 0 }));
+  await settleScroll(page);
+  await expect(active).toHaveText("Tall Document");
+});
+
+test("switching UI mode mid-session keeps every scroll path working", async ({ page }) => {
+  // §7.6, second half. The effective scroll container changes underneath a live
+  // session, with no remount and no scroll event on the old container — so both
+  // the reveal path and the scroll spy have to re-resolve rather than hold a
+  // reference captured at boot.
+  await openTallDoc(page);
+  // The outline has to be OPEN for this: its active-heading highlight is only
+  // an observable claim while the panel is on screen, and asserting against the
+  // hidden list would be asserting about something no reader can see.
+  await page.locator("#outline-toggle").click();
+
+  // Touch mode: the page scrolls.
+  await page.keyboard.press(FIND);
+  await page.locator("#find-query").fill("chrysoberyl");
+  await expect(page.locator("#find-status")).toHaveText("1 of 1");
+  await expect.poll(() => pageScrollY(page)).toBeGreaterThan(0);
+  await page.keyboard.press("Escape");
+
+  // Switch to desktop mode WITHOUT reloading. The toggle lives in the sidebar
+  // chrome, which in touch mode renders inside the Files tab.
+  await page.locator("#touch-tab-files").click();
+  await page.locator("#ui-mode-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "desktop");
+  await page.evaluate(() => window.scrollTo({ top: 0 }));
+
+  // Desktop mode at this viewport is the ≤900px stacked layout, which ALSO
+  // scrolls the page — so the reveal must still move `window.scrollY`, and the
+  // scroll spy must still be listening to something that fires.
+  await page.keyboard.press(FIND);
+  await page.locator("#find-query").fill("chrysoberyl");
+  await expect(page.locator("#find-status")).toHaveText("1 of 1");
+  await expect.poll(() => pageScrollY(page)).toBeGreaterThan(0);
+
+  // And the scroll spy must still be listening to something that fires. The
+  // regression this guards is a DEAD LISTENER — one bound to an element that
+  // stopped being the scroller — so the claim is that the highlight still
+  // moves, not that it lands on a particular heading. Which heading is right
+  // for a given offset is already pinned by the touch-mode test above; pinning
+  // it again here would only couple this test to the exact document height,
+  // which the docked outline's content gutter reflows underneath it.
+  // Opened here and only here — the outline's highlight is only an observable
+  // claim while the panel is on screen, and toggling twice would close it and
+  // leave the assertion reading a stale, hidden list.
+  await page.locator("#outline-toggle").click();
+  const active = page.locator(".uatu-outline-link.is-active");
+  // Opening the docked outline reserves a content gutter and reflows the page,
+  // which moves the scroll position under any request issued in the same beat.
+  // Let that land before asking the page to go anywhere.
+  await settleScroll(page);
+
+  await page.evaluate(() => window.scrollTo({ top: 0 }));
+  await settleScroll(page);
+  await expect(active).toHaveText("Tall Document");
+
+  await page.evaluate(() => window.scrollTo({ top: document.documentElement.scrollHeight }));
+  await settleScroll(page);
+  await expect(active).toHaveText("Landing Zone");
 });

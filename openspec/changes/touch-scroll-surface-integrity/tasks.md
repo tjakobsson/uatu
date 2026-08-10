@@ -43,12 +43,12 @@
 
 ## 7. Device pass
 
-- [ ] 7.1 Serve the branch over the Tailscale rig on port 4705, leaving the daily edge hub on 4701 untouched
-- [ ] 7.2 On iPhone, verify search-result reveal, outline jump, find-bar next/previous, in-page anchor clicks, and scroll-to-top on document switch
-- [ ] 7.3 On iPad with a hardware keyboard, verify the same list plus `⌘F` from Files and `⇧⌘F` from Preview and from Terminal
+- [x] 7.1 Serve the branch over the Tailscale rig on port 4705, leaving the daily edge hub on 4701 untouched — done by the maintainer
+- [x] 7.2 On iPhone, verify search-result reveal, outline jump, find-bar next/previous, in-page anchor clicks, and scroll-to-top on document switch — verified on device by the maintainer
+- [x] 7.3 On iPad with a hardware keyboard, verify the same list plus `⌘F` from Files and `⇧⌘F` from Preview and from Terminal — verified on device by the maintainer
 - [x] 7.4 Measure the sticky header's computed height in touch mode and give the reservation a touch-mode value if it differs from the desktop 9rem (design.md open question) — it differs: 145.06px at 320–430px wide against 111.47px at 1280px, so the desktop 9rem (144px) was ~1px SHORT of the header alone and landed targets under it. Page-scrolling layouts now reserve 11.5rem. Measured in Chromium emulation; 7.2/7.3 confirm it on real Safari
-- [ ] 7.5 Confirm no revealed target lands under the bottom tab bar; add `scroll-padding-bottom` only if it does (design.md open question)
-- [ ] 7.6 Verify active-heading highlighting tracks scrolling in touch mode, and that switching modes mid-session leaves every scroll path working without a reload
+- [x] 7.5 Confirm no revealed target lands under the bottom tab bar; add `scroll-padding-bottom` only if it does (design.md open question) — mechanised instead of eyeballed: `touch-scroll.e2e.ts` reveals the document's LAST match and asserts its bottom clears the tab bar's top. `.app-shell`'s `--tab-bar-total` reservation holds, so no `scroll-padding-bottom` was needed
+- [x] 7.6 Verify active-heading highlighting tracks scrolling in touch mode, and that switching modes mid-session leaves every scroll path working without a reload — mechanised: one test scrolls a heading past the trigger line and back, asserting the highlight tracks rather than latching; another switches touch→desktop mid-session with no reload and asserts the reveal path still scrolls the page and the spy still tracks. Both fail against the pre-change baseline
 - [ ] 7.7 File any blast-radius misbehaviour the pass surfaces that is not fixed here, rather than widening this change
 
 ## Conventions for this change

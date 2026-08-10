@@ -270,7 +270,7 @@ Rollback is a revert: nothing here is written to disk or to `localStorage`.
   in Chromium emulation; the device pass confirms it against real Safari, where
   safe-area insets and font rendering could shift the header height again.
 
-- **Does the bottom tab bar need a matching `scroll-padding-bottom`?**
-  `.app-shell` already reserves `--tab-bar-total` as padding, so a revealed
-  target should never land under the bar. Confirm on-device; add only if the
-  device pass shows otherwise.
+- ~~**Does the bottom tab bar need a matching `scroll-padding-bottom`?**~~
+  Resolved: no. `.app-shell`'s `--tab-bar-total` reservation holds even for the
+  last match in a document, which is the only position with no scroll runway
+  left to lift it clear. Pinned by an E2E case rather than left to the eye.
