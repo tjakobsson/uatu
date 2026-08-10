@@ -31,11 +31,22 @@ export const CLIENT_BUILD_IDENTITY: ClientBuildIdentity = {
 
 export const FRESHNESS_RELOAD_MARKER_KEY = "uatu:freshness-reloaded-for";
 
-export function serverIdentityKey(server: BuildSummary): string {
+export function serverIdentityKey(server: BuildSummary | undefined): string {
+  // A payload without a build field comes from a pre-handshake server —
+  // one stable key so the reload-once guard still terminates.
+  if (!server) {
+    return "pre-handshake";
+  }
   return `${server.version}@${server.commitSha}#${server.apiRevision}`;
 }
 
-export function buildsMismatch(client: ClientBuildIdentity, server: BuildSummary): boolean {
+export function buildsMismatch(client: ClientBuildIdentity, server: BuildSummary | undefined): boolean {
+  // No build field = a server too old to report one = by definition not
+  // this client's build. Guarding here keeps a legacy payload from throwing
+  // inside the SSE reducer before the snapshot is even applied.
+  if (!server) {
+    return true;
+  }
   if (client.apiRevision !== server.apiRevision) {
     return true;
   }
@@ -53,7 +64,7 @@ export function buildsMismatch(client: ClientBuildIdentity, server: BuildSummary
 // server identity — a NEW server identity re-arms the automatic reload.
 export function evaluateFreshness(
   client: ClientBuildIdentity,
-  server: BuildSummary,
+  server: BuildSummary | undefined,
   reloadedForIdentity: string | null,
 ): FreshnessDecision {
   if (!buildsMismatch(client, server)) {
@@ -91,7 +102,7 @@ function clearReloadMarker(): void {
 
 const NOTICE_ID = "stale-client-notice";
 
-function showStaleClientNotice(server: BuildSummary): void {
+function showStaleClientNotice(server: BuildSummary | undefined): void {
   if (document.getElementById(NOTICE_ID)) {
     return;
   }
@@ -102,7 +113,9 @@ function showStaleClientNotice(server: BuildSummary): void {
 
   const message = document.createElement("span");
   message.className = "stale-client-notice-message";
-  message.textContent = `This page is running a different build than the server (${server.identifier}). Reload to update.`;
+  message.textContent = server
+    ? `This page is running a different build than the server (${server.identifier}). Reload to update.`
+    : "This page is running a different build than the server. Reload to update.";
 
   const action = document.createElement("button");
   action.type = "button";
@@ -121,8 +134,9 @@ function removeStaleClientNotice(): void {
 }
 
 // Entry point, called from the SSE state reducer for every payload (boot
-// applies its initial payload through the same funnel).
-export function checkBuildFreshness(server: BuildSummary): void {
+// applies its initial payload through the same funnel). `server` is
+// undefined when a pre-handshake server sent a payload with no build field.
+export function checkBuildFreshness(server: BuildSummary | undefined): void {
   const decision = evaluateFreshness(CLIENT_BUILD_IDENTITY, server, readReloadMarker());
   if (decision === "in-sync") {
     clearReloadMarker();

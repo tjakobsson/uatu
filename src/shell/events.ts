@@ -78,6 +78,13 @@ export function applyServerSnapshot(payload: StatePayload): void {
 }
 
 export function connectEvents() {
+  // A pending reconnect timer belongs to the source being superseded; left
+  // armed it would block scheduling for the new source and then no-op when
+  // it fires (its activeEvents check fails) — stranding a CLOSED stream.
+  if (reconnectTimer !== null) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
   activeEvents?.close();
   const events = new EventSource(contextualAppUrl(appUrl("/api/events")));
   activeEvents = events;

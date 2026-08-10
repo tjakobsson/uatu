@@ -46,6 +46,10 @@ describe("buildsMismatch", () => {
     expect(buildsMismatch(matchingClient, serverBuild({ apiRevision: 2 }))).toBe(true);
   });
 
+  test("a payload without a build field (pre-handshake server) is a mismatch, not a crash", () => {
+    expect(buildsMismatch(matchingClient, undefined)).toBe(true);
+  });
+
   test("an unknown commit on either side skips the commit comparison", () => {
     // Dev serving can't embed a commit in the browser bundle; version and
     // apiRevision still compare, the commit check just can't.
@@ -80,6 +84,14 @@ describe("evaluateFreshness — reload loop protection", () => {
     const staleMarker = serverIdentityKey(newServer);
     const evenNewerServer = serverBuild({ commitSha: "c".repeat(40), commitShort: "ccccccc" });
     expect(evaluateFreshness(matchingClient, evenNewerServer, staleMarker)).toBe("reload");
+  });
+
+  test("a pre-handshake server follows the same reload-once-then-notice path with a stable key", () => {
+    expect(serverIdentityKey(undefined)).toBe(serverIdentityKey(undefined));
+    expect(evaluateFreshness(matchingClient, undefined, null)).toBe("reload");
+    expect(
+      evaluateFreshness(matchingClient, undefined, serverIdentityKey(undefined)),
+    ).toBe("notice");
   });
 
   test("an apiRevision break follows the same reload-once-then-notice path", () => {
