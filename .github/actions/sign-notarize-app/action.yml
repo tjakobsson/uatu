@@ -1,10 +1,10 @@
 name: Sign, notarize, and staple UatuCode Desktop
 description: >
   Imports the Developer ID certificate into a throwaway keychain, signs the
-  embedded uatu binary (hardened runtime + JIT entitlement) and the app,
-  notarizes and staples both architectures, and zips each app into the
-  output directory. Extracted from the release workflow so the release and
-  edge channels share one signing pipeline and cannot drift.
+  app (hardened runtime; the app embeds no uatu binary — it is a pure hub
+  client), notarizes and staples both architectures, and zips each app into
+  the output directory. Extracted from the release workflow so the release
+  and edge channels share one signing pipeline and cannot drift.
 
 inputs:
   cert-p12:
@@ -28,10 +28,6 @@ inputs:
   x64-app:
     description: Path to the x64 .app bundle
     required: true
-  entitlements:
-    description: Entitlements file for the embedded uatu binary
-    required: false
-    default: desktop/macos/uatu-jit.entitlements
   output-dir:
     description: Directory receiving UatuCode-Desktop-<arch>.zip
     required: false
@@ -71,7 +67,6 @@ runs:
         NOTARY_ISSUER: ${{ inputs.notary-issuer }}
         ARM64_APP: ${{ inputs.arm64-app }}
         X64_APP: ${{ inputs.x64-app }}
-        ENTITLEMENTS: ${{ inputs.entitlements }}
         OUTPUT_DIR: ${{ inputs.output-dir }}
       run: |
         echo "$NOTARY_KEY" > "$RUNNER_TEMP/notary-key.p8"
@@ -79,11 +74,8 @@ runs:
         for arch in arm64 x64; do
           app="$ARM64_APP"
           [ "$arch" = "x64" ] && app="$X64_APP"
-          # The embedded Bun binary carries the JIT entitlement; the app
-          # itself needs none. Nested-first signing order is required.
-          codesign --force --options runtime --timestamp \
-            --entitlements "$ENTITLEMENTS" \
-            --sign "$SIGNING_IDENTITY" "$app/Contents/Resources/uatu"
+          # A pure Swift app under the hardened runtime needs no
+          # entitlements, and there is no embedded binary to nested-sign.
           codesign --force --options runtime --timestamp \
             --sign "$SIGNING_IDENTITY" "$app"
           ditto -c -k --keepParent "$app" "$RUNNER_TEMP/notarize-$arch.zip"
