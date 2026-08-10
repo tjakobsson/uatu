@@ -3,7 +3,8 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { createNavigationFetchHandler, prefersHtmlNavigation, relocateCssUrls, relocateShellHtml, resolveKnownDocument, spaShellResponse } from "./navigation";
+import { BUNDLE_ASSET_PREFIX, createNavigationFetchHandler, prefersHtmlNavigation, relocateCssUrls, relocateShellHtml, resolveKnownDocument, shellCacheKey, spaShellResponse } from "./navigation";
+import { BUILD } from "../shared/version";
 import { resolveWatchRoots, scanRoots } from "./roots";
 import { createWatchSession } from "./watch-session";
 
@@ -279,9 +280,15 @@ describe("Accept-based navigation dispatch", () => {
 });
 
 describe("relocateShellHtml", () => {
-  test("is the identity at /", () => {
-    const html = `<html><head></head><body><script src="/chunk-a.js"></script></body></html>`;
-    expect(relocateShellHtml(html, "/")).toBe(html);
+  test("at / bundle-asset refs move under the managed prefix; app refs stay put", () => {
+    const html = `<html><head><link rel="manifest" href="/manifest.webmanifest" /><link rel="stylesheet" href="/chunk-abcd1234.css" /></head><body><script src="/chunk-abcd1234.js"></script><script src="/_bun/client/index-0000000099fff035.js"></script><a href="/">home</a></body></html>`;
+    const relocated = relocateShellHtml(html, "/");
+    expect(relocated).toContain(`href="${BUNDLE_ASSET_PREFIX}/chunk-abcd1234.css"`);
+    expect(relocated).toContain(`src="${BUNDLE_ASSET_PREFIX}/chunk-abcd1234.js"`);
+    expect(relocated).toContain(`src="${BUNDLE_ASSET_PREFIX}/_bun/client/index-0000000099fff035.js"`);
+    // App routes are NOT bundle assets and keep their URLs.
+    expect(relocated).toContain(`href="/manifest.webmanifest"`);
+    expect(relocated).toContain(`href="/"`);
   });
 
   test("prefixes root-absolute refs and injects the base-path meta", () => {
@@ -296,9 +303,11 @@ describe("relocateShellHtml", () => {
 });
 
 describe("relocateCssUrls", () => {
-  test("is the identity at /", () => {
-    const css = `@font-face { src: url("/font.woff2"); }`;
-    expect(relocateCssUrls(css, "/")).toBe(css);
+  test("at / bundle-asset url() refs move under the managed prefix; others stay put", () => {
+    const css = `@font-face { src: url("/HackNerdFontMono-ab12cd34.woff2"); } a { background: url(/assets/uatu-logo.svg); }`;
+    const out = relocateCssUrls(css, "/");
+    expect(out).toContain(`url("${BUNDLE_ASSET_PREFIX}/HackNerdFontMono-ab12cd34.woff2")`);
+    expect(out).toContain(`url(/assets/uatu-logo.svg)`);
   });
 
   test("prefixes root-absolute url() refs in every quoting style", () => {
@@ -309,6 +318,14 @@ describe("relocateCssUrls", () => {
     expect(out).toContain(`url('/s/alpha/mask.svg')`);
     // Protocol-relative URLs stay untouched.
     expect(out).toContain(`url(//cdn.example/x)`);
+  });
+});
+
+describe("shellCacheKey", () => {
+  test("carries the build identity so a cache entry can never outlive its build", () => {
+    const key = shellCacheKey("127.0.0.1", 4711, "/s/alpha/");
+    expect(key).toContain("127.0.0.1:4711:/s/alpha/");
+    expect(key).toContain(BUILD.commitSha);
   });
 });
 

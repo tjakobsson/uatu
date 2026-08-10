@@ -89,7 +89,7 @@
   --danger: light-dark(#cf222e, #f85149);
   --attention: light-dark(#bf8700, #d29922);
   /* Severity chip families (low = green, medium = yellow, high = red),
-     shared by the config-warning and stale-hint surfaces. */
+     shared by the config-warning and stale-client-notice surfaces. */
   --score-low-border: light-dark(#b7e4c7, #2ea043);
   --score-low-bg: light-dark(#effaf2, #0f2417);
   --score-medium-border: light-dark(#f0cf7a, #9e6a03);
@@ -4077,35 +4077,32 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
   inset: -3px;
 }
 
-/* Stale-content hint strip — shown above the preview header. */
-.stale-hint {
+/* Stale-client notice — the client-freshness handshake's terminal state:
+   this bundle mismatches the server and one automatic reload didn't fix it.
+   Fixed to the viewport bottom so it survives any pane layout, and never
+   auto-dismisses. Created by shell/freshness.ts. */
+.stale-client-notice {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 100;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
   gap: 0.75rem;
-  padding: 0.45rem 1.5rem;
+  padding: 0.5rem 1.5rem;
   background: var(--score-medium-bg);
-  border-bottom: 1px solid var(--score-medium-border);
+  border-top: 1px solid var(--score-medium-border);
   color: light-dark(#6f4e00, #eac54f);
   font-size: 0.82rem;
 }
 
-.stale-hint[hidden] {
-  display: none;
-}
-
-.stale-hint.is-deleted {
-  background: var(--score-high-bg);
-  border-bottom-color: var(--score-high-border);
-  color: light-dark(#8b1f1a, #ffa8a3);
-}
-
-.stale-hint-message {
-  flex: 1 1 auto;
+.stale-client-notice-message {
   font-weight: 500;
 }
 
-.stale-hint-action {
+.stale-client-notice-action {
   flex-shrink: 0;
   padding: 0.25rem 0.75rem;
   border: 1px solid currentColor;
@@ -4118,11 +4115,11 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
   transition: background-color 0.15s ease;
 }
 
-.stale-hint-action:hover {
+.stale-client-notice-action:hover {
   background: light-dark(rgba(36, 41, 47, 0.05), rgba(230, 237, 243, 0.06));
 }
 
-.stale-hint-action:focus-visible {
+.stale-client-notice-action:focus-visible {
   outline: 2px solid currentColor;
   outline-offset: 1px;
 }

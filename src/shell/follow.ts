@@ -8,11 +8,9 @@
 //
 // See openspec/specs/follow-mode/spec.md for the full contract.
 
-import { applyStaleHint } from "./stale-hint-mount";
 import { chooseSelectionForFileEvent, selectionForChipTurnOn } from "./follow-rules";
 import { findDocumentById } from "./storage";
 import { loadDocument } from "../preview/mount";
-import { nextStaleHint } from "./stale-hint";
 import { renderSidebar } from "../sidebar/shell";
 import { pushSelection } from "./history";
 import { appState } from "./state";
@@ -93,7 +91,6 @@ export function applyUserRowClick(documentId: string): Promise<void> {
   setFollowEnabled(false);
   setSelectedId(documentId);
   setPreviewMode({ kind: "document" });
-  applyStaleHint(nextStaleHint(appState.staleHint, { kind: "manual-navigation" }));
   const doc = findDocumentById(documentId);
   if (doc) {
     pushSelection(documentId, doc.relativePath);

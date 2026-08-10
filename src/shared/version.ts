@@ -19,6 +19,14 @@ const INJECTED_BUILD: BuildInfo | undefined =
 // the embedded version incapable of drifting from the released tag.
 export const PACKAGE_VERSION: string = packageJsonVersion;
 
+// Hand-bumped integer marking client/server contract breaks (renamed state
+// payload fields, changed endpoint semantics, …). Bump it in the same change
+// that breaks the contract; the client-freshness handshake compares it so a
+// client can refuse to silently continue against an incompatible server.
+// Coarse on purpose — the version/commit comparison catches every build
+// mismatch, this only adds "the break was known".
+export const API_REVISION = 1;
+
 function runGit(args: string[]): string | null {
   try {
     const result = Bun.spawnSync({

@@ -28,10 +28,11 @@ src/
 │                   the shared find bar and its pluggable engines (preview and
 │                   terminal), text indexing, matching, and highlight painting
 ├── shell/          boot, events, history, url, connection, pwa, follow,
-│                   follow-rules, state, storage, stale-hint, ui-mode
-│                   (per-device touch/desktop mode on <html>), tab-bar
-│                   (touch mode's bottom Files/Preview/Terminal tabs) —
-│                   the app-wide chrome and the appState singleton
+│                   follow-rules, state, storage, freshness (client/server
+│                   build-identity handshake), ui-mode (per-device
+│                   touch/desktop mode on <html>), tab-bar (touch mode's
+│                   bottom Files/Preview/Terminal tabs) — the app-wide
+│                   chrome and the appState singleton
 ├── preview/        the right pane — mounting rendered HTML, view-mode
 │                   chooser, layout (split/stacked), diff view,
 │                   mermaid trigger, anchors, image/binary fallbacks,

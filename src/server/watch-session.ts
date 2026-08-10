@@ -20,7 +20,7 @@ import {
   type StatePayload,
   type TerminalAvailability,
 } from "../shared/types";
-import { BUILD, formatBuildIdentifier } from "../shared/version";
+import { API_REVISION, BUILD, formatBuildIdentifier } from "../shared/version";
 import {
   DEFAULT_WATCH_CONTEXT,
   type WatchContext,
@@ -34,6 +34,7 @@ export const BUILD_SUMMARY: BuildSummary = {
   commitShort: BUILD.commitShort,
   release: BUILD.release,
   identifier: formatBuildIdentifier(BUILD),
+  apiRevision: API_REVISION,
 };
 
 const encoder = new TextEncoder();

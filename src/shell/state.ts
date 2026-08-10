@@ -25,7 +25,6 @@ import {
   type ViewLayout,
   type ViewMode,
 } from "../shared/types";
-import type { StaleHint } from "./stale-hint";
 import { presentationLocalStorage } from "./presentation-storage";
 
 // Best-effort access to window.localStorage. Wrapped because cross-origin
@@ -189,9 +188,6 @@ export const appState = {
   // whichever view supports wrapping (Source and Diff); ignored in
   // Rendered. Resolved on boot from localStorage; defaults to off.
   wrap: readPreviewWrapPreference(safeLocalStorage()),
-  // Per-active-file stale-content hint state. Cleared by manual navigation
-  // or refresh action.
-  staleHint: null as StaleHint | null,
   scope: { kind: "folder" } as Scope,
   // Opaque hash of the unscoped corpus, from the server snapshot. The Search
   // pane compares it across snapshots to notice out-of-scope documents
