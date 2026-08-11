@@ -737,6 +737,53 @@ test.describe("touch mermaid viewer", () => {
     await dispatchPointer(page, "pointerup", 1, 240, 440);
   });
 
+  // Dispatch a whole sequence inside ONE page.evaluate. A double-tap is
+  // classified from `event.timeStamp` against a 300ms window, so sending the
+  // four events as four round-trips makes the test measure the harness's
+  // dispatch latency rather than the viewer — it pairs on a fast machine and
+  // silently stops pairing on a loaded CI runner. One round-trip puts the taps
+  // microseconds apart, which is also what a real double-tap looks like.
+  async function dispatchSequence(
+    page: import("@playwright/test").Page,
+    steps: Array<["pointerdown" | "pointermove" | "pointerup", number, number, number]>,
+  ): Promise<void> {
+    await page.evaluate(sequence => {
+      const viewport = document.querySelector<HTMLElement>(".mermaid-viewer-viewport");
+      if (!viewport) throw new Error("no viewer viewport");
+      for (const [type, pointerId, x, y] of sequence) {
+        viewport.dispatchEvent(
+          new PointerEvent(type, {
+            pointerId,
+            pointerType: "touch",
+            isPrimary: pointerId === 1,
+            clientX: x,
+            clientY: y,
+            button: 0,
+            buttons: type === "pointerup" ? 0 : 1,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      }
+    }, steps);
+  }
+
+  // The two taps of a genuine double-tap, at one point, in one round-trip.
+  function doubleTap(
+    page: import("@playwright/test").Page,
+    idA: number,
+    idB: number,
+    x: number,
+    y: number,
+  ): Promise<void> {
+    return dispatchSequence(page, [
+      ["pointerdown", idA, x, y],
+      ["pointerup", idA, x, y],
+      ["pointerdown", idB, x, y],
+      ["pointerup", idB, x, y],
+    ]);
+  }
+
   test("double-tap fits the diagram to the screen", async ({ page }) => {
     await openViewer(page);
     const fitted = await stageTransform(page);
@@ -748,10 +795,7 @@ test.describe("touch mermaid viewer", () => {
     expect(await stageTransform(page)).not.toBe(fitted);
 
     // Two quick taps in the same place: back to fit.
-    for (const id of [2, 3]) {
-      await dispatchPointer(page, "pointerdown", id, 200, 400);
-      await dispatchPointer(page, "pointerup", id, 200, 400);
-    }
+    await doubleTap(page, 2, 3, 200, 400);
     await expect.poll(() => stageTransform(page)).toBe(fitted);
   });
 
@@ -796,37 +840,40 @@ test.describe("touch mermaid viewer", () => {
     await dispatchPointer(page, "pointerup", 50, 255, 460);
     expect(await stageTransform(page)).not.toBe(fitted);
 
+    // Each interleaved sequence goes in ONE round-trip, so the taps really are
+    // inside the double-tap window and the assertion is about the intervening
+    // gesture rather than about how fast the harness can dispatch.
+    //
     // Tap, then a pan past the movement limit, then a tap back where the first
-    // one landed — all in quick succession.
-    await dispatchPointer(page, "pointerdown", 51, 195, 300);
-    await dispatchPointer(page, "pointerup", 51, 195, 300);
-    await dispatchPointer(page, "pointerdown", 52, 195, 300);
-    await dispatchPointer(page, "pointermove", 52, 195, 500);
-    await dispatchPointer(page, "pointerup", 52, 195, 500);
-    await dispatchPointer(page, "pointerdown", 53, 195, 300);
-    await dispatchPointer(page, "pointerup", 53, 195, 300);
-
+    // one landed.
+    await dispatchSequence(page, [
+      ["pointerdown", 51, 195, 300],
+      ["pointerup", 51, 195, 300],
+      ["pointerdown", 52, 195, 300],
+      ["pointermove", 52, 195, 500],
+      ["pointerup", 52, 195, 500],
+      ["pointerdown", 53, 195, 300],
+      ["pointerup", 53, 195, 300],
+    ]);
     expect(await stageTransform(page)).not.toBe(fitted);
 
     // Same for a pinch between the two taps.
-    await dispatchPointer(page, "pointerdown", 54, 195, 300);
-    await dispatchPointer(page, "pointerup", 54, 195, 300);
-    await dispatchPointer(page, "pointerdown", 55, 165, 300);
-    await dispatchPointer(page, "pointerdown", 56, 225, 300);
-    await dispatchPointer(page, "pointermove", 55, 155, 300);
-    await dispatchPointer(page, "pointermove", 56, 235, 300);
-    await dispatchPointer(page, "pointerup", 55, 155, 300);
-    await dispatchPointer(page, "pointerup", 56, 235, 300);
-    await dispatchPointer(page, "pointerdown", 57, 195, 300);
-    await dispatchPointer(page, "pointerup", 57, 195, 300);
-
+    await dispatchSequence(page, [
+      ["pointerdown", 54, 195, 300],
+      ["pointerup", 54, 195, 300],
+      ["pointerdown", 55, 165, 300],
+      ["pointerdown", 56, 225, 300],
+      ["pointermove", 55, 155, 300],
+      ["pointermove", 56, 235, 300],
+      ["pointerup", 55, 155, 300],
+      ["pointerup", 56, 235, 300],
+      ["pointerdown", 57, 195, 300],
+      ["pointerup", 57, 195, 300],
+    ]);
     expect(await stageTransform(page)).not.toBe(fitted);
 
     // …and a genuine double-tap still fits, so the guard has not disabled it.
-    for (const id of [58, 59]) {
-      await dispatchPointer(page, "pointerdown", id, 195, 300);
-      await dispatchPointer(page, "pointerup", id, 195, 300);
-    }
+    await doubleTap(page, 58, 59, 195, 300);
     await expect.poll(() => stageTransform(page)).toBe(fitted);
   });
 

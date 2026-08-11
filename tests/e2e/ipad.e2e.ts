@@ -307,11 +307,32 @@ test.describe("iPad mermaid viewer", () => {
     await send("pointerup", 1, 380, 380);
     await send("pointerup", 2, 620, 380);
 
-    // Double-tap returns to the fitted view.
-    for (const id of [3, 4]) {
-      await send("pointerdown", id, 500, 380);
-      await send("pointerup", id, 500, 380);
-    }
+    // Double-tap returns to the fitted view. Both taps go in ONE page.evaluate:
+    // the pairing window is 300ms of `event.timeStamp`, so dispatching them as
+    // separate round-trips would measure harness latency rather than the
+    // viewer, and stop pairing on a loaded runner.
+    await page.evaluate(() => {
+      const viewport = document.querySelector<HTMLElement>(".mermaid-viewer-viewport")!;
+      for (const [type, pointerId] of [
+        ["pointerdown", 3],
+        ["pointerup", 3],
+        ["pointerdown", 4],
+        ["pointerup", 4],
+      ] as Array<[string, number]>) {
+        viewport.dispatchEvent(
+          new PointerEvent(type, {
+            pointerId,
+            pointerType: "touch",
+            clientX: 500,
+            clientY: 380,
+            button: 0,
+            buttons: type === "pointerup" ? 0 : 1,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      }
+    });
     await expect.poll(transform).toBe(fitted);
   });
 });
