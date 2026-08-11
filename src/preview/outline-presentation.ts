@@ -28,7 +28,9 @@ export type OutlinePresentation = "rail" | "sheet";
 // `layoutPanel` starts from the stored width and falls back to 288. Deriving
 // from a width the rail never uses let a 596px preview qualify as "wide
 // enough" while actually leaving ~245px of prose, not the 380 promised here.
-const RAIL_FOOTPRINT = 304;
+const RAIL_DEFAULT_WIDTH = 288;
+const RAIL_EDGE_MARGIN = 16;
+const RAIL_FOOTPRINT = RAIL_DEFAULT_WIDTH + RAIL_EDGE_MARGIN; // 304
 
 // A readable prose column beside the rail. At the preview's 16px base, ~45
 // characters — the low end of a comfortable measure — is about 380px. Below
@@ -62,6 +64,23 @@ export type PreviewArea = {
  *  column, for a given amount of padding. Exposed for tests and diagnostics. */
 export function railMinWidth(documentPadding: number): number {
   return RAIL_FOOTPRINT + READABLE_MEASURE + documentPadding;
+}
+
+// The widest the rail may actually be DRAWN at, which is a different question
+// from whether a rail is viable at all.
+//
+// `pickPresentation` deliberately asks about the DEFAULT footprint, so that
+// dragging never flips the presentation mid-drag. That leaves a gap: a width
+// the user saved on a large display is reapplied verbatim on a smaller one, so
+// a 500px rail saved on a desktop would leave ~270px of prose on an 834px
+// tablet — the exact squeeze this whole rule exists to prevent, arriving by the
+// back door. Capping the drawn width closes it without making the presentation
+// itself depend on stored state.
+//
+// At exactly `railMinWidth` this returns `RAIL_DEFAULT_WIDTH`, so the two
+// functions meet at the threshold instead of disagreeing near it.
+export function maxRailWidth(area: PreviewArea): number {
+  return area.width - area.documentPadding - READABLE_MEASURE - RAIL_EDGE_MARGIN;
 }
 
 // The rule itself, separated from the DOM so it can be tested.

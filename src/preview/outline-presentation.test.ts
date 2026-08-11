@@ -7,6 +7,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  maxRailWidth,
   pickPresentation,
   railMinWidth,
   RAIL_MIN_HEIGHT,
@@ -103,6 +104,28 @@ describe("pickPresentation", () => {
     expect(
       pickPresentation(area(railMinWidth(NARROW_PADDING), RAIL_MIN_HEIGHT - 1, NARROW_PADDING)),
     ).toBe("sheet");
+  });
+
+  test("the drawn-width cap and the viability threshold meet at the boundary", () => {
+    // The two questions differ on purpose — viability asks about the DEFAULT
+    // footprint so dragging never flips the presentation — so they must at
+    // least agree where they touch, or the rail would be viable at a width it
+    // is not allowed to be drawn at.
+    const padding = NARROW_PADDING;
+    const minimum = railMinWidth(padding);
+    expect(maxRailWidth(area(minimum, 900, padding))).toBe(288);
+  });
+
+  test("a stored width wider than the space allows is capped, not honoured", () => {
+    // The back door the presentation rule leaves open: a 500px rail saved on a
+    // large display, reapplied verbatim on an 834px tablet, leaves ~270px of
+    // prose — the squeeze this whole rule exists to prevent.
+    const tablet = area(834, 1112, NARROW_PADDING);
+    expect(pickPresentation(tablet)).toBe("rail");
+    const cap = maxRailWidth(tablet);
+    expect(cap).toBeLessThan(500);
+    // Whatever the cap is, the readable measure survives beside it.
+    expect(tablet.width - tablet.documentPadding - (cap + 16)).toBeGreaterThanOrEqual(380);
   });
 
   test("the rule reads geometry only, never a mode", () => {

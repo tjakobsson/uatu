@@ -448,6 +448,39 @@ test.describe("tablet width keeps the rail", () => {
     await expect(page.locator("#outline-toggle")).toHaveAttribute("aria-pressed", "false");
   });
 
+  test("a stored width from a bigger display is capped to protect the reading column", async ({
+    page,
+  }) => {
+    // The presentation rule asks about the rail's DEFAULT footprint so that
+    // dragging never flips it mid-drag — which leaves a stored width free to
+    // break the same promise from the other side. A 500px rail saved on a
+    // desktop would otherwise be reapplied verbatim here and leave ~270px of
+    // prose on an 834px tablet.
+    await page.evaluate(() => {
+      for (let index = 0; index < window.localStorage.length; index += 1) {
+        const key = window.localStorage.key(index)!;
+        if (key.endsWith("uatu:outline-width")) {
+          window.localStorage.setItem(key, "500");
+          return;
+        }
+      }
+      // No key yet on a fresh profile — write one under the same namespace the
+      // app uses, resolved from any existing presentation-scoped key.
+      window.localStorage.setItem("uatu:presentation:v1:%2F:uatu:outline-width", "500");
+    });
+    await page.reload();
+    await waitForPreviewToSettle(page);
+    await page.locator("#outline-toggle").click();
+    await expectPresentation(page, "rail");
+
+    const panelWidth = await page
+      .locator(".uatu-outline")
+      .evaluate(element => element.getBoundingClientRect().width);
+    expect(panelWidth).toBeLessThan(500);
+    // The promise the whole change rests on, restated as an assertion.
+    expect(await textColumnWidth(page)).toBeGreaterThanOrEqual(380);
+  });
+
   test("the rail keeps its resize handle", async ({ page }) => {
     await page.locator("#outline-toggle").click();
     await expectPresentation(page, "rail");

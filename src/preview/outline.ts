@@ -29,6 +29,7 @@ import { copyToClipboard } from "./code-block";
 import { copySourceButton, outlineToggleButton } from "./header";
 import { collectHeadings, type OutlineHeading } from "./outline-headings";
 import {
+  maxRailWidth,
   pickPresentation,
   type OutlinePresentation,
   type PreviewArea,
@@ -39,7 +40,6 @@ export { collectHeadings, cleanHeadingText, type OutlineHeading } from "./outlin
 const WIDTH_KEY = "uatu:outline-width";
 const MIN_WIDTH = 200; // px
 const DEFAULT_WIDTH = 288; // px (~18rem) used until the user resizes
-const MIN_CONTENT = 280; // px of document kept visible beside a docked outline
 const EDGE_MARGIN = 16; // px kept between the panel and the preview-area edges
 
 function readWidthPreference(): number | null {
@@ -260,10 +260,13 @@ function layoutPanel(): void {
     return;
   }
 
+  // Measured once and shared: the presentation branch and the rail's width
+  // clamp must agree about the geometry they are reasoning over.
+  const area = previewArea();
   // The presentation attribute is what the stylesheet keys on, so it is stamped
   // before either branch runs — including when the panel is closed, so a sheet
   // never paints one frame as a rail on open.
-  const presentation = currentPresentation();
+  const presentation = area ? pickPresentation(area) : "rail";
   panel.dataset.presentation = presentation;
 
   const shellRect = shell.getBoundingClientRect();
@@ -309,8 +312,14 @@ function layoutPanel(): void {
   panel.style.right = `${Math.round(Math.max(0, window.innerWidth - shellRect.right) + EDGE_MARGIN)}px`;
   panel.style.height = `${Math.round(Math.max(120, usableBottom - top - EDGE_MARGIN))}px`;
 
-  // Clamp width so at least MIN_CONTENT of document stays visible beside it.
-  const maxWidth = Math.max(MIN_WIDTH, shellRect.width - MIN_CONTENT);
+  // Clamp the drawn width so the readable measure survives beside it.
+  //
+  // The presentation rule asks about the rail's DEFAULT footprint so dragging
+  // never flips it mid-drag; that leaves a stored width free to violate the
+  // same promise from the other direction — a 500px rail saved on a desktop
+  // reapplied verbatim on an 834px tablet leaves ~270px of prose. Clamping here
+  // closes that without making the presentation depend on stored state.
+  const maxWidth = area ? Math.max(MIN_WIDTH, maxRailWidth(area)) : MIN_WIDTH;
   const clamped = Math.round(Math.min(Math.max(width, MIN_WIDTH), maxWidth));
   panel.style.width = `${clamped}px`;
   shell.style.setProperty("--outline-gutter", `${clamped + EDGE_MARGIN}px`);

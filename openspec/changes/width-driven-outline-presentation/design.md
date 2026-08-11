@@ -114,8 +114,17 @@ changes. It uses the rail's *default* footprint rather than the user's stored
 width on purpose: dragging the rail must never flip the presentation out from
 under the drag.
 
-Two consequences worth stating: this replaces `MIN_CONTENT` as the real
-reading-space guarantee, leaving `MIN_CONTENT` as a drag bound only; and the
+Asking about the default footprint leaves one gap, which review caught: a width
+the user saved on a large display is reapplied verbatim on a smaller one, so a
+500px rail could still leave ~270px of prose on an 834px tablet — the same
+squeeze arriving by the back door. The *drawn* width is therefore capped
+(`maxRailWidth`) so the readable measure survives, while the *presentation*
+stays a function of the default footprint alone. Two different questions, and
+they meet exactly at the threshold.
+
+Two consequences worth stating: this replaces `MIN_CONTENT` entirely — the old
+280px drag bound is gone, since the cap now enforces the same 380px promise the
+threshold makes; and the
 measurement is of the **preview area**, not the window, so docking the terminal
 to the right can push the outline into the sheet presentation without the window
 changing size. That is the correct behaviour and follows from measuring the
