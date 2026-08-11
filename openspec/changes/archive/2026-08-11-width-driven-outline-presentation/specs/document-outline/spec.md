@@ -205,11 +205,14 @@ reflow the document, since it covers the preview rather than sitting beside it.
 ### Requirement: Outline width is adjustable and remembered
 
 The outline width SHALL be adjustable in the rail presentation by dragging a
-handle on its left edge (its docked right edge staying fixed), bounded to a
-minimum width and to keeping a minimum amount of document visible. The chosen
-width SHALL persist across reloads using browser-local UI state. The sheet
-presentation SHALL NOT render a resize handle, since it is sized to the
-available surface rather than to a stored width.
+handle on its left edge (its docked right edge staying fixed), bounded below by
+a minimum width and above by the width that still leaves a readable text column
+beside it. The chosen width SHALL persist across reloads using browser-local UI
+state, and SHALL be capped to that same bound when reapplied in a preview area
+too narrow to honour it, so a width chosen on a large display cannot squeeze the
+document on a smaller one. The sheet presentation SHALL NOT render a resize
+handle, since it is sized to the available surface rather than to a stored
+width.
 
 #### Scenario: Resizing by dragging the left edge
 - **WHEN** the user drags the outline's left-edge handle in the rail
@@ -229,3 +232,10 @@ available surface rather than to a stored width.
 - **WHEN** the user has resized the rail, then uses the outline at a width that
   resolves to the sheet, then returns to a width that resolves to the rail
 - **THEN** the rail reopens at the previously chosen width
+
+#### Scenario: A stored width too wide for the current preview is capped
+- **WHEN** a width stored on a larger display is reapplied in a preview area
+  where honouring it would leave less than a readable text column
+- **THEN** the rail is drawn at the widest width that still leaves a readable
+  column
+- **AND** the stored preference itself is left unchanged
