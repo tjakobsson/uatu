@@ -510,6 +510,59 @@ test.describe("crossing the threshold", () => {
     await expectPresentation(page, "sheet");
   });
 
+  test("a document change while Preview is hidden is judged on current width, not stale state", async ({
+    page,
+    request,
+  }) => {
+    // The preview shell is `display: none` whenever another touch tab is
+    // active, so it measures 0 wide — and `refreshOutline()` still runs there,
+    // because a follow-mode file event switches documents without bringing
+    // Preview forward. An earlier revision answered that unmeasurable moment
+    // with the last resolved presentation, which goes stale the instant the
+    // width changes while hidden. This is that sequence.
+    await boot(page, request);
+
+    // Start wide, so the RAIL is what is open and the stale value would be
+    // "rail" — the value that suppresses the sheet's dismissal rule.
+    await page.setViewportSize({ width: 834, height: 1112 });
+    await openFixtureDoc(page);
+    await page.locator("#outline-toggle").click();
+    await expectPresentation(page, "rail");
+
+    // Follow on, from the Files surface that owns the chip.
+    await page.locator("#touch-tab-files").click();
+    const follow = page.locator("#follow-toggle");
+    if ((await follow.getAttribute("aria-pressed")) !== "true") {
+      await follow.click();
+    }
+    await expect(follow).toHaveAttribute("aria-pressed", "true");
+
+    // Narrow to phone width while the shell is hidden and unmeasurable.
+    await page.setViewportSize({ width: 390, height: 844 });
+
+    // A watched-file event switches the document and deliberately does NOT
+    // steal the Files tab, so the outline is refreshed against a hidden shell.
+    await fs.writeFile(
+      workspacePath("outline-two.md"),
+      `${OUTLINE_DOC_TWO}\n\nFollowed while browsing files.\n`,
+      "utf8",
+    );
+    await expect(page.locator("html")).toHaveAttribute("data-active-tab", "files");
+
+    await page.locator("#touch-tab-preview").click();
+    await expect(page.locator("#preview-title")).toHaveText("Second Fixture");
+
+    // Phone width means a sheet, and the document changed — so it must not be
+    // left covering a document the user never opened it on. Asserted before
+    // reopening, because a dismissed panel has no presentation to measure.
+    await expect(page.locator("#outline-toggle")).toHaveAttribute("aria-pressed", "false");
+
+    // And the width that drove that decision really is sheet-width: had the
+    // stale "rail" been used, the dismissal above would have been skipped.
+    await page.locator("#outline-toggle").click();
+    await expectPresentation(page, "sheet");
+  });
+
   test("returning to the rail restores the width chosen before the sheet", async ({ page, request }) => {
     await boot(page, request);
     await openFixtureDoc(page);

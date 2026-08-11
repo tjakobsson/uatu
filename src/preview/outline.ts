@@ -183,6 +183,23 @@ function previewArea(): PreviewArea | null {
     return null;
   }
   const shellStyle = getComputedStyle(shell);
+  // A hidden shell measures 0 wide, and 0 is not "narrow" — it is the absence
+  // of a measurement. Touch mode sets `display: none` on the preview shell
+  // whenever a tab other than Preview is active, and `refreshOutline()` still
+  // runs there: a follow-mode file event switches documents without bringing
+  // the Preview tab forward.
+  //
+  // Answer with the viewport instead. It is always measurable, always current,
+  // and in touch mode it IS the width the shell will have once shown — the
+  // preview spans the full width there. An earlier revision reused the last
+  // resolved presentation instead, which went stale the moment the width
+  // changed while hidden (rotate, or enter Split View, from another tab), and
+  // then reported a rail for a viewport that had become sheet-width.
+  //
+  // Desktop never hides the shell, so the estimate is only ever consulted in
+  // the mode where it is accurate.
+  const measuredWidth = shell.getBoundingClientRect().width;
+  const width = measuredWidth > 0 ? measuredWidth : document.documentElement.clientWidth;
   const preview = document.querySelector<HTMLElement>("#preview");
   // The document's own left padding, counted for BOTH sides on purpose: its
   // right padding is the reserved outline gutter whenever the rail is open, so
@@ -191,7 +208,7 @@ function previewArea(): PreviewArea | null {
   // so the left side is the honest sample.
   const previewPadLeft = preview ? parseFloat(getComputedStyle(preview).paddingLeft) || 0 : 0;
   return {
-    width: shell.getBoundingClientRect().width,
+    width,
     height: scrollportRect(previewScrollRoot()).height,
     documentPadding:
       (parseFloat(shellStyle.paddingLeft) || 0)
@@ -200,27 +217,13 @@ function previewArea(): PreviewArea | null {
   };
 }
 
-// The last resolution that came from a real measurement, so an unmeasurable
-// moment can answer with the truth from just before it instead of a guess.
-let lastPresentation: OutlinePresentation = "rail";
-
 // Resolved per call, never cached — the available width changes on rotation, a
 // window drag, a UI-mode switch, and a terminal dock, and the same reasoning
 // `preview-scroll-root` gives applies: the resolution is cheap and caching it
 // would buy nothing while costing correctness.
-//
-// A zero measurement is the one thing that must NOT be taken at face value. The
-// preview shell is `display: none` for a frame during a touch-mode tab switch,
-// and a hidden element measures 0 — which is not "narrow", it is the absence of
-// an answer. Reading it as narrow would resolve to the sheet and dismiss an
-// open rail on every iPad document change.
 function currentPresentation(): OutlinePresentation {
   const area = previewArea();
-  if (!area || area.width === 0 || area.height === 0) {
-    return lastPresentation;
-  }
-  lastPresentation = pickPresentation(area);
-  return lastPresentation;
+  return area ? pickPresentation(area) : "rail";
 }
 
 // Fixed bottom chrome that overlays the scrollport rather than shortening it.
