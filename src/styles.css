@@ -4049,7 +4049,15 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
   bottom: var(--outline-surface-gap, 0px);
   width: var(--outline-surface-width, 100%);
   height: auto;
-  z-index: 35;
+  /* Deliberately NOT raised above the base `.uatu-outline` z-index of 3.
+     An earlier revision used 35 to outrank the touch Files (30) and Terminal
+     (40) surfaces — defending against an overlap that cannot happen, since the
+     rule below already sets `display: none` whenever the active tab is not
+     Preview. Outranking them cost two real regressions: the preview find bar
+     (`.find-slot`, z-index 4) opened BEHIND the sheet, invisible, with ⌘F
+     still swallowing the keystroke; and a desktop fullscreen terminal
+     (z-index 5) stayed under it. Both work at 3, and 3 still covers the
+     preview header (z-index 2), which is all the sheet actually needs. */
   border: 0;
   border-radius: 0;
   box-shadow: none;

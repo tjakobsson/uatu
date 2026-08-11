@@ -72,19 +72,54 @@ portrait and landscape, narrow desktop windows, and the stacked layout.
 strictly more code for strictly less coverage, and it preserves a known defect
 in the stacked layout on the technicality that it is a desktop-mode layout.
 
+### Corrections from review
+
+Two errors in the first implementation, both caught in review on the PR and
+both worth recording because the reasoning that produced them looked sound:
+
+**The threshold was derived from a width the rail never uses.** It was computed
+from `MIN_WIDTH` (200) + `EDGE_MARGIN`, giving 596 — but `layoutPanel` opens the
+rail at the stored width, defaulting to `DEFAULT_WIDTH` (288). At a 596px
+preview the rail therefore took 304px and left roughly 245px of prose, not the
+380 the derivation promised. The floor is now computed from the footprint the
+rail actually applies, and from the layout's measured padding rather than an
+assumed constant — the shell alone swings between 1.75rem and 1rem across the
+≤900px breakpoint. Stated as "what would be left for prose", which is the
+question that matters, instead of a bare width that has to be re-derived by
+hand whenever either input moves.
+
+**The sheet's `z-index: 35` outranked things it needed to stay under.** It was
+chosen to beat the touch Files (30) and Terminal (40) surfaces — an overlap that
+cannot occur, because the sheet is already `display: none` whenever the active
+tab is not Preview. Defending against the impossible cost two real regressions:
+the preview find bar (`.find-slot`, z-index 4) opened *behind* the sheet and
+invisible while ⌘F still swallowed the keystroke, and a desktop fullscreen
+terminal (z-index 5) stayed underneath it. The sheet now inherits the base
+`z-index: 3`, which still covers the preview header (2) — all it ever needed.
+
+The general lesson for this file: a z-index picked to win against a specific
+neighbour silently changes the relationship with every other neighbour.
+
 ### The threshold is derived, not chosen by taste
 
-The rail is viable when the preview area can seat the panel's `MIN_WIDTH`
-(200px) plus `EDGE_MARGIN` (16px) plus a genuinely readable prose column. At the
-preview's 16px base, roughly 45 characters — the low end of comfortable measure
-— is about 380px, giving a threshold near 600px.
+The rail is viable when the preview area can seat what the rail actually
+occupies — `DEFAULT_WIDTH` (288px) plus `EDGE_MARGIN` (16px) — plus the layout's
+own horizontal padding, plus a genuinely readable prose column. At the preview's
+16px base, roughly 45 characters — the low end of comfortable measure — is about
+380px.
+
+The rule is expressed as the prose column that would survive, not as a width
+constant, so it stays correct when the rail's width or the layout's padding
+changes. It uses the rail's *default* footprint rather than the user's stored
+width on purpose: dragging the rail must never flip the presentation out from
+under the drag.
 
 Two consequences worth stating: this replaces `MIN_CONTENT` as the real
-reading-space guarantee, so `MIN_CONTENT` becomes redundant once the rail only
-ever runs above the threshold; and the measurement is of the **preview area**,
-not the window, so docking the terminal to the right can push the outline into
-the sheet presentation without the window changing size. That is the correct
-behaviour and follows from measuring the right box.
+reading-space guarantee, leaving `MIN_CONTENT` as a drag bound only; and the
+measurement is of the **preview area**, not the window, so docking the terminal
+to the right can push the outline into the sheet presentation without the window
+changing size. That is the correct behaviour and follows from measuring the
+right box.
 
 *Landscape phone:* an iPhone in landscape is 844px wide and clears the width
 threshold, but only 390px tall — a full-height rail there yields roughly four

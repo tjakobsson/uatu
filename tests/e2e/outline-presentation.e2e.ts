@@ -284,6 +284,41 @@ test.describe("phone width resolves to the sheet", () => {
     expect(close.height).toBeGreaterThanOrEqual(44);
   });
 
+  test("the find bar opens ON TOP of the sheet, not behind it", async ({ page }) => {
+    // The sheet is a stacking neighbour of the preview find bar
+    // (`.find-slot`, z-index 4), which lives inside `.preview-shell`. An
+    // earlier revision gave the sheet z-index 35 to outrank the touch Files
+    // and Terminal surfaces — an overlap that cannot occur, since the sheet is
+    // `display: none` off the Preview tab — and the cost was that ⌘F opened
+    // the find bar invisibly underneath it while still swallowing the
+    // keystroke, leaving no affordance at all.
+    await page.locator("#outline-toggle").click();
+    await expectPresentation(page, "sheet");
+
+    await page.keyboard.press("ControlOrMeta+f");
+    await expect(page.locator("#find-query")).toBeVisible();
+
+    const stacking = await page.evaluate(() => {
+      // `.find-bar-inner`, not `#find-bar`: the outer element is a zero-height
+      // wrapper inside the zero-height sticky slot, so hit-testing its centre
+      // samples a point the bar does not occupy and reports whatever is
+      // painted behind it.
+      const bar = document.querySelector<HTMLElement>(".find-bar-inner")!;
+      const box = bar.getBoundingClientRect();
+      const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      return {
+        // Named so a failure says WHAT is covering the bar, not just "false".
+        topmost: hit ? `${hit.tagName.toLowerCase()}.${hit.className}` : "none",
+        coveredByOutline: hit ? !!hit.closest(".uatu-outline") : false,
+        barHeight: box.height,
+      };
+    });
+    // Guards the hit-test itself: a zero-height box would make the assertion
+    // below pass or fail for reasons unrelated to stacking.
+    expect(stacking.barHeight).toBeGreaterThan(0);
+    expect(stacking.coveredByOutline).toBe(false);
+  });
+
   test("the sheet renders no resize handle", async ({ page }) => {
     await page.locator("#outline-toggle").click();
     await expectPresentation(page, "sheet");
@@ -417,6 +452,40 @@ test.describe("tablet width keeps the rail", () => {
     await page.locator("#outline-toggle").click();
     await expectPresentation(page, "rail");
     await expect(page.locator(".uatu-outline-resizer")).toBeVisible();
+  });
+});
+
+test.describe("desktop stacking against the sheet", () => {
+  // Desktop, fine pointer. Right-docking the terminal narrows the preview from
+  // 954px to 590px, which resolves to the sheet — the case where the sheet has
+  // desktop chrome to coexist with rather than a tab bar.
+  test.use({ viewport: { width: 1280, height: 720 } });
+
+  test("a fullscreen terminal comes up over the sheet", async ({ page, request }) => {
+    await boot(page, request);
+    await treeRow(page, "outline-doc.md").click();
+    await expect(page.locator("#preview-title")).toHaveText("Outline Fixture");
+
+    await page.locator("#terminal-toggle").click();
+    await expect(page.locator("#terminal-panel")).toBeVisible();
+    await page.locator("#terminal-dock-toggle").click();
+    await expect(page.locator("#terminal-panel")).toHaveAttribute("data-dock", "right");
+
+    await page.locator("#outline-toggle").click();
+    await expectPresentation(page, "sheet");
+
+    // The terminal's fullscreen layer is z-index 5. While the sheet sat at 35
+    // it stayed underneath, so entering fullscreen looked like it did nothing.
+    await page.locator("#terminal-fullscreen").click();
+    await expect(page.locator("#terminal-panel")).toHaveAttribute("data-display", "fullscreen");
+
+    const terminalOnTop = await page.evaluate(() => {
+      const panel = document.querySelector<HTMLElement>("#terminal-panel")!;
+      const box = panel.getBoundingClientRect();
+      const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      return panel.contains(hit) || hit === panel;
+    });
+    expect(terminalOnTop).toBe(true);
   });
 });
 

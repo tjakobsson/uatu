@@ -182,9 +182,21 @@ function previewArea(): PreviewArea | null {
   if (!shell) {
     return null;
   }
+  const shellStyle = getComputedStyle(shell);
+  const preview = document.querySelector<HTMLElement>("#preview");
+  // The document's own left padding, counted for BOTH sides on purpose: its
+  // right padding is the reserved outline gutter whenever the rail is open, so
+  // reading it back would fold the rail's width into the measurement and let
+  // the answer depend on the previous answer. The natural padding is symmetric,
+  // so the left side is the honest sample.
+  const previewPadLeft = preview ? parseFloat(getComputedStyle(preview).paddingLeft) || 0 : 0;
   return {
     width: shell.getBoundingClientRect().width,
     height: scrollportRect(previewScrollRoot()).height,
+    documentPadding:
+      (parseFloat(shellStyle.paddingLeft) || 0)
+      + (parseFloat(shellStyle.paddingRight) || 0)
+      + previewPadLeft * 2,
   };
 }
 
