@@ -13,6 +13,11 @@ import { expect, test } from "./fixtures";
 import { waitForPreviewToSettle } from "./fixtures";
 import { treeRow } from "./tree-helpers";
 import { workspacePath } from "./config";
+import {
+  expectStageTransform,
+  expectStageTransformDiffers,
+  readStageTransform,
+} from "./transform-helpers";
 
 // iPhone 13 Pro portrait. hasTouch + isMobile make Chromium report a coarse
 // pointer, which is what defaults the UI mode to touch.
@@ -786,17 +791,17 @@ test.describe("touch mermaid viewer", () => {
 
   test("double-tap fits the diagram to the screen", async ({ page }) => {
     await openViewer(page);
-    const fitted = await stageTransform(page);
+    const fitted = (await readStageTransform(page))!;
 
     // Move it away from the fitted position.
     await dispatchPointer(page, "pointerdown", 1, 200, 400);
     await dispatchPointer(page, "pointermove", 1, 260, 460);
     await dispatchPointer(page, "pointerup", 1, 260, 460);
-    expect(await stageTransform(page)).not.toBe(fitted);
+    expectStageTransformDiffers(await readStageTransform(page), fitted);
 
     // Two quick taps in the same place: back to fit.
     await doubleTap(page, 2, 3, 200, 400);
-    await expect.poll(() => stageTransform(page)).toBe(fitted);
+    await expectStageTransform(page, fitted);
   });
 
   test("a drag that returns near its start is not a tap", async ({ page }) => {
@@ -805,14 +810,14 @@ test.describe("touch mermaid viewer", () => {
     // makes two out-and-back pans read as a double-tap, snapping the diagram
     // back to fit and discarding the position the user panned to.
     await openViewer(page);
-    const fitted = await stageTransform(page);
+    const fitted = (await readStageTransform(page))!;
 
     // Move away from the fitted view so a spurious fit is detectable.
     await dispatchPointer(page, "pointerdown", 40, 195, 400);
     await dispatchPointer(page, "pointermove", 40, 255, 460);
     await dispatchPointer(page, "pointerup", 40, 255, 460);
-    const moved = await stageTransform(page);
-    expect(moved).not.toBe(fitted);
+    const moved = await readStageTransform(page);
+    expectStageTransformDiffers(moved, fitted);
 
     // Two drags that each wander far out and return to within the tap slop of
     // where they began.
@@ -825,7 +830,7 @@ test.describe("touch mermaid viewer", () => {
 
     // Neither counted as a tap, so no fit fired — the diagram is wherever the
     // pans left it, not back at the fitted transform.
-    expect(await stageTransform(page)).not.toBe(fitted);
+    expectStageTransformDiffers(await readStageTransform(page), fitted);
   });
 
   test("a gesture between two taps breaks the double-tap sequence", async ({ page }) => {
@@ -833,12 +838,12 @@ test.describe("touch mermaid viewer", () => {
     // Otherwise tap, pan, tap reads as a double-tap and snaps the diagram back
     // to fit, throwing away the position the pan was used to reach.
     await openViewer(page);
-    const fitted = await stageTransform(page);
+    const fitted = (await readStageTransform(page))!;
 
     await dispatchPointer(page, "pointerdown", 50, 195, 400);
     await dispatchPointer(page, "pointermove", 50, 255, 460);
     await dispatchPointer(page, "pointerup", 50, 255, 460);
-    expect(await stageTransform(page)).not.toBe(fitted);
+    expectStageTransformDiffers(await readStageTransform(page), fitted);
 
     // Each interleaved sequence goes in ONE round-trip, so the taps really are
     // inside the double-tap window and the assertion is about the intervening
@@ -855,7 +860,7 @@ test.describe("touch mermaid viewer", () => {
       ["pointerdown", 53, 195, 300],
       ["pointerup", 53, 195, 300],
     ]);
-    expect(await stageTransform(page)).not.toBe(fitted);
+    expectStageTransformDiffers(await readStageTransform(page), fitted);
 
     // Same for a pinch between the two taps.
     await dispatchSequence(page, [
@@ -870,11 +875,11 @@ test.describe("touch mermaid viewer", () => {
       ["pointerdown", 57, 195, 300],
       ["pointerup", 57, 195, 300],
     ]);
-    expect(await stageTransform(page)).not.toBe(fitted);
+    expectStageTransformDiffers(await readStageTransform(page), fitted);
 
     // …and a genuine double-tap still fits, so the guard has not disabled it.
     await doubleTap(page, 58, 59, 195, 300);
-    await expect.poll(() => stageTransform(page)).toBe(fitted);
+    await expectStageTransform(page, fitted);
   });
 
   test("panning cannot move the diagram entirely off-screen", async ({ page }) => {

@@ -4,6 +4,7 @@ import { promises as fs } from "node:fs";
 
 import { workspacePath } from "./config";
 import { treeRow } from "./tree-helpers";
+import { expectStageTransform, readStageTransform } from "./transform-helpers";
 import { standardBeforeEach } from "./fixtures";
 
 
@@ -673,7 +674,7 @@ test.describe("desktop layout", () => {
         return match ? Number.parseFloat(match[1]!) : Number.NaN;
       });
 
-    const fitted = await transform();
+    const fitted = (await readStageTransform(page))!;
     const fittedScale = await scale();
     expect(Number.isFinite(fittedScale)).toBe(true);
 
@@ -686,21 +687,9 @@ test.describe("desktop layout", () => {
     await page.mouse.down();
     await page.mouse.move(centreX + 40, centreY + 30);
     await page.mouse.up();
-    const panned = await page.evaluate(
-      ({ before, after }) => {
-        const parse = (t: string) => {
-          const m = t.match(/translate\((-?[\d.]+)px,\s*(-?[\d.]+)px\)/);
-          return m ? { x: Number.parseFloat(m[1]!), y: Number.parseFloat(m[2]!) } : null;
-        };
-        const a = parse(before);
-        const b = parse(after);
-        return a && b ? { dx: b.x - a.x, dy: b.y - a.y } : null;
-      },
-      { before: fitted, after: await transform() },
-    );
-    expect(panned).not.toBeNull();
-    expect(Math.abs(panned!.dx - 40)).toBeLessThan(1.5);
-    expect(Math.abs(panned!.dy - 30)).toBeLessThan(1.5);
+    const afterDrag = (await readStageTransform(page))!;
+    expect(Math.abs(afterDrag.tx - fitted.tx - 40)).toBeLessThan(1.5);
+    expect(Math.abs(afterDrag.ty - fitted.ty - 30)).toBeLessThan(1.5);
 
     // Cursor-anchored wheel zoom: the world point under the cursor stays put.
     const anchorBefore = await page.evaluate(
@@ -729,14 +718,14 @@ test.describe("desktop layout", () => {
 
     // dblclick fits — the mouse detector is retained alongside double-tap.
     await page.mouse.dblclick(centreX, centreY);
-    await expect.poll(transform).toBe(fitted);
+    await expectStageTransform(page, fitted);
 
     // Toolbar actions.
     await page.locator(".mermaid-viewer-toolbar [aria-label='Zoom in']").click();
     expect(await scale()).toBeGreaterThan(fittedScale);
     await page.locator(".mermaid-viewer-toolbar [aria-label='Zoom out']").click();
     await page.locator(".mermaid-viewer-toolbar [aria-label='Fit to screen']").click();
-    await expect.poll(transform).toBe(fitted);
+    await expectStageTransform(page, fitted);
 
     // Keyboard shortcuts: +, -, 0 and f.
     await page.keyboard.press("+");
@@ -745,10 +734,10 @@ test.describe("desktop layout", () => {
     await expect.poll(scale).toBeCloseTo(fittedScale, 3);
     await page.keyboard.press("+");
     await page.keyboard.press("0");
-    await expect.poll(transform).toBe(fitted);
+    await expectStageTransform(page, fitted);
     await page.keyboard.press("+");
     await page.keyboard.press("f");
-    await expect.poll(transform).toBe(fitted);
+    await expectStageTransform(page, fitted);
 
     // Dismissal is still exactly Escape and the close control.
     await page.keyboard.press("Escape");

@@ -8,6 +8,7 @@
 
 import { expect, test } from "./fixtures";
 import { treeRow } from "./tree-helpers";
+import { expectStageTransform, readStageTransform } from "./transform-helpers";
 
 function readStoredValue(page: import("@playwright/test").Page, suffix: string): Promise<string | null> {
   return page.evaluate(s => {
@@ -296,7 +297,7 @@ test.describe("iPad mermaid viewer", () => {
     const transform = () =>
       page.locator(".mermaid-viewer-stage").evaluate(el => (el as HTMLElement).style.transform);
 
-    const fitted = await transform();
+    const fitted = (await readStageTransform(page))!;
     const before = await scale();
 
     await send("pointerdown", 1, 470, 380);
@@ -333,6 +334,6 @@ test.describe("iPad mermaid viewer", () => {
         );
       }
     });
-    await expect.poll(transform).toBe(fitted);
+    await expectStageTransform(page, fitted);
   });
 });
