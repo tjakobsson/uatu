@@ -142,6 +142,12 @@ and interacting with the document while it is open. The sheet presentation
 covers the preview by design and is therefore modal over the document, but SHALL
 always offer a reachable dismissal.
 
+#### Scenario: Opening the outline
+- **WHEN** the user activates the outline toggle
+- **THEN** the outline panel appears in whichever presentation the available
+  width resolves to
+- **AND** focus is not trapped inside it
+
 #### Scenario: Opening the rail
 - **WHEN** the user activates the outline toggle and the rail presentation is
   resolved
