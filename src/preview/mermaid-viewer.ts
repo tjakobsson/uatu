@@ -272,7 +272,11 @@ function createViewer(): ViewerInternals {
     if (!pointer) {
       return;
     }
-    if (!cancelled) {
+    if (cancelled) {
+      // A cancelled pointer is not a tap either, and leaving a prior tap live
+      // across it has the same stale-pairing consequence.
+      lastTap = null;
+    } else {
       handlePossibleTap(event, pointer);
     }
     pointers.delete(event.pointerId);
@@ -302,11 +306,19 @@ function createViewer(): ViewerInternals {
   // which the pan surface needs — interferes with it. Mouse input keeps the
   // native `dblclick` listener below; two detectors, each reliable for its own
   // input mode, beat one that is unreliable for half of them.
+  // Anything that is not a tap BREAKS a tap sequence — it does not merely fail
+  // to extend it. Returning early while leaving `lastTap` in place lets a tap,
+  // then a pan or a pinch, then another tap read as a double-tap and snap the
+  // diagram to fit, discarding exactly the position the intervening gesture was
+  // used to reach. Every disqualifying path below therefore clears it.
   function handlePossibleTap(event: PointerEvent, pointer: ActivePointer): void {
     if (event.pointerType === "mouse") {
+      // The mouse runs on `dblclick` and never participates in this state
+      // machine, so it neither sets nor invalidates a touch tap sequence.
       return;
     }
     if (gestureWasMultiTouch || pointers.size > 1) {
+      lastTap = null;
       return;
     }
     const moved = Math.max(
@@ -314,6 +326,7 @@ function createViewer(): ViewerInternals {
       Math.hypot(event.clientX - pointer.downX, event.clientY - pointer.downY),
     );
     if (moved > TAP_MOVE_LIMIT || event.timeStamp - pointer.downTime > TAP_MAX_MS) {
+      lastTap = null;
       return;
     }
     const previous = lastTap;

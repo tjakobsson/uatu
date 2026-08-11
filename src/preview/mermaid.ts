@@ -53,10 +53,16 @@ onColorSchemeChange(() => {
   void rerenderMermaidDiagrams(currentMermaidThemeInputs());
 });
 
-// A mode flip moves scrolling between the preview shell and the page, but an
-// IntersectionObserver's root is fixed at construction — the live observer
-// stays bound to the region that was effective at mount. Rebuild it, for the
-// diagrams that have not rendered yet.
+// Scrolling moves between the preview shell and the page without any document
+// remount, and an IntersectionObserver's root is fixed at construction — the
+// live observer stays bound to whatever region was effective at mount. Rebuild
+// it, for the diagrams that have not rendered yet.
+//
+// Two events move it, and both must be handled: switching UI mode swaps the
+// scroller outright, and crossing the ≤900px stacked breakpoint by resizing or
+// rotating in desktop mode does the same with no mode change to subscribe to.
+// This is the same pair `outline.ts` subscribes to, for the same reason and
+// with the same no-op-unless-changed guard inside.
 //
 // Not `rerenderMermaidDiagrams`: that path is for a theme change and resets
 // every diagram to its source to force a re-render. Nothing about the theme
@@ -69,6 +75,8 @@ onColorSchemeChange(() => {
 onUiModeChange(() => {
   requestAnimationFrame(() => reobserveMermaidDiagrams());
 });
+
+window.addEventListener("resize", () => reobserveMermaidDiagrams(), { passive: true });
 
 export function handleMermaidTriggerClick(event: MouseEvent): void {
   const target = event.target;

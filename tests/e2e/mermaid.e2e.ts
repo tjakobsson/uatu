@@ -136,6 +136,55 @@ test.describe("lazy rendering where the page scrolls", () => {
     });
   });
 
+  test.describe("crossing the stacked breakpoint by resize", () => {
+    // Desktop mode throughout — no UI-mode event fires here at all. Crossing
+    // 900px restyles `.preview-shell` from a scroller to `overflow: visible;
+    // height: auto`, so a stale observer still rooted at the shell sees a box
+    // that now spans the whole document and reports every pending diagram as
+    // intersecting at once. Measured before the fix: 2 of 12 rendered wide,
+    // all 12 immediately after the resize.
+    test.use({ viewport: { width: 1200, height: 800 }, hasTouch: false, isMobile: false });
+
+    test("a resize across 900px re-roots observation instead of dumping the batch", async ({
+      page,
+      request,
+    }) => {
+      await request.post("/__e2e/reset", {
+        data: { dirty: { "many-diagrams.md": manyDiagramsDoc(DIAGRAMS) } },
+      });
+      await page.goto("/");
+      await page.evaluate(() => window.localStorage.clear());
+      await page.reload();
+      await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "desktop");
+
+      await treeRow(page, "many-diagrams.md").click();
+      await expect(page.locator("#preview-title")).toHaveText("Many Diagrams");
+      await expect(page.locator("#preview .mermaid")).toHaveCount(DIAGRAMS);
+      await expect(page.locator("#preview .mermaid svg").first()).toBeVisible();
+      const pendingWide = await page.locator("#preview .mermaid.mermaid-pending").count();
+      expect(pendingWide).toBeGreaterThan(0);
+
+      await page.setViewportSize({ width: 800, height: 800 });
+      // The shell has genuinely stopped scrolling — this is the condition that
+      // makes a stale root dangerous, so assert it rather than assume it.
+      await expect
+        .poll(async () =>
+          page.evaluate(
+            () => getComputedStyle(document.querySelector(".preview-shell")!).overflowY,
+          ),
+        )
+        .toBe("visible");
+      // Give a stale observer every chance to fire its batch.
+      await page.waitForTimeout(1500);
+
+      expect(await page.locator("#preview .mermaid.mermaid-pending").count()).toBeGreaterThan(0);
+
+      // Still lazy AND still reachable: the rebuilt root is the viewport, so
+      // scrolling the page renders the rest.
+      expect(await sweepPageAndCountRendered(page, DIAGRAMS)).toBe(DIAGRAMS);
+    });
+  });
+
   test.describe("live UI-mode switch", () => {
     test.use({ viewport: { width: 1024, height: 768 }, hasTouch: true, isMobile: true });
 

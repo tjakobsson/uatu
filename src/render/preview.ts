@@ -48,6 +48,10 @@ let lastInstallContainer: ParentNode | null = null;
 // need the root as it is *now*. A value captured at mount would freeze the
 // layout the document happened to be mounted in.
 let lastObserverRootResolver: ObserverRootResolver | null = null;
+// The root the live observer was actually built against, so re-observation can
+// tell a real container change from the resize storm that delivered it. Also
+// distinguishes "the viewport" (null) from "never installed" (undefined).
+let lastObserverRoot: Element | null | undefined;
 // The theme inputs the current install was made with, so re-observation can
 // rebuild queue entries identically. Distinct from `lastThemeInputs`, which
 // tracks what mermaid itself was last initialized with.
@@ -126,6 +130,10 @@ export async function renderMermaidDiagrams(
 // scroll position, so they never render at all (#186). Layout is not this
 // module's knowledge to hold; `preview/mount.ts` supplies it from the single
 // resolver in `shell/preview-scroll-root.ts`.
+function resolveObserverRootNow(): Element | null {
+  return lastObserverRootResolver?.() ?? null;
+}
+
 function installObserver(
   nodes: HTMLElement[],
   generation: number,
@@ -140,13 +148,15 @@ function installObserver(
   // before they scroll into actual view, so pop-in and placeholder-height
   // layout shift stay off-screen. The margin expands whatever the root
   // clips, so it is only meaningful once the root is the right region.
+  const root = resolveObserverRootNow();
   const observer = new Observer(entries => {
     for (const entry of entries) {
       if (!entry.isIntersecting) continue;
       observer.unobserve(entry.target);
       enqueueDiagram({ node: entry.target as HTMLElement, generation, themeInputs });
     }
-  }, { root: lastObserverRootResolver?.() ?? null, rootMargin: OBSERVER_ROOT_MARGIN });
+  }, { root, rootMargin: OBSERVER_ROOT_MARGIN });
+  lastObserverRoot = root;
   activeObserver = observer;
   for (const node of nodes) {
     observer.observe(node);
@@ -158,10 +168,20 @@ function installObserver(
 // have not rendered yet.
 //
 // An observer's root is fixed at construction — there is no way to retarget a
-// live one — so a UI-mode switch that moves scrolling from the shell to the
-// page leaves the existing observer bound to a region that no longer clips
-// anything relevant. Disconnecting and rebuilding is the only mechanism the
-// API offers.
+// live one — so anything that moves scrolling between the shell and the page
+// leaves the existing observer bound to a region that no longer clips anything
+// relevant. Disconnecting and rebuilding is the only mechanism the API offers.
+// Two things move it: a UI-mode switch, and crossing the ≤900px stacked
+// breakpoint by resizing or rotating in desktop mode. The second fires no mode
+// event at all, and is the worse of the two — a shell that stops scrolling
+// keeps its old root while its box grows to span the whole document, so every
+// pending diagram reports as intersecting and the entire eager batch this
+// queue exists to prevent lands in one frame.
+//
+// Callers may therefore fire this on every resize event. It is a no-op unless
+// the resolved root actually changed, which costs one computed-style read per
+// event — the same bargain `outline.ts:resyncScrollSpy` makes for the same
+// reason.
 //
 // Deliberately NOT the theme-flip path: that restores each node's stashed
 // source and clears `data-processed` to force a re-render, which is right when
@@ -178,6 +198,12 @@ function installObserver(
 export function reobserveMermaidDiagrams(): void {
   const container = lastInstallContainer;
   if (!container) {
+    return;
+  }
+  // Nothing moved, so the live observer is still bound to the right region.
+  // `undefined` means no observer was ever installed, which is not a match for
+  // a legitimately-null (viewport) root.
+  if (lastObserverRoot !== undefined && resolveObserverRootNow() === lastObserverRoot) {
     return;
   }
   const pending = Array.from(
@@ -430,6 +456,7 @@ export function __resetMermaidStateForTests(): void {
   activeObserver = null;
   lastInstallContainer = null;
   lastObserverRootResolver = null;
+  lastObserverRoot = undefined;
   lastInstallThemeInputs = DEFAULT_THEME_INPUTS;
 }
 
