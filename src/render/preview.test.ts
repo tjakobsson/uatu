@@ -7,6 +7,7 @@ import {
   normalizeMermaidSvg,
   normalizeRenderedDiagram,
   renderMermaidDiagrams,
+  reobserveMermaidDiagrams,
   replaceMermaidCodeBlocks,
   rerenderMermaidDiagrams,
 } from "./preview";
@@ -331,37 +332,70 @@ describe("lazy mermaid render queue", () => {
     expect(run.mock.calls.length).toBe(2);
   });
 
-  test("the observer roots at the nearest scrollable ancestor, not the viewport", async () => {
+  test("the observer root comes from the injected resolver, not from the DOM", async () => {
+    // The seam that replaced the `nearestScrollRoot()` walk-up (#186). This
+    // module must not form an opinion about layout: whatever the resolver
+    // returns is the root, verbatim. The walk-up's failure was precisely that
+    // it formed one — it answered "does an ancestor have a scrolling
+    // overflow?" and picked `<body>`, which has one without being what
+    // scrolls.
     (globalThis as { mermaid?: unknown }).mermaid = { initialize: mock(() => undefined), run: okRun() };
 
-    let observedRoot: Element | null | undefined;
+    const roots: Array<Element | null | undefined> = [];
     class FakeObserver {
       constructor(_cb: unknown, options?: { root?: Element | null }) {
-        observedRoot = options?.root;
+        roots.push(options?.root);
       }
       observe(): void {}
       unobserve(): void {}
       disconnect(): void {}
     }
     (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver = FakeObserver;
-    // linkedom has no getComputedStyle; provide one that marks the shell
-    // as the overflow-scrolling ancestor, mirroring `.preview-shell`.
-    const previousGetComputedStyle = (globalThis as { getComputedStyle?: unknown }).getComputedStyle;
-    (globalThis as { getComputedStyle?: unknown }).getComputedStyle = (el: Element) =>
-      ({ overflow: "", overflowY: el.classList.contains("preview-shell") ? "auto" : "visible" }) as CSSStyleDeclaration;
 
-    try {
-      const shell = doc.createElement("main");
-      shell.className = "preview-shell";
-      const container = containerWith("graph ROOTED");
-      shell.appendChild(container as unknown as Node);
+    const shell = doc.createElement("main") as unknown as Element;
+    const container = containerWith("graph ROOTED");
 
-      await renderMermaidDiagrams(container as unknown as ParentNode);
+    // An element scroller (desktop) passes through.
+    await renderMermaidDiagrams(container as unknown as ParentNode, undefined, () => shell);
+    expect(roots[0]).toBe(shell);
 
-      expect(observedRoot).toBe(shell as unknown as Element);
-    } finally {
-      (globalThis as { getComputedStyle?: unknown }).getComputedStyle = previousGetComputedStyle;
+    // A page scroller (touch mode, ≤900px stacked) is the implicit root.
+    await renderMermaidDiagrams(containerWith("graph PAGE") as unknown as ParentNode, undefined, () => null);
+    expect(roots[1]).toBeNull();
+
+    // No resolver at all — a non-browser DOM — also means the implicit root.
+    await renderMermaidDiagrams(containerWith("graph BARE") as unknown as ParentNode);
+    expect(roots[2]).toBeNull();
+  });
+
+  test("the resolver is re-consulted on reinstall, so a layout change is picked up", async () => {
+    // Stored as a resolver rather than a resolved value: `rerenderMermaidDiagrams`
+    // runs from the theme subscription with no caller present, and the layout
+    // may have changed since the mount that installed it.
+    (globalThis as { mermaid?: unknown }).mermaid = { initialize: mock(() => undefined), run: okRun() };
+
+    const roots: Array<Element | null | undefined> = [];
+    class FakeObserver {
+      constructor(_cb: unknown, options?: { root?: Element | null }) {
+        roots.push(options?.root);
+      }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
     }
+    (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver = FakeObserver;
+
+    const shell = doc.createElement("main") as unknown as Element;
+    let current: Element | null = shell;
+    const container = containerWith("graph FLIPPED");
+
+    await renderMermaidDiagrams(container as unknown as ParentNode, { theme: "default" }, () => current);
+    expect(roots[0]).toBe(shell);
+
+    // The layout hands scrolling to the page, then a theme flip reinstalls.
+    current = null;
+    await rerenderMermaidDiagrams({ theme: "dark" });
+    expect(roots[1]).toBeNull();
   });
 
   test("with an IntersectionObserver, nodes render only when they intersect", async () => {
@@ -402,5 +436,174 @@ describe("lazy mermaid render queue", () => {
     expect(nodes[0]?.querySelector("svg")).not.toBeNull();
     expect(nodes[1]?.querySelector("svg")).toBeNull();
     expect(nodes[1]?.classList.contains("mermaid-pending")).toBe(true);
+  });
+});
+
+describe("mermaid re-observation on a layout change", () => {
+  let doc: Document;
+  let observers: FakeObserver[];
+  let originalObserver: unknown;
+
+  // Records what each generation of observer was built against and which
+  // nodes it watches, and lets a test fire intersections by hand.
+  class FakeObserver {
+    root: Element | null | undefined;
+    observed: Element[] = [];
+    disconnected = false;
+    callback: (entries: Array<{ target: Element; isIntersecting: boolean }>) => void;
+    constructor(
+      cb: (entries: Array<{ target: Element; isIntersecting: boolean }>) => void,
+      options?: { root?: Element | null },
+    ) {
+      this.callback = cb;
+      this.root = options?.root;
+      observers.push(this);
+    }
+    observe(target: Element): void {
+      this.observed.push(target);
+    }
+    unobserve(target: Element): void {
+      this.observed = this.observed.filter(node => node !== target);
+    }
+    disconnect(): void {
+      this.disconnected = true;
+    }
+  }
+
+  beforeEach(() => {
+    doc = parseHTML("<!doctype html><html><body></body></html>").document as unknown as Document;
+    __resetMermaidStateForTests();
+    observers = [];
+    originalObserver = (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver;
+    (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver = FakeObserver;
+    (globalThis as { mermaid?: unknown }).mermaid = {
+      initialize: mock(() => undefined),
+      run: mock(async (options: { nodes: HTMLElement[] }) => {
+        for (const node of options.nodes) {
+          node.innerHTML = "<svg></svg>";
+          node.setAttribute("data-processed", "true");
+        }
+      }),
+    };
+  });
+
+  afterEach(() => {
+    (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver = originalObserver;
+    delete (globalThis as { mermaid?: unknown }).mermaid;
+  });
+
+  function containerWith(...sources: string[]) {
+    const container = doc.createElement("div");
+    container.innerHTML = sources.map(source => `<div class="mermaid">${source}</div>`).join("");
+    return container;
+  }
+
+  test("rebuilds against the current root and re-observes only pending diagrams", async () => {
+    const shell = doc.createElement("main") as unknown as Element;
+    let current: Element | null = shell;
+    const container = containerWith("graph ONE", "graph TWO", "graph THREE");
+
+    await renderMermaidDiagrams(container as unknown as ParentNode, { theme: "default" }, () => current);
+    const first = observers[0]!;
+    expect(first.root).toBe(shell);
+    expect(first.observed.length).toBe(3);
+
+    // The first diagram scrolls into view and renders.
+    const nodes = Array.from(container.querySelectorAll(".mermaid")) as unknown as HTMLElement[];
+    first.callback([{ target: nodes[0]!, isIntersecting: true }]);
+    await __drainMermaidQueueForTests();
+    expect(nodes[0]!.querySelector("svg")).not.toBeNull();
+    expect(nodes[0]!.classList.contains("mermaid-pending")).toBe(false);
+
+    // The user flips UI mode: scrolling moves to the page.
+    current = null;
+    reobserveMermaidDiagrams();
+
+    expect(first.disconnected).toBe(true);
+    const second = observers[1]!;
+    // Built against the NEW root — the whole point, since a live observer's
+    // root cannot be retargeted.
+    expect(second.root).toBeNull();
+    // Only the two still-pending diagrams. Re-observing the rendered one
+    // would buy nothing and risk re-running it.
+    expect(second.observed.length).toBe(2);
+    expect(second.observed).not.toContain(nodes[0] as unknown as Element);
+
+    // And the rebuilt observer still renders what it sees.
+    second.callback([{ target: nodes[1]!, isIntersecting: true }]);
+    await __drainMermaidQueueForTests();
+    expect(nodes[1]!.querySelector("svg")).not.toBeNull();
+  });
+
+  test("does not reset rendered diagrams to their source or clear data-processed", async () => {
+    // The distinction from `rerenderMermaidDiagrams`: the theme has not
+    // changed, so a rendered diagram must not be rewound to its source and
+    // re-run. Doing so would flash every visible diagram on a mode switch.
+    const container = containerWith("graph KEPT");
+    await renderMermaidDiagrams(container as unknown as ParentNode, { theme: "default" }, () => null);
+    const node = container.querySelector(".mermaid") as unknown as HTMLElement;
+    observers[0]!.callback([{ target: node, isIntersecting: true }]);
+    await __drainMermaidQueueForTests();
+
+    const renderedHtml = node.innerHTML;
+    const runCallsBefore = (
+      (globalThis as { mermaid?: { run: { mock: { calls: unknown[] } } } }).mermaid!.run.mock.calls
+    ).length;
+
+    reobserveMermaidDiagrams();
+    await __drainMermaidQueueForTests();
+
+    expect(node.innerHTML).toBe(renderedHtml);
+    expect(node.getAttribute("data-processed")).toBe("true");
+    expect(node.classList.contains("mermaid-pending")).toBe(false);
+    expect(
+      ((globalThis as { mermaid?: { run: { mock: { calls: unknown[] } } } }).mermaid!.run.mock.calls).length,
+    ).toBe(runCallsBefore);
+  });
+
+  test("a diagram already in flight in the queue is not enqueued twice", async () => {
+    // A node that has intersected but not finished rendering still carries
+    // the pending class, so a naive "re-observe everything pending" would
+    // hand the drain loop a second entry for work already under way.
+    let releaseRun!: () => void;
+    const gate = new Promise<void>(resolve => {
+      releaseRun = resolve;
+    });
+    let runCount = 0;
+    const run = mock(async (options: { nodes: HTMLElement[] }) => {
+      runCount += 1;
+      if (runCount === 1) await gate;
+      for (const node of options.nodes) {
+        node.innerHTML = "<svg></svg>";
+        node.setAttribute("data-processed", "true");
+      }
+    });
+    (globalThis as { mermaid?: unknown }).mermaid = { initialize: mock(() => undefined), run };
+
+    const container = containerWith("graph INFLIGHT");
+    await renderMermaidDiagrams(container as unknown as ParentNode, { theme: "default" }, () => null);
+    const node = container.querySelector(".mermaid") as unknown as HTMLElement;
+
+    // Intersect, then let the drain reach the gated run and stall there.
+    observers[0]!.callback([{ target: node, isIntersecting: true }]);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    // Still pending — the render has not completed.
+    expect(node.classList.contains("mermaid-pending")).toBe(true);
+
+    reobserveMermaidDiagrams();
+    // The in-flight node is excluded from the rebuilt observer, so no second
+    // intersection can enqueue it again.
+    expect(observers[1]).toBeUndefined();
+
+    releaseRun();
+    await __drainMermaidQueueForTests();
+
+    expect(runCount).toBe(1);
+    expect(node.querySelector("svg")).not.toBeNull();
+  });
+
+  test("is a no-op when nothing has been installed", () => {
+    expect(() => reobserveMermaidDiagrams()).not.toThrow();
+    expect(observers.length).toBe(0);
   });
 });

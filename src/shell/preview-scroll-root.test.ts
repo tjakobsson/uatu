@@ -8,7 +8,7 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { pickScrollRoot, scrollportRect } from "./preview-scroll-root";
+import { observerRootFor, pickScrollRoot, scrollportRect } from "./preview-scroll-root";
 
 // Stand-ins for the three candidates. Strings, because the rule never looks
 // inside an element — it only asks the predicate.
@@ -70,6 +70,43 @@ describe("pickScrollRoot", () => {
     });
     expect(result).toBe(VIEWPORT);
     expect(asked).toEqual([SHELL]);
+  });
+});
+
+// --- observerRootFor --------------------------------------------------------
+//
+// The IntersectionObserver translation. Same shape of test as pickScrollRoot,
+// and for the same reason: the rule is what a DOM-less suite can honestly
+// hold, and the rule is where the bug lived.
+
+describe("observerRootFor", () => {
+  test("an element scroller passes through as the element root", () => {
+    // Desktop single view. The shell genuinely clips the diagrams, so its box
+    // is the region to observe against and rootMargin expands something real.
+    expect(observerRootFor(SHELL, VIEWPORT)).toBe(SHELL);
+    expect(observerRootFor(PANE, VIEWPORT)).toBe(PANE);
+  });
+
+  test("the viewport scroller becomes the implicit root, not an element", () => {
+    // Touch mode and the ≤900px stacked layout. Returning the element here is
+    // the #186 defect: `<html>` and `<body>` are both `height: 100%` boxes
+    // pinned to the document origin, so every target below the first screenful
+    // is clipped out of the root at every scroll position and never renders.
+    // `null` is not a fallback for "no root found" — it is the only correct
+    // way to say "the visible region".
+    expect(observerRootFor(VIEWPORT, VIEWPORT)).toBeNull();
+  });
+
+  test("identity is what decides, not the element's own overflow", () => {
+    // The distinction this module exists to draw. An element can carry
+    // `overflow: auto` and still not be the scroller — `<body>`, whose
+    // overflow propagates to the viewport, is exactly that case, and is what
+    // the removed walk-up in render/preview.ts used to select.
+    const bodyLikeButNotTheScroller = "body";
+    expect(observerRootFor(bodyLikeButNotTheScroller, VIEWPORT)).toBe(bodyLikeButNotTheScroller);
+    // …which is why the caller must hand us the resolved scroller, never a
+    // candidate it liked the look of.
+    expect(observerRootFor(bodyLikeButNotTheScroller, bodyLikeButNotTheScroller)).toBeNull();
   });
 });
 

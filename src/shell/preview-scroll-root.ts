@@ -81,6 +81,34 @@ export function previewScrollEventTarget(): EventTarget {
   return root === viewportScroller() ? document : root;
 }
 
+// How `IntersectionObserver` wants that element expressed as its `root`.
+//
+// The third translation over the same resolution, and the one that fails most
+// quietly. An observer's root is an *element or the implicit viewport* — and
+// for the viewport there is no element that will do. Both `<html>` and
+// `<body>` are `height: 100%` boxes pinned to the document origin, so once the
+// page scrolls they describe a region the content has already left. Passing
+// either does not merely mis-report; it clips every target below the first
+// screenful out of the root permanently. Those targets never intersect, at any
+// scroll position, so a lazy consumer never acts on them at all (#186 — in
+// touch mode AND in the ≤900px stacked layout, both of which hand scrolling to
+// the page through `body { overflow: auto }`).
+//
+// Note what that means for a walk-up that looks for a scrolling overflow
+// value: `<body>` matches, and is wrong. "Has an overflow" and "is the thing
+// that scrolls" are different questions, which is the whole reason this
+// resolver exists.
+//
+// Split out from the DOM for the same reason as `pickScrollRoot`.
+export function observerRootFor<T>(root: T, viewport: T): T | null {
+  return root === viewport ? null : root;
+}
+
+// The `root` an IntersectionObserver over preview content should use.
+export function previewObserverRoot(): Element | null {
+  return observerRootFor<Element>(previewScrollRoot(), viewportScroller());
+}
+
 // The visible box of a scroll container, in viewport coordinates.
 //
 // For an ordinary overflow container that is its border box. For the document
