@@ -1,29 +1,4 @@
-## Purpose
-
-Define the document outline: a panel over the preview pane that enumerates the rendered document's headings (Markdown and AsciiDoc alike), supports click-to-navigate, scroll-spy active-heading tracking, and substring filtering. It takes one of two presentations, chosen from the width available to the preview area rather than from the UI mode — a non-modal docked rail with a reserved gutter and an adjustable, persisted width where there is room for a readable text column beside it, and a fullscreen sheet over the preview surface where there is not.
-
-## Requirements
-
-### Requirement: Outline enumerates rendered document headings
-
-The system SHALL build the outline by enumerating the heading elements
-(`h1` through `h6`) in the rendered preview DOM, capturing each heading's level,
-text, and element reference. This SHALL work identically for Markdown and
-AsciiDoc documents without renderer-specific logic.
-
-#### Scenario: Markdown document with headings
-- **WHEN** a Markdown document containing multiple heading levels is rendered
-- **THEN** the outline lists one entry per heading in document order
-- **AND** each entry is indented according to its heading level
-
-#### Scenario: AsciiDoc document with headings
-- **WHEN** an AsciiDoc document containing multiple heading levels is rendered
-- **THEN** the outline lists one entry per heading in document order using the
-  same enumeration path as Markdown
-
-#### Scenario: Document with no headings
-- **WHEN** a rendered document contains no heading elements
-- **THEN** the outline is not available and its toggle is not shown
+## ADDED Requirements
 
 ### Requirement: Outline presentation follows the available width
 
@@ -86,47 +61,6 @@ SHALL NOT extend beyond the surface it belongs to.
   (such as a docked terminal) sits beside the preview
 - **THEN** the sheet spans the preview area only
 - **AND** the neighbouring region remains visible and usable
-
-### Requirement: Outline is a non-modal panel
-
-The outline SHALL NOT trap focus in either presentation, and in the rail
-presentation SHALL additionally be non-modal so the user can continue reading
-and interacting with the document while it is open. The sheet presentation
-covers the preview by design and is therefore modal over the document, but SHALL
-always offer a reachable dismissal.
-
-#### Scenario: Opening the outline
-- **WHEN** the user activates the outline toggle
-- **THEN** the outline panel appears in whichever presentation the available
-  width resolves to
-- **AND** focus is not trapped inside it
-
-#### Scenario: Opening the rail
-- **WHEN** the user activates the outline toggle and the rail presentation is
-  resolved
-- **THEN** the outline rail appears
-- **AND** the document content remains scrollable and clickable
-
-#### Scenario: Opening the sheet
-- **WHEN** the user activates the outline toggle and the sheet presentation is
-  resolved
-- **THEN** the outline sheet appears over the preview
-- **AND** focus is not trapped inside it
-
-#### Scenario: Closing the outline
-- **WHEN** the user activates the close control or presses Escape while the
-  outline is open
-- **THEN** the outline panel is dismissed
-
-#### Scenario: A dismissal is always reachable
-- **WHEN** the outline is open in either presentation and the user has scrolled
-  the document to any position
-- **THEN** a dismissal control is visible and activatable without first
-  scrolling the document
-
-#### Scenario: Closed by default
-- **WHEN** a document is first loaded
-- **THEN** the outline panel is closed and does not cover the content
 
 ### Requirement: Sheet presentation dismisses on selection and on document change
 
@@ -198,80 +132,48 @@ a long document does not start at the top of an unrelated list.
 - **WHEN** the user opens the outline with the document scrolled to the top
 - **THEN** the list is shown from its first entry
 
-### Requirement: Outline navigation jumps to the heading
+## MODIFIED Requirements
 
-The system SHALL scroll the corresponding heading into view when the user
-selects an outline entry, working even when heading IDs are missing or
-duplicated by falling back to the captured element reference. The jump SHALL act
-on the effective scroll container for the current layout and UI mode, and the
-heading SHALL land clear of the sticky preview header in every layout and UI
-mode — including touch mode and the stacked layout, where the page scrolls
-rather than the preview shell.
+### Requirement: Outline is a non-modal panel
 
-#### Scenario: Jump to a section
-- **WHEN** the user selects an outline entry
-- **THEN** the corresponding heading is scrolled into view in the preview
+The outline SHALL NOT trap focus in either presentation, and in the rail
+presentation SHALL additionally be non-modal so the user can continue reading
+and interacting with the document while it is open. The sheet presentation
+covers the preview by design and is therefore modal over the document, but SHALL
+always offer a reachable dismissal.
 
-#### Scenario: Heading without a usable ID
-- **WHEN** the user selects an entry whose heading has a missing or duplicated
-  ID
-- **THEN** navigation still scrolls to the correct heading element
+#### Scenario: Opening the outline
+- **WHEN** the user activates the outline toggle
+- **THEN** the outline panel appears in whichever presentation the available
+  width resolves to
+- **AND** focus is not trapped inside it
 
-#### Scenario: Jump lands below the sticky header in touch mode
-- **WHEN** the user taps an outline entry in touch mode
-- **THEN** the heading is scrolled into view and is fully visible below the
-  sticky preview header rather than hidden underneath it
+#### Scenario: Opening the rail
+- **WHEN** the user activates the outline toggle and the rail presentation is
+  resolved
+- **THEN** the outline rail appears
+- **AND** the document content remains scrollable and clickable
 
-### Requirement: Outline highlights the active heading on scroll
+#### Scenario: Opening the sheet
+- **WHEN** the user activates the outline toggle and the sheet presentation is
+  resolved
+- **THEN** the outline sheet appears over the preview
+- **AND** focus is not trapped inside it
 
-The system SHALL highlight the outline entry for the heading currently scrolled
-into view, updating as the user scrolls. The active-heading tracking SHALL
-observe the scroll container that is active for the current layout and UI mode,
-subscribing to the event target that actually emits scroll events for it — which
-is the document, not an element, when the viewport scroller is the active
-container — and SHALL be rebuilt when the document remounts, the layout changes,
-or the UI mode changes.
+#### Scenario: Closing the outline
+- **WHEN** the user activates the close control or presses Escape while the
+  outline is open
+- **THEN** the outline panel is dismissed
 
-#### Scenario: Active heading updates while scrolling (single layout)
-- **WHEN** the user scrolls the preview in single layout
-- **THEN** the outline entry for the heading currently in view is highlighted
-  and updates as scrolling continues
+#### Scenario: A dismissal is always reachable
+- **WHEN** the outline is open in either presentation and the user has scrolled
+  the document to any position
+- **THEN** a dismissal control is visible and activatable without first
+  scrolling the document
 
-#### Scenario: Active heading updates while scrolling in touch mode
-- **WHEN** the user scrolls a document in touch mode with the outline open
-- **THEN** the outline entry for the heading currently in view is highlighted
-  and updates as scrolling continues
-
-#### Scenario: Active heading tracking survives a layout change
-- **WHEN** the user switches between single and split layout with the outline
-  open
-- **THEN** active-heading highlighting continues to work against the newly
-  active scroll container
-
-#### Scenario: Active heading tracking survives a UI-mode switch
-- **WHEN** the user switches between touch and desktop mode with the outline
-  open
-- **THEN** active-heading highlighting continues to work against the newly
-  active scroll container
-
-#### Scenario: Active heading tracking survives a document remount
-- **WHEN** the rendered document is replaced (e.g. a watched file changes)
-- **THEN** the outline is rebuilt from the new content and active-heading
-  highlighting continues to work
-
-### Requirement: Outline supports filtering headings
-
-The outline SHALL provide a text input that filters the visible heading entries
-by substring match. Filtering SHALL affect only which entries are visible and
-SHALL NOT change which heading is tracked as active.
-
-#### Scenario: Filtering the outline
-- **WHEN** the user types text into the outline filter
-- **THEN** only entries whose text matches are shown
-
-#### Scenario: Filter does not disturb active tracking
-- **WHEN** a filter hides the currently active heading's entry
-- **THEN** active-heading tracking continues against the real document position
+#### Scenario: Closed by default
+- **WHEN** a document is first loaded
+- **THEN** the outline panel is closed and does not cover the content
 
 ### Requirement: Outline is docked beside the content
 

@@ -61,6 +61,15 @@ function coarsePointerNow(): boolean {
   return typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
 }
 
+/** Whether the device's primary pointer is coarse — a finger rather than a
+ *  cursor. Deliberately NOT the same question as `uiMode()`: an iPad in
+ *  desktop mode still has no cursor, which is why input affordances (target
+ *  sizes, the keybar, size steppers) key on this while layout keys on the
+ *  mode. Exported from here because this module already owns the distinction. */
+export function coarsePointer(): boolean {
+  return coarsePointerNow();
+}
+
 function stamp(mode: UiMode): void {
   document.documentElement.setAttribute("data-ui-mode", mode);
 }

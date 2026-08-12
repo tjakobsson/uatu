@@ -22,19 +22,24 @@ import {
   previewScrollRoot,
   scrollportRect,
 } from "../shell/preview-scroll-root";
-import { onUiModeChange } from "../shell/ui-mode";
+import { coarsePointer, onUiModeChange } from "../shell/ui-mode";
 import { presentationLocalStorage } from "../shell/presentation-storage";
 import type { ViewMode } from "../shared/types";
 import { copyToClipboard } from "./code-block";
 import { copySourceButton, outlineToggleButton } from "./header";
 import { collectHeadings, type OutlineHeading } from "./outline-headings";
+import {
+  maxRailWidth,
+  pickPresentation,
+  type OutlinePresentation,
+  type PreviewArea,
+} from "./outline-presentation";
 
 export { collectHeadings, cleanHeadingText, type OutlineHeading } from "./outline-headings";
 
 const WIDTH_KEY = "uatu:outline-width";
 const MIN_WIDTH = 200; // px
 const DEFAULT_WIDTH = 288; // px (~18rem) used until the user resizes
-const MIN_CONTENT = 280; // px of document kept visible beside a docked outline
 const EDGE_MARGIN = 16; // px kept between the panel and the preview-area edges
 
 function readWidthPreference(): number | null {
@@ -163,11 +168,89 @@ function previewShellEl(): HTMLElement | null {
   return document.querySelector<HTMLElement>(".preview-shell");
 }
 
-// Position and size the docked panel against the preview-shell: pinned just
-// below the sticky header, full height down to the shell's bottom, flush to the
-// right edge, at the current (clamped) width. Reserves the matching gutter on
-// the document so its content reflows beside the panel. Re-runs whenever the
-// shell changes (terminal dock/resize, window resize) while open.
+// The area the outline actually has to work with.
+//
+// Width comes from the preview shell — the region the panel docks into, which
+// is what shrinks when the terminal docks right or the sidebar widens. Height
+// must come from the SCROLLPORT instead: in touch mode and the ≤900px stacked
+// layout the shell is `height: auto` with the page scrolling, so its rect
+// height is the length of the whole document rather than the room on screen.
+// Asking the shell for both is exactly the mistake that sized the panel at
+// 57,220px.
+function previewArea(): PreviewArea | null {
+  const shell = previewShellEl();
+  if (!shell) {
+    return null;
+  }
+  const shellStyle = getComputedStyle(shell);
+  // A hidden shell measures 0 wide, and 0 is not "narrow" — it is the absence
+  // of a measurement. Touch mode sets `display: none` on the preview shell
+  // whenever a tab other than Preview is active, and `refreshOutline()` still
+  // runs there: a follow-mode file event switches documents without bringing
+  // the Preview tab forward.
+  //
+  // Answer with the viewport instead. It is always measurable, always current,
+  // and in touch mode it IS the width the shell will have once shown — the
+  // preview spans the full width there. An earlier revision reused the last
+  // resolved presentation instead, which went stale the moment the width
+  // changed while hidden (rotate, or enter Split View, from another tab), and
+  // then reported a rail for a viewport that had become sheet-width.
+  //
+  // Desktop never hides the shell, so the estimate is only ever consulted in
+  // the mode where it is accurate.
+  const measuredWidth = shell.getBoundingClientRect().width;
+  const width = measuredWidth > 0 ? measuredWidth : document.documentElement.clientWidth;
+  const preview = document.querySelector<HTMLElement>("#preview");
+  // The document's own left padding, counted for BOTH sides on purpose: its
+  // right padding is the reserved outline gutter whenever the rail is open, so
+  // reading it back would fold the rail's width into the measurement and let
+  // the answer depend on the previous answer. The natural padding is symmetric,
+  // so the left side is the honest sample.
+  const previewPadLeft = preview ? parseFloat(getComputedStyle(preview).paddingLeft) || 0 : 0;
+  return {
+    width,
+    height: scrollportRect(previewScrollRoot()).height,
+    documentPadding:
+      (parseFloat(shellStyle.paddingLeft) || 0)
+      + (parseFloat(shellStyle.paddingRight) || 0)
+      + previewPadLeft * 2,
+  };
+}
+
+// Resolved per call, never cached — the available width changes on rotation, a
+// window drag, a UI-mode switch, and a terminal dock, and the same reasoning
+// `preview-scroll-root` gives applies: the resolution is cheap and caching it
+// would buy nothing while costing correctness.
+function currentPresentation(): OutlinePresentation {
+  const area = previewArea();
+  return area ? pickPresentation(area) : "rail";
+}
+
+// Fixed bottom chrome that overlays the scrollport rather than shortening it.
+// The touch tab bar is `position: fixed` over the layout viewport, so
+// `documentElement.clientHeight` still counts the strip underneath it — a
+// full-height rail measured from the scrollport alone would run below the bar.
+// Measured from the element so a hidden bar contributes nothing without this
+// having to ask which mode is live.
+function bottomChromeInset(): number {
+  const bar = document.querySelector<HTMLElement>(".touch-tab-bar");
+  return bar ? bar.getBoundingClientRect().height : 0;
+}
+
+// Position and size the panel against the preview's SCROLLPORT — the box the
+// reader can actually see — in viewport coordinates, for both presentations.
+//
+// Emphatically NOT against the shell's bounding box. In touch mode and the
+// ≤900px stacked layout the shell is `height: auto` with the page scrolling, so
+// its rect describes the entire document: measuring it gave the rail a height
+// of 12,395px on iPad and 57,220px on iPhone, scrolled it out of reach with the
+// page, and let its empty lower reaches cover the very toggle that would close
+// it (#231). The horizontal extent still comes from the shell, which IS the
+// region the outline belongs to and the thing that narrows when the terminal
+// docks right.
+//
+// Re-runs whenever the shell changes (terminal dock/resize, window resize,
+// rotation, UI-mode switch) while open.
 function layoutPanel(): void {
   if (!panel) {
     return;
@@ -176,18 +259,67 @@ function layoutPanel(): void {
   if (!shell) {
     return;
   }
-  const stackRect = mainStackElement().getBoundingClientRect();
+
+  // Measured once and shared: the presentation branch and the rail's width
+  // clamp must agree about the geometry they are reasoning over.
+  const area = previewArea();
+  // The presentation attribute is what the stylesheet keys on, so it is stamped
+  // before either branch runs — including when the panel is closed, so a sheet
+  // never paints one frame as a rail on open.
+  const presentation = area ? pickPresentation(area) : "rail";
+  panel.dataset.presentation = presentation;
+
   const shellRect = shell.getBoundingClientRect();
+  const port = scrollportRect(previewScrollRoot());
+  // The lowest the panel may reach: the scrollport's own bottom, or the top of
+  // the fixed bottom chrome, whichever comes first.
+  const usableBottom = Math.min(port.bottom, window.innerHeight - bottomChromeInset());
+  // ...expressed as a distance up from the window's bottom edge, which is what
+  // a `bottom` offset on a fixed element wants.
+  const bottomGap = Math.max(0, window.innerHeight - usableBottom);
+
+  if (presentation === "sheet") {
+    // Fills the preview SURFACE, not the window. In touch mode the scrollport
+    // is the viewport, so this is the fullscreen sheet above the tab bar; on a
+    // desktop with the terminal right-docked it covers the preview pane and
+    // leaves the sidebar and terminal reachable, instead of blanketing both.
+    panel.style.setProperty("--outline-surface-top", `${Math.round(port.top)}px`);
+    panel.style.setProperty("--outline-surface-left", `${Math.round(shellRect.left)}px`);
+    panel.style.setProperty("--outline-surface-width", `${Math.round(shellRect.width)}px`);
+    panel.style.setProperty("--outline-surface-gap", `${Math.round(bottomGap)}px`);
+    // The rail's inline geometry has to come back off, or it would out-specify
+    // the sheet's stylesheet rules and win.
+    panel.style.removeProperty("top");
+    panel.style.removeProperty("right");
+    panel.style.removeProperty("height");
+    panel.style.removeProperty("width");
+    // A sheet covers the preview rather than sitting beside it, so it reserves
+    // nothing. This is also what releases the gutter when a rail becomes a
+    // sheet mid-session (a rotation, or docking the terminal).
+    releaseGutter();
+    return;
+  }
+
+  // The sticky preview header covers the top of the scrollport in single
+  // layout; in split layout the rendered pane starts below it and there is no
+  // overlap. Taking the lower of the two edges handles both without asking
+  // which layout is live.
   const header = document.querySelector<HTMLElement>(".preview-header");
-  const headerHeight = header ? header.getBoundingClientRect().height : 64;
-  const topOffset = Math.max(0, shellRect.top - stackRect.top) + headerHeight + 8;
+  const contentTop = Math.max(port.top, header ? header.getBoundingClientRect().bottom : port.top + 64);
+  const top = contentTop + 8;
 
-  panel.style.top = `${topOffset}px`;
-  panel.style.right = `${Math.max(0, stackRect.right - shellRect.right) + EDGE_MARGIN}px`;
-  panel.style.height = `${Math.max(120, shellRect.height - headerHeight - 8 - EDGE_MARGIN)}px`;
+  panel.style.top = `${Math.round(top)}px`;
+  panel.style.right = `${Math.round(Math.max(0, window.innerWidth - shellRect.right) + EDGE_MARGIN)}px`;
+  panel.style.height = `${Math.round(Math.max(120, usableBottom - top - EDGE_MARGIN))}px`;
 
-  // Clamp width so at least MIN_CONTENT of document stays visible beside it.
-  const maxWidth = Math.max(MIN_WIDTH, shellRect.width - MIN_CONTENT);
+  // Clamp the drawn width so the readable measure survives beside it.
+  //
+  // The presentation rule asks about the rail's DEFAULT footprint so dragging
+  // never flips it mid-drag; that leaves a stored width free to violate the
+  // same promise from the other direction — a 500px rail saved on a desktop
+  // reapplied verbatim on an 834px tablet leaves ~270px of prose. Clamping here
+  // closes that without making the presentation depend on stored state.
+  const maxWidth = area ? Math.max(MIN_WIDTH, maxRailWidth(area)) : MIN_WIDTH;
   const clamped = Math.round(Math.min(Math.max(width, MIN_WIDTH), maxWidth));
   panel.style.width = `${clamped}px`;
   shell.style.setProperty("--outline-gutter", `${clamped + EDGE_MARGIN}px`);
@@ -235,18 +367,47 @@ function attachResizeHandle(panelEl: HTMLElement, handle: HTMLElement): void {
   });
 }
 
+// Scroll the outline's OWN list so the active entry is visible.
+//
+// Written against the list's `scrollTop` rather than `scrollIntoView`, which
+// scrolls every scrollable ancestor as well — including the page in touch mode
+// and the stacked layout. That would move the reader away from the position
+// they opened the outline to inspect, which is the opposite of the point.
+function revealActiveEntry(): void {
+  const list = listElement;
+  if (!list) {
+    return;
+  }
+  const active = list.querySelector<HTMLElement>(".uatu-outline-link.is-active");
+  if (!active) {
+    return;
+  }
+  const listRect = list.getBoundingClientRect();
+  const activeRect = active.getBoundingClientRect();
+  // Centre the entry in the list's scrollport. The browser clamps to the
+  // scrollable range, so an active entry near either end simply lands at that
+  // end — which is why opening at the top of a document still shows entry one.
+  list.scrollTop += activeRect.top - listRect.top - (list.clientHeight - activeRect.height) / 2;
+}
+
 function setOpen(next: boolean): void {
   open = next;
   if (panel) {
     panel.hidden = !next;
     if (next) {
       layoutPanel();
+      // After layout, so the list has its final height to centre within.
+      revealActiveEntry();
     } else {
       releaseGutter();
     }
   }
   outlineToggleButton.setAttribute("aria-pressed", String(next));
-  if (next && filterInput) {
+  // Focusing the filter raises the software keyboard over the very list the
+  // panel was opened to read. Gated on the pointer rather than the presentation
+  // because this is an input-device question — an iPad in desktop mode still
+  // has no cursor — matching how the keybar and size steppers are gated.
+  if (next && filterInput && !coarsePointer()) {
     filterInput.focus();
   }
 }
@@ -293,6 +454,12 @@ function buildList(headings: OutlineHeading[]): void {
       event.preventDefault();
       heading.element.scrollIntoView({ behavior: "smooth", block: "start" });
       setActiveLink(heading.element);
+      // A sheet covers the document it just navigated, so staying open would
+      // hide the destination. The rail sits beside the document and stays, as
+      // it always has.
+      if (currentPresentation() === "sheet") {
+        setOpen(false);
+      }
     });
     list.appendChild(link);
   }
@@ -520,6 +687,10 @@ export function refreshOutline(doc: OutlineDocument | null): void {
     return;
   }
 
+  // Captured before the assignment: a live remount of the SAME document (a
+  // watched file changed) must not be mistaken for the user opening a different
+  // one, or every save would dismiss an open sheet.
+  const documentChanged = currentDocId !== doc.id;
   currentDocId = doc.id;
   copySourceButton.hidden = false;
 
@@ -539,8 +710,10 @@ export function refreshOutline(doc: OutlineDocument | null): void {
   applyFilter();
   attachScrollSpy(roots.scrollRoot, previewScrollEventTarget());
   // Preserve the open/closed state across remounts (panel stays open if the
-  // user had it open); default is closed.
-  setOpen(open);
+  // user had it open); default is closed. The sheet is the exception: it covers
+  // the preview, so carrying it across a document change would leave a modal
+  // surface on top of the document the user just chose to open.
+  setOpen(open && !(documentChanged && currentPresentation() === "sheet"));
 }
 
 async function handleCopySource(): Promise<void> {
@@ -593,8 +766,18 @@ export function initOutline(): void {
   // resizing or rotating does the same in desktop mode. Left unhandled, the
   // spy stays bound to an element that will never fire again and the active
   // heading freezes.
-  onUiModeChange(() => resyncScrollSpy());
-  window.addEventListener("resize", () => resyncScrollSpy(), { passive: true });
+  // The same events also change the width the presentation is resolved from —
+  // a rotation, a window drag, or a mode flip can carry the preview across the
+  // rail/sheet threshold with the panel open. Re-laying out is what adopts the
+  // new presentation; the panel deliberately stays open across the swap.
+  const onViewportChange = (): void => {
+    resyncScrollSpy();
+    if (open) {
+      layoutPanel();
+    }
+  };
+  onUiModeChange(onViewportChange);
+  window.addEventListener("resize", onViewportChange, { passive: true });
 
   outlineToggleButton.addEventListener("click", () => {
     ensurePanel();

@@ -3865,7 +3865,13 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
    `hidden` attribute; the toggle flips it. Position, height and width are set
    from JS (width persisted in localStorage); the values here are fallbacks. */
 .uatu-outline {
-  position: absolute;
+  /* Fixed, not absolute. The panel is pinned to the VIEWPORT because in touch
+     mode and the ≤900px stacked layout its old containing block (`.main-stack`)
+     is as tall as the document, so an absolutely-positioned panel scrolled away
+     with the page and stretched to the document's full height (#231).
+     outline.ts writes the offsets in viewport coordinates for both
+     presentations; the values here are only pre-layout fallbacks. */
+  position: fixed;
   top: 4.5rem;
   right: 1.25rem;
   z-index: 3;
@@ -4018,6 +4024,79 @@ html:not([data-ui-mode="touch"]) .app-shell:has(.terminal-panel[data-dock="right
   padding: 0.4rem 0.6rem;
   font-size: 0.76rem;
   color: var(--text-subtle);
+}
+
+/* Sheet presentation — the outline below the width threshold resolved in
+   preview/outline-presentation.ts, where the rail's reserved gutter would leave
+   the document a 114px column rather than protect it.
+
+   Reuses the fullscreen-surface recipe the Files and Terminal tabs already use:
+   fixed to the viewport, above the tab bar where one renders. Keyed on the
+   presentation attribute rather than on `data-ui-mode`, because the threshold
+   is crossed by iPad Split View, a narrow desktop window, and the ≤900px
+   stacked layout too. Positioned entirely from here — outline.ts strips the
+   rail's inline top/right/width/height when it stamps this presentation — so
+   none of these declarations needs `!important` to win. */
+.uatu-outline[data-presentation="sheet"] {
+  /* The surface box is measured by outline.ts (the preview's scrollport, not
+     the window) and handed over as custom properties, so the sheet covers the
+     preview pane on a desktop with the terminal right-docked instead of
+     blanketing the sidebar and terminal too. In touch mode the scrollport IS
+     the viewport, so these resolve to the fullscreen sheet above the tab bar. */
+  top: var(--outline-surface-top, 0px);
+  left: var(--outline-surface-left, 0px);
+  right: auto;
+  bottom: var(--outline-surface-gap, 0px);
+  width: var(--outline-surface-width, 100%);
+  height: auto;
+  /* Deliberately NOT raised above the base `.uatu-outline` z-index of 3.
+     An earlier revision used 35 to outrank the touch Files (30) and Terminal
+     (40) surfaces — defending against an overlap that cannot happen, since the
+     rule below already sets `display: none` whenever the active tab is not
+     Preview. Outranking them cost two real regressions: the preview find bar
+     (`.find-slot`, z-index 4) opened BEHIND the sheet, invisible, with ⌘F
+     still swallowing the keystroke; and a desktop fullscreen terminal
+     (z-index 5) stayed under it. Both work at 3, and 3 still covers the
+     preview header (z-index 2), which is all the sheet actually needs. */
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: var(--surface);
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+}
+
+/* No resize handle in the sheet: it is sized to the surface rather than to the
+   stored width, and a 6px `touch-action: none` strip is both unhittable by a
+   finger and sitting exactly where a dismissal swipe would land. The stored
+   width is untouched, so returning to the rail restores it. */
+.uatu-outline[data-presentation="sheet"] .uatu-outline-resizer {
+  display: none;
+}
+
+/* The panel hangs off `.main-stack`, not `.preview-shell`, so the touch rule
+   that swaps the Preview surface out for another tab has never covered it. Up
+   to now an open outline was merely OCCLUDED behind the fixed Files and
+   Terminal surfaces, which outranked its `z-index: 3`. The sheet outranks them
+   instead, so the tie has to be stated rather than won by luck of stacking. */
+html[data-ui-mode="touch"]:not([data-active-tab="preview"]) .uatu-outline {
+  display: none;
+}
+
+/* Touch target sizes, matching the 44px the preview toolbar already guarantees.
+   Keyed on the pointer rather than the presentation: an iPad in desktop mode
+   showing the rail still has no cursor. `padding-block` and not the `padding`
+   shorthand — the per-level `padding-left` indentation rules above must
+   survive, and the shorthand would reset them to zero. */
+@media (pointer: coarse) {
+  .uatu-outline-link {
+    min-height: 44px;
+    padding-block: 0.78rem;
+  }
+
+  .uatu-outline-head button {
+    width: 44px;
+    height: 44px;
+  }
 }
 
 /* Split layout: when #preview carries .is-split, it switches from a body
