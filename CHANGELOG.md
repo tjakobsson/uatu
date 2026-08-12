@@ -4,6 +4,44 @@ Notable user-facing changes to uatu are documented here. Versions follow
 [Semantic Versioning](https://semver.org/) and are generated from Conventional
 Commits by [Release Please](https://github.com/googleapis/release-please).
 
+## [0.5.0](https://github.com/tjakobsson/uatu/compare/v0.4.0...v0.5.0) (2026-08-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* **config:** reduce .uatu.json to a single ignore block ([#215](https://github.com/tjakobsson/uatu/issues/215))
+* **overview:** remove the review-burden score and the .uatu.json review block ([#212](https://github.com/tjakobsson/uatu/issues/212))
+
+### Features
+
+* **cli:** deprecate public `uatu serve` in favor of `uatu hub` (one stderr line; behavior unchanged) ([6bc345c](https://github.com/tjakobsson/uatu/commit/6bc345c2b54ec0260ef7e2dd3094e588d69c2cb0))
+* **config:** reduce .uatu.json to a single ignore block ([#215](https://github.com/tjakobsson/uatu/issues/215)) ([b488aee](https://github.com/tjakobsson/uatu/commit/b488aee3a64f2115e9e758c4eb11cc34c498df19))
+* **desktop:** make UatuCode Desktop a connect-only hub client — add hubs by URL, including http://localhost, and sign in once ([6bc345c](https://github.com/tjakobsson/uatu/commit/6bc345c2b54ec0260ef7e2dd3094e588d69c2cb0))
+* **hub:** add workspaces from the dashboard by browsing the server's filesystem — register any absolute path, or clone a repository straight into a browsed destination ([e67d08f](https://github.com/tjakobsson/uatu/commit/e67d08f1e91dec505f1946e808f490b8a4fd4c92))
+* **hub:** keep sessions in a revocable server-side store — signing out ends the session on every device at once, and the dashboard's Devices pane lists each signed-in device with per-session revoke ([6bc345c](https://github.com/tjakobsson/uatu/commit/6bc345c2b54ec0260ef7e2dd3094e588d69c2cb0))
+* **hub:** persist workspace state across clients ([4d7cc34](https://github.com/tjakobsson/uatu/commit/4d7cc340eec62742301ab09b4bcc86e574cff697))
+* **hub:** require a login on every interface, localhost included, and print the exact bootstrap steps when a hub starts with no users configured ([6bc345c](https://github.com/tjakobsson/uatu/commit/6bc345c2b54ec0260ef7e2dd3094e588d69c2cb0))
+* **hub:** self-hostable session hub with remote access and base-path serving ([#162](https://github.com/tjakobsson/uatu/issues/162)) ([6e3b155](https://github.com/tjakobsson/uatu/commit/6e3b1551d494931d81f3f43b05af7ed913dd1d0c))
+* **mermaid:** operate the fullscreen diagram viewer by touch ([1afc4c2](https://github.com/tjakobsson/uatu/commit/1afc4c22b7746b313d5fdd9917ab9350efc00239))
+* **mobile:** make phones and iPads first-class surfaces ([#176](https://github.com/tjakobsson/uatu/issues/176)) ([cb778fd](https://github.com/tjakobsson/uatu/commit/cb778fd53604ac0ecefbcd3c5b6893410903097c))
+* **mobile:** navigate touch devices with a bottom tab bar ([574b75b](https://github.com/tjakobsson/uatu/commit/574b75b5344d036ea805379839aca7b07b24677a))
+* **overview:** remove the review-burden score and the .uatu.json review block ([#212](https://github.com/tjakobsson/uatu/issues/212)) ([73bdd6e](https://github.com/tjakobsson/uatu/commit/73bdd6ebe3578d1775eaa3d36a79c0d5e88dbc2d))
+* **preview:** choose the outline presentation by available width ([#232](https://github.com/tjakobsson/uatu/issues/232)) ([861770d](https://github.com/tjakobsson/uatu/commit/861770d6289426a8378279ce95dfe8d3291a016f))
+* **pwa:** make the hub the installable web app and drop the service worker ([#208](https://github.com/tjakobsson/uatu/issues/208)) ([49f07ca](https://github.com/tjakobsson/uatu/commit/49f07ca54c199bf1f7c5d849fe94a3b4a0f00c22))
+* **release:** publish the uatu CLI on the nightly edge channel ([#165](https://github.com/tjakobsson/uatu/issues/165)) ([aeeebef](https://github.com/tjakobsson/uatu/commit/aeeebef13cd260df5f5c8da4c3b3b9a59bb820ef))
+* **server:** cap watch-refresh deferral at 2s under sustained churn ([#210](https://github.com/tjakobsson/uatu/issues/210)) ([ba8be9c](https://github.com/tjakobsson/uatu/commit/ba8be9c6d1bd5223853c0cd6388ad13a16974719))
+* **shell:** reload the web client once when its build no longer matches the server, and surface a persistent notice when the mismatch survives the reload ([289d867](https://github.com/tjakobsson/uatu/commit/289d86797e34a0bc602aaba49fdb8c71686139b5))
+* **terminal:** auto-attach detached sessions and add a touch terminal switcher ([a084d20](https://github.com/tjakobsson/uatu/commit/a084d20a17acf03128fc2b58ca036c26fa50220c))
+
+
+### Bug Fixes
+
+* **deps:** patch a DOMPurify XSS in detached subtrees (GHSA-55q2-fjhq-7xh7) by raising the bundled copy from 3.4.12 to 3.4.13 ([801b23c](https://github.com/tjakobsson/uatu/commit/801b23c20e62bee2b6b6ad7d852fcde2b7df0f39))
+* **deps:** update Mermaid to address four moderate security advisories ([574b75b](https://github.com/tjakobsson/uatu/commit/574b75b5344d036ea805379839aca7b07b24677a))
+* **mermaid:** render every diagram in narrow windows and touch mode, not only the first screenful ([1afc4c2](https://github.com/tjakobsson/uatu/commit/1afc4c22b7746b313d5fdd9917ab9350efc00239))
+* **server:** serve HTML entry points with no-cache and bundle assets as content-hashed immutable, so a hard refresh can never resurrect a stale UI from browser cache ([289d867](https://github.com/tjakobsson/uatu/commit/289d86797e34a0bc602aaba49fdb8c71686139b5))
+* **shell:** re-establish the live-update stream after a server restart instead of sitting on "Reconnecting" forever ([289d867](https://github.com/tjakobsson/uatu/commit/289d86797e34a0bc602aaba49fdb8c71686139b5))
+
 ## [0.4.0](https://github.com/tjakobsson/uatu/compare/v0.3.0...v0.4.0) (2026-08-01)
 
 
