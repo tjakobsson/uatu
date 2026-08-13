@@ -39,6 +39,8 @@ class FakeProcess implements CloneProcess {
   readonly writes: string[] = [];
   terminateCalls = 0;
   private resolveExit!: (code: number) => void;
+  private terminateBarrier: Promise<void> = Promise.resolve();
+  private releaseTerminate?: () => void;
   readonly exited = new Promise<number>(resolve => {
     this.resolveExit = resolve;
   });
@@ -49,11 +51,22 @@ class FakeProcess implements CloneProcess {
 
   async terminate(): Promise<void> {
     this.terminateCalls += 1;
+    await this.terminateBarrier;
     this.resolveExit(143);
   }
 
   exit(code: number): void {
     this.resolveExit(code);
+  }
+
+  holdTerminate(): void {
+    this.terminateBarrier = new Promise(resolve => {
+      this.releaseTerminate = resolve;
+    });
+  }
+
+  releaseHeldTerminate(): void {
+    this.releaseTerminate?.();
   }
 }
 
@@ -75,6 +88,9 @@ function fixture(overrides: { maxReplayBytes?: number; maxInputBytes?: number; i
   const stopped: string[] = [];
   let registerError: Error | undefined;
   let startError: Error | undefined;
+  let stopError: Error | undefined;
+  let startBarrier: Promise<void> | undefined;
+  let releaseStart: (() => void) | undefined;
   const registry = {
     async register(target: string) {
       if (registerError) throw registerError;
@@ -90,10 +106,12 @@ function fixture(overrides: { maxReplayBytes?: number; maxInputBytes?: number; i
   const sessions = {
     async start(id: string) {
       started.push(id);
+      await startBarrier;
       if (startError) throw startError;
     },
     async stop(id: string) {
       stopped.push(id);
+      if (stopError) throw stopError;
       return true;
     },
   };
@@ -114,6 +132,13 @@ function fixture(overrides: { maxReplayBytes?: number; maxInputBytes?: number; i
     manager, timer, processes, starts, registered, removed, started, stopped,
     failRegister(error: Error) { registerError = error; },
     failStart(error: Error) { startError = error; },
+    failStop(error: Error) { stopError = error; },
+    holdStart() {
+      startBarrier = new Promise(resolve => {
+        releaseStart = resolve;
+      });
+    },
+    releaseHeldStart() { releaseStart?.(); },
   };
 }
 
@@ -210,6 +235,44 @@ describe("CloneJobManager state machine", () => {
     await tick();
     expect(registration.started).toEqual([]);
     expect(registrationEvents.at(-1)?.data).toMatchObject({ status: "register-failed", error: "disk full" });
+  });
+
+  test("a cancel racing failed-clone cleanup remains the terminal result", async () => {
+    const f = fixture();
+    const events: CloneJobEvent[] = [];
+    const { jobId } = f.manager.create("alice", "remote", "/tmp/cancel-failed-clone");
+    f.manager.subscribe("alice", jobId, 0, event => events.push(event));
+    await tick();
+    f.processes[0].holdTerminate();
+    f.processes[0].exit(2);
+    await tick();
+
+    const cancelling = f.manager.cancel("alice", jobId);
+    f.processes[0].releaseHeldTerminate();
+
+    expect(await cancelling).toBe("cancelled");
+    expect(events.at(-1)?.data).toMatchObject({ status: "cancelled" });
+  });
+
+  test("failed cleanup after cancellation keeps the started workspace tracked", async () => {
+    const f = fixture();
+    f.holdStart();
+    f.failStop(new Error("backend refused stop"));
+    const events: CloneJobEvent[] = [];
+    const { jobId } = f.manager.create("alice", "remote", "/tmp/cleanup-fail");
+    f.manager.subscribe("alice", jobId, 0, event => events.push(event));
+    await tick();
+    f.processes[0].exit(0);
+    await tick();
+
+    const cancelling = f.manager.cancel("alice", jobId);
+    f.releaseHeldStart();
+
+    expect(await cancelling).toBe("cleanup-failed");
+    expect(f.registered.has("repo")).toBe(true);
+    expect(f.removed).toEqual([]);
+    expect(f.stopped).toEqual(["repo"]);
+    expect(events.at(-1)?.data).toMatchObject({ status: "cleanup-failed", error: expect.stringContaining("backend refused stop") });
   });
 
   test("rolls registration back on start failure without deleting the target", async () => {

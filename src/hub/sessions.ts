@@ -128,8 +128,8 @@ export class SessionManager {
       if (!session) {
         return false;
       }
-      this.running.delete(workspaceId);
       await session.stop();
+      this.running.delete(workspaceId);
       return true;
     });
   }

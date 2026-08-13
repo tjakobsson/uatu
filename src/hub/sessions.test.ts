@@ -121,6 +121,32 @@ describe("SessionManager.stop during an in-flight start", () => {
 });
 
 describe("SessionManager start during an in-flight stop", () => {
+  test("a failed backend stop retains the running session for retry", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-stop-fail-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    await registry.register("/srv/workspaces/stop-fail");
+
+    let stopCalls = 0;
+    const backend: SessionBackend = {
+      start: async () => ({
+        ...fakeSession("stop-fail"),
+        stop: async () => {
+          stopCalls += 1;
+          if (stopCalls === 1) throw new Error("backend refused stop");
+        },
+      }),
+    };
+    const sessions = new SessionManager(registry, { local: backend });
+    await sessions.start("stop-fail");
+
+    await expect(sessions.stop("stop-fail")).rejects.toThrow("backend refused stop");
+    expect(sessions.isRunning("stop-fail")).toBe(true);
+    expect(await sessions.stop("stop-fail")).toBe(true);
+    expect(sessions.isRunning("stop-fail")).toBe(false);
+  });
+
   test("start waits for the teardown instead of spawning a second child", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-race-"));
     tempDirectories.push(dir);

@@ -649,6 +649,7 @@ export function createHubFetchHandler(deps: HubDeps) {
         if (cloneJobAction[2] === "cancel") {
           const result = await cloneJobs.cancel(session.user, jobId);
           if (result === "not-found") return json(404, { error: "clone job not found" });
+          if (result === "cleanup-failed") return json(500, { error: "clone job cleanup failed; the workspace remains registered" });
           return json(200, { status: result });
         }
         let body: { input?: unknown };

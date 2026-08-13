@@ -784,6 +784,7 @@ async function finishClone(result) {
     "clone-failed": "Clone failed.",
     "register-failed": "Workspace registration failed.",
     "start-failed": "Clone completed, but the session could not start.",
+    "cleanup-failed": "Clone completed, but cancellation could not stop its session.",
     succeeded: "Clone complete. Opening session…",
   };
   const error = result.error || result.message;

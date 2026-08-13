@@ -37,3 +37,4 @@
 - [x] 6.1 Hide prompt input and cancellation after every terminal clone result, visibly distinguish disabled controls, clear residual input state, and leave failure output available while restoring the clone form for retry.
 - [x] 6.2 Add an optional checkout folder name, default it from the remote when blank, and reject path-like overrides before creating a clone job.
 - [x] 6.3 Clear PTY terminal echo before every submitted response and add a real-PTY regression test proving a secret cannot enter captured output or replay through terminal echo.
+- [x] 6.4 Preserve workspace/session tracking when cancellation cleanup fails, preserve cancellation across failed-clone cleanup races, and replace the CodeQL-flagged HTML extraction regex.

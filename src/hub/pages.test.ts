@@ -5,7 +5,9 @@ import { dashboardPage } from "./pages";
 describe("dashboard clone panel", () => {
   test("renders syntactically valid client JavaScript", () => {
     const html = dashboardPage();
-    const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
+    const start = html.indexOf("<script>");
+    const end = html.lastIndexOf("</script>");
+    const script = start >= 0 && end > start ? html.slice(start + "<script>".length, end) : undefined;
 
     expect(script).toBeDefined();
     expect(() => new Function(script!)).not.toThrow();

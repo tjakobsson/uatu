@@ -6,7 +6,7 @@ import type { WorkspaceEntry } from "./registry";
 export type CloneJobPhase = "cloning" | "registering" | "starting";
 export type CloneJobResult =
   | { status: "succeeded"; workspaceId: string; target: string }
-  | { status: "clone-failed" | "register-failed" | "start-failed"; target: string; error: string }
+  | { status: "clone-failed" | "register-failed" | "start-failed" | "cleanup-failed"; target: string; error: string }
   | { status: "cancelled" | "timed-out"; target: string; reason?: "inactivity" | "lifetime" };
 
 export type CloneJobEvent =
@@ -152,13 +152,14 @@ export class CloneJobManager {
     return "accepted";
   }
 
-  async cancel(owner: string, jobId: string): Promise<"cancelled" | "terminal" | "not-found"> {
+  async cancel(owner: string, jobId: string): Promise<"cancelled" | "cleanup-failed" | "terminal" | "not-found"> {
     const job = this.owned(owner, jobId);
     if (!job) return "not-found";
     if (job.result) return "terminal";
     await this.requestStop(job, { status: "cancelled", target: job.target });
     await job.done;
-    return "cancelled";
+    const result = this.owned(owner, jobId)?.result;
+    return result?.status === "cancelled" ? "cancelled" : result?.status === "cleanup-failed" ? "cleanup-failed" : "terminal";
   }
 
   async close(): Promise<void> {
@@ -202,7 +203,7 @@ export class CloneJobManager {
       }
       if (exitCode !== 0) {
         await job.process.terminate();
-        await this.finish(job, { status: "clone-failed", target: job.target, error: `git clone exited ${exitCode}` });
+        await this.finish(job, job.stop ?? { status: "clone-failed", target: job.target, error: `git clone exited ${exitCode}` });
         return;
       }
 
@@ -233,7 +234,16 @@ export class CloneJobManager {
         return;
       }
       if (job.stop) {
-        await this.sessions.stop(job.registered.id).catch(() => false);
+        try {
+          await this.sessions.stop(job.registered.id);
+        } catch (error) {
+          await this.finish(job, {
+            status: "cleanup-failed",
+            target: job.target,
+            error: `clone cancellation could not stop the started session: ${errorText(error)}`,
+          });
+          return;
+        }
         await this.rollback(job.registered);
         await this.finish(job, job.stop);
         return;
