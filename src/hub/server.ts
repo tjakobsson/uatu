@@ -598,8 +598,14 @@ export function createHubFetchHandler(deps: HubDeps) {
       return browse(url);
     }
     const cloneJobEvents = /^\/api\/hub\/clone-jobs\/([^/]+)\/events$/.exec(pathname);
-    if (cloneJobEvents && request.method === "GET") {
-      return cloneEvents(request, session.user, decodeURIComponent(cloneJobEvents[1]!));
+    if (cloneJobEvents && (request.method === "GET" || request.method === "HEAD")) {
+      const jobId = decodeURIComponent(cloneJobEvents[1]!);
+      if (request.method === "HEAD") {
+        return cloneJobs.has(session.user, jobId)
+          ? new Response(null, { status: 204 })
+          : json(404, { error: "clone job not found" });
+      }
+      return cloneEvents(request, session.user, jobId);
     }
     // The device-session list: the signed-in user's active sessions, with
     // per-session revocation handles. Handles are id prefixes — never the

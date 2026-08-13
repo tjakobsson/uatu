@@ -210,6 +210,11 @@ export class CloneJobManager {
         await this.finish(job, job.stop ?? { status: "clone-failed", target: job.target, error: `git clone exited ${exitCode}` });
         return;
       }
+      await job.process.terminate();
+      if (job.stop) {
+        await this.finish(job, job.stop);
+        return;
+      }
 
       this.setPhase(job, "registering");
       if (this.registry.byPath(job.target)) {

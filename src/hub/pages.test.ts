@@ -33,12 +33,14 @@ describe("dashboard clone panel", () => {
     expect(html).toContain('new EventSource("/api/hub/clone-jobs/"');
     expect(html).toContain("sessionStorage.getItem(cloneJobStorageKey)");
     expect(html).toContain("sessionStorage.setItem(cloneJobStorageKey, cloneJobId)");
+    expect(html).toContain('{ method: "HEAD" }');
     expect(html).toContain('events.addEventListener("output"');
     expect(html).toContain('events.addEventListener("phase"');
     expect(html).toContain('events.addEventListener("result"');
     expect(html).toContain("events.onmessage = event => handleCloneEvent");
     expect(html).toContain('cloneOutput.textContent += text');
     expect(html).toContain('cloneResponse.value = "";');
+    expect(html).not.toContain("if (!input) return;");
     expect(html).not.toContain('api("/api/hub/clone"');
   });
 

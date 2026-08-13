@@ -764,6 +764,16 @@ function closeCloneEvents() {
   if (cloneEvents) cloneEvents.close();
   cloneEvents = null;
 }
+function clearCloneState() {
+  closeCloneEvents();
+  cloneJobId = null;
+  sessionStorage.removeItem(cloneJobStorageKey);
+  setCloneActive(false);
+  if (cloneBusy) {
+    cloneBusy = false;
+    uiBusy -= 1;
+  }
+}
 function parseCloneEvent(event) {
   try { return JSON.parse(event.data); }
   catch { return {}; }
@@ -775,10 +785,7 @@ function handleCloneEvent(payload) {
   else if (payload.type === "result") finishClone(data);
 }
 async function finishClone(result) {
-  closeCloneEvents();
-  cloneJobId = null;
-  sessionStorage.removeItem(cloneJobStorageKey);
-  setCloneActive(false);
+  clearCloneState();
   const status = result.status || result.result;
   const labels = {
     cancelled: "Clone cancelled.",
@@ -803,10 +810,6 @@ async function finishClone(result) {
       openSession(workspaceId);
       return;
     }
-  }
-  if (cloneBusy) {
-    cloneBusy = false;
-    uiBusy -= 1;
   }
   await Promise.all([refresh(true), loadBrowser()]);
 }
@@ -834,7 +837,17 @@ function connectCloneEvents() {
   // events; the payload contract remains identical in both transports.
   events.onmessage = event => handleCloneEvent(parseCloneEvent(event));
   events.onopen = () => { if (cloneJobId === jobId) setClonePhase(null, clonePhase.textContent === "Reconnecting…" ? "Connected." : clonePhase.textContent); };
-  events.onerror = () => { if (cloneJobId === jobId) setClonePhase(null, "Reconnecting…"); };
+  events.onerror = async () => {
+    if (cloneJobId !== jobId) return;
+    setClonePhase(null, "Reconnecting…");
+    try {
+      const response = await fetch("/api/hub/clone-jobs/" + encodeURIComponent(jobId) + "/events", { method: "HEAD" });
+      if (response.status === 404 && cloneJobId === jobId) {
+        clearCloneState();
+        setClonePhase(null, "Previous clone job is no longer available.");
+      }
+    } catch {}
+  };
 }
 if (cloneForm) cloneForm.onsubmit = async event => {
   event.preventDefault();
@@ -883,7 +896,6 @@ cloneResponseForm.onsubmit = async event => {
   event.preventDefault();
   if (!cloneJobId) return;
   const input = cloneResponse.value;
-  if (!input) return;
   cloneResponse.value = "";
   try { await api("/api/hub/clone-jobs/" + encodeURIComponent(cloneJobId) + "/input", { input }); }
   catch (error) { showError(error.message); }

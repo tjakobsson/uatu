@@ -759,6 +759,16 @@ describe("hub end to end", () => {
 
     const aliceSession = await sessionStore.issue("alice", "integration test");
     const aliceCookie = `${HUB_COOKIE_NAME}=${aliceSession.id}`;
+    const visibleHead = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/events`, {
+      method: "HEAD",
+      headers: { cookie },
+    });
+    expect(visibleHead.status).toBe(204);
+    const hiddenHead = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/events`, {
+      method: "HEAD",
+      headers: { cookie: aliceCookie },
+    });
+    expect(hiddenHead.status).toBe(404);
     const hidden = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/events`, {
       headers: { cookie: aliceCookie },
     });
@@ -779,7 +789,7 @@ describe("hub end to end", () => {
     const firstInput = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/input`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie, origin },
-      body: JSON.stringify({ input: "private-passphrase" }),
+      body: JSON.stringify({ input: "" }),
     });
     expect(firstInput.status).toBe(200);
     const secondInput = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/input`, {
@@ -792,13 +802,12 @@ describe("hub end to end", () => {
     expect(stream).toContain("Enter passphrase");
     expect(stream).toContain("Custom authentication challenge");
     expect(stream).toContain('"status":"succeeded"');
-    expect(stream).not.toContain("private-passphrase");
     expect(stream).not.toContain("private-custom-response");
 
     const replay = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/events`, { headers: { cookie } });
     const replayText = await replay.text();
     expect(replayText).toContain('"status":"succeeded"');
-    expect(replayText).not.toContain("private-passphrase");
+    expect(replayText).not.toContain("private-custom-response");
     const afterFirst = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/events`, {
       headers: { cookie, "last-event-id": "1" },
     });

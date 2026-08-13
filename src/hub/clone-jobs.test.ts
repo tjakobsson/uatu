@@ -220,6 +220,7 @@ describe("CloneJobManager state machine", () => {
     f.manager.subscribe("alice", jobId, 0, event => events.push(event));
     f.processes[0].exit(0);
     await tick();
+    expect(f.processes[0].terminateCalls).toBeGreaterThan(0);
     expect(f.started).toEqual(["repo"]);
     expect(events.filter(event => event.type === "phase").map(event => event.data.phase)).toEqual([
       "cloning", "registering", "starting",
