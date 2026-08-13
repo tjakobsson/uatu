@@ -15,6 +15,7 @@ export type CloneJobEvent =
   | { id: number; type: "result"; data: CloneJobResult };
 
 type Registry = {
+  byPath(target: string): WorkspaceEntry | undefined;
   register(target: string): Promise<WorkspaceEntry>;
   remove(workspaceId: string): Promise<boolean>;
 };
@@ -132,6 +133,10 @@ export class CloneJobManager {
     return this.owned(owner, jobId) !== undefined;
   }
 
+  isTargetReserved(target: string): boolean {
+    return this.reservations.has(path.normalize(path.resolve(target)));
+  }
+
   subscribe(owner: string, jobId: string, afterEventId: number, listener: (event: CloneJobEvent) => void): (() => void) | null {
     const job = this.owned(owner, jobId);
     if (!job) return null;
@@ -147,7 +152,7 @@ export class CloneJobManager {
     if (!job) return "not-found";
     if (job.result || job.stop || job.phase !== "cloning" || !job.process) return "inactive";
     if (new TextEncoder().encode(value).byteLength > this.maxInputBytes) return "too-large";
-    job.process.writeLine(value);
+    if (!job.process.writeLine(value)) return "inactive";
     this.resetInactivity(job);
     return "accepted";
   }
@@ -202,12 +207,19 @@ export class CloneJobManager {
         return;
       }
       if (exitCode !== 0) {
-        await job.process.terminate();
         await this.finish(job, job.stop ?? { status: "clone-failed", target: job.target, error: `git clone exited ${exitCode}` });
         return;
       }
 
       this.setPhase(job, "registering");
+      if (this.registry.byPath(job.target)) {
+        await this.finish(job, {
+          status: "register-failed",
+          target: job.target,
+          error: `workspace is already registered: ${job.target}`,
+        });
+        return;
+      }
       try {
         job.registered = await this.registry.register(job.target);
       } catch (error) {
@@ -215,8 +227,7 @@ export class CloneJobManager {
         return;
       }
       if (job.stop) {
-        await this.rollback(job.registered);
-        await this.finish(job, job.stop);
+        await this.finishAfterRollback(job, job.registered);
         return;
       }
 
@@ -226,7 +237,7 @@ export class CloneJobManager {
       } catch (error) {
         const rollbackError = await this.rollback(job.registered);
         if (job.stop) {
-          await this.finish(job, job.stop);
+          await this.finish(job, rollbackError ? this.rollbackFailure(job, rollbackError) : job.stop);
           return;
         }
         const detail = rollbackError ? `${errorText(error)}; registration rollback failed: ${rollbackError}` : errorText(error);
@@ -244,8 +255,7 @@ export class CloneJobManager {
           });
           return;
         }
-        await this.rollback(job.registered);
-        await this.finish(job, job.stop);
+        await this.finishAfterRollback(job, job.registered);
         return;
       }
       await this.finish(job, { status: "succeeded", workspaceId: job.registered.id, target: job.target });
@@ -262,16 +272,39 @@ export class CloneJobManager {
   private async requestStop(job: Job, result: Extract<CloneJobResult, { status: "cancelled" | "timed-out" }>): Promise<void> {
     if (job.result || job.stop) return;
     job.stop = result;
-    if (job.process) await job.process.terminate().catch(() => undefined);
+    if (job.process) {
+      try {
+        await job.process.terminate();
+      } catch (error) {
+        await this.finish(job, {
+          status: "cleanup-failed",
+          target: job.target,
+          error: `clone process cleanup failed: ${errorText(error)}`,
+        });
+      }
+    }
   }
 
   private async finish(job: Job, result: CloneJobResult): Promise<void> {
     if (job.result) return;
-    if (job.process && result.status !== "succeeded") await job.process.terminate().catch(() => undefined);
+    if (job.process && result.status !== "succeeded" && result.status !== "cleanup-failed") {
+      try {
+        await job.process.terminate();
+      } catch (error) {
+        result = {
+          status: "cleanup-failed",
+          target: job.target,
+          error: `clone process cleanup failed: ${errorText(error)}`,
+        };
+      }
+    }
+    if (job.stop && result.status !== "cleanup-failed") result = job.stop;
     job.result = result;
     this.clearTimer(job.inactivityTimer);
     this.clearTimer(job.lifetimeTimer);
-    this.reservations.delete(job.target);
+    // A failed cleanup can leave a process or session still using the target.
+    // Keep it reserved rather than allowing a second clone to overlap it.
+    if (result.status !== "cleanup-failed") this.reservations.delete(job.target);
     this.emit(job, "result", result);
     job.subscribers.clear();
     job.process = undefined;
@@ -295,6 +328,19 @@ export class CloneJobManager {
     } catch (error) {
       return errorText(error);
     }
+  }
+
+  private async finishAfterRollback(job: Job, entry: WorkspaceEntry): Promise<void> {
+    const rollbackError = await this.rollback(entry);
+    await this.finish(job, rollbackError ? this.rollbackFailure(job, rollbackError) : job.stop!);
+  }
+
+  private rollbackFailure(job: Job, error: string): CloneJobResult {
+    return {
+      status: "cleanup-failed",
+      target: job.target,
+      error: `clone cancellation could not remove the workspace registration: ${error}`,
+    };
   }
 
   private emit(job: Job, type: "output", data: { output: string }): void;

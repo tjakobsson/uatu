@@ -41,17 +41,20 @@ class FakeProcess implements CloneProcess {
   private resolveExit!: (code: number) => void;
   private terminateBarrier: Promise<void> = Promise.resolve();
   private releaseTerminate?: () => void;
+  private terminateError?: Error;
   readonly exited = new Promise<number>(resolve => {
     this.resolveExit = resolve;
   });
 
-  writeLine(value: string): void {
+  writeLine(value: string): boolean {
     this.writes.push(value);
+    return true;
   }
 
   async terminate(): Promise<void> {
     this.terminateCalls += 1;
     await this.terminateBarrier;
+    if (this.terminateError) throw this.terminateError;
     this.resolveExit(143);
   }
 
@@ -67,6 +70,10 @@ class FakeProcess implements CloneProcess {
 
   releaseHeldTerminate(): void {
     this.releaseTerminate?.();
+  }
+
+  failTerminate(error: Error): void {
+    this.terminateError = error;
   }
 }
 
@@ -87,11 +94,15 @@ function fixture(overrides: { maxReplayBytes?: number; maxInputBytes?: number; i
   const started: string[] = [];
   const stopped: string[] = [];
   let registerError: Error | undefined;
+  let removeError: Error | undefined;
   let startError: Error | undefined;
   let stopError: Error | undefined;
   let startBarrier: Promise<void> | undefined;
   let releaseStart: (() => void) | undefined;
   const registry = {
+    byPath(target: string) {
+      return [...registered.values()].find(entry => entry.path === target);
+    },
     async register(target: string) {
       if (registerError) throw registerError;
       const entry = { id: "repo", path: target, backend: "local" as const };
@@ -100,6 +111,7 @@ function fixture(overrides: { maxReplayBytes?: number; maxInputBytes?: number; i
     },
     async remove(id: string) {
       removed.push(id);
+      if (removeError) throw removeError;
       return registered.delete(id);
     },
   };
@@ -131,6 +143,7 @@ function fixture(overrides: { maxReplayBytes?: number; maxInputBytes?: number; i
   return {
     manager, timer, processes, starts, registered, removed, started, stopped,
     failRegister(error: Error) { registerError = error; },
+    failRemove(error: Error) { removeError = error; },
     failStart(error: Error) { startError = error; },
     failStop(error: Error) { stopError = error; },
     holdStart() {
@@ -275,6 +288,46 @@ describe("CloneJobManager state machine", () => {
     expect(events.at(-1)?.data).toMatchObject({ status: "cleanup-failed", error: expect.stringContaining("backend refused stop") });
   });
 
+  test("failed process-group cleanup is a terminal cleanup failure", async () => {
+    const f = fixture();
+    const events: CloneJobEvent[] = [];
+    const { jobId } = f.manager.create("alice", "remote", "/tmp/process-cleanup-fail");
+    f.manager.subscribe("alice", jobId, 0, event => events.push(event));
+    await tick();
+    f.processes[0].failTerminate(new Error("descendant survived SIGKILL"));
+
+    expect(await f.manager.cancel("alice", jobId)).toBe("cleanup-failed");
+    expect(events.at(-1)?.data).toMatchObject({
+      status: "cleanup-failed",
+      error: expect.stringContaining("descendant survived SIGKILL"),
+    });
+    expect(() => f.manager.create("bob", "remote", "/tmp/process-cleanup-fail")).toThrow("already reserved");
+  });
+
+  test("failed registration rollback after cancellation reports cleanup failure", async () => {
+    const f = fixture();
+    f.holdStart();
+    f.failRemove(new Error("registry is read-only"));
+    const events: CloneJobEvent[] = [];
+    const { jobId } = f.manager.create("alice", "remote", "/tmp/rollback-fail");
+    f.manager.subscribe("alice", jobId, 0, event => events.push(event));
+    await tick();
+    f.processes[0].exit(0);
+    await tick();
+
+    const cancelling = f.manager.cancel("alice", jobId);
+    f.releaseHeldStart();
+
+    expect(await cancelling).toBe("cleanup-failed");
+    expect(f.registered.has("repo")).toBe(true);
+    expect(f.stopped).toEqual(["repo"]);
+    expect(events.at(-1)?.data).toMatchObject({
+      status: "cleanup-failed",
+      error: expect.stringContaining("registry is read-only"),
+    });
+    expect(() => f.manager.create("bob", "remote", "/tmp/rollback-fail")).toThrow("already reserved");
+  });
+
   test("rolls registration back on start failure without deleting the target", async () => {
     const f = fixture();
     f.failStart(new Error("no session URL"));
@@ -287,6 +340,23 @@ describe("CloneJobManager state machine", () => {
     expect(f.removed).toEqual(["repo"]);
     expect(f.registered.size).toBe(0);
     expect(events.at(-1)?.data).toEqual({ status: "start-failed", target: "/tmp/keep-checkout", error: "no session URL" });
+  });
+
+  test("does not adopt or roll back a registration created during cloning", async () => {
+    const f = fixture();
+    const events: CloneJobEvent[] = [];
+    const target = "/tmp/already-registered";
+    const { jobId } = f.manager.create("alice", "remote", target);
+    f.manager.subscribe("alice", jobId, 0, event => events.push(event));
+    await tick();
+    f.registered.set("existing", { id: "existing", path: target, backend: "local" });
+    f.processes[0].exit(0);
+    await tick();
+
+    expect(f.started).toEqual([]);
+    expect(f.removed).toEqual([]);
+    expect(f.registered.has("existing")).toBe(true);
+    expect(events.at(-1)?.data).toMatchObject({ status: "register-failed", error: expect.stringContaining("already registered") });
   });
 });
 

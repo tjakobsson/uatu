@@ -142,6 +142,23 @@ describe("CloneProcessAdapter", () => {
     expect(processExists(proc.pid)).toBe(false);
     expect(processExists(childPid)).toBe(false);
   });
+
+  test("rejects termination when descendants remain after SIGKILL", async () => {
+    const signals: Array<NodeJS.Signals | 0> = [];
+    const terminal = { localFlags: 0xff, write() {}, close() {} };
+    const adapter = new CloneProcessAdapter({
+      spawn: () => ({ pid: 42, exited: Promise.resolve(143), terminal }),
+      killGroup(_pid, signal) {
+        signals.push(signal);
+      },
+      sleep: async () => Bun.sleep(1),
+      termGraceMs: 1,
+    });
+    const proc = adapter.start({ url: "remote", target: "/tmp/repo", onOutput: () => undefined });
+
+    await expect(proc.terminate()).rejects.toThrow("did not exit after SIGKILL");
+    expect(signals).toContain("SIGKILL");
+  });
 });
 
 function processExists(pid: number): boolean {

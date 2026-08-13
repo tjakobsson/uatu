@@ -81,12 +81,13 @@ beforeAll(async () => {
           responses += 1;
           if (responses === 1) {
             options.onOutput("\nCustom authentication challenge: ");
-            return;
+            return true;
           }
           void mkdir(options.target, { recursive: true }).then(() => {
             execFileSync("git", ["init"], { cwd: options.target, stdio: "ignore" });
             resolveExit(0);
           });
+          return true;
         },
         async terminate() {
           resolveExit(143);

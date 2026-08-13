@@ -31,6 +31,8 @@ describe("dashboard clone panel", () => {
 
     expect(html).toContain('api("/api/hub/clone-jobs"');
     expect(html).toContain('new EventSource("/api/hub/clone-jobs/"');
+    expect(html).toContain("sessionStorage.getItem(cloneJobStorageKey)");
+    expect(html).toContain("sessionStorage.setItem(cloneJobStorageKey, cloneJobId)");
     expect(html).toContain('events.addEventListener("output"');
     expect(html).toContain('events.addEventListener("phase"');
     expect(html).toContain('events.addEventListener("result"');

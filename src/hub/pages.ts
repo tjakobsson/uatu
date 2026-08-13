@@ -716,7 +716,8 @@ const cloneResponseLabel = document.getElementById("clone-response-label");
 const cloneCancel = document.getElementById("clone-cancel");
 const cloneSubmit = cloneForm && cloneForm.querySelector("button");
 const cloneOutputLimit = 64 * 1024;
-let cloneJobId = null;
+const cloneJobStorageKey = "uatu.activeCloneJob";
+let cloneJobId = sessionStorage.getItem(cloneJobStorageKey);
 let cloneEvents = null;
 let cloneBusy = false;
 let clonePromptText = "";
@@ -776,6 +777,7 @@ function handleCloneEvent(payload) {
 async function finishClone(result) {
   closeCloneEvents();
   cloneJobId = null;
+  sessionStorage.removeItem(cloneJobStorageKey);
   setCloneActive(false);
   const status = result.status || result.result;
   const labels = {
@@ -784,7 +786,7 @@ async function finishClone(result) {
     "clone-failed": "Clone failed.",
     "register-failed": "Workspace registration failed.",
     "start-failed": "Clone completed, but the session could not start.",
-    "cleanup-failed": "Clone completed, but cancellation could not stop its session.",
+    "cleanup-failed": "Clone cleanup failed; the target remains reserved.",
     succeeded: "Clone complete. Opening session…",
   };
   const error = result.error || result.message;
@@ -859,6 +861,7 @@ if (cloneForm) cloneForm.onsubmit = async event => {
     const result = await api("/api/hub/clone-jobs", { url, dest: browsePath, folderName });
     cloneJobId = result.jobId;
     if (!cloneJobId) throw new Error("clone job did not return an id");
+    sessionStorage.setItem(cloneJobStorageKey, cloneJobId);
     input.value = "";
     folderNameInput.value = "";
     button.textContent = "Clone";
@@ -911,6 +914,14 @@ window.addEventListener("pageshow", event => {
 refresh();
 loadBrowser();
 loadDevices();
+if (cloneJobId) {
+  clonePanel.hidden = false;
+  cloneBusy = true;
+  uiBusy = 1;
+  setCloneActive(true);
+  setClonePhase(null, "Reconnecting…");
+  connectCloneEvents();
+}
 setInterval(refresh, 5000);
 </script>`,
   );

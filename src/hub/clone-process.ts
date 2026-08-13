@@ -6,7 +6,7 @@ const TERMINAL_ECHO_FLAG = 0x00000008;
 export type CloneProcess = {
   readonly pid: number;
   readonly exited: Promise<number>;
-  writeLine(value: string): void;
+  writeLine(value: string): boolean;
   terminate(): Promise<void>;
 };
 
@@ -110,7 +110,7 @@ export class CloneProcessAdapter implements CloneProcessFactory {
       pid: proc.pid,
       exited,
       writeLine(value) {
-        if (!terminal) return;
+        if (!terminal) return false;
         try {
           // A PTY starts with terminal echo enabled. Git and SSH normally
           // disable it for secrets, but arbitrary/unrecognized prompts may
@@ -118,8 +118,10 @@ export class CloneProcessAdapter implements CloneProcessFactory {
           // credentials can never return through captured output/replay.
           terminal.localFlags &= ~TERMINAL_ECHO_FLAG;
           terminal.write(`${value}\n`);
+          return true;
         } catch {
           // Process may have exited between the active-state check and write.
+          return false;
         }
       },
       terminate: () => {
@@ -149,6 +151,13 @@ export class CloneProcessAdapter implements CloneProcessFactory {
       }
     }
     await exited.catch(() => undefined);
+    const killDeadline = Date.now() + this.termGraceMs;
+    while (Date.now() < killDeadline && this.groupExists(pid)) {
+      await this.sleep(Math.min(25, Math.max(1, killDeadline - Date.now())));
+    }
+    if (this.groupExists(pid)) {
+      throw new Error(`clone process group ${pid} did not exit after SIGKILL`);
+    }
   }
 
   private groupExists(pid: number): boolean {
