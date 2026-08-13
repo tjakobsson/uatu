@@ -40,9 +40,9 @@ service definitions for systemd and launchd.
   browsers gate service workers (the PWA install) and the clipboard API
   behind secure contexts. Plain HTTP is only permitted on loopback — the
   hub refuses to bind a non-loopback address without TLS.
-- **`git clone` runs with the daemon user's ambient credentials** (its
-  `~/.gitconfig`, ssh agent, credential helpers). The hub stores no
-  credentials of its own.
+- **The hub stores no Git credentials.** Clone jobs retain the daemon user's
+  SSH agent but disable credential helpers and route interactive Git/OpenSSH
+  prompts through the dashboard.
 - **Signed-in users can browse the daemon user's filesystem.** The
   dashboard's Add Folder browser lists directories so users can pick any
   folder to serve. This adds nothing to the threat model — the embedded
