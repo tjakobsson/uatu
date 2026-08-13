@@ -715,6 +715,16 @@ describe("hub end to end", () => {
     });
     expect(noDest.status).toBe(400);
 
+    const existingTarget = path.join(dest, "existing-target");
+    await mkdir(existingTarget, { recursive: true });
+    const existing = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ url: source, dest, folderName: "existing-target" }),
+    });
+    expect(existing.status).toBe(409);
+    expect(((await existing.json()) as { error: string }).error).toContain("target already exists");
+
     const failed = await fetch(`${origin}/api/hub/clone-jobs`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie, origin },

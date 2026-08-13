@@ -383,7 +383,7 @@ export function createHubFetchHandler(deps: HubDeps) {
       if (registry.byPath(target)) {
         return json(409, { error: `workspace is already registered: ${target}` });
       }
-      if (await Bun.file(path.join(target, ".git", "HEAD")).exists()) {
+      if (await fs.stat(target).then(() => true).catch(() => false)) {
         return json(409, { error: `target already exists: ${target}` });
       }
       return json(202, cloneJobs.create(owner, url, target));
@@ -661,7 +661,7 @@ export function createHubFetchHandler(deps: HubDeps) {
         if (cloneJobAction[2] === "cancel") {
           const result = await cloneJobs.cancel(session.user, jobId);
           if (result === "not-found") return json(404, { error: "clone job not found" });
-          if (result === "cleanup-failed") return json(500, { error: "clone job cleanup failed; the target remains reserved" });
+          if (result === "cleanup-failed") return json(500, { error: "clone job cleanup failed; review the job output and workspace state" });
           return json(200, { status: result });
         }
         let body: { input?: unknown };

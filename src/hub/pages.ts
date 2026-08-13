@@ -793,7 +793,7 @@ async function finishClone(result) {
     "clone-failed": "Clone failed.",
     "register-failed": "Workspace registration failed.",
     "start-failed": "Clone completed, but the session could not start.",
-    "cleanup-failed": "Clone cleanup failed; the target remains reserved.",
+    "cleanup-failed": "Clone cleanup failed; review the output and workspace state.",
     succeeded: "Clone complete. Opening session…",
   };
   const error = result.error || result.message;
