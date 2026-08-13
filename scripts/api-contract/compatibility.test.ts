@@ -130,4 +130,15 @@ describe("API compatibility policy", () => {
       "GET /s/{workspaceId}/api/state: changed path parameter workspaceId schema",
     );
   });
+
+  test("detects removal of an optional parameter", () => {
+    const base = { paths: { "/api/hub/browse": { get: {
+      ...operation("Hub"),
+      parameters: [{ name: "path", in: "query", schema: { type: "string" } }],
+    } } } };
+    const proposed = { paths: { "/api/hub/browse": { get: operation("Hub") } } };
+    expect(compareContracts(base, proposed).breaking.hub).toContain(
+      "GET /api/hub/browse: removed query parameter path",
+    );
+  });
 });

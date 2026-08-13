@@ -290,6 +290,7 @@ jobs:
     # and still produce the correct output. A failure here never affects the
     # already-published release.
     needs: publish
+    continue-on-error: true
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

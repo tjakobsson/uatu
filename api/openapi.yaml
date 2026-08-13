@@ -378,20 +378,6 @@ paths:
         '500': { $ref: '#/components/responses/Error' }
   /s/{workspaceId}/api/auth:
     parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
-    post:
-      operationId: workspaceCreateTerminalAuth
-      tags: [Terminal]
-      summary: Exchange a terminal token for a child-scoped cookie
-      requestBody:
-        required: true
-        content:
-          application/json: { schema: { $ref: '#/components/schemas/TerminalAuthRequest' } }
-      responses:
-        '200': { $ref: '#/components/responses/Accepted' }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/SessionUnreachable' }
-        '503': { $ref: '#/components/responses/WorkspaceStopped' }
     get:
       operationId: workspaceProbeTerminalAuth
       tags: [Terminal]
@@ -709,11 +695,6 @@ components:
       type: object
       minProperties: 1
       properties: { version: { const: 1 }, documentPath: { type: [string, 'null'] }, follow: { type: [boolean, 'null'] }, previewMode: { oneOf: [{ $ref: '#/components/schemas/ViewMode' }, { type: 'null' }] }, compareTarget: { enum: [base, last-commit, null] }, filesFilter: { enum: [all, changed, null] }, lastPtyId: { oneOf: [{ type: string, format: uuid }, { type: 'null' }] } }
-      additionalProperties: false
-    TerminalAuthRequest:
-      type: object
-      required: [token]
-      properties: { token: { type: string, minLength: 1 } }
       additionalProperties: false
     TerminalDimensions:
       type: object

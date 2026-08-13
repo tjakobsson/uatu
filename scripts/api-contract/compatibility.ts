@@ -88,6 +88,10 @@ function compareOperation(name: string, before: JsonObject, after: JsonObject): 
   }
   for (const parameter of beforeParameters) {
     const next = afterParameters.find(candidate => candidate.name === parameter.name && candidate.in === parameter.in);
+    if (!next) {
+      failures.push(`${name}: removed ${String(parameter.in)} parameter ${String(parameter.name)}`);
+      continue;
+    }
     if (next && parameter.required !== true && next.required === true) {
       failures.push(`${name}: made ${String(parameter.in)} parameter ${String(parameter.name)} required`);
     }

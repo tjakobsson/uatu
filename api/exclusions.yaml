@@ -10,6 +10,7 @@ exclusions:
   - { id: workspace-assets, scope: workspace, methods: [GET], pathPattern: "/s/{workspaceId}/assets/*", reason: static assets }
   - { id: workspace-manifest, scope: workspace, methods: [GET], path: "/s/{workspaceId}/manifest.webmanifest", reason: browser installation metadata }
   - { id: workspace-debug, scope: workspace, methods: [GET], path: "/s/{workspaceId}/debug/metrics", reason: opt-in internal diagnostics }
+  - { id: workspace-terminal-cookie-auth, scope: workspace, methods: [POST], path: "/s/{workspaceId}/api/auth", reason: browser bootstrap flow requiring a Hub-private child token; public clients use Hub session authentication }
   - { id: e2e-reset, scope: test, methods: [POST], path: /__e2e/reset, reason: test-only route }
   - { id: e2e-terminal-token, scope: test, methods: [GET], path: /__e2e/terminal-token, reason: test-only credential helper }
   - { id: e2e-personal-state, scope: test, methods: [GET, PATCH], path: /api/personal-state, reason: direct-child test substitute; public form is proxied }

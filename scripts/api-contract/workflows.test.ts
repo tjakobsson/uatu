@@ -38,7 +38,9 @@ describe("API publication workflows", () => {
   });
 
   test("only a successful Release run advances latest from its exact commit", async () => {
+    const release = await workflow("release.yml");
     const document = await workflow("api-release.yml");
+    expect(release.jobs["update-tap"]["continue-on-error"]).toBe(true);
     expect(document.on.workflow_run).toEqual({ workflows: ["Release"], types: ["completed"] });
     expect(document.jobs.bundle.if).toBe("github.event.workflow_run.conclusion == 'success'");
     expect(document.jobs.bundle.steps.find((step: any) => step.name === "Check out tagged source").with.ref)

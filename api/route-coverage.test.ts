@@ -22,7 +22,7 @@ test("workspace route table and fallback routes are classified", async () => {
     expect(source).toContain(marker);
   }
   expect(sessionsSource).toContain('const SESSIONS_PATH = "/api/terminal/sessions"');
-  for (const id of ["workspace-assets", "workspace-manifest", "workspace-debug", "e2e-reset", "e2e-terminal-token", "e2e-personal-state", "direct-child-api"]) {
+  for (const id of ["workspace-assets", "workspace-manifest", "workspace-debug", "workspace-terminal-cookie-auth", "e2e-reset", "e2e-terminal-token", "e2e-personal-state", "direct-child-api"]) {
     expect(excluded.exclusions.some(item => item.id === id)).toBe(true);
   }
   const literalRoutes = [...source.matchAll(/p\("([^"]+)"\)/g)].map(match => match[1]!);
