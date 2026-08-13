@@ -68,6 +68,7 @@ const defaultTimer: CloneJobTimer = {
   set: (callback, milliseconds) => setTimeout(callback, milliseconds),
   clear: handle => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
+const SHUTDOWN_CLEANUP_ATTEMPTS = 2;
 
 export class CloneJobManager {
   private readonly jobs = new Map<string, Job>();
@@ -175,16 +176,16 @@ export class CloneJobManager {
         await this.requestStop(job, { status: "cancelled", target: job.target });
         await job.done;
       }
-      while (job.process) {
+      for (let attempt = 0; job.process && attempt < SHUTDOWN_CLEANUP_ATTEMPTS; attempt += 1) {
         try {
           await this.terminateProcess(job);
         } catch {
-          await new Promise(resolve => setTimeout(resolve, 25));
+          if (attempt + 1 < SHUTDOWN_CLEANUP_ATTEMPTS) {
+            await new Promise(resolve => setTimeout(resolve, 25));
+          }
         }
       }
-      if (job.result?.status === "cleanup-failed") {
-        this.reservations.delete(job.target);
-      }
+      if (!job.process) this.reservations.delete(job.target);
     }));
   }
 
@@ -319,9 +320,10 @@ export class CloneJobManager {
     job.result = result;
     this.clearTimer(job.inactivityTimer);
     this.clearTimer(job.lifetimeTimer);
-    // A failed cleanup can leave a process or session still using the target.
-    // Keep it reserved rather than allowing a second clone to overlap it.
-    if (result.status !== "cleanup-failed") this.reservations.delete(job.target);
+    // Only a retained process can still be operating on the clone target.
+    // Registry and session cleanup failures remain represented by their own
+    // managers and must not permanently poison this in-memory reservation.
+    if (!job.process) this.reservations.delete(job.target);
     this.emit(job, "result", result);
     job.subscribers.clear();
     job.url = "";

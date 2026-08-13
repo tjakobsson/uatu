@@ -301,6 +301,8 @@ describe("CloneJobManager state machine", () => {
     expect(f.removed).toEqual([]);
     expect(f.stopped).toEqual(["repo"]);
     expect(events.at(-1)?.data).toMatchObject({ status: "cleanup-failed", error: expect.stringContaining("backend refused stop") });
+    expect(() => f.manager.create("bob", "remote", "/tmp/cleanup-fail")).not.toThrow();
+    await f.manager.close();
   });
 
   test("failed process-group cleanup is a terminal cleanup failure", async () => {
@@ -322,7 +324,7 @@ describe("CloneJobManager state machine", () => {
     expect(f.manager.has("alice", jobId)).toBe(true);
     f.processes[0].failTerminateTimes(new Error("descendant still present"), 1);
     await f.manager.close();
-    expect(f.processes[0].terminateCalls).toBeGreaterThan(callsAfterFailure + 1);
+    expect(f.processes[0].terminateCalls).toBe(callsAfterFailure + 2);
   });
 
   test("failed registration rollback after cancellation reports cleanup failure", async () => {
@@ -346,7 +348,21 @@ describe("CloneJobManager state machine", () => {
       status: "cleanup-failed",
       error: expect.stringContaining("registry is read-only"),
     });
-    expect(() => f.manager.create("bob", "remote", "/tmp/rollback-fail")).toThrow("already reserved");
+    expect(() => f.manager.create("bob", "remote", "/tmp/rollback-fail")).not.toThrow();
+    await f.manager.close();
+  });
+
+  test("shutdown bounds retries for a permanently unreapable process group", async () => {
+    const f = fixture();
+    const { jobId } = f.manager.create("alice", "remote", "/tmp/unreapable");
+    await tick();
+    f.processes[0].failTerminate(new Error("zombie process group"));
+    expect(await f.manager.cancel("alice", jobId)).toBe("cleanup-failed");
+    const callsAfterFailure = f.processes[0].terminateCalls;
+
+    await f.manager.close();
+
+    expect(f.processes[0].terminateCalls).toBe(callsAfterFailure + 2);
   });
 
   test("rolls registration back on start failure without deleting the target", async () => {
