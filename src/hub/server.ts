@@ -379,7 +379,7 @@ export function createHubFetchHandler(deps: HubDeps) {
     try {
       const resolvedDest = path.resolve(dest);
       await fs.mkdir(resolvedDest, { recursive: true });
-      const target = path.join(resolvedDest, requestedFolderName || cloneTargetName(url)!);
+      const target = path.join(await fs.realpath(resolvedDest), requestedFolderName || cloneTargetName(url)!);
       if (registry.byPath(target)) {
         return json(409, { error: `workspace is already registered: ${target}` });
       }

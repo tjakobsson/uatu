@@ -6,7 +6,7 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -702,7 +702,8 @@ describe("hub end to end", () => {
     expect(cloneStream).toContain('"status":"succeeded"');
     const id = (JSON.parse(cloneStream.match(/data: (\{"status":"succeeded"[^\n]+\})/)?.[1] ?? "{}") as { workspaceId: string }).workspaceId;
     expect(id).toBe("cloneme");
-    expect(registry.byId(id)?.path).toBe(path.join(dest, "cloneme"));
+    const canonicalDest = await realpath(dest);
+    expect(registry.byId(id)?.path).toBe(path.join(canonicalDest, "cloneme"));
     const state = await fetch(`${origin}/s/${id}/api/state`, { headers: { cookie } });
     expect(state.status).toBe(200);
     await sessions.stop(id);
@@ -725,6 +726,27 @@ describe("hub end to end", () => {
     expect(existing.status).toBe(409);
     expect(((await existing.json()) as { error: string }).error).toContain("target already exists");
 
+    const aliasedDest = path.join(tempRoot, "checkouts-alias");
+    await symlink(dest, aliasedDest);
+    const aliasClone = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ url: "interactive:alias.git", dest: aliasedDest, folderName: "alias-checkout" }),
+    });
+    expect(aliasClone.status).toBe(202);
+    const aliasJobId = ((await aliasClone.json()) as { jobId: string }).jobId;
+    const duplicateAlias = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ url: source, dest, folderName: "alias-checkout" }),
+    });
+    expect(duplicateAlias.status).toBe(409);
+    expect(((await duplicateAlias.json()) as { error: string }).error).toContain("already reserved");
+    await fetch(`${origin}/api/hub/clone-jobs/${aliasJobId}/cancel`, {
+      method: "POST",
+      headers: { cookie, origin },
+    });
+
     const failed = await fetch(`${origin}/api/hub/clone-jobs`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie, origin },
@@ -746,7 +768,7 @@ describe("hub end to end", () => {
     const customEvents = await fetch(`${origin}/api/hub/clone-jobs/${customJobId}/events`, { headers: { cookie } });
     const customStream = await customEvents.text();
     expect(customStream).toContain('"status":"succeeded"');
-    expect(customStream).toContain(path.join(dest, "custom-checkout"));
+    expect(customStream).toContain(path.join(canonicalDest, "custom-checkout"));
 
     const nested = await fetch(`${origin}/api/hub/clone-jobs`, {
       method: "POST",
