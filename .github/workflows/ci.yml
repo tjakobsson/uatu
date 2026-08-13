@@ -26,11 +26,11 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
-          code=false
+          code=true
 
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ -z "$BASE_SHA" ] || [[ "$BASE_SHA" =~ ^0+$ ]]; then
-            code=true
-          else
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] && [ -n "$BASE_SHA" ] && [[ ! "$BASE_SHA" =~ ^0+$ ]]; then
+            changed=$(git diff --no-renames --name-only "$BASE_SHA" "$GITHUB_SHA") || exit 1
+            code=false
             while IFS= read -r file; do
               case "$file" in
                 docs/*|openspec/*|.claude/*|.opencode/*|desktop/macos/*|*.md|LICENSE|LICENSES/*|.github/*)
@@ -40,7 +40,7 @@ jobs:
                   code=true
                   ;;
               esac
-            done < <(git diff --name-only "$BASE_SHA" "$GITHUB_SHA")
+            done <<< "$changed"
           fi
 
           echo "code=$code" >> "$GITHUB_OUTPUT"

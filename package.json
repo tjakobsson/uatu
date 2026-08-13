@@ -57,8 +57,5 @@
   "overrides": {
     "dompurify": "^3.4.13",
     "uuid": "^14.0.1"
-  },
-  "allowScripts": {
-    "@fission-ai/openspec": true
   }
 }
