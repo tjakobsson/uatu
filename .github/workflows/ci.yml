@@ -33,7 +33,7 @@ jobs:
             code=false
             while IFS= read -r file; do
               case "$file" in
-                docs/*|openspec/*|.claude/*|.opencode/*|desktop/macos/*|*.md|LICENSE|LICENSES/*|.github/*)
+                docs/*|openspec/*|.claude/*|.opencode/*|desktop/macos/*|ARCHITECTURE.md|CHANGELOG.md|CLAUDE.md|CONTRIBUTING.md|README.md|SECURITY.md|LICENSE|LICENSES/*|.github/*)
                   ;;
                 *)
                   # Unknown paths are code until explicitly classified above.
