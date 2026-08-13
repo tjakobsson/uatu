@@ -169,10 +169,22 @@ export class CloneJobManager {
 
   async close(): Promise<void> {
     this.closed = true;
-    const active = [...this.jobs.values()].filter(job => !job.result);
-    await Promise.all(active.map(async job => {
-      await this.requestStop(job, { status: "cancelled", target: job.target });
-      await job.done;
+    const tracked = [...this.jobs.values()].filter(job => !job.result || job.process);
+    await Promise.all(tracked.map(async job => {
+      if (!job.result) {
+        await this.requestStop(job, { status: "cancelled", target: job.target });
+        await job.done;
+      }
+      while (job.process) {
+        try {
+          await this.terminateProcess(job);
+        } catch {
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+      }
+      if (job.result?.status === "cleanup-failed") {
+        this.reservations.delete(job.target);
+      }
     }));
   }
 
@@ -210,7 +222,7 @@ export class CloneJobManager {
         await this.finish(job, job.stop ?? { status: "clone-failed", target: job.target, error: `git clone exited ${exitCode}` });
         return;
       }
-      await job.process.terminate();
+      await this.terminateProcess(job);
       if (job.stop) {
         await this.finish(job, job.stop);
         return;
@@ -265,7 +277,7 @@ export class CloneJobManager {
       }
       await this.finish(job, { status: "succeeded", workspaceId: job.registered.id, target: job.target });
     } catch (error) {
-      if (job.process) await job.process.terminate().catch(() => undefined);
+      if (job.process) await this.terminateProcess(job).catch(() => undefined);
       await this.finish(job, { status: "clone-failed", target: job.target, error: errorText(error) });
     }
   }
@@ -279,7 +291,7 @@ export class CloneJobManager {
     job.stop = result;
     if (job.process) {
       try {
-        await job.process.terminate();
+        await this.terminateProcess(job);
       } catch (error) {
         await this.finish(job, {
           status: "cleanup-failed",
@@ -294,7 +306,7 @@ export class CloneJobManager {
     if (job.result) return;
     if (job.process && result.status !== "succeeded" && result.status !== "cleanup-failed") {
       try {
-        await job.process.terminate();
+        await this.terminateProcess(job);
       } catch (error) {
         result = {
           status: "cleanup-failed",
@@ -312,13 +324,20 @@ export class CloneJobManager {
     if (result.status !== "cleanup-failed") this.reservations.delete(job.target);
     this.emit(job, "result", result);
     job.subscribers.clear();
-    job.process = undefined;
     job.url = "";
     job.resolveDone();
     job.expiryTimer = this.timer.set(() => {
+      if (job.process) return;
       this.jobs.delete(job.id);
       job.events.length = 0;
     }, this.retentionMs);
+  }
+
+  private async terminateProcess(job: Job): Promise<void> {
+    const process = job.process;
+    if (!process) return;
+    await process.terminate();
+    if (job.process === process) job.process = undefined;
   }
 
   private setPhase(job: Job, phase: CloneJobPhase): void {

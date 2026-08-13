@@ -42,6 +42,7 @@ class FakeProcess implements CloneProcess {
   private terminateBarrier: Promise<void> = Promise.resolve();
   private releaseTerminate?: () => void;
   private terminateError?: Error;
+  private remainingTerminateFailures = 0;
   readonly exited = new Promise<number>(resolve => {
     this.resolveExit = resolve;
   });
@@ -54,7 +55,9 @@ class FakeProcess implements CloneProcess {
   async terminate(): Promise<void> {
     this.terminateCalls += 1;
     await this.terminateBarrier;
-    if (this.terminateError) throw this.terminateError;
+    if (this.terminateError && (this.remainingTerminateFailures < 0 || this.remainingTerminateFailures-- > 0)) {
+      throw this.terminateError;
+    }
     this.resolveExit(143);
   }
 
@@ -74,6 +77,17 @@ class FakeProcess implements CloneProcess {
 
   failTerminate(error: Error): void {
     this.terminateError = error;
+    this.remainingTerminateFailures = -1;
+  }
+
+  failTerminateTimes(error: Error, count: number): void {
+    this.terminateError = error;
+    this.remainingTerminateFailures = count;
+  }
+
+  allowTerminate(): void {
+    this.terminateError = undefined;
+    this.remainingTerminateFailures = 0;
   }
 }
 
@@ -303,6 +317,12 @@ describe("CloneJobManager state machine", () => {
       error: expect.stringContaining("descendant survived SIGKILL"),
     });
     expect(() => f.manager.create("bob", "remote", "/tmp/process-cleanup-fail")).toThrow("already reserved");
+    const callsAfterFailure = f.processes[0].terminateCalls;
+    await f.timer.advance(50);
+    expect(f.manager.has("alice", jobId)).toBe(true);
+    f.processes[0].failTerminateTimes(new Error("descendant still present"), 1);
+    await f.manager.close();
+    expect(f.processes[0].terminateCalls).toBeGreaterThan(callsAfterFailure + 1);
   });
 
   test("failed registration rollback after cancellation reports cleanup failure", async () => {

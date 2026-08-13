@@ -159,6 +159,25 @@ describe("CloneProcessAdapter", () => {
     await expect(proc.terminate()).rejects.toThrow("did not exit after SIGKILL");
     expect(signals).toContain("SIGKILL");
   });
+
+  test("retries process-group termination after verification failure", async () => {
+    let attempt = 0;
+    const terminal = { localFlags: 0xff, write() {}, close() {} };
+    const adapter = new CloneProcessAdapter({
+      spawn: () => ({ pid: 42, exited: Promise.resolve(143), terminal }),
+      killGroup(_pid, signal) {
+        if (signal === "SIGTERM") attempt += 1;
+        if (signal === 0 && attempt > 1) throw new Error("gone");
+      },
+      sleep: async () => Bun.sleep(1),
+      termGraceMs: 1,
+    });
+    const proc = adapter.start({ url: "remote", target: "/tmp/repo", onOutput: () => undefined });
+
+    await expect(proc.terminate()).rejects.toThrow("did not exit after SIGKILL");
+    await expect(proc.terminate()).resolves.toBeUndefined();
+    expect(attempt).toBe(2);
+  });
 });
 
 function processExists(pid: number): boolean {

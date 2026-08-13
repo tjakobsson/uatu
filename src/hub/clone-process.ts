@@ -125,7 +125,10 @@ export class CloneProcessAdapter implements CloneProcessFactory {
         }
       },
       terminate: () => {
-        terminating ??= this.terminateGroup(proc.pid, exited);
+        terminating ??= this.terminateGroup(proc.pid, exited).catch(error => {
+          terminating = undefined;
+          throw error;
+        });
         return terminating;
       },
     };
