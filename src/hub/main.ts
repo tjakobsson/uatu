@@ -62,6 +62,7 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     console.error("uatu hub: shutting down");
     void (async () => {
       try {
+        await server.cloneJobs.close();
         await sessions.stopAll();
       } finally {
         server.stop(true);

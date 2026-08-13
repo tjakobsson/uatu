@@ -84,6 +84,16 @@ directory you have browsed to. There is no configured workspaces root; a
 `workspacesDir` key in the config is rejected at startup (it existed only in
 pre-release edge builds — delete the key).
 
+Clone credentials are entered in the dashboard's clone panel. The Hub runs
+Git in a dedicated pseudo-terminal and disables Git/SSH askpass programs and
+Git credential helpers for that clone, so prompts controlled by Git or
+OpenSSH appear in the browser rather than in the daemon's terminal or an OS
+credential dialog. An existing `SSH_AUTH_SOCK` is retained so already-loaded
+keys continue to work. That agent is a separate process and can still apply
+its own confirmation, hardware-token, or GUI policy; the Hub cannot suppress
+UI independently initiated by the agent. Responses entered in the clone panel
+are sent only to the clone terminal and are not stored or echoed in its log.
+
 Generate a password hash (read from stdin so it never lands in shell
 history):
 

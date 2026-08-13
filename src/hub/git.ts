@@ -4,9 +4,6 @@
 // run as the daemon's OS user with its ambient git config/credentials —
 // the hub stores no credentials of its own.
 
-import { promises as fs } from "node:fs";
-import path from "node:path";
-
 export type GitProbeResult =
   | { kind: "repository"; toplevel: string }
   | { kind: "not-a-repository" }
@@ -67,22 +64,6 @@ export function cloneTargetName(url: string): string | null {
   return name;
 }
 
-export async function gitClone(
-  url: string,
-  destDir: string,
-): Promise<{ ok: true; path: string } | { ok: false; error: string }> {
-  const name = cloneTargetName(url);
-  if (!name) {
-    return { ok: false, error: `cannot derive a folder name from clone URL: ${url}` };
-  }
-  const target = path.join(destDir, name);
-  if (await Bun.file(path.join(target, ".git", "HEAD")).exists()) {
-    return { ok: false, error: `target already exists: ${target}` };
-  }
-  await fs.mkdir(destDir, { recursive: true });
-  const result = await runGit(["clone", url, target]);
-  if (result.exitCode === 0) {
-    return { ok: true, path: target };
-  }
-  return { ok: false, error: result.stderr.trim() || `git clone exited ${result.exitCode}` };
+export function validCloneFolderName(value: string): boolean {
+  return value !== "" && value !== "." && value !== ".." && !value.includes("/") && !value.includes("\\") && !value.includes("\0");
 }
