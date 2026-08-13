@@ -1,0 +1,28 @@
+---
+import SiteLayout from "../../../layouts/SiteLayout.astro";
+import { guides, renderGuide } from "../../../lib/guides";
+import { sitePath } from "../../../lib/paths";
+
+export function getStaticPaths() {
+  return guides.map(guide => ({ params: { slug: guide.slug }, props: { guide } }));
+}
+
+const { guide } = Astro.props;
+const current = guides.findIndex(item => item.slug === guide.slug);
+const next = guides[(current + 1) % guides.length];
+---
+
+<SiteLayout title={guide.title} description={guide.summary}>
+  <div class="doc-shell">
+    <aside class="doc-nav">
+      <p class="eyebrow">GUIDES</p>
+      {guides.map(item => <a class:list={{ active: item.slug === guide.slug }} href={sitePath(`docs/guides/${item.slug}/`)}>{item.title}</a>)}
+    </aside>
+    <article class="prose">
+      <p class="eyebrow">INTEGRATION NOTE / {String(current + 1).padStart(2, "0")}</p>
+      <h1>{guide.title}</h1>
+      <div set:html={renderGuide(guide.source)} />
+      <a class="next-guide" href={sitePath(`docs/guides/${next.slug}/`)}>Next: {next.title} →</a>
+    </article>
+  </div>
+</SiteLayout>

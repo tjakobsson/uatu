@@ -1,0 +1,42 @@
+---
+import "../styles/global.css";
+import { sitePath } from "../lib/paths";
+import UatuLogo from "../components/UatuLogo.astro";
+
+interface Props {
+  title: string;
+  description: string;
+}
+
+const { title, description } = Astro.props;
+const canonical = new URL(Astro.url.pathname.replace(/^\/uatu\/?/, "uatu/"), Astro.site);
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    <title>{title} | UatuCode</title>
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href={sitePath()} aria-label="UatuCode home">
+        <UatuLogo />
+        <span>UatuCode</span>
+      </a>
+      <nav aria-label="Primary navigation">
+        <a href={sitePath("docs/guides/")}>Guides</a>
+        <a href={sitePath("docs/api/")}>API reference</a>
+        <a class="nav-raw" href={sitePath("api/edge/openapi.yaml")}>Raw OpenAPI</a>
+      </nav>
+    </header>
+    <main><slot /></main>
+    <footer>
+      <span>Documentation and API contracts.</span>
+      <a href="https://github.com/tjakobsson/uatu">Source on GitHub</a>
+    </footer>
+  </body>
+</html>

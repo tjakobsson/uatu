@@ -3,6 +3,7 @@ dist/
 .e2e/
 playwright-report/
 test-results/
+.astro/
 *.bun-build
 
 # macOS Finder metadata

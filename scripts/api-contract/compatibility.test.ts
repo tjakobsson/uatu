@@ -1,0 +1,83 @@
+import { describe, expect, test } from "bun:test";
+import { assertCompatibilityPolicy, compareContracts, compareStreamingContracts } from "./compatibility";
+
+const operation = (tag: string, responses: Record<string, unknown> = { "200": {} }) => ({
+  tags: [tag],
+  responses,
+});
+
+describe("API compatibility policy", () => {
+  test("accepts additive changes without a revision increment", () => {
+    const base = { paths: { "/api/hub/state": { get: operation("Hub") } } };
+    const proposed = { paths: { ...base.paths, "/api/hub/browse": { get: operation("Hub") } } };
+    const result = compareContracts(base, proposed);
+    expect(result.changedDomains).toEqual(["hub"]);
+    expect(() => assertCompatibilityPolicy(result, { hubApiRevision: 1, workspaceApiRevision: 1 }, { hubApiRevision: 1, workspaceApiRevision: 1 }, "")).not.toThrow();
+  });
+
+  test("requires only the affected domain revision and migration guidance", () => {
+    const base = { paths: { "/s/{workspaceId}/api/state": { get: operation("Workspace", { "200": {}, "401": {} }) } } };
+    const proposed = { paths: { "/s/{workspaceId}/api/state": { get: operation("Workspace", { "200": {} }) } } };
+    const result = compareContracts(base, proposed);
+    expect(() => assertCompatibilityPolicy(result, { hubApiRevision: 3, workspaceApiRevision: 4 }, { hubApiRevision: 3, workspaceApiRevision: 4 }, ""))
+      .toThrow("workspace: breaking change requires a revision greater than 4");
+    expect(() => assertCompatibilityPolicy(result, { hubApiRevision: 3, workspaceApiRevision: 4 }, { hubApiRevision: 3, workspaceApiRevision: 5 }, "## Workspace migration\nClients must stop handling 401."))
+      .not.toThrow();
+  });
+
+  test("reports removed operation identity", () => {
+    const result = compareContracts({ paths: { "/api/hub/state": { get: operation("Hub") } } }, { paths: {} });
+    expect(result.breaking.hub).toEqual(["GET /api/hub/state: operation removed"]);
+  });
+
+  test("attributes referenced component changes to the operation domain", () => {
+    const base = {
+      paths: { "/api/hub/state": { get: { ...operation("Hub"), responses: { "200": { $ref: "#/components/responses/State" } } } } },
+      components: { responses: { State: { content: { "application/json": { schema: { type: "string" } } } } } },
+    };
+    const proposed = structuredClone(base);
+    proposed.components.responses.State.content["application/json"].schema.type = "integer";
+    const result = compareContracts(base, proposed);
+    expect(result.changedDomains).toEqual(["hub"]);
+    expect(result.breaking.hub[0]).toContain("referenced request or response schema changed");
+  });
+
+  test("detects authentication, requiredness, and inline response schema breaks", () => {
+    const base = { paths: { "/api/hub/state": { get: {
+      ...operation("Hub"),
+      security: [{ hubBearer: [] }],
+      parameters: [{ name: "scope", in: "query", schema: { type: "string" } }],
+      responses: { "200": { content: { "application/json": { schema: { type: "string" } } } } },
+    } } } };
+    const proposed = structuredClone(base);
+    const next = proposed.paths["/api/hub/state"].get;
+    next.security = [{ hubCookie: [] }];
+    next.parameters[0]!.required = true;
+    next.responses["200"].content["application/json"].schema.type = "integer";
+    expect(compareContracts(base, proposed).breaking.hub).toEqual(expect.arrayContaining([
+      expect.stringContaining("required"),
+      expect.stringContaining("changed response 200 schema"),
+      expect.stringContaining("authentication"),
+    ]));
+  });
+
+  test("attributes existing streaming protocol changes to their domain", () => {
+    const base = { channels: { state: { path: "/s/{workspaceId}/api/events", events: [{ name: "state" }] } } };
+    const proposed = { channels: { state: { path: "/s/{workspaceId}/api/events", events: [{ name: "snapshot" }] } } };
+    expect(compareStreamingContracts(base, proposed).breaking.workspace).toEqual([
+      "streaming channel state: existing protocol changed",
+    ]);
+  });
+
+  test("detects changes to path-level parameters", () => {
+    const base = { paths: { "/s/{workspaceId}/api/state": {
+      parameters: [{ name: "workspaceId", in: "path", required: true, schema: { type: "string" } }],
+      get: operation("Workspace"),
+    } } };
+    const proposed = structuredClone(base);
+    proposed.paths["/s/{workspaceId}/api/state"].parameters[0]!.schema = { type: "integer" };
+    expect(compareContracts(base, proposed).breaking.workspace).toContain(
+      "GET /s/{workspaceId}/api/state: changed path parameter workspaceId schema",
+    );
+  });
+});

@@ -19,9 +19,20 @@ import { PersonalWorkspaceStateStore } from "./personal-state";
 import { WorkspaceRegistry } from "./registry";
 import { startHubServer } from "./server";
 import { SessionManager } from "./sessions";
+import {
+  assertOpenApiResponse,
+  assertSchema,
+  assertWebSocketFrame,
+  loadContract,
+  parseNdjson,
+  parseSse,
+} from "../../tests/contracts/contract-harness";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "..", "..");
 const CLI_PATH = path.join(REPO_ROOT, "src", "cli.ts");
+const openApi = await loadContract(path.join(REPO_ROOT, "api", "openapi.yaml"));
+const streaming = await loadContract(path.join(REPO_ROOT, "api", "streaming.yaml"));
+const streamSchemas = streaming.schemas as Record<string, unknown>;
 
 let tempRoot = "";
 let workspace = "";
@@ -174,6 +185,7 @@ describe("hub end to end", () => {
     });
     expect(wrongPassword.status).toBe(401);
     expect(unknownUser.status).toBe(401);
+    await assertOpenApiResponse(openApi, { method: "POST", path: "/login", response: wrongPassword });
     expect(await wrongPassword.text()).toBe(await unknownUser.text());
   });
 
@@ -184,6 +196,7 @@ describe("hub end to end", () => {
       body: JSON.stringify({ name: "tobias", password: "open sesame", deviceLabel: "integration test" }),
     });
     expect(response.status).toBe(200);
+    await assertOpenApiResponse(openApi, { method: "POST", path: "/login", response });
     const payload = (await response.json()) as { sessionId: string; user: string };
     expect(payload.user).toBe("tobias");
     expect(payload.sessionId.length).toBeGreaterThanOrEqual(32);
@@ -210,6 +223,8 @@ describe("hub end to end", () => {
     });
     expect(revokedProbe.status).toBe(401);
     expect((revokedProbe.headers.get("content-type") ?? "")).toContain("application/json");
+    await assertOpenApiResponse(openApi, { method: "GET", path: "/api/hub/state", response: viaCookie });
+    await assertOpenApiResponse(openApi, { method: "GET", path: "/api/hub/state", response: revokedProbe });
   });
 
   test("sessions survive a hub restart via the persisted store", async () => {
@@ -372,14 +387,23 @@ describe("hub end to end", () => {
       body: JSON.stringify({ path: workspace }),
     });
     expect(created.status).toBe(200);
+    await assertOpenApiResponse(openApi, { method: "POST", path: "/api/hub/workspaces", response: created });
     expect(((await created.json()) as { id: string }).id).toBe("myproject");
 
     const state = await fetch(`${origin}/api/hub/state`, { headers: { cookie } });
-    const payload = (await state.json()) as { version: string; workspaces: { id: string; running: boolean }[] };
+    const payload = (await state.json()) as {
+      version: string;
+      hubApiRevision: number;
+      workspaceApiRevision: number;
+      workspaces: { id: string; running: boolean }[];
+    };
     expect(payload.workspaces).toEqual([expect.objectContaining({ id: "myproject", running: true })]);
     // The authenticated state API reports the hub's uatu version.
     expect(typeof payload.version).toBe("string");
     expect(payload.version.length).toBeGreaterThan(0);
+    const { HUB_API_REVISION, WORKSPACE_API_REVISION } = await import("../shared/version");
+    expect(payload.hubApiRevision).toBe(HUB_API_REVISION);
+    expect(payload.workspaceApiRevision).toBe(WORKSPACE_API_REVISION);
   }, 60_000);
 
   test("the dashboard page ships the version slot and the browser pane", async () => {
@@ -399,8 +423,14 @@ describe("hub end to end", () => {
   test("HTTP proxying round-trips /api/state and the shell through the prefix", async () => {
     const state = await fetch(`${origin}/s/myproject/api/state`, { headers: { cookie } });
     expect(state.status).toBe(200);
-    const payload = (await state.json()) as { roots: { docs: unknown[] }[] };
+    await assertOpenApiResponse(openApi, { method: "GET", path: "/s/{workspaceId}/api/state", response: state });
+    const payload = (await state.json()) as {
+      workspaceApiRevision: number;
+      roots: { docs: unknown[] }[];
+    };
     expect(payload.roots.length).toBeGreaterThan(0);
+    const { WORKSPACE_API_REVISION } = await import("../shared/version");
+    expect(payload.workspaceApiRevision).toBe(WORKSPACE_API_REVISION);
 
     const shell = await fetch(`${origin}/s/myproject/`, { headers: { cookie, accept: "text/html" } });
     expect(shell.status).toBe(200);
@@ -495,7 +525,23 @@ describe("hub end to end", () => {
     ]);
     controller.abort();
     expect(result).toBe(true);
+    const observed = parseSse(received).find(event => event.event === "state");
+    expect(observed).toBeDefined();
+    const workspaceState = (openApi.components as Record<string, unknown> as { schemas: Record<string, unknown> }).schemas.WorkspaceState;
+    assertSchema(openApi, workspaceState, observed!.data, "workspaceStreamState state event");
   }, 30_000);
+
+  test("NDJSON search emits only documented items and a terminal done item", async () => {
+    const response = await fetch(`${origin}/s/myproject/api/search?q=Hub`, { headers: { cookie } });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type") ?? "").toContain("application/x-ndjson");
+    const items = parseNdjson(await response.text());
+    expect(items.length).toBeGreaterThan(0);
+    for (const [index, item] of items.entries()) {
+      assertSchema(streaming, streamSchemas.SearchStreamItem, item, `workspaceSearch item ${index + 1}`);
+    }
+    expect(items.at(-1)).toEqual(expect.objectContaining({ kind: "done" }));
+  });
 
   test("terminal WebSocket bridges through the hub with the token brokered server-side", async () => {
     const created = await fetch(`${origin}/s/myproject/api/terminal/sessions`, {
@@ -504,6 +550,7 @@ describe("hub end to end", () => {
       body: JSON.stringify({ cols: 80, rows: 24 }),
     });
     expect(created.status).toBe(201);
+    await assertOpenApiResponse(openApi, { method: "POST", path: "/s/{workspaceId}/api/terminal/sessions", response: created });
     const sessionId = ((await created.json()) as { id: string }).id;
     // The browser-visible URL carries NO token — the hub injects the
     // child's credential during proxying.
@@ -514,7 +561,8 @@ describe("hub end to end", () => {
     const gotOutput = await new Promise<boolean>(resolve => {
       const timeout = setTimeout(() => resolve(false), 15_000);
       let reconstructionReceived = false;
-      ws.addEventListener("message", () => {
+      ws.addEventListener("message", event => {
+        assertWebSocketFrame(event.data, {}, true);
         if (!reconstructionReceived) {
           reconstructionReceived = true;
           ws.send(new TextEncoder().encode("echo bridged\r\n"));
@@ -528,7 +576,9 @@ describe("hub end to end", () => {
         resolve(false);
       });
       ws.addEventListener("open", () => {
-        ws.send(JSON.stringify({ type: "attach-ready", cols: 80, rows: 24 }));
+        const control = JSON.stringify({ type: "attach-ready", cols: 80, rows: 24 });
+        assertWebSocketFrame(control, { "attach-ready": streamSchemas.TerminalAttachReady }, true);
+        ws.send(control);
       });
     });
     expect(gotOutput).toBe(true);
@@ -693,6 +743,7 @@ describe("hub end to end", () => {
       body: JSON.stringify({ url: source, dest }),
     });
     expect(cloned.status).toBe(202);
+    await assertOpenApiResponse(openApi, { method: "POST", path: "/api/hub/clone-jobs", response: cloned });
     const cloneJobId = ((await cloned.json()) as { jobId: string }).jobId;
     const cloneEvents = await fetch(`${origin}/api/hub/clone-jobs/${cloneJobId}/events`, { headers: { cookie } });
     expect(cloneEvents.status).toBe(200);

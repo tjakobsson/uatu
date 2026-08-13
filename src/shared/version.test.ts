@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
-import { formatBuildIdentifier, type BuildInfo } from "./version";
+import {
+  BUNDLED_WEB_REVISION,
+  formatBuildIdentifier,
+  HUB_API_REVISION,
+  type BuildInfo,
+  WORKSPACE_API_REVISION,
+} from "./version";
 
 function makeBuild(overrides: Partial<BuildInfo>): BuildInfo {
   return {
@@ -28,5 +34,13 @@ describe("formatBuildIdentifier", () => {
   test("dev build without git falls back to branch@unknown", () => {
     const build = makeBuild({ commitSha: "unknown", commitShort: "unknown" });
     expect(formatBuildIdentifier(build)).toBe("main@unknown");
+  });
+});
+
+describe("compatibility revisions", () => {
+  test("bundled-web, Hub, and workspace compatibility are integer constants", () => {
+    expect(Number.isInteger(BUNDLED_WEB_REVISION)).toBe(true);
+    expect(Number.isInteger(HUB_API_REVISION)).toBe(true);
+    expect(Number.isInteger(WORKSPACE_API_REVISION)).toBe(true);
   });
 });

@@ -1,0 +1,72 @@
+import { describe, expect, test } from "bun:test";
+
+import { createAjv, openApiOperations, readJson, readYaml, schemaForAjv, validateApi } from "../scripts/validate-api";
+
+type Inventory = { operations: Array<{ operationId: string; method: string; path: string; runtime: string }> };
+type Streaming = { channels: Record<string, unknown>; schemas: Record<string, object> };
+
+describe("API contract structure", () => {
+  test("metadata, schemas, and all source examples validate", async () => {
+    await validateApi();
+  });
+
+  test("OpenAPI operations exactly match the public inventory", async () => {
+    const [openapi, inventory] = await Promise.all([
+      readYaml<Parameters<typeof openApiOperations>[0]>("api/openapi.yaml"),
+      readYaml<Inventory>("api/operations.yaml"),
+    ]);
+    const actual = openApiOperations(openapi).map(({ method, path, operationId }) => `${operationId} ${method} ${path}`).sort();
+    const expected = inventory.operations.map(({ method, path, operationId }) => `${operationId} ${method} ${path}`).sort();
+    expect(actual).toEqual(expected);
+    expect(new Set(inventory.operations.map(operation => operation.operationId)).size).toBe(inventory.operations.length);
+  });
+
+  test("Hub cookie authentication matches the runtime cookie name", async () => {
+    const openapi = await readYaml<{ components: { securitySchemes: { hubCookie: { name: string } } } }>("api/openapi.yaml");
+    expect(openapi.components.securitySchemes.hubCookie.name).toBe("uatu_hub");
+  });
+
+  test("metadata revisions agree with OpenAPI and changelog", async () => {
+    const [metadata, openapi, changelog] = await Promise.all([
+      readJson<{ hubApiRevision: number; workspaceApiRevision: number }>("api/contract.json"),
+      readYaml<{ info: { "x-uatu-revisions": { hubApiRevision: number; workspaceApiRevision: number } } }>("api/openapi.yaml"),
+      Bun.file(new URL("CHANGELOG.md", new URL("./", import.meta.url))).text(),
+    ]);
+    expect(openapi.info["x-uatu-revisions"]).toEqual({
+      hubApiRevision: metadata.hubApiRevision,
+      workspaceApiRevision: metadata.workspaceApiRevision,
+    });
+    expect(changelog).toContain(`## Hub ${metadata.hubApiRevision} / Workspace ${metadata.workspaceApiRevision}`);
+    expect(changelog).toMatch(/Compatibility: (initial|additive|breaking)/);
+    expect(changelog).toMatch(/### Migration\n\n\S/);
+  });
+
+  test("every exclusion is explicit and uniquely identified", async () => {
+    const manifest = await readYaml<{ exclusions: Array<Record<string, unknown>> }>("api/exclusions.yaml");
+    expect(manifest.exclusions.length).toBeGreaterThan(0);
+    expect(new Set(manifest.exclusions.map(item => item.id)).size).toBe(manifest.exclusions.length);
+    for (const item of manifest.exclusions) {
+      expect(typeof item.id).toBe("string");
+      expect(typeof item.reason).toBe("string");
+      expect("path" in item || "pathPattern" in item).toBe(true);
+      expect(Array.isArray(item.methods)).toBe(true);
+    }
+  });
+});
+
+describe("streaming protocol is closed", () => {
+  test("rejects unknown events, controls, and close codes but accepts binary PTY data", async () => {
+    const contract = await readYaml<Streaming & { channels: { terminal: { closeCodes: Array<{ code: number }> } } }>("api/streaming.yaml");
+    const ajv = createAjv();
+    const compile = (name: string) => ajv.compile(schemaForAjv(contract.schemas[name], contract.schemas));
+    expect(compile("ClonePhase")({ phase: "unknown" })).toBe(false);
+    expect(compile("SearchStreamItem")({ kind: "error", error: "boom" })).toBe(false);
+    expect(compile("TerminalAttachReady")({ type: "ping", cols: 80, rows: 24 })).toBe(false);
+    expect(compile("TerminalResize")({ type: "resize", cols: 0, rows: 24 })).toBe(false);
+    const cloneEvents = (contract.channels as unknown as { cloneJobEvents: { events: Array<{ name: string }> } }).cloneJobEvents.events;
+    expect(cloneEvents.map(event => event.name)).not.toContain("error");
+    expect(contract.channels.terminal.closeCodes.map(item => item.code)).not.toContain(4444);
+    expect(contract.channels.terminal.closeCodes.map(item => item.code)).toEqual([1000, 1011, 4001, 4404, 4409, 4410]);
+    expect(new Uint8Array([0, 255, 10])).toBeInstanceOf(Uint8Array);
+  });
+});

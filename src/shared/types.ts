@@ -54,11 +54,19 @@ export type BuildSummary = {
   commitShort: string;
   release: boolean;
   identifier: string;
-  // Client/server contract revision (shared/version.ts API_REVISION). The
-  // client-freshness handshake compares it against the client's own embedded
-  // value; a differing revision must be surfaced, never silently ignored.
-  apiRevision: number;
+  // Contract revision between this server and its bundled web assets. Public
+  // API compatibility is reported separately from build freshness.
+  bundledWebRevision: number;
 };
+
+export type ApiRevision = number;
+
+export type HubApiCompatibility = {
+  hubApiRevision: ApiRevision;
+  workspaceApiRevision: ApiRevision;
+};
+
+export type WorkspaceApiCompatibility = Pick<HubApiCompatibility, "workspaceApiRevision">;
 
 export type Scope = { kind: "folder" } | { kind: "file"; documentId: string };
 
@@ -154,7 +162,7 @@ export type RepositorySnapshot = {
 
 export type TerminalAvailability = "enabled" | "disabled";
 
-export type StatePayload = {
+export type StatePayload = WorkspaceApiCompatibility & {
   roots: RootGroup[];
   repositories: RepositorySnapshot[];
   // The server-session compare target the snapshots were computed for. The
@@ -465,4 +473,3 @@ export function nextSelectedDocumentId(
 
   return defaultDocumentId(roots);
 }
-

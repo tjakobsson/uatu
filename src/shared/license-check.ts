@@ -18,6 +18,7 @@ const permissiveLicensePatterns = [
   /^BSD(?:-\d-Clause)?$/i,
   /^ISC$/i,
   /^Apache-2\.0$/i,
+  /^BlueOak-1\.0\.0$/i,
   /^0BSD$/i,
   /^CC0-1\.0$/i,
   /^Unlicense$/i,
@@ -69,7 +70,25 @@ export async function collectInstalledLicenses(rootPath: string): Promise<Licens
 }
 
 export function validateLicenseRecords(records: LicenseRecord[]): LicenseRecord[] {
-  return records.filter(record => !isAllowedLicenseExpression(record.license));
+  return records.filter(record =>
+    !isBuildOnlySiteTool(record)
+    && !isUnusedAstroImageBinary(record)
+    && !isAllowedLicenseExpression(record.license)
+  );
+}
+
+function isBuildOnlySiteTool(record: LicenseRecord): boolean {
+  // Vite's CSS transformer runs only while producing the static Pages site;
+  // neither package is included in the emitted HTML, CSS, or JavaScript.
+  return (record.name === "lightningcss" || record.name.startsWith("lightningcss-"))
+    && /^MPL-2\.0$/i.test(record.license);
+}
+
+function isUnusedAstroImageBinary(record: LicenseRecord): boolean {
+  // Astro installs platform-specific libvips binaries through optional sharp
+  // dependencies even when a site does not use Astro's image service. The
+  // UatuCode site serves only source images and never imports astro:assets.
+  return record.name.startsWith("@img/sharp-libvips-") && /^LGPL-3\.0-or-later$/i.test(record.license);
 }
 
 export function isAllowedLicenseExpression(expression: string): boolean {

@@ -20,7 +20,12 @@ import {
   type StatePayload,
   type TerminalAvailability,
 } from "../shared/types";
-import { API_REVISION, BUILD, formatBuildIdentifier } from "../shared/version";
+import {
+  BUNDLED_WEB_REVISION,
+  BUILD,
+  formatBuildIdentifier,
+  WORKSPACE_API_REVISION,
+} from "../shared/version";
 import {
   DEFAULT_WATCH_CONTEXT,
   type WatchContext,
@@ -34,7 +39,7 @@ export const BUILD_SUMMARY: BuildSummary = {
   commitShort: BUILD.commitShort,
   release: BUILD.release,
   identifier: formatBuildIdentifier(BUILD),
-  apiRevision: API_REVISION,
+  bundledWebRevision: BUNDLED_WEB_REVISION,
 };
 
 const encoder = new TextEncoder();
@@ -57,6 +62,7 @@ export function createStatePayload(
   unscopedFingerprint?: string,
 ): StatePayload {
   return {
+    workspaceApiRevision: WORKSPACE_API_REVISION,
     roots,
     repositories,
     compareTarget,

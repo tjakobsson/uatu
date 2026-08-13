@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type { IgnoreMatcher } from "../ignore/engine";
+import { WORKSPACE_API_REVISION } from "../shared/version";
 import { resolveWatchRoots, scanRoots } from "./roots";
 import {
   attachWatcherCrashGuard,
@@ -29,6 +30,7 @@ describe("createStatePayload", () => {
     expect("startupMode" in payload).toBe(false);
     expect(payload.initialFollow).toBe(true);
     expect(payload.scope).toEqual({ kind: "folder" });
+    expect(payload.workspaceApiRevision).toBe(WORKSPACE_API_REVISION);
   });
 
   test("carries no config payload fields", () => {

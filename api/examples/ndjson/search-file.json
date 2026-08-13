@@ -1,0 +1,9 @@
+{
+  "kind": "file",
+  "result": {
+    "documentId": "/src/uatu/README.md",
+    "relativePath": "README.md",
+    "rootId": "root",
+    "matches": [{ "line": 1, "text": "UatuCode", "start": 0, "end": 8, "ordinal": 0, "literalTotal": 1 }]
+  }
+}

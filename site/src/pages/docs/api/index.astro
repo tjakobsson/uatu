@@ -1,0 +1,63 @@
+---
+import SiteLayout from "../../../layouts/SiteLayout.astro";
+import { readOperations } from "../../../lib/openapi";
+import { sitePath } from "../../../lib/paths";
+
+const operations = readOperations();
+const tags = [...new Set(operations.flatMap(operation => operation.tags))].sort();
+---
+
+<SiteLayout title="API reference" description="Search the generated UatuCode Hub and workspace OpenAPI reference.">
+  <section class="api-intro">
+    <p class="eyebrow">CANONICAL HTTP SURFACE</p>
+    <h1>API reference</h1>
+    <p>{operations.length} operations, generated directly from <a href={sitePath("api/edge/openapi.yaml")}>api/openapi.yaml</a>.</p>
+    <label class="api-search">
+      <span>Search operations</span>
+      <input id="operation-search" type="search" placeholder="operation ID, path, summary…" autocomplete="off" />
+      <kbd>/</kbd>
+    </label>
+    <div class="tag-row">
+      <button class="tag active" type="button" data-tag="">All</button>
+      {tags.map(tag => <button class="tag" type="button" data-tag={tag}>{tag}</button>)}
+    </div>
+  </section>
+  <p id="search-status" class="search-status" aria-live="polite">Showing all {operations.length} operations</p>
+  <div id="operation-list" class="operation-list">
+    {operations.map(operation => (
+      <article class="operation" id={operation.id} data-operation-id={operation.id} data-tags={operation.tags.join(" ")} data-search={`${operation.id} ${operation.method} ${operation.path} ${operation.summary} ${operation.description} ${operation.tags.join(" ")}`.toLowerCase()}>
+        <div class="operation-route"><span class={`method method-${operation.method.toLowerCase()}`}>{operation.method}</span><code>{operation.path}</code></div>
+        <div><p class="operation-id">{operation.id}</p><h2>{operation.summary}</h2>{operation.description && <p>{operation.description}</p>}</div>
+      </article>
+    ))}
+  </div>
+  <script>
+    const input = document.querySelector<HTMLInputElement>("#operation-search");
+    const cards = [...document.querySelectorAll<HTMLElement>("[data-operation-id]")];
+    const status = document.querySelector<HTMLElement>("#search-status");
+    const buttons = [...document.querySelectorAll<HTMLButtonElement>("[data-tag]")];
+    let selectedTag = "";
+    const filter = () => {
+      const query = input?.value.trim().toLowerCase() ?? "";
+      let visible = 0;
+      for (const card of cards) {
+        const matches = card.dataset.search?.includes(query) && (!selectedTag || card.dataset.tags?.split(" ").includes(selectedTag));
+        card.hidden = !matches;
+        if (matches) visible++;
+      }
+      if (status) status.textContent = `Showing ${visible} of ${cards.length} operations`;
+    };
+    input?.addEventListener("input", filter);
+    buttons.forEach(button => button.addEventListener("click", () => {
+      selectedTag = button.dataset.tag ?? "";
+      buttons.forEach(item => item.classList.toggle("active", item === button));
+      filter();
+    }));
+    document.addEventListener("keydown", event => {
+      if (event.key === "/" && document.activeElement !== input) {
+        event.preventDefault();
+        input?.focus();
+      }
+    });
+  </script>
+</SiteLayout>

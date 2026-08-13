@@ -1,0 +1,17 @@
+{
+  "$schema": "./contract.schema.json",
+  "schemaVersion": 1,
+  "stability": "experimental",
+  "hubApiRevision": 1,
+  "workspaceApiRevision": 1,
+  "productVersion": null,
+  "sourceCommit": null,
+  "publishedAt": null,
+  "artifacts": {
+    "openapi": "api/openapi.yaml",
+    "streaming": "api/streaming.yaml",
+    "inventory": "api/operations.yaml",
+    "exclusions": "api/exclusions.yaml",
+    "changelog": "api/CHANGELOG.md"
+  }
+}

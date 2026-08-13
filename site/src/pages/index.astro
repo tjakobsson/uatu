@@ -1,0 +1,65 @@
+---
+import SiteLayout from "../layouts/SiteLayout.astro";
+import { sitePath } from "../lib/paths";
+---
+
+<SiteLayout title="Documentation" description="UatuCode is a local documentation viewer with repository context, an embedded terminal, and a self-hostable Hub.">
+  <section class="hero">
+    <div class="hero-atmosphere" aria-hidden="true">
+      <i class="atmosphere-one"></i>
+      <i class="atmosphere-two"></i>
+      <i class="atmosphere-three"></i>
+      <i class="atmosphere-four"></i>
+      <i class="atmosphere-lens"></i>
+    </div>
+    <div class="hero-copy">
+      <h1 class="hero-title">
+        <span class="title-line title-line-one"><span>Agents</span> <span>work.</span></span>
+        <span class="title-line title-line-two"><span>You’re</span> <span class="loop-word" aria-hidden="true"><span>in</span><span>on</span></span><span class="sr-only">in</span> <span>the</span> <span>loop.</span></span>
+      </h1>
+      <p class="lede">UatuCode helps you follow the files agents are changing, review the result as it happens, and work in the same persistent terminal session.</p>
+      <div class="actions">
+        <a class="button primary" href={sitePath("docs/guides/")}>Guides</a>
+        <a class="button" href={sitePath("docs/api/")}>API reference</a>
+      </div>
+    </div>
+    <div class="device-stage" aria-label="UatuCode on laptop, tablet, and phone">
+      <div class="device device-laptop">
+        <div class="device-camera"></div>
+        <div class="device-shot shot-laptop">
+          <div class="shot-sidebar"><i></i><i></i><i></i><i></i></div>
+          <div class="shot-document"><b></b><i></i><i></i><i></i><i></i></div>
+          <div class="shot-terminal"><span>$ agent working</span><span>changed src/app.ts</span></div>
+        </div>
+        <div class="laptop-base"></div>
+      </div>
+      <div class="device device-tablet">
+        <div class="device-camera"></div>
+        <div class="device-shot shot-tablet">
+          <div class="shot-toolbar"></div>
+          <div class="shot-document"><b></b><i></i><i></i><i></i></div>
+        </div>
+      </div>
+      <div class="device device-phone">
+        <div class="device-island"></div>
+        <div class="device-shot shot-phone">
+          <div class="shot-toolbar"></div>
+          <div class="shot-document"><b></b><i></i><i></i><i></i></div>
+          <div class="shot-tabs"><i></i><i></i><i></i></div>
+        </div>
+      </div>
+    </div>
+  </section>
+  <section class="signal-grid" aria-label="Product capabilities">
+    <article><h2>Follow changes</h2><p>See Markdown, AsciiDoc, source files, Mermaid diagrams, and git diffs update while an agent works.</p></article>
+    <article><h2>Join from anywhere</h2><p>Open the same session in a browser from your computer, phone, or tablet. Terminal sessions remain attached to the workspace.</p></article>
+    <article><h2>Run your own Hub</h2><p>Register multiple workspaces behind one authenticated server and choose where it runs.</p></article>
+  </section>
+  <section class="contract-band">
+    <p class="eyebrow">FOR DEVELOPERS</p>
+    <h2>Build on UatuCode</h2>
+    <p>The Hub and Workspace APIs are for contributors and developers building integrations or their own clients for UatuCode services. HTTP operations are described in OpenAPI, with separate contracts for SSE, NDJSON, and terminal WebSockets.</p>
+    <a href={sitePath("docs/api/")}>API reference</a>
+    <a href={sitePath("api/edge/agent.md")}>Agent guide</a>
+  </section>
+</SiteLayout>

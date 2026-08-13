@@ -1,0 +1,5 @@
+{
+  "id": 2,
+  "event": "output",
+  "data": { "output": "Cloning into 'repo'...\n" }
+}

@@ -1,0 +1,22 @@
+---
+import SiteLayout from "../../../layouts/SiteLayout.astro";
+import { guides } from "../../../lib/guides";
+import { sitePath } from "../../../lib/paths";
+---
+
+<SiteLayout title="Integration guides" description="Concise UatuCode API integration guides.">
+  <section class="page-intro">
+    <p class="eyebrow">FIELD NOTES / 07</p>
+    <h1>Integration guides</h1>
+    <p>Conceptual routes through the Hub and workspace APIs. Exact wire shapes remain in the generated contract.</p>
+  </section>
+  <div class="guide-grid">
+    {guides.map((guide, index) => (
+      <a class="guide-card" href={sitePath(`docs/guides/${guide.slug}/`)}>
+        <span>{String(index + 1).padStart(2, "0")}</span>
+        <h2>{guide.title}</h2>
+        <p>{guide.summary}</p>
+      </a>
+    ))}
+  </div>
+</SiteLayout>

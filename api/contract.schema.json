@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tjakobsson.github.io/uatu/api/contract.schema.json",
+  "title": "UatuCode API contract metadata",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "stability", "hubApiRevision", "workspaceApiRevision", "artifacts"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schemaVersion": { "const": 1 },
+    "stability": { "enum": ["experimental", "stable"] },
+    "hubApiRevision": { "type": "integer", "minimum": 1 },
+    "workspaceApiRevision": { "type": "integer", "minimum": 1 },
+    "productVersion": { "type": ["string", "null"] },
+    "sourceCommit": { "type": ["string", "null"], "pattern": "^(?:[0-9a-f]{40})?$" },
+    "publishedAt": { "type": ["string", "null"], "format": "date-time" },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["openapi", "streaming", "inventory", "exclusions", "changelog"],
+      "properties": {
+        "openapi": { "$ref": "#/$defs/path" },
+        "streaming": { "$ref": "#/$defs/path" },
+        "inventory": { "$ref": "#/$defs/path" },
+        "exclusions": { "$ref": "#/$defs/path" },
+        "changelog": { "$ref": "#/$defs/path" }
+      }
+    }
+  },
+  "$defs": {
+    "path": { "type": "string", "pattern": "^(?:api/)?[^/].+" }
+  }
+}
