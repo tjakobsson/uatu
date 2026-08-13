@@ -27,6 +27,7 @@ const openApi = {
             },
           },
           "401": { content: { "application/json": { schema: { type: "object", required: ["error"] } } } },
+          "502": { content: { "text/plain": { schema: { type: "string", const: "session unreachable" } } } },
         },
       },
     },
@@ -53,6 +54,19 @@ describe("black-box HTTP contract validation", () => {
       path: "/api/hub/state",
       response: Response.json({ hubApiRevision: "one" }, { headers: { "x-request-id": "request-1" } }),
     })).rejects.toThrow("hubGetState: hubGetState response.hubApiRevision: expected integer");
+  });
+
+  test("validates non-JSON response bodies as text", async () => {
+    await assertOpenApiResponse(openApi, {
+      method: "GET",
+      path: "/api/hub/state",
+      response: new Response("session unreachable", { status: 502, headers: { "content-type": "text/plain" } }),
+    });
+    await expect(assertOpenApiResponse(openApi, {
+      method: "GET",
+      path: "/api/hub/state",
+      response: new Response("different error", { status: 502, headers: { "content-type": "text/plain" } }),
+    })).rejects.toThrow("expected constant");
   });
 
   test("enforces documented numeric and string constraints", async () => {

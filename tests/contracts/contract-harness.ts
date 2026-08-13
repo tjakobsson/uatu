@@ -134,9 +134,12 @@ export async function assertOpenApiResponse(openApi: JsonObject, observation: Op
   const contentType = observation.response.headers.get("content-type")?.split(";", 1)[0] ?? "";
   const mediaContract = media[contentType];
   if (!mediaContract) throw new Error(`${operationId}: undocumented response media type ${contentType || "<missing>"}`);
-  const body = await observation.response.clone().json().catch(() => {
-    throw new Error(`${operationId}: response body is not valid JSON`);
-  });
+  const jsonMedia = contentType === "application/json" || contentType.endsWith("+json");
+  const body = jsonMedia
+    ? await observation.response.clone().json().catch(() => {
+      throw new Error(`${operationId}: response body is not valid JSON`);
+    })
+    : await observation.response.clone().text();
   const schema = object(mediaContract, `${operationId} ${contentType}`).schema;
   if (schema) {
     const error = schemaError(openApi, schema, body, `${operationId} response`);
