@@ -4,7 +4,7 @@ The public documentation root is <https://tjakobsson.github.io/uatu/>. Raw contr
 
 - `https://tjakobsson.github.io/uatu/api/edge/` for the validated `main` commit
 - `https://tjakobsson.github.io/uatu/api/latest/` for the latest released bundle
-- `https://tjakobsson.github.io/uatu/api/revisions/hub-N_workspace-M/` for an immutable revision pair
+- `https://tjakobsson.github.io/uatu/api/revisions/hub-N_workspace-M_vX.Y.Z/` for an immutable release snapshot
 
 Each channel contains `contract.json`, `openapi.yaml`, `streaming.yaml`, `agent.md`, `CHANGELOG.md`, and release channels also contain `SHA256SUMS.json`. Consumers should read `contract.json` first, compare both domain revisions, then follow migration guidance in the API changelog.
 
@@ -18,7 +18,7 @@ Create an orphan `pages-history` branch before the first deployment with empty `
 
 Successful CI on `main` uploads an exact, short-lived site artifact named for the validated source commit. `.github/workflows/pages.yml` downloads that artifact by workflow run, verifies `api/edge/contract.json` names the same full commit SHA, restores `latest` and revision history byte-for-byte, and deploys. The edge path cannot initialize or advance `latest`.
 
-A `v*` tag runs `.github/workflows/api-release.yml`. It validates the tagged source, creates a release bundle, attaches the bundle to the GitHub Release, creates `api/revisions/hub-N_workspace-M/` if it does not already exist, and atomically replaces `api/latest/` with that same bundle. An existing revision pair with different bytes is rejected.
+A `v*` tag runs `.github/workflows/api-release.yml`. It validates the tagged source, creates a release bundle, attaches the bundle to the GitHub Release, creates `api/revisions/hub-N_workspace-M_vX.Y.Z/` if it does not already exist, and atomically replaces `api/latest/` with that same bundle. An existing release snapshot with different bytes is rejected.
 
 The release workflow persists the assembled output to `pages-history` before deployment. Protect that environment and branch so this tagged release path is the only automated writer. Never regenerate old revision directories from current source.
 

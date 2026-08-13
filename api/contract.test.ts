@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { createAjv, openApiOperations, readJson, readYaml, schemaForAjv, validateApi } from "../scripts/validate-api";
 
-type Inventory = { operations: Array<{ operationId: string; method: string; path: string; runtime: string }> };
+type Inventory = { operations: Array<{ operationId: string; method: string; path: string; childPath?: string; transport?: string; runtime: string }> };
 type Streaming = { channels: Record<string, unknown>; schemas: Record<string, object> };
 
 describe("API contract structure", () => {
@@ -24,6 +24,16 @@ describe("API contract structure", () => {
   test("Hub cookie authentication matches the runtime cookie name", async () => {
     const openapi = await readYaml<{ components: { securitySchemes: { hubCookie: { name: string } } } }>("api/openapi.yaml");
     expect(openapi.components.securitySchemes.hubCookie.name).toBe("uatu_hub");
+  });
+
+  test("every proxied HTTP operation documents an unreachable child", async () => {
+    const [openapi, inventory] = await Promise.all([
+      readYaml<{ paths: Record<string, Record<string, { responses?: Record<string, unknown> }>> }>("api/openapi.yaml"),
+      readYaml<Inventory>("api/operations.yaml"),
+    ]);
+    for (const operation of inventory.operations.filter(item => item.childPath && item.transport !== "websocket")) {
+      expect(openapi.paths[operation.path]?.[operation.method.toLowerCase()]?.responses?.["502"]).toBeDefined();
+    }
   });
 
   test("metadata revisions agree with OpenAPI and changelog", async () => {

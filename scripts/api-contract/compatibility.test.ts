@@ -21,8 +21,30 @@ describe("API compatibility policy", () => {
     const result = compareContracts(base, proposed);
     expect(() => assertCompatibilityPolicy(result, { hubApiRevision: 3, workspaceApiRevision: 4 }, { hubApiRevision: 3, workspaceApiRevision: 4 }, ""))
       .toThrow("workspace: breaking change requires a revision greater than 4");
-    expect(() => assertCompatibilityPolicy(result, { hubApiRevision: 3, workspaceApiRevision: 4 }, { hubApiRevision: 3, workspaceApiRevision: 5 }, "## Workspace migration\nClients must stop handling 401."))
+    expect(() => assertCompatibilityPolicy(result, { hubApiRevision: 3, workspaceApiRevision: 4 }, { hubApiRevision: 3, workspaceApiRevision: 5 }, "## Hub 3 / Workspace 5 - Unreleased\n\n### Migration\n\nWorkspace clients must stop handling 401."))
       .not.toThrow();
+  });
+
+  test("does not reuse migration guidance from an older revision entry", () => {
+    const result = compareContracts(
+      { paths: { "/api/hub/state": { get: operation("Hub", { "200": {}, "401": {} }) } } },
+      { paths: { "/api/hub/state": { get: operation("Hub", { "200": {} }) } } },
+    );
+    const changelog = [
+      "## Hub 2 / Workspace 1 - Unreleased",
+      "",
+      "### Migration",
+      "",
+      "None.",
+      "",
+      "## Hub 1 / Workspace 1",
+      "",
+      "### Migration",
+      "",
+      "Hub clients must update their status handling.",
+    ].join("\n");
+    expect(() => assertCompatibilityPolicy(result, { hubApiRevision: 1, workspaceApiRevision: 1 }, { hubApiRevision: 2, workspaceApiRevision: 1 }, changelog))
+      .toThrow("hub: breaking change requires changelog migration guidance");
   });
 
   test("reports removed operation identity", () => {

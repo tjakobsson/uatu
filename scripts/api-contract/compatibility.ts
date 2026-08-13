@@ -193,12 +193,19 @@ export function assertCompatibilityPolicy(
   const base = revisions(baseMetadata);
   const proposed = revisions(proposedMetadata);
   const failures: string[] = [];
+  const entryHeader = `## Hub ${proposed.hub} / Workspace ${proposed.workspace}`;
+  const entryStart = changelog.indexOf(entryHeader);
+  const entryEnd = entryStart < 0 ? -1 : changelog.indexOf("\n## ", entryStart + entryHeader.length);
+  const entry = entryStart < 0 ? "" : changelog.slice(entryStart, entryEnd < 0 ? undefined : entryEnd);
+  const migrationMatch = /(?:^|\n)### Migration\s*\n([\s\S]*?)(?=\n### |$)/i.exec(entry);
+  const migrationText = migrationMatch?.[1]?.trim() ?? "";
   for (const domain of ["hub", "workspace"] as const) {
     if (proposed[domain] < base[domain]) failures.push(`${domain}: revision decreased from ${base[domain]} to ${proposed[domain]}`);
     if (result.breaking[domain].length === 0) continue;
     if (proposed[domain] <= base[domain]) failures.push(`${domain}: breaking change requires a revision greater than ${base[domain]}`);
-    const migration = new RegExp(`migration[\\s\\S]{0,500}${domain}`, "i").test(changelog)
-      || new RegExp(`${domain}[\\s\\S]{0,500}migration`, "i").test(changelog);
+    const migration = migrationText !== ""
+      && !/^none\b/i.test(migrationText)
+      && new RegExp(`\\b${domain}\\b`, "i").test(migrationText);
     if (!migration) failures.push(`${domain}: breaking change requires changelog migration guidance naming the domain`);
   }
   if (failures.length > 0) {

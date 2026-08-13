@@ -268,6 +268,7 @@ paths:
               example: { workspaceApiRevision: 1, roots: [], repositories: [], compareTarget: base, initialFollow: true, defaultDocumentId: null, changedId: null, generatedAt: 0, build: { version: 0.5.1, branch: main, commitSha: abcdef, commitShort: abcdef, release: false, identifier: 0.5.1, bundledWebRevision: 1 }, scope: { kind: folder }, terminal: enabled }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
         '503': { $ref: '#/components/responses/WorkspaceStopped' }
   /s/{workspaceId}/api/document:
     parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/Scope' }, { $ref: '#/components/parameters/CompareTarget' }]
@@ -287,6 +288,7 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '415': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
         '503': { $ref: '#/components/responses/WorkspaceStopped' }
   /s/{workspaceId}/api/document/diff:
     parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/Scope' }, { $ref: '#/components/parameters/CompareTarget' }]
@@ -304,6 +306,7 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
         '503': { $ref: '#/components/responses/WorkspaceStopped' }
   /s/{workspaceId}/api/events:
     parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/Scope' }, { $ref: '#/components/parameters/CompareTarget' }]
@@ -318,6 +321,7 @@ paths:
             text/event-stream: { schema: { type: string } }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
         '503': { $ref: '#/components/responses/WorkspaceStopped' }
   /s/{workspaceId}/api/search:
     parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/Scope' }, { $ref: '#/components/parameters/CompareTarget' }]
@@ -338,6 +342,7 @@ paths:
             application/x-ndjson: { schema: { type: string } }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
         '503': { $ref: '#/components/responses/WorkspaceStopped' }
   /s/{workspaceId}/api/personal-state:
     parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
@@ -384,6 +389,7 @@ paths:
         '200': { $ref: '#/components/responses/Accepted' }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
         '503': { $ref: '#/components/responses/WorkspaceStopped' }
     get:
       operationId: workspaceProbeTerminalAuth
@@ -394,6 +400,7 @@ paths:
         '204': { description: Credentials and origin accepted }
         '401': { description: Terminal credentials rejected }
         '403': { description: Browser origin rejected }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
         '503': { $ref: '#/components/responses/WorkspaceStopped' }
   /s/{workspaceId}/api/terminal/sessions:
     parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
@@ -407,8 +414,9 @@ paths:
           description: Terminal inventory
           content:
             application/json: { schema: { $ref: '#/components/schemas/TerminalSessionList' } }
-        '401': { $ref: '#/components/responses/PlainError' }
-        '503': { $ref: '#/components/responses/PlainError' }
+        '401': { $ref: '#/components/responses/ProxyError' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
+        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
     post:
       operationId: workspaceCreateTerminalSession
       tags: [Terminal]
@@ -424,10 +432,11 @@ paths:
           content:
             application/json: { schema: { $ref: '#/components/schemas/TerminalSession' } }
         '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/PlainError' }
-        '403': { $ref: '#/components/responses/PlainError' }
+        '401': { $ref: '#/components/responses/ProxyError' }
+        '403': { $ref: '#/components/responses/ProxyError' }
         '500': { $ref: '#/components/responses/Error' }
-        '503': { $ref: '#/components/responses/PlainError' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
+        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
   /s/{workspaceId}/api/terminal/sessions/{terminalSessionId}:
     parameters:
       - { $ref: '#/components/parameters/WorkspaceId' }
@@ -439,11 +448,12 @@ paths:
       security: [{ hubBearer: [] }, { hubCookie: [] }]
       responses:
         '204': { description: Terminal terminated }
-        '400': { $ref: '#/components/responses/PlainError' }
-        '401': { $ref: '#/components/responses/PlainError' }
-        '403': { $ref: '#/components/responses/PlainError' }
+        '400': { $ref: '#/components/responses/ProxyError' }
+        '401': { $ref: '#/components/responses/ProxyError' }
+        '403': { $ref: '#/components/responses/ProxyError' }
         '404': { $ref: '#/components/responses/PlainError' }
-        '503': { $ref: '#/components/responses/PlainError' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
+        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
   /s/{workspaceId}/api/terminal:
     parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
     get:
@@ -459,13 +469,13 @@ paths:
         - { name: Upgrade, in: header, required: true, schema: { type: string, const: websocket } }
       responses:
         '101': { description: WebSocket upgrade accepted }
-        '400': { $ref: '#/components/responses/PlainError' }
-        '401': { $ref: '#/components/responses/PlainError' }
-        '403': { $ref: '#/components/responses/PlainError' }
+        '400': { $ref: '#/components/responses/ProxyError' }
+        '401': { $ref: '#/components/responses/ProxyError' }
+        '403': { $ref: '#/components/responses/ProxyError' }
         '404': { $ref: '#/components/responses/PlainError' }
         '409': { $ref: '#/components/responses/PlainError' }
         '500': { $ref: '#/components/responses/PlainError' }
-        '503': { $ref: '#/components/responses/PlainError' }
+        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
 components:
   securitySchemes:
     hubBearer: { type: http, scheme: bearer, description: Session ID returned by native JSON login. }
@@ -492,6 +502,20 @@ components:
       description: Workspace session is stopped. Runtime currently returns an HTML stopped-session page.
       content:
         text/html: { schema: { type: string } }
+    ProxyError:
+      description: Request rejected by the Hub as JSON or by the running child as plain text.
+      content:
+        application/json: { schema: { $ref: '#/components/schemas/Error' } }
+        text/plain: { schema: { type: string } }
+    WorkspaceUnavailable:
+      description: Workspace is stopped, or its terminal backend is unavailable.
+      content:
+        text/html: { schema: { type: string } }
+        text/plain: { schema: { type: string } }
+    SessionUnreachable:
+      description: The Hub could not reach the running workspace child.
+      content:
+        text/plain: { schema: { type: string, const: session unreachable } }
     Accepted:
       description: Request accepted
       content:
