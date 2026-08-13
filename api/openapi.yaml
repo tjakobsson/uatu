@@ -55,6 +55,7 @@ paths:
       operationId: hubLogout
       tags: [Hub authentication]
       summary: Revoke the bearer session
+      security: [{ hubBearer: [] }]
       responses:
         '200': { $ref: '#/components/responses/Revoked' }
         '403': { $ref: '#/components/responses/Error' }

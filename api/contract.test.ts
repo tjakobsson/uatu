@@ -26,6 +26,11 @@ describe("API contract structure", () => {
     expect(openapi.components.securitySchemes.hubCookie.name).toBe("uatu_hub");
   });
 
+  test("public logout uses the bearer JSON transport", async () => {
+    const openapi = await readYaml<{ paths: { "/logout": { post: { security: unknown } } } }>("api/openapi.yaml");
+    expect(openapi.paths["/logout"].post.security).toEqual([{ hubBearer: [] }]);
+  });
+
   test("every proxied HTTP operation documents an unreachable child", async () => {
     const [openapi, inventory] = await Promise.all([
       readYaml<{ paths: Record<string, Record<string, { responses?: Record<string, unknown> }>> }>("api/openapi.yaml"),

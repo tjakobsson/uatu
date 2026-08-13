@@ -92,6 +92,18 @@ describe("API compatibility policy", () => {
     );
   });
 
+  test("detects changes to inline request schemas", () => {
+    const base = { paths: { "/api/hub/workspaces": { post: {
+      ...operation("Hub"),
+      requestBody: { content: { "application/json": { schema: { type: "object", properties: { start: { type: "boolean" } } } } } },
+    } } } };
+    const proposed = structuredClone(base);
+    proposed.paths["/api/hub/workspaces"].post.requestBody.content["application/json"].schema.properties.start = { type: "string" };
+    expect(compareContracts(base, proposed).breaking.hub).toContain(
+      "POST /api/hub/workspaces: changed request schema for application/json",
+    );
+  });
+
   test("preserves an operation-level authentication override", () => {
     const paths = { "/api/hub/state": { get: { ...operation("Hub"), security: [] } } };
     const base = { security: [{ hubBearer: [] }], paths };

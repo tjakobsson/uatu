@@ -105,6 +105,14 @@ function compareOperation(name: string, before: JsonObject, after: JsonObject): 
     }
   };
   removedMedia("request", object(before.requestBody).content, object(after.requestBody).content);
+  const beforeRequestContent = object(object(before.requestBody).content);
+  const afterRequestContent = object(object(after.requestBody).content);
+  for (const media of Object.keys(beforeRequestContent)) {
+    if (!(media in afterRequestContent)) continue;
+    const beforeSchema = object(beforeRequestContent[media]).schema;
+    const afterSchema = object(afterRequestContent[media]).schema;
+    if (stable(beforeSchema) !== stable(afterSchema)) failures.push(`${name}: changed request schema for ${media}`);
+  }
   for (const [status, response] of Object.entries(beforeResponses)) {
     if (!(status in afterResponses)) continue;
     removedMedia(`response ${status}`, object(response).content, object(afterResponses[status]).content);

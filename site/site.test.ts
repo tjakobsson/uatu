@@ -48,6 +48,11 @@ describe("static API site", () => {
     expect(ids.length).toBeGreaterThan(0);
     for (const id of ids) expect(html).toContain(`data-operation-id="${id}"`);
     expect(html.match(/data-operation-id=/g)?.length).toBe(ids.length);
+    expect(html).toContain("Parameters");
+    expect(html).toContain("Request body");
+    expect(html).toContain("Responses");
+    expect(html).toContain('id="schema-NativeLoginRequest"');
+    expect(html).toContain('&quot;required&quot;: [');
   });
 
   test("uses the GitHub Pages base for local absolute URLs", async () => {
