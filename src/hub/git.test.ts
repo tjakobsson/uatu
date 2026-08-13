@@ -4,12 +4,22 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { cloneTargetName, gitInit, probeGitRepository } from "./git";
+import { cloneTargetName, gitInit, probeGitRepository, validCloneFolderName } from "./git";
 
 const tempDirectories: string[] = [];
 
 afterEach(async () => {
   await Promise.all(tempDirectories.splice(0).map(dir => rm(dir, { recursive: true, force: true })));
+});
+
+describe("validCloneFolderName", () => {
+  test("accepts one folder name and rejects paths and dot segments", () => {
+    expect(validCloneFolderName("my-checkout")).toBe(true);
+    expect(validCloneFolderName("repo copy")).toBe(true);
+    for (const value of ["", ".", "..", "nested/repo", "nested\\repo", "/tmp/repo", "bad\0name"]) {
+      expect(validCloneFolderName(value)).toBe(false);
+    }
+  });
 });
 
 async function tempDir(): Promise<string> {

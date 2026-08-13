@@ -202,6 +202,8 @@ const SHARED_STYLE = `
     transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
   }
   button:hover { background: var(--surface-muted); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button:disabled:hover { background: var(--surface); filter: none; }
   button.primary { background: var(--accent); border-color: var(--accent); color: #ffffff; }
   button.primary:hover { filter: brightness(1.08); background: var(--accent); }
   button.danger { color: var(--danger); }
@@ -223,6 +225,33 @@ const SHARED_STYLE = `
   }
 
   .form-row { display: flex; gap: 0.5rem; padding: 0.6rem 1rem; }
+  .clone-panel { border-top: 1px solid var(--border-soft); background: var(--surface-subtle); }
+  .clone-status { display: flex; align-items: center; gap: 0.5rem; padding: 0.6rem 1rem 0; }
+  .clone-status strong { font-size: 0.78rem; color: var(--text-strong); }
+  .clone-status span:last-child { color: var(--text-subtle); font-size: 0.78rem; }
+  .clone-output {
+    margin: 0.6rem 1rem;
+    padding: 0.65rem;
+    min-height: 5rem;
+    max-height: 12rem;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    border: 1px solid var(--border-medium);
+    border-radius: 0.375rem;
+    color: var(--text-strong);
+    background: var(--surface);
+    font: 0.72rem/1.45 var(--mono-font-family);
+  }
+  .clone-response { padding-top: 0; align-items: end; }
+  .clone-response label { flex: 1; min-width: 0; color: var(--text-subtle); font-size: 0.72rem; font-weight: 600; }
+  .clone-response input { display: block; margin-top: 0.2rem; }
+  @media (max-width: 520px) {
+    .form-row { flex-wrap: wrap; }
+    .form-row input { flex-basis: 100%; }
+    .clone-response label { flex-basis: 100%; }
+    .clone-response button { flex: 1; }
+  }
   .empty { padding: 0.75rem 1rem; color: var(--text-subtle); font-size: 0.8rem; }
   .error-text { color: var(--danger); font-size: 0.8rem; margin: 0.75rem 0; }
   .hub-version {
@@ -333,8 +362,25 @@ export function dashboardPage(): string {
   <div id="browser"><p class="empty">Loading…</p></div>
   <form class="form-row" id="clone-form" style="border-top: 1px solid var(--border-soft);">
     <input type="text" id="clone-url" placeholder="Clone a repository into this folder — git URL" aria-label="Git clone URL" />
+    <input type="text" id="clone-folder-name" placeholder="Folder name (optional)" aria-label="Checkout folder name" />
     <button type="submit">Clone</button>
   </form>
+  <div id="clone-panel" class="clone-panel" hidden>
+    <div class="clone-status">
+      <span id="clone-indicator" class="indicator-dot is-live"></span>
+      <strong>Clone</strong>
+      <span id="clone-phase" role="status">Starting…</span>
+    </div>
+    <pre id="clone-output" class="clone-output" aria-live="polite" aria-label="Clone progress"></pre>
+    <form id="clone-response-form" class="form-row clone-response">
+      <label><span id="clone-response-label">Terminal response</span>
+        <input id="clone-response" type="password" autocomplete="off" aria-describedby="clone-response-help" />
+      </label>
+      <button type="submit">Send</button>
+      <button id="clone-cancel" type="button" class="danger">Cancel</button>
+    </form>
+    <p id="clone-response-help" class="empty" style="padding-top: 0;">Available for any Git or SSH prompt. Responses are not shown in this log.</p>
+  </div>
 </section>
 `;
   return page(
@@ -660,29 +706,206 @@ async function loadDevices() {
   renderInto(document.getElementById("devices"), rows, "No active sessions.");
 }
 const cloneForm = document.getElementById("clone-form");
+const clonePanel = document.getElementById("clone-panel");
+const clonePhase = document.getElementById("clone-phase");
+const cloneOutput = document.getElementById("clone-output");
+const cloneIndicator = document.getElementById("clone-indicator");
+const cloneResponseForm = document.getElementById("clone-response-form");
+const cloneResponse = document.getElementById("clone-response");
+const cloneResponseLabel = document.getElementById("clone-response-label");
+const cloneCancel = document.getElementById("clone-cancel");
+const cloneSubmit = cloneForm && cloneForm.querySelector("button");
+const cloneOutputLimit = 64 * 1024;
+const cloneJobStorageKey = "uatu.activeCloneJob";
+let cloneJobId = sessionStorage.getItem(cloneJobStorageKey);
+let cloneEvents = null;
+let cloneBusy = false;
+let clonePromptText = "";
+
+function setCloneActive(active) {
+  cloneResponseForm.hidden = !active;
+  cloneResponse.disabled = !active;
+  cloneResponseForm.querySelector('button[type="submit"]').disabled = !active;
+  cloneCancel.disabled = !active;
+  cloneIndicator.classList.toggle("is-live", active);
+  if (cloneSubmit) cloneSubmit.disabled = active;
+  document.getElementById("clone-url").disabled = active;
+  document.getElementById("clone-folder-name").disabled = active;
+}
+function setClonePhase(phase, label) {
+  const labels = {
+    cloning: "Cloning…",
+    registering: "Registering workspace…",
+    starting: "Starting session…",
+  };
+  clonePhase.textContent = label || labels[phase] || phase || "Working…";
+}
+function appendCloneOutput(text) {
+  if (!text) return;
+  cloneOutput.textContent += text;
+  if (cloneOutput.textContent.length > cloneOutputLimit) {
+    cloneOutput.textContent = cloneOutput.textContent.slice(-cloneOutputLimit);
+  }
+  cloneOutput.scrollTop = cloneOutput.scrollHeight;
+  clonePromptText = (clonePromptText + text).slice(-2048).toLowerCase();
+  classifyClonePrompt();
+}
+function classifyClonePrompt() {
+  let label = "Terminal response";
+  if (/passphrase[^\\n]*:?\\s*$/.test(clonePromptText)) label = "Passphrase";
+  else if (/(password|token)[^\\n]*:?\\s*$/.test(clonePromptText)) label = "Password or token";
+  else if (/username[^\\n]*:?\\s*$/.test(clonePromptText)) label = "Username";
+  else if (/(authenticity of host|continue connecting|yes\\/no)[^\\n]*$/.test(clonePromptText)) label = "Host trust response";
+  else if (/(verification|one[- ]time|otp|code)[^\\n]*:?\\s*$/.test(clonePromptText)) label = "Verification response";
+  cloneResponseLabel.textContent = label;
+  if (label !== "Terminal response" && !cloneResponse.disabled) cloneResponse.focus({ preventScroll: true });
+}
+function closeCloneEvents() {
+  if (cloneEvents) cloneEvents.close();
+  cloneEvents = null;
+}
+function clearCloneState() {
+  closeCloneEvents();
+  cloneJobId = null;
+  sessionStorage.removeItem(cloneJobStorageKey);
+  setCloneActive(false);
+  if (cloneBusy) {
+    cloneBusy = false;
+    uiBusy -= 1;
+  }
+}
+function parseCloneEvent(event) {
+  try { return JSON.parse(event.data); }
+  catch { return {}; }
+}
+function handleCloneEvent(payload) {
+  const data = payload.data || payload;
+  if (payload.type === "output") appendCloneOutput(data.text || data.output || "");
+  else if (payload.type === "phase") setClonePhase(data.phase, data.label);
+  else if (payload.type === "result") finishClone(data);
+}
+async function finishClone(result) {
+  clearCloneState();
+  const status = result.status || result.result;
+  const labels = {
+    cancelled: "Clone cancelled.",
+    "timed-out": "Clone timed out.",
+    "clone-failed": "Clone failed.",
+    "register-failed": "Workspace registration failed.",
+    "start-failed": "Clone completed, but the session could not start.",
+    "cleanup-failed": "Clone cleanup failed; review the output and workspace state.",
+    succeeded: "Clone complete. Opening session…",
+  };
+  const error = result.error || result.message;
+  setClonePhase(status, labels[status] || error || "Clone ended.");
+  cloneResponse.value = "";
+  cloneResponseLabel.textContent = "Terminal response";
+  if (error && status !== "succeeded") appendCloneOutput((cloneOutput.textContent ? "\\n" : "") + error + "\\n");
+  if (status === "succeeded") {
+    const workspaceId = result.workspaceId || result.id;
+    if (!workspaceId) {
+      setClonePhase("start-failed", "Clone completed, but no session was returned.");
+    } else {
+      await Promise.all([refresh(true), loadBrowser()]);
+      openSession(workspaceId);
+      return;
+    }
+  }
+  await Promise.all([refresh(true), loadBrowser()]);
+}
+function connectCloneEvents() {
+  closeCloneEvents();
+  if (!cloneJobId) return;
+  const jobId = cloneJobId;
+  const events = new EventSource("/api/hub/clone-jobs/" + encodeURIComponent(jobId) + "/events");
+  cloneEvents = events;
+  events.addEventListener("output", event => {
+    const payload = parseCloneEvent(event);
+    const data = payload.data || payload;
+    appendCloneOutput(data.text || data.output || "");
+  });
+  events.addEventListener("phase", event => {
+    const payload = parseCloneEvent(event);
+    const data = payload.data || payload;
+    setClonePhase(data.phase, data.label);
+  });
+  events.addEventListener("result", event => {
+    const payload = parseCloneEvent(event);
+    finishClone(payload.data || payload);
+  });
+  // Accept typed JSON on the default SSE message event as well as named SSE
+  // events; the payload contract remains identical in both transports.
+  events.onmessage = event => handleCloneEvent(parseCloneEvent(event));
+  events.onopen = () => { if (cloneJobId === jobId) setClonePhase(null, clonePhase.textContent === "Reconnecting…" ? "Connected." : clonePhase.textContent); };
+  events.onerror = async () => {
+    if (cloneJobId !== jobId) return;
+    setClonePhase(null, "Reconnecting…");
+    try {
+      const response = await fetch("/api/hub/clone-jobs/" + encodeURIComponent(jobId) + "/events", { method: "HEAD" });
+      if (response.status === 404 && cloneJobId === jobId) {
+        clearCloneState();
+        setClonePhase(null, "Previous clone job is no longer available.");
+      }
+    } catch {}
+  };
+}
 if (cloneForm) cloneForm.onsubmit = async event => {
   event.preventDefault();
   showError("");
   const input = document.getElementById("clone-url");
+  const folderNameInput = document.getElementById("clone-folder-name");
   const url = input.value.trim();
+  const folderName = folderNameInput.value.trim();
   if (!url) return;
   const button = event.target.querySelector("button");
   uiBusy += 1;
+  cloneBusy = true;
   button.disabled = true;
-  button.textContent = "Cloning…";
+  document.getElementById("clone-url").disabled = true;
+  folderNameInput.disabled = true;
+  button.textContent = "Starting…";
+  clonePanel.hidden = false;
+  cloneResponseForm.hidden = true;
+  cloneOutput.textContent = "";
+  clonePromptText = "";
+  cloneResponseLabel.textContent = "Terminal response";
+  setClonePhase("cloning", "Starting clone…");
   try {
-    const result = await api("/api/hub/clone", { url, dest: browsePath });
+    const result = await api("/api/hub/clone-jobs", { url, dest: browsePath, folderName });
+    cloneJobId = result.jobId;
+    if (!cloneJobId) throw new Error("clone job did not return an id");
+    sessionStorage.setItem(cloneJobStorageKey, cloneJobId);
     input.value = "";
-    openSession(result.id);
+    folderNameInput.value = "";
+    button.textContent = "Clone";
+    setCloneActive(true);
+    connectCloneEvents();
   } catch (error) {
     showError(error.message);
-  } finally {
+    setClonePhase("clone-failed", "Could not start clone.");
+    setCloneActive(false);
+    cloneBusy = false;
     uiBusy -= 1;
     button.disabled = false;
+    input.disabled = false;
+    folderNameInput.disabled = false;
     button.textContent = "Clone";
-    await refresh(true);
-    await loadBrowser();
   }
+};
+cloneResponseForm.onsubmit = async event => {
+  event.preventDefault();
+  if (!cloneJobId) return;
+  const input = cloneResponse.value;
+  cloneResponse.value = "";
+  try { await api("/api/hub/clone-jobs/" + encodeURIComponent(cloneJobId) + "/input", { input }); }
+  catch (error) { showError(error.message); }
+};
+cloneCancel.onclick = async () => {
+  if (!cloneJobId) return;
+  cloneCancel.disabled = true;
+  setClonePhase(null, "Cancelling…");
+  try { await api("/api/hub/clone-jobs/" + encodeURIComponent(cloneJobId) + "/cancel"); }
+  catch (error) { showError(error.message); cloneCancel.disabled = false; }
 };
 // Back/forward restores this page from WebKit's page cache exactly as we
 // left it — including a stale opening overlay and busy buttons. Clear the
@@ -690,9 +913,12 @@ if (cloneForm) cloneForm.onsubmit = async event => {
 window.addEventListener("pageshow", event => {
   if (!event.persisted) return;
   for (const overlay of document.querySelectorAll(".nav-overlay")) overlay.remove();
-  // The page cache preserves the JS heap too — a busy hold from the
-  // navigation that left this page would otherwise pin refresh forever.
-  uiBusy = 0;
+  closeCloneEvents();
+  // Preserve the active clone's busy hold, but discard a navigation hold
+  // left behind by the page we returned from.
+  uiBusy = cloneJobId ? 1 : 0;
+  cloneBusy = Boolean(cloneJobId);
+  if (cloneJobId) connectCloneEvents();
   refresh(true);
   loadBrowser();
   loadDevices();
@@ -700,6 +926,14 @@ window.addEventListener("pageshow", event => {
 refresh();
 loadBrowser();
 loadDevices();
+if (cloneJobId) {
+  clonePanel.hidden = false;
+  cloneBusy = true;
+  uiBusy = 1;
+  setCloneActive(true);
+  setClonePhase(null, "Reconnecting…");
+  connectCloneEvents();
+}
 setInterval(refresh, 5000);
 </script>`,
   );

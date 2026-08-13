@@ -40,9 +40,9 @@ service definitions for systemd and launchd.
   browsers gate service workers (the PWA install) and the clipboard API
   behind secure contexts. Plain HTTP is only permitted on loopback — the
   hub refuses to bind a non-loopback address without TLS.
-- **`git clone` runs with the daemon user's ambient credentials** (its
-  `~/.gitconfig`, ssh agent, credential helpers). The hub stores no
-  credentials of its own.
+- **The hub stores no Git credentials.** Clone jobs retain the daemon user's
+  SSH agent but disable credential helpers and route interactive Git/OpenSSH
+  prompts through the dashboard.
 - **Signed-in users can browse the daemon user's filesystem.** The
   dashboard's Add Folder browser lists directories so users can pick any
   folder to serve. This adds nothing to the threat model — the embedded
@@ -83,6 +83,16 @@ Add Folder pane is a directory browser (starting at the daemon user's home)
 directory you have browsed to. There is no configured workspaces root; a
 `workspacesDir` key in the config is rejected at startup (it existed only in
 pre-release edge builds — delete the key).
+
+Clone credentials are entered in the dashboard's clone panel. The Hub runs
+Git in a dedicated pseudo-terminal and disables Git/SSH askpass programs and
+Git credential helpers for that clone, so prompts controlled by Git or
+OpenSSH appear in the browser rather than in the daemon's terminal or an OS
+credential dialog. An existing `SSH_AUTH_SOCK` is retained so already-loaded
+keys continue to work. That agent is a separate process and can still apply
+its own confirmation, hardware-token, or GUI policy; the Hub cannot suppress
+UI independently initiated by the agent. Responses entered in the clone panel
+are sent only to the clone terminal and are not stored or echoed in its log.
 
 Generate a password hash (read from stdin so it never lands in shell
 history):

@@ -6,12 +6,14 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 import { LocalProcessBackend } from "./backend";
-import { hashPassword, HubSessionStore } from "./auth";
+import { hashPassword, HubSessionStore, HUB_COOKIE_NAME } from "./auth";
+import { CloneJobManager } from "./clone-jobs";
+import { CloneProcessAdapter, type CloneProcessFactory } from "./clone-process";
 import type { HubConfig } from "./config";
 import { PersonalWorkspaceStateStore } from "./personal-state";
 import { WorkspaceRegistry } from "./registry";
@@ -32,6 +34,7 @@ let server: ReturnType<typeof startHubServer>;
 let origin = "";
 let cookie = "";
 let bearerId = "";
+let cloneJobs: CloneJobManager;
 
 beforeAll(async () => {
   tempRoot = await mkdtemp(path.join(os.tmpdir(), "uatu-hub-int-"));
@@ -44,7 +47,10 @@ beforeAll(async () => {
     port: 0 as number,
     host: "127.0.0.1",
     tls: null,
-    users: [{ name: "tobias", passwordHash: await hashPassword("open sesame") }],
+    users: [
+      { name: "tobias", passwordHash: await hashPassword("open sesame") },
+      { name: "alice", passwordHash: await hashPassword("alice secret") },
+    ],
     stateDir: path.join(tempRoot, "state"),
   };
 
@@ -58,11 +64,44 @@ beforeAll(async () => {
   sessions = new SessionManager(registry, {
     local: new LocalProcessBackend({ uatuArgv: ["bun", "run", CLI_PATH] }),
   });
-  server = startHubServer({ config, registry, sessions, sessionStore, personalState });
+  const realCloneProcess = new CloneProcessAdapter();
+  const processFactory: CloneProcessFactory = {
+    start(options) {
+      if (!options.url.startsWith("interactive:")) return realCloneProcess.start(options);
+      let resolveExit!: (code: number) => void;
+      const exited = new Promise<number>(resolve => {
+        resolveExit = resolve;
+      });
+      let responses = 0;
+      queueMicrotask(() => options.onOutput("Enter passphrase for key '/tmp/test-key': "));
+      return {
+        pid: process.pid,
+        exited,
+        writeLine() {
+          responses += 1;
+          if (responses === 1) {
+            options.onOutput("\nCustom authentication challenge: ");
+            return true;
+          }
+          void mkdir(options.target, { recursive: true }).then(() => {
+            execFileSync("git", ["init"], { cwd: options.target, stdio: "ignore" });
+            resolveExit(0);
+          });
+          return true;
+        },
+        async terminate() {
+          resolveExit(143);
+        },
+      };
+    },
+  };
+  cloneJobs = new CloneJobManager({ processFactory, registry, sessions });
+  server = startHubServer({ config, registry, sessions, sessionStore, personalState, cloneJobs });
   origin = `http://127.0.0.1:${server.port}`;
 }, 30_000);
 
 afterAll(async () => {
+  await cloneJobs?.close();
   await sessions?.stopAll();
   server?.stop(true);
   if (tempRoot) {
@@ -640,7 +679,7 @@ describe("hub end to end", () => {
     expect(unknown.status).toBe(404);
   });
 
-  test("git clone creates, registers, and serves a workspace; failures register nothing", async () => {
+  test("git clone job streams completion, registers, and serves a workspace; failures register nothing", async () => {
     // A source repo cloned into a browsed destination directory.
     const source = path.join(tempRoot, "cloneme");
     const dest = path.join(tempRoot, "checkouts");
@@ -648,34 +687,189 @@ describe("hub end to end", () => {
     execFileSync("git", ["init"], { cwd: source, stdio: "ignore" });
     await writeFile(path.join(source, "README.md"), "# Clone Me\n");
 
-    const cloned = await fetch(`${origin}/api/hub/clone`, {
+    const cloned = await fetch(`${origin}/api/hub/clone-jobs`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie, origin },
       body: JSON.stringify({ url: source, dest }),
     });
-    expect(cloned.status).toBe(200);
-    const id = ((await cloned.json()) as { id: string }).id;
+    expect(cloned.status).toBe(202);
+    const cloneJobId = ((await cloned.json()) as { jobId: string }).jobId;
+    const cloneEvents = await fetch(`${origin}/api/hub/clone-jobs/${cloneJobId}/events`, { headers: { cookie } });
+    expect(cloneEvents.status).toBe(200);
+    const cloneStream = await cloneEvents.text();
+    expect(cloneStream).toContain("id: 1");
+    expect(cloneStream).toContain("event: phase");
+    expect(cloneStream).toContain('"status":"succeeded"');
+    const id = (JSON.parse(cloneStream.match(/data: (\{"status":"succeeded"[^\n]+\})/)?.[1] ?? "{}") as { workspaceId: string }).workspaceId;
     expect(id).toBe("cloneme");
-    expect(registry.byId(id)?.path).toBe(path.join(dest, "cloneme"));
+    const canonicalDest = await realpath(dest);
+    expect(registry.byId(id)?.path).toBe(path.join(canonicalDest, "cloneme"));
     const state = await fetch(`${origin}/s/${id}/api/state`, { headers: { cookie } });
     expect(state.status).toBe(200);
     await sessions.stop(id);
 
     // Clone without a destination is rejected before touching git.
-    const noDest = await fetch(`${origin}/api/hub/clone`, {
+    const noDest = await fetch(`${origin}/api/hub/clone-jobs`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie, origin },
       body: JSON.stringify({ url: source }),
     });
     expect(noDest.status).toBe(400);
 
-    const failed = await fetch(`${origin}/api/hub/clone`, {
+    const existingTarget = path.join(dest, "existing-target");
+    await mkdir(existingTarget, { recursive: true });
+    const existing = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ url: source, dest, folderName: "existing-target" }),
+    });
+    expect(existing.status).toBe(409);
+    expect(((await existing.json()) as { error: string }).error).toContain("target already exists");
+
+    const aliasedDest = path.join(tempRoot, "checkouts-alias");
+    await symlink(dest, aliasedDest);
+    const aliasClone = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ url: "interactive:alias.git", dest: aliasedDest, folderName: "alias-checkout" }),
+    });
+    expect(aliasClone.status).toBe(202);
+    const aliasJobId = ((await aliasClone.json()) as { jobId: string }).jobId;
+    const duplicateAlias = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ url: source, dest, folderName: "alias-checkout" }),
+    });
+    expect(duplicateAlias.status).toBe(409);
+    expect(((await duplicateAlias.json()) as { error: string }).error).toContain("already reserved");
+    await fetch(`${origin}/api/hub/clone-jobs/${aliasJobId}/cancel`, {
+      method: "POST",
+      headers: { cookie, origin },
+    });
+
+    const failed = await fetch(`${origin}/api/hub/clone-jobs`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie, origin },
       body: JSON.stringify({ url: path.join(tempRoot, "does-not-exist"), dest }),
     });
-    expect(failed.status).toBe(500);
-    expect(((await failed.json()) as { error: string }).error).toContain("git clone failed");
+    expect(failed.status).toBe(202);
+    const failedJobId = ((await failed.json()) as { jobId: string }).jobId;
+    const failedEvents = await fetch(`${origin}/api/hub/clone-jobs/${failedJobId}/events`, { headers: { cookie } });
+    expect(await failedEvents.text()).toContain('"status":"clone-failed"');
+    expect(registry.list().some(entry => entry.path.includes("does-not-exist"))).toBe(false);
+
+    const custom = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ url: source, dest, folderName: "custom-checkout" }),
+    });
+    expect(custom.status).toBe(202);
+    const customJobId = ((await custom.json()) as { jobId: string }).jobId;
+    const customEvents = await fetch(`${origin}/api/hub/clone-jobs/${customJobId}/events`, { headers: { cookie } });
+    const customStream = await customEvents.text();
+    expect(customStream).toContain('"status":"succeeded"');
+    expect(customStream).toContain(path.join(canonicalDest, "custom-checkout"));
+
+    const nested = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ url: source, dest, folderName: "nested/checkout" }),
+    });
+    expect(nested.status).toBe(400);
+    expect(((await nested.json()) as { error: string }).error).toContain("single folder name");
+  }, 60_000);
+
+  test("clone jobs accept private prompt input and enforce owner and CSRF gates", async () => {
+    const dest = path.join(tempRoot, "interactive-checkouts");
+    const created = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ url: "interactive:prompted.git", dest }),
+    });
+    expect(created.status).toBe(202);
+    const jobId = ((await created.json()) as { jobId: string }).jobId;
+
+    const aliceSession = await sessionStore.issue("alice", "integration test");
+    const aliceCookie = `${HUB_COOKIE_NAME}=${aliceSession.id}`;
+    const visibleHead = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/events`, {
+      method: "HEAD",
+      headers: { cookie },
+    });
+    expect(visibleHead.status).toBe(204);
+    const hiddenHead = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/events`, {
+      method: "HEAD",
+      headers: { cookie: aliceCookie },
+    });
+    expect(hiddenHead.status).toBe(404);
+    const hidden = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/events`, {
+      headers: { cookie: aliceCookie },
+    });
+    expect(hidden.status).toBe(404);
+    const deniedInput = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/input`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: aliceCookie, origin },
+      body: JSON.stringify({ input: "stolen" }),
+    });
+    expect(deniedInput.status).toBe(404);
+    const deniedCancel = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/cancel`, {
+      method: "POST",
+      headers: { cookie: aliceCookie, origin },
+    });
+    expect(deniedCancel.status).toBe(404);
+
+    const streamResponse = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/events`, { headers: { cookie } });
+    const firstInput = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/input`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ input: "" }),
+    });
+    expect(firstInput.status).toBe(200);
+    const secondInput = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/input`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ input: "private-custom-response" }),
+    });
+    expect(secondInput.status).toBe(200);
+    const stream = await streamResponse.text();
+    expect(stream).toContain("Enter passphrase");
+    expect(stream).toContain("Custom authentication challenge");
+    expect(stream).toContain('"status":"succeeded"');
+    expect(stream).not.toContain("private-custom-response");
+
+    const replay = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/events`, { headers: { cookie } });
+    const replayText = await replay.text();
+    expect(replayText).toContain('"status":"succeeded"');
+    expect(replayText).not.toContain("private-custom-response");
+    const afterFirst = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/events`, {
+      headers: { cookie, "last-event-id": "1" },
+    });
+    const afterFirstText = await afterFirst.text();
+    expect(afterFirstText).not.toContain("id: 1\n");
+    expect(afterFirstText).toContain('"status":"succeeded"');
+
+    const crossOrigin = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin: "https://evil.example" },
+      body: JSON.stringify({ url: "interactive:csrf.git", dest }),
+    });
+    expect(crossOrigin.status).toBe(403);
+
+    const bearerCreated = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${bearerId}` },
+      body: JSON.stringify({ url: "interactive:bearer.git", dest }),
+    });
+    expect(bearerCreated.status).toBe(202);
+    const bearerJobId = ((await bearerCreated.json()) as { jobId: string }).jobId;
+    const cancelled = await fetch(`${origin}/api/hub/clone-jobs/${bearerJobId}/cancel`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${bearerId}` },
+    });
+    expect(cancelled.status).toBe(200);
+    const cancelledEvents = await fetch(`${origin}/api/hub/clone-jobs/${bearerJobId}/events`, {
+      headers: { authorization: `Bearer ${bearerId}` },
+    });
+    expect(await cancelledEvents.text()).toContain('"status":"cancelled"');
   }, 60_000);
 
   test("secure-context plumbing survives the proxy: manifest and state config", async () => {

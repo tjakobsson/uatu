@@ -26,7 +26,9 @@ import {
   type HubSessionStore,
 } from "./auth";
 import type { HubConfig } from "./config";
-import { cloneTargetName, gitClone, gitInit, probeGitRepository } from "./git";
+import { CloneJobManager, type CloneJobEvent } from "./clone-jobs";
+import { CloneProcessAdapter } from "./clone-process";
+import { cloneTargetName, gitInit, probeGitRepository, validCloneFolderName } from "./git";
 import { dashboardPage, loginPage, stoppedSessionPage } from "./pages";
 import {
   bridgeWebSocketHandlers,
@@ -48,6 +50,7 @@ export type HubDeps = {
   sessions: SessionManager;
   sessionStore: HubSessionStore;
   personalState: PersonalWorkspaceStateStore;
+  cloneJobs?: CloneJobManager;
 };
 
 type HubServer = UpgradableServer & {
@@ -76,6 +79,11 @@ function formTarget(target: string): string | undefined {
 
 export function createHubFetchHandler(deps: HubDeps) {
   const { config, registry, sessions, sessionStore, personalState } = deps;
+  const cloneJobs = deps.cloneJobs ?? new CloneJobManager({
+    processFactory: new CloneProcessAdapter(),
+    registry,
+    sessions,
+  });
   const limiter = new LoginRateLimiter();
 
   // Whether the browser-facing connection is HTTPS: either the hub
@@ -317,6 +325,9 @@ export function createHubFetchHandler(deps: HubDeps) {
     if (!isDirectory) {
       return json(404, { error: `no such folder: ${folder}` });
     }
+    if (cloneJobs.isTargetReserved(folder)) {
+      return json(409, { error: `folder is currently being cloned: ${folder}` });
+    }
 
     const probe = await probeGitRepository(folder);
     if (probe.kind === "not-a-repository") {
@@ -344,10 +355,10 @@ export function createHubFetchHandler(deps: HubDeps) {
     return json(200, { id: entry.id });
   };
 
-  // POST /api/hub/clone {url, dest} — clones into a browsed destination
-  // directory, then registers and serves the checkout.
-  const cloneWorkspace = async (request: Request): Promise<Response> => {
-    let body: { url?: unknown; dest?: unknown };
+  // A clone is a user-owned, addressable job: creation returns immediately;
+  // output is replayable SSE; input and cancellation are POST mutations.
+  const createCloneJob = async (request: Request, owner: string): Promise<Response> => {
+    let body: { url?: unknown; dest?: unknown; folderName?: unknown };
     try {
       body = (await request.json()) as typeof body;
     } catch {
@@ -361,18 +372,62 @@ export function createHubFetchHandler(deps: HubDeps) {
     if (dest === "" || !path.isAbsolute(dest)) {
       return json(400, { error: "an absolute destination directory is required" });
     }
-    const cloned = await gitClone(url, path.resolve(dest));
-    if (!cloned.ok) {
-      return json(500, { error: `git clone failed: ${cloned.error}` });
+    const requestedFolderName = typeof body.folderName === "string" ? body.folderName.trim() : "";
+    if (requestedFolderName !== "" && !validCloneFolderName(requestedFolderName)) {
+      return json(400, { error: "checkout folder name must be a single folder name" });
     }
-    const entry = await registry.register(cloned.path);
     try {
-      await sessions.start(entry.id);
+      const resolvedDest = path.resolve(dest);
+      await fs.mkdir(resolvedDest, { recursive: true });
+      const target = path.join(await fs.realpath(resolvedDest), requestedFolderName || cloneTargetName(url)!);
+      if (registry.byPath(target)) {
+        return json(409, { error: `workspace is already registered: ${target}` });
+      }
+      if (await fs.stat(target).then(() => true).catch(() => false)) {
+        return json(409, { error: `target already exists: ${target}` });
+      }
+      return json(202, cloneJobs.create(owner, url, target));
     } catch (error) {
-      await registry.remove(entry.id);
-      return json(500, { error: error instanceof Error ? error.message : String(error) });
+      const message = error instanceof Error ? error.message : String(error);
+      return json(message.includes("already reserved") ? 409 : 500, { error: message });
     }
-    return json(200, { id: entry.id });
+  };
+
+  const cloneEvents = (request: Request, owner: string, jobId: string): Response => {
+    if (!cloneJobs.has(owner, jobId)) return json(404, { error: "clone job not found" });
+    const afterEventId = Number.parseInt(request.headers.get("last-event-id") ?? "0", 10);
+    let unsubscribe: (() => void) | undefined;
+    const encoder = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const send = (event: CloneJobEvent) => {
+          try {
+            controller.enqueue(encoder.encode(
+              `id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event.data)}\n\n`,
+            ));
+            if (event.type === "result") controller.close();
+          } catch {
+            unsubscribe?.();
+          }
+        };
+        unsubscribe = cloneJobs.subscribe(
+          owner,
+          jobId,
+          Number.isFinite(afterEventId) ? afterEventId : 0,
+          send,
+        ) ?? undefined;
+      },
+      cancel() {
+        unsubscribe?.();
+      },
+    });
+    return new Response(body, {
+      headers: {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache, no-transform",
+        connection: "keep-alive",
+      },
+    });
   };
 
   return async (request: Request, server: HubServer): Promise<Response | undefined> => {
@@ -542,6 +597,16 @@ export function createHubFetchHandler(deps: HubDeps) {
     if (pathname === "/api/hub/browse" && request.method === "GET") {
       return browse(url);
     }
+    const cloneJobEvents = /^\/api\/hub\/clone-jobs\/([^/]+)\/events$/.exec(pathname);
+    if (cloneJobEvents && (request.method === "GET" || request.method === "HEAD")) {
+      const jobId = decodeURIComponent(cloneJobEvents[1]!);
+      if (request.method === "HEAD") {
+        return cloneJobs.has(session.user, jobId)
+          ? new Response(null, { status: 204 })
+          : json(404, { error: "clone job not found" });
+      }
+      return cloneEvents(request, session.user, jobId);
+    }
     // The device-session list: the signed-in user's active sessions, with
     // per-session revocation handles. Handles are id prefixes — never the
     // full id, which is a live credential the page has no business holding.
@@ -587,8 +652,30 @@ export function createHubFetchHandler(deps: HubDeps) {
       if (pathname === "/api/hub/workspaces") {
         return createWorkspace(request);
       }
-      if (pathname === "/api/hub/clone") {
-        return cloneWorkspace(request);
+      if (pathname === "/api/hub/clone-jobs") {
+        return createCloneJob(request, session.user);
+      }
+      const cloneJobAction = /^\/api\/hub\/clone-jobs\/([^/]+)\/(input|cancel)$/.exec(pathname);
+      if (cloneJobAction) {
+        const jobId = decodeURIComponent(cloneJobAction[1]!);
+        if (cloneJobAction[2] === "cancel") {
+          const result = await cloneJobs.cancel(session.user, jobId);
+          if (result === "not-found") return json(404, { error: "clone job not found" });
+          if (result === "cleanup-failed") return json(500, { error: "clone job cleanup failed; review the job output and workspace state" });
+          return json(200, { status: result });
+        }
+        let body: { input?: unknown };
+        try {
+          body = (await request.json()) as typeof body;
+        } catch {
+          return json(400, { error: "invalid JSON body" });
+        }
+        if (typeof body.input !== "string") return json(400, { error: "a terminal response is required" });
+        const result = cloneJobs.input(session.user, jobId, body.input);
+        if (result === "not-found") return json(404, { error: "clone job not found" });
+        if (result === "inactive") return json(409, { error: "clone job is not accepting input" });
+        if (result === "too-large") return json(413, { error: "terminal response is too large" });
+        return json(200, { accepted: true });
       }
       const action = /^\/api\/hub\/sessions\/([^/]+)\/(start|stop)$/.exec(pathname);
       if (action) {
@@ -638,8 +725,13 @@ export function createHubFetchHandler(deps: HubDeps) {
 // Starts the hub's Bun.serve with TLS when configured and the WebSocket
 // bridge handlers wired.
 export function startHubServer(deps: HubDeps) {
-  const handler = createHubFetchHandler(deps);
-  return Bun.serve<BridgeData>({
+  const cloneJobs = deps.cloneJobs ?? new CloneJobManager({
+    processFactory: new CloneProcessAdapter(),
+    registry: deps.registry,
+    sessions: deps.sessions,
+  });
+  const handler = createHubFetchHandler({ ...deps, cloneJobs });
+  const server = Bun.serve<BridgeData>({
     hostname: deps.config.host,
     port: deps.config.port,
     // SSE and long-lived terminal sockets must never be idle-reaped.
@@ -660,4 +752,5 @@ export function startHubServer(deps: HubDeps) {
       },
     },
   });
+  return Object.assign(server, { cloneJobs });
 }
