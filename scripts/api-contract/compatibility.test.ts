@@ -83,6 +83,22 @@ describe("API compatibility policy", () => {
     ]));
   });
 
+  test("detects changes to inherited authentication requirements", () => {
+    const paths = { "/api/hub/state": { get: operation("Hub") } };
+    const base = { security: [{ hubBearer: [] }], paths };
+    const proposed = { security: [{ hubCookie: [] }], paths };
+    expect(compareContracts(base, proposed).breaking.hub).toContain(
+      "GET /api/hub/state: changed authentication requirements",
+    );
+  });
+
+  test("preserves an operation-level authentication override", () => {
+    const paths = { "/api/hub/state": { get: { ...operation("Hub"), security: [] } } };
+    const base = { security: [{ hubBearer: [] }], paths };
+    const proposed = { security: [{ hubCookie: [] }], paths };
+    expect(compareContracts(base, proposed).changedDomains).toEqual([]);
+  });
+
   test("attributes existing streaming protocol changes to their domain", () => {
     const base = { channels: { state: { path: "/s/{workspaceId}/api/events", events: [{ name: "state" }] } } };
     const proposed = { channels: { state: { path: "/s/{workspaceId}/api/events", events: [{ name: "snapshot" }] } } };

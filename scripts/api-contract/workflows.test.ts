@@ -37,9 +37,14 @@ describe("API publication workflows", () => {
     expect(assemble.run).not.toContain("--mode=release");
   });
 
-  test("only tagged publication advances latest and persists history", async () => {
+  test("only a successful Release run advances latest from its exact commit", async () => {
     const document = await workflow("api-release.yml");
-    expect(document.on.push.tags).toEqual(["v*"]);
+    expect(document.on.workflow_run).toEqual({ workflows: ["Release"], types: ["completed"] });
+    expect(document.jobs.bundle.if).toBe("github.event.workflow_run.conclusion == 'success'");
+    expect(document.jobs.bundle.steps.find((step: any) => step.name === "Check out tagged source").with.ref)
+      .toBe("${{ github.event.workflow_run.head_sha }}");
+    expect(document.jobs.bundle.steps.find((step: any) => step.name === "Create immutable release bundle").run)
+      .toContain("Release $tag is not published");
     const steps = document.jobs.assemble.steps as any[];
     expect(steps.find(step => step.name === "Assemble immutable revision and latest").run).toContain("--mode=release");
     expect(steps.find(step => step.name === "Persist release publication history").run).toContain("HEAD:pages-history");

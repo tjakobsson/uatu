@@ -20,6 +20,7 @@ function domainFor(path: string, operation: JsonObject): ApiDomain {
 
 function operations(contract: JsonObject): Map<string, { domain: ApiDomain; value: JsonObject }> {
   const result = new Map<string, { domain: ApiDomain; value: JsonObject }>();
+  const inheritedSecurity = contract.security;
   for (const [path, pathItem] of Object.entries(object(contract.paths))) {
     const inheritedParameters = Array.isArray(object(pathItem).parameters)
       ? object(pathItem).parameters as unknown[]
@@ -28,7 +29,11 @@ function operations(contract: JsonObject): Map<string, { domain: ApiDomain; valu
       if (!new Set(["get", "post", "put", "patch", "delete", "head", "options"]).has(method)) continue;
       const operationValue = object(value);
       const operationParameters = Array.isArray(operationValue.parameters) ? operationValue.parameters : [];
-      const operation = { ...operationValue, parameters: [...inheritedParameters, ...operationParameters] };
+      const operation = {
+        ...operationValue,
+        parameters: [...inheritedParameters, ...operationParameters],
+        security: Object.hasOwn(operationValue, "security") ? operationValue.security : inheritedSecurity,
+      };
       result.set(`${method.toUpperCase()} ${path}`, { domain: domainFor(path, operation), value: operation });
     }
   }

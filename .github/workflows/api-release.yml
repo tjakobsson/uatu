@@ -1,8 +1,9 @@
 name: Publish released API contract
 
 on:
-  push:
-    tags: ["v*"]
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
 
 permissions: {}
 
@@ -12,13 +13,18 @@ concurrency:
 
 jobs:
   bundle:
+    if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      release-tag: ${{ steps.release.outputs.tag }}
     permissions:
       contents: write
     steps:
       - name: Check out tagged source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -32,25 +38,39 @@ jobs:
           bun test tests/contracts scripts/api-contract src/hub/hub.integration.test.ts
       - name: Build tagged Pages site
         env:
-          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_SHA: ${{ github.event.workflow_run.head_sha }}
         run: bunx astro build --root site
       - name: Create immutable release bundle
+        id: release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          published_at=$(gh release view "$GITHUB_REF_NAME" --json publishedAt --jq .publishedAt)
-          product_version=${GITHUB_REF_NAME#v}
-          bun run scripts/api-contract/release-bundle.ts api api-release-bundle "${{ github.sha }}" "$published_at" "$product_version"
+          product_version=$(jq -r .version package.json)
+          tag="v$product_version"
+          release=$(gh release view "$tag" --json isDraft,publishedAt)
+          if [ "$(jq -r .isDraft <<<"$release")" != false ]; then
+            echo "::error::Release $tag is not published" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin "refs/tags/$tag:refs/tags/$tag"
+          if [ "$(git rev-parse "$tag^{commit}")" != "${{ github.event.workflow_run.head_sha }}" ]; then
+            echo "::error::Release tag $tag does not identify the triggering Release workflow commit" >&2
+            exit 1
+          fi
+          published_at=$(jq -r .publishedAt <<<"$release")
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          bun run scripts/api-contract/release-bundle.ts api api-release-bundle "${{ github.event.workflow_run.head_sha }}" "$published_at" "$product_version"
       - name: Attach contract bundle to release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tar -czf "uatu-api-contract-${GITHUB_REF_NAME}.tar.gz" -C api-release-bundle .
-          gh release upload "$GITHUB_REF_NAME" "uatu-api-contract-${GITHUB_REF_NAME}.tar.gz" --clobber
+          tag="${{ steps.release.outputs.tag }}"
+          tar -czf "uatu-api-contract-$tag.tar.gz" -C api-release-bundle .
+          gh release upload "$tag" "uatu-api-contract-$tag.tar.gz" --clobber
       - name: Upload validated release inputs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: api-release-${{ github.sha }}
+          name: api-release-${{ github.event.workflow_run.head_sha }}
           path: |
             api-release-bundle
             site/dist
@@ -66,6 +86,8 @@ jobs:
     steps:
       - name: Check out tagged source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
       - name: Check out publication history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -78,16 +100,16 @@ jobs:
       - name: Download validated release inputs
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.0
         with:
-          name: api-release-${{ github.sha }}
+          name: api-release-${{ github.event.workflow_run.head_sha }}
           path: validated-release
       - name: Assemble immutable revision and latest
-        run: bun run scripts/api-contract/publish.ts --mode=release --site=validated-release/site/dist --history=pages-history --output=pages-output --bundle=validated-release/api-release-bundle --commit=${{ github.sha }}
+        run: bun run scripts/api-contract/publish.ts --mode=release --site=validated-release/site/dist --history=pages-history --output=pages-output --bundle=validated-release/api-release-bundle --commit=${{ github.event.workflow_run.head_sha }}
       - name: Persist release publication history
         run: |
           rsync -a --delete --exclude=.git pages-output/ pages-history/
           git -C pages-history add --all
           if ! git -C pages-history diff --cached --quiet; then
-            git -C pages-history -c user.name=github-actions -c user.email=41898282+github-actions[bot]@users.noreply.github.com commit -m "docs(api): publish ${GITHUB_REF_NAME} contract"
+            git -C pages-history -c user.name=github-actions -c user.email=41898282+github-actions[bot]@users.noreply.github.com commit -m "docs(api): publish ${{ needs.bundle.outputs.release-tag }} contract"
             git -C pages-history push origin HEAD:pages-history
           fi
       - name: Configure Pages
