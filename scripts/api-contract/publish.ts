@@ -84,12 +84,14 @@ async function verifyBundleChecksums(bundle: string): Promise<void> {
 
 function revisionId(values: Record<ApiDomain, number>, productVersion: unknown): string {
   // Full SemVer: prerelease and build-metadata suffixes may appear together
-  // (1.2.3-rc.1+build.5). Build metadata is excluded from the directory name:
-  // SemVer ignores it for precedence, and "+" is hostile in URLs.
+  // (1.2.3-rc.1+build.5). Build metadata stays part of the identity — two
+  // releases differing only in build metadata are distinct publications and
+  // must not collide on one immutable directory — but "+" is hostile in
+  // URLs, so it is encoded as "_".
   if (typeof productVersion !== "string" || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(productVersion)) {
     throw new Error("release metadata must contain a valid productVersion");
   }
-  return `hub-${values.hub}_workspace-${values.workspace}_v${productVersion.split("+", 1)[0]}`;
+  return `hub-${values.hub}_workspace-${values.workspace}_v${productVersion.replace("+", "_")}`;
 }
 
 export type PublishOptions = {

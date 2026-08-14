@@ -116,15 +116,25 @@ describe("contract publication dry runs", () => {
     await publish({ mode: "release", site, history: beta1Output, output: path.join(root, "beta2-output"), bundle: beta2Bundle, commit: beta2Commit });
   });
 
-  test("a prerelease with build metadata publishes; the directory drops the build suffix", async () => {
+  test("build metadata stays in the revision identity, URL-safe", async () => {
     const { root, site, history, source } = await fixture();
     const bundle = path.join(root, "bundle");
     const output = path.join(root, "output");
     await createReleaseBundle(source, bundle, commit, "2026-08-14T00:00:00.000Z", "0.7.0-rc.1+build.5");
     await publish({ mode: "release", site, history, output, bundle, commit });
-    expect(await Bun.file(path.join(output, "api", "revisions", "hub-2_workspace-1_v0.7.0-rc.1", "contract.json")).exists()).toBe(true);
+    expect(await Bun.file(path.join(output, "api", "revisions", "hub-2_workspace-1_v0.7.0-rc.1_build.5", "contract.json")).exists()).toBe(true);
     const metadata = JSON.parse(await readFile(path.join(output, "api", "latest", "contract.json"), "utf8"));
     expect(metadata.productVersion).toBe("0.7.0-rc.1+build.5");
+
+    // A sibling release differing only in build metadata is a distinct
+    // publication: it must get its own immutable directory, not collide.
+    const siblingCommit = "abcdef0123456789abcdef0123456789abcdef01";
+    const siblingBundle = path.join(root, "sibling-bundle");
+    const siblingOutput = path.join(root, "sibling-output");
+    await createReleaseBundle(source, siblingBundle, siblingCommit, "2026-08-14T01:00:00.000Z", "0.7.0-rc.1+build.6");
+    await publish({ mode: "release", site, history: output, output: siblingOutput, bundle: siblingBundle, commit: siblingCommit });
+    expect(await Bun.file(path.join(siblingOutput, "api", "revisions", "hub-2_workspace-1_v0.7.0-rc.1_build.5", "contract.json")).exists()).toBe(true);
+    expect(await Bun.file(path.join(siblingOutput, "api", "revisions", "hub-2_workspace-1_v0.7.0-rc.1_build.6", "contract.json")).exists()).toBe(true);
   });
 
   test("unchanged API revisions can publish a later product release", async () => {
