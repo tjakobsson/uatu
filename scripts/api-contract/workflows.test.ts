@@ -51,21 +51,30 @@ describe("repository workflows", () => {
     expect(offenders).toEqual([]);
   });
 
-  test("no workflow checks out a ref derived from event payload data", async () => {
-    // Scorecard's Dangerous-Workflow check is syntactic: it flags any
-    // actions/checkout `ref:` naming github.event.* under workflow_run or
-    // pull_request_target, and it cannot see the `if:` guards that make such
-    // a checkout safe. The publication pipeline used to trip it three times.
-    // Privileged work now runs on trusted triggers against a fixed ref, so
-    // the pattern is structurally absent rather than argued away.
+  test("no workflow checks out a ref derived from event payload data under a privileged trigger", async () => {
+    // Scorecard's Dangerous-Workflow check is syntactic: it flags an
+    // actions/checkout `ref:` naming github.event.* in a workflow carrying
+    // workflow_run or pull_request_target, and it cannot see the `if:` guards
+    // that make such a checkout safe. The publication pipeline used to trip it
+    // three times.
+    //
+    // Only the COMBINATION is forbidden, matching both Scorecard and the
+    // security-posture requirement. Each half alone is legitimate: a
+    // workflow_run workflow that merely inspects a completed run without
+    // checking out its ref is the recommended safe pattern, and an
+    // event-derived ref under a trusted trigger (github.event.after on a
+    // push) resolves to a commit that already passed the branch gate.
+    // Failing either half independently would reject correct workflows and
+    // teach the next maintainer to weaken this test.
+    const privileged = ["workflow_run", "pull_request_target"];
     const offenders: string[] = [];
     for (const [name, document] of await allWorkflows()) {
-      for (const trigger of Object.keys(document.on ?? {})) {
-        if (trigger === "workflow_run" || trigger === "pull_request_target") offenders.push(`${name}: on.${trigger}`);
-      }
+      const triggers = Object.keys(document.on ?? {}).filter(trigger => privileged.includes(trigger));
+      if (triggers.length === 0) continue;
       for (const { job, step } of steps(document)) {
         if (!step.uses?.startsWith("actions/checkout@")) continue;
-        if (String(step.with?.ref ?? "").includes("github.event.")) offenders.push(`${name}/${job}: ref ${step.with.ref}`);
+        const ref = String(step.with?.ref ?? "");
+        if (ref.includes("github.event.")) offenders.push(`${name}/${job}: on.${triggers.join("+")} checks out ${ref}`);
       }
     }
     expect(offenders).toEqual([]);
