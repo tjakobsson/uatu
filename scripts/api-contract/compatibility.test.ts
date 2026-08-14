@@ -97,10 +97,27 @@ describe("API compatibility policy", () => {
       } } },
       components: { schemas: { CloneJobInput: { type: "object", required: ["input"], properties: { input: { type: "string" } }, additionalProperties: false } } },
     });
+    // Adding a constraint sibling turns the resolved shape into an allOf
+    // conjunction, so the break reports as a structural change rather than
+    // naming the keyword — what matters is that it is breaking at all.
     const narrowed = compareContracts(contract(undefined), contract(4096));
-    expect(narrowed.breaking.hub.some(item => item.includes("maxLength"))).toBe(true);
+    expect(narrowed.breaking.hub.length).toBeGreaterThan(0);
     const unchanged = compareContracts(contract(4096), contract(4096));
     expect(unchanged.breaking.hub).toEqual([]);
+  });
+
+  test("a sibling keyword cannot shadow a change to the same keyword in the $ref target", () => {
+    // Both constraints apply (conjunction); a merge would resolve to the
+    // sibling's maxLength on both sides and hide the component tightening.
+    const contract = (targetMax: number) => ({
+      paths: { "/api/hub/clone-jobs": { post: {
+        ...operation("Hub"),
+        requestBody: { content: { "application/json": { schema: { $ref: "#/components/schemas/Input", maxLength: 20 } } } },
+      } } },
+      components: { schemas: { Input: { type: "string", maxLength: targetMax } } },
+    });
+    const result = compareContracts(contract(10), contract(5));
+    expect(result.breaking.hub.some(item => item.includes("maxLength"))).toBe(true);
   });
 
   test("still breaks on removed or newly required referenced properties", () => {

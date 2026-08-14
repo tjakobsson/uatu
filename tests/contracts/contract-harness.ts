@@ -27,11 +27,14 @@ function pointer(root: unknown, ref: string): unknown {
 function schemaError(root: unknown, schemaValue: unknown, value: unknown, at: string): string | undefined {
   const schema = object(schemaValue, `${at} schema`);
   if (typeof schema.$ref === "string") {
-    // OpenAPI 3.1 allows constraints beside $ref (both apply); merge them
-    // over the resolved target so sibling keywords still validate.
-    const target = object(pointer(root, schema.$ref), `reference ${schema.$ref}`);
+    // OpenAPI 3.1 allows constraints beside $ref and BOTH apply: validate
+    // the target and the siblings independently (a merge would let a looser
+    // sibling shadow the target's same-named constraint).
+    const target = pointer(root, schema.$ref);
+    const targetError = schemaError(root, target, value, at);
+    if (targetError) return targetError;
     const { $ref: _ignored, ...siblings } = schema;
-    return schemaError(root, Object.keys(siblings).length === 0 ? target : { ...target, ...siblings }, value, at);
+    return Object.keys(siblings).length === 0 ? undefined : schemaError(root, siblings, value, at);
   }
   if (schema.nullable === true && value === null) return undefined;
   if (Array.isArray(schema.oneOf) || Array.isArray(schema.anyOf)) {

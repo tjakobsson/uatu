@@ -89,6 +89,21 @@ describe("black-box HTTP contract validation", () => {
     })).rejects.toThrow("longer than 4 characters");
   });
 
+  test("a looser sibling cannot shadow the $ref target's own constraint", async () => {
+    const contract = {
+      paths: { "/note": { get: { operationId: "getNote", responses: { "200": { content: { "application/json": { schema: {
+        $ref: "#/components/schemas/ShortNote",
+        maxLength: 10,
+      } } } } } } } },
+      components: { schemas: { ShortNote: { type: "string", maxLength: 4 } } },
+    };
+    await expect(assertOpenApiResponse(contract, {
+      method: "GET",
+      path: "/note",
+      response: Response.json("sixish"),
+    })).rejects.toThrow("longer than 4 characters");
+  });
+
   test("enforces documented numeric and string constraints", async () => {
     const constrained = {
       paths: { "/value": { get: { operationId: "getValue", responses: { "200": { content: { "application/json": { schema: {

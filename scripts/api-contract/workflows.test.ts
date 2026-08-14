@@ -59,6 +59,22 @@ describe("API publication workflows", () => {
       .toContain("HEAD:pages-history");
   });
 
+  test("a release deploy cannot roll a newer edge deployment back", async () => {
+    // The release assembles the newest successful main CI's validated site
+    // (verified to name that run's commit) instead of unconditionally
+    // rebuilding everything from the tagged SHA, falling back to the
+    // tag-built site only when the newer artifact is unavailable.
+    const document = await workflow("api-release.yml");
+    const steps = document.jobs.assemble.steps as any[];
+    const select = steps.find(step => step.name === "Prefer the newest validated main site");
+    expect(select.run).toContain("pages-edge-$head_sha");
+    expect(select.run).toContain("falling back to the tag-built site");
+    expect(select.run).toContain("sourceCommit");
+    const assemble = steps.find(step => step.name === "Assemble immutable revision and latest");
+    expect(assemble.run).toContain("--site=${{ steps.site.outputs.dir }}");
+    expect(steps.indexOf(select)).toBeLessThan(steps.indexOf(assemble));
+  });
+
   test("history writes and the edge staleness guard both hold the deploy lock", async () => {
     // Every pages-history write must happen inside the github-pages
     // concurrency lock, and BEFORE deploy-pages (push-first self-heals a

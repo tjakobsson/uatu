@@ -461,15 +461,27 @@ being where the searched text always exists.
 
 ### Break the client/server API contract
 
-1. If a change renames/reshapes state-payload fields, changes endpoint
-   semantics, or otherwise breaks clients built from an older commit, bump
-   `API_REVISION` in `src/shared/version.ts` in the same change.
-2. That's the whole mechanism: the client-freshness handshake
-   (`src/shell/freshness.ts`) compares the server's `build.apiRevision`
-   (riding every state payload) against the client's embedded value, next to
-   the version/commit comparison that catches every build mismatch anyway.
-   `API_REVISION` only adds intent — "this break was known" — and lets
-   future native clients refuse to run against an incompatible server.
+Two separate revision families live in `src/shared/version.ts`; bump the
+one that matches what actually broke.
+
+1. **Bundled web client vs. its own server** — if a change renames/reshapes
+   state-payload fields or endpoint semantics the shipped SPA depends on,
+   bump `BUNDLED_WEB_REVISION` in the same change. The client-freshness
+   handshake (`src/shell/freshness.ts`) compares the server's
+   `build.bundledWebRevision` (riding every state payload) against the
+   client's embedded value, next to the version/commit comparison that
+   catches every build mismatch anyway. The revision only adds intent —
+   "this break was known" — and forces the stale PWA bundle to reload.
+2. **The public wire contract** — if the break is visible to independent
+   clients (anything documented in `api/openapi.yaml` / `api/streaming.yaml`),
+   bump `HUB_API_REVISION` and/or `WORKSPACE_API_REVISION` for the affected
+   domain instead, mirror the pair in `api/contract.json` and the OpenAPI
+   `x-uatu-revisions` block, and add a changelog entry with migration
+   guidance to `api/CHANGELOG.md` — CI's compatibility gate
+   (`scripts/api-contract/compatibility.ts`) rejects breaking contract
+   diffs that arrive without the bump and the guidance.
+   A product or bundled-web change alone is NOT a public API break; the
+   families move independently.
 
 ### Add an e2e test
 

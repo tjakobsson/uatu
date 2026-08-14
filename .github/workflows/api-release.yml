@@ -120,8 +120,38 @@ jobs:
         with:
           name: api-release-${{ github.event.workflow_run.head_sha }}
           path: validated-release
+      - name: Prefer the newest validated main site
+        id: site
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # A release deploys the FULL site. If main advanced past the tag and
+        # its edge already deployed, shipping the tag-built site would roll
+        # /api/edge and the documentation pages back with nothing scheduled
+        # to restore them. Prefer the newest successful main CI run's
+        # validated site artifact (verifying it names that run's commit) and
+        # fall back to the tag-built site when it is unavailable or stale.
+        run: |
+          site_dir=validated-release/site/dist
+          run=$(gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?branch=main&status=success&per_page=1" --jq '.workflow_runs[0] // empty | "\(.id) \(.head_sha)"')
+          if [ -n "$run" ]; then
+            run_id=${run%% *}
+            head_sha=${run##* }
+            if [ "$head_sha" != "${{ github.event.workflow_run.head_sha }}" ]; then
+              if gh run download "$run_id" --name "pages-edge-$head_sha" --dir newer-edge --repo "${{ github.repository }}"; then
+                edge_commit=$(jq -r '.sourceCommit // empty' newer-edge/api/edge/contract.json)
+                if [ "$edge_commit" = "$head_sha" ]; then
+                  site_dir=newer-edge
+                else
+                  echo "newer edge artifact names $edge_commit, not $head_sha; falling back to the tag-built site"
+                fi
+              else
+                echo "newer edge artifact unavailable; falling back to the tag-built site"
+              fi
+            fi
+          fi
+          echo "dir=$site_dir" >> "$GITHUB_OUTPUT"
       - name: Assemble immutable revision and latest
-        run: bun run scripts/api-contract/publish.ts --mode=release --site=validated-release/site/dist --history=pages-history --output=pages-output --bundle=validated-release/api-release-bundle --commit=${{ github.event.workflow_run.head_sha }}
+        run: bun run scripts/api-contract/publish.ts --mode=release --site=${{ steps.site.outputs.dir }} --history=pages-history --output=pages-output --bundle=validated-release/api-release-bundle --commit=${{ github.event.workflow_run.head_sha }}
       - name: Upload assembled publication
         # The deploy job persists this to pages-history while it holds the
         # github-pages lock; assembling and persisting in one unserialized job

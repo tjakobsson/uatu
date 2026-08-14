@@ -97,16 +97,19 @@ function resolveRefs(value: unknown, document: JsonObject, external: JsonObject,
     const nested = new Set(stack);
     nested.add(key);
     const resolved = resolveRefs(target, nextDocument, external, nested);
-    // OpenAPI 3.1 allows constraints beside $ref (both apply). Merge them
-    // over the resolved target so a sibling change — adding maxLength next
-    // to an unchanged $ref — is visible to the comparison.
+    // OpenAPI 3.1 allows constraints beside $ref, and BOTH apply. A plain
+    // spread would let a sibling shadow the target's same-named keyword
+    // (sibling maxLength: 20 hiding the component tightening 10 -> 5), so
+    // non-annotation siblings are kept as an explicit allOf conjunction.
+    // Annotation-only siblings merge; stripAnnotations removes them anyway.
     const { $ref: _ignored, ...siblings } = record;
     if (Object.keys(siblings).length === 0) return resolved;
     const resolvedSiblings = resolveRefs(siblings, document, external, stack) as JsonObject;
-    if (resolved && typeof resolved === "object" && !Array.isArray(resolved)) {
+    if (!resolved || typeof resolved !== "object" || Array.isArray(resolved)) return resolved;
+    if (Object.keys(siblings).every(key => ANNOTATION_KEYS.has(key))) {
       return { ...(resolved as JsonObject), ...resolvedSiblings };
     }
-    return resolved;
+    return { allOf: [resolved, resolvedSiblings] };
   }
   const result: JsonObject = {};
   for (const [key, item] of Object.entries(record)) {
