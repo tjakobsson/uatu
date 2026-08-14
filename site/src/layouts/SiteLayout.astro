@@ -34,12 +34,27 @@ const fontFace = `@font-face { font-family: "Hack Uatu"; src: url("${sitePath("f
         <UatuLogo />
         <span>UatuCode</span>
       </a>
-      <nav aria-label="Primary navigation">
+      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" aria-label="Menu">
+        <span></span><span></span><span></span>
+      </button>
+      <nav id="site-nav" aria-label="Primary navigation">
         <a href={sitePath("docs/guides/")}>Guides</a>
         <a href={sitePath("docs/api/")}>API reference</a>
         <a class="nav-raw" href={sitePath("api/edge/openapi.yaml")}>Raw OpenAPI</a>
       </nav>
     </header>
+    <script is:inline>
+      (() => {
+        const header = document.querySelector(".site-header");
+        const toggle = document.querySelector(".nav-toggle");
+        if (!header || !toggle) return;
+        toggle.addEventListener("click", () => {
+          const open = toggle.getAttribute("aria-expanded") === "true";
+          toggle.setAttribute("aria-expanded", String(!open));
+          header.classList.toggle("nav-open", !open);
+        });
+      })();
+    </script>
     <main><slot /></main>
     <footer>
       <span>Documentation and API contracts.</span>
