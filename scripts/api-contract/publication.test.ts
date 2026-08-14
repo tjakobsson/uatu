@@ -116,6 +116,17 @@ describe("contract publication dry runs", () => {
     await publish({ mode: "release", site, history: beta1Output, output: path.join(root, "beta2-output"), bundle: beta2Bundle, commit: beta2Commit });
   });
 
+  test("a prerelease with build metadata publishes; the directory drops the build suffix", async () => {
+    const { root, site, history, source } = await fixture();
+    const bundle = path.join(root, "bundle");
+    const output = path.join(root, "output");
+    await createReleaseBundle(source, bundle, commit, "2026-08-14T00:00:00.000Z", "0.7.0-rc.1+build.5");
+    await publish({ mode: "release", site, history, output, bundle, commit });
+    expect(await Bun.file(path.join(output, "api", "revisions", "hub-2_workspace-1_v0.7.0-rc.1", "contract.json")).exists()).toBe(true);
+    const metadata = JSON.parse(await readFile(path.join(output, "api", "latest", "contract.json"), "utf8"));
+    expect(metadata.productVersion).toBe("0.7.0-rc.1+build.5");
+  });
+
   test("unchanged API revisions can publish a later product release", async () => {
     const { root, site, history, source } = await fixture();
     const firstBundle = path.join(root, "first-bundle");

@@ -83,10 +83,13 @@ async function verifyBundleChecksums(bundle: string): Promise<void> {
 }
 
 function revisionId(values: Record<ApiDomain, number>, productVersion: unknown): string {
-  if (typeof productVersion !== "string" || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(productVersion)) {
+  // Full SemVer: prerelease and build-metadata suffixes may appear together
+  // (1.2.3-rc.1+build.5). Build metadata is excluded from the directory name:
+  // SemVer ignores it for precedence, and "+" is hostile in URLs.
+  if (typeof productVersion !== "string" || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(productVersion)) {
     throw new Error("release metadata must contain a valid productVersion");
   }
-  return `hub-${values.hub}_workspace-${values.workspace}_v${productVersion}`;
+  return `hub-${values.hub}_workspace-${values.workspace}_v${productVersion.split("+", 1)[0]}`;
 }
 
 export type PublishOptions = {
