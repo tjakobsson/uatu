@@ -54,6 +54,10 @@ describe("static API site", () => {
     expect(html).toContain("Responses");
     expect(html).toContain('id="schema-NativeLoginRequest"');
     expect(html).toContain('&quot;required&quot;: [');
+    // Multiword tag labels must survive as one data-tags token (pipe
+    // delimited), or selecting their filter button matches nothing.
+    expect(html).toContain('data-tags="Hub authentication"');
+    expect(html).not.toMatch(/data-tags="[^"]*Hub authentication [^"|]/);
   });
 
   test("uses the configured Pages base for local absolute URLs", async () => {

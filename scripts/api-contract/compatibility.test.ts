@@ -241,6 +241,22 @@ describe("API compatibility policy", () => {
     ]);
   });
 
+  test("an operation-level parameter override replaces the inherited one", () => {
+    // OpenAPI merge semantics: same (name, in) at operation level replaces
+    // the path-level entry. Concatenating both made an unchanged contract
+    // compare against itself as breaking.
+    const contract = () => ({ paths: { "/s/{workspaceId}/api/state": {
+      parameters: [{ name: "workspaceId", in: "path", required: true, schema: { type: "string" } }],
+      get: {
+        ...operation("Workspace"),
+        parameters: [{ name: "workspaceId", in: "path", required: true, schema: { type: "string", pattern: "^[a-z]+$" } }],
+      },
+    } } });
+    const result = compareContracts(contract(), contract());
+    expect(result.breaking.workspace).toEqual([]);
+    expect(result.changedDomains).toEqual([]);
+  });
+
   test("detects changes to path-level parameters", () => {
     const base = { paths: { "/s/{workspaceId}/api/state": {
       parameters: [{ name: "workspaceId", in: "path", required: true, schema: { type: "string" } }],
