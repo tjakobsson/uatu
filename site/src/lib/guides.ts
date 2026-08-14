@@ -31,7 +31,7 @@ function inlineMarkdown(value: string): string {
   return escapeHtml(value)
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, label, href) => {
-      const resolved = href.startsWith("../") ? sitePath(`api/edge/${href.slice(3)}`) : href;
+      const resolved = href.startsWith("../") ? sitePath(`api/${href.slice(3)}`) : href;
       return `<a href="${escapeHtml(resolved)}">${label}</a>`;
     });
 }

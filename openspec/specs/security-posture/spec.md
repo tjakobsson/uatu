@@ -16,7 +16,7 @@ The repository SHALL provide a root `SECURITY.md` that states which versions rec
 - **THEN** it finds a security policy file at a standard location
 
 ### Requirement: The main branch is protected by an enforced ruleset
-The repository SHALL enforce a ruleset on `main` that requires changes to arrive via pull request, requires the CI `validate` status check to pass before merging, and blocks force pushes and branch deletion. The ruleset MUST NOT include standing bypass actors, and required approving reviews MAY remain at zero while the project has a single maintainer.
+The repository SHALL enforce a ruleset on `main` that requires changes to arrive via pull request, requires every status check that gates a published artifact to pass before merging, and blocks force pushes and branch deletion. The required checks MUST include the CI `validate` and `validate-specs` checks and the contract checks `contract-fast` and `contract-integration`, so a commit whose API contract fails structural, compatibility, or integration validation cannot reach `main` and therefore cannot be published. The ruleset MUST additionally require branches to be up to date before merging (a strict required-status-checks policy), because publication builds `main` without waiting for `main`'s own check run: only an up-to-date branch guarantees that the tree those checks passed against is the tree the squash commit lands. The ruleset MUST NOT include standing bypass actors, and required approving reviews MAY remain at zero while the project has a single maintainer.
 
 #### Scenario: A direct push to main is rejected
 - **WHEN** any actor attempts to push a commit directly to `main`
@@ -25,6 +25,16 @@ The repository SHALL enforce a ruleset on `main` that requires changes to arrive
 #### Scenario: A pull request cannot merge with failing validation
 - **WHEN** a pull request targeting `main` has a failing or missing `validate` check
 - **THEN** the merge is blocked until the check passes
+
+#### Scenario: A backward-incompatible contract change cannot reach main
+- **WHEN** a pull request targeting `main` fails the `contract-fast` compatibility gate because it breaks the published contract without the required revision increment and changelog migration entry
+- **THEN** the merge is blocked until the check passes
+- **AND** no publication of that contract can occur, because publication builds from `main`
+
+#### Scenario: Main advances while a contract pull request is open
+- **WHEN** another pull request merges into `main` after an open contract pull request's checks have already passed
+- **THEN** the open pull request cannot merge until it is brought up to date and its required checks run again against the new base
+- **AND** the commit that lands on `main` carries the same tree those checks passed against, so publishing it cannot ship contract content that was never validated
 
 #### Scenario: Release automation continues to work
 - **WHEN** Release Please merges its release pull request and the release workflow pushes a version tag
@@ -68,6 +78,22 @@ Every GitHub Actions workflow SHALL declare an explicit workflow-level `permissi
 #### Scenario: A future job defaults to no permissions
 - **WHEN** a new job is added to an existing workflow without its own `permissions` block
 - **THEN** it inherits the workflow-level grant of none (or read-only) rather than any write scope
+
+### Requirement: Workflows do not check out event-derived refs under privileged triggers
+The repository SHALL NOT define a GitHub Actions workflow that checks out a Git ref taken from event payload data — such as `github.event.workflow_run.head_sha`, `github.event.workflow_run.head_branch`, or `github.event.pull_request.head.sha` — under the `workflow_run` or `pull_request_target` triggers. Work that needs elevated permissions after another workflow's validation MUST instead run as a job inside the workflow that produced the validation, or on a trusted trigger that checks out a fixed ref. Job-level `if` guards on the originating repository or branch are not a substitute: they are invisible to external supply-chain analysis, so a guarded checkout still reports as an untrusted code checkout.
+
+#### Scenario: Automation needs elevated permissions after validation
+- **WHEN** a workflow needs `pages: write`, `contents: write`, or another write scope to act on validated output
+- **THEN** it runs on a trusted trigger such as `push`, `release`, or `workflow_dispatch`, or as a gated job within the validating workflow
+- **AND** its checkout resolves a fixed ref rather than one read from the event payload
+
+#### Scenario: Supply-chain analysis measures dangerous workflow patterns
+- **WHEN** OpenSSF Scorecard analyses the repository's workflows
+- **THEN** its `Dangerous-Workflow` check reports no untrusted code checkout finding
+
+#### Scenario: A reintroduced privilege hop is caught before merge
+- **WHEN** a change adds a workflow that checks out an event-derived ref under `workflow_run` or `pull_request_target`
+- **THEN** the repository's workflow shape tests fail
 
 ### Requirement: Input-handling code is property-based tested
 The repository SHALL include property-based tests, using the `fast-check` library under the standard unit-test runner, for units that parse, transform, or emit untrusted input: HTML escaping, Markdown rendering, Mermaid sanitization, and the ignore engine. These tests MUST assert security invariants over generated arbitrary inputs — at minimum that rendering never throws, that escaped or sanitized output cannot carry script-capable markup (script elements, event-handler attributes, `javascript:` URLs), and that ignore decisions are deterministic. Property tests MUST run as part of the standard unit suite with bounded run counts so suite runtime stays practical.

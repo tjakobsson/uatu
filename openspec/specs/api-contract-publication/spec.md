@@ -33,7 +33,7 @@ UatuCode SHALL provide human-readable API documentation and concise guides for a
 - **THEN** it receives the minimum orientation needed to locate authoritative artifacts, compare revisions, and identify required client changes without scraping a JavaScript-rendered page
 
 ### Requirement: GitHub Pages publishes the product site and raw API artifacts
-The project SHALL publish a static UatuCode product and documentation site at the repository's standard GitHub Pages URL under `/uatu/`. The site SHALL work with that base path and SHALL expose static, directly fetchable raw artifacts at documented stable paths, including `llms.txt`, the agent guide, OpenAPI contract, streaming protocol contract, contract metadata, and API changelog. Essential agent-facing content MUST be available without executing client-side JavaScript or authenticating.
+The project SHALL publish a static UatuCode product and documentation site at the repository's standard GitHub Pages URL under `/uatu/`. The site SHALL work with that base path and SHALL expose static, directly fetchable raw artifacts at documented stable paths, including `llms.txt`, the agent guide, OpenAPI contract, streaming protocol contract, contract metadata, and API changelog. Raw contract artifacts SHALL be served directly under `/uatu/api/` with no channel path segment. Essential agent-facing content MUST be available without executing client-side JavaScript or authenticating.
 
 #### Scenario: User opens the repository Pages site
 - **WHEN** a user visits `https://tjakobsson.github.io/uatu/`
@@ -43,29 +43,35 @@ The project SHALL publish a static UatuCode product and documentation site at th
 - **WHEN** an agent fetches a documented OpenAPI, metadata, guide, or changelog URL directly
 - **THEN** it receives the artifact as static text or structured data without a repository clone, authentication, or browser execution
 
+#### Scenario: Agent fetches the OpenAPI contract by its documented path
+- **WHEN** an agent fetches `https://tjakobsson.github.io/uatu/api/openapi.yaml`
+- **THEN** it receives the OpenAPI 3.1 contract without a channel segment in the path
+
 #### Scenario: Agent discovers documentation from the site root
 - **WHEN** an agent fetches the site's `llms.txt`
 - **THEN** it finds direct links to the current contract metadata, agent guide, API contracts, and changelog
+- **AND** every link it lists resolves to a published artifact
 
-### Requirement: Published contracts have edge, latest, and immutable revision identities
-The published API SHALL distinguish the contract built from the current main branch as `edge`, the latest released contract as `latest`, and immutable numbered revision snapshots. Contract metadata SHALL identify the API revision, stability, product version when released, source commit, publication time, and links to its associated artifacts. Previously published numbered revisions MUST remain available and MUST NOT change after publication. Clients SHALL be able to pin a numbered revision and compare it with `latest` or `edge`.
+### Requirement: The published contract has a single identity derived from main
+The published API contract SHALL have exactly one identity, built from the current `main` branch, with no release-derived or historical channels. Contract metadata SHALL identify the API revision pair, stability, the source commit it was built from, and the publication time. The site MUST NOT retain published state between deployments: each deployment is the complete build output of one commit, so no publication depends on what a previous publication left behind.
 
-#### Scenario: Main changes without a release
-- **WHEN** a contract change merges to the main branch
-- **THEN** the `edge` publication identifies that source commit
-- **AND** `latest` continues to identify the most recently released contract
+#### Scenario: Main changes
+- **WHEN** a contract change merges to the main branch and the site is published
+- **THEN** the published contract metadata identifies that source commit
+- **AND** the published artifacts are the ones built from that commit
 
-#### Scenario: Release advances latest
-- **WHEN** a product release at version X.Y.Z publishes Hub revision N and workspace revision M
-- **THEN** `/api/revisions/hub-N_workspace-M_vX.Y.Z/` contains an immutable snapshot
-- **AND** `/api/latest/` resolves to equivalent artifacts and metadata for that revision pair
+#### Scenario: A product release is published
+- **WHEN** a `v*` release is tagged and published
+- **THEN** the site's published contract is unchanged by the release itself
+- **AND** no release-derived channel or snapshot directory is created
 
-#### Scenario: Client compares from a pinned revision
-- **WHEN** a client records one published revision pair and the latest metadata reports a newer pair
-- **THEN** the pinned pair's immutable contract and migration information remain available for compatibility analysis
+#### Scenario: Publishing twice from one commit
+- **WHEN** the publication runs twice for the same source commit
+- **THEN** both runs deploy equivalent artifacts
+- **AND** neither run depends on state carried over from an earlier publication
 
 ### Requirement: Contract changes are validated before publication
-Continuous integration SHALL validate contract syntax and references, compare supported route inventory with documented operations, validate representative running-server requests and responses against the contract, and report backward-incompatible contract differences against the appropriate baseline. A breaking change MUST increment the affected public API revision and include consumer-facing migration information in the API changelog. GitHub Pages publication MUST use the exact validated source commit and MUST NOT publish when required contract checks fail.
+Continuous integration SHALL validate contract syntax and references, compare supported route inventory with documented operations, validate representative running-server requests and responses against the contract, and report backward-incompatible contract differences against the appropriate baseline. A breaking change MUST increment the affected public API revision and include consumer-facing migration information in the API changelog. The publication workflow MUST itself validate the contract it builds and MUST verify the built site before deploying it, and MUST NOT deploy when either check fails.
 
 #### Scenario: Handler response drifts from its schema
 - **WHEN** a contract test observes a documented operation returning a status or body that violates its contract
@@ -82,3 +88,8 @@ Continuous integration SHALL validate contract syntax and references, compare su
 #### Scenario: Pages reflects validated sources
 - **WHEN** the Pages workflow deploys a successful build
 - **THEN** its contract metadata identifies the same source commit that passed contract validation
+
+#### Scenario: Publication validates what it deploys
+- **WHEN** the publication workflow runs for a commit whose contract fails validation or whose built site fails its link and content checks
+- **THEN** the workflow fails without deploying
+- **AND** the previously deployed site remains live

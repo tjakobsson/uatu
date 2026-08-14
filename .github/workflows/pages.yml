@@ -1,106 +1,72 @@
-name: Publish API edge to Pages
+name: Pages
+
+# Builds the UatuCode documentation site and deploys it to GitHub Pages on
+# every push to main. The workflow validates the contract it publishes and
+# checks the built site before deploying, so publication never depends on
+# another workflow's outcome, on a cross-run artifact handoff, or on state
+# left behind by an earlier publication.
 
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
+  push:
+    branches: [main]
+  workflow_dispatch:
 
 permissions: {}
 
-# Edge publications only need to serialize against themselves; the shared
-# github-pages group lives on the deploy job so a queued release publication
-# is never collapsed away by a later edge run.
+# Never cancel an in-flight deployment. Each run is the complete build output
+# of one commit, so cancelling loses no *state* — but it does lose a valid
+# deployment whenever the run that replaced it then fails validation, leaving
+# the site older than a commit that was ready to publish. Letting the active
+# run finish costs at most one extra deployment in a burst: GitHub keeps one
+# pending slot per group, so intermediate commits collapse and the newest
+# still wins.
 concurrency:
-  group: pages-edge
+  group: github-pages
   cancel-in-progress: false
 
 jobs:
-  assemble:
-    # head_branch alone is spoofable: a fork PR from a branch named `main`
-    # also carries head_branch == 'main'. Require the triggering run to be a
-    # push event from this repository before deploying anything it produced.
-    if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_branch == 'main' &&
-      github.event.workflow_run.head_repository.full_name == github.repository
+  deploy:
+    # Only ever publish main. A workflow_dispatch run checks out whichever ref
+    # the dispatcher selected, so without this guard a maintainer could deploy
+    # an unmerged branch straight to the public site — bypassing contract-fast
+    # and contract-integration, which are enforced at the merge layer and so
+    # have never run on that ref. Publication is safe by construction only
+    # while "what we build" and "what the ruleset gated" are the same commit.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
-      actions: read
+      pages: write
+      id-token: write
       contents: read
-    outputs:
-      history-sha: ${{ steps.history.outputs.sha }}
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Check out validated source
+      - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
           persist-credentials: false
-      - name: Check out publication history
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: pages-history
-          path: pages-history
-          persist-credentials: false
-      - name: Record history revision
-        id: history
-        run: echo "sha=$(git -C pages-history rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.3.14
-      - name: Download exact validated site artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.0
-        with:
-          name: pages-edge-${{ github.event.workflow_run.head_sha }}
-          path: validated-site
-          run-id: ${{ github.event.workflow_run.id }}
-          github-token: ${{ github.token }}
-      - name: Assemble edge without changing release history
-        run: bun run scripts/api-contract/publish.ts --mode=edge --site=validated-site --history=pages-history --output=pages-output --commit=${{ github.event.workflow_run.head_sha }}
-      - name: Configure Pages
-        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4.0.0
-        with:
-          path: pages-output
-
-  deploy:
-    needs: assemble
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    # Actual Pages deploys are serialized across this workflow and
-    # api-release.yml; never cancelled, so no publication is lost.
-    concurrency:
-      group: github-pages
-      cancel-in-progress: false
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    permissions:
-      pages: write
-      id-token: write
-    steps:
-      - name: Refuse to deploy a stale history snapshot
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Validate the contract being published
+        run: bun run api:validate && bun run scripts/api-contract/structural.ts
+      - name: Build the site
         env:
-          ASSEMBLED_SHA: ${{ needs.assemble.outputs.history-sha }}
-        # The assemble job read pages-history before this deploy slot opened;
-        # a release publication may have advanced it in between. Deploying the
-        # stale snapshot would roll the live api/latest and revisions back, so
-        # verify the branch has not moved and fail loudly if it has — the
-        # retry workflow re-runs a failed edge publication against the new
-        # history automatically.
-        run: |
-          current=$(git ls-remote "https://github.com/${{ github.repository }}" refs/heads/pages-history | cut -f1)
-          if [ -z "$current" ] || [ -z "$ASSEMBLED_SHA" ]; then
-            echo "could not resolve pages-history revisions for the staleness check"
-            exit 1
-          fi
-          if [ "$current" != "$ASSEMBLED_SHA" ]; then
-            echo "pages-history advanced during this run ($ASSEMBLED_SHA -> $current); re-run to assemble against the new release history"
-            exit 1
-          fi
-      - name: Deploy Pages artifact
+          GITHUB_SHA: ${{ github.sha }}
+        run: bunx astro build --root site
+      - name: Check the built site
+        run: bun run site:check
+      - name: Configure Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site/dist
+      - name: Deploy to Pages
         id: deployment
-        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

@@ -24,16 +24,16 @@ async function sourceCommit(): Promise<string> {
   return stdout.trim();
 }
 
-export async function assembleEdgeArtifacts(outputPath: string): Promise<void> {
-  const edge = join(outputPath, "api", "edge");
-  await mkdir(edge, { recursive: true });
+export async function assembleApiArtifacts(outputPath: string): Promise<void> {
+  const api = join(outputPath, "api");
+  await mkdir(api, { recursive: true });
   const hashes: Record<string, string> = {};
   const commit = await sourceCommit();
 
   for (const sourcePath of sourceArtifacts) {
     const content = await readFile(join(root, sourcePath));
     const name = basename(sourcePath);
-    await writeFile(join(edge, name), content);
+    await writeFile(join(api, name), content);
     hashes[name] = createHash("sha256").update(content).digest("hex");
   }
 
@@ -51,9 +51,9 @@ export async function assembleEdgeArtifacts(outputPath: string): Promise<void> {
     },
   };
   const metadataContent = `${JSON.stringify(metadata, null, 2)}\n`;
-  await writeFile(join(edge, "contract.json"), metadataContent);
+  await writeFile(join(api, "contract.json"), metadataContent);
   hashes["contract.json"] = createHash("sha256").update(metadataContent).digest("hex");
-  await writeFile(join(edge, "SHA256SUMS.json"), `${JSON.stringify({ sourceCommit: commit, files: hashes }, null, 2)}\n`);
+  await writeFile(join(api, "SHA256SUMS.json"), `${JSON.stringify({ sourceCommit: commit, files: hashes }, null, 2)}\n`);
 
   await writeFile(join(outputPath, "llms.txt"), await readFile(join(root, "llms.txt")));
   const font = await readFile(join(root, "src", "assets", "fonts", "HackNerdFontMono-Regular.woff2"));
@@ -64,5 +64,5 @@ export async function assembleEdgeArtifacts(outputPath: string): Promise<void> {
 if (import.meta.main) {
   const output = process.argv[2];
   if (!output) throw new Error("Usage: bun scripts/assemble-api-site.ts <output-directory>");
-  await assembleEdgeArtifacts(resolve(output));
+  await assembleApiArtifacts(resolve(output));
 }
