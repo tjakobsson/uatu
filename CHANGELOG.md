@@ -4,6 +4,13 @@ Notable user-facing changes to uatu are documented here. Versions follow
 [Semantic Versioning](https://semver.org/) and are generated from Conventional
 Commits by [Release Please](https://github.com/googleapis/release-please).
 
+## [0.6.0](https://github.com/tjakobsson/uatu/compare/v0.5.1...v0.6.0) (2026-08-14)
+
+
+### Features
+
+* **api:** publish the API contract and documentation site ([#240](https://github.com/tjakobsson/uatu/issues/240)) ([373c938](https://github.com/tjakobsson/uatu/commit/373c9380d18d58f50a275df428ffd3bffc95ff2a))
+
 ## [0.5.1](https://github.com/tjakobsson/uatu/compare/v0.5.0...v0.5.1) (2026-08-13)
 
 
