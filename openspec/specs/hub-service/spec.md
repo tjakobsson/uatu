@@ -4,6 +4,18 @@
 
 Define the uatu hub daemon: a long-running service that keeps a persistent workspace registry (absolute paths, stable session ids), starts and stops `uatu serve` sessions through a pluggable session backend, and reverse-proxies all session traffic (HTTP, SSE, WebSocket) under `/s/<id>/` prefixes behind hub-terminated TLS — so one authenticated origin fronts many loopback-bound sessions — plus a self-hosting runbook covering real certificate and startup paths.
 ## Requirements
+### Requirement: Hub reports its public API compatibility identity
+The Hub SHALL expose an authenticated machine-readable compatibility identity containing its public Hub API revision and the public workspace API revision expected behind its proxied workspace routes. These revisions SHALL identify wire-contract compatibility independently from the product version and source-build identity, and SHALL correspond to published contract metadata. Clients MUST NOT need to infer API compatibility from a display-formatted version string.
+
+#### Scenario: Native client probes Hub compatibility
+- **WHEN** an authenticated native client requests Hub state
+- **THEN** the response identifies the Hub API revision and proxied workspace API revision as machine-readable values
+- **AND** the values can be matched to published contract revisions
+
+#### Scenario: Product release does not imply a contract break
+- **WHEN** the product version changes without an incompatible Hub or workspace wire-contract change
+- **THEN** the corresponding public API revision remains unchanged
+
 ### Requirement: Hub manages clone operations as authenticated jobs
 The hub SHALL execute each repository clone as an in-memory job owned by the authenticated user who created it. Creation SHALL return a non-blocking job identifier; the owner SHALL be able to receive a bounded replayable stream of job output and state, submit terminal responses, and cancel the job. Another user MUST NOT be able to observe or control the job. Input and cancellation SHALL be POST operations protected like other state-changing hub endpoints. Completed jobs and their bounded output SHALL expire automatically and MUST NOT survive a hub restart.
 

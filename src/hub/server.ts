@@ -42,7 +42,13 @@ import type { WorkspaceRegistry } from "./registry";
 import type { PersonalWorkspaceStateStore } from "./personal-state";
 import type { SessionManager } from "./sessions";
 import type { TerminalSessionInfo } from "../terminal/server";
-import { BUILD, formatBuildIdentifier } from "../shared/version";
+import type { HubApiCompatibility } from "../shared/types";
+import {
+  BUILD,
+  formatBuildIdentifier,
+  HUB_API_REVISION,
+  WORKSPACE_API_REVISION,
+} from "../shared/version";
 
 export type HubDeps = {
   config: HubConfig;
@@ -250,11 +256,20 @@ export function createHubFetchHandler(deps: HubDeps) {
           path: entry.path,
           backend: entry.backend,
           running: running !== undefined,
+          // The local-process backend always spawns this build's binary, so
+          // every child speaks this constant. A backend that runs children
+          // of other builds (the deferred container backend) must report
+          // the child's own revision here instead of the hub's.
+          workspaceApiRevision: WORKSPACE_API_REVISION,
           shells,
         };
       }),
     );
-    return json(200, { version: formatBuildIdentifier(BUILD), workspaces });
+    const compatibility: HubApiCompatibility = {
+      hubApiRevision: HUB_API_REVISION,
+      workspaceApiRevision: WORKSPACE_API_REVISION,
+    };
+    return json(200, { version: formatBuildIdentifier(BUILD), ...compatibility, workspaces });
   };
 
   // GET /api/hub/browse?path=<abs> — one level of the hub host's directory

@@ -72,10 +72,12 @@ function forwardedHeaders(request: Request, session: RunningSession): Headers {
   // instead of unknown-length chunked streams.
   headers.set("accept-encoding", "identity");
   // Loopback-shape the Origin so the child's localhost origin gate holds;
-  // the hub validated the browser's real Origin before proxying.
-  if (request.headers.has("origin")) {
-    headers.set("origin", childOrigin(session));
-  }
+  // the hub validated the caller's real Origin (when present) before
+  // proxying. Injected even when absent: browsers always send Origin on
+  // cross-origin and mutating requests, so an Origin-less request is a
+  // native client the hub has already authenticated — mirroring the
+  // WebSocket bridge, which injects the loopback Origin unconditionally.
+  headers.set("origin", childOrigin(session));
   return headers;
 }
 

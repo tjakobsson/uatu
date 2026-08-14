@@ -1,0 +1,89 @@
+---
+import SiteLayout from "../../../layouts/SiteLayout.astro";
+import { readApiReference } from "../../../lib/openapi";
+import { sitePath } from "../../../lib/paths";
+import contract from "../../../../../api/contract.json";
+import pkg from "../../../../../package.json";
+
+const { operations, schemas } = readApiReference();
+const tags = [...new Set(operations.flatMap(operation => operation.tags))].sort();
+---
+
+<SiteLayout title="API reference" description="Search the generated UatuCode Hub and workspace OpenAPI reference.">
+  <section class="api-intro">
+    <p class="eyebrow">CANONICAL HTTP SURFACE</p>
+    <h1>API reference</h1>
+    <p class="contract-identity">
+      <strong>Edge contract</strong> — Hub API revision {contract.hubApiRevision} · Workspace API revision {contract.workspaceApiRevision} — tracks unreleased <code>main</code>.
+      The current product release line is v{pkg.version}; released, immutable contract snapshots publish under <code>api/latest/</code> and <code>api/revisions/</code>, and edge may document behavior not yet in any release.
+    </p>
+    <p>{operations.length} operations, generated directly from <a href={sitePath("api/edge/openapi.yaml")}>api/openapi.yaml</a>.</p>
+    <label class="api-search">
+      <span>Search operations</span>
+      <input id="operation-search" type="search" placeholder="operation ID, path, summary…" autocomplete="off" />
+      <kbd>/</kbd>
+    </label>
+    <div class="tag-row">
+      <button class="tag active" type="button" data-tag="">All</button>
+      {tags.map(tag => <button class="tag" type="button" data-tag={tag}>{tag}</button>)}
+    </div>
+  </section>
+  <p id="search-status" class="search-status" aria-live="polite">Showing all {operations.length} operations</p>
+  <div id="operation-list" class="operation-list">
+    {operations.map(operation => (
+      <article class="operation" id={operation.id} data-operation-id={operation.id} data-tags={operation.tags.join("|")} data-search={`${operation.id} ${operation.method} ${operation.path} ${operation.summary} ${operation.description} ${operation.tags.join(" ")}`.toLowerCase()}>
+        <div class="operation-route"><span class={`method method-${operation.method.toLowerCase()}`}>{operation.method}</span><code>{operation.path}</code></div>
+        <div class="operation-contract">
+          <p class="operation-id">{operation.id}</p><h2>{operation.summary}</h2>{operation.description && <p>{operation.description}</p>}
+          {operation.parameters.length > 0 && <section class="contract-section"><h3>Parameters</h3><div class="contract-rows">{operation.parameters.map(parameter => (
+            <div class="contract-row"><code>{parameter.name}</code><span>{parameter.location}{parameter.required ? " · required" : ""}</span>{parameter.schema && (parameter.schema.anchor ? <a href={`#${parameter.schema.anchor}`}>{parameter.schema.label}</a> : <b>{parameter.schema.label}</b>)}{parameter.description && <small>{parameter.description}</small>}</div>
+          ))}</div></section>}
+          {operation.requestMedia.length > 0 && <section class="contract-section"><h3>Request body</h3><div class="contract-rows">{operation.requestMedia.map(item => (
+            <div class="contract-row"><code>{item.type}</code>{item.schema && (item.schema.anchor ? <a href={`#${item.schema.anchor}`}>{item.schema.label}</a> : <b>{item.schema.label}</b>)}</div>
+          ))}</div></section>}
+          <section class="contract-section"><h3>Responses</h3><div class="response-grid">{operation.responses.map(response => (
+            <div class="response-row"><strong>{response.status}</strong><span>{response.description}</span>{response.media.map(item => <code>{item.type}{item.schema ? " · " : ""}{item.schema?.label}</code>)}</div>
+          ))}</div></section>
+        </div>
+      </article>
+    ))}
+  </div>
+  <section class="schema-catalog" id="schemas">
+    <div class="schema-heading"><p class="eyebrow">COMPONENT LIBRARY</p><h2>Schemas</h2><p>{schemas.length} reusable definitions from the canonical contract.</p></div>
+    <div class="schema-list">{schemas.map(schema => (
+      <details class="schema" id={`schema-${schema.name}`}><summary><span>{schema.name}</span><code>{schema.summary}</code></summary>{schema.description && <p>{schema.description}</p>}<pre><code>{schema.json}</code></pre></details>
+    ))}</div>
+  </section>
+  <script>
+    const input = document.querySelector<HTMLInputElement>("#operation-search");
+    const cards = [...document.querySelectorAll<HTMLElement>("[data-operation-id]")];
+    const status = document.querySelector<HTMLElement>("#search-status");
+    const buttons = [...document.querySelectorAll<HTMLButtonElement>("[data-tag]")];
+    let selectedTag = "";
+    const filter = () => {
+      const query = input?.value.trim().toLowerCase() ?? "";
+      let visible = 0;
+      for (const card of cards) {
+        // Tags are pipe-delimited: multiword labels ("Hub authentication",
+        // "Clone jobs") must survive as one token or selecting them matches
+        // nothing.
+        const matches = card.dataset.search?.includes(query) && (!selectedTag || card.dataset.tags?.split("|").includes(selectedTag));
+        card.hidden = !matches;
+        if (matches) visible++;
+      }
+      if (status) status.textContent = `Showing ${visible} of ${cards.length} operations`;
+    };
+    input?.addEventListener("input", filter);
+    buttons.forEach(button => button.addEventListener("click", () => {
+      selectedTag = button.dataset.tag ?? "";
+      buttons.forEach(item => item.classList.toggle("active", item === button));
+      filter();
+    }));
+    document.addEventListener("keydown", event => {
+      if (event.key === "/" && document.activeElement !== input) {
+        event.preventDefault();
+        input?.focus();
+      }
+    });
+  </script>
+</SiteLayout>

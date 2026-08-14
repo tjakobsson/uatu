@@ -1,0 +1,15 @@
+---
+import logoSource from "../../../src/assets/uatu-logo.svg?raw";
+
+interface Props {
+  class?: string;
+}
+
+const className = Astro.props.class ?? "";
+const logo = logoSource
+  .slice(logoSource.indexOf("<svg"))
+  .replaceAll(/\s+id="[^"]+"/g, "")
+  .replace("<svg ", `<svg class="uatu-logo ${className}" aria-hidden="true" focusable="false" `);
+---
+
+<Fragment set:html={logo} />

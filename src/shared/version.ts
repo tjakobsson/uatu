@@ -19,13 +19,16 @@ const INJECTED_BUILD: BuildInfo | undefined =
 // the embedded version incapable of drifting from the released tag.
 export const PACKAGE_VERSION: string = packageJsonVersion;
 
-// Hand-bumped integer marking client/server contract breaks (renamed state
-// payload fields, changed endpoint semantics, …). Bump it in the same change
-// that breaks the contract; the client-freshness handshake compares it so a
-// client can refuse to silently continue against an incompatible server.
-// Coarse on purpose — the version/commit comparison catches every build
-// mismatch, this only adds "the break was known".
-export const API_REVISION = 1;
+// Hand-bumped integer marking contract breaks between the workspace server
+// and the web assets bundled with the same product build. This is only part
+// of the stale-web-client handshake; external clients use the independent
+// public API revisions below.
+export const BUNDLED_WEB_REVISION = 1;
+
+// Public wire-contract compatibility identities. Breaking changes increment
+// only the affected domain; product and bundled-web changes do not.
+export const HUB_API_REVISION = 1;
+export const WORKSPACE_API_REVISION = 1;
 
 function runGit(args: string[]): string | null {
   try {

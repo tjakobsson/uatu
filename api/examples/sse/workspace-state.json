@@ -1,0 +1,25 @@
+{
+  "event": "state",
+  "data": {
+    "workspaceApiRevision": 1,
+    "roots": [],
+    "repositories": [],
+    "compareTarget": "base",
+    "initialFollow": true,
+    "defaultDocumentId": null,
+    "changedId": null,
+    "generatedAt": 0,
+    "build": {
+      "version": "0.5.1",
+      "branch": "main",
+      "commitSha": "abcdef",
+      "commitShort": "abcdef",
+      "release": false,
+      "identifier": "0.5.1",
+      "bundledWebRevision": 1
+    },
+    "scope": { "kind": "folder" },
+    "unscopedFingerprint": "3f2a",
+    "terminal": "enabled"
+  }
+}

@@ -1,0 +1,134 @@
+$schema: https://json-schema.org/draft/2020-12/schema
+schemaVersion: 1
+title: UatuCode streaming protocol contract
+channels:
+  workspaceState:
+    transport: sse
+    operationId: workspaceStreamState
+    path: /s/{workspaceId}/api/events
+    mediaType: text/event-stream
+    authentication: hubSession
+    events:
+      - { name: state, dataSchema: WorkspaceState, replayId: none }
+    lifecycle:
+      initialEvent: state
+      reconnection: Browser EventSource retry is supported; the stream sends a fresh complete state snapshot after reconnect.
+      completion: Open until client cancellation, server shutdown, or transport failure.
+      errors: HTTP errors occur before stream start; no in-band error event exists.
+  cloneJobEvents:
+    transport: sse
+    operationId: hubStreamCloneJobEvents
+    path: /api/hub/clone-jobs/{jobId}/events
+    mediaType: text/event-stream
+    authentication: hubSession
+    events:
+      - { name: output, dataSchema: CloneOutput, replayId: integer }
+      - { name: phase, dataSchema: ClonePhase, replayId: integer }
+      - { name: result, dataSchema: CloneResult, replayId: integer, terminal: true }
+    lifecycle:
+      replay: Send Last-Event-ID; retained events whose integer id is greater are replayed in order.
+      replayLimit: Output retention is byte-bounded; phase and result events remain replayable while the job is retained.
+      reconnection: A result event closes the stream. Reconnecting within the job retention window replays retained events — including the terminal result — and then closes again.
+      errors: Unknown or non-owned jobs return HTTP 404 before stream start; no in-band error event exists.
+  workspaceSearch:
+    transport: ndjson
+    operationId: workspaceSearch
+    path: /s/{workspaceId}/api/search
+    mediaType: application/x-ndjson
+    authentication: hubSession
+    itemSchema: SearchStreamItem
+    lifecycle:
+      completion: A done item is emitted after a completed or bounded sweep and is the final item.
+      cancellation: Client disconnect or stream cancellation aborts the sweep and may end without a done item.
+      errors: Invalid patterns return HTTP 400 JSON before streaming. An internal mid-stream failure closes the stream without an error item.
+  terminal:
+    transport: websocket
+    operationId: workspaceAttachTerminal
+    path: /s/{workspaceId}/api/terminal
+    authentication: hubSession
+    handshake:
+      requiredQuery: [sessionId]
+      optionalQuery: [takeover]
+      requiredHeaders: [Upgrade]
+      optionalHeaders: [Origin]
+      successStatus: 101
+      failureStatuses: [400, 401, 403, 404, 409, 500, 503]
+      proxyBehavior: >-
+        The Hub validates authentication and Origin (when present) before
+        accepting the upgrade, but does not preflight the workspace child:
+        on a genuine upgrade it accepts the public connection first and then
+        opens its own socket to the child. Session-level failures — invalid
+        or unknown sessionId (400/404), an already-attached session without
+        takeover (409) — therefore surface on an accepted upgrade as a
+        post-upgrade close (code 1011 upstream error, or the child's mapped
+        close code), not as an HTTP failure status. The 400/404/409 HTTP
+        statuses remain observable only for non-upgrade requests to this
+        path, which proxy through as plain HTTP.
+    clientFrames:
+      binary: { schema: BinaryPtyData, meaning: UTF-8 bytes written to the PTY after attach completes. }
+      textJson: { schemas: [TerminalAttachReady, TerminalResize] }
+    serverFrames:
+      binary: { schema: BinaryPtyData, meaning: Serialized terminal snapshot followed by live PTY output bytes. }
+      textJson: { schemas: [TerminalExit] }
+    lifecycle:
+      attach: Client must send attach-ready with dimensions. The server sends a binary snapshot and then marks the socket attached.
+      resize: Accepted only from the attached holder. Dimensions below 1 are clamped up to 1; frames with non-integer dimensions or values above 1000 are silently ignored in full, never clamped down.
+      takeover: takeover=1 may claim an attached session. Ownership changes only after snapshot delivery; the prior holder closes with 4410.
+      detach: Any client close except 4001 detaches and preserves the PTY. Close 4001 terminates it.
+      exit: Server sends TerminalExit then closes with 1000 when the shell exits.
+    closeCodes:
+      - { code: 1000, name: normalShellExit, sender: server, terminal: true }
+      - { code: 1011, name: attachFailed, sender: server, terminal: false }
+      - { code: 4001, name: userTerminate, sender: client, terminal: true }
+      - { code: 4404, name: unknownSession, sender: server, terminal: false }
+      - { code: 4409, name: sessionCollision, sender: server, terminal: false }
+      - { code: 4410, name: sessionTaken, sender: server, terminal: false }
+schemas:
+  WorkspaceState:
+    description: Same schema as openapi.yaml#/components/schemas/WorkspaceState.
+    $ref: ./openapi.yaml#/components/schemas/WorkspaceState
+  CloneOutput:
+    type: object
+    required: [output]
+    properties: { output: { type: string } }
+    additionalProperties: false
+  ClonePhase:
+    type: object
+    required: [phase]
+    properties: { phase: { enum: [cloning, registering, starting] } }
+    additionalProperties: false
+  CloneResult:
+    oneOf:
+      - { type: object, required: [status, workspaceId, target], properties: { status: { const: succeeded }, workspaceId: { type: string }, target: { type: string } }, additionalProperties: false }
+      - { type: object, required: [status, target, error], properties: { status: { enum: [clone-failed, register-failed, start-failed, cleanup-failed] }, target: { type: string }, error: { type: string } }, additionalProperties: false }
+      - { type: object, required: [status, target], properties: { status: { enum: [cancelled, timed-out] }, target: { type: string }, reason: { enum: [inactivity, lifetime] } }, additionalProperties: false }
+  SearchStreamItem:
+    oneOf:
+      - { $ref: '#/schemas/SearchFile' }
+      - { $ref: '#/schemas/SearchExpensive' }
+      - { $ref: '#/schemas/SearchOversized' }
+      - { $ref: '#/schemas/SearchDone' }
+  SearchFile:
+    type: object
+    required: [kind, result]
+    properties:
+      kind: { const: file }
+      result:
+        type: object
+        required: [documentId, relativePath, rootId, matches]
+        properties:
+          documentId: { type: string }
+          relativePath: { type: string }
+          rootId: { type: string }
+          matches:
+            type: array
+            items: { type: object, required: [line, text, start, end, ordinal, literalTotal], properties: { line: { type: integer, minimum: 1 }, text: { type: string }, start: { type: integer, minimum: 0 }, end: { type: integer, minimum: 1 }, ordinal: { type: integer, minimum: 0 }, literalTotal: { type: integer, minimum: 1 } }, additionalProperties: false }
+        additionalProperties: false
+    additionalProperties: false
+  SearchExpensive: { type: object, required: [kind, relativePath], properties: { kind: { const: expensive }, relativePath: { type: string } }, additionalProperties: false }
+  SearchOversized: { type: object, required: [kind, relativePath], properties: { kind: { const: oversized }, relativePath: { type: string } }, additionalProperties: false }
+  SearchDone: { type: object, required: [kind, truncated, filesSearched, totalMatches], properties: { kind: { const: done }, truncated: { type: boolean }, filesSearched: { type: integer, minimum: 0 }, totalMatches: { type: integer, minimum: 0 }, abandoned: { type: boolean } }, additionalProperties: false }
+  TerminalAttachReady: { type: object, required: [type, cols, rows], properties: { type: { const: attach-ready }, cols: { type: integer, minimum: 1, maximum: 1000 }, rows: { type: integer, minimum: 1, maximum: 1000 } }, additionalProperties: false }
+  TerminalResize: { type: object, required: [type, cols, rows], properties: { type: { const: resize }, cols: { type: integer, minimum: 1, maximum: 1000 }, rows: { type: integer, minimum: 1, maximum: 1000 } }, additionalProperties: false }
+  TerminalExit: { type: object, required: [type, exitCode, signal], properties: { type: { const: exit }, exitCode: { type: integer, description: "Always an integer; signal death is reported as exitCode 0 with the signal number set." }, signal: { type: [integer, 'null'] } }, additionalProperties: false }
+  BinaryPtyData: { type: string, contentEncoding: base64, description: Arbitrary non-empty binary frame. Validation operates on frame type and bytes rather than JSON decoding. }

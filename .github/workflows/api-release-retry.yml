@@ -1,0 +1,51 @@
+name: Retry API publication
+
+# Two publication runs need automatic retries, both bounded so a
+# persistently failing run cannot loop:
+#
+# 1. A CANCELLED release publication. The release deploy job shares the
+#    github-pages concurrency group with edge deploys so history writes and
+#    the edge staleness guard stay atomic — but GitHub keeps only ONE
+#    pending slot per group and a newly queued job replaces (cancels) the
+#    pending one even with cancel-in-progress: false. Two edge deploys
+#    arriving back-to-back can therefore cancel a pending release
+#    publication, and nothing else would re-run it: the released contract
+#    bundle would never reach api/latest.
+#
+# 2. A FAILED edge publication. The edge deploy's staleness guard fails the
+#    run when pages-history advanced (a release published) between its
+#    assemble and deploy — correct, but without a retry the validated main
+#    deployment is dropped and /api/edge stays older than main until the
+#    next push happens to arrive. A re-run re-reads the new history and
+#    publishes cleanly. (A cancelled edge run needs no retry: it was
+#    superseded by a newer edge run in the same group.)
+
+on:
+  workflow_run:
+    workflows: [Publish released API contract, Publish API edge to Pages]
+    types: [completed]
+
+permissions: {}
+
+# Deliberately NO concurrency group: GitHub keeps one pending slot per group
+# and replaces it, so grouping retries would let a burst of publication
+# completions cancel a pending retry that targeted a different run — the
+# exact pending-slot loss this workflow exists to repair. Each retry run
+# targets one specific run id, does nothing but POST a rerun, and is safe to
+# execute concurrently with any other retry.
+
+jobs:
+  retry:
+    if: >-
+      github.event.workflow_run.run_attempt < 5 &&
+      ((github.event.workflow_run.name == 'Publish released API contract' && github.event.workflow_run.conclusion == 'cancelled') ||
+       (github.event.workflow_run.name == 'Publish API edge to Pages' && github.event.workflow_run.conclusion == 'failure'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Re-run the dropped publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}/rerun"

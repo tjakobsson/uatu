@@ -18,6 +18,7 @@ const permissiveLicensePatterns = [
   /^BSD(?:-\d-Clause)?$/i,
   /^ISC$/i,
   /^Apache-2\.0$/i,
+  /^BlueOak-1\.0\.0$/i,
   /^0BSD$/i,
   /^CC0-1\.0$/i,
   /^Unlicense$/i,
@@ -68,8 +69,32 @@ export async function collectInstalledLicenses(rootPath: string): Promise<Licens
   });
 }
 
-export function validateLicenseRecords(records: LicenseRecord[]): LicenseRecord[] {
-  return records.filter(record => !isAllowedLicenseExpression(record.license));
+export function validateLicenseRecords(records: LicenseRecord[], productionDependencies: Set<string> = new Set()): LicenseRecord[] {
+  return records.filter(record =>
+    !isBuildOnlySiteTool(record, productionDependencies)
+    && !isUnusedAstroImageBinary(record, productionDependencies)
+    && !isAllowedLicenseExpression(record.license)
+  );
+}
+
+// Both carve-outs below rest on the same assumption: the package never ships
+// inside dist/uatu. The compiled binary bundles only what src/ imports, and
+// those imports resolve from package.json "dependencies" — so a carved-out
+// name appearing there voids the carve-out and the audit fails again.
+function isBuildOnlySiteTool(record: LicenseRecord, productionDependencies: Set<string>): boolean {
+  // Vite's CSS transformer runs only while producing the static Pages site;
+  // neither package is included in the emitted HTML, CSS, or JavaScript.
+  if (productionDependencies.has(record.name)) return false;
+  return (record.name === "lightningcss" || record.name.startsWith("lightningcss-"))
+    && /^MPL-2\.0$/i.test(record.license);
+}
+
+function isUnusedAstroImageBinary(record: LicenseRecord, productionDependencies: Set<string>): boolean {
+  // Astro installs platform-specific libvips binaries through optional sharp
+  // dependencies even when a site does not use Astro's image service. The
+  // UatuCode site serves only source images and never imports astro:assets.
+  if (productionDependencies.has(record.name)) return false;
+  return record.name.startsWith("@img/sharp-libvips-") && /^LGPL-3\.0-or-later$/i.test(record.license);
 }
 
 export function isAllowedLicenseExpression(expression: string): boolean {
@@ -153,7 +178,9 @@ async function findPackageJsonFiles(directory: string): Promise<string[]> {
 async function main() {
   const rootPath = process.cwd();
   const records = await collectInstalledLicenses(rootPath);
-  const forbidden = validateLicenseRecords(records);
+  const rootPackage = JSON.parse(await fs.readFile(path.join(rootPath, "package.json"), "utf8")) as { dependencies?: Record<string, string> };
+  const productionDependencies = new Set(Object.keys(rootPackage.dependencies ?? {}));
+  const forbidden = validateLicenseRecords(records, productionDependencies);
 
   if (records.length === 0) {
     throw new Error("no installed packages found to audit");

@@ -8,14 +8,14 @@
 // renders instead of a reload loop.
 
 import type { BuildSummary } from "../shared/types";
-import { API_REVISION, BUILD } from "../shared/version";
+import { BUNDLED_WEB_REVISION, BUILD } from "../shared/version";
 
 export type FreshnessDecision = "in-sync" | "reload" | "notice";
 
 export type ClientBuildIdentity = {
   version: string;
   commitSha: string;
-  apiRevision: number;
+  bundledWebRevision: number;
 };
 
 // The identity baked into this bundle at build time (`__UATU_BUILD__` via
@@ -26,7 +26,7 @@ export type ClientBuildIdentity = {
 export const CLIENT_BUILD_IDENTITY: ClientBuildIdentity = {
   version: BUILD.version,
   commitSha: BUILD.commitSha,
-  apiRevision: API_REVISION,
+  bundledWebRevision: BUNDLED_WEB_REVISION,
 };
 
 export const FRESHNESS_RELOAD_MARKER_KEY = "uatu:freshness-reloaded-for";
@@ -37,7 +37,7 @@ export function serverIdentityKey(server: BuildSummary | undefined): string {
   if (!server) {
     return "pre-handshake";
   }
-  return `${server.version}@${server.commitSha}#${server.apiRevision}`;
+  return `${server.version}@${server.commitSha}#${server.bundledWebRevision}`;
 }
 
 export function buildsMismatch(client: ClientBuildIdentity, server: BuildSummary | undefined): boolean {
@@ -47,7 +47,7 @@ export function buildsMismatch(client: ClientBuildIdentity, server: BuildSummary
   if (!server) {
     return true;
   }
-  if (client.apiRevision !== server.apiRevision) {
+  if (client.bundledWebRevision !== server.bundledWebRevision) {
     return true;
   }
   if (client.version !== server.version) {

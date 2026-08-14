@@ -16,7 +16,7 @@ function serverBuild(overrides: Partial<BuildSummary> = {}): BuildSummary {
     commitShort: "aaaaaaa",
     release: true,
     identifier: "v0.5.0 · aaaaaaa",
-    apiRevision: 1,
+    bundledWebRevision: 1,
     ...overrides,
   };
 }
@@ -24,7 +24,7 @@ function serverBuild(overrides: Partial<BuildSummary> = {}): BuildSummary {
 const matchingClient: ClientBuildIdentity = {
   version: "0.5.0",
   commitSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  apiRevision: 1,
+  bundledWebRevision: 1,
 };
 
 describe("buildsMismatch", () => {
@@ -42,8 +42,17 @@ describe("buildsMismatch", () => {
     expect(buildsMismatch(matchingClient, serverBuild({ version: "0.6.0" }))).toBe(true);
   });
 
-  test("a differing apiRevision is a mismatch on its own", () => {
-    expect(buildsMismatch(matchingClient, serverBuild({ apiRevision: 2 }))).toBe(true);
+  test("public API revisions do not participate in bundled-web freshness", () => {
+    const server = {
+      ...serverBuild(),
+      hubApiRevision: 99,
+      workspaceApiRevision: 99,
+    };
+    expect(buildsMismatch(matchingClient, server)).toBe(false);
+  });
+
+  test("a differing bundledWebRevision is a mismatch on its own", () => {
+    expect(buildsMismatch(matchingClient, serverBuild({ bundledWebRevision: 2 }))).toBe(true);
   });
 
   test("a payload without a build field (pre-handshake server) is a mismatch, not a crash", () => {
@@ -52,7 +61,7 @@ describe("buildsMismatch", () => {
 
   test("an unknown commit on either side skips the commit comparison", () => {
     // Dev serving can't embed a commit in the browser bundle; version and
-    // apiRevision still compare, the commit check just can't.
+    // bundledWebRevision still compares; the commit check just can't.
     const devClient = { ...matchingClient, commitSha: "unknown" };
     expect(buildsMismatch(devClient, serverBuild({ commitSha: "b".repeat(40) }))).toBe(false);
     expect(buildsMismatch(matchingClient, serverBuild({ commitSha: "unknown" }))).toBe(false);
@@ -94,8 +103,8 @@ describe("evaluateFreshness — reload loop protection", () => {
     ).toBe("notice");
   });
 
-  test("an apiRevision break follows the same reload-once-then-notice path", () => {
-    const contractBreak = serverBuild({ apiRevision: 2 });
+  test("a bundledWebRevision break follows the same reload-once-then-notice path", () => {
+    const contractBreak = serverBuild({ bundledWebRevision: 2 });
     expect(evaluateFreshness(matchingClient, contractBreak, null)).toBe("reload");
     expect(
       evaluateFreshness(matchingClient, contractBreak, serverIdentityKey(contractBreak)),
