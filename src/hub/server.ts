@@ -256,6 +256,11 @@ export function createHubFetchHandler(deps: HubDeps) {
           path: entry.path,
           backend: entry.backend,
           running: running !== undefined,
+          // The local-process backend always spawns this build's binary, so
+          // every child speaks this constant. A backend that runs children
+          // of other builds (the deferred container backend) must report
+          // the child's own revision here instead of the hub's.
+          workspaceApiRevision: WORKSPACE_API_REVISION,
           shells,
         };
       }),

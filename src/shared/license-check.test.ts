@@ -42,6 +42,16 @@ describe("validateLicenseRecords", () => {
     ])).toHaveLength(1);
   });
 
+  test("carve-outs are void for packages in the production dependency graph", () => {
+    const records = [
+      { name: "lightningcss", version: "1.33.0", license: "MPL-2.0" },
+      { name: "@img/sharp-libvips-darwin-arm64", version: "1.2.4", license: "LGPL-3.0-or-later" },
+    ];
+    expect(validateLicenseRecords(records, new Set(["lightningcss"])).map(record => record.name)).toEqual(["lightningcss"]);
+    expect(validateLicenseRecords(records, new Set(["@img/sharp-libvips-darwin-arm64"])).map(record => record.name))
+      .toEqual(["@img/sharp-libvips-darwin-arm64"]);
+  });
+
   test("accepts permissive alternatives in OR expressions", () => {
     expect(isAllowedLicenseExpression("(MPL-2.0 OR Apache-2.0)")).toBe(true);
   });

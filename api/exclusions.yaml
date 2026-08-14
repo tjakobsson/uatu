@@ -2,7 +2,7 @@ schemaVersion: 1
 exclusions:
   - { id: hub-login-page, scope: hub, methods: [GET], path: /login, reason: browser HTML flow }
   - { id: hub-form-login, scope: hub, methods: [POST], path: /login, condition: content-type is not application/json, reason: browser HTML form variant }
-  - { id: hub-cookie-logout, scope: hub, methods: [POST], path: /logout, condition: cookie transport, reason: browser redirect variant; bearer JSON operation is public }
+  - { id: hub-cookie-logout, scope: hub, methods: [POST], path: /logout, condition: cookie or absent credential transport, reason: browser redirect variant (303 + cookie clear, also for credential-less requests); bearer JSON operation is public }
   - { id: hub-dashboard, scope: hub, methods: [GET], path: /, reason: HTML application shell }
   - { id: hub-assets, scope: hub, methods: [GET], pathPattern: /hub-assets/*, reason: static assets }
   - { id: hub-manifest, scope: hub, methods: [GET], path: /manifest.webmanifest, reason: browser installation metadata }
@@ -15,4 +15,4 @@ exclusions:
   - { id: e2e-terminal-token, scope: test, methods: [GET], path: /__e2e/terminal-token, reason: test-only credential helper }
   - { id: e2e-personal-state, scope: test, methods: [GET, PATCH], path: /api/personal-state, reason: direct-child test substitute; public form is proxied }
   - { id: direct-child-api, scope: workspace, methods: [GET, POST, PATCH, DELETE], pathPattern: /api/*, reason: "implementation mapping; public clients use /s/{workspaceId}/api/* through Hub" }
-  - { id: unsupported-methods, scope: all, methods: [OPTIONS, PUT, TRACE], pathPattern: "*", reason: no supported public operations }
+  - { id: unsupported-methods, scope: all, methods: [OPTIONS, PUT, TRACE], pathPattern: "*", reason: no supported public operations; undocumented methods on documented paths likewise reject (405 or 404) without a documented contract }

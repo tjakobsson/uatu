@@ -10,7 +10,9 @@ async function exists(target: string): Promise<boolean> {
 async function treeHashes(root: string): Promise<Record<string, string>> {
   if (!await exists(root)) return {};
   const result: Record<string, string> = {};
-  for await (const relative of new Bun.Glob("**/*").scan({ cwd: root, onlyFiles: true })) {
+  // dot: true — without it Glob skips dotfiles, leaving the immutability
+  // guards blind to dotfile payloads smuggled into latest/revisions.
+  for await (const relative of new Bun.Glob("**/*").scan({ cwd: root, onlyFiles: true, dot: true })) {
     result[relative] = await sha256(path.join(root, relative));
   }
   return result;
@@ -22,6 +24,36 @@ function equalHashes(a: Record<string, string>, b: Record<string, string>): bool
 
 async function copyIfPresent(source: string, destination: string): Promise<void> {
   if (await exists(source)) await cp(source, destination, { recursive: true });
+}
+
+function parseSemver(version: unknown): [number, number, number] | undefined {
+  if (typeof version !== "string") return undefined;
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$/.exec(version);
+  if (!match) return undefined;
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+function compareSemver(a: [number, number, number], b: [number, number, number]): number {
+  for (let index = 0; index < 3; index++) {
+    if (a[index] !== b[index]) return a[index] < b[index] ? -1 : 1;
+  }
+  return 0;
+}
+
+async function verifyBundleChecksums(bundle: string): Promise<void> {
+  const sumsPath = path.join(bundle, "SHA256SUMS.json");
+  if (!await exists(sumsPath)) throw new Error("release bundle is missing SHA256SUMS.json");
+  const sums = JSON.parse(await readFile(sumsPath, "utf8")) as { files?: Record<string, string> };
+  const files = Object.entries(sums.files ?? {});
+  if (files.length === 0) throw new Error("release bundle SHA256SUMS.json lists no files");
+  for (const [file, expected] of files) {
+    const target = path.join(bundle, file);
+    if (!await exists(target)) throw new Error(`release bundle file ${file} listed in SHA256SUMS.json is missing`);
+    const actual = await sha256(target);
+    if (actual !== expected) {
+      throw new Error(`release bundle file ${file} does not match SHA256SUMS.json (expected ${expected}, computed ${actual})`);
+    }
+  }
 }
 
 function revisionId(values: Record<ApiDomain, number>, productVersion: unknown): string {
@@ -42,6 +74,12 @@ export type PublishOptions = {
 
 export async function publish(options: PublishOptions): Promise<void> {
   if (!/^[0-9a-f]{40}$/i.test(options.commit)) throw new Error("validated commit must be a full 40-character Git commit SHA");
+  if (options.mode === "release") {
+    if (!options.bundle) throw new Error("release publication requires a validated bundle");
+    // The downloaded bundle is not trusted at face value: recompute every
+    // hash SHA256SUMS.json claims before any of its bytes are copied.
+    await verifyBundleChecksums(options.bundle);
+  }
   const priorLatest = await treeHashes(path.join(options.history, "api", "latest"));
   const priorRevisions = await treeHashes(path.join(options.history, "api", "revisions"));
   await rm(options.output, { recursive: true, force: true });
@@ -83,6 +121,24 @@ export async function publish(options: PublishOptions): Promise<void> {
     await rename(temporary, destination);
   }
   const latest = path.join(options.output, "api", "latest");
+  // Rerunning an old release's publication must never point latest backward
+  // past a newer release that already published.
+  const latestMetadataPath = path.join(latest, "contract.json");
+  if (await exists(latestMetadataPath)) {
+    let existingVersion: unknown;
+    try {
+      existingVersion = (JSON.parse(await readFile(latestMetadataPath, "utf8")) as Record<string, unknown>).productVersion;
+    } catch {
+      existingVersion = undefined;
+    }
+    const existing = parseSemver(existingVersion);
+    const incoming = parseSemver(metadata.productVersion);
+    if (existing === undefined) {
+      console.warn("warning: existing api/latest metadata has no parseable productVersion; replacing it");
+    } else if (incoming !== undefined && compareSemver(incoming, existing) < 0) {
+      throw new Error(`refusing to roll api/latest back from ${String(existingVersion)} to ${String(metadata.productVersion)}`);
+    }
+  }
   const temporaryLatest = path.join(options.output, "api", `.latest.${crypto.randomUUID()}`);
   await cp(options.bundle, temporaryLatest, { recursive: true });
   await rm(latest, { recursive: true, force: true });

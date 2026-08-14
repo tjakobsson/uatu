@@ -1,7 +1,9 @@
 import { readdir, readFile } from "node:fs/promises";
 import { extname, join, relative, resolve } from "node:path";
+import { base } from "../site/base.mjs";
 
 const output = resolve(process.argv[2] ?? "site/dist");
+const basePrefix = `${base}/`;
 
 async function walk(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -16,8 +18,8 @@ const failures: string[] = [];
 function targetFor(href: string): string | undefined {
   if (/^(?:https?:|mailto:|#|data:)/.test(href)) return;
   const clean = href.split(/[?#]/, 1)[0];
-  if (clean.startsWith("/") && !clean.startsWith("/uatu/")) return `root-relative URL escapes /uatu/: ${href}`;
-  const siteRelative = clean.startsWith("/uatu/") ? clean.slice(5) : clean;
+  if (clean.startsWith("/") && !clean.startsWith(basePrefix)) return `root-relative URL escapes ${basePrefix}: ${href}`;
+  const siteRelative = clean.startsWith(basePrefix) ? clean.slice(base.length) : clean;
   const path = siteRelative.endsWith("/") ? `${siteRelative}index.html` : siteRelative;
   return available.has(path) || available.has(`${path}/index.html`) ? undefined : `missing target: ${href}`;
 }
@@ -31,4 +33,4 @@ for (const file of files.filter(file => extname(file) === ".html")) {
 }
 
 if (failures.length) throw new Error(`Static site link check failed:\n${failures.join("\n")}`);
-console.log(`Checked ${files.filter(file => extname(file) === ".html").length} HTML files under /uatu/`);
+console.log(`Checked ${files.filter(file => extname(file) === ".html").length} HTML files under ${basePrefix}`);

@@ -19,6 +19,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -27,23 +28,40 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Validate contract structure
         run: bun run api:validate && bun run scripts/api-contract/structural.ts
-      - name: Enforce compatibility against the pull request base
-        if: github.event_name == 'pull_request'
+      - name: Enforce compatibility against the base contract
+        # Pull requests compare against the PR base; pushes to main compare
+        # the merged state against the pre-push tip (github.event.before) so
+        # the gate also covers what actually landed.
+        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
+          if [ -z "$BASE_SHA" ] || [[ "$BASE_SHA" =~ ^0+$ ]] || ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            echo "No usable base commit for compatibility comparison; skipping."
+            exit 0
+          fi
           if ! git cat-file -e "$BASE_SHA:api/openapi.yaml" || ! git cat-file -e "$BASE_SHA:api/streaming.yaml" || ! git cat-file -e "$BASE_SHA:api/contract.json"; then
-            echo "Base branch has no published API contract; treating this as contract initialization."
+            echo "Base commit has no published API contract; treating this as contract initialization."
             exit 0
           fi
           mkdir -p "$RUNNER_TEMP/base-api"
           for file in openapi.yaml streaming.yaml contract.json; do
             git show "$BASE_SHA:api/$file" > "$RUNNER_TEMP/base-api/$file"
           done
+          base_args=()
+          if git cat-file -e "$BASE_SHA:api/operations.yaml" 2>/dev/null; then
+            git show "$BASE_SHA:api/operations.yaml" > "$RUNNER_TEMP/base-api/operations.yaml"
+            base_args+=(--base-operations="$RUNNER_TEMP/base-api/operations.yaml")
+          fi
+          if git cat-file -e "$BASE_SHA:api/exclusions.yaml" 2>/dev/null; then
+            git show "$BASE_SHA:api/exclusions.yaml" > "$RUNNER_TEMP/base-api/exclusions.yaml"
+            base_args+=(--base-exclusions="$RUNNER_TEMP/base-api/exclusions.yaml")
+          fi
           bun run scripts/api-contract/compatibility.ts \
             --base-contract="$RUNNER_TEMP/base-api/openapi.yaml" \
             --base-streaming="$RUNNER_TEMP/base-api/streaming.yaml" \
             --base-metadata="$RUNNER_TEMP/base-api/contract.json" \
+            "${base_args[@]}" \
             --contract=api/openapi.yaml \
             --streaming=api/streaming.yaml \
             --metadata=api/contract.json \
@@ -56,6 +74,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -63,14 +83,15 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
       - name: Run black-box HTTP and streaming contract checks
-        run: bun test tests/contracts scripts/api-contract src/hub/hub.integration.test.ts
+        run: bun run test:api
       - name: Verify Swift client generation
         run: bun run api:swift
       - name: Build validated Pages site
-        if: github.ref == 'refs/heads/main'
         env:
           GITHUB_SHA: ${{ github.sha }}
         run: bunx astro build --root site
+      - name: Check API site content and links
+        run: bun run site:check
       - name: Upload exact validated edge site
         if: github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -89,6 +110,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Classify changes
         id: changes
@@ -186,6 +208,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0

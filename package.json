@@ -26,7 +26,7 @@
     "api:docs": "redocly build-docs api/openapi.yaml --output /tmp/uatu-api.html",
     "api:diff": "openapi-diff",
     "api:validate": "bun run scripts/validate-api.ts && bun run api:lint",
-    "test:api": "bun test api/contract.test.ts api/route-coverage.test.ts tests/contracts scripts/api-contract",
+    "test:api": "bun test api/contract.test.ts api/route-coverage.test.ts tests/contracts scripts/api-contract src/hub/hub.integration.test.ts src/shared/api-revisions.test.ts",
     "site:build": "astro build --root site",
     "site:check": "bun test site/site.test.ts && bun run scripts/check-api-site-links.ts site/dist",
     "api:swift": "bash scripts/verify-swift-openapi.sh"

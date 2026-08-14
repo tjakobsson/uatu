@@ -9,6 +9,10 @@ Current edge artifacts:
 - Streaming contract: https://tjakobsson.github.io/uatu/api/edge/streaming.yaml
 - API changelog: https://tjakobsson.github.io/uatu/api/edge/CHANGELOG.md
 
+Release channels (populated from the first tagged release onward; prefer these for production clients):
+- Latest released contract: https://tjakobsson.github.io/uatu/api/latest/
+- Immutable revision snapshots: https://tjakobsson.github.io/uatu/api/revisions/hub-N_workspace-M_vX.Y.Z/
+
 Human documentation:
 - Product and guides: https://tjakobsson.github.io/uatu/
 - Searchable API reference: https://tjakobsson.github.io/uatu/docs/api/

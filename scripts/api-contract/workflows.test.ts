@@ -42,7 +42,7 @@ describe("API publication workflows", () => {
     const document = await workflow("api-release.yml");
     expect(release.jobs["update-tap"]["continue-on-error"]).toBe(true);
     expect(document.on.workflow_run).toEqual({ workflows: ["Release"], types: ["completed"] });
-    expect(document.jobs.bundle.if).toBe("github.event.workflow_run.conclusion == 'success'");
+    expect(document.jobs.bundle.if).toContain("github.event.workflow_run.conclusion == 'success'");
     expect(document.jobs.bundle.steps.find((step: any) => step.name === "Check out tagged source").with.ref)
       .toBe("${{ github.event.workflow_run.head_sha }}");
     expect(document.jobs.bundle.steps.find((step: any) => step.name === "Create immutable release bundle").run)
@@ -50,5 +50,80 @@ describe("API publication workflows", () => {
     const steps = document.jobs.assemble.steps as any[];
     expect(steps.find(step => step.name === "Assemble immutable revision and latest").run).toContain("--mode=release");
     expect(steps.find(step => step.name === "Persist release publication history").run).toContain("HEAD:pages-history");
+  });
+
+  test("workflow_run triggers reject fork lookalikes", async () => {
+    // head_branch alone is fork-spoofable: a fork PR whose source branch is
+    // named main satisfies it. Both privileged consumers must also require a
+    // push event originating from this repository.
+    const pages = await workflow("pages.yml");
+    for (const condition of [
+      "github.event.workflow_run.event == 'push'",
+      "github.event.workflow_run.head_branch == 'main'",
+      "github.event.workflow_run.head_repository.full_name == github.repository",
+    ]) {
+      expect(pages.jobs.assemble.if).toContain(condition);
+    }
+    const apiRelease = await workflow("api-release.yml");
+    for (const condition of [
+      "github.event.workflow_run.event == 'push'",
+      "github.event.workflow_run.head_repository.full_name == github.repository",
+    ]) {
+      expect(apiRelease.jobs.bundle.if).toContain(condition);
+    }
+  });
+
+  test("a queued release publication cannot be collapsed away by an edge run", async () => {
+    // One pending run per concurrency group: sharing a workflow-level group
+    // would let a later edge run silently cancel a queued release
+    // publication. Only the deploy jobs serialize on the shared group.
+    const pages = await workflow("pages.yml");
+    const apiRelease = await workflow("api-release.yml");
+    expect(pages.concurrency.group).not.toBe(apiRelease.concurrency.group);
+    expect(pages.concurrency["cancel-in-progress"]).toBe(false);
+    expect(apiRelease.concurrency["cancel-in-progress"]).toBe(false);
+    expect(pages.jobs.deploy.concurrency.group).toBe("github-pages");
+    expect(apiRelease.jobs.deploy.concurrency.group).toBe("github-pages");
+  });
+
+  test("checkouts that never push do not persist credentials", async () => {
+    for (const name of ["pages.yml", "api-release.yml", "ci.yml", "release.yml"]) {
+      const document = await workflow(name);
+      for (const [jobName, job] of Object.entries(document.jobs) as [string, any][]) {
+        for (const step of job.steps ?? []) {
+          if (!step.uses?.startsWith("actions/checkout@")) continue;
+          // The pages-history checkout in api-release pushes back with its
+          // persisted token; every other checkout must stay credential-free.
+          const pushesBack = name === "api-release.yml" && jobName === "assemble" && step.with?.ref === "pages-history";
+          if (!pushesBack) expect(step.with?.["persist-credentials"]).toBe(false);
+        }
+      }
+    }
+  });
+
+  test("contract validation runs the full test:api set everywhere", async () => {
+    // ci.yml and api-release.yml previously hand-listed test paths and
+    // drifted from test:api; both must invoke the one package script.
+    const ci = await workflow("ci.yml");
+    const apiRelease = await workflow("api-release.yml");
+    const ciRuns = (Object.values(ci.jobs) as any[]).flatMap(job => (job.steps ?? []).map((step: any) => step.run ?? ""));
+    expect(ciRuns.some(run => run.includes("bun run test:api"))).toBe(true);
+    expect(ciRuns.some(run => run.includes("bun run site:check"))).toBe(true);
+    const releaseRuns = apiRelease.jobs.bundle.steps.map((step: any) => step.run ?? "");
+    expect(releaseRuns.some((run: string) => run.includes("bun run test:api"))).toBe(true);
+    const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
+    for (const target of ["api/contract.test.ts", "api/route-coverage.test.ts", "src/hub/hub.integration.test.ts", "src/shared/api-revisions.test.ts"]) {
+      expect(packageJson.scripts["test:api"]).toContain(target);
+    }
+  });
+
+  test("compatibility gate also covers pushes to main", async () => {
+    const ci = await workflow("ci.yml");
+    const validate = (Object.values(ci.jobs) as any[]).flatMap(job => job.steps ?? [])
+      .find((step: any) => step.name === "Enforce compatibility against the base contract");
+    expect(validate.if).toContain("github.event_name == 'push'");
+    expect(validate.env.BASE_SHA).toContain("github.event.before");
+    expect(validate.run).toContain("--base-operations");
+    expect(validate.run).toContain("--base-exclusions");
   });
 });

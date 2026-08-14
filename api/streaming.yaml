@@ -28,7 +28,7 @@ channels:
     lifecycle:
       replay: Send Last-Event-ID; retained events whose integer id is greater are replayed in order.
       replayLimit: Output retention is byte-bounded; phase and result events remain replayable while the job is retained.
-      reconnection: Reconnect while no result has been received. A result event closes the stream.
+      reconnection: A result event closes the stream. Reconnecting within the job retention window replays retained events — including the terminal result — and then closes again.
       errors: Unknown or non-owned jobs return HTTP 404 before stream start; no in-band error event exists.
   workspaceSearch:
     transport: ndjson
@@ -49,9 +49,21 @@ channels:
     handshake:
       requiredQuery: [sessionId]
       optionalQuery: [takeover]
-      requiredHeaders: [Origin, Upgrade]
+      requiredHeaders: [Upgrade]
+      optionalHeaders: [Origin]
       successStatus: 101
       failureStatuses: [400, 401, 403, 404, 409, 500, 503]
+      proxyBehavior: >-
+        The Hub validates authentication and Origin (when present) before
+        accepting the upgrade, but does not preflight the workspace child:
+        on a genuine upgrade it accepts the public connection first and then
+        opens its own socket to the child. Session-level failures — invalid
+        or unknown sessionId (400/404), an already-attached session without
+        takeover (409) — therefore surface on an accepted upgrade as a
+        post-upgrade close (code 1011 upstream error, or the child's mapped
+        close code), not as an HTTP failure status. The 400/404/409 HTTP
+        statuses remain observable only for non-upgrade requests to this
+        path, which proxy through as plain HTTP.
     clientFrames:
       binary: { schema: BinaryPtyData, meaning: UTF-8 bytes written to the PTY after attach completes. }
       textJson: { schemas: [TerminalAttachReady, TerminalResize] }
@@ -60,7 +72,7 @@ channels:
       textJson: { schemas: [TerminalExit] }
     lifecycle:
       attach: Client must send attach-ready with dimensions. The server sends a binary snapshot and then marks the socket attached.
-      resize: Accepted only from the attached holder; dimensions are clamped to integers from 1 through 1000.
+      resize: Accepted only from the attached holder. Dimensions below 1 are clamped up to 1; frames with non-integer dimensions or values above 1000 are silently ignored in full, never clamped down.
       takeover: takeover=1 may claim an attached session. Ownership changes only after snapshot delivery; the prior holder closes with 4410.
       detach: Any client close except 4001 detaches and preserves the PTY. Close 4001 terminates it.
       exit: Server sends TerminalExit then closes with 1000 when the shell exits.
@@ -118,5 +130,5 @@ schemas:
   SearchDone: { type: object, required: [kind, truncated, filesSearched, totalMatches], properties: { kind: { const: done }, truncated: { type: boolean }, filesSearched: { type: integer, minimum: 0 }, totalMatches: { type: integer, minimum: 0 }, abandoned: { type: boolean } }, additionalProperties: false }
   TerminalAttachReady: { type: object, required: [type, cols, rows], properties: { type: { const: attach-ready }, cols: { type: integer, minimum: 1, maximum: 1000 }, rows: { type: integer, minimum: 1, maximum: 1000 } }, additionalProperties: false }
   TerminalResize: { type: object, required: [type, cols, rows], properties: { type: { const: resize }, cols: { type: integer, minimum: 1, maximum: 1000 }, rows: { type: integer, minimum: 1, maximum: 1000 } }, additionalProperties: false }
-  TerminalExit: { type: object, required: [type, exitCode, signal], properties: { type: { const: exit }, exitCode: { type: [integer, 'null'] }, signal: { type: [string, integer, 'null'] } }, additionalProperties: false }
+  TerminalExit: { type: object, required: [type, exitCode, signal], properties: { type: { const: exit }, exitCode: { type: integer, description: "Always an integer; signal death is reported as exitCode 0 with the signal number set." }, signal: { type: [integer, 'null'] } }, additionalProperties: false }
   BinaryPtyData: { type: string, contentEncoding: base64, description: Arbitrary non-empty binary frame. Validation operates on frame type and bytes rather than JSON decoding. }

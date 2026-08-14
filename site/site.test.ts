@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "astro";
 import { parse } from "yaml";
+import { base } from "./base.mjs";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 let output = "";
@@ -55,12 +56,22 @@ describe("static API site", () => {
     expect(html).toContain('&quot;required&quot;: [');
   });
 
-  test("uses the GitHub Pages base for local absolute URLs", async () => {
+  test("uses the configured Pages base for local absolute URLs", async () => {
+    // The base comes from site/base.mjs — the same source astro.config.mjs
+    // uses — so this cannot keep passing against a stale literal.
+    const prefix = `${base}/`;
     const htmlFiles = ["index.html", "docs/guides/index.html", "docs/api/index.html"];
     for (const file of htmlFiles) {
       const html = await readFile(join(output, file), "utf8");
       const localAbsolute = [...html.matchAll(/(?:href|src)="(\/[^"#]+)"/g)].map(match => match[1]);
-      expect(localAbsolute.every(url => url.startsWith("/uatu/"))).toBe(true);
+      expect(localAbsolute.length).toBeGreaterThan(0);
+      expect(localAbsolute.every(url => url.startsWith(prefix))).toBe(true);
+      // CSS url() references (inline styles and stylesheets) must respect
+      // the base too — the webfont regression lived exactly here.
+      const cssUrls = [...html.matchAll(/url\("(\/[^"]+)"\)/g)].map(match => match[1]);
+      expect(cssUrls.every(url => url.startsWith(prefix))).toBe(true);
     }
+    const fontFace = await readFile(join(output, "index.html"), "utf8");
+    expect(fontFace).toContain(`url("${prefix}fonts/HackNerdFontMono-Regular.woff2")`);
   });
 });

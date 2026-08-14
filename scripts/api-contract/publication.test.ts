@@ -44,6 +44,15 @@ describe("contract publication dry runs", () => {
     await expect(publish({ mode: "edge", site, history, output, commit })).rejects.toThrow("does not match validated commit");
   });
 
+  test("edge cannot smuggle a dotfile into api/latest", async () => {
+    const { root, site, history } = await fixture();
+    const output = path.join(root, "output");
+    await mkdir(path.join(site, "api", "latest"), { recursive: true });
+    await writeFile(path.join(site, "api", "latest", ".hidden"), "sneaky");
+    await expect(publish({ mode: "edge", site, history, output, commit }))
+      .rejects.toThrow("edge publication attempted to modify api/latest");
+  });
+
   test("release preserves history, creates an immutable pair, and advances latest atomically", async () => {
     const { root, site, history, source } = await fixture();
     const bundle = path.join(root, "bundle");
@@ -56,6 +65,31 @@ describe("contract publication dry runs", () => {
     const metadata = JSON.parse(await readFile(path.join(output, "api", "latest", "contract.json"), "utf8"));
     expect(metadata.sourceCommit).toBe(commit);
     expect(metadata.productVersion).toBe("0.5.1");
+  });
+
+  test("release refuses a bundle whose files do not match SHA256SUMS.json", async () => {
+    const { root, site, history, source } = await fixture();
+    const bundle = path.join(root, "bundle");
+    const output = path.join(root, "output");
+    await createReleaseBundle(source, bundle, commit, "2026-08-13T00:00:00.000Z", "0.5.1");
+    await writeFile(path.join(bundle, "openapi.yaml"), "tampered\n");
+    await expect(publish({ mode: "release", site, history, output, bundle, commit }))
+      .rejects.toThrow("does not match SHA256SUMS.json");
+  });
+
+  test("rerunning an older release cannot roll latest backward", async () => {
+    const { root, site, history, source } = await fixture();
+    const newerBundle = path.join(root, "newer-bundle");
+    const newerOutput = path.join(root, "newer-output");
+    await createReleaseBundle(source, newerBundle, commit, "2026-08-20T00:00:00.000Z", "0.6.0");
+    await publish({ mode: "release", site, history, output: newerOutput, bundle: newerBundle, commit });
+
+    const olderCommit = "abcdef0123456789abcdef0123456789abcdef01";
+    const olderBundle = path.join(root, "older-bundle");
+    const olderOutput = path.join(root, "older-output");
+    await createReleaseBundle(source, olderBundle, olderCommit, "2026-08-13T00:00:00.000Z", "0.5.1");
+    await expect(publish({ mode: "release", site, history: newerOutput, output: olderOutput, bundle: olderBundle, commit: olderCommit }))
+      .rejects.toThrow("refusing to roll api/latest back");
   });
 
   test("unchanged API revisions can publish a later product release", async () => {

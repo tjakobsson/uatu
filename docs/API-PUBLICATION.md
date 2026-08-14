@@ -6,7 +6,7 @@ The public documentation root is <https://tjakobsson.github.io/uatu/>. Raw contr
 - `https://tjakobsson.github.io/uatu/api/latest/` for the latest released bundle
 - `https://tjakobsson.github.io/uatu/api/revisions/hub-N_workspace-M_vX.Y.Z/` for an immutable release snapshot
 
-Each channel contains `contract.json`, `openapi.yaml`, `streaming.yaml`, `agent.md`, `CHANGELOG.md`, and release channels also contain `SHA256SUMS.json`. Consumers should read `contract.json` first, compare both domain revisions, then follow migration guidance in the API changelog.
+Every channel — edge included — contains `contract.json`, `contract.schema.json`, `openapi.yaml`, `streaming.yaml`, `operations.yaml`, `exclusions.yaml`, `agent.md`, `CHANGELOG.md`, and `SHA256SUMS.json`. Consumers should read `contract.json` first, compare both domain revisions, then follow migration guidance in the API changelog.
 
 ## Repository settings
 

@@ -74,7 +74,7 @@ paths:
                 version: 0.5.1 (abcdef0)
                 hubApiRevision: 1
                 workspaceApiRevision: 1
-                workspaces: [{ id: uatu, path: /src/uatu, backend: local, running: true, shells: [{ attached: false, label: zsh }] }]
+                workspaces: [{ id: uatu, path: /src/uatu, backend: local, running: true, workspaceApiRevision: 1, shells: [{ attached: false, label: zsh }] }]
         '401': { $ref: '#/components/responses/Error' }
   /api/hub/browse:
     get:
@@ -204,8 +204,8 @@ paths:
       summary: Check whether an owned clone job exists
       responses:
         '204': { description: Job exists }
-        '401': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
+        '401': { description: Session missing or invalid. HEAD strips the JSON error body the GET variant carries; only the application/json content-type header survives. }
+        '404': { description: Job absent or owned by another user. HEAD strips the JSON error body the GET variant carries; only the application/json content-type header survives. }
     get:
       operationId: hubStreamCloneJobEvents
       tags: [Clone jobs]
@@ -255,7 +255,7 @@ paths:
         '404': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
   /s/{workspaceId}/api/state:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/Scope' }, { $ref: '#/components/parameters/CompareTarget' }]
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/Scope' }, { $ref: '#/components/parameters/DocumentId' }, { $ref: '#/components/parameters/CompareTarget' }]
     get:
       operationId: workspaceGetState
       tags: [Workspace]
@@ -266,13 +266,14 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/WorkspaceState' }
-              example: { workspaceApiRevision: 1, roots: [], repositories: [], compareTarget: base, initialFollow: true, defaultDocumentId: null, changedId: null, generatedAt: 0, build: { version: 0.5.1, branch: main, commitSha: abcdef, commitShort: abcdef, release: false, identifier: 0.5.1, bundledWebRevision: 1 }, scope: { kind: folder }, terminal: enabled }
+              example: { workspaceApiRevision: 1, roots: [], repositories: [], compareTarget: base, initialFollow: true, defaultDocumentId: null, changedId: null, generatedAt: 0, build: { version: 0.5.1, branch: main, commitSha: abcdef, commitShort: abcdef, release: false, identifier: 0.5.1, bundledWebRevision: 1 }, scope: { kind: folder }, unscopedFingerprint: 3f2a, terminal: enabled }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
         '502': { $ref: '#/components/responses/SessionUnreachable' }
         '503': { $ref: '#/components/responses/WorkspaceStopped' }
   /s/{workspaceId}/api/document:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/Scope' }, { $ref: '#/components/parameters/CompareTarget' }]
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/Scope' }, { $ref: '#/components/parameters/DocumentId' }, { $ref: '#/components/parameters/CompareTarget' }]
     get:
       operationId: workspaceRenderDocument
       tags: [Workspace]
@@ -287,12 +288,13 @@ paths:
             application/json: { schema: { $ref: '#/components/schemas/RenderedDocument' } }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '415': { $ref: '#/components/responses/Error' }
         '502': { $ref: '#/components/responses/SessionUnreachable' }
         '503': { $ref: '#/components/responses/WorkspaceStopped' }
   /s/{workspaceId}/api/document/diff:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/Scope' }, { $ref: '#/components/parameters/CompareTarget' }]
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/Scope' }, { $ref: '#/components/parameters/DocumentId' }, { $ref: '#/components/parameters/CompareTarget' }]
     get:
       operationId: workspaceGetDocumentDiff
       tags: [Workspace]
@@ -305,12 +307,13 @@ paths:
             application/json: { schema: { $ref: '#/components/schemas/DocumentDiff' } }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
         '502': { $ref: '#/components/responses/SessionUnreachable' }
         '503': { $ref: '#/components/responses/WorkspaceStopped' }
   /s/{workspaceId}/api/events:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/Scope' }, { $ref: '#/components/parameters/CompareTarget' }]
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/Scope' }, { $ref: '#/components/parameters/DocumentId' }, { $ref: '#/components/parameters/CompareTarget' }]
     get:
       operationId: workspaceStreamState
       tags: [Workspace]
@@ -322,10 +325,11 @@ paths:
             text/event-stream: { schema: { type: string } }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
         '502': { $ref: '#/components/responses/SessionUnreachable' }
         '503': { $ref: '#/components/responses/WorkspaceStopped' }
   /s/{workspaceId}/api/search:
-    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/Scope' }, { $ref: '#/components/parameters/CompareTarget' }]
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/Scope' }, { $ref: '#/components/parameters/DocumentId' }, { $ref: '#/components/parameters/CompareTarget' }]
     get:
       operationId: workspaceSearch
       tags: [Workspace]
@@ -343,6 +347,7 @@ paths:
             application/x-ndjson: { schema: { type: string } }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
         '502': { $ref: '#/components/responses/SessionUnreachable' }
         '503': { $ref: '#/components/responses/WorkspaceStopped' }
   /s/{workspaceId}/api/personal-state:
@@ -357,6 +362,7 @@ paths:
           content:
             application/json: { schema: { $ref: '#/components/schemas/PersonalState' } }
         '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
     patch:
       operationId: workspacePatchPersonalState
@@ -385,8 +391,14 @@ paths:
       parameters: [{ name: X-Uatu-Page-Origin, in: header, schema: { type: string, format: uri } }]
       responses:
         '204': { description: Credentials and origin accepted }
-        '401': { description: Terminal credentials rejected }
-        '403': { description: Browser origin rejected }
+        '401':
+          description: Terminal credentials rejected. Bodiless when produced by the workspace child; the Hub's own session gate rejects with a JSON error body.
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+        '403':
+          description: Browser origin rejected. Bodiless when produced by the workspace child; the Hub's cross-origin cookie gate rejects with a JSON error body.
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
         '502': { $ref: '#/components/responses/SessionUnreachable' }
         '503': { $ref: '#/components/responses/WorkspaceStopped' }
   /s/{workspaceId}/api/terminal/sessions:
@@ -402,6 +414,7 @@ paths:
           content:
             application/json: { schema: { $ref: '#/components/schemas/TerminalSessionList' } }
         '401': { $ref: '#/components/responses/ProxyError' }
+        '403': { $ref: '#/components/responses/ProxyError' }
         '502': { $ref: '#/components/responses/SessionUnreachable' }
         '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
     post:
@@ -452,7 +465,7 @@ paths:
       parameters:
         - { $ref: '#/components/parameters/TerminalSessionIdQuery' }
         - { name: takeover, in: query, schema: { type: string, enum: ['0', '1'], default: '0' } }
-        - { name: Origin, in: header, required: true, schema: { type: string, format: uri } }
+        - { name: Origin, in: header, required: false, schema: { type: string, format: uri }, description: "Optional: browsers send it and a present-but-foreign Origin is rejected with 403; native clients may omit it — the Hub injects a loopback Origin toward the workspace child." }
         - { name: Upgrade, in: header, required: true, schema: { type: string, const: websocket } }
       responses:
         '101': { description: WebSocket upgrade accepted }
@@ -472,7 +485,8 @@ components:
     JobId: { name: jobId, in: path, required: true, schema: { type: string, minLength: 1 } }
     TerminalSessionId: { name: terminalSessionId, in: path, required: true, schema: { type: string, format: uuid } }
     TerminalSessionIdQuery: { name: sessionId, in: query, required: true, schema: { type: string, format: uuid } }
-    Scope: { name: scope, in: query, schema: { type: string, enum: [folder, file] }, description: Optional watched-tree scope. }
+    Scope: { name: scope, in: query, schema: { type: string, enum: [folder, file] }, description: "Optional watched-tree scope. scope=file requires the companion documentId parameter." }
+    DocumentId: { name: documentId, in: query, schema: { type: string }, description: "Watched-document identifier selecting the file to scope to. Required when scope=file; scope=file without documentId is rejected with 400." }
     CompareTarget: { name: compareTarget, in: query, schema: { type: string, enum: [base, last-commit] } }
   responses:
     Error:
@@ -564,12 +578,13 @@ components:
       additionalProperties: false
     HubWorkspace:
       type: object
-      required: [id, path, backend, running]
+      required: [id, path, backend, running, workspaceApiRevision]
       properties:
         id: { $ref: '#/components/schemas/WorkspaceId' }
         path: { type: string }
         backend: { type: string, const: local }
         running: { type: boolean }
+        workspaceApiRevision: { type: integer, minimum: 1, description: "Workspace API revision spoken by this workspace's child. Matches the top-level workspaceApiRevision for the local backend; backends running children of other builds report the child's own revision." }
         shells: { type: array, items: { type: object, required: [attached, label], properties: { attached: { type: boolean }, label: { type: string } }, additionalProperties: false } }
       additionalProperties: false
     BrowseResult:
@@ -618,7 +633,7 @@ components:
     CloneJobInput:
       type: object
       required: [input]
-      properties: { input: { type: string, maxLength: 8192 } }
+      properties: { input: { type: string, description: "At most 8192 bytes UTF-8 encoded (a byte limit, not a character count); larger payloads are rejected with 413." } }
       additionalProperties: false
     CloneJobCancelResult:
       type: object
@@ -693,7 +708,6 @@ components:
       additionalProperties: false
     PersonalStatePatch:
       type: object
-      minProperties: 1
       properties: { version: { const: 1 }, documentPath: { type: [string, 'null'] }, follow: { type: [boolean, 'null'] }, previewMode: { oneOf: [{ $ref: '#/components/schemas/ViewMode' }, { type: 'null' }] }, compareTarget: { enum: [base, last-commit, null] }, filesFilter: { enum: [all, changed, null] }, lastPtyId: { oneOf: [{ type: string, format: uuid }, { type: 'null' }] } }
       additionalProperties: false
     TerminalDimensions:

@@ -15,3 +15,6 @@ test-results/
 # Xcode build output (local `build/`, CI `build-<arch>/`) and per-user state
 desktop/macos/build*/
 xcuserdata/
+
+# Swift package build output (the swift-openapi smoke fixture)
+tests/fixtures/swift-openapi-smoke/.build/

@@ -34,6 +34,23 @@ const openApi = await loadContract(path.join(REPO_ROOT, "api", "openapi.yaml"));
 const streaming = await loadContract(path.join(REPO_ROOT, "api", "streaming.yaml"));
 const streamSchemas = streaming.schemas as Record<string, unknown>;
 
+// Every assertContract call records its operationId; the final test compares
+// the set against the whole contract, so a documented operation cannot ship
+// without at least one black-box schema assertion here.
+const coveredOperations = new Set<string>();
+
+function operationIdFor(method: string, templatePath: string): string {
+  const pathItem = (openApi.paths as Record<string, Record<string, { operationId?: string }>>)[templatePath];
+  const operation = pathItem?.[method.toLowerCase()];
+  if (!operation?.operationId) throw new Error(`no documented operation for ${method} ${templatePath}`);
+  return operation.operationId;
+}
+
+async function assertContract(method: string, templatePath: string, response: Response): Promise<void> {
+  await assertOpenApiResponse(openApi, { method, path: templatePath, response });
+  coveredOperations.add(operationIdFor(method, templatePath));
+}
+
 let tempRoot = "";
 let workspace = "";
 let registry: WorkspaceRegistry;
@@ -185,7 +202,7 @@ describe("hub end to end", () => {
     });
     expect(wrongPassword.status).toBe(401);
     expect(unknownUser.status).toBe(401);
-    await assertOpenApiResponse(openApi, { method: "POST", path: "/login", response: wrongPassword });
+    await assertContract("POST", "/login", wrongPassword);
     expect(await wrongPassword.text()).toBe(await unknownUser.text());
   });
 
@@ -196,7 +213,7 @@ describe("hub end to end", () => {
       body: JSON.stringify({ name: "tobias", password: "open sesame", deviceLabel: "integration test" }),
     });
     expect(response.status).toBe(200);
-    await assertOpenApiResponse(openApi, { method: "POST", path: "/login", response });
+    await assertContract("POST", "/login", response);
     const payload = (await response.json()) as { sessionId: string; user: string };
     expect(payload.user).toBe("tobias");
     expect(payload.sessionId.length).toBeGreaterThanOrEqual(32);
@@ -223,8 +240,8 @@ describe("hub end to end", () => {
     });
     expect(revokedProbe.status).toBe(401);
     expect((revokedProbe.headers.get("content-type") ?? "")).toContain("application/json");
-    await assertOpenApiResponse(openApi, { method: "GET", path: "/api/hub/state", response: viaCookie });
-    await assertOpenApiResponse(openApi, { method: "GET", path: "/api/hub/state", response: revokedProbe });
+    await assertContract("GET", "/api/hub/state", viaCookie);
+    await assertContract("GET", "/api/hub/state", revokedProbe);
   });
 
   test("sessions survive a hub restart via the persisted store", async () => {
@@ -387,7 +404,7 @@ describe("hub end to end", () => {
       body: JSON.stringify({ path: workspace }),
     });
     expect(created.status).toBe(200);
-    await assertOpenApiResponse(openApi, { method: "POST", path: "/api/hub/workspaces", response: created });
+    await assertContract("POST", "/api/hub/workspaces", created);
     expect(((await created.json()) as { id: string }).id).toBe("myproject");
 
     const state = await fetch(`${origin}/api/hub/state`, { headers: { cookie } });
@@ -423,7 +440,7 @@ describe("hub end to end", () => {
   test("HTTP proxying round-trips /api/state and the shell through the prefix", async () => {
     const state = await fetch(`${origin}/s/myproject/api/state`, { headers: { cookie } });
     expect(state.status).toBe(200);
-    await assertOpenApiResponse(openApi, { method: "GET", path: "/s/{workspaceId}/api/state", response: state });
+    await assertContract("GET", "/s/{workspaceId}/api/state", state);
     const payload = (await state.json()) as {
       workspaceApiRevision: number;
       roots: { docs: unknown[] }[];
@@ -529,12 +546,17 @@ describe("hub end to end", () => {
     expect(observed).toBeDefined();
     const workspaceState = (openApi.components as Record<string, unknown> as { schemas: Record<string, unknown> }).schemas.WorkspaceState;
     assertSchema(openApi, workspaceState, observed!.data, "workspaceStreamState state event");
+    // A live SSE response cannot go through assertContract (cloning would
+    // wait for the stream to end); the event-payload assertion above is the
+    // black-box validation for this operation.
+    coveredOperations.add("workspaceStreamState");
   }, 30_000);
 
   test("NDJSON search emits only documented items and a terminal done item", async () => {
     const response = await fetch(`${origin}/s/myproject/api/search?q=Hub`, { headers: { cookie } });
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type") ?? "").toContain("application/x-ndjson");
+    await assertContract("GET", "/s/{workspaceId}/api/search", response);
     const items = parseNdjson(await response.text());
     expect(items.length).toBeGreaterThan(0);
     for (const [index, item] of items.entries()) {
@@ -550,7 +572,7 @@ describe("hub end to end", () => {
       body: JSON.stringify({ cols: 80, rows: 24 }),
     });
     expect(created.status).toBe(201);
-    await assertOpenApiResponse(openApi, { method: "POST", path: "/s/{workspaceId}/api/terminal/sessions", response: created });
+    await assertContract("POST", "/s/{workspaceId}/api/terminal/sessions", created);
     const sessionId = ((await created.json()) as { id: string }).id;
     // The browser-visible URL carries NO token — the hub injects the
     // child's credential during proxying.
@@ -562,7 +584,9 @@ describe("hub end to end", () => {
       const timeout = setTimeout(() => resolve(false), 15_000);
       let reconstructionReceived = false;
       ws.addEventListener("message", event => {
-        assertWebSocketFrame(event.data, {}, true);
+        // Binary PTY frames pass; any text control frame must be a
+        // documented variant with a valid schema.
+        assertWebSocketFrame(event.data, { exit: streamSchemas.TerminalExit } as Record<string, unknown>, true);
         if (!reconstructionReceived) {
           reconstructionReceived = true;
           ws.send(new TextEncoder().encode("echo bridged\r\n"));
@@ -597,6 +621,9 @@ describe("hub end to end", () => {
     // (the child kills the PTY rather than parking a detached session).
     ws.close(4001, "kill");
     await new Promise(resolve => setTimeout(resolve, 300));
+    // The 101 upgrade never yields a Response object; the frame-level
+    // assertions above are the black-box validation for this operation.
+    coveredOperations.add("workspaceAttachTerminal");
   }, 30_000);
 
   test("the directory browser lists child directories with git status and registration", async () => {
@@ -610,6 +637,7 @@ describe("hub end to end", () => {
       headers: { cookie },
     });
     expect(response.status).toBe(200);
+    await assertContract("GET", "/api/hub/browse", response);
     const payload = (await response.json()) as {
       path: string;
       parent: string | null;
@@ -628,11 +656,13 @@ describe("hub end to end", () => {
     // A relative path is rejected; an unreadable one is a 404.
     const relative = await fetch(`${origin}/api/hub/browse?path=relative%2Fplace`, { headers: { cookie } });
     expect(relative.status).toBe(400);
+    await assertContract("GET", "/api/hub/browse", relative);
     const missing = await fetch(
       `${origin}/api/hub/browse?path=${encodeURIComponent(path.join(tempRoot, "no-such-dir"))}`,
       { headers: { cookie } },
     );
     expect(missing.status).toBe(404);
+    await assertContract("GET", "/api/hub/browse", missing);
   });
 
   test("start:false registers without starting a session (recents import)", async () => {
@@ -679,6 +709,7 @@ describe("hub end to end", () => {
       body: JSON.stringify({ path: plain }),
     });
     expect(first.status).toBe(409);
+    await assertContract("POST", "/api/hub/workspaces", first);
     expect(((await first.json()) as { needsInit?: boolean }).needsInit).toBe(true);
     // Declining is the client doing nothing further — nothing registered.
     expect(registry.byPath(plain)).toBeUndefined();
@@ -703,6 +734,7 @@ describe("hub end to end", () => {
       headers: { cookie, origin },
     });
     expect(runningRefusal.status).toBe(409);
+    await assertContract("POST", "/api/hub/workspaces/{workspaceId}/forget", runningRefusal);
     expect(registry.byId("myproject")).toBeDefined();
 
     const forgotten = await fetch(`${origin}/api/hub/workspaces/plain-folder/forget`, {
@@ -710,6 +742,7 @@ describe("hub end to end", () => {
       headers: { cookie, origin },
     });
     expect(forgotten.status).toBe(200);
+    await assertContract("POST", "/api/hub/workspaces/{workspaceId}/forget", forgotten);
     expect(registry.byId("plain-folder")).toBeUndefined();
 
     // The folder survives on disk and shows unregistered in the browser.
@@ -727,6 +760,7 @@ describe("hub end to end", () => {
       headers: { cookie, origin },
     });
     expect(unknown.status).toBe(404);
+    await assertContract("POST", "/api/hub/workspaces/{workspaceId}/forget", unknown);
   });
 
   test("git clone job streams completion, registers, and serves a workspace; failures register nothing", async () => {
@@ -743,14 +777,26 @@ describe("hub end to end", () => {
       body: JSON.stringify({ url: source, dest }),
     });
     expect(cloned.status).toBe(202);
-    await assertOpenApiResponse(openApi, { method: "POST", path: "/api/hub/clone-jobs", response: cloned });
+    await assertContract("POST", "/api/hub/clone-jobs", cloned);
     const cloneJobId = ((await cloned.json()) as { jobId: string }).jobId;
     const cloneEvents = await fetch(`${origin}/api/hub/clone-jobs/${cloneJobId}/events`, { headers: { cookie } });
     expect(cloneEvents.status).toBe(200);
+    await assertContract("GET", "/api/hub/clone-jobs/{jobId}/events", cloneEvents);
     const cloneStream = await cloneEvents.text();
     expect(cloneStream).toContain("id: 1");
     expect(cloneStream).toContain("event: phase");
     expect(cloneStream).toContain('"status":"succeeded"');
+    // Every clone SSE payload must match its documented streaming schema.
+    const cloneEventSchemas: Record<string, unknown> = {
+      output: streamSchemas.CloneOutput,
+      phase: streamSchemas.ClonePhase,
+      result: streamSchemas.CloneResult,
+    };
+    for (const event of parseSse(cloneStream)) {
+      const schema = cloneEventSchemas[event.event];
+      if (!schema) throw new Error(`undocumented clone SSE event ${event.event}`);
+      assertSchema(streaming, schema, event.data, `cloneJobEvents ${event.event}`);
+    }
     const id = (JSON.parse(cloneStream.match(/data: (\{"status":"succeeded"[^\n]+\})/)?.[1] ?? "{}") as { workspaceId: string }).workspaceId;
     expect(id).toBe("cloneme");
     const canonicalDest = await realpath(dest);
@@ -847,11 +893,13 @@ describe("hub end to end", () => {
       headers: { cookie },
     });
     expect(visibleHead.status).toBe(204);
+    await assertContract("HEAD", "/api/hub/clone-jobs/{jobId}/events", visibleHead);
     const hiddenHead = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/events`, {
       method: "HEAD",
       headers: { cookie: aliceCookie },
     });
     expect(hiddenHead.status).toBe(404);
+    await assertContract("HEAD", "/api/hub/clone-jobs/{jobId}/events", hiddenHead);
     const hidden = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/events`, {
       headers: { cookie: aliceCookie },
     });
@@ -862,6 +910,7 @@ describe("hub end to end", () => {
       body: JSON.stringify({ input: "stolen" }),
     });
     expect(deniedInput.status).toBe(404);
+    await assertContract("POST", "/api/hub/clone-jobs/{jobId}/input", deniedInput);
     const deniedCancel = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/cancel`, {
       method: "POST",
       headers: { cookie: aliceCookie, origin },
@@ -875,6 +924,7 @@ describe("hub end to end", () => {
       body: JSON.stringify({ input: "" }),
     });
     expect(firstInput.status).toBe(200);
+    await assertContract("POST", "/api/hub/clone-jobs/{jobId}/input", firstInput);
     const secondInput = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/input`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie, origin },
@@ -917,6 +967,7 @@ describe("hub end to end", () => {
       headers: { authorization: `Bearer ${bearerId}` },
     });
     expect(cancelled.status).toBe(200);
+    await assertContract("POST", "/api/hub/clone-jobs/{jobId}/cancel", cancelled);
     const cancelledEvents = await fetch(`${origin}/api/hub/clone-jobs/${bearerJobId}/events`, {
       headers: { authorization: `Bearer ${bearerId}` },
     });
@@ -944,6 +995,63 @@ describe("hub end to end", () => {
     expect(payload).toHaveProperty("terminal");
   });
 
+  test("workspace document, personal-state, and terminal inventory operations honor the contract", async () => {
+    const state = await fetch(`${origin}/s/myproject/api/state`, { headers: { cookie } });
+    const statePayload = (await state.json()) as { roots: { docs: { id: string }[] }[] };
+    const documentId = statePayload.roots[0]?.docs[0]?.id;
+    expect(documentId).toBeDefined();
+
+    const rendered = await fetch(`${origin}/s/myproject/api/document?id=${encodeURIComponent(documentId!)}`, { headers: { cookie } });
+    expect(rendered.status).toBe(200);
+    await assertContract("GET", "/s/{workspaceId}/api/document", rendered);
+    const missingDocument = await fetch(`${origin}/s/myproject/api/document?id=no-such-document`, { headers: { cookie } });
+    expect(missingDocument.status).toBe(404);
+    await assertContract("GET", "/s/{workspaceId}/api/document", missingDocument);
+
+    const diff = await fetch(`${origin}/s/myproject/api/document/diff?id=${encodeURIComponent(documentId!)}`, { headers: { cookie } });
+    expect(diff.status).toBe(200);
+    await assertContract("GET", "/s/{workspaceId}/api/document/diff", diff);
+
+    const personal = await fetch(`${origin}/s/myproject/api/personal-state`, { headers: { cookie } });
+    expect(personal.status).toBe(200);
+    await assertContract("GET", "/s/{workspaceId}/api/personal-state", personal);
+    const patched = await fetch(`${origin}/s/myproject/api/personal-state`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ follow: true }),
+    });
+    expect(patched.status).toBe(200);
+    await assertContract("PATCH", "/s/{workspaceId}/api/personal-state", patched);
+    const rejectedPatch = await fetch(`${origin}/s/myproject/api/personal-state`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ follow: "sideways" }),
+    });
+    expect(rejectedPatch.status).toBe(400);
+    await assertContract("PATCH", "/s/{workspaceId}/api/personal-state", rejectedPatch);
+
+    const inventory = await fetch(`${origin}/s/myproject/api/terminal/sessions`, { headers: { cookie } });
+    expect(inventory.status).toBe(200);
+    await assertContract("GET", "/s/{workspaceId}/api/terminal/sessions", inventory);
+
+    // A bearer client sends no Origin header at all; the hub must broker a
+    // loopback Origin so the child's origin gate passes (the generated-client
+    // path that used to 403).
+    const created = await fetch(`${origin}/s/myproject/api/terminal/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${bearerId}` },
+      body: JSON.stringify({ cols: 80, rows: 24 }),
+    });
+    expect(created.status).toBe(201);
+    const terminalSessionId = ((await created.json()) as { id: string }).id;
+    const deleted = await fetch(`${origin}/s/myproject/api/terminal/sessions/${terminalSessionId}`, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${bearerId}` },
+    });
+    expect(deleted.status).toBe(204);
+    await assertContract("DELETE", "/s/{workspaceId}/api/terminal/sessions/{terminalSessionId}", deleted);
+  }, 30_000);
+
   test("proxied session traffic rejects foreign origins before any rewriting", async () => {
     // A same-site-but-different-origin page can carry the SameSite=Lax
     // cookie; the hub must refuse it before loopback-shaping the Origin
@@ -952,6 +1060,7 @@ describe("hub end to end", () => {
       headers: { cookie, origin: "https://attacker.example" },
     });
     expect(proxied.status).toBe(403);
+    await assertContract("GET", "/s/{workspaceId}/api/state", proxied);
 
     const sessionId = crypto.randomUUID();
     const ws = new WebSocket(`ws://127.0.0.1:${server.port}/s/myproject/api/terminal?sessionId=${sessionId}`, {
@@ -987,6 +1096,7 @@ describe("hub end to end", () => {
       headers: { cookie },
     });
     expect(probe.status).toBe(204);
+    await assertContract("GET", "/s/{workspaceId}/api/auth", probe);
   });
 
   test("workspace folder names with edge whitespace round-trip exactly", async () => {
@@ -1030,6 +1140,7 @@ describe("hub end to end", () => {
       headers: { cookie, origin },
     });
     expect(stop.status).toBe(200);
+    await assertContract("POST", "/api/hub/sessions/{workspaceId}/stop", stop);
 
     const page = await fetch(`${origin}/s/myproject/`, { headers: { cookie, accept: "text/html" } });
     expect(page.status).toBe(503);
@@ -1068,6 +1179,7 @@ describe("hub end to end", () => {
 
     const listing = await fetch(`${origin}/api/hub/sessions`, { headers: { cookie } });
     expect(listing.status).toBe(200);
+    await assertContract("GET", "/api/hub/sessions", listing);
     const payload = (await listing.json()) as {
       sessions: { handle: string; deviceLabel: string; issuedAt: number; current: boolean }[];
     };
@@ -1087,6 +1199,7 @@ describe("hub end to end", () => {
       headers: { cookie, origin },
     });
     expect(revoke.status).toBe(200);
+    await assertContract("POST", "/api/hub/sessions/{sessionHandle}/revoke", revoke);
     expect(((await revoke.json()) as { current: boolean }).current).toBe(false);
     const dead = await fetch(`${origin}/api/hub/state`, {
       headers: { authorization: `Bearer ${secondId}` },
@@ -1117,6 +1230,27 @@ describe("hub end to end", () => {
       body: JSON.stringify({ name: "tobias", password: "open sesame" }),
     });
     expect(plain.headers.get("set-cookie") ?? "").not.toContain("Secure");
+  });
+
+  test("bearer logout returns the documented JSON revocation result", async () => {
+    const login = await fetch(`${origin}/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "alice", password: "alice secret", deviceLabel: "bearer logout" }),
+    });
+    expect(login.status).toBe(200);
+    const sessionId = ((await login.json()) as { sessionId: string }).sessionId;
+    const response = await fetch(`${origin}/logout`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${sessionId}` },
+    });
+    expect(response.status).toBe(200);
+    await assertContract("POST", "/logout", response);
+    expect(((await response.json()) as { revoked: boolean }).revoked).toBe(true);
+    const dead = await fetch(`${origin}/api/hub/state`, {
+      headers: { authorization: `Bearer ${sessionId}` },
+    });
+    expect(dead.status).toBe(401);
   });
 
   test("logout revokes the session server-side for every transport", async () => {
@@ -1168,6 +1302,7 @@ describe("hub end to end", () => {
       headers: { cookie, origin },
     });
     expect(start.status).toBe(200);
+    await assertContract("POST", "/api/hub/sessions/{workspaceId}/start", start);
     const state = await fetch(`${origin}/s/myproject/api/state`, { headers: { cookie } });
     expect(state.status).toBe(200);
 
@@ -1177,4 +1312,17 @@ describe("hub end to end", () => {
     expect(await running!.exited).not.toBeUndefined();
     expect(sessions.runningIds()).toEqual([]);
   }, 60_000);
+
+  test("every documented HTTP operation was black-box validated", () => {
+    const documented = new Set<string>();
+    for (const pathItem of Object.values(openApi.paths as Record<string, Record<string, unknown>>)) {
+      for (const candidate of Object.values(pathItem)) {
+        const operationId = (candidate as { operationId?: unknown } | null)?.operationId;
+        if (typeof operationId === "string") documented.add(operationId);
+      }
+    }
+    expect(documented.size).toBeGreaterThan(20);
+    const missing = [...documented].filter(id => !coveredOperations.has(id));
+    expect(missing).toEqual([]);
+  });
 });

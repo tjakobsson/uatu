@@ -19,6 +19,7 @@
       "bundledWebRevision": 1
     },
     "scope": { "kind": "folder" },
+    "unscopedFingerprint": "3f2a",
     "terminal": "enabled"
   }
 }

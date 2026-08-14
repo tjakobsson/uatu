@@ -8,7 +8,7 @@ Workspace state and clone jobs use SSE. Parse named events, retain the most rece
 
 ## NDJSON search
 
-Search emits one JSON value per line. Process complete lines incrementally and distinguish result, completion, and error variants by their documented discriminator. HTTP success alone does not imply the stream completed successfully. Cancelling the request cancels the search; a partial result set is not a completion.
+Search emits one JSON value per line. Process complete lines incrementally and distinguish the documented variants — file results, expensive/oversized disclosures, and the final done record — by their `kind` discriminator; there is no in-band error variant. HTTP success alone does not imply the stream completed successfully. Cancelling the request cancels the search; a partial result set is not a completion.
 
 ## Terminal WebSocket
 

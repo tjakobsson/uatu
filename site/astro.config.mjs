@@ -1,9 +1,11 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "astro/config";
 import { assembleEdgeArtifacts } from "../scripts/assemble-api-site.ts";
+import { base } from "./base.mjs";
 
 export default defineConfig({
   site: "https://tjakobsson.github.io",
-  base: "/uatu",
+  base,
   output: "static",
   outDir: "./dist",
   integrations: [
@@ -11,7 +13,9 @@ export default defineConfig({
       name: "uatu-edge-artifacts",
       hooks: {
         "astro:build:done": async ({ dir }) => {
-          await assembleEdgeArtifacts(dir.pathname);
+          // fileURLToPath, not dir.pathname: URL.pathname yields /C:/... on
+          // Windows and breaks the assemble step.
+          await assembleEdgeArtifacts(fileURLToPath(dir));
         },
       },
     },

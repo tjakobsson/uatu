@@ -28,10 +28,19 @@ function object(value: unknown): JsonObject {
 }
 
 function resolve(document: JsonObject, value: unknown): JsonObject {
-  const candidate = object(value);
-  if (typeof candidate.$ref !== "string" || !candidate.$ref.startsWith("#/")) return candidate;
-  return candidate.$ref.slice(2).split("/").reduce<JsonObject>((node, part) =>
-    object(node[part.replaceAll("~1", "/").replaceAll("~0", "~")]), document);
+  let candidate = object(value);
+  // Follow ref chains (bounded), and fail the build on a dangling pointer:
+  // silently rendering nothing would ship a reference page missing content.
+  for (let hop = 0; typeof candidate.$ref === "string"; hop++) {
+    const ref = candidate.$ref;
+    if (hop >= 8) throw new Error(`api reference: $ref chain too deep at ${ref}`);
+    if (!ref.startsWith("#/")) throw new Error(`api reference: unsupported external $ref ${ref}`);
+    const target = ref.slice(2).split("/").reduce<unknown>((node, part) =>
+      object(node)[part.replaceAll("~1", "/").replaceAll("~0", "~")], document);
+    candidate = object(target);
+    if (Object.keys(candidate).length === 0) throw new Error(`api reference: unresolvable $ref ${ref}`);
+  }
+  return candidate;
 }
 
 function schemaRef(value: unknown): ApiSchemaRef | undefined {
@@ -40,6 +49,12 @@ function schemaRef(value: unknown): ApiSchemaRef | undefined {
   if (typeof schema.$ref === "string") {
     const name = schema.$ref.split("/").at(-1) ?? schema.$ref;
     return { label: name, anchor: schema.$ref.startsWith("#/components/schemas/") ? `schema-${name}` : undefined };
+  }
+  if (schema.type === "array") {
+    // Keep the link to the item schema: a bare "array" label hid where the
+    // element documentation lives.
+    const items = schemaRef(schema.items);
+    return items ? { label: `array of ${items.label}`, anchor: items.anchor } : { label: "array" };
   }
   if (Array.isArray(schema.type)) return { label: schema.type.map(String).join(" | ") };
   if (typeof schema.type === "string") return { label: schema.type };
@@ -123,8 +138,4 @@ export function readApiReference(source = openapiSource): ApiReference {
     operations: operations.sort((a, b) => a.path.localeCompare(b.path) || a.method.localeCompare(b.method)),
     schemas: schemas.sort((a, b) => a.name.localeCompare(b.name)),
   };
-}
-
-export function readOperations(source = openapiSource): ApiOperation[] {
-  return readApiReference(source).operations;
 }

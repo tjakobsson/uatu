@@ -1,8 +1,6 @@
-@font-face {
-  font-family: "Hack Uatu";
-  src: url("/uatu/fonts/HackNerdFontMono-Regular.woff2") format("woff2");
-  font-display: swap;
-}
+/* The "Hack Uatu" @font-face is declared inline by SiteLayout.astro: CSS
+   cannot interpolate the configured base path, and hardcoding it here broke
+   the font whenever the base changed. */
 
 :root {
   color-scheme: light dark;

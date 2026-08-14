@@ -16,18 +16,38 @@ export const guides = [
   { slug: "compatibility", title: "Compatibility", summary: "Compare Hub and workspace revisions and apply migrations.", source: compatibility },
 ] as const;
 
+import { sitePath } from "./paths";
+
 function escapeHtml(value: string): string {
-  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function inlineMarkdown(value: string): string {
   return escapeHtml(value)
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, label, href) => {
-      const resolved = href.startsWith("../") ? `/uatu/api/edge/${href.slice(3)}` : href;
-      return `<a href="${resolved}">${label}</a>`;
+      const resolved = href.startsWith("../") ? sitePath(`api/edge/${href.slice(3)}`) : href;
+      return `<a href="${escapeHtml(resolved)}">${label}</a>`;
     });
 }
+
+// The renderer supports exactly: h1 (dropped), h2, flat lists, paragraphs,
+// inline code, and links. Anything else would render as mangled literal
+// text, so an unsupported construct fails the build instead of shipping
+// wrong documentation.
+const UNSUPPORTED_CONSTRUCTS: [RegExp, string][] = [
+  [/^```/, "fenced code block"],
+  [/^#{3,} /, "heading deeper than h2"],
+  [/^\s+(?:- |\d+\. )/, "nested list"],
+  [/\*\*[^*]+\*\*/, "bold emphasis"],
+  [/^> /, "blockquote"],
+  [/^\|/, "table"],
+];
 
 export function renderGuide(source: string): string {
   const blocks: string[] = [];
@@ -42,7 +62,12 @@ export function renderGuide(source: string): string {
     paragraph = [];
   };
 
-  for (const line of source.split("\n")) {
+  source.split("\n").forEach((line, index) => {
+    for (const [pattern, label] of UNSUPPORTED_CONSTRUCTS) {
+      if (pattern.test(line)) {
+        throw new Error(`guide uses unsupported markdown (${label}) on line ${index + 1}: ${line.trim()}`);
+      }
+    }
     if (!line.trim()) {
       flushParagraph();
       flushList();
@@ -59,7 +84,7 @@ export function renderGuide(source: string): string {
     } else {
       paragraph.push(line.trim());
     }
-  }
+  });
   flushParagraph();
   flushList();
   return blocks.join("\n");

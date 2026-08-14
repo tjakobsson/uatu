@@ -8,6 +8,10 @@ export type CompatibilityResult = {
   breaking: Record<ApiDomain, string[]>;
 };
 
+// Wire direction of a schema: request-side schemas may gain optional inputs
+// compatibly, response-side schemas may not surprise old strict validators.
+type Direction = "request" | "response";
+
 function object(value: unknown): JsonObject {
   return value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : {};
 }
@@ -48,39 +52,154 @@ function stable(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function referencedContract(operation: JsonObject, document: JsonObject): string {
-  const seen = new Set<string>();
-  const values: unknown[] = [];
-  const visit = (value: unknown): void => {
-    if (Array.isArray(value)) {
-      value.forEach(visit);
-      return;
-    }
-    if (!value || typeof value !== "object") return;
-    const record = value as JsonObject;
-    if (typeof record.$ref === "string" && record.$ref.startsWith("#/")) {
-      if (seen.has(record.$ref)) return;
-      seen.add(record.$ref);
-      const target = record.$ref.slice(2).split("/").reduce<unknown>((node, segment) =>
-        object(node)[segment.replaceAll("~1", "/").replaceAll("~0", "~")], document);
-      values.push([record.$ref, target]);
-      visit(target);
-    }
-    Object.values(record).forEach(visit);
-  };
-  visit(operation);
-  return stable(values);
+// Documentation-only keys that never change what is valid on the wire.
+const ANNOTATION_KEYS = new Set(["description", "title", "summary", "example", "examples", "default", "$comment", "externalDocs", "meaning", "deprecated"]);
+
+function stripAnnotations(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripAnnotations);
+  if (!value || typeof value !== "object") return value;
+  const result: JsonObject = {};
+  for (const [key, item] of Object.entries(value as JsonObject)) {
+    if (ANNOTATION_KEYS.has(key)) continue;
+    result[key] = stripAnnotations(item);
+  }
+  return result;
 }
 
-function compareOperation(name: string, before: JsonObject, after: JsonObject): string[] {
+function pointerTarget(pointer: string, document: JsonObject): unknown {
+  return pointer.split("/").filter(Boolean).reduce<unknown>((node, segment) =>
+    object(node)[segment.replaceAll("~1", "/").replaceAll("~0", "~")], document);
+}
+
+// Deep-resolves $ref nodes so schema comparison sees the actual shapes
+// instead of opaque pointer strings. Local "#/..." refs resolve against the
+// current document; "./openapi.yaml#/..." refs (used by streaming.yaml)
+// resolve against the companion OpenAPI document and continue resolving
+// there. Cycles collapse to a stable {$cycle} marker.
+function resolveRefs(value: unknown, document: JsonObject, external: JsonObject, stack: Set<string> = new Set()): unknown {
+  if (Array.isArray(value)) return value.map(item => resolveRefs(item, document, external, stack));
+  if (!value || typeof value !== "object") return value;
+  const record = value as JsonObject;
+  if (typeof record.$ref === "string") {
+    const ref = record.$ref;
+    let target: unknown;
+    let nextDocument = document;
+    if (ref.startsWith("#/")) {
+      target = pointerTarget(ref.slice(1), document);
+    } else if (ref.startsWith("./openapi.yaml#/")) {
+      nextDocument = external;
+      target = pointerTarget(ref.slice("./openapi.yaml#".length), external);
+    } else {
+      return { $unresolvedRef: ref };
+    }
+    const key = `${nextDocument === external ? "openapi" : "self"}:${ref}`;
+    if (stack.has(key)) return { $cycle: ref };
+    const nested = new Set(stack);
+    nested.add(key);
+    return resolveRefs(target, nextDocument, external, nested);
+  }
+  const result: JsonObject = {};
+  for (const [key, item] of Object.entries(record)) {
+    result[key] = resolveRefs(item, document, external, stack);
+  }
+  return result;
+}
+
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(String) : [];
+}
+
+// Semantic schema comparison over fully resolved, annotation-stripped nodes.
+// Conservative fail-closed: only explicitly recognized additive shapes are
+// compatible; every unrecognized difference is breaking.
+function compareSchemas(label: string, before: unknown, after: unknown, direction: Direction, failures: string[]): void {
+  if (stable(before) === stable(after)) return;
+  if (Array.isArray(before) || Array.isArray(after) || !before || !after || typeof before !== "object" || typeof after !== "object") {
+    failures.push(`${label}: changed`);
+    return;
+  }
+  const b = before as JsonObject;
+  const a = after as JsonObject;
+  const keywords = new Set([...Object.keys(b), ...Object.keys(a)]);
+  for (const keyword of keywords) {
+    if (stable(b[keyword]) === stable(a[keyword])) continue;
+    switch (keyword) {
+      case "properties": {
+        const beforeProperties = object(b.properties);
+        const afterProperties = object(a.properties);
+        const afterRequired = new Set(asStringArray(a.required));
+        for (const name of Object.keys(beforeProperties)) {
+          if (!(name in afterProperties)) {
+            failures.push(`${label}: removed property ${name}`);
+            continue;
+          }
+          compareSchemas(`${label}.${name}`, beforeProperties[name], afterProperties[name], direction, failures);
+        }
+        for (const name of Object.keys(afterProperties)) {
+          if (name in beforeProperties) continue;
+          if (afterRequired.has(name)) continue; // reported by the required case below
+          if (direction === "response" && b.additionalProperties === false) {
+            failures.push(`${label}: added property ${name} to a closed response object (old validators reject it)`);
+          }
+        }
+        break;
+      }
+      case "required": {
+        const beforeRequired = new Set(asStringArray(b.required));
+        const afterRequired = new Set(asStringArray(a.required));
+        for (const name of afterRequired) {
+          if (!beforeRequired.has(name) && direction === "request") failures.push(`${label}: property ${name} became required`);
+          if (!beforeRequired.has(name) && direction === "response" && !(name in object(b.properties))) {
+            failures.push(`${label}: added required property ${name}`);
+          }
+        }
+        for (const name of beforeRequired) {
+          if (!afterRequired.has(name) && direction === "response") failures.push(`${label}: property ${name} is no longer guaranteed (required removed)`);
+        }
+        break;
+      }
+      case "enum": {
+        const beforeValues = new Set((Array.isArray(b.enum) ? b.enum : []).map(stable));
+        const afterValues = new Set((Array.isArray(a.enum) ? a.enum : []).map(stable));
+        const added = [...afterValues].filter(item => !beforeValues.has(item));
+        const removed = [...beforeValues].filter(item => !afterValues.has(item));
+        if (direction === "request" && removed.length > 0) failures.push(`${label}: enum no longer accepts ${removed.join(", ")}`);
+        if (direction === "response" && added.length > 0) failures.push(`${label}: enum gained values old clients do not know: ${added.join(", ")}`);
+        break;
+      }
+      case "items": {
+        compareSchemas(`${label}.items`, b.items, a.items, direction, failures);
+        break;
+      }
+      case "oneOf":
+      case "anyOf":
+      case "allOf": {
+        const beforeBranches = Array.isArray(b[keyword]) ? b[keyword] as unknown[] : [];
+        const afterBranches = Array.isArray(a[keyword]) ? a[keyword] as unknown[] : [];
+        if (beforeBranches.length !== afterBranches.length) {
+          failures.push(`${label}: ${keyword} branch count changed`);
+          break;
+        }
+        beforeBranches.forEach((branch, index) => compareSchemas(`${label}.${keyword}[${index}]`, branch, afterBranches[index], direction, failures));
+        break;
+      }
+      default:
+        failures.push(`${label}: changed ${keyword}`);
+    }
+  }
+}
+
+function compareOperation(name: string, before: JsonObject, after: JsonObject, baseDocument: JsonObject, proposedDocument: JsonObject): string[] {
   const failures: string[] = [];
-  const beforeResponses = object(before.responses);
-  const afterResponses = object(after.responses);
+  const resolveBase = (value: unknown) => stripAnnotations(resolveRefs(value, baseDocument, {}));
+  const resolveProposed = (value: unknown) => stripAnnotations(resolveRefs(value, proposedDocument, {}));
+  const beforeResponses = object(resolveBase(before.responses));
+  const afterResponses = object(resolveProposed(after.responses));
   for (const status of Object.keys(beforeResponses)) {
     if (!(status in afterResponses)) failures.push(`${name}: removed response ${status}`);
   }
-  const beforeParameters = Array.isArray(before.parameters) ? before.parameters.map(object) : [];
-  const afterParameters = Array.isArray(after.parameters) ? after.parameters.map(object) : [];
+  const beforeParameters = (Array.isArray(before.parameters) ? before.parameters : []).map(item => object(resolveBase(item)));
+  const afterParameters = (Array.isArray(after.parameters) ? after.parameters : []).map(item => object(resolveProposed(item)));
   for (const parameter of afterParameters) {
     if (parameter.required !== true) continue;
     const existed = beforeParameters.some(candidate => candidate.name === parameter.name && candidate.in === parameter.in);
@@ -92,45 +211,85 @@ function compareOperation(name: string, before: JsonObject, after: JsonObject): 
       failures.push(`${name}: removed ${String(parameter.in)} parameter ${String(parameter.name)}`);
       continue;
     }
-    if (next && parameter.required !== true && next.required === true) {
+    if (parameter.required !== true && next.required === true) {
       failures.push(`${name}: made ${String(parameter.in)} parameter ${String(parameter.name)} required`);
     }
-    if (next && stable(parameter.schema) !== stable(next.schema)) {
-      failures.push(`${name}: changed ${String(parameter.in)} parameter ${String(parameter.name)} schema`);
-    }
+    compareSchemas(`${name}: ${String(parameter.in)} parameter ${String(parameter.name)} schema`, parameter.schema, next.schema, "request", failures);
   }
   if (!before.requestBody && object(after.requestBody).required === true) failures.push(`${name}: added required request body`);
   if (before.requestBody && object(before.requestBody).required !== true && object(after.requestBody).required === true) {
     failures.push(`${name}: made request body required`);
   }
-  const removedMedia = (label: string, beforeContent: unknown, afterContent: unknown) => {
-    for (const media of Object.keys(object(beforeContent))) {
-      if (!(media in object(afterContent))) failures.push(`${name}: removed ${label} media type ${media}`);
-    }
-  };
-  removedMedia("request", object(before.requestBody).content, object(after.requestBody).content);
-  const beforeRequestContent = object(object(before.requestBody).content);
-  const afterRequestContent = object(object(after.requestBody).content);
+  const beforeRequestContent = object(object(resolveBase(before.requestBody)).content);
+  const afterRequestContent = object(object(resolveProposed(after.requestBody)).content);
   for (const media of Object.keys(beforeRequestContent)) {
-    if (!(media in afterRequestContent)) continue;
-    const beforeSchema = object(beforeRequestContent[media]).schema;
-    const afterSchema = object(afterRequestContent[media]).schema;
-    if (stable(beforeSchema) !== stable(afterSchema)) failures.push(`${name}: changed request schema for ${media}`);
+    if (!(media in afterRequestContent)) {
+      failures.push(`${name}: removed request media type ${media}`);
+      continue;
+    }
+    compareSchemas(`${name}: request schema for ${media}`, object(beforeRequestContent[media]).schema, object(afterRequestContent[media]).schema, "request", failures);
   }
   for (const [status, response] of Object.entries(beforeResponses)) {
     if (!(status in afterResponses)) continue;
-    removedMedia(`response ${status}`, object(response).content, object(afterResponses[status]).content);
+    const afterResponse = object(afterResponses[status]);
     const beforeContent = object(object(response).content);
-    const afterContent = object(object(afterResponses[status]).content);
+    const afterContent = object(afterResponse.content);
     for (const media of Object.keys(beforeContent)) {
-      if (!(media in afterContent)) continue;
-      const beforeSchema = object(beforeContent[media]).schema;
-      const afterSchema = object(afterContent[media]).schema;
-      if (stable(beforeSchema) !== stable(afterSchema)) failures.push(`${name}: changed response ${status} schema for ${media}`);
+      if (!(media in afterContent)) {
+        failures.push(`${name}: removed response ${status} media type ${media}`);
+        continue;
+      }
+      compareSchemas(`${name}: response ${status} schema for ${media}`, object(beforeContent[media]).schema, object(afterContent[media]).schema, "response", failures);
+    }
+    // Documented response headers are part of the wire contract: removing
+    // one or changing its schema breaks clients that read it.
+    const beforeHeaders = object(object(response).headers);
+    const afterHeaders = object(afterResponse.headers);
+    for (const [header, headerValue] of Object.entries(beforeHeaders)) {
+      if (!(header in afterHeaders)) {
+        failures.push(`${name}: removed response ${status} header ${header}`);
+        continue;
+      }
+      compareSchemas(`${name}: response ${status} header ${header} schema`, object(headerValue).schema, object(afterHeaders[header]).schema, "response", failures);
     }
   }
   if (stable(before.security) !== stable(after.security)) failures.push(`${name}: changed authentication requirements`);
   return failures;
+}
+
+// A change to a security scheme *definition* (cookie name, scheme type) is a
+// wire break for every operation whose effective security references it,
+// even though requirement arrays only name schemes and never $ref them.
+function compareSecuritySchemes(base: JsonObject, proposed: JsonObject, baseOperations: Map<string, { domain: ApiDomain; value: JsonObject }>): CompatibilityResult {
+  const breaking: Record<ApiDomain, string[]> = { hub: [], workspace: [] };
+  const changed = new Set<ApiDomain>();
+  const baseSchemes = object(object(base.components).securitySchemes);
+  const proposedSchemes = object(object(proposed.components).securitySchemes);
+  const domainsReferencing = (scheme: string): ApiDomain[] => {
+    const domains = new Set<ApiDomain>();
+    for (const { domain, value } of baseOperations.values()) {
+      const requirements = Array.isArray(value.security) ? value.security : [];
+      if (requirements.some(requirement => scheme in object(requirement))) domains.add(domain);
+    }
+    return [...domains];
+  };
+  for (const [scheme, definition] of Object.entries(baseSchemes)) {
+    const affected = domainsReferencing(scheme);
+    if (!(scheme in proposedSchemes)) {
+      for (const domain of affected) {
+        changed.add(domain);
+        breaking[domain].push(`security scheme ${scheme}: removed`);
+      }
+      continue;
+    }
+    if (stable(stripAnnotations(definition)) !== stable(stripAnnotations(proposedSchemes[scheme]))) {
+      for (const domain of affected) {
+        changed.add(domain);
+        breaking[domain].push(`security scheme ${scheme}: definition changed`);
+      }
+    }
+  }
+  return { changedDomains: [...changed].sort(), breaking };
 }
 
 export function compareContracts(base: JsonObject, proposed: JsonObject): CompatibilityResult {
@@ -146,39 +305,179 @@ export function compareContracts(base: JsonObject, proposed: JsonObject): Compat
       continue;
     }
     const operationChanged = stable(prior.value) !== stable(next.value);
-    const referencedChanged = referencedContract(prior.value, base) !== referencedContract(next.value, proposed);
-    if (operationChanged || referencedChanged) changed.add(prior.domain);
-    breaking[prior.domain].push(...compareOperation(name, prior.value, next.value));
-    if (referencedChanged) {
-      breaking[prior.domain].push(`${name}: referenced request or response schema changed; review as incompatible`);
-    }
+    const resolvedChanged = stable(resolveRefs(prior.value, base, {})) !== stable(resolveRefs(next.value, proposed, {}));
+    if (operationChanged || resolvedChanged) changed.add(prior.domain);
+    breaking[prior.domain].push(...compareOperation(name, prior.value, next.value, base, proposed));
   }
   for (const [name, next] of proposedOperations) {
     if (!baseOperations.has(name)) changed.add(next.domain);
   }
+  const schemes = compareSecuritySchemes(base, proposed, baseOperations);
+  return mergeCompatibilityResults({ changedDomains: [...changed].sort(), breaking }, schemes);
+}
+
+function streamingChannelDomain(channel: JsonObject): ApiDomain {
+  return String(channel.path ?? "").startsWith("/s/") ? "workspace" : "hub";
+}
+
+// Schema names a channel references, keyed by wire direction. Channels name
+// schemas as plain strings (dataSchema/itemSchema/frames), and the bodies
+// live in the document's top-level schemas block.
+function channelSchemaDirections(channel: JsonObject): Map<string, Direction> {
+  const result = new Map<string, Direction>();
+  const note = (value: unknown, direction: Direction) => {
+    if (typeof value === "string") {
+      // A schema referenced in both directions keeps "response": strict old
+      // validators make it the more conservative side for every rule.
+      result.set(value, result.get(value) === "response" ? "response" : direction);
+    }
+  };
+  const frames = (framesValue: unknown, direction: Direction) => {
+    const framesObject = object(framesValue);
+    note(object(framesObject.binary).schema, direction);
+    for (const schema of asStringArray(object(framesObject.textJson).schemas)) note(schema, direction);
+  };
+  for (const event of Array.isArray(channel.events) ? channel.events : []) note(object(event).dataSchema, "response");
+  note(channel.itemSchema, "response");
+  frames(channel.clientFrames, "request");
+  frames(channel.serverFrames, "response");
+  return result;
+}
+
+export function compareStreamingContracts(base: JsonObject, proposed: JsonObject, baseOpenapi: JsonObject = {}, proposedOpenapi: JsonObject = {}): CompatibilityResult {
+  const breaking: Record<ApiDomain, string[]> = { hub: [], workspace: [] };
+  const changed = new Set<ApiDomain>();
+  const baseSchemas = object(base.schemas);
+  const proposedSchemas = object(proposed.schemas);
+  const resolveSchema = (name: string, document: JsonObject, schemas: JsonObject, openapi: JsonObject): unknown =>
+    name in schemas ? stripAnnotations(resolveRefs(schemas[name], document, openapi)) : undefined;
+  for (const [name, value] of Object.entries(object(base.channels))) {
+    const channel = object(value);
+    const domain = streamingChannelDomain(channel);
+    const next = object(base.channels && object(proposed.channels)[name]);
+    if (!(name in object(proposed.channels))) {
+      changed.add(domain);
+      breaking[domain].push(`streaming channel ${name}: removed`);
+      continue;
+    }
+    if (stable(stripAnnotations(channel)) !== stable(stripAnnotations(next))) {
+      changed.add(domain);
+      breaking[domain].push(`streaming channel ${name}: existing protocol changed`);
+    } else if (stable(channel) !== stable(next)) {
+      changed.add(domain);
+    }
+    // The channel body only names its schemas — compare the referenced
+    // schema bodies too, or a wire break in the schemas block ships unseen.
+    for (const [schemaName, direction] of channelSchemaDirections(channel)) {
+      const before = resolveSchema(schemaName, base, baseSchemas, baseOpenapi);
+      const after = resolveSchema(schemaName, proposed, proposedSchemas, proposedOpenapi);
+      if (before === undefined) continue;
+      if (after === undefined) {
+        changed.add(domain);
+        breaking[domain].push(`streaming channel ${name}: schema ${schemaName} removed`);
+        continue;
+      }
+      const failures: string[] = [];
+      compareSchemas(`streaming channel ${name}: schema ${schemaName}`, before, after, direction, failures);
+      if (failures.length > 0) {
+        changed.add(domain);
+        breaking[domain].push(...failures);
+      } else if (stable(resolveRefs(baseSchemas[schemaName], base, baseOpenapi)) !== stable(resolveRefs(proposedSchemas[schemaName], proposed, proposedOpenapi))) {
+        changed.add(domain);
+      }
+    }
+  }
+  for (const [name, value] of Object.entries(object(proposed.channels))) {
+    if (name in object(base.channels)) continue;
+    changed.add(streamingChannelDomain(object(value)));
+  }
   return { changedDomains: [...changed].sort(), breaking };
 }
 
-export function compareStreamingContracts(base: JsonObject, proposed: JsonObject): CompatibilityResult {
+type InventoryOperation = JsonObject & { operationId?: unknown; domain?: unknown };
+
+// Fields of an inventory entry that describe the wire contract itself;
+// mutating any of them for an existing operation is a break.
+const INVENTORY_WIRE_FIELDS = ["method", "path", "childPath", "transport", "auth"] as const;
+const INVENTORY_SET_FIELDS = ["statuses", "requestMediaTypes", "responseMediaTypes"] as const;
+
+export function compareInventories(base: JsonObject, proposed: JsonObject): CompatibilityResult {
   const breaking: Record<ApiDomain, string[]> = { hub: [], workspace: [] };
   const changed = new Set<ApiDomain>();
-  const baseChannels = object(base.channels);
-  const proposedChannels = object(proposed.channels);
-  for (const [name, value] of Object.entries(baseChannels)) {
-    const channel = object(value);
-    const domain: ApiDomain = String(channel.path ?? "").startsWith("/s/") ? "workspace" : "hub";
-    const next = proposedChannels[name];
-    if (stable(channel) !== stable(next)) {
-      changed.add(domain);
-      breaking[domain].push(`streaming channel ${name}: existing protocol changed`);
+  const entryDomain = (entry: InventoryOperation): ApiDomain => (entry.domain === "workspace" ? "workspace" : "hub");
+  const index = (document: JsonObject): Map<string, InventoryOperation> => {
+    const result = new Map<string, InventoryOperation>();
+    for (const entry of Array.isArray(document.operations) ? document.operations : []) {
+      const record = object(entry) as InventoryOperation;
+      if (typeof record.operationId === "string") result.set(record.operationId, record);
     }
+    return result;
+  };
+  const baseIndex = index(base);
+  const proposedIndex = index(proposed);
+  for (const [id, entry] of baseIndex) {
+    const domain = entryDomain(entry);
+    const next = proposedIndex.get(id);
+    if (!next) {
+      changed.add(domain);
+      breaking[domain].push(`inventory: removed operation ${id}`);
+      continue;
+    }
+    for (const field of INVENTORY_WIRE_FIELDS) {
+      if (stable(entry[field]) !== stable(next[field])) {
+        changed.add(domain);
+        breaking[domain].push(`inventory: operation ${id} changed ${field}`);
+      }
+    }
+    for (const field of INVENTORY_SET_FIELDS) {
+      const before = new Set((Array.isArray(entry[field]) ? entry[field] as unknown[] : []).map(stable));
+      const after = new Set((Array.isArray(next[field]) ? next[field] as unknown[] : []).map(stable));
+      const removed = [...before].filter(item => !after.has(item));
+      if (removed.length > 0) {
+        changed.add(domain);
+        breaking[domain].push(`inventory: operation ${id} removed ${field} entries ${removed.join(", ")}`);
+      } else if ([...after].some(item => !before.has(item))) {
+        changed.add(domain);
+      }
+    }
+    if (stable(entry) !== stable(next)) changed.add(domain);
   }
-  for (const [name, value] of Object.entries(proposedChannels)) {
-    if (name in baseChannels) continue;
-    const domain: ApiDomain = String(object(value).path ?? "").startsWith("/s/") ? "workspace" : "hub";
-    changed.add(domain);
+  for (const [id, entry] of proposedIndex) {
+    if (!baseIndex.has(id)) changed.add(entryDomain(entry));
   }
   return { changedDomains: [...changed].sort(), breaking };
+}
+
+// Exclusions are classification, not wire shape: adding, removing, or
+// rewording one marks the affected domain changed but is never breaking on
+// its own (promoting an excluded route to public shows up in the contract
+// comparison instead).
+export function compareExclusions(base: JsonObject, proposed: JsonObject): CompatibilityResult {
+  const changed = new Set<ApiDomain>();
+  const scopeDomains = (scope: unknown): ApiDomain[] => {
+    if (scope === "hub") return ["hub"];
+    if (scope === "workspace") return ["workspace"];
+    if (scope === "test") return [];
+    return ["hub", "workspace"];
+  };
+  const index = (document: JsonObject): Map<string, JsonObject> => {
+    const result = new Map<string, JsonObject>();
+    for (const entry of Array.isArray(document.exclusions) ? document.exclusions : []) {
+      const record = object(entry);
+      if (typeof record.id === "string") result.set(record.id, record);
+    }
+    return result;
+  };
+  const baseIndex = index(base);
+  const proposedIndex = index(proposed);
+  for (const [id, entry] of baseIndex) {
+    const next = proposedIndex.get(id);
+    if (!next || stable(entry) !== stable(next)) scopeDomains(entry.scope).forEach(domain => changed.add(domain));
+  }
+  for (const [id, entry] of proposedIndex) {
+    if (!baseIndex.has(id)) scopeDomains(entry.scope).forEach(domain => changed.add(domain));
+  }
+  return { changedDomains: [...changed].sort(), breaking: { hub: [], workspace: [] } };
 }
 
 export function mergeCompatibilityResults(...results: CompatibilityResult[]): CompatibilityResult {
@@ -243,10 +542,21 @@ if (import.meta.main) {
   for (const required of ["base-contract", "base-streaming", "base-metadata", "contract", "streaming", "metadata", "changelog"]) {
     if (!values[required]) throw new Error(`missing --${required}=PATH`);
   }
-  const result = mergeCompatibilityResults(
-    compareContracts(await readYaml(values["base-contract"]), await readYaml(values.contract)),
-    compareStreamingContracts(await readYaml(values["base-streaming"]), await readYaml(values.streaming)),
-  );
+  const baseContract = await readYaml(values["base-contract"]);
+  const proposedContract = await readYaml(values.contract);
+  const results = [
+    compareContracts(baseContract, proposedContract),
+    compareStreamingContracts(await readYaml(values["base-streaming"]), await readYaml(values.streaming), baseContract, proposedContract),
+  ];
+  // Inventory and exclusions are published artifacts too; their base files
+  // are optional so contract initialization stays a clean first publication.
+  if (values["base-operations"]) {
+    results.push(compareInventories(await readYaml(values["base-operations"]), await readYaml(values.operations ?? "api/operations.yaml")));
+  }
+  if (values["base-exclusions"]) {
+    results.push(compareExclusions(await readYaml(values["base-exclusions"]), await readYaml(values.exclusions ?? "api/exclusions.yaml")));
+  }
+  const result = mergeCompatibilityResults(...results);
   assertCompatibilityPolicy(
     result,
     await readYaml(values["base-metadata"]),
