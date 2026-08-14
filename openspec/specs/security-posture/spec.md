@@ -16,7 +16,7 @@ The repository SHALL provide a root `SECURITY.md` that states which versions rec
 - **THEN** it finds a security policy file at a standard location
 
 ### Requirement: The main branch is protected by an enforced ruleset
-The repository SHALL enforce a ruleset on `main` that requires changes to arrive via pull request, requires the CI `validate` status check to pass before merging, and blocks force pushes and branch deletion. The ruleset MUST NOT include standing bypass actors, and required approving reviews MAY remain at zero while the project has a single maintainer.
+The repository SHALL enforce a ruleset on `main` that requires changes to arrive via pull request, requires every status check that gates a published artifact to pass before merging, and blocks force pushes and branch deletion. The required checks MUST include the CI `validate` and `validate-specs` checks and the contract checks `contract-fast` and `contract-integration`, so a commit whose API contract fails structural, compatibility, or integration validation cannot reach `main` and therefore cannot be published. The ruleset MUST NOT include standing bypass actors, and required approving reviews MAY remain at zero while the project has a single maintainer.
 
 #### Scenario: A direct push to main is rejected
 - **WHEN** any actor attempts to push a commit directly to `main`
@@ -25,6 +25,11 @@ The repository SHALL enforce a ruleset on `main` that requires changes to arrive
 #### Scenario: A pull request cannot merge with failing validation
 - **WHEN** a pull request targeting `main` has a failing or missing `validate` check
 - **THEN** the merge is blocked until the check passes
+
+#### Scenario: A backward-incompatible contract change cannot reach main
+- **WHEN** a pull request targeting `main` fails the `contract-fast` compatibility gate because it breaks the published contract without the required revision increment and changelog migration entry
+- **THEN** the merge is blocked until the check passes
+- **AND** no publication of that contract can occur, because publication builds from `main`
 
 #### Scenario: Release automation continues to work
 - **WHEN** Release Please merges its release pull request and the release workflow pushes a version tag

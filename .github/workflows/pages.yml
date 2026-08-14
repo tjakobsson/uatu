@@ -13,12 +13,16 @@ on:
 
 permissions: {}
 
-# Every deployment is the complete build output of one commit, so a
-# superseded run loses nothing: the newer run publishes a strictly newer
-# complete site. Cancelling is therefore safe here.
+# Never cancel an in-flight deployment. Each run is the complete build output
+# of one commit, so cancelling loses no *state* — but it does lose a valid
+# deployment whenever the run that replaced it then fails validation, leaving
+# the site older than a commit that was ready to publish. Letting the active
+# run finish costs at most one extra deployment in a burst: GitHub keeps one
+# pending slot per group, so intermediate commits collapse and the newest
+# still wins.
 concurrency:
   group: github-pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   deploy:

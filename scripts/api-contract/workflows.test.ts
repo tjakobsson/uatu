@@ -76,9 +76,10 @@ describe("repository workflows", () => {
     expect(Object.keys(pages.on)).toEqual(["push", "workflow_dispatch"]);
     expect(pages.on.push.branches).toEqual(["main"]);
     expect(pages.permissions).toEqual({});
-    // Each deployment is the complete build output of one commit with no
-    // carried-over state, so cancelling a superseded run loses nothing.
-    expect(pages.concurrency).toEqual({ group: "github-pages", "cancel-in-progress": true });
+    // Cancelling loses no state, but it does lose a valid deployment when the
+    // run that replaced it then fails: the site would sit older than a commit
+    // that was ready to publish, with nothing scheduled to retry it.
+    expect(pages.concurrency).toEqual({ group: "github-pages", "cancel-in-progress": false });
     expect(Object.keys(pages.jobs)).toEqual(["deploy"]);
     expect(pages.jobs.deploy.permissions).toEqual({ pages: "write", "id-token": "write", contents: "read" });
 

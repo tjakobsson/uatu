@@ -33,9 +33,11 @@ The new `pages.yml` runs `bun run api:validate`, `bun run scripts/api-contract/s
 
 *Note:* the heavy suites (`test:api`, e2e, license audit, build) stay in `ci.yml` only. They gate merges to `main`; they are not preconditions for rendering documentation that is already on `main`.
 
-### `cancel-in-progress: true` is now correct
+### The deploy group stays non-cancelling, for a different reason than before
 
-Every deployment is the complete build output of one commit with no carried-over state, so a superseded run loses nothing — the newer run publishes a strictly newer complete site. Under the old design the same setting would have been a data-loss bug, which is why `github-pages` was a non-cancelling group shared across two workflows. That whole apparatus goes.
+Every deployment is the complete build output of one commit with no carried-over state, so cancelling a superseded run cannot corrupt or lose published *state* — the old design's reason for `cancel-in-progress: false` (a cancelled run dropping a history write) is gone.
+
+It stays `false` anyway, on a liveness argument rather than a safety one: cancelling an in-flight run whose replacement then fails validation leaves the site older than a commit that was ready to publish, with nothing scheduled to retry it. Letting the active run finish costs at most one extra deployment in a burst, because GitHub keeps one pending slot per group — intermediate commits collapse and the newest still wins.
 
 ### `/api/edge/` → `/api/` is a single-source change
 
@@ -53,7 +55,8 @@ The `persist-credentials` assertion loses its `pushesBack` exemption: with `page
 
 ## Risks / Trade-offs
 
-- **Publication is no longer gated on the full CI suite.** A commit whose e2e tests fail can still publish documentation. → Acceptable and arguably correct: the contract validation that governs the published artifacts runs in the publishing workflow itself, and the branch ruleset already requires CI `validate` to pass before anything reaches `main`.
+- **Publication is no longer gated on the full CI suite.** The old `pages.yml` triggered on `workflow_run` with `conclusion == 'success'`, which meant every CI job was green. Publishing on `push` drops that, and the branch ruleset required only `validate` and `validate-specs` — so a commit failing the `contract-fast` compatibility gate could reach `main` and be published, its revision numbers claiming a compatibility it no longer had. → Fixed at the merge layer rather than the publish layer: `contract-fast` and `contract-integration` are now required status checks on `main` (`security-posture` spec). A contract that fails structural, compatibility, or integration validation never lands, so building from `main` is safe by construction. Gating the publish instead would have left `main` — the source clients read directly — holding a bad contract, merely undeployed.
+- **A commit whose e2e `validate` job fails can still publish documentation.** → Intended. `validate` covers the application, not the contract or the site; a flaky Playwright run should not hold back documentation that passed every check governing it.
 - **The site rebuilds on every push to `main`, including docs-only and unrelated changes.** → ~1 minute of runner time. `ci.yml`'s change-classification logic could be borrowed later if it becomes noise; not worth the complexity now.
 - **Losing immutable revision snapshots removes a future compatibility-analysis affordance.** → No consumer exists, `contract.json` still reports the revision pair, and the Non-Goals note records how to reintroduce channels without shared mutable state.
 - **Dropping the `uatu-api-contract-v*.tar.gz` release asset.** → It has never been produced (the workflow that creates it has never succeeded), so no release loses an asset it previously had. Scorecard's `Signed-Releases` is unaffected — it counts attested binaries, which `release.yml` still produces.
