@@ -88,9 +88,9 @@ jobs:
         # The assemble job read pages-history before this deploy slot opened;
         # a release publication may have advanced it in between. Deploying the
         # stale snapshot would roll the live api/latest and revisions back, so
-        # verify the branch has not moved and fail loudly if it has — the next
-        # CI run on main (or a manual re-run) republishes edge on top of the
-        # new history.
+        # verify the branch has not moved and fail loudly if it has — the
+        # retry workflow re-runs a failed edge publication against the new
+        # history automatically.
         run: |
           current=$(git ls-remote "https://github.com/${{ github.repository }}" refs/heads/pages-history | cut -f1)
           if [ -z "$current" ] || [ -z "$ASSEMBLED_SHA" ]; then

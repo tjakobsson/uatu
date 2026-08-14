@@ -80,15 +80,21 @@ describe("API publication workflows", () => {
     expect(steps.indexOf(select)).toBeLessThan(steps.indexOf(assemble));
   });
 
-  test("a cancelled release publication is re-run automatically", async () => {
-    // GitHub keeps one pending slot per concurrency group and replaces it,
-    // so back-to-back edge deploys can cancel a pending release deploy even
-    // with cancel-in-progress: false. The retry workflow re-runs cancelled
-    // publications, bounded so a persistent failure cannot loop forever.
+  test("dropped publications are re-run automatically", async () => {
+    // Cancelled release publications (pending-slot replacement in the
+    // shared github-pages group) and failed edge publications (the
+    // staleness guard tripping after a release advanced pages-history)
+    // would otherwise be silently dropped — no later run is guaranteed to
+    // restore api/latest or /api/edge. Both retries are attempt-bounded so
+    // a persistent failure cannot loop forever.
     const retry = await workflow("api-release-retry.yml");
-    expect(retry.on.workflow_run).toEqual({ workflows: ["Publish released API contract"], types: ["completed"] });
+    expect(retry.on.workflow_run).toEqual({
+      workflows: ["Publish released API contract", "Publish API edge to Pages"],
+      types: ["completed"],
+    });
     expect(retry.permissions).toEqual({});
-    expect(retry.jobs.retry.if).toContain("github.event.workflow_run.conclusion == 'cancelled'");
+    expect(retry.jobs.retry.if).toContain("'Publish released API contract' && github.event.workflow_run.conclusion == 'cancelled'");
+    expect(retry.jobs.retry.if).toContain("'Publish API edge to Pages' && github.event.workflow_run.conclusion == 'failure'");
     expect(retry.jobs.retry.if).toContain("github.event.workflow_run.run_attempt < 5");
     expect(retry.jobs.retry.permissions).toEqual({ actions: "write" });
     expect(retry.jobs.retry.steps[0].run).toContain("/rerun");
