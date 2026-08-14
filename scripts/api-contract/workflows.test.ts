@@ -70,9 +70,28 @@ describe("API publication workflows", () => {
     expect(select.run).toContain("pages-edge-$head_sha");
     expect(select.run).toContain("falling back to the tag-built site");
     expect(select.run).toContain("sourceCommit");
+    // Only a strict descendant of the tag may replace the tag-built site —
+    // the latest successful main CI run can predate the tag when the tag's
+    // own CI is still running or failed.
+    expect(select.run).toContain("/compare/");
+    expect(select.run).toContain('"$ancestry" != "ahead"');
     const assemble = steps.find(step => step.name === "Assemble immutable revision and latest");
     expect(assemble.run).toContain("--site=${{ steps.site.outputs.dir }}");
     expect(steps.indexOf(select)).toBeLessThan(steps.indexOf(assemble));
+  });
+
+  test("a cancelled release publication is re-run automatically", async () => {
+    // GitHub keeps one pending slot per concurrency group and replaces it,
+    // so back-to-back edge deploys can cancel a pending release deploy even
+    // with cancel-in-progress: false. The retry workflow re-runs cancelled
+    // publications, bounded so a persistent failure cannot loop forever.
+    const retry = await workflow("api-release-retry.yml");
+    expect(retry.on.workflow_run).toEqual({ workflows: ["Publish released API contract"], types: ["completed"] });
+    expect(retry.permissions).toEqual({});
+    expect(retry.jobs.retry.if).toContain("github.event.workflow_run.conclusion == 'cancelled'");
+    expect(retry.jobs.retry.if).toContain("github.event.workflow_run.run_attempt < 5");
+    expect(retry.jobs.retry.permissions).toEqual({ actions: "write" });
+    expect(retry.jobs.retry.steps[0].run).toContain("/rerun");
   });
 
   test("history writes and the edge staleness guard both hold the deploy lock", async () => {

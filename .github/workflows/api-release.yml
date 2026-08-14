@@ -137,7 +137,14 @@ jobs:
             run_id=${run%% *}
             head_sha=${run##* }
             if [ "$head_sha" != "${{ github.event.workflow_run.head_sha }}" ]; then
-              if gh run download "$run_id" --name "pages-edge-$head_sha" --dir newer-edge --repo "${{ github.repository }}"; then
+              # The latest successful main CI run can predate the tag (the
+              # tag's own CI still running or failed): only a strict
+              # descendant of the tagged commit may replace the tag-built
+              # site, or the release would roll the site backward.
+              ancestry=$(gh api "repos/${{ github.repository }}/compare/${{ github.event.workflow_run.head_sha }}...$head_sha" --jq .status || echo unknown)
+              if [ "$ancestry" != "ahead" ]; then
+                echo "latest main CI commit $head_sha is '$ancestry' relative to the tag; keeping the tag-built site"
+              elif gh run download "$run_id" --name "pages-edge-$head_sha" --dir newer-edge --repo "${{ github.repository }}"; then
                 edge_commit=$(jq -r '.sourceCommit // empty' newer-edge/api/edge/contract.json)
                 if [ "$edge_commit" = "$head_sha" ]; then
                   site_dir=newer-edge

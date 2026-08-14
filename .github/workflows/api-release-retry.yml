@@ -1,0 +1,36 @@
+name: Retry cancelled API publication
+
+# The release deploy job shares the github-pages concurrency group with edge
+# deploys so history writes and the edge staleness guard stay atomic — but
+# GitHub keeps only ONE pending slot per group and a newly queued job
+# replaces (cancels) the pending one even with cancel-in-progress: false.
+# Two edge deploys arriving back-to-back can therefore cancel a pending
+# release publication, and nothing else would re-run it: the released
+# contract bundle would never reach api/latest. This workflow re-runs a
+# cancelled publication, bounded so a persistently failing run cannot loop.
+
+on:
+  workflow_run:
+    workflows: [Publish released API contract]
+    types: [completed]
+
+permissions: {}
+
+concurrency:
+  group: api-release-retry
+  cancel-in-progress: false
+
+jobs:
+  retry:
+    if: >-
+      github.event.workflow_run.conclusion == 'cancelled' &&
+      github.event.workflow_run.run_attempt < 5
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Re-run the cancelled publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}/rerun"
