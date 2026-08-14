@@ -128,8 +128,13 @@ jobs:
         # its edge already deployed, shipping the tag-built site would roll
         # /api/edge and the documentation pages back with nothing scheduled
         # to restore them. Prefer the newest successful main CI run's
-        # validated site artifact (verifying it names that run's commit) and
-        # fall back to the tag-built site when it is unavailable or stale.
+        # validated site artifact (verifying it names that run's commit).
+        # When a strictly newer main site exists but its artifact cannot be
+        # fetched intact (pages-edge artifacts are retained briefly), FAIL
+        # instead of falling back: a fallback would deploy the older
+        # tag-built site over the live newer one with no failed edge run to
+        # restore it. Re-run the latest main CI (regenerating its artifact)
+        # and then re-run this publication.
         run: |
           site_dir=validated-release/site/dist
           run=$(gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?branch=main&status=success&per_page=1" --jq '.workflow_runs[0] // empty | "\(.id) \(.head_sha)"')
@@ -144,15 +149,17 @@ jobs:
               ancestry=$(gh api "repos/${{ github.repository }}/compare/${{ github.event.workflow_run.head_sha }}...$head_sha" --jq .status || echo unknown)
               if [ "$ancestry" != "ahead" ]; then
                 echo "latest main CI commit $head_sha is '$ancestry' relative to the tag; keeping the tag-built site"
-              elif gh run download "$run_id" --name "pages-edge-$head_sha" --dir newer-edge --repo "${{ github.repository }}"; then
-                edge_commit=$(jq -r '.sourceCommit // empty' newer-edge/api/edge/contract.json)
-                if [ "$edge_commit" = "$head_sha" ]; then
-                  site_dir=newer-edge
-                else
-                  echo "newer edge artifact names $edge_commit, not $head_sha; falling back to the tag-built site"
-                fi
               else
-                echo "newer edge artifact unavailable; falling back to the tag-built site"
+                if ! gh run download "$run_id" --name "pages-edge-$head_sha" --dir newer-edge --repo "${{ github.repository }}"; then
+                  echo "::error::a newer validated main site ($head_sha) is live but its pages-edge artifact is unavailable; re-run the latest main CI to regenerate it, then re-run this publication" >&2
+                  exit 1
+                fi
+                edge_commit=$(jq -r '.sourceCommit // empty' newer-edge/api/edge/contract.json)
+                if [ "$edge_commit" != "$head_sha" ]; then
+                  echo "::error::newer edge artifact names ${edge_commit:-<missing>}, not $head_sha; refusing to deploy either an unverified or an older site" >&2
+                  exit 1
+                fi
+                site_dir=newer-edge
               fi
             fi
           fi

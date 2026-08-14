@@ -103,6 +103,14 @@ export function readApiReference(source = openapiSource): ApiReference {
       const operation = object(candidate);
       if (typeof operation.operationId !== "string") continue;
       const operationParameters = Array.isArray(operation.parameters) ? operation.parameters : [];
+      // An operation-level parameter with the same (name, in) REPLACES the
+      // inherited path-level one; rendering both would show duplicate rows
+      // with conflicting requiredness or schemas.
+      const mergedParameters = new Map<string, unknown>();
+      for (const value of [...inheritedParameters, ...operationParameters]) {
+        const resolved = resolve(document, value);
+        mergedParameters.set(`${String(resolved.name)} ${String(resolved.in)}`, value);
+      }
       const requestBody = resolve(document, operation.requestBody);
       const responses = Object.entries(object(operation.responses)).map(([status, responseValue]) => {
         const response = resolve(document, responseValue);
@@ -119,7 +127,7 @@ export function readApiReference(source = openapiSource): ApiReference {
         summary: typeof operation.summary === "string" ? operation.summary : operation.operationId,
         description: typeof operation.description === "string" ? operation.description : "",
         tags: Array.isArray(operation.tags) ? operation.tags.filter((tag): tag is string => typeof tag === "string") : [],
-        parameters: [...inheritedParameters, ...operationParameters].map(value => parameter(document, value)),
+        parameters: [...mergedParameters.values()].map(value => parameter(document, value)),
         requestMedia: media(document, requestBody.content),
         responses,
       });

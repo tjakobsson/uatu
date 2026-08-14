@@ -27,9 +27,12 @@ on:
 
 permissions: {}
 
-concurrency:
-  group: api-release-retry
-  cancel-in-progress: false
+# Deliberately NO concurrency group: GitHub keeps one pending slot per group
+# and replaces it, so grouping retries would let a burst of publication
+# completions cancel a pending retry that targeted a different run — the
+# exact pending-slot loss this workflow exists to repair. Each retry run
+# targets one specific run id, does nothing but POST a rerun, and is safe to
+# execute concurrently with any other retry.
 
 jobs:
   retry:

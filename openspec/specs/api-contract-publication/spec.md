@@ -56,13 +56,13 @@ The published API SHALL distinguish the contract built from the current main bra
 - **AND** `latest` continues to identify the most recently released contract
 
 #### Scenario: Release advances latest
-- **WHEN** a product release publishes API revision 4
-- **THEN** `/api/revisions/4/` contains an immutable snapshot
-- **AND** `/api/latest/` resolves to equivalent revision-4 artifacts and metadata
+- **WHEN** a product release at version X.Y.Z publishes Hub revision N and workspace revision M
+- **THEN** `/api/revisions/hub-N_workspace-M_vX.Y.Z/` contains an immutable snapshot
+- **AND** `/api/latest/` resolves to equivalent artifacts and metadata for that revision pair
 
 #### Scenario: Client compares from a pinned revision
-- **WHEN** a client records revision 3 and the latest metadata reports revision 4
-- **THEN** the revision-3 contract and migration information remain available for compatibility analysis
+- **WHEN** a client records one published revision pair and the latest metadata reports a newer pair
+- **THEN** the pinned pair's immutable contract and migration information remain available for compatibility analysis
 
 ### Requirement: Contract changes are validated before publication
 Continuous integration SHALL validate contract syntax and references, compare supported route inventory with documented operations, validate representative running-server requests and responses against the contract, and report backward-incompatible contract differences against the appropriate baseline. A breaking change MUST increment the affected public API revision and include consumer-facing migration information in the API changelog. GitHub Pages publication MUST use the exact validated source commit and MUST NOT publish when required contract checks fail.

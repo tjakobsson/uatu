@@ -68,13 +68,18 @@ describe("API publication workflows", () => {
     const steps = document.jobs.assemble.steps as any[];
     const select = steps.find(step => step.name === "Prefer the newest validated main site");
     expect(select.run).toContain("pages-edge-$head_sha");
-    expect(select.run).toContain("falling back to the tag-built site");
     expect(select.run).toContain("sourceCommit");
     // Only a strict descendant of the tag may replace the tag-built site —
     // the latest successful main CI run can predate the tag when the tag's
     // own CI is still running or failed.
     expect(select.run).toContain("/compare/");
     expect(select.run).toContain('"$ancestry" != "ahead"');
+    // When a strictly newer main site is live but its short-retention
+    // artifact is gone, the publication must FAIL, not fall back — the
+    // fallback would silently deploy the older tag-built site over it.
+    expect(select.run).toContain("re-run the latest main CI");
+    expect(select.run).toContain("exit 1");
+    expect(select.run).not.toContain("falling back");
     const assemble = steps.find(step => step.name === "Assemble immutable revision and latest");
     expect(assemble.run).toContain("--site=${{ steps.site.outputs.dir }}");
     expect(steps.indexOf(select)).toBeLessThan(steps.indexOf(assemble));
@@ -98,6 +103,12 @@ describe("API publication workflows", () => {
     expect(retry.jobs.retry.if).toContain("github.event.workflow_run.run_attempt < 5");
     expect(retry.jobs.retry.permissions).toEqual({ actions: "write" });
     expect(retry.jobs.retry.steps[0].run).toContain("/rerun");
+    // No concurrency group: grouping retries would let a burst of
+    // publication completions cancel a pending retry targeting a DIFFERENT
+    // run (one pending slot per group) — the exact loss this workflow
+    // exists to repair. Retries are per-run-id and safe to run concurrently.
+    expect(retry.concurrency).toBeUndefined();
+    expect(retry.jobs.retry.concurrency).toBeUndefined();
   });
 
   test("history writes and the edge staleness guard both hold the deploy lock", async () => {
