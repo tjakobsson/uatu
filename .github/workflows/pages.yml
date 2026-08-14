@@ -29,6 +29,8 @@ jobs:
     permissions:
       actions: read
       contents: read
+    outputs:
+      history-sha: ${{ steps.history.outputs.sha }}
     steps:
       - name: Check out validated source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -41,6 +43,9 @@ jobs:
           ref: pages-history
           path: pages-history
           persist-credentials: false
+      - name: Record history revision
+        id: history
+        run: echo "sha=$(git -C pages-history rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -77,6 +82,25 @@ jobs:
       pages: write
       id-token: write
     steps:
+      - name: Refuse to deploy a stale history snapshot
+        env:
+          ASSEMBLED_SHA: ${{ needs.assemble.outputs.history-sha }}
+        # The assemble job read pages-history before this deploy slot opened;
+        # a release publication may have advanced it in between. Deploying the
+        # stale snapshot would roll the live api/latest and revisions back, so
+        # verify the branch has not moved and fail loudly if it has — the next
+        # CI run on main (or a manual re-run) republishes edge on top of the
+        # new history.
+        run: |
+          current=$(git ls-remote "https://github.com/${{ github.repository }}" refs/heads/pages-history | cut -f1)
+          if [ -z "$current" ] || [ -z "$ASSEMBLED_SHA" ]; then
+            echo "could not resolve pages-history revisions for the staleness check"
+            exit 1
+          fi
+          if [ "$current" != "$ASSEMBLED_SHA" ]; then
+            echo "pages-history advanced during this run ($ASSEMBLED_SHA -> $current); re-run to assemble against the new release history"
+            exit 1
+          fi
       - name: Deploy Pages artifact
         id: deployment
         uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5

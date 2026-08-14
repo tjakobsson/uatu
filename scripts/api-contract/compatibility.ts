@@ -214,6 +214,14 @@ function compareOperation(name: string, before: JsonObject, after: JsonObject, b
     if (parameter.required !== true && next.required === true) {
       failures.push(`${name}: made ${String(parameter.in)} parameter ${String(parameter.name)} required`);
     }
+    // Serialization keywords change the wire encoding (repeated keys vs a
+    // comma-joined value, reserved-character escaping) even when the schema
+    // is untouched — generated clients keep emitting the old format.
+    for (const keyword of ["style", "explode", "allowReserved"] as const) {
+      if (stable(parameter[keyword]) !== stable(next[keyword])) {
+        failures.push(`${name}: changed ${String(parameter.in)} parameter ${String(parameter.name)} ${keyword}`);
+      }
+    }
     compareSchemas(`${name}: ${String(parameter.in)} parameter ${String(parameter.name)} schema`, parameter.schema, next.schema, "request", failures);
   }
   if (!before.requestBody && object(after.requestBody).required === true) failures.push(`${name}: added required request body`);

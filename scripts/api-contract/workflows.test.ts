@@ -20,7 +20,13 @@ describe("API publication workflows", () => {
           if (step.uses && !step.uses.startsWith("./")) expect(step.uses).toMatch(shaAction);
         }
       }
-      expect(document.jobs.deploy.permissions).toEqual({ pages: "write", "id-token": "write" });
+      if (name === "pages.yml") {
+        expect(document.jobs.deploy.permissions).toEqual({ pages: "write", "id-token": "write" });
+      } else {
+        // The release deploy job also pushes pages-history from inside the
+        // deploy lock, so it additionally needs contents: write.
+        expect(document.jobs.deploy.permissions).toEqual({ pages: "write", "id-token": "write", contents: "write", actions: "read" });
+      }
     }
   });
 
@@ -49,7 +55,31 @@ describe("API publication workflows", () => {
       .toContain("Release $tag is not published");
     const steps = document.jobs.assemble.steps as any[];
     expect(steps.find(step => step.name === "Assemble immutable revision and latest").run).toContain("--mode=release");
-    expect(steps.find(step => step.name === "Persist release publication history").run).toContain("HEAD:pages-history");
+    expect(document.jobs.deploy.steps.find((step: any) => step.name === "Persist release publication history").run)
+      .toContain("HEAD:pages-history");
+  });
+
+  test("history writes and the edge staleness guard both hold the deploy lock", async () => {
+    // Every pages-history write must happen inside the github-pages
+    // concurrency lock, and BEFORE deploy-pages (push-first self-heals a
+    // failed deployment; deploy-first would open a rollback window). The
+    // edge deploy validates its assembled history snapshot under the same
+    // lock, so a release publication can never be silently rolled back by a
+    // concurrent edge run that assembled earlier.
+    const apiRelease = await workflow("api-release.yml");
+    const releaseSteps = apiRelease.jobs.deploy.steps.map((step: any) => step.name);
+    expect(apiRelease.jobs.deploy.concurrency.group).toBe("github-pages");
+    expect(releaseSteps.indexOf("Persist release publication history"))
+      .toBeLessThan(releaseSteps.indexOf("Deploy released Pages artifact"));
+    // The assemble job no longer pushes and must not hold write permission.
+    expect(apiRelease.jobs.assemble.permissions.contents).toBe("read");
+
+    const pages = await workflow("pages.yml");
+    expect(pages.jobs.assemble.outputs["history-sha"]).toContain("steps.history.outputs.sha");
+    const guard = pages.jobs.deploy.steps.find((step: any) => step.name === "Refuse to deploy a stale history snapshot");
+    const guardIndex = pages.jobs.deploy.steps.indexOf(guard);
+    expect(guard.run).toContain("pages-history advanced");
+    expect(guardIndex).toBeLessThan(pages.jobs.deploy.steps.findIndex((step: any) => step.name === "Deploy Pages artifact"));
   });
 
   test("workflow_run triggers reject fork lookalikes", async () => {
@@ -92,9 +122,10 @@ describe("API publication workflows", () => {
       for (const [jobName, job] of Object.entries(document.jobs) as [string, any][]) {
         for (const step of job.steps ?? []) {
           if (!step.uses?.startsWith("actions/checkout@")) continue;
-          // The pages-history checkout in api-release pushes back with its
-          // persisted token; every other checkout must stay credential-free.
-          const pushesBack = name === "api-release.yml" && jobName === "assemble" && step.with?.ref === "pages-history";
+          // The pages-history checkout in api-release's deploy job pushes
+          // back with its persisted token; every other checkout must stay
+          // credential-free.
+          const pushesBack = name === "api-release.yml" && jobName === "deploy" && step.with?.ref === "pages-history";
           if (!pushesBack) expect(step.with?.["persist-credentials"]).toBe(false);
         }
       }

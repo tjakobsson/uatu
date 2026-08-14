@@ -219,6 +219,17 @@ describe("API compatibility policy", () => {
     )).toBe(true);
   });
 
+  test("changing parameter serialization is breaking even with an unchanged schema", () => {
+    const contract = (explode: boolean | undefined) => ({ paths: { "/api/hub/browse": { get: {
+      ...operation("Hub"),
+      parameters: [{ name: "kinds", in: "query", schema: { type: "array", items: { type: "string" } }, style: "form", ...(explode === undefined ? {} : { explode }) }],
+    } } } });
+    const result = compareContracts(contract(true), contract(false));
+    expect(result.breaking.hub).toContain("GET /api/hub/browse: changed query parameter kinds explode");
+    const styled = compareContracts(contract(undefined), contract(undefined));
+    expect(styled.breaking.hub).toEqual([]);
+  });
+
   test("detects removal of an optional parameter", () => {
     const base = { paths: { "/api/hub/browse": { get: {
       ...operation("Hub"),
