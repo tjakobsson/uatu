@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,20 +26,27 @@ describe("static API site", () => {
     expect(await readFile(join(output, "docs/api/index.html"), "utf8")).toContain("Search operations");
   });
 
-  test("publishes readable raw edge artifacts", async () => {
-    const metadata = JSON.parse(await readFile(join(output, "api/edge/contract.json"), "utf8"));
+  test("publishes readable raw artifacts directly under api/", async () => {
+    const metadata = JSON.parse(await readFile(join(output, "api/contract.json"), "utf8"));
     expect(metadata.sourceCommit).toMatch(/^[0-9a-f]{40}$/);
     expect(metadata.artifacts.openapi).toBe("openapi.yaml");
-    expect(await readFile(join(output, "api/edge/openapi.yaml"), "utf8")).toContain("openapi: 3.1");
-    expect(await readFile(join(output, "api/edge/streaming.yaml"), "utf8")).toContain("channels:");
-    expect(await readFile(join(output, "api/edge/agent.md"), "utf8")).toContain("Artifact precedence");
-    expect(await readFile(join(output, "api/edge/contract.schema.json"), "utf8")).toContain("UatuCode API contract metadata");
-    expect(await readFile(join(output, "api/edge/operations.yaml"), "utf8")).toContain("operations:");
-    expect(await readFile(join(output, "api/edge/exclusions.yaml"), "utf8")).toContain("exclusions:");
-    const hashes = JSON.parse(await readFile(join(output, "api/edge/SHA256SUMS.json"), "utf8"));
+    expect(await readFile(join(output, "api/openapi.yaml"), "utf8")).toContain("openapi: 3.1");
+    expect(await readFile(join(output, "api/streaming.yaml"), "utf8")).toContain("channels:");
+    expect(await readFile(join(output, "api/agent.md"), "utf8")).toContain("Artifact precedence");
+    expect(await readFile(join(output, "api/contract.schema.json"), "utf8")).toContain("UatuCode API contract metadata");
+    expect(await readFile(join(output, "api/operations.yaml"), "utf8")).toContain("operations:");
+    expect(await readFile(join(output, "api/exclusions.yaml"), "utf8")).toContain("exclusions:");
+    const hashes = JSON.parse(await readFile(join(output, "api/SHA256SUMS.json"), "utf8"));
     expect(hashes.sourceCommit).toBe(metadata.sourceCommit);
     expect(hashes.files["openapi.yaml"]).toMatch(/^[0-9a-f]{64}$/);
-    expect(await readFile(join(output, "llms.txt"), "utf8")).toContain("Current edge artifacts");
+    expect(await readFile(join(output, "llms.txt"), "utf8")).toContain("Machine-readable contract");
+  });
+
+  test("publishes no channel subdirectories under api/", async () => {
+    // The site serves exactly one contract. A resurrected channel directory
+    // would mean publication state is being accumulated again.
+    const entries = await readdir(join(output, "api"), { withFileTypes: true });
+    expect(entries.filter(entry => entry.isDirectory())).toEqual([]);
   });
 
   test("renders every canonical operation ID", async () => {
@@ -58,11 +65,11 @@ describe("static API site", () => {
     // delimited), or selecting their filter button matches nothing.
     expect(html).toContain('data-tags="Hub authentication"');
     expect(html).not.toMatch(/data-tags="[^"]*Hub authentication [^"|]/);
-    // The reference must say WHICH contract it documents: the edge channel
-    // with its revision pair, distinguished from the product release line.
+    // The reference must say WHICH contract it documents: its revision pair,
+    // distinguished from the product release line.
     const apiContract = JSON.parse(await readFile(join(root, "api/contract.json"), "utf8"));
     const pkg = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
-    expect(html).toContain("Edge contract");
+    expect(html).toContain("Published contract");
     expect(html).toContain(`Hub API revision ${apiContract.hubApiRevision}`);
     expect(html).toContain(`Workspace API revision ${apiContract.workspaceApiRevision}`);
     expect(html).toContain(`v${pkg.version}`);

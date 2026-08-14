@@ -2,19 +2,15 @@
 
 UatuCode is a local documentation workbench and self-hostable Hub with a public HTTP and streaming API contract.
 
-Current edge artifacts:
-- Metadata: https://tjakobsson.github.io/uatu/api/edge/contract.json
-- Agent guide: https://tjakobsson.github.io/uatu/api/edge/agent.md
-- OpenAPI 3.1: https://tjakobsson.github.io/uatu/api/edge/openapi.yaml
-- Streaming contract: https://tjakobsson.github.io/uatu/api/edge/streaming.yaml
-- API changelog: https://tjakobsson.github.io/uatu/api/edge/CHANGELOG.md
-
-Release channels (populated from the first tagged release onward; prefer these for production clients):
-- Latest released contract: https://tjakobsson.github.io/uatu/api/latest/
-- Immutable revision snapshots: https://tjakobsson.github.io/uatu/api/revisions/hub-N_workspace-M_vX.Y.Z/
+Machine-readable contract (built from `main`):
+- Metadata: https://tjakobsson.github.io/uatu/api/contract.json
+- Agent guide: https://tjakobsson.github.io/uatu/api/agent.md
+- OpenAPI 3.1: https://tjakobsson.github.io/uatu/api/openapi.yaml
+- Streaming contract: https://tjakobsson.github.io/uatu/api/streaming.yaml
+- API changelog: https://tjakobsson.github.io/uatu/api/CHANGELOG.md
 
 Human documentation:
 - Product and guides: https://tjakobsson.github.io/uatu/
 - Searchable API reference: https://tjakobsson.github.io/uatu/docs/api/
 
-OpenAPI governs HTTP wire details. The streaming contract governs SSE, NDJSON, and WebSocket behavior. Metadata and changelog govern revision selection and migration.
+OpenAPI governs HTTP wire details. The streaming contract governs SSE, NDJSON, and WebSocket behavior. Metadata and changelog govern revision selection and migration. Contract metadata reports the `sourceCommit` it was built from.

@@ -14,10 +14,10 @@ const tags = [...new Set(operations.flatMap(operation => operation.tags))].sort(
     <p class="eyebrow">CANONICAL HTTP SURFACE</p>
     <h1>API reference</h1>
     <p class="contract-identity">
-      <strong>Edge contract</strong> — Hub API revision {contract.hubApiRevision} · Workspace API revision {contract.workspaceApiRevision} — tracks unreleased <code>main</code>.
-      The current product release line is v{pkg.version}; released, immutable contract snapshots publish under <code>api/latest/</code> and <code>api/revisions/</code>, and edge may document behavior not yet in any release.
+      <strong>Published contract</strong> — Hub API revision {contract.hubApiRevision} · Workspace API revision {contract.workspaceApiRevision} — built from <code>main</code>.
+      The current product release line is v{pkg.version}; the published contract tracks <code>main</code> and may document behavior not yet in any release.
     </p>
-    <p>{operations.length} operations, generated directly from <a href={sitePath("api/edge/openapi.yaml")}>api/openapi.yaml</a>.</p>
+    <p>{operations.length} operations, generated directly from <a href={sitePath("api/openapi.yaml")}>api/openapi.yaml</a>.</p>
     <label class="api-search">
       <span>Search operations</span>
       <input id="operation-search" type="search" placeholder="operation ID, path, summary…" autocomplete="off" />
