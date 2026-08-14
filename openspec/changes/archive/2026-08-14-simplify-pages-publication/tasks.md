@@ -1,6 +1,6 @@
 ## 1. Replace the publication workflow
 
-- [x] 1.1 Rewrite `.github/workflows/pages.yml` as a single `deploy` job: triggers `push` (branches `[main]`) and `workflow_dispatch`; workflow-level `permissions: {}`; `concurrency: { group: github-pages, cancel-in-progress: true }`; job-level `permissions: { pages: write, id-token: write, contents: read }`; `environment: github-pages`
+- [x] 1.1 Rewrite `.github/workflows/pages.yml` as a single `deploy` job: triggers `push` (branches `[main]`) and `workflow_dispatch`; workflow-level `permissions: {}`; `concurrency: { group: github-pages, cancel-in-progress: false }`; job-level `permissions: { pages: write, id-token: write, contents: read }`; `environment: github-pages`; guarded `if: github.ref == 'refs/heads/main'` so a dispatch cannot publish an unmerged ref
 - [x] 1.2 Give that job the step sequence: checkout (`persist-credentials: false`, no `ref:`) → `oven-sh/setup-bun` at `1.3.14` → `bun install --frozen-lockfile` → `bun run api:validate && bun run scripts/api-contract/structural.ts` → `bunx astro build --root site` (with `GITHUB_SHA` in env) → `bun run site:check` → `configure-pages` → `upload-pages-artifact` with `path: site/dist` → `deploy-pages`. Keep every action pinned to its existing 40-character SHA
 - [x] 1.3 Remove the `Upload exact validated edge site` step from the `contract-integration` job in `.github/workflows/ci.yml`
 

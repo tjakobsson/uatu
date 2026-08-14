@@ -26,6 +26,13 @@ concurrency:
 
 jobs:
   deploy:
+    # Only ever publish main. A workflow_dispatch run checks out whichever ref
+    # the dispatcher selected, so without this guard a maintainer could deploy
+    # an unmerged branch straight to the public site — bypassing contract-fast
+    # and contract-integration, which are enforced at the merge layer and so
+    # have never run on that ref. Publication is safe by construction only
+    # while "what we build" and "what the ruleset gated" are the same commit.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

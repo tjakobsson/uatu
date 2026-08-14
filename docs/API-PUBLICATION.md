@@ -20,4 +20,6 @@ Do not grant repository-wide workflow write permissions: the workflow declares e
 
 ## Recovery
 
-Redeploy by dispatching the `Pages` workflow on `main`, or on any commit whose site you want live. Because every deployment rebuilds the whole site from source, there is no publication history to repair and no rollback state to restore.
+Redeploy by dispatching the `Pages` workflow on `main`. The deploy job is guarded to `refs/heads/main` and skips on any other ref, so an unmerged branch cannot be published: `contract-fast` and `contract-integration` gate at the merge layer, and a branch that never merged has never had to pass them.
+
+Because every deployment rebuilds the whole site from source, there is no publication history to repair and no rollback state to restore. To roll back, revert on `main` — the next deployment reflects it.

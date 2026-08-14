@@ -82,6 +82,11 @@ describe("repository workflows", () => {
     expect(pages.concurrency).toEqual({ group: "github-pages", "cancel-in-progress": false });
     expect(Object.keys(pages.jobs)).toEqual(["deploy"]);
     expect(pages.jobs.deploy.permissions).toEqual({ pages: "write", "id-token": "write", contents: "read" });
+    // workflow_dispatch checks out the ref the dispatcher picked, so without
+    // this guard an unmerged branch could be published straight to the public
+    // site, bypassing the contract checks that are enforced at the merge layer
+    // and therefore never ran on that ref.
+    expect(pages.jobs.deploy.if).toBe("github.ref == 'refs/heads/main'");
 
     const names = pages.jobs.deploy.steps.map((step: any) => step.name);
     const order = (label: string) => names.indexOf(label);
