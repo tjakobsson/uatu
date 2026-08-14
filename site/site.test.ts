@@ -58,6 +58,14 @@ describe("static API site", () => {
     // delimited), or selecting their filter button matches nothing.
     expect(html).toContain('data-tags="Hub authentication"');
     expect(html).not.toMatch(/data-tags="[^"]*Hub authentication [^"|]/);
+    // The reference must say WHICH contract it documents: the edge channel
+    // with its revision pair, distinguished from the product release line.
+    const apiContract = JSON.parse(await readFile(join(root, "api/contract.json"), "utf8"));
+    const pkg = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+    expect(html).toContain("Edge contract");
+    expect(html).toContain(`Hub API revision ${apiContract.hubApiRevision}`);
+    expect(html).toContain(`Workspace API revision ${apiContract.workspaceApiRevision}`);
+    expect(html).toContain(`v${pkg.version}`);
   });
 
   test("uses the configured Pages base for local absolute URLs", async () => {

@@ -8,6 +8,11 @@ info:
     Canonical HTTP contract for the UatuCode Hub and workspace APIs. Workspace
     operations use their externally visible Hub proxy paths. Streaming message
     and lifecycle semantics are defined in `streaming.yaml`.
+
+    `info.version` encodes the revision pair as `<hub>.<workspace>.0` with an
+    `-experimental` tag while stability is experimental; `x-uatu-revisions`
+    is the authoritative machine-readable pair, and the product version of a
+    published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
     hubApiRevision: 1
     workspaceApiRevision: 1
