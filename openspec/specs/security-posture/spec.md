@@ -16,7 +16,7 @@ The repository SHALL provide a root `SECURITY.md` that states which versions rec
 - **THEN** it finds a security policy file at a standard location
 
 ### Requirement: The main branch is protected by an enforced ruleset
-The repository SHALL enforce a ruleset on `main` that requires changes to arrive via pull request, requires every status check that gates a published artifact to pass before merging, and blocks force pushes and branch deletion. The required checks MUST include the CI `validate` and `validate-specs` checks and the contract checks `contract-fast` and `contract-integration`, so a commit whose API contract fails structural, compatibility, or integration validation cannot reach `main` and therefore cannot be published. The ruleset MUST NOT include standing bypass actors, and required approving reviews MAY remain at zero while the project has a single maintainer.
+The repository SHALL enforce a ruleset on `main` that requires changes to arrive via pull request, requires every status check that gates a published artifact to pass before merging, and blocks force pushes and branch deletion. The required checks MUST include the CI `validate` and `validate-specs` checks and the contract checks `contract-fast` and `contract-integration`, so a commit whose API contract fails structural, compatibility, or integration validation cannot reach `main` and therefore cannot be published. The ruleset MUST additionally require branches to be up to date before merging (a strict required-status-checks policy), because publication builds `main` without waiting for `main`'s own check run: only an up-to-date branch guarantees that the tree those checks passed against is the tree the squash commit lands. The ruleset MUST NOT include standing bypass actors, and required approving reviews MAY remain at zero while the project has a single maintainer.
 
 #### Scenario: A direct push to main is rejected
 - **WHEN** any actor attempts to push a commit directly to `main`
@@ -30,6 +30,11 @@ The repository SHALL enforce a ruleset on `main` that requires changes to arrive
 - **WHEN** a pull request targeting `main` fails the `contract-fast` compatibility gate because it breaks the published contract without the required revision increment and changelog migration entry
 - **THEN** the merge is blocked until the check passes
 - **AND** no publication of that contract can occur, because publication builds from `main`
+
+#### Scenario: Main advances while a contract pull request is open
+- **WHEN** another pull request merges into `main` after an open contract pull request's checks have already passed
+- **THEN** the open pull request cannot merge until it is brought up to date and its required checks run again against the new base
+- **AND** the commit that lands on `main` carries the same tree those checks passed against, so publishing it cannot ship contract content that was never validated
 
 #### Scenario: Release automation continues to work
 - **WHEN** Release Please merges its release pull request and the release workflow pushes a version tag
