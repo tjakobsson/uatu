@@ -69,6 +69,26 @@ describe("black-box HTTP contract validation", () => {
     })).rejects.toThrow("expected constant");
   });
 
+  test("enforces constraint siblings beside a $ref (OpenAPI 3.1)", async () => {
+    const contract = {
+      paths: { "/note": { get: { operationId: "getNote", responses: { "200": { content: { "application/json": { schema: {
+        $ref: "#/components/schemas/Note",
+        maxLength: 4,
+      } } } } } } } },
+      components: { schemas: { Note: { type: "string" } } },
+    };
+    await assertOpenApiResponse(contract, {
+      method: "GET",
+      path: "/note",
+      response: Response.json("ok"),
+    });
+    await expect(assertOpenApiResponse(contract, {
+      method: "GET",
+      path: "/note",
+      response: Response.json("far too long"),
+    })).rejects.toThrow("longer than 4 characters");
+  });
+
   test("enforces documented numeric and string constraints", async () => {
     const constrained = {
       paths: { "/value": { get: { operationId: "getValue", responses: { "200": { content: { "application/json": { schema: {

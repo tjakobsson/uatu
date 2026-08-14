@@ -26,7 +26,13 @@ function pointer(root: unknown, ref: string): unknown {
 
 function schemaError(root: unknown, schemaValue: unknown, value: unknown, at: string): string | undefined {
   const schema = object(schemaValue, `${at} schema`);
-  if (typeof schema.$ref === "string") return schemaError(root, pointer(root, schema.$ref), value, at);
+  if (typeof schema.$ref === "string") {
+    // OpenAPI 3.1 allows constraints beside $ref (both apply); merge them
+    // over the resolved target so sibling keywords still validate.
+    const target = object(pointer(root, schema.$ref), `reference ${schema.$ref}`);
+    const { $ref: _ignored, ...siblings } = schema;
+    return schemaError(root, Object.keys(siblings).length === 0 ? target : { ...target, ...siblings }, value, at);
+  }
   if (schema.nullable === true && value === null) return undefined;
   if (Array.isArray(schema.oneOf) || Array.isArray(schema.anyOf)) {
     const variants = (schema.oneOf ?? schema.anyOf) as unknown[];

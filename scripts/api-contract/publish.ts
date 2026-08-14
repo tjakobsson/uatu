@@ -26,16 +26,42 @@ async function copyIfPresent(source: string, destination: string): Promise<void>
   if (await exists(source)) await cp(source, destination, { recursive: true });
 }
 
-function parseSemver(version: unknown): [number, number, number] | undefined {
+type Semver = { core: [number, number, number]; prerelease: (string | number)[] | null };
+
+function parseSemver(version: unknown): Semver | undefined {
   if (typeof version !== "string") return undefined;
-  const match = /^(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$/.exec(version);
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(version);
   if (!match) return undefined;
-  return [Number(match[1]), Number(match[2]), Number(match[3])];
+  return {
+    core: [Number(match[1]), Number(match[2]), Number(match[3])],
+    prerelease: match[4] === undefined
+      ? null
+      : match[4].split(".").map(identifier => (/^\d+$/.test(identifier) ? Number(identifier) : identifier)),
+  };
 }
 
-function compareSemver(a: [number, number, number], b: [number, number, number]): number {
+// Full SemVer precedence: numeric identifiers compare numerically and sort
+// below alphanumeric ones, a stable version sorts after its prereleases, and
+// a longer prerelease list wins over its own prefix. Dropping the prerelease
+// suffix would make 1.0.0-beta.1 equal to 1.0.0 and let a rerun of the
+// prerelease publication roll latest backward.
+function compareSemver(a: Semver, b: Semver): number {
   for (let index = 0; index < 3; index++) {
-    if (a[index] !== b[index]) return a[index] < b[index] ? -1 : 1;
+    if (a.core[index] !== b.core[index]) return a.core[index]! < b.core[index]! ? -1 : 1;
+  }
+  if (a.prerelease === null && b.prerelease === null) return 0;
+  if (a.prerelease === null) return 1;
+  if (b.prerelease === null) return -1;
+  for (let index = 0; index < Math.max(a.prerelease.length, b.prerelease.length); index++) {
+    const left = a.prerelease[index];
+    const right = b.prerelease[index];
+    if (left === undefined) return -1;
+    if (right === undefined) return 1;
+    if (left === right) continue;
+    if (typeof left === "number" && typeof right === "number") return left < right ? -1 : 1;
+    if (typeof left === "number") return -1;
+    if (typeof right === "number") return 1;
+    return left < right ? -1 : 1;
   }
   return 0;
 }

@@ -86,6 +86,23 @@ describe("API compatibility policy", () => {
     expect(result.breaking.hub).toEqual([]);
   });
 
+  test("constraint siblings beside an unchanged $ref participate in comparison", () => {
+    const contract = (maxLength: number | undefined) => ({
+      paths: { "/api/hub/clone-jobs": { post: {
+        ...operation("Hub"),
+        requestBody: { content: { "application/json": { schema: {
+          $ref: "#/components/schemas/CloneJobInput",
+          ...(maxLength === undefined ? {} : { maxLength }),
+        } } } },
+      } } },
+      components: { schemas: { CloneJobInput: { type: "object", required: ["input"], properties: { input: { type: "string" } }, additionalProperties: false } } },
+    });
+    const narrowed = compareContracts(contract(undefined), contract(4096));
+    expect(narrowed.breaking.hub.some(item => item.includes("maxLength"))).toBe(true);
+    const unchanged = compareContracts(contract(4096), contract(4096));
+    expect(unchanged.breaking.hub).toEqual([]);
+  });
+
   test("still breaks on removed or newly required referenced properties", () => {
     const base = {
       paths: { "/api/hub/workspaces": { post: {

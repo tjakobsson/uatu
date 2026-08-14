@@ -96,7 +96,17 @@ function resolveRefs(value: unknown, document: JsonObject, external: JsonObject,
     if (stack.has(key)) return { $cycle: ref };
     const nested = new Set(stack);
     nested.add(key);
-    return resolveRefs(target, nextDocument, external, nested);
+    const resolved = resolveRefs(target, nextDocument, external, nested);
+    // OpenAPI 3.1 allows constraints beside $ref (both apply). Merge them
+    // over the resolved target so a sibling change — adding maxLength next
+    // to an unchanged $ref — is visible to the comparison.
+    const { $ref: _ignored, ...siblings } = record;
+    if (Object.keys(siblings).length === 0) return resolved;
+    const resolvedSiblings = resolveRefs(siblings, document, external, stack) as JsonObject;
+    if (resolved && typeof resolved === "object" && !Array.isArray(resolved)) {
+      return { ...(resolved as JsonObject), ...resolvedSiblings };
+    }
+    return resolved;
   }
   const result: JsonObject = {};
   for (const [key, item] of Object.entries(record)) {

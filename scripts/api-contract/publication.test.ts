@@ -92,6 +92,30 @@ describe("contract publication dry runs", () => {
       .rejects.toThrow("refusing to roll api/latest back");
   });
 
+  test("prerelease ordering guards latest: stable beats its prereleases, prereleases order by identifier", async () => {
+    const { root, site, history, source } = await fixture();
+    const stableBundle = path.join(root, "stable-bundle");
+    const stableOutput = path.join(root, "stable-output");
+    await createReleaseBundle(source, stableBundle, commit, "2026-08-20T00:00:00.000Z", "0.6.0");
+    await publish({ mode: "release", site, history, output: stableOutput, bundle: stableBundle, commit });
+
+    // A rerun of the prerelease publication must not replace the stable one.
+    const betaCommit = "abcdef0123456789abcdef0123456789abcdef01";
+    const betaBundle = path.join(root, "beta-bundle");
+    await createReleaseBundle(source, betaBundle, betaCommit, "2026-08-15T00:00:00.000Z", "0.6.0-beta.1");
+    await expect(publish({ mode: "release", site, history: stableOutput, output: path.join(root, "beta-output"), bundle: betaBundle, commit: betaCommit }))
+      .rejects.toThrow("refusing to roll api/latest back");
+
+    // Forward prerelease progression stays allowed.
+    const beta2Commit = "1234567890abcdef1234567890abcdef12345678";
+    const beta2Bundle = path.join(root, "beta2-bundle");
+    const beta1Output = path.join(root, "beta1-output");
+    await createReleaseBundle(source, path.join(root, "beta1-bundle"), betaCommit, "2026-08-15T00:00:00.000Z", "0.7.0-beta.1");
+    await publish({ mode: "release", site, history: stableOutput, output: beta1Output, bundle: path.join(root, "beta1-bundle"), commit: betaCommit });
+    await createReleaseBundle(source, beta2Bundle, beta2Commit, "2026-08-16T00:00:00.000Z", "0.7.0-beta.2");
+    await publish({ mode: "release", site, history: beta1Output, output: path.join(root, "beta2-output"), bundle: beta2Bundle, commit: beta2Commit });
+  });
+
   test("unchanged API revisions can publish a later product release", async () => {
     const { root, site, history, source } = await fixture();
     const firstBundle = path.join(root, "first-bundle");
