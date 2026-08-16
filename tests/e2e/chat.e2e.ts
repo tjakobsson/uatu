@@ -165,16 +165,21 @@ test.describe("desktop OpenCode chat", () => {
 
     const freeForm = page.locator('[data-chat-item-id="question:q-2"] input[type="text"]');
     await freeForm.fill("my own answer");
-    await page.getByRole("radio", { name: "Minimal Small change" }).check();
 
     // The agent keeps streaming while the answer sits half-typed; a timeline
-    // rebuild here would silently discard both the text and the selection.
-    for (const delta of [" about", " your", " question"]) {
+    // rebuild here would silently discard the text.
+    for (const delta of [" about", " your"]) {
       await control(request, { action: "delta", conversationId: id, itemId: "part:stream", delta });
     }
-    await expect(page.locator('[data-chat-item-id="part:stream"]')).toContainText("Thinking about your question");
-
+    await expect(page.locator('[data-chat-item-id="part:stream"]')).toContainText("Thinking about your");
     await expect(freeForm).toHaveValue("my own answer");
+
+    // Single choice: picking an option supersedes the half-typed "Other" —
+    // exactly one answer may reach the server.
+    await page.getByRole("radio", { name: "Minimal Small change" }).check();
+    await expect(freeForm).toHaveValue("");
+    await control(request, { action: "delta", conversationId: id, itemId: "part:stream", delta: " question" });
+    await expect(page.locator('[data-chat-item-id="part:stream"]')).toContainText("Thinking about your question");
     await expect(page.getByRole("radio", { name: "Minimal Small change" })).toBeChecked();
 
     await page.getByRole("button", { name: "Answer" }).click();

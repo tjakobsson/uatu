@@ -84,6 +84,32 @@ describe("OpenCode v2 identity policy", () => {
     });
   });
 
+  test("a command rejected within the admission window propagates to the caller", async () => {
+    const client = {
+      session: {
+        command: async () => ({ error: { message: "unknown command" } }),
+        summarize: async () => ({ error: { message: "provider unavailable" } }),
+      },
+    } as unknown as OpencodeClient;
+    const provider = new SdkV2Provider(client, "/workspace");
+
+    await expect(provider.command("ses", { id: "r1", name: "review", arguments: "" })).rejects.toThrow("OpenCode request failed");
+    await expect(provider.command("ses", { id: "r2", name: "compact", arguments: "" })).rejects.toThrow("OpenCode request failed");
+  });
+
+  test("a command still running after the admission window is reported accepted", async () => {
+    const client = {
+      session: {
+        // Models the classic route, which resolves only when the turn ends.
+        command: () => new Promise(() => {}),
+      },
+    } as unknown as OpencodeClient;
+    const provider = new SdkV2Provider(client, "/workspace", 20);
+
+    const accepted = await provider.command("ses", { id: "slow", name: "review", arguments: "" });
+    expect(accepted.messageId).toMatch(/^msg_[a-f0-9]{26}$/);
+  });
+
   test("merges native and compatibility event streams without duplicates", async () => {
     const stream = (events: unknown[]) => ({
       async *[Symbol.asyncIterator]() { for (const event of events) yield event; },

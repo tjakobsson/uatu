@@ -35,7 +35,11 @@ export function createSdkV2Provider(options: {
 export class SdkV2Provider implements OpenCodeProvider {
   private readonly compatibilitySessions = new Set<string>();
 
-  constructor(private readonly client: OpencodeClient, private readonly directory: string) {}
+  constructor(
+    private readonly client: OpencodeClient,
+    private readonly directory: string,
+    private readonly commandAdmissionMs = 1_000,
+  ) {}
 
   async listCommands(): Promise<ChatCommand[]> {
     const response = unwrap(await this.client.command.list({ directory: this.directory })) as unknown;
@@ -217,24 +221,37 @@ export class SdkV2Provider implements OpenCodeProvider {
     return { messageId: admitted.data.id };
   }
 
+  /**
+   * The classic command/summarize routes resolve only when the whole turn
+   * finishes, so admission cannot be awaited to completion. Instead the
+   * dispatch races a short window: an invalid command or unavailable provider
+   * rejects immediately and reaches the caller's draft-restoration path,
+   * while a healthy turn outlives the window, detaches, and reports failures
+   * through the event stream like any running turn.
+   */
   async command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection }): Promise<{ messageId: string }> {
     const messageId = stableProviderId("msg", input.id);
-    if (input.name === "compact" || input.name === "summarize") {
-      void Promise.resolve().then(async () => ensureSuccess(await this.client.session.summarize({
+    const dispatch = input.name === "compact" || input.name === "summarize"
+      ? (async () => ensureSuccess(await this.client.session.summarize({
           sessionID: sessionId,
           directory: this.directory,
           providerID: input.model?.providerId,
           modelID: input.model?.modelId,
-        }))).catch(() => undefined);
-    } else {
-      void Promise.resolve().then(async () => unwrap(await this.client.session.command({
+        })))()
+      : (async () => { unwrap(await this.client.session.command({
           sessionID: sessionId,
           directory: this.directory,
           messageID: messageId,
           command: input.name,
           arguments: input.arguments,
           ...(input.model ? { model: `${input.model.providerId}/${input.model.modelId}` } : {}),
-        }))).catch(() => undefined);
+        })); })();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([dispatch, new Promise<void>(resolve => { timer = setTimeout(resolve, this.commandAdmissionMs); })]);
+    } finally {
+      clearTimeout(timer);
+      dispatch.catch(() => undefined);
     }
     return { messageId };
   }

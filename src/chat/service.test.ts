@@ -24,26 +24,30 @@ function provider(): OpenCodeProvider {
   };
 }
 
+function fixtureRuntime(): OpenCodeService {
+  let resolveExit!: (code: number) => void;
+  const exited = new Promise<number>(resolve => { resolveExit = resolve; });
+  const child: SpawnedOpenCode = {
+    pid: 42,
+    exited,
+    stderr: new ReadableStream({ start(controller) { controller.close(); } }),
+    kill() { resolveExit(143); },
+  };
+  return new OpenCodeService({
+    workspacePath: "/workspace",
+    discoverExecutable: async () => "/bin/opencode",
+    allocatePort: async () => 43210,
+    spawn: () => child,
+    fetch: async () => Response.json({ healthy: true, version: "test" }),
+    killGroup: () => resolveExit(143),
+  });
+}
+
 describe("LazyOpenCodeChatService", () => {
   test("creates the SDK provider and adapter only after the runtime is ready", async () => {
     let providerCalls = 0;
     let adapterCalls = 0;
-    let resolveExit!: (code: number) => void;
-    const exited = new Promise<number>(resolve => { resolveExit = resolve; });
-    const child: SpawnedOpenCode = {
-      pid: 42,
-      exited,
-      stderr: new ReadableStream({ start(controller) { controller.close(); } }),
-      kill() { resolveExit(143); },
-    };
-    const runtime = new OpenCodeService({
-      workspacePath: "/workspace",
-      discoverExecutable: async () => "/bin/opencode",
-      allocatePort: async () => 43210,
-      spawn: () => child,
-      fetch: async () => Response.json({ healthy: true, version: "test" }),
-      killGroup: () => resolveExit(143),
-    });
+    const runtime = fixtureRuntime();
     const service = new LazyOpenCodeChatService({
       workspacePath: "/workspace",
       runtime,
@@ -71,22 +75,6 @@ describe("LazyOpenCodeChatService", () => {
   });
 
   test("a failed adapter probe is retried on the next status call instead of caching unsupported", async () => {
-    let resolveExit!: (code: number) => void;
-    const exited = new Promise<number>(resolve => { resolveExit = resolve; });
-    const child: SpawnedOpenCode = {
-      pid: 42,
-      exited,
-      stderr: new ReadableStream({ start(controller) { controller.close(); } }),
-      kill() { resolveExit(143); },
-    };
-    const runtime = new OpenCodeService({
-      workspacePath: "/workspace",
-      discoverExecutable: async () => "/bin/opencode",
-      allocatePort: async () => 43210,
-      spawn: () => child,
-      fetch: async () => Response.json({ healthy: true, version: "test" }),
-      killGroup: () => resolveExit(143),
-    });
     let probes = 0;
     const flaky = {
       ...provider(),
@@ -98,7 +86,7 @@ describe("LazyOpenCodeChatService", () => {
     } satisfies OpenCodeProvider;
     const service = new LazyOpenCodeChatService({
       workspacePath: "/workspace",
-      runtime,
+      runtime: fixtureRuntime(),
       createProvider: () => flaky,
       createAdapter: options => new OpenCodeChatAdapter({ ...options, generation: "test" }),
     });
@@ -115,29 +103,13 @@ describe("LazyOpenCodeChatService", () => {
   });
 
   test("an incompatible provider keeps reporting unsupported and blocks operations", async () => {
-    let resolveExit!: (code: number) => void;
-    const exited = new Promise<number>(resolve => { resolveExit = resolve; });
-    const child: SpawnedOpenCode = {
-      pid: 42,
-      exited,
-      stderr: new ReadableStream({ start(controller) { controller.close(); } }),
-      kill() { resolveExit(143); },
-    };
-    const runtime = new OpenCodeService({
-      workspacePath: "/workspace",
-      discoverExecutable: async () => "/bin/opencode",
-      allocatePort: async () => 43210,
-      spawn: () => child,
-      fetch: async () => Response.json({ healthy: true, version: "test" }),
-      killGroup: () => resolveExit(143),
-    });
     const incompatible = {
       ...provider(),
       async listModels(): Promise<never> { throw new Error("404 not found"); },
     } satisfies OpenCodeProvider;
     const service = new LazyOpenCodeChatService({
       workspacePath: "/workspace",
-      runtime,
+      runtime: fixtureRuntime(),
       createProvider: () => incompatible,
       createAdapter: options => new OpenCodeChatAdapter({ ...options, generation: "test" }),
     });
@@ -151,22 +123,6 @@ describe("LazyOpenCodeChatService", () => {
   });
 
   test("restarts the event pump when the provider stream dies", async () => {
-    let resolveExit!: (code: number) => void;
-    const exited = new Promise<number>(resolve => { resolveExit = resolve; });
-    const child: SpawnedOpenCode = {
-      pid: 42,
-      exited,
-      stderr: new ReadableStream({ start(controller) { controller.close(); } }),
-      kill() { resolveExit(143); },
-    };
-    const runtime = new OpenCodeService({
-      workspacePath: "/workspace",
-      discoverExecutable: async () => "/bin/opencode",
-      allocatePort: async () => 43210,
-      spawn: () => child,
-      fetch: async () => Response.json({ healthy: true, version: "test" }),
-      killGroup: () => resolveExit(143),
-    });
     let pumpStarts = 0;
     const failing = {
       ...provider(),
@@ -179,7 +135,7 @@ describe("LazyOpenCodeChatService", () => {
     } satisfies OpenCodeProvider;
     const service = new LazyOpenCodeChatService({
       workspacePath: "/workspace",
-      runtime,
+      runtime: fixtureRuntime(),
       createProvider: () => failing,
       createAdapter: options => new OpenCodeChatAdapter({ ...options, generation: "test" }),
     });

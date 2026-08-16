@@ -693,10 +693,23 @@ export function initChat(): void {
     syncQuestionForm(form);
   };
 
+  // Radios and the "Other" free-form field share a name, and a single-choice
+  // question must submit exactly one answer — picking one side clears the
+  // other, so the form state always matches what FormData will produce.
+  const enforceSingleChoice = (input: HTMLInputElement, form: HTMLFormElement) => {
+    const siblings = form.querySelectorAll<HTMLInputElement>(`input[name="${CSS.escape(input.name)}"]`);
+    if (input.type === "radio") {
+      siblings.forEach(sibling => { if (sibling.type === "text") sibling.value = ""; });
+    } else if (input.type === "text" && input.value.trim() !== "") {
+      siblings.forEach(sibling => { if (sibling.type === "radio") sibling.checked = false; });
+    }
+  };
+
   items.addEventListener("change", event => {
     const input = event.target as HTMLInputElement;
     const form = input.form;
     if (!form?.matches("form[data-question-form]")) return;
+    enforceSingleChoice(input, form);
     syncQuestionForm(form);
     // A lone single-choice question needs no confirmation step: picking the
     // option is the answer. Anything with more questions, multiple allowed
@@ -709,8 +722,11 @@ export function initChat(): void {
     void resolveQuestion(item.id, { kind: "answered", answers: [[input.value]] });
   });
   items.addEventListener("input", event => {
-    const form = (event.target as HTMLInputElement).form;
-    if (form?.matches("form[data-question-form]")) syncQuestionForm(form);
+    const input = event.target as HTMLInputElement;
+    const form = input.form;
+    if (!form?.matches("form[data-question-form]")) return;
+    enforceSingleChoice(input, form);
+    syncQuestionForm(form);
   });
   items.addEventListener("click", event => {
     const tab = (event.target as Element).closest<HTMLButtonElement>("[data-question-tab]");
