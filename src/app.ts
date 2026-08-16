@@ -1,4 +1,4 @@
-import { captureTerminalToken } from "./terminal/client";
+import { captureTerminalToken, waitForWorkspaceCredential } from "./terminal/client";
 import { initHubNav } from "./shell/hub-nav";
 import { injectPwaLinks, unregisterLegacyServiceWorkers } from "./shell/pwa";
 import { attachPopstateHandler } from "./shell/history";
@@ -21,6 +21,8 @@ import { initFindShortcuts, registerProjectSearch } from "./find/shortcut";
 import { initSearchPane, openSearchPane } from "./sidebar/search-pane";
 import { initUiMode } from "./shell/ui-mode";
 import { initTabBar } from "./shell/tab-bar";
+import { initMainSurfaceSwitch } from "./chat/surface";
+import { initChat } from "./chat/ui";
 
 const appShellElement = document.querySelector<HTMLDivElement>(".app-shell");
 const previewBaseElement = document.querySelector<HTMLBaseElement>("#preview-base");
@@ -90,6 +92,7 @@ if (
 // data-ui-mode / data-active-tab attributes these two stamp on <html>.
 initUiMode();
 initTabBar();
+initMainSurfaceSwitch();
 
 initActiveSurfaceTracking();
 initFindBar();
@@ -122,7 +125,9 @@ injectPwaLinks();
 unregisterLegacyServiceWorkers();
 attachPopstateHandler();
 
-void loadInitialState().then(() => {
+void loadInitialState().then(async () => {
+  await waitForWorkspaceCredential();
+  initChat();
   // Prewarm the diff renderer at idle once we know whether this is a
   // git-backed session — off the critical path, so the first Diff open
   // skips the library + highlighter stall.

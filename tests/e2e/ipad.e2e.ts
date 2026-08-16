@@ -54,9 +54,9 @@ test.describe("iPad touch mode", () => {
     await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
     await expect(page.locator("#touch-tab-bar")).toBeVisible();
     await expect(page.locator("html")).toHaveAttribute("data-active-tab", "preview");
-    // The bar carries only the three surface tabs; the mode switch lives
+    // The bar carries only the four surface tabs; the mode switch lives
     // in the sidebar header, i.e. the Files tab's surface.
-    await expect(page.locator("#touch-tab-bar button")).toHaveCount(3);
+    await expect(page.locator("#touch-tab-bar button")).toHaveCount(4);
     // One surface at a time applies on iPad exactly as on phones.
     await expect(page.locator(".sidebar")).toBeHidden();
     await expect(page.locator(".preview-shell")).toBeVisible();

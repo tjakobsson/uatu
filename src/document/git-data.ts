@@ -431,13 +431,23 @@ async function collectNameStatus(repoRoot: string, rangeArgs: string[]): Promise
   return map;
 }
 
+let hunkCountFailureWarned = false;
+
 async function countHunks(repoRoot: string, rangeArgs: string[]): Promise<Map<string, number>> {
   const result = await safeGit(repoRoot, ["diff", "--unified=0", "--no-ext-diff", "-M", ...rangeArgs], {
-    maxBuffer: 512 * 1024,
+    // Sized for real feature branches: hunk counting reads the whole diff
+    // body, and the old 512KB limit overflowed on any sizable branch.
+    maxBuffer: 16 * 1024 * 1024,
   });
   const hunks = new Map<string, number>();
   if (!result.ok) {
-    console.warn(`uatu: failed to count diff hunks: ${result.message}`);
+    // Missing hunk counts only soften the change-overview detail, and this
+    // runs on every sweep — a repeating failure (e.g. a diff beyond even the
+    // raised limit) is one fact, not a log line per file event.
+    if (!hunkCountFailureWarned) {
+      hunkCountFailureWarned = true;
+      console.warn(`uatu: failed to count diff hunks: ${result.message}`);
+    }
     return hunks;
   }
 

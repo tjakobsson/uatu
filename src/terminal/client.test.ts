@@ -209,3 +209,22 @@ describe("terminalBufferText", () => {
     ]))).toBe("prompt");
   });
 });
+
+describe("persistTerminalToken", () => {
+  it("notifies credential-refresh listeners only when the server accepts the token", async () => {
+    const { persistTerminalToken, onWorkspaceCredentialRefresh } = await import("./client");
+    let refreshes = 0;
+    onWorkspaceCredentialRefresh(() => { refreshes += 1; });
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async () => new Response(null, { status: 401 })) as unknown as typeof fetch;
+      expect(await persistTerminalToken("stale")).toBe(false);
+      expect(refreshes).toBe(0);
+      globalThis.fetch = (async () => new Response(null, { status: 204 })) as unknown as typeof fetch;
+      expect(await persistTerminalToken("fresh")).toBe(true);
+      expect(refreshes).toBe(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});

@@ -18,6 +18,7 @@ const FIELD_OWNERS: Record<string, string> = {
   scope: "src/shell/watch-context.ts",
   unscopedFingerprint: "src/shell/events.ts",
   activeSurface: "src/find/active-surface.ts",
+  mainSurface: "src/chat/surface.ts",
   viewMode: "src/preview/view-mode.ts",
   wrap: "src/preview/view-mode.ts",
   viewLayout: "src/preview/layout.ts",

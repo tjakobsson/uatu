@@ -67,6 +67,8 @@ function buildTheme(): ITheme {
 //
 // Returns the live token, or `null` if no token has been observed (terminal
 // feature off or first visit predates the URL parameter).
+let credentialPromotion: Promise<boolean> | null = null;
+
 export function captureTerminalToken(): string | null {
   if (typeof window === "undefined") return null;
   try {
@@ -77,7 +79,7 @@ export function captureTerminalToken(): string | null {
       // Promote the URL token into a same-origin auth cookie. Fire-and-forget
       // — failures aren't fatal because the in-memory token is still in
       // sessionStorage and ?t= still works for this tab.
-      void persistTerminalToken(fromUrl);
+      credentialPromotion = persistTerminalToken(fromUrl);
       url.searchParams.delete("t");
       const next = url.pathname + (url.search ? url.search : "") + url.hash;
       window.history.replaceState(null, "", next);
@@ -87,6 +89,23 @@ export function captureTerminalToken(): string | null {
   } catch {
     return null;
   }
+}
+
+/** Wait for a URL credential to become the shared HttpOnly workspace cookie.
+ * Read-only features such as Chat call this before their first authenticated
+ * request so they cannot race the fire-and-forget promotion above. */
+export async function waitForWorkspaceCredential(): Promise<void> {
+  await credentialPromotion;
+}
+
+// Fired after the server accepts a token and re-mints the workspace cookie —
+// the terminal's reconnect form is the usual source. Features whose bootstrap
+// failed on stale credentials (a PWA cookie holding a pre-restart token)
+// listen here to retry instead of staying dead until a full page reload.
+const credentialRefreshListeners = new Set<() => void>();
+
+export function onWorkspaceCredentialRefresh(listener: () => void): void {
+  credentialRefreshListeners.add(listener);
 }
 
 // Build the WebSocket URL for the terminal endpoint. The `pageUrl` source
@@ -142,6 +161,7 @@ export async function persistTerminalToken(token: string): Promise<boolean> {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ token }),
     });
+    if (response.ok) for (const listener of [...credentialRefreshListeners]) listener();
     return response.ok;
   } catch {
     return false;

@@ -15,10 +15,10 @@ test("workspace route table and fallback routes are classified", async () => {
     readYaml<{ exclusions: Exclusion[] }>("api/exclusions.yaml"),
   ]);
   const publicChildPaths = new Set(inventory.operations.filter(item => item.domain === "workspace").map(item => item.childPath ?? item.path));
-  for (const path of ["/api/state", "/api/document", "/api/document/diff", "/api/events", "/api/search", "/api/auth", "/api/terminal", "/api/terminal/sessions", "/api/terminal/sessions/{terminalSessionId}"]) {
+  for (const path of ["/api/state", "/api/document", "/api/document/diff", "/api/events", "/api/search", "/api/chat/status", "/api/chat/models", "/api/chat/commands", "/api/chat/conversations", "/api/chat/conversations/{conversationId}", "/api/chat/conversations/{conversationId}/events", "/api/chat/conversations/{conversationId}/prompts", "/api/chat/conversations/{conversationId}/cancel", "/api/chat/conversations/{conversationId}/permissions/{interactionId}", "/api/chat/conversations/{conversationId}/questions/{interactionId}", "/api/auth", "/api/terminal", "/api/terminal/sessions", "/api/terminal/sessions/{terminalSessionId}"]) {
     expect(publicChildPaths.has(path)).toBe(true);
   }
-  for (const marker of ["p(\"/api/state\")", "p(\"/api/document\")", "p(\"/api/document/diff\")", "p(\"/api/events\")", "p(\"/api/search\")", 'requestUrl.pathname === "/api/terminal"', 'requestUrl.pathname === "/api/auth"']) {
+  for (const marker of ["p(\"/api/state\")", "p(\"/api/document\")", "p(\"/api/document/diff\")", "p(\"/api/events\")", "p(\"/api/search\")", "p(\"/api/chat/status\")", "p(\"/api/chat/models\")", "p(\"/api/chat/commands\")", "p(\"/api/chat/conversations\")", 'requestUrl.pathname === "/api/terminal"', 'requestUrl.pathname === "/api/auth"']) {
     expect(source).toContain(marker);
   }
   expect(sessionsSource).toContain('const SESSIONS_PATH = "/api/terminal/sessions"');
@@ -27,7 +27,7 @@ test("workspace route table and fallback routes are classified", async () => {
   }
   const literalRoutes = [...source.matchAll(/p\("([^"]+)"\)/g)].map(match => match[1]!);
   const classified = (path: string) =>
-    publicChildPaths.has(path)
+    publicChildPaths.has(path.replace(/:([A-Za-z0-9_]+)/g, "{$1}"))
     || path.startsWith("/assets/")
     || path === "/manifest.webmanifest"
     || path === "/debug/metrics"

@@ -33,10 +33,8 @@ describe("createWatchSession terminal token", () => {
   });
 
   it("mints a token even when the terminal feature is disabled", () => {
-    // The token isn't surfaced to clients in this case (no `?t=` in URL,
-    // /api/state.terminal === "disabled"), but minting it unconditionally
-    // keeps the createWatchSession shape stable and lets other consumers
-    // not gate on terminalEnabled.
+    // Chat uses the same child workspace credential even when PTYs are not
+    // available, so minting remains independent of terminalEnabled.
     const session = createWatchSession([], false, { terminalEnabled: false });
     expect(typeof session.getTerminalToken()).toBe("string");
     expect(session.getTerminalToken().length).toBeGreaterThan(0);

@@ -3,9 +3,8 @@
 // boots into touch mode with the bottom tab bar. Covers the three tab
 // surfaces and their switching semantics, the PTY-preserving terminal tab,
 // the keybar, both size steppers, and the stacked preview header. The
-// visualViewport keyboard behavior is unit-tested (visual-viewport.test.ts)
-// and gated on a real device — Playwright cannot emulate the iOS software
-// keyboard.
+// Chat's visualViewport integration is exercised in chat-touch.e2e.ts with a
+// deterministic viewport shim; final behavior remains gated on real iOS.
 
 import fs from "node:fs/promises";
 
@@ -129,8 +128,8 @@ test.describe("touch tab navigation", () => {
     const barBox = await page.locator("#touch-tab-bar").boundingBox();
     expect(barBox?.width ?? 0).toBeGreaterThanOrEqual(389);
     expect((barBox?.y ?? 0) + (barBox?.height ?? 0)).toBeGreaterThanOrEqual(843);
-    // The bar carries only the three surface tabs — no mode control.
-    await expect(page.locator("#touch-tab-bar button")).toHaveCount(3);
+    // The bar carries only the four surface tabs — no mode control.
+    await expect(page.locator("#touch-tab-bar button")).toHaveCount(4);
     // Desktop-only chrome stays gone in touch mode.
     await expect(page.locator("#terminal-toggle")).toBeHidden();
   });

@@ -148,7 +148,7 @@ describe("boot stamp — data-active-tab", () => {
   });
 
   test("each valid stored tab round-trips", () => {
-    for (const tab of ["files", "preview", "terminal"] as TouchTab[]) {
+    for (const tab of ["files", "preview", "chat", "terminal"] as TouchTab[]) {
       const store = new Map<string, string>();
       seed(store, ACTIVE_TAB_KEY, tab);
       expect(runBootStamp({ store })["data-active-tab"]).toBe(

@@ -63,6 +63,11 @@ export function formatTerminalCookie(token: string, requestUrl: URL, basePath: s
   ].join("; ");
 }
 
+// The credential originally shipped for terminal access and now protects all
+// high-authority child workspace controls. Keep the terminal names as aliases
+// so the cookie name and existing clients remain byte-for-byte compatible.
+export const formatWorkspaceCookie = formatTerminalCookie;
+
 export function readCookie(header: string | null, name: string): string {
   if (!header) return "";
   for (const part of header.split(";")) {
@@ -132,6 +137,8 @@ export function hasValidTerminalCredentials(
   const cookieToken = readCookie(request.headers.get("Cookie"), terminalCookieName(requestUrl));
   return constantTimeEqual(queryToken, expected) || constantTimeEqual(cookieToken, expected);
 }
+
+export const hasValidWorkspaceCredentials = hasValidTerminalCredentials;
 
 // Origin gate for the terminal surface. The real question is "was this page
 // served by me?", and the request's Host header answers it directly: the

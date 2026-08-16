@@ -1,6 +1,6 @@
 // Bottom tab bar — touch mode's only navigation chrome (touch-tab-navigation
-// change). Three tabs, each an existing surface rendered fullscreen: Files
-// (the sidebar pane stack), Preview (the main-stack), Terminal (the
+// change). Four tabs, each a persistent surface rendered fullscreen: Files
+// (the sidebar pane stack), Preview, Chat, and Terminal (the
 // fullscreen panel). This module owns the active-tab state in `appState`,
 // its per-device persistence, the `data-active-tab` stamp on <html> that all
 // surface CSS keys on, and the mode-escape controls (the bar's Desktop
@@ -12,6 +12,7 @@
 
 import { ACTIVE_TAB_KEY, appState, safeLocalStorage, type TouchTab } from "./state";
 import { onUiModeChange, setUiMode, uiMode } from "./ui-mode";
+import { setMainSurface } from "../chat/surface";
 
 export type TabChangeListener = (tab: TouchTab, previous: TouchTab) => void;
 
@@ -53,6 +54,7 @@ export function setActiveTab(tab: TouchTab): void {
   const previous = appState.activeTab;
   if (previous === tab) return;
   appState.activeTab = tab;
+  if (tab === "preview" || tab === "chat") setMainSurface(tab);
   writeActiveTabPreference(tab);
   applyActiveTabToDom();
   for (const listener of listeners) {
@@ -95,12 +97,17 @@ export function tabBarBottomInset(): number {
   return barElement.offsetHeight;
 }
 
-/** Backend-off sessions have no terminal to show: the Terminal tab hides and
- *  an active Terminal tab falls back to Preview. Called by
+/** Backend-off sessions keep the four-surface navigation stable but disable
+ *  Terminal, and an active Terminal tab falls back to Preview. Called by
  *  setupTerminalPanel once the backend state is known. */
 export function setTerminalTabAvailable(available: boolean): void {
   const terminalButton = tabButtons.find(button => button.dataset.tab === "terminal");
-  if (terminalButton) terminalButton.toggleAttribute("hidden", !available);
+  if (terminalButton) {
+    terminalButton.hidden = false;
+    terminalButton.disabled = !available;
+    terminalButton.setAttribute("aria-disabled", String(!available));
+    terminalButton.title = available ? "Terminal" : "Terminal is unavailable in this workspace";
+  }
   if (!available && appState.activeTab === "terminal") {
     setActiveTab("preview");
   }
@@ -121,9 +128,22 @@ export function initTabBar(): void {
   for (const button of tabButtons) {
     button.addEventListener("click", () => {
       const tab = button.dataset.tab;
-      if (tab === "files" || tab === "preview" || tab === "terminal") {
+      if (tab === "files" || tab === "preview" || tab === "chat" || tab === "terminal") {
         setActiveTab(tab);
       }
+    });
+    button.addEventListener("keydown", event => {
+      const enabled = tabButtons.filter(candidate => !candidate.disabled);
+      const index = enabled.indexOf(button);
+      let target: HTMLButtonElement | undefined;
+      if (event.key === "ArrowRight" || event.key === "ArrowDown") target = enabled[(index + 1) % enabled.length];
+      else if (event.key === "ArrowLeft" || event.key === "ArrowUp") target = enabled[(index - 1 + enabled.length) % enabled.length];
+      else if (event.key === "Home") target = enabled[0];
+      else if (event.key === "End") target = enabled.at(-1);
+      if (!target) return;
+      event.preventDefault();
+      target.focus();
+      target.click();
     });
   }
 
@@ -149,6 +169,9 @@ export function initTabBar(): void {
     }
   };
   onUiModeChange(syncModeToggleLabels);
+  onUiModeChange(mode => {
+    if (mode === "touch") setActiveTab(appState.mainSurface);
+  });
   syncModeToggleLabels();
 
   // appState.activeTab was restored from storage at state-module init;

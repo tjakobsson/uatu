@@ -41,6 +41,7 @@ export function safeLocalStorage(): Storage | null {
 export const SIDEBAR_PANES_KEY = "uatu:sidebar-panes";
 export const GIT_LOG_LIMIT_KEY = "uatu:git-log-limit";
 export const ACTIVE_TAB_KEY = "uatu:active-tab";
+export const MAIN_SURFACE_KEY = "uatu:main-surface";
 
 // Discriminated union describing what the preview pane is showing. Drives
 // the renderer dispatch in `connectEvents` / `loadInitialState`.
@@ -114,15 +115,24 @@ export function readPaneState(
 // separate WKWebView: page-side tracking never produces it, because when that
 // pane has focus this page receives no events at all. The wrapper owns that
 // state and resolves it before a key ever reaches here.
-export type ActiveSurface = "preview" | "terminal" | "browser";
+export type ActiveSurface = "preview" | "chat" | "terminal" | "browser";
+
+export type MainSurface = "preview" | "chat";
+
+export function readMainSurfacePreference(storage: Pick<Storage, "getItem"> | null = safeLocalStorage()): MainSurface {
+  try {
+    if (storage?.getItem(MAIN_SURFACE_KEY) === "chat") return "chat";
+  } catch { /* use default */ }
+  return "preview";
+}
 
 // Touch-mode tab surfaces (touch-tab-navigation). One surface fills the
 // viewport at a time; `preview` is the first-use default. Persisted per
 // device (presentation storage) so a reload lands where the user left off.
-export type TouchTab = "files" | "preview" | "terminal";
+export type TouchTab = "files" | "preview" | "chat" | "terminal";
 
 export function isTouchTab(value: unknown): value is TouchTab {
-  return value === "files" || value === "preview" || value === "terminal";
+  return value === "files" || value === "preview" || value === "chat" || value === "terminal";
 }
 
 export function readActiveTabPreference(
@@ -197,6 +207,7 @@ export const appState = {
   // Which surface find acts on. Set only from user interaction; file events
   // and programmatic selection must leave it alone.
   activeSurface: "preview" as ActiveSurface,
+  mainSurface: readMainSurfacePreference() as MainSurface,
   panes: readPaneState(),
   // Touch mode's active tab surface. Meaningful only while the UI mode is
   // `touch`; desktop mode ignores it (and CSS keys every surface rule on

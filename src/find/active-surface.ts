@@ -18,6 +18,7 @@
 // the watcher. `active-surface.test.ts` asserts structurally that no
 // file-event module reaches the setter OR the tab.
 
+import { onMainSurfaceChange } from "../chat/surface";
 import { appState, type ActiveSurface, type TouchTab } from "../shell/state";
 import { onActiveTabChange } from "../shell/tab-bar";
 import { uiMode } from "../shell/ui-mode";
@@ -26,13 +27,14 @@ import { uiMode } from "../shell/ui-mode";
 // rather than being folded into `preview` by selector, so that the
 // sidebar-means-preview rule stays visible in `surfaceForRoot` instead of
 // hiding inside a selector list.
-export type SurfaceRoot = "preview" | "terminal" | "sidebar";
+export type SurfaceRoot = "preview" | "chat" | "terminal" | "sidebar";
 
 const ROOT_SELECTORS: ReadonlyArray<readonly [SurfaceRoot, string]> = [
   // Terminal first: the panel is a sibling of the preview shell inside
   // `.main-stack`, and checking it first keeps the match unambiguous if the
   // markup is ever nested differently.
   ["terminal", "#terminal-panel"],
+  ["chat", "#chat-surface"],
   ["preview", ".preview-shell"],
   // `.sidebar-rail` is the collapsed sidebar's expand button, which sits
   // outside `.sidebar` but is still sidebar chrome.
@@ -83,6 +85,8 @@ export function surfaceForRoot(root: SurfaceRoot | null): ActiveSurface | null {
   switch (root) {
     case "terminal":
       return "terminal";
+    case "chat":
+      return "chat";
     case "preview":
     case "sidebar":
       return "preview";
@@ -102,7 +106,7 @@ export function resolveSurfaceFromTarget(target: EventTarget | null): ActiveSurf
 export function surfaceForTab(tab: TouchTab): ActiveSurface {
   // Files renders the sidebar pane stack, and directing the sidebar is an act
   // about the document it directs — the same rule `surfaceForRoot` applies.
-  return tab === "terminal" ? "terminal" : "preview";
+  return tab === "terminal" ? "terminal" : tab === "chat" ? "chat" : "preview";
 }
 
 export function getActiveSurface(): ActiveSurface {
@@ -157,6 +161,18 @@ export function initActiveSurfaceTracking(): void {
   onActiveTabChange(tab => {
     if (uiMode() === "touch") {
       setActiveSurface(surfaceForTab(tab));
+    }
+  });
+
+  // Desktop swaps Preview and Chat exclusively through the main-surface
+  // switch, which sits in the chrome outside every surface root — the same
+  // blind spot the tab bar has in touch mode, with the same answer: the
+  // committed change is itself the statement of where the user now works.
+  // Every setMainSurface caller is a user action (segment click, tab commit,
+  // find-bar reveal, chat file link), so the claim stays inert to watchers.
+  onMainSurfaceChange(surface => {
+    if (uiMode() === "desktop") {
+      setActiveSurface(surface);
     }
   });
 }
