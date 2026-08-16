@@ -475,8 +475,19 @@ async function runWatch(options: WatchOptions) {
   // ignored (piped invocations like `uatu serve | tee` must not couple).
   if (options.exitOnStdinClose && !process.stdin.isTTY) {
     process.stdin.resume();
-    process.stdin.on("end", shutdown);
-    process.stdin.on("close", shutdown);
+    // Bun emits BOTH `end` and `close` for a single EOF. Wired directly to
+    // shutdown, the second event hit the second-interrupt guard and force-
+    // exited while the first call was still disposing the detached OpenCode
+    // child — orphaning it on every supervisor shutdown. One EOF is one
+    // shutdown request, however many events report it.
+    let stdinGone = false;
+    const onStdinGone = () => {
+      if (stdinGone) return;
+      stdinGone = true;
+      void shutdown();
+    };
+    process.stdin.on("end", onStdinGone);
+    process.stdin.on("close", onStdinGone);
   }
 
   // Some terminals don't reliably deliver SIGINT to Bun-compiled binaries when

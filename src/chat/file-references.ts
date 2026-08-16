@@ -11,7 +11,11 @@ export function resolveWorkspaceFileReference(raw: string, roots: RootGroup[]): 
   if (!candidate || candidate.includes("\0") || candidate.split("/").includes("..") || (line !== undefined && (!Number.isSafeInteger(line) || line < 1))) return null;
 
   const matches: DocumentMeta[] = [];
-  if (candidate.startsWith("/")) {
+  // Absolute also covers Windows drive-qualified paths (C:/workspace/…),
+  // which the backslash normalization above produces — a drive path dropped
+  // into the relative lookup can never equal a relativePath and goes inert.
+  const absolute = candidate.startsWith("/") || /^[A-Za-z]:\//.test(candidate);
+  if (absolute) {
     for (const root of roots) {
       const rootPath = root.path.replaceAll("\\", "/").replace(/\/$/, "");
       if (candidate === rootPath || !candidate.startsWith(`${rootPath}/`)) continue;

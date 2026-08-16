@@ -156,14 +156,18 @@ export class OpenCodeChatAdapter {
     items.sort((left, right) => left.createdAt - right.createdAt);
     // OpenCode 1.18 never emits `question.v2.asked`, so a pending question is
     // invisible to the event stream and only the provider knows about it.
-    // Asking here is what makes an open question answerable at all.
-    const pendingNow = await this.pendingQuestions(id);
-    for (const pending of pendingNow) {
-      if (items.some(item => item.id === pending.id)) continue;
-      items.push(pending);
-    }
-    if (pendingNow.length > 0) this.publishedQuestions.set(id, new Set(pendingNow.map(item => item.id)));
-    else this.publishedQuestions.delete(id);
+    // Asking here is what makes an open question answerable at all. A failed
+    // list degrades the snapshot (the next refresh republishes) but must not
+    // rewrite the published set — that would erase live questions.
+    try {
+      const pendingNow = await this.pendingQuestions(id);
+      for (const pending of pendingNow) {
+        if (items.some(item => item.id === pending.id)) continue;
+        items.push(pending);
+      }
+      if (pendingNow.length > 0) this.publishedQuestions.set(id, new Set(pendingNow.map(item => item.id)));
+      else this.publishedQuestions.delete(id);
+    } catch { /* unknown, not empty */ }
     const projection = this.projection(id);
     projection.seed(items);
     return {
@@ -229,25 +233,39 @@ export class OpenCodeChatAdapter {
         if (!models.some(candidate => sameSelection(candidate.selection, model))) throw new InvalidModelSelectionError();
         this.lastModel.set(conversationId, model);
       }
-      let conversation: ConversationSummary | undefined;
+      // Emptiness is checked before dispatch (afterwards the store already
+      // holds this prompt), but the rename itself waits for admission — a
+      // rejected first prompt must not permanently title the conversation
+      // from a message that was never accepted.
+      let renameToFirstPrompt = false;
       if (this.provider.renameSession && isDefaultConversationTitle(session.title)) {
         const page = await this.provider.listMessages(conversationId, { limit: 1 });
-        if (page.items.length === 0) {
-          session = await this.provider.renameSession(conversationId, deriveConversationTitle(text));
-          if (!await isSessionInWorkspace(session.directory, this.workspacePath)) throw new ConversationNotFoundError();
-          conversation = this.summary(session, "sending");
-        }
+        renameToFirstPrompt = page.items.length === 0;
       }
+      let conversation: ConversationSummary | undefined;
       projection.statusUpdate("sending");
       try {
+        // A failed command listing propagates: classifying "/compact" as
+        // plain prose because the list was momentarily unavailable would
+        // send the text as a message and report it accepted.
         const slash = text.startsWith("/")
-          ? parseSlashCommand(text, await this.provider.listCommands().catch(() => []))
+          ? parseSlashCommand(text, await this.provider.listCommands())
           : undefined;
         const accepted = slash
           ? await this.provider.command(conversationId, { id: messageId, name: slash.name, arguments: slash.arguments, model })
           : await this.provider.prompt(conversationId, { id: messageId, text, delivery, model });
+        if (renameToFirstPrompt) {
+          try {
+            session = await this.provider.renameSession!(conversationId, deriveConversationTitle(text));
+            if (!await isSessionInWorkspace(session.directory, this.workspacePath)) throw new ConversationNotFoundError();
+            conversation = this.summary(session, projection.status);
+          } catch { /* cosmetic — listConversations repairs default titles later */ }
+        }
         projection.upsert({ id: `message:${accepted.messageId}`, type: "user_message", createdAt: Date.now(), text, requestId });
-        projection.statusUpdate("running");
+        // A fast command can finish its whole turn while the dispatch
+        // resolves; the pump's terminal status then outranks our optimistic
+        // promotion, or the turn sticks at "working" forever.
+        if (projection.status === "sending") projection.statusUpdate("running");
         return { messageId: accepted.messageId, delivery, ...(conversation ? { conversation } : {}) };
       } catch (error) {
         projection.statusUpdate("failed", errorMessage(error));
@@ -346,9 +364,10 @@ export class OpenCodeChatAdapter {
    * shape so an event-emitting provider and this fallback converge on one
    * item rather than rendering the same question twice.
    */
+  /** Throws on provider failure — an errored list is unknown, not empty. */
   private async pendingQuestions(id: string): Promise<ConversationItem[]> {
     if (!this.provider.listQuestions) return [];
-    const pending = await this.provider.listQuestions(id).catch(() => []);
+    const pending = await this.provider.listQuestions(id);
     return pending.map(request => {
       const itemId = `question:${request.requestId}`;
       // First-seen time, remembered: the provider gives no timestamp, and a
@@ -390,13 +409,20 @@ export class OpenCodeChatAdapter {
         if (live.size > 0) this.publishedQuestions.set(conversationId, live);
         else this.publishedQuestions.delete(conversationId);
         if (updates.length > 0) coalescer.push(conversationId, updates);
-      } catch { /* a failed refresh leaves the next tool update to retry */ }
+      }
+      // A failed refresh must reach THIS catch with the published set intact:
+      // treating it as an empty pending list would remove live questions and
+      // leave the agent blocked with nothing on screen to answer.
+      catch { /* a failed refresh leaves the next tool update to retry */ }
       finally { this.questionRefreshes.delete(conversationId); }
     })();
   }
 
   private async requireSession(id: string): Promise<ProviderSession> {
-    const session = await this.provider.getSession(id).catch(() => null);
+    // A provider failure propagates as itself: the pump treats not-found as
+    // "skip this frame" but must restart on transport errors, and the API
+    // routes should answer 500, not 404, when the provider is unreachable.
+    const session = await this.provider.getSession(id);
     if (!session || !await isSessionInWorkspace(session.directory, this.workspacePath)) throw new ConversationNotFoundError();
     return session;
   }
@@ -510,9 +536,14 @@ export class ConversationProjection {
     return this.replay.publish({ type: "item.text_delta", itemId: update.itemId, delta });
   }
 
-  upsert(item: ConversationItem): ChatEvent {
+  upsert(item: ConversationItem): ChatEvent | undefined {
     const current = this.timeline.get(item.id);
     const merged = mergeInteraction(current, item);
+    // A resolution for a question this projection never saw (asked frame
+    // missed, projection evicted) has no question content to render, and an
+    // empty questions array fails client validation — publishing it would
+    // trade one lost frame for a stream resync loop.
+    if (merged.type === "question" && merged.questions.length === 0) return undefined;
     this.timeline.set(item.id, merged);
     if (merged.type === "assistant_message") this.text.seed(merged.id.replace(/^part:/, ""), merged.markdown);
     if (merged.type === "reasoning") this.text.seed(merged.id.replace(/^part:|^reasoning:/, ""), merged.text);

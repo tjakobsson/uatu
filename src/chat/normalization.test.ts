@@ -136,6 +136,34 @@ describe("provider text reconciliation", () => {
     expect(text.value("part")).toBe("hello world!");
   });
 
+  test("a question resolution without its asked event is dropped, not published empty", () => {
+    const projection = new ConversationProjection(new ConversationReplay("g", "s", 10_000));
+    const replied = { id: "1", type: "question.v2.replied", data: { sessionID: "s", requestID: "que_1", answers: [["Yes"]] } };
+    for (const update of normalizeProviderEvent(replied).updates) projection.apply(update);
+    // No renderable content and empty questions fail client validation — the
+    // orphan resolution must neither publish nor enter the snapshot.
+    expect(projection.items()).toEqual([]);
+
+    const asked = { id: "2", type: "question.v2.asked", data: { sessionID: "s", id: "que_2", questions: [{ question: "Go?", header: "Next", options: [{ label: "Yes" }] }] } };
+    const resolved = { id: "3", type: "question.v2.replied", data: { sessionID: "s", requestID: "que_2", answers: [["Yes"]] } };
+    for (const event of [asked, resolved]) for (const update of normalizeProviderEvent(event).updates) projection.apply(update);
+    expect(projection.items()).toEqual([expect.objectContaining({
+      type: "question",
+      status: "resolved",
+      questions: [expect.objectContaining({ prompt: "Go?" })],
+    })]);
+  });
+
+  test("a repeated identical delta with no intervening cumulative is legitimate text", () => {
+    const text = new ProviderTextReconciler();
+    expect(text.incremental("part", "line one")).toBe("line one");
+    expect(text.incremental("part", "\n\n")).toBe("\n\n");
+    expect(text.incremental("part", "\n\n")).toBe("\n\n");
+    expect(text.incremental("part", "line")).toBe("line");
+    expect(text.incremental("part", "line")).toBe("line");
+    expect(text.value("part")).toBe("line one\n\n\n\nlineline");
+  });
+
   test("updates one projected text and tool identity in place under replay", () => {
     const projection = new ConversationProjection(new ConversationReplay("g", "s", 10_000));
     const textEvents = [
