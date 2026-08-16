@@ -34,9 +34,12 @@ type Presentation = {
   // claim whatever was last chosen anywhere, for every conversation.
   model?: ModelSelection;
   models: Record<string, ModelSelection>;
+  // Dismissed finished-subagent entry ids, per conversation — dismissal is a
+  // user statement that must survive reload.
+  dismissedSubagents: Record<string, string[]>;
 };
 
-const EMPTY_PRESENTATION: Presentation = { drafts: {}, expanded: [], anchors: {}, workingSince: {}, models: {} };
+const EMPTY_PRESENTATION: Presentation = { drafts: {}, expanded: [], anchors: {}, workingSince: {}, models: {}, dismissedSubagents: {} };
 
 export function initChat(): void {
   const surface = document.querySelector<HTMLElement>("#chat-surface");
@@ -134,6 +137,7 @@ export function initChat(): void {
       for (const key of Object.keys(presentation.anchors)) if (!known.has(key)) delete presentation.anchors[key];
       for (const key of Object.keys(presentation.workingSince)) if (!known.has(key)) delete presentation.workingSince[key];
       for (const key of Object.keys(presentation.models)) if (!known.has(key)) delete presentation.models[key];
+      for (const key of Object.keys(presentation.dismissedSubagents)) if (!known.has(key)) delete presentation.dismissedSubagents[key];
     }
     while (expanded.size > MAX_EXPANDED_ENTRIES) {
       const oldest = expanded.values().next().value;
@@ -185,8 +189,10 @@ export function initChat(): void {
   const subagentsItems = document.querySelector<HTMLElement>("#chat-subagents-items");
   const dismissButton = document.querySelector<HTMLButtonElement>("#chat-subagents-dismiss");
   // Finished subagents stay until explicitly dismissed — nothing retires
-  // them on a timer. Per conversation, and forgotten on reload.
-  const dismissedSubagents = new Set<string>();
+  // them on a timer. Dismissals persist with the rest of the per-conversation
+  // presentation, so a reload does not resurrect an already-dismissed strip.
+  const dismissedSubagents = (conversationId: string): Set<string> =>
+    new Set(presentation.dismissedSubagents[conversationId] ?? []);
   subagentsItems?.addEventListener("click", event => {
     const open = (event.target as Element).closest<HTMLElement>("[data-open-conversation]");
     if (open?.dataset.openConversation) openChildConversation(open.dataset.openConversation, open.textContent ?? "Subagent");
@@ -194,9 +200,12 @@ export function initChat(): void {
   dismissButton?.addEventListener("click", event => {
     event.preventDefault();
     if (!projection) return;
+    const dismissed = dismissedSubagents(projection.conversationId);
     for (const entry of subagentEntries(projection.items)) {
-      if (entry.status !== "running" && entry.status !== "pending") dismissedSubagents.add(entry.id);
+      if (entry.status !== "running" && entry.status !== "pending") dismissed.add(entry.id);
     }
+    presentation.dismissedSubagents[projection.conversationId] = [...dismissed];
+    save();
     syncSubagents();
   });
 
@@ -208,7 +217,8 @@ export function initChat(): void {
   const syncSubagents = () => {
     if (!subagents || !subagentsLabel || !subagentsItems) return;
     const all = projection ? subagentEntries(projection.items) : [];
-    const entries = all.filter(entry => !dismissedSubagents.has(entry.id));
+    const dismissed = projection ? dismissedSubagents(projection.conversationId) : new Set<string>();
+    const entries = all.filter(entry => !dismissed.has(entry.id));
     if (dismissButton) {
       dismissButton.hidden = !entries.some(entry => entry.status !== "running" && entry.status !== "pending");
     }
@@ -523,7 +533,6 @@ export function initChat(): void {
       if (currentAnchor) presentation.anchors[projection.conversationId] = currentAnchor;
     }
     presentation.selectedId = id;
-    dismissedSubagents.clear();
     applyModel(id);
     const conversation = conversations.find(item => item.id === id);
     if (chatTitle) chatTitle.textContent = conversation ? displayConversationTitle(conversation) : "OpenCode Chat";
@@ -1038,8 +1047,16 @@ function readPresentation(): Presentation {
       workingSince: parseStoredTimestamps(value.workingSince),
       model: parseStoredModel(value.model),
       models: parseStoredModels(value.models),
+      dismissedSubagents: parseStoredIdLists(value.dismissedSubagents),
     };
   } catch { return structuredClone(EMPTY_PRESENTATION); }
+}
+
+function parseStoredIdLists(value: unknown): Record<string, string[]> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value)
+    .filter((entry): entry is [string, unknown[]] => Array.isArray(entry[1]))
+    .map(([key, list]) => [key, list.filter((item): item is string => typeof item === "string")]));
 }
 
 function parseStoredTimestamps(value: unknown): Record<string, number> {

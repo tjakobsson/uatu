@@ -114,6 +114,15 @@ test.describe("chat panels and navigation", () => {
     await page.getByRole("button", { name: "Dismiss finished" }).click();
     await expect(track.locator("li")).toHaveCount(1);
     await expect(track.locator("summary")).toContainText("1 of 1 agent working · Still going");
+
+    // Dismissal is a user statement — reloading the conversation must not
+    // resurrect the dismissed strip.
+    await page.reload();
+    await page.getByRole("radio", { name: "Chat" }).click();
+    await expect(track).toBeVisible();
+    await track.locator("summary").click();
+    await expect(track.locator("li")).toHaveCount(1);
+    await expect(track.locator("summary")).toContainText("1 of 1 agent working · Still going");
   });
 
   test("the prompt rail jumps to a prompt and flashes the landing", async ({ page, request }) => {
