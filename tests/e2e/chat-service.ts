@@ -26,6 +26,10 @@ export class FakeE2EChatService implements WorkspaceChatService {
   // status() launches the OpenCode server, so a page load that never opens
   // Chat must never call it.
   statusCalls = 0;
+  // Every prompt attempt's request id, in arrival order — lets the suite
+  // assert that a retry after an ambiguous failure reuses the id (the
+  // at-most-once contract) instead of minting a fresh one.
+  promptAttempts: string[] = [];
   // When set, the next prompt stalls half a second and then rejects —
   // enough of a window for a test to deterministically switch conversations
   // while the request is in flight.
@@ -99,6 +103,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     const existing = this.receipts.get(key) as { messageId: string; delivery: "steer" | "queue"; conversation?: ConversationSummary } | undefined;
     if (existing) return existing;
     const conversation = this.require(id);
+    this.promptAttempts.push(requestId);
     if (this.failNextPrompt) {
       this.failNextPrompt = false;
       await new Promise(resolve => setTimeout(resolve, 500));
@@ -165,6 +170,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
   reset(): void {
     this.disconnect();
     this.statusCalls = 0;
+    this.promptAttempts = [];
     this.failNextPrompt = false;
     this.generation = `e2e-chat-${this.nextId++}`;
     this.conversations.clear();

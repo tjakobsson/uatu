@@ -186,6 +186,24 @@ test.describe("desktop OpenCode chat", () => {
     await expect(page.locator('[data-chat-item-id="question:q-2"]')).toContainText("Answered");
   });
 
+  test("resending after a failure reuses the request id for at-most-once delivery", async ({ page, request }) => {
+    await page.getByRole("button", { name: "New" }).click();
+    await expect(page.locator("#chat-conversation-select")).not.toHaveValue("");
+    await control(request, { action: "failPrompt" });
+    await page.locator("#chat-input").fill("retry me");
+    await page.locator("#chat-send").click();
+    await expect(page.locator("#chat-composer-status")).toHaveText("Message not accepted; draft restored");
+    await expect(page.locator("#chat-input")).toHaveValue("retry me");
+
+    await page.locator("#chat-send").click();
+    await expect(page.locator("#chat-items")).toContainText("retry me");
+    const stats = await control(request, { action: "stats" }) as { promptAttempts: string[] };
+    // Same id both times: the server's idempotency receipt can dedupe a
+    // request whose first response was lost after acceptance.
+    expect(stats.promptAttempts).toHaveLength(2);
+    expect(stats.promptAttempts[0]).toBe(stats.promptAttempts[1]);
+  });
+
   test("a prompt failure after switching conversations restores the draft on return", async ({ page, request }) => {
     const first = await control(request, { action: "seed", title: "First", items: [] }) as { conversation: { id: string } };
     const second = await control(request, { action: "seed", title: "Second", items: [] }) as { conversation: { id: string } };

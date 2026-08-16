@@ -183,7 +183,7 @@ async function handleE2EChat(request: Request): Promise<Response> {
       chatService.disconnect();
       return Response.json({ ok: true });
     case "stats":
-      return Response.json({ statusCalls: chatService.statusCalls });
+      return Response.json({ statusCalls: chatService.statusCalls, promptAttempts: chatService.promptAttempts });
     case "failPrompt":
       chatService.failPrompt();
       return Response.json({ ok: true });

@@ -73,6 +73,10 @@ export function initChat(): void {
   let rendering = false;
   let renderFrame: number | null = null;
   let submitting = false;
+  // A failed send leaves acceptance unknown — the server may already hold a
+  // receipt for the request. Resubmitting the same text reuses its id so the
+  // receipt dedupes instead of starting a second agent turn.
+  let retryRequest: { conversationId: string; text: string; requestId: string } | null = null;
   let commandMatch: ReturnType<typeof matchingCommands> = null;
   let commandIndex = 0;
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -863,7 +867,9 @@ export function initChat(): void {
     if (!projection || !input.value.trim() || submitting) return;
     const conversationId = projection.conversationId;
     const text = input.value;
-    const requestId = newRequestId();
+    const requestId = retryRequest?.conversationId === conversationId && retryRequest.text === text
+      ? retryRequest.requestId
+      : newRequestId();
     const selectedModel = models.find(model => modelValue(model.selection) === modelSelect.value)?.selection;
     const wasRunning = projection.status === "running" || projection.status === "sending";
     submitting = true;
@@ -879,6 +885,7 @@ export function initChat(): void {
     scheduleRender(true);
     try {
       const accepted = await api.prompt(conversationId, requestId, text, selectedModel);
+      retryRequest = null;
       if (accepted.conversation) {
         conversations = conversations.map(conversation => conversation.id === accepted.conversation!.id ? accepted.conversation! : conversation);
         const option = Array.from(select.options).find(candidate => candidate.value === accepted.conversation!.id);
@@ -893,6 +900,7 @@ export function initChat(): void {
       noteComposer(accepted.delivery === "steer" ? "Steer accepted" : "Message accepted");
     } catch (error) {
       announce(messageOf(error), true);
+      retryRequest = { conversationId, text, requestId };
       if (projection?.conversationId === conversationId) {
         projection = removeAcceptedDraft(projection, requestId);
         if (!input.value.trim()) {
