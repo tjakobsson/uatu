@@ -355,6 +355,7 @@ async function* mergeProviderEvents(streams: AsyncIterable<unknown>[], signal: A
   const queued: ProviderEvent[] = [];
   const seen = new Set<string>();
   let active = streams.length;
+  const failures: unknown[] = [];
   let wake: (() => void) | null = null;
   const notify = () => { wake?.(); wake = null; };
   for (const stream of streams) {
@@ -369,6 +370,11 @@ async function* mergeProviderEvents(streams: AsyncIterable<unknown>[], signal: A
           queued.push(event);
           notify();
         }
+      } catch (error) {
+        // A mid-stream death must surface to the consumer — swallowing it here
+        // would leave the merged stream half-alive with no way for the event
+        // pump's supervisor to notice and reconnect.
+        failures.push(error);
       } finally {
         active -= 1;
         notify();
@@ -377,9 +383,11 @@ async function* mergeProviderEvents(streams: AsyncIterable<unknown>[], signal: A
   }
   while (!signal.aborted && (active > 0 || queued.length > 0)) {
     const event = queued.shift();
-    if (event) yield event;
-    else await new Promise<void>(resolve => { wake = resolve; });
+    if (event) { yield event; continue; }
+    if (failures.length > 0) throw failures[0];
+    await new Promise<void>(resolve => { wake = resolve; });
   }
+  if (failures.length > 0 && !signal.aborted) throw failures[0];
 }
 
 function providerEventIdentity(event: ProviderEvent): string {

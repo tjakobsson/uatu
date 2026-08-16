@@ -547,8 +547,12 @@ export class ConversationProjection {
 
 function mergeInteraction(current: ConversationItem | undefined, incoming: ConversationItem): ConversationItem {
   if (!current || current.type !== incoming.type) return incoming;
-  if (current.type === "user_message" && incoming.type === "user_message" && current.requestId && !incoming.requestId) {
-    return { ...incoming, text: current.text, requestId: current.requestId };
+  if (current.type === "user_message" && incoming.type === "user_message") {
+    if (current.requestId && !incoming.requestId) return { ...incoming, text: current.text, requestId: current.requestId };
+    // A history-loaded message carries no requestId, and message.updated events
+    // normalize with empty parts — an empty incoming text is "no new content",
+    // not a blanking instruction.
+    if (!incoming.text) return { ...incoming, text: current.text };
   }
   if (current.type === "permission" && incoming.type === "permission") {
     return { ...current, ...incoming, action: incoming.action === "permission" ? current.action : incoming.action, resources: incoming.resources.length ? incoming.resources : current.resources };

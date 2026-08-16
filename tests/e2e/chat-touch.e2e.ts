@@ -108,8 +108,13 @@ test("history prepend and activity expansion preserve semantic position", async 
   const id = await page.locator("#chat-conversation-select").inputValue();
   const activity: ConversationItem = { id: "tool:expand", type: "tool", createdAt: 200, name: "Inspect", status: "completed", output: "detail\n".repeat(30) };
   await control(request, { action: "item", conversationId: id, item: activity });
+  // The spec anchors an expanded entry only away from the timeline end — at the
+  // end, pinned follow-to-bottom wins — so put a message after the activity.
+  await control(request, { action: "item", conversationId: id, item: { id: "message:after-activity", type: "user_message", createdAt: 201, text: `after activity ${"content ".repeat(30)}` } });
   const details = page.locator('[data-chat-item-id="tool:expand"]');
-  await details.scrollIntoViewIfNeeded();
+  await expect(page.locator('[data-chat-item-id="message:after-activity"]')).toBeAttached();
+  await timeline.evaluate(element => { element.scrollTop = element.scrollHeight - element.clientHeight - 80; element.dispatchEvent(new Event("scroll")); });
+  await expect(details).toBeInViewport();
   const activityTop = await details.evaluate(element => element.getBoundingClientRect().top);
   await details.locator("summary").click();
   await expect(details).toHaveAttribute("open", "");

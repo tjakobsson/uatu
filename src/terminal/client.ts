@@ -98,6 +98,16 @@ export async function waitForWorkspaceCredential(): Promise<void> {
   await credentialPromotion;
 }
 
+// Fired after the server accepts a token and re-mints the workspace cookie —
+// the terminal's reconnect form is the usual source. Features whose bootstrap
+// failed on stale credentials (a PWA cookie holding a pre-restart token)
+// listen here to retry instead of staying dead until a full page reload.
+const credentialRefreshListeners = new Set<() => void>();
+
+export function onWorkspaceCredentialRefresh(listener: () => void): void {
+  credentialRefreshListeners.add(listener);
+}
+
 // Build the WebSocket URL for the terminal endpoint. The `pageUrl` source
 // (usually `window.location.href`) carries the current page's hash when the
 // user arrived via a deep link like `/some/doc.md#section`. The WebSocket
@@ -151,6 +161,7 @@ export async function persistTerminalToken(token: string): Promise<boolean> {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ token }),
     });
+    if (response.ok) for (const listener of [...credentialRefreshListeners]) listener();
     return response.ok;
   } catch {
     return false;

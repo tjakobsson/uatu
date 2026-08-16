@@ -70,6 +70,86 @@ describe("LazyOpenCodeChatService", () => {
     await service.dispose();
   });
 
+  test("a failed adapter probe is retried on the next status call instead of caching unsupported", async () => {
+    let resolveExit!: (code: number) => void;
+    const exited = new Promise<number>(resolve => { resolveExit = resolve; });
+    const child: SpawnedOpenCode = {
+      pid: 42,
+      exited,
+      stderr: new ReadableStream({ start(controller) { controller.close(); } }),
+      kill() { resolveExit(143); },
+    };
+    const runtime = new OpenCodeService({
+      workspacePath: "/workspace",
+      discoverExecutable: async () => "/bin/opencode",
+      allocatePort: async () => 43210,
+      spawn: () => child,
+      fetch: async () => Response.json({ healthy: true, version: "test" }),
+      killGroup: () => resolveExit(143),
+    });
+    let probes = 0;
+    const flaky = {
+      ...provider(),
+      async listModels() {
+        probes += 1;
+        if (probes === 1) throw new Error("transient blip");
+        return [];
+      },
+    } satisfies OpenCodeProvider;
+    const service = new LazyOpenCodeChatService({
+      workspacePath: "/workspace",
+      runtime,
+      createProvider: () => flaky,
+      createAdapter: options => new OpenCodeChatAdapter({ ...options, generation: "test" }),
+    });
+
+    expect(await service.status()).toEqual({
+      state: "unavailable",
+      reason: "unsupported",
+      message: "The installed OpenCode version is not compatible with chat.",
+    });
+    expect(await service.status()).toEqual({ state: "ready", version: "test" });
+    expect(probes).toBe(2);
+    expect(await service.models()).toEqual([]);
+    await service.dispose();
+  });
+
+  test("an incompatible provider keeps reporting unsupported and blocks operations", async () => {
+    let resolveExit!: (code: number) => void;
+    const exited = new Promise<number>(resolve => { resolveExit = resolve; });
+    const child: SpawnedOpenCode = {
+      pid: 42,
+      exited,
+      stderr: new ReadableStream({ start(controller) { controller.close(); } }),
+      kill() { resolveExit(143); },
+    };
+    const runtime = new OpenCodeService({
+      workspacePath: "/workspace",
+      discoverExecutable: async () => "/bin/opencode",
+      allocatePort: async () => 43210,
+      spawn: () => child,
+      fetch: async () => Response.json({ healthy: true, version: "test" }),
+      killGroup: () => resolveExit(143),
+    });
+    const incompatible = {
+      ...provider(),
+      async listModels(): Promise<never> { throw new Error("404 not found"); },
+    } satisfies OpenCodeProvider;
+    const service = new LazyOpenCodeChatService({
+      workspacePath: "/workspace",
+      runtime,
+      createProvider: () => incompatible,
+      createAdapter: options => new OpenCodeChatAdapter({ ...options, generation: "test" }),
+    });
+
+    const first = await service.status();
+    expect(first.state).toBe("unavailable");
+    const second = await service.status();
+    expect(second).toEqual(first);
+    await expect(service.models()).rejects.toThrow("chat is unavailable");
+    await service.dispose();
+  });
+
   test("restarts the event pump when the provider stream dies", async () => {
     let resolveExit!: (code: number) => void;
     const exited = new Promise<number>(resolve => { resolveExit = resolve; });

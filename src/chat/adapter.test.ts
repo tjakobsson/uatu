@@ -247,6 +247,21 @@ describe("filtered provider event pump", () => {
     expect(adapter.projectionForTests("local").items()).toEqual([expect.objectContaining({ markdown: "safe" })]);
   });
 
+  test("a message.updated echo without parts keeps a history-loaded user message's text", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    provider.pages.set("first", { items: [{ id: "msg_history", type: "user", time: { created: 1 }, text: "hello from history" }] });
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    await adapter.history("local");
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push({ id: "echo", type: "message.updated", data: { info: { id: "msg_history", role: "user", sessionID: "local", time: { created: 1 } } } });
+    await Bun.sleep(1);
+    await adapter.stopEventPump();
+    await pump;
+
+    expect(adapter.projectionForTests("local").items()).toEqual([expect.objectContaining({ type: "user_message", text: "hello from history" })]);
+  });
+
   test("coalesces streamed deltas into a single published event per window", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("local")];

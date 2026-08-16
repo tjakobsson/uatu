@@ -1,6 +1,7 @@
 import { escapeHtml } from "../shared/html";
 import { appState } from "../shell/state";
 import { presentationLocalStorage } from "../shell/presentation-storage";
+import { onWorkspaceCredentialRefresh } from "../terminal/client";
 import { ChatApiClient, ChatTransportError, type ChatEventStream } from "./client";
 import { TimelineAnchorController, type AnchorGeometry, type TimelineAnchor } from "./anchor";
 import { ChatViewportController } from "./viewport";
@@ -913,11 +914,22 @@ export function initChat(): void {
     flushSave();
     stream?.close();
     observer?.disconnect();
+    surfaceObserver.disconnect();
     viewport.stop();
     if (workingTimer !== null) clearInterval(workingTimer);
   }, { once: true });
 
-  void (async () => {
+  // Bootstrap is deferred until Chat is actually the active surface: status()
+  // lazily launches the OpenCode server, and merely opening Preview, Files, or
+  // Terminal must not pay that cost. A restored Chat surface bootstraps
+  // immediately via the initial maybeBootstrap() call. Failures — a stale PWA
+  // cookie 401, a transient status error — leave the bootstrap re-runnable:
+  // it retries on the next Chat activation and on credential refresh.
+  let bootstrapped = false;
+  let bootstrapping = false;
+  const bootstrap = async () => {
+    if (bootstrapped || bootstrapping) return;
+    bootstrapping = true;
     try {
       const availability = await api.status();
       if (availability.state === "unavailable") {
@@ -928,11 +940,27 @@ export function initChat(): void {
         return;
       }
       [models, conversations, commands] = await Promise.all([api.models(), api.conversations(), api.commands().catch(() => [])]);
+      form.hidden = false;
+      select.disabled = false;
+      newButton.disabled = false;
       renderModels();
       announce(conversations.length ? "" : "No conversations yet. Create one to start.");
       renderChooser();
+      bootstrapped = true;
     } catch (error) { announce(messageOf(error), true); }
-  })();
+    finally { bootstrapping = false; }
+  };
+  const chatSurfaceActive = () => {
+    const root = document.documentElement;
+    return root.getAttribute("data-ui-mode") === "touch"
+      ? root.getAttribute("data-active-tab") === "chat"
+      : root.getAttribute("data-main-surface") === "chat";
+  };
+  const maybeBootstrap = () => { if (chatSurfaceActive()) void bootstrap(); };
+  const surfaceObserver = new MutationObserver(maybeBootstrap);
+  surfaceObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-main-surface", "data-active-tab", "data-ui-mode"] });
+  onWorkspaceCredentialRefresh(maybeBootstrap);
+  maybeBootstrap();
 }
 
 function isTextEditingControl(value: Element | null): boolean {

@@ -56,7 +56,6 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
   private readonly createAdapter: NonNullable<LazyOpenCodeChatServiceOptions["createAdapter"]>;
   private adapterPromise: Promise<OpenCodeChatAdapter> | null = null;
   private adapter: OpenCodeChatAdapter | null = null;
-  private adapterFailure: ChatAvailability | null = null;
   private disposed = false;
 
   constructor(options: LazyOpenCodeChatServiceOptions) {
@@ -67,19 +66,25 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
   }
 
   async status(): Promise<ChatAvailability> {
-    if (this.adapterFailure) return this.adapterFailure;
     const availability = await this.runtime.status();
     if (availability.state !== "ready") return availability;
     try {
       await this.ensureAdapter();
       return availability;
-    } catch {
-      this.adapterFailure = {
+    } catch (error) {
+      // Deliberately not cached: ensureAdapter forgets a rejected attempt, so
+      // the next status() call rebuilds and re-probes. A transient failure — a
+      // connection race right after the runtime reports ready, a dropped
+      // request — must not lock chat into "unavailable" for the process
+      // lifetime; a genuinely incompatible server just fails the probe again.
+      if (error instanceof ChatUnavailableError) {
+        return { state: "unavailable", reason: "startup-failed", message: "OpenCode is restarting; chat will retry." };
+      }
+      return {
         state: "unavailable",
         reason: "unsupported",
         message: "The installed OpenCode version is not compatible with chat.",
       };
-      return this.adapterFailure;
     }
   }
 
@@ -112,7 +117,7 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
   }
 
   private ensureAdapter(): Promise<OpenCodeChatAdapter> {
-    this.adapterPromise ??= Promise.resolve().then(() => {
+    const pending = this.adapterPromise ??= (async () => {
       const connection = this.runtime.currentConnection();
       if (!connection) throw new ChatUnavailableError();
       const provider = this.createProvider({
@@ -120,12 +125,17 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
         password: connection.password,
         directory: this.workspacePath,
       });
+      // A passing health check says nothing about SDK compatibility, and event
+      // pump failures are swallowed by the supervisor — without a probe an
+      // incompatible server reports "ready" and then fails every operation.
+      await provider.listModels();
       const adapter = this.createAdapter({ provider, workspacePath: this.workspacePath });
       this.adapter = adapter;
       this.superviseEventPump(adapter);
       return adapter;
-    });
-    return this.adapterPromise;
+    })();
+    pending.catch(() => { if (this.adapterPromise === pending) this.adapterPromise = null; });
+    return pending;
   }
 
   /**

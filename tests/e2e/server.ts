@@ -182,6 +182,8 @@ async function handleE2EChat(request: Request): Promise<Response> {
     case "disconnect":
       chatService.disconnect();
       return Response.json({ ok: true });
+    case "stats":
+      return Response.json({ statusCalls: chatService.statusCalls });
     case "resync":
       chatService.rotateGeneration();
       return Response.json({ ok: true });

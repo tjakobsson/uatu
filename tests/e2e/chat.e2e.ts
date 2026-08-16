@@ -207,6 +207,21 @@ test.describe("desktop OpenCode chat", () => {
   });
 });
 
+test("the chat backend starts only when Chat becomes the active surface", async ({ page, request }) => {
+  await request.post("/__e2e/reset");
+  const token = await request.get("/__e2e/terminal-token").then(response => response.json()) as { token: string };
+  await page.goto(`/?t=${encodeURIComponent(token.token)}`);
+  await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
+  // Opening the app on Preview must not touch chat status — in production that
+  // call lazily launches the OpenCode server.
+  await page.waitForTimeout(250);
+  expect(((await control(request, { action: "stats" })) as { statusCalls: number }).statusCalls).toBe(0);
+  await page.getByRole("radio", { name: "Chat" }).click();
+  await expect(page.locator("#chat-surface")).toBeVisible();
+  await expect(page.locator("#chat-state")).not.toContainText("Loading OpenCode");
+  await expect.poll(async () => ((await control(request, { action: "stats" })) as { statusCalls: number }).statusCalls).toBeGreaterThan(0);
+});
+
 function elapsedSeconds(value: string | null): number {
   const match = /(?:·\s*)?(?:(\d+)m\s+)?(\d+)s/.exec(value ?? "");
   return match ? Number(match[1] ?? 0) * 60 + Number(match[2]) : -1;

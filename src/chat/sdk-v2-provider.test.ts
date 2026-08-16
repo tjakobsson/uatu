@@ -100,6 +100,35 @@ describe("OpenCode v2 identity policy", () => {
     expect(events.sort()).toEqual(["classic", "native", "shared"]);
   });
 
+  test("a mid-stream failure propagates after queued events instead of ending the merge silently", async () => {
+    const client = {
+      event: {
+        subscribe: async () => ({
+          stream: {
+            async *[Symbol.asyncIterator]() {
+              yield { id: "classic", type: "message.updated", data: {} };
+              throw new Error("stream died");
+            },
+          },
+        }),
+      },
+      v2: {
+        event: {
+          subscribe: async () => ({
+            stream: { async *[Symbol.asyncIterator]() { yield { id: "native", type: "session.idle", data: {} }; } },
+          }),
+        },
+      },
+    } as unknown as OpencodeClient;
+    const provider = new SdkV2Provider(client, "/workspace");
+
+    const events: unknown[] = [];
+    const consume = async () => {
+      for await (const event of provider.events(new AbortController().signal)) events.push(event.id);
+    };
+    await expect(consume()).rejects.toThrow("stream died");
+  });
+
   test("lets OpenCode issue session IDs and maps request IDs to stable message IDs", async () => {
     let createInput: Record<string, unknown> | undefined;
     let promptInput: Record<string, unknown> | undefined;

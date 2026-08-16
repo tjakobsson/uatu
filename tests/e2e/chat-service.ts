@@ -22,8 +22,15 @@ export class FakeE2EChatService implements WorkspaceChatService {
   private readonly receipts = new Map<string, unknown>();
   private readonly olderItems = new Map<string, ConversationItem[]>();
   private readonly subscriptions = new Set<{ cancel(): void }>();
+  // Counted so the suite can assert Chat's lazy backend startup: in production
+  // status() launches the OpenCode server, so a page load that never opens
+  // Chat must never call it.
+  statusCalls = 0;
 
-  async status(): Promise<ChatAvailability> { return { state: "ready", version: "e2e" }; }
+  async status(): Promise<ChatAvailability> {
+    this.statusCalls += 1;
+    return { state: "ready", version: "e2e" };
+  }
 
   async models() {
     return [
@@ -144,6 +151,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
 
   reset(): void {
     this.disconnect();
+    this.statusCalls = 0;
     this.generation = `e2e-chat-${this.nextId++}`;
     this.conversations.clear();
     this.items.clear();
