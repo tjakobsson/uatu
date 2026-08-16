@@ -392,20 +392,53 @@ html.uatu-desktop-host .terminal-panel[data-dock="right"] {
 }
 
 /* Fullscreen overlays the main stack from the window top regardless of dock,
-   so it needs the same strip clearance. */
+   so it needs the same strip clearance — and it must outrank the lifted
+   headers below (91): fullscreen replaces the whole work area, chrome
+   included, and at its browser z-index (5) the raised preview header would
+   float over the panel and intercept its exit controls. */
 html.uatu-desktop-host .terminal-panel[data-display="fullscreen"] {
   margin-top: var(--titlebar-inset, 0px);
+  z-index: 92;
 }
 
 /* Like the sidebar, the right-docked terminal is a solid non-scrolling
    surface: nothing of it ever flows under the native chrome, so the frost
    has nothing to frost there and only paints a visible blur seam at the
-   preview/terminal boundary. Cap the strip at the panel's left edge.
-   Fullscreen is excluded — there the panel spans the full width and the
-   strip above it shows only shell background, which the frost may cover. */
+   preview/terminal boundary. Cap the strip at the panel's left edge. */
 html.uatu-desktop-host
   body:has(.terminal-panel[data-dock="right"]:not([hidden]):not([data-display="fullscreen"]))::before {
   right: var(--terminal-panel-width, 360px);
+}
+
+/* Fullscreen terminal: the panel starts at the inset, so the falloff below
+   it would only smear the panel's dark surface — the artifact the
+   right-dock cap exists to prevent. But the covered strip itself still
+   needs the frost: the page behind the overlay peeks through the strip and
+   would read raw under the native glass. Confine the frost to exactly the
+   strip — full height cut at the inset, no ramp — and the cut edge hides
+   under the panel's own top edge. */
+html.uatu-desktop-host
+  body:has(.terminal-panel[data-display="fullscreen"]:not([hidden]))::before {
+  height: var(--titlebar-inset, 0px);
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+
+/* The app's own top chrome renders ABOVE the frost (91 vs. its 90): the
+   frost exists to treat scrolled CONTENT escaping into the covered strip,
+   not the app's controls. Without this the falloff washes the preview
+   header (which already renders its own translucent glass — the desktop
+   frost double-blurred it) and the chat panel's conversation controls.
+   Content flowing above the preview header still frosts: it stacks below
+   the header, and the header's chain has no intervening stacking context. */
+html.uatu-desktop-host .preview-header {
+  z-index: 91;
+}
+
+html.uatu-desktop-host .chat-header,
+html.uatu-desktop-host .chat-expand-strip {
+  position: relative;
+  z-index: 91;
 }
 
 /* The minimized dock-right rail collapses to a fixed 36px strip; the width

@@ -141,6 +141,54 @@ test("the chat panel's header and collapsed strip clear the covered strip", asyn
   expect(stripTop).toBeGreaterThanOrEqual(INSET);
 });
 
+test("a fullscreen terminal confines the frost to the covered strip", async ({ page }) => {
+  await page.locator("#terminal-toggle").click();
+  await expect(page.locator("#terminal-panel")).toBeVisible();
+  await applyInsetMarker(page, INSET);
+  const frost = () => page.evaluate(() => {
+    const style = getComputedStyle(document.body, "::before");
+    return { height: parseFloat(style.height), mask: style.maskImage || style.webkitMaskImage };
+  });
+  // Before fullscreen: the strip plus its 64px falloff ramp.
+  expect((await frost()).height).toBeCloseTo(INSET + 64, 0);
+
+  await page.locator("#terminal-fullscreen").click();
+  await expect(page.locator("#terminal-panel")).toHaveAttribute("data-display", "fullscreen");
+  // Fullscreen: frost ends exactly at the inset — the panel's top edge —
+  // with no ramp to smear the dark surface; the strip above still frosts
+  // the page content peeking through it.
+  const fullscreen = await frost();
+  expect(fullscreen.height).toBeCloseTo(INSET, 0);
+  expect(fullscreen.mask).toBe("none");
+  const panelTop = await page.evaluate(
+    () => document.querySelector("#terminal-panel")!.getBoundingClientRect().top,
+  );
+  expect(panelTop).toBeGreaterThanOrEqual(INSET);
+
+  await page.locator("#terminal-fullscreen").click();
+  await expect(page.locator("#terminal-panel")).not.toHaveAttribute("data-display", "fullscreen");
+  expect((await frost()).height).toBeCloseTo(INSET + 64, 0);
+});
+
+test("app top chrome stacks above the frost so its controls stay crisp", async ({ page }) => {
+  await openChatPanel(page);
+  await applyInsetMarker(page, INSET);
+  const stack = await page.evaluate(() => ({
+    frost: Number(getComputedStyle(document.body, "::before").zIndex),
+    previewHeader: Number(getComputedStyle(document.querySelector(".preview-header")!).zIndex),
+    chatHeader: Number(getComputedStyle(document.querySelector(".chat-header")!).zIndex),
+  }));
+  expect(stack.previewHeader).toBeGreaterThan(stack.frost);
+  expect(stack.chatHeader).toBeGreaterThan(stack.frost);
+
+  await page.locator("#chat-collapse").click();
+  const strip = await page.evaluate(() => ({
+    frost: Number(getComputedStyle(document.body, "::before").zIndex),
+    strip: Number(getComputedStyle(document.querySelector("#chat-expand")!).zIndex),
+  }));
+  expect(strip.strip).toBeGreaterThan(strip.frost);
+});
+
 test("a live inset change (native tab bar) re-lays-out without reload", async ({ page }) => {
   await applyInsetMarker(page, INSET);
   const before = await chromeTops(page);

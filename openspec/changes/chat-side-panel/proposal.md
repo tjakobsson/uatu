@@ -49,7 +49,12 @@ None.
   reveal-in-place.
 - `desktop-titlebar-inset`: the chrome-below-the-inset requirement's list of
   top-level chrome gains the chat panel (header row + collapsed strip), so
-  the UatuCode Desktop titlebar cannot cover the conversation controls.
+  the UatuCode Desktop titlebar cannot cover the conversation controls. The
+  frost requirement additionally suppresses the frost for a fullscreen
+  terminal and lifts app top chrome (preview header, chat header/strip)
+  above the frost — fixing two pre-existing violations of its own
+  "frost only where content scrolls under chrome" rule that the chat panel
+  made more visible.
 - `touch-navigation`: the mode-toggle requirement's description of desktop
   mode ("main Preview-or-Chat surface") and its mode-switch normalization
   ("the active Preview-or-Chat main surface remains selected") are updated to
