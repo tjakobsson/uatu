@@ -16,6 +16,7 @@ import { describe, expect, test } from "bun:test";
 import { presentationStorage } from "./presentation-storage";
 import { resolveUiMode, UI_MODE_KEY } from "./ui-mode";
 import { ACTIVE_TAB_KEY, readActiveTabPreference, type TouchTab } from "./state";
+import { CHAT_PANEL_KEY, readChatPanelPreference } from "../chat/surface";
 
 const html = await Bun.file(`${import.meta.dir}/../index.html`).text();
 
@@ -69,7 +70,9 @@ type StampOptions = {
   throwOnRead?: boolean;
 };
 
-/** Runs the real inline script and returns the attributes it stamped. */
+/** Runs the real inline script and returns everything it stamped: attributes
+ *  under their names, style custom properties under theirs (the `--` prefix
+ *  keeps the two namespaces from colliding). */
 function runBootStamp(options: StampOptions = {}): Record<string, string> {
   const { basePath = null, store = new Map<string, string>(), coarse = false } = options;
   const attributes: Record<string, string> = {};
@@ -77,6 +80,11 @@ function runBootStamp(options: StampOptions = {}): Record<string, string> {
     documentElement: {
       setAttribute: (name: string, value: string) => {
         attributes[name] = value;
+      },
+      style: {
+        setProperty: (name: string, value: string) => {
+          attributes[name] = value;
+        },
       },
     },
     querySelector: (selector: string) =>
@@ -161,6 +169,49 @@ describe("boot stamp — data-active-tab", () => {
     const store = new Map<string, string>();
     seed(store, ACTIVE_TAB_KEY, "settings");
     expect(runBootStamp({ store })["data-active-tab"]).toBe("preview");
+  });
+});
+
+describe("boot stamp — data-chat-panel", () => {
+  test("no stored preference matches readChatPanelPreference's default", () => {
+    const stamped = runBootStamp();
+    const expected = readChatPanelPreference(null);
+    expect(stamped["data-chat-panel"]).toBe(expected.open ? "open" : "collapsed");
+    expect(stamped["--chat-fraction"]).toBe(String(expected.fraction));
+  });
+
+  test("a stored open panel and fraction round-trip", () => {
+    const store = new Map<string, string>();
+    seed(store, CHAT_PANEL_KEY, '{"open":true,"fraction":0.55}');
+    const stamped = runBootStamp({ store });
+    const expected = readChatPanelPreference(presentationStorage(rawStorage(store), "/"));
+    expect(stamped["data-chat-panel"]).toBe(expected.open ? "open" : "collapsed");
+    expect(stamped["--chat-fraction"]).toBe(String(expected.fraction));
+  });
+
+  test("an out-of-bounds fraction is clamped in agreement with the reader", () => {
+    for (const raw of ['{"open":true,"fraction":7}', '{"open":true,"fraction":0.001}']) {
+      const store = new Map<string, string>();
+      seed(store, CHAT_PANEL_KEY, raw);
+      const stamped = runBootStamp({ store });
+      const expected = readChatPanelPreference(presentationStorage(rawStorage(store), "/"));
+      expect(stamped["--chat-fraction"]).toBe(String(expected.fraction));
+    }
+  });
+
+  test("malformed storage degrades to the defaults in agreement with the reader", () => {
+    for (const raw of ["not json", '{"open":"yes","fraction":"wide"}']) {
+      const store = new Map<string, string>();
+      seed(store, CHAT_PANEL_KEY, raw);
+      const stamped = runBootStamp({ store });
+      const expected = readChatPanelPreference(presentationStorage(rawStorage(store), "/"));
+      expect(stamped["data-chat-panel"]).toBe(expected.open ? "open" : "collapsed");
+      expect(stamped["--chat-fraction"]).toBe(String(expected.fraction));
+    }
+  });
+
+  test("a throwing localStorage stamps the collapsed default", () => {
+    expect(runBootStamp({ throwOnRead: true })["data-chat-panel"]).toBe("collapsed");
   });
 });
 

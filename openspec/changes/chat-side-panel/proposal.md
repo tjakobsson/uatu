@@ -47,6 +47,12 @@ None.
   persistence, narrow-viewport fallback, terminal framing invariants), and
   the file-reference requirement's "SHALL switch to Preview" wording becomes
   reveal-in-place.
+- `touch-navigation`: the mode-toggle requirement's description of desktop
+  mode ("main Preview-or-Chat surface") and its mode-switch normalization
+  ("the active Preview-or-Chat main surface remains selected") are updated to
+  the split work area: entering desktop with the Chat tab active opens the
+  panel; entering touch lands on Chat only when the user was last working in
+  an open panel.
 
 Note: `opencode-chat` currently exists only as a delta under the completed,
 not-yet-archived `add-opencode-chat` change. This proposal assumes

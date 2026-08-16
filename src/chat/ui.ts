@@ -1010,11 +1010,11 @@ export function initChat(): void {
     const root = document.documentElement;
     return root.getAttribute("data-ui-mode") === "touch"
       ? root.getAttribute("data-active-tab") === "chat"
-      : root.getAttribute("data-main-surface") === "chat";
+      : root.getAttribute("data-chat-panel") === "open";
   };
   const maybeBootstrap = () => { if (chatSurfaceActive()) void bootstrap(); };
   const surfaceObserver = new MutationObserver(maybeBootstrap);
-  surfaceObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-main-surface", "data-active-tab", "data-ui-mode"] });
+  surfaceObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-chat-panel", "data-active-tab", "data-ui-mode"] });
   onWorkspaceCredentialRefresh(maybeBootstrap);
   maybeBootstrap();
 }

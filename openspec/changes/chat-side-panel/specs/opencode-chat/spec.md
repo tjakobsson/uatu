@@ -44,9 +44,7 @@ right edge, with Chat between Preview and the terminal.
 - **THEN** the panel expands to its retained fraction rather than acting on an
   invisible surface
 
-## MODIFIED Requirements
-
-### Requirement: Chat adapts to desktop, touch, and software-keyboard viewports
+### Requirement: Chat adapts to the desktop split, touch, and software-keyboard viewports
 In desktop mode Preview and Chat SHALL be co-visible primary surfaces sharing
 the main work area alongside the existing sidebar and independently dockable
 terminal; there SHALL NOT be a mode that replaces Preview with Chat.
@@ -78,6 +76,8 @@ current reading position to jump.
 - **AND** the timeline resizes without placing the active content behind the
   composer
 
+## MODIFIED Requirements
+
 ### Requirement: Conversation file references navigate through UatuCode safely
 Workspace-relative file references in assistant content or normalized
 file-change activity SHALL offer navigation to the corresponding UatuCode
@@ -99,3 +99,15 @@ MUST NOT be exposed as navigable workspace links.
   root or contains traversal outside the workspace
 - **THEN** Chat renders it as inert text rather than a UatuCode navigation
   action
+
+## REMOVED Requirements
+
+### Requirement: Chat adapts to desktop, touch, and software-keyboard viewports
+**Reason**: Desktop no longer presents Chat as an exclusive main surface
+behind a Preview/Chat switch — Preview and Chat are co-visible as a split of
+the work area, which removes the switch, its "Desktop switches between
+Preview and Chat" scenario, and the full-width Chat state.
+**Migration**: Replaced by "Chat adapts to the desktop split, touch, and
+software-keyboard viewports" and "Desktop presents Preview and Chat as a
+persistent split" above; the touch and software-keyboard obligations carry
+over unchanged.

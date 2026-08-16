@@ -21,7 +21,7 @@ import { initFindShortcuts, registerProjectSearch } from "./find/shortcut";
 import { initSearchPane, openSearchPane } from "./sidebar/search-pane";
 import { initUiMode } from "./shell/ui-mode";
 import { initTabBar } from "./shell/tab-bar";
-import { initMainSurfaceSwitch } from "./chat/surface";
+import { initChatPanel } from "./chat/surface";
 import { initChat } from "./chat/ui";
 
 const appShellElement = document.querySelector<HTMLDivElement>(".app-shell");
@@ -92,7 +92,7 @@ if (
 // data-ui-mode / data-active-tab attributes these two stamp on <html>.
 initUiMode();
 initTabBar();
-initMainSurfaceSwitch();
+initChatPanel();
 
 initActiveSurfaceTracking();
 initFindBar();

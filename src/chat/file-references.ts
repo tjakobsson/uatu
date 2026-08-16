@@ -1,5 +1,4 @@
 import type { DocumentMeta, RootGroup } from "../shared/types";
-import { setMainSurface } from "./surface";
 
 export type WorkspaceFileReference = { document: DocumentMeta; line?: number };
 
@@ -51,7 +50,10 @@ export async function navigateWorkspaceFileReference(reference: WorkspaceFileRef
     import("../shell/tab-bar"),
     import("../preview/view-mode"),
   ]);
-  setMainSurface("preview");
+  // Desktop needs no surface change — Preview is co-visible beside the chat
+  // panel, so navigation happens in place while the conversation stays put.
+  // Touch presents one surface at a time, so there the Preview tab comes
+  // forward (revealPreviewSurface is a desktop no-op).
   revealPreviewSurface();
   if (reference.line) applyViewMode("source");
   await applyUserRowClick(reference.document.id);

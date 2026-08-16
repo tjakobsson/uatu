@@ -774,6 +774,18 @@ h2 {
   min-width: 0;
 }
 
+/* Desktop work row (chat-side-panel change): Preview and Chat side by side.
+   A child of .main-stack so the terminal keeps framing the pair from the
+   stack's edge — bottom dock below the row, right dock beside it — and the
+   stack's children stay [content, resizer, panel] for the dock rules. */
+.work-row {
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+  position: relative;
+}
+
 /* Search pane. Result rows are dense on purpose — the value is scanning many
    hits at once, and a sidebar has no room to spare. */
 .search-pane-body {
@@ -4551,42 +4563,105 @@ html[data-ui-mode="touch"]:not([data-active-tab="preview"]) .uatu-outline {
   }
 }
 
-/* Chat is a persistent main-surface sibling of Preview. Visibility switches
-   only at the CSS layer so conversation state, scroll, and terminal attachment
-   survive every Preview/Chat transition. Each surface header carries its own
-   switch instance at the top right (the wiring syncs every instance); only
-   the visible surface's copy is on screen, so the control never floats over
-   the terminal dock. */
-.main-surface-switch {
-  display: inline-flex;
-  flex-shrink: 0;
-  padding: 2px;
-  border: 1px solid var(--border-soft);
-  border-radius: 0.5rem;
-  background: var(--surface-raised);
+/* Desktop chat panel (chat-side-panel change): Preview and Chat are
+   co-visible primary surfaces splitting the work row — there is no mode that
+   replaces one with the other. Chat's share is a fraction of the row
+   (--chat-fraction, stamped pre-paint by the boot script) so resizing the
+   window keeps the proportion; the max-width backstop keeps Preview at its
+   minimum even when a fraction persisted on a wide window is replayed on a
+   narrower one. Collapse narrows the surface to the expand strip — the
+   surface stays MOUNTED, which is what preserves the conversation, draft,
+   and reading position across collapse/expand. Touch mode ignores all of
+   this: there Chat is a full-screen tab keyed on data-active-tab. */
+html[data-ui-mode="desktop"] .chat-surface {
+  flex: 0 0 auto;
+  width: calc(var(--chat-fraction, 0.4) * 100%);
+  min-width: 340px;
+  max-width: calc(100% - 364px);
 }
 
-.chat-conversation-controls .main-surface-switch {
-  margin-left: 0.5rem;
+html[data-ui-mode="desktop"][data-chat-panel="collapsed"] .chat-surface {
+  width: auto;
+  min-width: 0;
+  max-width: none;
 }
 
-.main-surface-segment {
+html[data-ui-mode="desktop"][data-chat-panel="collapsed"] .chat-surface > :not(.chat-expand-strip),
+html[data-ui-mode="desktop"][data-chat-panel="collapsed"] .chat-resizer,
+html[data-ui-mode="touch"] .chat-resizer {
+  display: none;
+}
+
+/* The collapsed panel's entire presentation: a slim vertical strip that owns
+   the reopen affordance, keeping Chat's home visible at the work row's right
+   edge. Hidden whenever the panel is open (or in touch mode) by the display
+   default here. */
+.chat-expand-strip {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  flex: 1 1 auto;
+  width: 28px;
+  padding: 0.75rem 0;
   border: 0;
-  border-radius: 0.35rem;
-  padding: 0.3rem 0.75rem;
+  border-left: 1px solid var(--border-soft);
+  background: var(--surface-raised);
   color: var(--text-subtle);
-  background: transparent;
   cursor: pointer;
+  writing-mode: vertical-rl;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
-.main-surface-segment.is-active {
+.chat-expand-strip:hover,
+.chat-expand-strip:focus-visible {
   color: var(--text-strong);
   background: var(--accent-soft);
 }
 
-html[data-ui-mode="desktop"][data-main-surface="chat"] .preview-shell,
-html[data-ui-mode="desktop"][data-main-surface="preview"] .chat-surface {
-  display: none;
+html[data-ui-mode="desktop"][data-chat-panel="collapsed"] .chat-expand-strip {
+  display: flex;
+}
+
+.chat-resizer:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+body.is-resizing-chat {
+  cursor: col-resize;
+  user-select: none;
+}
+
+body.is-resizing-chat .chat-resizer {
+  background: var(--accent-soft);
+}
+
+/* The ≤900px stacked layout gives up side-by-side chrome entirely, so the
+   chat panel presents collapsed regardless of its stored preference. The JS
+   guard (chat/surface.ts) mirrors this breakpoint so the data-chat-panel
+   attribute agrees; these rules are the pre-JS backstop, and they live AFTER
+   the split rules above because equal-specificity order decides the winner. */
+@media (max-width: 900px) {
+  html[data-ui-mode="desktop"] .chat-surface {
+    width: auto;
+    min-width: 0;
+    max-width: none;
+  }
+
+  html[data-ui-mode="desktop"] .chat-surface > :not(.chat-expand-strip) {
+    display: none;
+  }
+
+  html[data-ui-mode="desktop"] .chat-resizer {
+    display: none;
+  }
+
+  html[data-ui-mode="desktop"] .chat-expand-strip {
+    display: flex;
+  }
 }
 
 .chat-surface {
@@ -5209,7 +5284,7 @@ html[data-ui-mode="touch"] .app-shell {
   padding-bottom: var(--tab-bar-total);
 }
 
-html[data-ui-mode="touch"] .main-surface-switch {
+html[data-ui-mode="touch"] .chat-collapse-button {
   display: none;
 }
 
