@@ -11,6 +11,11 @@
 
 import type { Serve } from "bun";
 
+import { InteractionConflictError, InvalidModelSelectionError } from "../chat/adapter";
+import { encodeReplayCursor } from "../chat/replay";
+import { ChatUnavailableError, type WorkspaceChatService } from "../chat/service";
+import type { ModelSelection, PermissionOutcome, QuestionOutcome } from "../chat/types";
+import { ConversationNotFoundError } from "../chat/workspace";
 import { getDocumentDiff } from "../document/diff";
 import { collectFileFacts } from "../document/file-facts";
 import {
@@ -18,6 +23,7 @@ import {
   constantTimeEqual,
   formatTerminalCookie,
   hasValidTerminalCredentials,
+  hasValidWorkspaceCredentials,
   isAllowedOrigin,
 } from "../terminal/auth";
 import type { createTerminalServer } from "../terminal/server";
@@ -67,6 +73,10 @@ type BaseDeps = {
   // session on every `/__e2e/reset`, so the routes must read through to the
   // current instance each time they're invoked.
   getSession: () => WatchSession;
+  // Mandatory injection keeps production and E2E on the same public route
+  // table while allowing the test harness to use a deterministic provider.
+  chatService: WorkspaceChatService;
+  getWorkspaceCredential: () => string;
   // Normalized base-path prefix (leading + trailing "/"). Every static
   // route key is served under it; "/" (the default) is the identity.
   basePath?: string;
@@ -96,6 +106,7 @@ export type E2ERouteDeps = BaseDeps & {
   // The production endpoint is Hub-owned. The direct-child Playwright
   // harness supplies an in-memory equivalent so resume behavior is testable.
   handleE2EPersonalState: (request: Request) => Promise<Response>;
+  handleE2EChat: (request: Request) => Promise<Response>;
 };
 
 export type BuildRoutesDeps = ProdRouteDeps | E2ERouteDeps;
@@ -119,6 +130,8 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
     }
     return parsed.context;
   };
+
+  const chat = buildChatRoutes(deps, p);
 
   const modeRoutes =
     deps.mode === "prod"
@@ -372,8 +385,306 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
         });
       },
     },
+    ...chat,
     ...modeRoutes,
   };
+}
+
+const CHAT_ID_LIMIT = 512;
+const CHAT_CURSOR_LIMIT = 2_048;
+const CHAT_PROMPT_BYTES = 64 * 1024;
+const CHAT_BODY_BYTES = 128 * 1024;
+const CHAT_KEEPALIVE_MS = 15_000;
+
+type RouteRequest = Request & { params?: Record<string, string> };
+
+function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
+  const authenticated = (request: Request): Response | null => {
+    const url = new URL(request.url);
+    return hasValidWorkspaceCredentials(request, url, deps.getWorkspaceCredential())
+      ? null
+      : chatError(401, "authentication required");
+  };
+  const mutationGate = (request: Request): Response | null => {
+    const auth = authenticated(request);
+    if (auth) return auth;
+    return isAllowedOrigin(request.headers.get("origin"), new URL(request.url))
+      ? null
+      : chatError(403, "cross-origin request rejected");
+  };
+  const run = async (operation: () => Promise<unknown>, status = 200): Promise<Response> => {
+    try {
+      return Response.json(await operation(), { status, headers: { "cache-control": "no-store" } });
+    } catch (error) {
+      return normalizedChatError(error);
+    }
+  };
+
+  return {
+    [p("/api/chat/status")]: {
+      GET: async (request: Request) => authenticated(request) ?? run(() => deps.chatService.status()),
+    },
+    [p("/api/chat/models")]: {
+      GET: async (request: Request) => authenticated(request) ?? run(async () => ({
+        models: await deps.chatService.models(),
+      })),
+    },
+    [p("/api/chat/commands")]: {
+      GET: async (request: Request) => authenticated(request) ?? run(async () => ({
+        commands: await deps.chatService.commands(),
+      })),
+    },
+    [p("/api/chat/conversations")]: {
+      GET: async (request: Request) => authenticated(request) ?? run(async () => ({
+        conversations: await deps.chatService.listConversations(),
+      })),
+      POST: async (request: Request) => {
+        const rejected = mutationGate(request);
+        if (rejected) return rejected;
+        const body = await parseJsonObject(request, []);
+        if (body instanceof Response) return body;
+        return run(() => deps.chatService.createConversation(), 201);
+      },
+    },
+    [p("/api/chat/conversations/:conversationId")]: {
+      GET: async (request: RouteRequest) => {
+        const rejected = authenticated(request);
+        if (rejected) return rejected;
+        const id = routeIdentity(request, "conversationId");
+        if (id instanceof Response) return id;
+        const url = new URL(request.url);
+        const cursor = optionalBounded(url.searchParams.get("cursor"), "cursor", CHAT_CURSOR_LIMIT);
+        if (cursor instanceof Response) return cursor;
+        const rawLimit = url.searchParams.get("limit");
+        const limit = rawLimit === null ? undefined : Number(rawLimit);
+        if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)) {
+          return chatError(400, "limit must be an integer from 1 to 100");
+        }
+        return run(() => deps.chatService.history(id, { cursor, limit }));
+      },
+    },
+    [p("/api/chat/conversations/:conversationId/events")]: {
+      GET: async (request: RouteRequest) => {
+        const rejected = authenticated(request);
+        if (rejected) return rejected;
+        const id = routeIdentity(request, "conversationId");
+        if (id instanceof Response) return id;
+        const url = new URL(request.url);
+        const cursor = optionalBounded(
+          url.searchParams.get("cursor") ?? request.headers.get("last-event-id"),
+          "cursor",
+          CHAT_CURSOR_LIMIT,
+        );
+        if (cursor instanceof Response) return cursor;
+        const abort = new AbortController();
+        const onAbort = () => abort.abort();
+        request.signal.addEventListener("abort", onAbort, { once: true });
+        try {
+          const { events } = await deps.chatService.subscribe(id, { cursor, signal: abort.signal });
+          const encoder = new TextEncoder();
+          const stream = new ReadableStream<Uint8Array>({
+            async start(controller) {
+              const iterator = events[Symbol.asyncIterator]();
+              let pending = iterator.next();
+              try {
+                while (!abort.signal.aborted) {
+                  const result = await nextChatEvent(pending, CHAT_KEEPALIVE_MS);
+                  if (result === "keepalive") {
+                    controller.enqueue(encoder.encode(": keepalive\n\n"));
+                    continue;
+                  }
+                  if (result.done) break;
+                  pending = iterator.next();
+                  const event = result.value;
+                  const eventId = encodeReplayCursor({ generation: event.generation, sequence: event.sequence });
+                  const eventName = event.type === "resync" ? "resync" : "chat";
+                  controller.enqueue(encoder.encode(`id: ${eventId}\nevent: ${eventName}\ndata: ${JSON.stringify(event)}\n\n`));
+                  if (event.type === "resync") break;
+                }
+              } catch {
+                // A transport cancellation closes the stream without inventing
+                // an in-band provider error.
+              } finally {
+                await iterator.return?.();
+                events.cancel();
+                request.signal.removeEventListener("abort", onAbort);
+                try { controller.close(); } catch { /* consumer cancelled */ }
+              }
+            },
+            cancel() {
+              abort.abort();
+              events.cancel();
+              request.signal.removeEventListener("abort", onAbort);
+            },
+          });
+          return new Response(stream, {
+            headers: {
+              "cache-control": "no-cache, no-transform",
+              "content-type": "text/event-stream; charset=utf-8",
+              "x-accel-buffering": "no",
+            },
+          });
+        } catch (error) {
+          request.signal.removeEventListener("abort", onAbort);
+          return normalizedChatError(error);
+        }
+      },
+    },
+    [p("/api/chat/conversations/:conversationId/prompts")]: {
+      POST: async (request: RouteRequest) => chatMutation(request, ["requestId", "text", "model"], async (id, body) => {
+        const requestId = bodyIdentity(body, "requestId");
+        if (requestId instanceof Response) return requestId;
+        if (typeof body.text !== "string" || !body.text.trim()) return chatError(400, "text must not be empty");
+        if (Buffer.byteLength(body.text) > CHAT_PROMPT_BYTES) return chatError(413, "text is too large");
+        const model = parseModelSelection(body.model);
+        if (model instanceof Response) return model;
+        return run(() => deps.chatService.prompt(id, requestId, body.text as string, model), 202);
+      }),
+    },
+    [p("/api/chat/conversations/:conversationId/cancel")]: {
+      POST: async (request: RouteRequest) => chatMutation(request, ["requestId"], async (id, body) => {
+        const requestId = bodyIdentity(body, "requestId");
+        return requestId instanceof Response ? requestId : run(() => deps.chatService.cancel(id, requestId));
+      }),
+    },
+    [p("/api/chat/conversations/:conversationId/permissions/:interactionId")]: {
+      POST: async (request: RouteRequest) => chatMutation(request, ["requestId", "outcome"], async (id, body) => {
+        const interactionId = routeIdentity(request, "interactionId");
+        const requestId = bodyIdentity(body, "requestId");
+        if (interactionId instanceof Response) return interactionId;
+        if (requestId instanceof Response) return requestId;
+        const outcomes = new Set<PermissionOutcome>(["approved-once", "approved-session", "rejected"]);
+        if (typeof body.outcome !== "string" || !outcomes.has(body.outcome as PermissionOutcome)) return chatError(400, "invalid permission outcome");
+        return run(() => deps.chatService.respondPermission(id, interactionId, requestId, body.outcome as PermissionOutcome));
+      }),
+    },
+    [p("/api/chat/conversations/:conversationId/questions/:interactionId")]: {
+      POST: async (request: RouteRequest) => chatMutation(request, ["requestId", "outcome"], async (id, body) => {
+        const interactionId = routeIdentity(request, "interactionId");
+        const requestId = bodyIdentity(body, "requestId");
+        if (interactionId instanceof Response) return interactionId;
+        if (requestId instanceof Response) return requestId;
+        const outcome = parseQuestionMutationOutcome(body.outcome);
+        if (outcome instanceof Response) return outcome;
+        return run(() => deps.chatService.respondQuestion(id, interactionId, requestId, outcome));
+      }),
+    },
+  };
+
+  async function chatMutation(
+    request: RouteRequest,
+    keys: string[],
+    operation: (id: string, body: Record<string, unknown>) => Promise<Response>,
+  ): Promise<Response> {
+    const rejected = mutationGate(request);
+    if (rejected) return rejected;
+    const id = routeIdentity(request, "conversationId");
+    if (id instanceof Response) return id;
+    const body = await parseJsonObject(request, keys);
+    return body instanceof Response ? body : operation(id, body);
+  }
+}
+
+async function parseJsonObject(request: Request, allowedKeys: string[]): Promise<Record<string, unknown> | Response> {
+  if (!(request.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) {
+    return chatError(415, "content-type must be application/json");
+  }
+  let text: string;
+  try { text = await request.text(); } catch { return chatError(400, "invalid request body"); }
+  if (Buffer.byteLength(text) > CHAT_BODY_BYTES) return chatError(413, "request body is too large");
+  let value: unknown;
+  try { value = text ? JSON.parse(text) : {}; } catch { return chatError(400, "invalid JSON body"); }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return chatError(400, "request body must be an object");
+  const body = value as Record<string, unknown>;
+  const unknown = Object.keys(body).find(key => !allowedKeys.includes(key));
+  if (unknown) return chatError(400, `unknown request field: ${unknown}`);
+  return body;
+}
+
+function routeIdentity(request: RouteRequest, name: string): string | Response {
+  let value = request.params?.[name] ?? "";
+  try { value = decodeURIComponent(value); } catch { return chatError(400, `invalid ${name}`); }
+  return validIdentity(value) ? value : chatError(400, `invalid ${name}`);
+}
+
+function bodyIdentity(body: Record<string, unknown>, name: string): string | Response {
+  return typeof body[name] === "string" && validIdentity(body[name])
+    ? body[name]
+    : chatError(400, `invalid ${name}`);
+}
+
+function validIdentity(value: string): boolean {
+  return value.length > 0 && value.length <= CHAT_ID_LIMIT && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+function optionalBounded(value: string | null, name: string, limit: number): string | undefined | Response {
+  if (value === null) return undefined;
+  return value.length > 0 && value.length <= limit && !/[\u0000-\u001f\u007f]/.test(value)
+    ? value
+    : chatError(400, `invalid ${name}`);
+}
+
+function parseQuestionMutationOutcome(value: unknown): QuestionOutcome | Response {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return chatError(400, "invalid question outcome");
+  const outcome = value as Record<string, unknown>;
+  if (outcome.kind === "rejected" && Object.keys(outcome).length === 1) return { kind: "rejected" };
+  if (outcome.kind !== "answered" || Object.keys(outcome).some(key => key !== "kind" && key !== "answers")) {
+    return chatError(400, "invalid question outcome");
+  }
+  if (!Array.isArray(outcome.answers) || outcome.answers.length > 32) return chatError(400, "invalid question answers");
+  let bytes = 0;
+  for (const answers of outcome.answers) {
+    if (!Array.isArray(answers) || answers.length > 32) return chatError(400, "invalid question answers");
+    for (const answer of answers) {
+      if (typeof answer !== "string" || !answer || answer.length > 4_096) return chatError(400, "invalid question answer");
+      bytes += Buffer.byteLength(answer);
+    }
+  }
+  if (bytes > CHAT_PROMPT_BYTES) return chatError(413, "question answers are too large");
+  return { kind: "answered", answers: outcome.answers as string[][] };
+}
+
+function parseModelSelection(value: unknown): ModelSelection | undefined | Response {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return chatError(400, "invalid model selection");
+  const selection = value as Record<string, unknown>;
+  if (Object.keys(selection).length !== 2 || !("providerId" in selection) || !("modelId" in selection)) {
+    return chatError(400, "invalid model selection");
+  }
+  const providerId = typeof selection.providerId === "string" ? selection.providerId : "";
+  const modelId = typeof selection.modelId === "string" ? selection.modelId : "";
+  return validIdentity(providerId) && validIdentity(modelId)
+    ? { providerId, modelId }
+    : chatError(400, "invalid model selection");
+}
+
+function normalizedChatError(error: unknown): Response {
+  if (error instanceof ConversationNotFoundError) return chatError(404, "conversation not found");
+  if (error instanceof InteractionConflictError) return chatError(409, error.message);
+  if (error instanceof InvalidModelSelectionError) return chatError(400, error.message);
+  if (error instanceof ChatUnavailableError) return chatError(503, "chat is unavailable");
+  if (error instanceof Error && /invalid history cursor/.test(error.message)) return chatError(400, "invalid cursor");
+  return chatError(500, "chat operation failed");
+}
+
+function nextChatEvent(
+  pending: Promise<IteratorResult<import("../chat/types").ChatEvent>>,
+  milliseconds: number,
+): Promise<IteratorResult<import("../chat/types").ChatEvent> | "keepalive"> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => resolve("keepalive"), milliseconds);
+    void pending.then(value => {
+      clearTimeout(timer);
+      resolve(value);
+    }, error => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
+
+function chatError(status: number, error: string): Response {
+  return Response.json({ error }, { status, headers: { "cache-control": "no-store" } });
 }
 
 function buildProdRoutes(deps: ProdRouteDeps, p: (path: string) => string) {
@@ -391,7 +702,7 @@ function buildProdRoutes(deps: ProdRouteDeps, p: (path: string) => string) {
 }
 
 function buildE2ERoutes(deps: E2ERouteDeps, p: (path: string) => string) {
-  const { getSession, handleE2EReset, handleE2EPersonalState } = deps;
+  const { getSession, handleE2EReset, handleE2EPersonalState, handleE2EChat } = deps;
   return {
     [p("/__e2e/terminal-token")]: {
       // Tests don't see the URL token (the e2e server doesn't print it to
@@ -408,6 +719,9 @@ function buildE2ERoutes(deps: E2ERouteDeps, p: (path: string) => string) {
     },
     [p("/__e2e/reset")]: {
       POST: (request: Request) => handleE2EReset(request),
+    },
+    [p("/__e2e/chat")]: {
+      POST: (request: Request) => handleE2EChat(request),
     },
     [p("/api/personal-state")]: {
       GET: (request: Request) => handleE2EPersonalState(request),

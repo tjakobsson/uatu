@@ -104,12 +104,16 @@ export async function validateApi(): Promise<void> {
     ...structuredClone(openapi.components.schemas),
     ...structuredClone(streaming.schemas),
     WorkspaceState: openapi.components.schemas.WorkspaceState!,
+    ChatEvent: openapi.components.schemas.ChatEvent!,
+    ChatResyncEvent: openapi.components.schemas.ChatResyncEvent!,
   };
   const fixtureSchemas: Record<string, string> = {
     "examples/sse/workspace-state.json": "WorkspaceState",
     "examples/sse/clone-phase.json": "ClonePhase",
     "examples/sse/clone-output.json": "CloneOutput",
     "examples/sse/clone-result.json": "CloneResult",
+    "examples/sse/chat-event.json": "ChatEvent",
+    "examples/sse/chat-resync.json": "ChatResyncEvent",
     "examples/ndjson/search-file.json": "SearchStreamItem",
     "examples/ndjson/search-done.json": "SearchStreamItem",
     "examples/websocket/attach-ready.json": "TerminalAttachReady",

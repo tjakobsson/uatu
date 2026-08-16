@@ -1099,6 +1099,25 @@ describe("hub end to end", () => {
     await assertContract("GET", "/s/{workspaceId}/api/auth", probe);
   });
 
+  test("chat status is authenticated through the hub without exposing the OpenCode child endpoint", async () => {
+    const unauthenticated = await fetch(`${origin}/s/myproject/api/chat/status`);
+    expect(unauthenticated.status).toBe(401);
+    const response = await fetch(`${origin}/s/myproject/api/chat/status`, { headers: { cookie } });
+    expect(response.status).toBe(200);
+    await assertContract("GET", "/s/{workspaceId}/api/chat/status", response);
+    const text = await response.text();
+    expect(text).not.toContain("OPENCODE_SERVER_PASSWORD");
+    expect(text).not.toMatch(/127\.0\.0\.1:\d+/);
+
+    const csrf = await fetch(`${origin}/s/myproject/api/chat/conversations/local/prompts`, {
+      method: "POST",
+      headers: { cookie, origin: "https://attacker.example", "content-type": "application/json" },
+      body: JSON.stringify({ requestId: "csrf-test", text: "must not run" }),
+    });
+    expect(csrf.status).toBe(403);
+    await assertContract("POST", "/s/{workspaceId}/api/chat/conversations/{conversationId}/prompts", csrf);
+  });
+
   test("workspace folder names with edge whitespace round-trip exactly", async () => {
     const spaced = path.join(tempRoot, "workspaces", " padded ");
     execFileSync("mkdir", ["-p", spaced]);
@@ -1152,6 +1171,29 @@ describe("hub end to end", () => {
     const unknown = await fetch(`${origin}/s/never-registered/`, { headers: { cookie, accept: "text/html" } });
     expect(unknown.status).toBe(503);
     expect(await unknown.text()).toContain("No workspace");
+
+    // Every chat operation remains hub-authenticated and reports the same
+    // documented stopped-workspace response before any child/provider access.
+    const stoppedOperations: Array<[string, string, string, unknown?]> = [
+      ["GET", "/s/myproject/api/chat/models", "/s/{workspaceId}/api/chat/models"],
+      ["GET", "/s/myproject/api/chat/commands", "/s/{workspaceId}/api/chat/commands"],
+      ["GET", "/s/myproject/api/chat/conversations", "/s/{workspaceId}/api/chat/conversations"],
+      ["POST", "/s/myproject/api/chat/conversations", "/s/{workspaceId}/api/chat/conversations", {}],
+      ["GET", "/s/myproject/api/chat/conversations/local", "/s/{workspaceId}/api/chat/conversations/{conversationId}"],
+      ["GET", "/s/myproject/api/chat/conversations/local/events", "/s/{workspaceId}/api/chat/conversations/{conversationId}/events"],
+      ["POST", "/s/myproject/api/chat/conversations/local/cancel", "/s/{workspaceId}/api/chat/conversations/{conversationId}/cancel", { requestId: "stopped" }],
+      ["POST", "/s/myproject/api/chat/conversations/local/permissions/request", "/s/{workspaceId}/api/chat/conversations/{conversationId}/permissions/{interactionId}", { requestId: "stopped", outcome: "rejected" }],
+      ["POST", "/s/myproject/api/chat/conversations/local/questions/request", "/s/{workspaceId}/api/chat/conversations/{conversationId}/questions/{interactionId}", { requestId: "stopped", outcome: { kind: "rejected" } }],
+    ];
+    for (const [method, requestPath, contractPath, body] of stoppedOperations) {
+      const response = await fetch(`${origin}${requestPath}`, {
+        method,
+        headers: { cookie, origin, ...(body === undefined ? {} : { "content-type": "application/json" }) },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      expect(response.status).toBe(503);
+      await assertContract(method, contractPath, response);
+    }
   });
 
   test("a live session for a user removed from the config is rejected", async () => {

@@ -1,0 +1,11 @@
+{
+  "id": "eyJ2IjoxLCJnIjoiZ2VuZXJhdGlvbi0yIiwicyI6MH0",
+  "event": "resync",
+  "data": {
+    "generation": "generation-2",
+    "sequence": 0,
+    "conversationId": "conversation-1",
+    "type": "resync",
+    "reason": "generation-changed"
+  }
+}

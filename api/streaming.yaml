@@ -41,6 +41,22 @@ channels:
       completion: A done item is emitted after a completed or bounded sweep and is the final item.
       cancellation: Client disconnect or stream cancellation aborts the sweep and may end without a done item.
       errors: Invalid patterns return HTTP 400 JSON before streaming. An internal mid-stream failure closes the stream without an error item.
+  workspaceChat:
+    transport: sse
+    operationId: workspaceStreamChatEvents
+    path: /s/{workspaceId}/api/chat/conversations/{conversationId}/events
+    mediaType: text/event-stream
+    authentication: hubSession
+    events:
+      - { name: chat, dataSchema: ChatEvent, replayId: cursor }
+      - { name: resync, dataSchema: ChatResyncEvent, replayId: cursor, terminal: true }
+    lifecycle:
+      replay: Send an opaque cursor query parameter or Last-Event-ID; retained later events are replayed in sequence before live events.
+      replayLimit: Replay is byte-bounded independently for each conversation.
+      reconnection: A generation mismatch, invalid cursor, or retention gap emits one typed resync event and closes; fetch a fresh snapshot before reconnecting.
+      keepalive: Comment frames may be sent while no chat event is available.
+      cancellation: Client disconnect or stream cancellation removes the subscriber.
+      errors: Authentication, unavailable chat, and unknown or foreign conversations return HTTP errors before stream start.
   terminal:
     transport: websocket
     operationId: workspaceAttachTerminal
@@ -87,6 +103,8 @@ schemas:
   WorkspaceState:
     description: Same schema as openapi.yaml#/components/schemas/WorkspaceState.
     $ref: ./openapi.yaml#/components/schemas/WorkspaceState
+  ChatEvent: { $ref: ./openapi.yaml#/components/schemas/ChatEvent }
+  ChatResyncEvent: { $ref: ./openapi.yaml#/components/schemas/ChatResyncEvent }
   CloneOutput:
     type: object
     required: [output]

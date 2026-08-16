@@ -33,6 +33,8 @@ function buildFontTestRoutes(
       },
     },
     getSession,
+    chatService: {} as never,
+    getWorkspaceCredential: () => "test-credential",
     debug: false,
     getMetricsSnapshot: () => ({}),
   });

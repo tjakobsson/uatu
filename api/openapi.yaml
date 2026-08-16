@@ -26,6 +26,7 @@ tags:
   - { name: Clone jobs, description: "Asynchronous clone creation, interaction, cancellation, and events." }
   - { name: Workspace, description: "Proxied document, repository, search, and personal-state APIs." }
   - { name: Terminal, description: "Terminal credentials, session inventory, and WebSocket attachment." }
+  - { name: Chat, description: "Workspace-scoped OpenCode conversations and interactions." }
 security:
   - hubBearer: []
   - hubCookie: []
@@ -355,6 +356,178 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '502': { $ref: '#/components/responses/SessionUnreachable' }
         '503': { $ref: '#/components/responses/WorkspaceStopped' }
+  /s/{workspaceId}/api/chat/status:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
+    get:
+      operationId: workspaceGetChatStatus
+      tags: [Chat]
+      summary: Start chat lazily and report OpenCode availability
+      responses:
+        '200': { description: Chat availability, content: { application/json: { schema: { $ref: '#/components/schemas/ChatAvailability' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
+        '503': { $ref: '#/components/responses/WorkspaceStopped' }
+  /s/{workspaceId}/api/chat/models:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
+    get:
+      operationId: workspaceListChatModels
+      tags: [Chat]
+      summary: List enabled native models available to Chat
+      responses:
+        '200': { description: Available chat models, content: { application/json: { schema: { $ref: '#/components/schemas/ChatModelList' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
+        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
+  /s/{workspaceId}/api/chat/commands:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
+    get:
+      operationId: workspaceListChatCommands
+      tags: [Chat]
+      summary: List slash commands available to Chat
+      responses:
+        '200': { description: Available slash commands, content: { application/json: { schema: { $ref: '#/components/schemas/ChatCommandList' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
+        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
+  /s/{workspaceId}/api/chat/conversations:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
+    get:
+      operationId: workspaceListChatConversations
+      tags: [Chat]
+      summary: List conversations confined to the workspace
+      responses:
+        '200': { description: Conversation inventory, content: { application/json: { schema: { $ref: '#/components/schemas/ConversationList' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
+        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
+    post:
+      operationId: workspaceCreateChatConversation
+      tags: [Chat]
+      summary: Create an empty workspace conversation
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/EmptyObject' }, example: {} } } }
+      responses:
+        '201': { description: Created conversation snapshot, content: { application/json: { schema: { $ref: '#/components/schemas/ConversationSnapshot' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '415': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
+        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
+  /s/{workspaceId}/api/chat/conversations/{conversationId}:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ConversationId' }]
+    get:
+      operationId: workspaceGetChatConversation
+      tags: [Chat]
+      summary: Read a paginated normalized conversation snapshot
+      parameters:
+        - { name: cursor, in: query, schema: { type: string, maxLength: 2048 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+      responses:
+        '200': { description: Conversation snapshot, content: { application/json: { schema: { $ref: '#/components/schemas/ConversationSnapshot' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
+        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
+  /s/{workspaceId}/api/chat/conversations/{conversationId}/events:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ConversationId' }]
+    get:
+      operationId: workspaceStreamChatEvents
+      tags: [Chat]
+      summary: Replay and follow ordered conversation events
+      parameters:
+        - { name: cursor, in: query, schema: { type: string, maxLength: 2048 } }
+        - { name: Last-Event-ID, in: header, schema: { type: string, maxLength: 2048 }, description: Used when cursor is absent. }
+      responses:
+        '200':
+          description: SSE stream described by streaming.yaml#channels.workspaceChat
+          headers:
+            Cache-Control: { schema: { type: string, const: 'no-cache, no-transform' } }
+            X-Accel-Buffering: { schema: { type: string, const: 'no' } }
+          content: { text/event-stream: { schema: { type: string } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
+        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
+  /s/{workspaceId}/api/chat/conversations/{conversationId}/prompts:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ConversationId' }]
+    post:
+      operationId: workspacePromptChatConversation
+      tags: [Chat]
+      summary: Prompt or steer a conversation idempotently
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ChatPromptRequest' }, example: { requestId: 550e8400-e29b-41d4-a716-446655440000, text: Implement the server routes, model: { providerId: anthropic, modelId: claude-sonnet } } } } }
+      responses:
+        '202': { description: Prompt accepted, content: { application/json: { schema: { $ref: '#/components/schemas/ChatPromptAccepted' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '413': { $ref: '#/components/responses/Error' }
+        '415': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
+        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
+  /s/{workspaceId}/api/chat/conversations/{conversationId}/cancel:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ConversationId' }]
+    post:
+      operationId: workspaceCancelChatConversation
+      tags: [Chat]
+      summary: Cancel an active turn idempotently
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ChatMutationRequest' } } } }
+      responses:
+        '200': { description: Cancellation accepted, content: { application/json: { schema: { $ref: '#/components/schemas/ChatCancelResult' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '415': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
+        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
+  /s/{workspaceId}/api/chat/conversations/{conversationId}/permissions/{interactionId}:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ConversationId' }, { $ref: '#/components/parameters/InteractionId' }]
+    post:
+      operationId: workspaceRespondChatPermission
+      tags: [Chat]
+      summary: Resolve a pending permission idempotently
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/PermissionResponseRequest' } } } }
+      responses:
+        '200': { description: Permission outcome, content: { application/json: { schema: { $ref: '#/components/schemas/PermissionResult' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '415': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
+        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
+  /s/{workspaceId}/api/chat/conversations/{conversationId}/questions/{interactionId}:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ConversationId' }, { $ref: '#/components/parameters/InteractionId' }]
+    post:
+      operationId: workspaceRespondChatQuestion
+      tags: [Chat]
+      summary: Answer or reject a pending structured question idempotently
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/QuestionResponseRequest' } } } }
+      responses:
+        '200': { description: Question outcome, content: { application/json: { schema: { $ref: '#/components/schemas/QuestionResult' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '413': { $ref: '#/components/responses/Error' }
+        '415': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
+        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
   /s/{workspaceId}/api/personal-state:
     parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
     get:
@@ -493,6 +666,8 @@ components:
     Scope: { name: scope, in: query, schema: { type: string, enum: [folder, file] }, description: "Optional watched-tree scope. scope=file requires the companion documentId parameter." }
     DocumentId: { name: documentId, in: query, schema: { type: string }, description: "Watched-document identifier selecting the file to scope to. Required when scope=file; scope=file without documentId is rejected with 400." }
     CompareTarget: { name: compareTarget, in: query, schema: { type: string, enum: [base, last-commit] } }
+    ConversationId: { name: conversationId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 512 } }
+    InteractionId: { name: interactionId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 512 } }
   responses:
     Error:
       description: JSON error
@@ -514,8 +689,9 @@ components:
         application/json: { schema: { $ref: '#/components/schemas/Error' } }
         text/plain: { schema: { type: string } }
     WorkspaceUnavailable:
-      description: Workspace is stopped, or its terminal backend is unavailable.
+      description: Workspace is stopped, or a requested child capability is unavailable.
       content:
+        application/json: { schema: { $ref: '#/components/schemas/Error' } }
         text/html: { schema: { type: string } }
         text/plain: { schema: { type: string } }
     SessionUnreachable:
@@ -645,6 +821,61 @@ components:
       required: [status]
       properties: { status: { enum: [cancelled, terminal] } }
       additionalProperties: false
+    EmptyObject: { type: object, additionalProperties: false }
+    ChatAvailability:
+      oneOf:
+        - { type: object, required: [state], properties: { state: { enum: [idle, starting] } }, additionalProperties: false }
+        - { type: object, required: [state, version], properties: { state: { const: ready }, version: { type: string, minLength: 1 } }, additionalProperties: false }
+        - { type: object, required: [state, reason, message], properties: { state: { const: unavailable }, reason: { enum: [not-installed, startup-failed, unsupported] }, message: { type: string, minLength: 1 } }, additionalProperties: false }
+    ConversationStatus: { enum: [idle, sending, running, completed, interrupted, failed] }
+    ModelSelection: { type: object, required: [providerId, modelId], properties: { providerId: { type: string, minLength: 1, maxLength: 512 }, modelId: { type: string, minLength: 1, maxLength: 512 } }, additionalProperties: false }
+    ChatModel: { type: object, required: [selection, provider, name], properties: { selection: { $ref: '#/components/schemas/ModelSelection' }, provider: { type: string, minLength: 1 }, name: { type: string, minLength: 1 } }, additionalProperties: false }
+    ChatModelList: { type: object, required: [models], properties: { models: { type: array, items: { $ref: '#/components/schemas/ChatModel' } } }, additionalProperties: false }
+    ChatCommand: { type: object, required: [name, description, argumentHint, kind], properties: { name: { type: string, minLength: 1, maxLength: 512, pattern: '^[^\s/]+$' }, description: { type: string }, argumentHint: { type: string }, kind: { enum: [command, skill] } }, additionalProperties: false }
+    ChatCommandList: { type: object, required: [commands], properties: { commands: { type: array, items: { $ref: '#/components/schemas/ChatCommand' } } }, additionalProperties: false }
+    ConversationSummary:
+      type: object
+      required: [id, title, createdAt, updatedAt, status]
+      properties: { id: { type: string, minLength: 1, maxLength: 512 }, title: { type: string }, createdAt: { type: number, minimum: 0 }, updatedAt: { type: number, minimum: 0 }, status: { $ref: '#/components/schemas/ConversationStatus' } }
+      additionalProperties: false
+    ConversationList: { type: object, required: [conversations], properties: { conversations: { type: array, items: { $ref: '#/components/schemas/ConversationSummary' } } }, additionalProperties: false }
+    TimelineBase: { type: object, required: [id, type, createdAt], properties: { id: { type: string }, type: { type: string }, createdAt: { type: number, minimum: 0 } } }
+    ConversationItem:
+      oneOf:
+        - { type: object, required: [id, type, createdAt, text], properties: { id: { type: string }, type: { const: user_message }, createdAt: { type: number }, text: { type: string }, requestId: { type: string } }, additionalProperties: false }
+        - { type: object, required: [id, type, createdAt, markdown], properties: { id: { type: string }, type: { const: assistant_message }, createdAt: { type: number }, markdown: { type: string }, completedAt: { type: number } }, additionalProperties: false }
+        - { type: object, required: [id, type, createdAt, text, status], properties: { id: { type: string }, type: { const: reasoning }, createdAt: { type: number }, text: { type: string }, status: { enum: [pending, running, completed, failed, cancelled] } }, additionalProperties: false }
+        - { type: object, required: [id, type, createdAt, name, status], properties: { id: { type: string }, type: { const: tool }, createdAt: { type: number }, name: { type: string }, status: { enum: [pending, running, completed, failed, cancelled] }, input: { type: string }, output: { type: string }, error: { type: string }, childConversationId: { type: string } }, additionalProperties: false }
+        - { type: object, required: [id, type, createdAt, command, status], properties: { id: { type: string }, type: { const: command }, createdAt: { type: number }, command: { type: string }, status: { enum: [pending, running, completed, failed, cancelled] }, output: { type: string }, exitCode: { type: integer } }, additionalProperties: false }
+        - { type: object, required: [id, type, createdAt, path, operation], properties: { id: { type: string }, type: { const: file_change }, createdAt: { type: number }, path: { type: string }, operation: { enum: [create, update, delete] }, additions: { type: integer, minimum: 0 }, deletions: { type: integer, minimum: 0 } }, additionalProperties: false }
+        - { $ref: '#/components/schemas/PermissionItem' }
+        - { $ref: '#/components/schemas/QuestionItem' }
+        - { type: object, required: [id, type, createdAt, status], properties: { id: { type: string }, type: { const: turn_status }, createdAt: { type: number }, status: { $ref: '#/components/schemas/ConversationStatus' }, message: { type: string } }, additionalProperties: false }
+        - { type: object, required: [id, type, createdAt, level, message], properties: { id: { type: string }, type: { const: notice }, createdAt: { type: number }, level: { enum: [info, warning, error] }, message: { type: string } }, additionalProperties: false }
+    PermissionItem: { type: object, required: [id, type, createdAt, requestId, action, resources, status], properties: { id: { type: string }, type: { const: permission }, createdAt: { type: number }, requestId: { type: string }, action: { type: string }, resources: { type: array, items: { type: string } }, status: { enum: [pending, resolved] }, outcome: { enum: [approved-once, approved-session, rejected] } }, additionalProperties: false }
+    StructuredQuestion: { type: object, required: [prompt, header, options, multiple, allowFreeForm], properties: { prompt: { type: string }, header: { type: string }, options: { type: array, items: { type: object, required: [label, description], properties: { label: { type: string }, description: { type: string } }, additionalProperties: false } }, multiple: { type: boolean }, allowFreeForm: { type: boolean } }, additionalProperties: false }
+    QuestionOutcome:
+      oneOf:
+        - { type: object, required: [kind], properties: { kind: { const: rejected } }, additionalProperties: false }
+        - { type: object, required: [kind, answers], properties: { kind: { const: answered }, answers: { type: array, maxItems: 32, items: { type: array, maxItems: 32, items: { type: string, minLength: 1, maxLength: 4096 } } } }, additionalProperties: false }
+    QuestionItem: { type: object, required: [id, type, createdAt, requestId, questions, status], properties: { id: { type: string }, type: { const: question }, createdAt: { type: number }, requestId: { type: string }, questions: { type: array, items: { $ref: '#/components/schemas/StructuredQuestion' } }, status: { enum: [pending, resolved] }, outcome: { $ref: '#/components/schemas/QuestionOutcome' } }, additionalProperties: false }
+    ConversationSnapshot: { type: object, required: [conversation, generation, cursor, items], properties: { conversation: { $ref: '#/components/schemas/ConversationSummary' }, generation: { type: string }, cursor: { type: string }, items: { type: array, items: { $ref: '#/components/schemas/ConversationItem' } }, olderCursor: { type: string } }, additionalProperties: false }
+    ChatMutationRequest: { type: object, required: [requestId], properties: { requestId: { type: string, minLength: 1, maxLength: 512 } }, additionalProperties: false }
+    ChatPromptRequest: { type: object, required: [requestId, text], properties: { requestId: { type: string, minLength: 1, maxLength: 512 }, text: { type: string, minLength: 1, maxLength: 65536 }, model: { $ref: '#/components/schemas/ModelSelection' } }, additionalProperties: false }
+    ChatPromptAccepted: { type: object, required: [messageId, delivery], properties: { messageId: { type: string }, delivery: { enum: [steer, queue] }, conversation: { $ref: '#/components/schemas/ConversationSummary' } }, additionalProperties: false }
+    ChatCancelResult: { type: object, required: [cancelled], properties: { cancelled: { const: true } }, additionalProperties: false }
+    PermissionResponseRequest: { type: object, required: [requestId, outcome], properties: { requestId: { type: string, minLength: 1, maxLength: 512 }, outcome: { enum: [approved-once, approved-session, rejected] } }, additionalProperties: false }
+    PermissionResult: { type: object, required: [outcome], properties: { outcome: { enum: [approved-once, approved-session, rejected] } }, additionalProperties: false }
+    QuestionResponseRequest: { type: object, required: [requestId, outcome], properties: { requestId: { type: string, minLength: 1, maxLength: 512 }, outcome: { $ref: '#/components/schemas/QuestionOutcome' } }, additionalProperties: false }
+    QuestionResult: { type: object, required: [outcome], properties: { outcome: { $ref: '#/components/schemas/QuestionOutcome' } }, additionalProperties: false }
+    ChatEvent:
+      oneOf:
+        - { type: object, required: [generation, sequence, conversationId, type, item], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: item.upsert }, item: { $ref: '#/components/schemas/ConversationItem' } }, additionalProperties: false }
+        - { type: object, required: [generation, sequence, conversationId, type, itemId], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: item.remove }, itemId: { type: string } }, additionalProperties: false }
+        - { type: object, required: [generation, sequence, conversationId, type, itemId, delta], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: item.text_delta }, itemId: { type: string }, delta: { type: string, minLength: 1 } }, additionalProperties: false }
+        - { type: object, required: [generation, sequence, conversationId, type, status], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: conversation.status }, status: { $ref: '#/components/schemas/ConversationStatus' }, message: { type: string } }, additionalProperties: false }
+        - { $ref: '#/components/schemas/ChatResyncEvent' }
+    ChatResyncEvent: { type: object, required: [generation, sequence, conversationId, type, reason], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: resync }, reason: { enum: [generation-changed, retention-gap, invalid-cursor] } }, additionalProperties: false }
     DocumentMeta:
       type: object
       required: [id, name, relativePath, mtimeMs, rootId, kind]

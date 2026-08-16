@@ -16,6 +16,8 @@ import nerdFontsLicenseAsset from "./assets/fonts/LICENSE-nerdfonts.txt" with { 
 import fontNoticesAsset from "./assets/fonts/NOTICES.md" with { type: "file" };
 import index from "./index.html";
 import { parseCommand, usageText, versionText, type WatchOptions } from "./cli/parse";
+import { LazyOpenCodeChatService } from "./chat/service";
+import { selectCanonicalChatRoot } from "./chat/workspace";
 import { runHashPassword, runHub } from "./hub/main";
 import {
   formatSessionUrl,
@@ -141,6 +143,7 @@ async function runWatch(options: WatchOptions) {
   let watchSession: ReturnType<typeof createWatchSession> | null = null;
   let server: ReturnType<typeof Bun.serve> | null = null;
   let terminalServer: ReturnType<typeof createTerminalServer> | null = null;
+  let chatService: LazyOpenCodeChatService | null = null;
 
   // Resolve the actual port to bind. When the user passed `--port`, honor it
   // strictly (no roll). When they didn't, pre-flight probe for a free port
@@ -157,8 +160,10 @@ async function runWatch(options: WatchOptions) {
   // Probe the PTY backend up front so /api/state and the printed URL can both
   // tell the truth about whether the terminal feature is available.
   const terminalEnabled = await terminalBackendAvailable();
+  const chatRoot = await selectCanonicalChatRoot(rootEntries);
 
   try {
+    chatService = new LazyOpenCodeChatService({ workspacePath: chatRoot });
     watchSession = createWatchSession(rootEntries, options.follow, {
       respectGitignore: options.respectGitignore,
       terminalEnabled,
@@ -227,6 +232,8 @@ async function runWatch(options: WatchOptions) {
             },
           },
           getSession: () => watchSession!,
+          chatService: chatService!,
+          getWorkspaceCredential: () => watchSession!.getTerminalToken(),
           basePath: options.basePath,
           manifestScope: options.manifestScope,
           debug: options.debug,
@@ -256,6 +263,7 @@ async function runWatch(options: WatchOptions) {
     });
   } catch (error) {
     clearIndexingStatus();
+    if (chatService) await chatService.dispose().catch(() => undefined);
     if (watchSession) {
       void Promise.resolve()
         .then(() => watchSession!.stop())
@@ -282,13 +290,13 @@ async function runWatch(options: WatchOptions) {
     throw new Error("failed to start watch session");
   }
 
-  // Token is appended only when the terminal feature is on so unrelated runs
-  // don't surface a confusing `?t=` in the printed URL. The browser strips it
-  // from `location` on first load and stores it for later WS upgrades.
+  // The child credential gates terminal and chat controls. The browser strips
+  // it from location on first load and promotes it to the existing HttpOnly
+  // cookie; the hub captures and brokers the same value without exposing it.
   const url = formatSessionUrl(
     server.port!,
     options.basePath,
-    terminalEnabled ? watchSession.getTerminalToken() : undefined,
+    watchSession.getTerminalToken(),
   );
   printStartupBanner(process.stdout);
   console.log(url);
@@ -420,7 +428,7 @@ async function runWatch(options: WatchOptions) {
     }, 50);
   };
 
-  const shutdown = () => {
+  const shutdown = async () => {
     if (shuttingDown) {
       console.error("uatu: received second interrupt — force exiting");
       hardExit(1);
@@ -428,6 +436,10 @@ async function runWatch(options: WatchOptions) {
     }
     shuttingDown = true;
     console.error("uatu: shutting down");
+
+    // The OpenCode child is detached as its own process group, so dispose it
+    // before the hard exit rather than relying on OS cleanup of this process.
+    await chatService!.dispose().catch(() => undefined);
 
     // Best-effort cleanup. We do NOT await these — if either hangs
     // (chokidar/fsevents sometimes never resolves close()), waiting would
@@ -480,12 +492,12 @@ async function runWatch(options: WatchOptions) {
       stdin.on("data", (chunk: Buffer) => {
         for (const byte of chunk) {
           if (byte === 0x03 || byte === 0x04) {
-            shutdown();
+            void shutdown();
             return;
           }
           if (byte === 0x71 || byte === 0x51) {
             // 'q' or 'Q'
-            shutdown();
+            void shutdown();
             return;
           }
         }

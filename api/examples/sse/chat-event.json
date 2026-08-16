@@ -1,0 +1,11 @@
+{
+  "id": "eyJ2IjoxLCJnIjoiZ2VuZXJhdGlvbi0xIiwicyI6MX0",
+  "event": "chat",
+  "data": {
+    "generation": "generation-1",
+    "sequence": 1,
+    "conversationId": "conversation-1",
+    "type": "conversation.status",
+    "status": "running"
+  }
+}
