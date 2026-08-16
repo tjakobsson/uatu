@@ -238,6 +238,59 @@ describe("a committed tab change claims its surface", () => {
       Reflect.set(globalThis, "window", savedWindow);
     }
   });
+
+  // Desktop's Preview/Chat segmented control sits in the chrome outside every
+  // surface root, so no pointer listener can claim from it — the committed
+  // main-surface change is the claim. Driven through the real setMainSurface.
+  test("a committed main-surface change claims the surface on desktop", async () => {
+    const savedDocument = Reflect.get(globalThis, "document");
+    const savedWindow = Reflect.get(globalThis, "window");
+    const store = new Map<string, string>();
+    Reflect.set(globalThis, "document", {
+      documentElement: { setAttribute: () => {} },
+      addEventListener: () => {},
+    });
+    Reflect.set(globalThis, "window", {
+      localStorage: {
+        getItem: (key: string) => store.get(key) ?? null,
+        setItem: (key: string, value: string) => void store.set(key, value),
+        removeItem: (key: string) => void store.delete(key),
+        get length() {
+          return store.size;
+        },
+        key: (index: number) => [...store.keys()][index] ?? null,
+      },
+      // Fine pointer => desktop mode, where the main surface decides.
+      matchMedia: () => ({ matches: false }),
+    });
+    // `uiMode()` caches its first resolution, which an earlier test pinned to
+    // touch — flip through the real setter (and restore) instead.
+    const savedRaf = Reflect.get(globalThis, "requestAnimationFrame");
+    Reflect.set(globalThis, "requestAnimationFrame", () => 0);
+    try {
+      const { initActiveSurfaceTracking, setActiveSurface } = await import("./active-surface");
+      const { setMainSurface } = await import("../chat/surface");
+      const { setUiMode, uiMode } = await import("../shell/ui-mode");
+      const previousMode = uiMode();
+      setUiMode("desktop");
+      try {
+        initActiveSurfaceTracking();
+
+        setActiveSurface("terminal");
+        setMainSurface("chat");
+        expect(appState.activeSurface).toBe("chat");
+
+        setMainSurface("preview");
+        expect(appState.activeSurface).toBe("preview");
+      } finally {
+        setUiMode(previousMode);
+      }
+    } finally {
+      Reflect.set(globalThis, "requestAnimationFrame", savedRaf);
+      Reflect.set(globalThis, "document", savedDocument);
+      Reflect.set(globalThis, "window", savedWindow);
+    }
+  });
 });
 
 describe("inertness against programmatic selection", () => {
@@ -271,6 +324,16 @@ describe("inertness against programmatic selection", () => {
         return contents.includes("setActiveTab") || contents.includes("revealPreviewSurface");
       },
     );
+    expect(offenders).toEqual([]);
+  });
+
+  // A committed main-surface change claims its surface too (desktop), so
+  // setMainSurface is a third route to the setter with the same rule.
+  test("no file-event module reaches the main surface either", () => {
+    const offenders = SELECTION_MODULES.filter(relative => {
+      const contents = readFileSync(path.join(SRC_ROOT, relative), "utf8");
+      return contents.includes("setMainSurface");
+    });
     expect(offenders).toEqual([]);
   });
 

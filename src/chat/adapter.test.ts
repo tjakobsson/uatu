@@ -247,6 +247,24 @@ describe("filtered provider event pump", () => {
     expect(adapter.projectionForTests("local").items()).toEqual([expect.objectContaining({ markdown: "safe" })]);
   });
 
+  test("a pump failure aborts the provider event signal so surviving streams shut down", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    let observed: AbortSignal | undefined;
+    provider.events = (signal: AbortSignal) => {
+      observed = signal;
+      return {
+        async *[Symbol.asyncIterator]() {
+          throw new Error("stream died");
+        },
+      };
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+
+    await expect(adapter.startEventPump()).rejects.toThrow("stream died");
+    expect(observed?.aborted).toBe(true);
+  });
+
   test("a message.updated echo without parts keeps a history-loaded user message's text", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("local")];

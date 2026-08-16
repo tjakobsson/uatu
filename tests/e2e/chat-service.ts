@@ -26,10 +26,18 @@ export class FakeE2EChatService implements WorkspaceChatService {
   // status() launches the OpenCode server, so a page load that never opens
   // Chat must never call it.
   statusCalls = 0;
+  // When set, the next prompt stalls half a second and then rejects —
+  // enough of a window for a test to deterministically switch conversations
+  // while the request is in flight.
+  private failNextPrompt = false;
 
   async status(): Promise<ChatAvailability> {
     this.statusCalls += 1;
     return { state: "ready", version: "e2e" };
+  }
+
+  failPrompt(): void {
+    this.failNextPrompt = true;
   }
 
   async models() {
@@ -91,6 +99,11 @@ export class FakeE2EChatService implements WorkspaceChatService {
     const existing = this.receipts.get(key) as { messageId: string; delivery: "steer" | "queue"; conversation?: ConversationSummary } | undefined;
     if (existing) return existing;
     const conversation = this.require(id);
+    if (this.failNextPrompt) {
+      this.failNextPrompt = false;
+      await new Promise(resolve => setTimeout(resolve, 500));
+      throw new Error("prompt rejected by fixture");
+    }
     await new Promise(resolve => setTimeout(resolve, 75));
     if (model && !(await this.models()).some(candidate =>
       candidate.selection.providerId === model.providerId && candidate.selection.modelId === model.modelId)) {
@@ -152,6 +165,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
   reset(): void {
     this.disconnect();
     this.statusCalls = 0;
+    this.failNextPrompt = false;
     this.generation = `e2e-chat-${this.nextId++}`;
     this.conversations.clear();
     this.items.clear();

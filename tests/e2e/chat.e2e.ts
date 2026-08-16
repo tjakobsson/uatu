@@ -186,6 +186,26 @@ test.describe("desktop OpenCode chat", () => {
     await expect(page.locator('[data-chat-item-id="question:q-2"]')).toContainText("Answered");
   });
 
+  test("a prompt failure after switching conversations restores the draft on return", async ({ page, request }) => {
+    const first = await control(request, { action: "seed", title: "First", items: [] }) as { conversation: { id: string } };
+    const second = await control(request, { action: "seed", title: "Second", items: [] }) as { conversation: { id: string } };
+    await page.reload();
+    await page.getByRole("radio", { name: "Chat" }).click();
+    await page.locator("#chat-conversation-select").selectOption(first.conversation.id);
+    await expect(page.locator("#chat-title")).toHaveText("First");
+
+    await control(request, { action: "failPrompt" });
+    await page.locator("#chat-input").fill("doomed message");
+    await page.locator("#chat-send").click();
+    // Switch away inside the fixture's 500ms in-flight window, before the
+    // rejection lands.
+    await page.locator("#chat-conversation-select").selectOption(second.conversation.id);
+    await expect(page.locator("#chat-composer-status")).toHaveText("Message not accepted; draft restored");
+
+    await page.locator("#chat-conversation-select").selectOption(first.conversation.id);
+    await expect(page.locator("#chat-input")).toHaveValue("doomed message");
+  });
+
   test("replays a missed event, resyncs a stale generation, and opens workspace files", async ({ page, request }) => {
     const seeded = await control(request, { action: "seed", title: "Reconnect", items: [] }) as { conversation: { id: string } };
     await page.reload();

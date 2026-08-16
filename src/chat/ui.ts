@@ -902,6 +902,12 @@ export function initChat(): void {
         presentation.drafts[conversationId] = input.value;
         save();
         scheduleRender();
+      } else {
+        // Switched away while the request was in flight: the live input now
+        // belongs to another conversation, so the failed text goes back into
+        // the stored draft and reappears on return.
+        if (!presentation.drafts[conversationId]) presentation.drafts[conversationId] = text;
+        save();
       }
       submitting = false;
       noteComposer("Message not accepted; draft restored");

@@ -18,6 +18,7 @@
 // the watcher. `active-surface.test.ts` asserts structurally that no
 // file-event module reaches the setter OR the tab.
 
+import { onMainSurfaceChange } from "../chat/surface";
 import { appState, type ActiveSurface, type TouchTab } from "../shell/state";
 import { onActiveTabChange } from "../shell/tab-bar";
 import { uiMode } from "../shell/ui-mode";
@@ -160,6 +161,18 @@ export function initActiveSurfaceTracking(): void {
   onActiveTabChange(tab => {
     if (uiMode() === "touch") {
       setActiveSurface(surfaceForTab(tab));
+    }
+  });
+
+  // Desktop swaps Preview and Chat exclusively through the main-surface
+  // switch, which sits in the chrome outside every surface root — the same
+  // blind spot the tab bar has in touch mode, with the same answer: the
+  // committed change is itself the statement of where the user now works.
+  // Every setMainSurface caller is a user action (segment click, tab commit,
+  // find-bar reveal, chat file link), so the claim stays inert to watchers.
+  onMainSurfaceChange(surface => {
+    if (uiMode() === "desktop") {
+      setActiveSurface(surface);
     }
   });
 }

@@ -186,8 +186,13 @@ export class OpenCodeChatAdapter {
 
   startEventPump(): Promise<void> {
     if (this.pumpPromise) return this.pumpPromise;
-    this.pumpController = new AbortController();
-    this.pumpPromise = this.pump(this.pumpController.signal).finally(() => {
+    const controller = new AbortController();
+    this.pumpController = controller;
+    this.pumpPromise = this.pump(controller.signal).finally(() => {
+      // Abort on every exit, not just stopEventPump: when one merged provider
+      // stream dies the other survives on this signal, and the supervisor's
+      // restart would stack a fresh pair of subscriptions on top of it.
+      controller.abort();
       this.pumpController = null;
       this.pumpPromise = null;
     });
