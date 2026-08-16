@@ -140,6 +140,12 @@ export class OpenCodeChatAdapter {
 
   async history(id: string, options: { cursor?: string; limit?: number } = {}): Promise<ConversationSnapshot> {
     const session = await this.requireSession(id);
+    // Captured before the provider reads: a pump event landing during them
+    // advances the replay log, and a cursor taken afterwards would tell the
+    // client's SSE handshake the event was already delivered when the items
+    // below may not contain it. Replaying from this earlier boundary instead
+    // re-applies such events idempotently.
+    const replayCursor = this.projection(id).replay.latestCursor();
     const cursor = options.cursor ? decodeHistoryCursor(options.cursor) : undefined;
     const page = await this.provider.listMessages(id, { cursor: cursor?.provider, limit: options.limit ?? DEFAULT_PAGE_SIZE });
     const items = page.items.flatMap(normalizeProviderMessage);
@@ -163,7 +169,7 @@ export class OpenCodeChatAdapter {
     return {
       conversation: this.summary(session, projection.status),
       generation: this.generation,
-      cursor: projection.replay.latestCursor(),
+      cursor: replayCursor,
       items,
       olderCursor: page.nextCursor ? encodeHistoryCursor({ provider: page.nextCursor }) : undefined,
     };

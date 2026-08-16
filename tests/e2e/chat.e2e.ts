@@ -204,6 +204,33 @@ test.describe("desktop OpenCode chat", () => {
     expect(stats.promptAttempts[0]).toBe(stats.promptAttempts[1]);
   });
 
+  test("a success in another conversation does not discard a retained retry id", async ({ page, request }) => {
+    const first = await control(request, { action: "seed", title: "First", items: [] }) as { conversation: { id: string } };
+    const second = await control(request, { action: "seed", title: "Second", items: [] }) as { conversation: { id: string } };
+    await page.reload();
+    await page.getByRole("radio", { name: "Chat" }).click();
+    await page.locator("#chat-conversation-select").selectOption(first.conversation.id);
+    await control(request, { action: "failPrompt" });
+    await page.locator("#chat-input").fill("cross retry");
+    await page.locator("#chat-send").click();
+    await expect(page.locator("#chat-composer-status")).toHaveText("Message not accepted; draft restored");
+
+    await page.locator("#chat-conversation-select").selectOption(second.conversation.id);
+    await page.locator("#chat-input").fill("unrelated message");
+    await page.locator("#chat-send").click();
+    await expect(page.locator("#chat-items")).toContainText("unrelated message");
+
+    await page.locator("#chat-conversation-select").selectOption(first.conversation.id);
+    await expect(page.locator("#chat-input")).toHaveValue("cross retry");
+    await page.locator("#chat-send").click();
+    await expect(page.locator("#chat-items")).toContainText("cross retry");
+
+    const stats = await control(request, { action: "stats" }) as { promptAttempts: string[] };
+    expect(stats.promptAttempts).toHaveLength(3);
+    expect(stats.promptAttempts[2]).toBe(stats.promptAttempts[0]);
+    expect(stats.promptAttempts[1]).not.toBe(stats.promptAttempts[0]);
+  });
+
   test("a prompt failure after switching conversations restores the draft on return", async ({ page, request }) => {
     const first = await control(request, { action: "seed", title: "First", items: [] }) as { conversation: { id: string } };
     const second = await control(request, { action: "seed", title: "Second", items: [] }) as { conversation: { id: string } };

@@ -155,6 +155,39 @@ describe("OpenCode conversation inventory and history", () => {
     expect(snapshot.items.map(item => item.type)).toEqual(["reasoning", "assistant_message"]);
   });
 
+  test("an event landing during the history read is replayable from the snapshot cursor", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+    // The pump publishes while listMessages is in flight — the torn-snapshot
+    // window: the update reaches the replay log but not the items history()
+    // is assembling.
+    provider.listMessages = async () => {
+      provider.eventQueue.push({ id: "during", type: "session.next.text.delta", data: { sessionID: "local", partID: "p", delta: "missed" } });
+      await Bun.sleep(10);
+      return { items: [] };
+    };
+
+    const snapshot = await adapter.history("local");
+    expect(snapshot.items).toEqual([]);
+    // Wait until the pump event is fully published, so nothing can arrive
+    // "live" after the handoff and mask a cursor that acknowledged too much.
+    while (adapter.projectionForTests("local").items().length === 0) await Bun.sleep(1);
+
+    // The SSE route forwards only replayed events, not the handoff snapshot —
+    // a cursor taken after the read would acknowledge the event and lose it.
+    const { events } = await adapter.subscribe("local", { cursor: snapshot.cursor });
+    const iterator = events[Symbol.asyncIterator]();
+    const first = await Promise.race([iterator.next(), Bun.sleep(500).then(() => "timeout" as const)]);
+    expect(first).not.toBe("timeout");
+    expect(JSON.stringify((first as IteratorResult<unknown>).value)).toContain("missed");
+    events.cancel();
+
+    await adapter.stopEventPump();
+    await pump;
+  });
+
   test("pending questions from the provider join the snapshot as answerable items", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];

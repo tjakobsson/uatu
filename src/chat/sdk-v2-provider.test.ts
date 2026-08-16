@@ -126,6 +126,25 @@ describe("OpenCode v2 identity policy", () => {
     expect(events.sort()).toEqual(["classic", "native", "shared"]);
   });
 
+  test("repeated identical id-less events from one stream all pass while cross-stream copies dedupe", async () => {
+    const repeat = { type: "message.part.delta", data: { delta: " " } };
+    const stream = (events: unknown[]) => ({
+      async *[Symbol.asyncIterator]() { for (const event of events) yield event; },
+    });
+    const client = {
+      // The classic stream mirrors the native one: same id-less payloads in
+      // the same order.
+      event: { subscribe: async () => ({ stream: stream([repeat, repeat]) }) },
+      v2: { event: { subscribe: async () => ({ stream: stream([repeat, repeat]) }) } },
+    } as unknown as OpencodeClient;
+    const provider = new SdkV2Provider(client, "/workspace");
+
+    const events: unknown[] = [];
+    for await (const event of provider.events(new AbortController().signal)) events.push(event);
+    // Two legitimate repeats survive; the mirrored stream's copies are dropped.
+    expect(events).toHaveLength(2);
+  });
+
   test("a mid-stream failure propagates after queued events instead of ending the merge silently", async () => {
     const client = {
       event: {

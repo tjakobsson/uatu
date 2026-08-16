@@ -75,8 +75,10 @@ export function initChat(): void {
   let submitting = false;
   // A failed send leaves acceptance unknown — the server may already hold a
   // receipt for the request. Resubmitting the same text reuses its id so the
-  // receipt dedupes instead of starting a second agent turn.
-  let retryRequest: { conversationId: string; text: string; requestId: string } | null = null;
+  // receipt dedupes instead of starting a second agent turn. Keyed per
+  // conversation: a success elsewhere must not discard another
+  // conversation's unresolved id.
+  const retryRequests = new Map<string, { text: string; requestId: string }>();
   let commandMatch: ReturnType<typeof matchingCommands> = null;
   let commandIndex = 0;
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -117,8 +119,17 @@ export function initChat(): void {
       clearTimeout(saveTimer);
       saveTimer = null;
     }
-    const known = new Set(conversations.map(conversation => conversation.id));
-    if (known.size > 0) {
+    // The picker options join the inventory: an opened subagent child is
+    // deliberately absent from `conversations` but present as a temporary
+    // option, and pruning it while open would delete its live draft.
+    const known = new Set([
+      ...conversations.map(conversation => conversation.id),
+      ...Array.from(select.options, option => option.value),
+    ]);
+    if (projection) known.add(projection.conversationId);
+    // Prune only once the inventory has actually loaded — an empty list at
+    // boot must not wipe every stored draft.
+    if (conversations.length > 0) {
       for (const key of Object.keys(presentation.drafts)) if (!known.has(key)) delete presentation.drafts[key];
       for (const key of Object.keys(presentation.anchors)) if (!known.has(key)) delete presentation.anchors[key];
       for (const key of Object.keys(presentation.workingSince)) if (!known.has(key)) delete presentation.workingSince[key];
@@ -874,9 +885,8 @@ export function initChat(): void {
     if (!projection || !input.value.trim() || submitting) return;
     const conversationId = projection.conversationId;
     const text = input.value;
-    const requestId = retryRequest?.conversationId === conversationId && retryRequest.text === text
-      ? retryRequest.requestId
-      : newRequestId();
+    const retry = retryRequests.get(conversationId);
+    const requestId = retry?.text === text ? retry.requestId : newRequestId();
     const selectedModel = models.find(model => modelValue(model.selection) === modelSelect.value)?.selection;
     const wasRunning = projection.status === "running" || projection.status === "sending";
     submitting = true;
@@ -892,7 +902,7 @@ export function initChat(): void {
     scheduleRender(true);
     try {
       const accepted = await api.prompt(conversationId, requestId, text, selectedModel);
-      retryRequest = null;
+      retryRequests.delete(conversationId);
       if (accepted.conversation) {
         conversations = conversations.map(conversation => conversation.id === accepted.conversation!.id ? accepted.conversation! : conversation);
         const option = Array.from(select.options).find(candidate => candidate.value === accepted.conversation!.id);
@@ -907,7 +917,7 @@ export function initChat(): void {
       noteComposer(accepted.delivery === "steer" ? "Steer accepted" : "Message accepted");
     } catch (error) {
       announce(messageOf(error), true);
-      retryRequest = { conversationId, text, requestId };
+      retryRequests.set(conversationId, { text, requestId });
       if (projection?.conversationId === conversationId) {
         projection = removeAcceptedDraft(projection, requestId);
         if (!input.value.trim()) {

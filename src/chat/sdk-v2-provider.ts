@@ -377,10 +377,22 @@ async function* mergeProviderEvents(streams: AsyncIterable<unknown>[], signal: A
   const notify = () => { wake?.(); wake = null; };
   for (const stream of streams) {
     void (async () => {
+      // Id-less events dedupe by payload, which would also swallow a
+      // legitimate repeat from the same stream (two identical " " deltas).
+      // Numbering occurrences per stream keeps cross-stream duplicates
+      // aligned (a mirrored stream repeats the same payloads in the same
+      // order) while same-stream repeats stay distinct.
+      const occurrences = new Map<string, number>();
       try {
         for await (const value of stream) {
           const event = value as ProviderEvent;
-          const identity = providerEventIdentity(event);
+          let identity = providerEventIdentity(event);
+          if (typeof event.id !== "string") {
+            const occurrence = (occurrences.get(identity) ?? 0) + 1;
+            occurrences.set(identity, occurrence);
+            if (occurrences.size > 2_048) occurrences.delete(occurrences.keys().next().value!);
+            identity = `${identity}#${occurrence}`;
+          }
           if (seen.has(identity)) continue;
           seen.add(identity);
           if (seen.size > 2_048) seen.delete(seen.values().next().value!);
