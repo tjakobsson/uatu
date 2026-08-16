@@ -47,6 +47,9 @@ None.
   persistence, narrow-viewport fallback, terminal framing invariants), and
   the file-reference requirement's "SHALL switch to Preview" wording becomes
   reveal-in-place.
+- `desktop-titlebar-inset`: the chrome-below-the-inset requirement's list of
+  top-level chrome gains the chat panel (header row + collapsed strip), so
+  the UatuCode Desktop titlebar cannot cover the conversation controls.
 - `touch-navigation`: the mode-toggle requirement's description of desktop
   mode ("main Preview-or-Chat surface") and its mode-switch normalization
   ("the active Preview-or-Chat main surface remains selected") are updated to

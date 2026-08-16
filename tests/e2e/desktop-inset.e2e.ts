@@ -8,6 +8,7 @@
 import { expect, test } from "./fixtures";
 import type { Page } from "@playwright/test";
 
+import { openChatPanel } from "./chat-helpers";
 import { treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";
 
@@ -117,6 +118,27 @@ test("the right-docked terminal clears the strip and caps the frost", async ({ p
     () => parseFloat(getComputedStyle(document.body, "::before").right),
   );
   expect(minimizedRight).toBeCloseTo(36, 0);
+});
+
+test("the chat panel's header and collapsed strip clear the covered strip", async ({ page }) => {
+  await openChatPanel(page);
+  const baseline = await page.evaluate(
+    () => document.querySelector(".chat-header")!.getBoundingClientRect().top,
+  );
+  await applyInsetMarker(page, INSET);
+  const headerTop = await page.evaluate(
+    () => document.querySelector(".chat-header")!.getBoundingClientRect().top,
+  );
+  // The conversation controls (picker, New, collapse) sit in this header —
+  // under the native toolbar they were unreachable.
+  expect(headerTop).toBeGreaterThanOrEqual(INSET);
+  expect(headerTop - baseline).toBeCloseTo(INSET, 0);
+
+  await page.locator("#chat-collapse").click();
+  const stripTop = await page.evaluate(
+    () => document.querySelector("#chat-expand")!.getBoundingClientRect().top,
+  );
+  expect(stripTop).toBeGreaterThanOrEqual(INSET);
 });
 
 test("a live inset change (native tab bar) re-lays-out without reload", async ({ page }) => {

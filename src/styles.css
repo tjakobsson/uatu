@@ -371,6 +371,17 @@ html.uatu-desktop-host .preview-shell {
   scroll-padding-top: calc(var(--preview-scroll-inset) + var(--titlebar-inset, 0px));
 }
 
+/* The chat panel (chat-side-panel change) is top-level chrome like the
+   sidebar: its header row — conversation picker, New, collapse — and the
+   collapsed strip's reopen affordance must clear the covered strip. Padding,
+   the sidebar's treatment: the surface background continues into the strip
+   for the frost to sample, and no interactive control sits above the inset.
+   Touch mode's fixed-position chat sets its own safe-area padding at higher
+   specificity, so this cannot leak into the tab presentation. */
+html.uatu-desktop-host .chat-surface {
+  padding-top: var(--titlebar-inset, 0px);
+}
+
 /* Margin, not padding: backgrounds paint through padding, so an inset-padded
    panel fills the covered strip with its opaque surface and the frost above
    smears it into a gradient band across the toolbar. With a margin the panel
