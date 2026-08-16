@@ -273,7 +273,8 @@ test.describe("touch terminal switcher", () => {
     await page.locator("#touch-tab-terminal").click();
     await expect(page.locator(".terminal-pane")).toHaveCount(1, { timeout: 10000 });
 
-    // Park the persisted touch tab on Files, then switch to desktop layout.
+    // Enter desktop layout through Files. Desktop normalizes back to the
+    // selected main surface (Preview), rather than persisting Files.
     // The keybar is coarse-pointer-gated, not mode-gated, so the switcher is
     // still reachable from the docked desktop terminal.
     await page.locator("#touch-tab-files").click();
@@ -284,11 +285,10 @@ test.describe("touch terminal switcher", () => {
 
     // The sheet's backdrop covers only the panel, so the sidebar's layout
     // toggle stays clickable around it. Flipping back to touch hides the
-    // terminal by CSS alone — the persisted tab is Files, so no tab change
-    // fires and nothing else would dismiss the sheet.
+    // terminal by CSS and restores the selected Preview main surface.
     await page.locator("#ui-mode-toggle").click();
     await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
-    await expect(page.locator("html")).toHaveAttribute("data-active-tab", "files");
+    await expect(page.locator("html")).toHaveAttribute("data-active-tab", "preview");
 
     // Returning to the terminal shows the terminal, not a stale sheet.
     await page.locator("#touch-tab-terminal").click();

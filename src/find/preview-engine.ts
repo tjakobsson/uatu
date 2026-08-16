@@ -21,6 +21,11 @@ export function createPreviewEngine(
   previewElement: HTMLElement,
   shellElement: HTMLElement,
   barSlot: HTMLElement,
+  config: {
+    label?: string;
+    revealSurface?: () => void;
+    scrollRoot?: () => HTMLElement;
+  } = {},
 ): FindEngine {
   let spans: TextSpan[] = [];
   let ranges: Range[] = [];
@@ -39,7 +44,7 @@ export function createPreviewEngine(
       // Resolved per call rather than using the captured `shellElement`: the
       // shell stops being the scroller in touch mode and the stacked layout,
       // where scrolling it is a silent no-op.
-      revealRange(ranges[currentIndex]!, previewScrollRoot());
+      revealRange(ranges[currentIndex]!, config.scrollRoot?.() ?? previewScrollRoot());
     }
   };
 
@@ -52,7 +57,7 @@ export function createPreviewEngine(
 
   return {
     barHost: () => barSlot,
-    label: "document",
+    label: config.label ?? "document",
 
     run(query, options, opts) {
       // Where the reader currently is, so a re-run after a live reload lands
@@ -107,7 +112,7 @@ export function createPreviewEngine(
     // where nobody can see it (#191). A no-op in desktop mode, where the
     // preview is always rendered.
     revealSurface() {
-      revealPreviewSurface();
+      (config.revealSurface ?? revealPreviewSurface)();
     },
 
     focusSurface() {
@@ -116,7 +121,7 @@ export function createPreviewEngine(
       // it is the scrolling one — while the reveal targets the real scroller.
       shellElement.focus({ preventScroll: true });
       if (landing) {
-        revealRange(landing, previewScrollRoot());
+        revealRange(landing, config.scrollRoot?.() ?? previewScrollRoot());
       }
     },
 

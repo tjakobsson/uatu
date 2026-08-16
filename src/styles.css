@@ -4551,8 +4551,507 @@ html[data-ui-mode="touch"]:not([data-active-tab="preview"]) .uatu-outline {
   }
 }
 
+/* Chat is a persistent main-surface sibling of Preview. Visibility switches
+   only at the CSS layer so conversation state, scroll, and terminal attachment
+   survive every Preview/Chat transition. */
+.main-surface-switch {
+  position: absolute;
+  top: 0.65rem;
+  left: 50%;
+  z-index: 4;
+  transform: translateX(-50%);
+  display: flex;
+  padding: 2px;
+  border: 1px solid var(--border-soft);
+  border-radius: 0.5rem;
+  background: var(--surface-raised);
+}
+
+.main-surface-segment {
+  border: 0;
+  border-radius: 0.35rem;
+  padding: 0.3rem 0.75rem;
+  color: var(--text-subtle);
+  background: transparent;
+  cursor: pointer;
+}
+
+.main-surface-segment.is-active {
+  color: var(--text-strong);
+  background: var(--accent-soft);
+}
+
+html[data-ui-mode="desktop"][data-main-surface="chat"] .preview-shell,
+html[data-ui-mode="desktop"][data-main-surface="preview"] .chat-surface {
+  display: none;
+}
+
+.chat-surface {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.chat-surface:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.chat-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.5rem 0.8rem;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--surface-raised);
+}
+
+.chat-conversation-controls,
+.chat-composer-actions,
+.chat-request-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.chat-conversation-controls select,
+.chat-model-select,
+.chat-composer textarea,
+.chat-request input[type="text"] {
+  border: 1px solid var(--border-medium);
+  border-radius: 0.45rem;
+  color: var(--text-strong);
+  background: var(--surface);
+  font: inherit;
+}
+
+.chat-conversation-controls select {
+  min-width: min(18rem, 38vw);
+  padding: 0.4rem 0.55rem;
+}
+
+.chat-state {
+  padding: 0.65rem 1.5rem;
+  color: var(--text-subtle);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.chat-state.is-error,
+.chat-notice.is-error {
+  color: var(--danger, #cf4f57);
+}
+
+.chat-timeline {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding: 1rem max(1rem, calc((100% - 52rem) / 2));
+  scroll-padding-block: 1rem;
+}
+
+#chat-items,
+.chat-item,
+.chat-assistant-message {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.chat-assistant-message {
+  overflow-wrap: anywhere;
+}
+
+.chat-assistant-message pre,
+.chat-assistant-message table {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.chat-load-older {
+  display: block;
+  margin: 0 auto 1rem;
+}
+
+.chat-load-older[hidden] {
+  display: none;
+}
+
+.chat-item {
+  margin: 0 0 1rem;
+}
+
+.chat-user-message {
+  width: fit-content;
+  max-width: 82%;
+  margin-left: auto;
+  padding: 0.75rem 0.9rem;
+  border-radius: 0.9rem 0.9rem 0.2rem 0.9rem;
+  background: var(--accent-soft);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.chat-user-message.is-pending {
+  opacity: 0.7;
+}
+
+.chat-user-message small,
+.chat-request label small {
+  display: block;
+  color: var(--text-subtle);
+}
+
+.chat-assistant-message {
+  max-width: none;
+  color: var(--text-strong);
+  line-height: 1.55;
+}
+
+.chat-request,
+.chat-file-change,
+.chat-notice,
+.chat-turn-status {
+  border: 1px solid var(--border-soft);
+  border-radius: 0.55rem;
+  padding: 0.65rem 0.75rem;
+  background: var(--surface-raised);
+  color: var(--text-subtle);
+}
+
+/* Tool, command and reasoning rows are chrome, not content: one quiet line
+   that yields to the prose it produced. Boxing each at prose weight turned a
+   normal turn into a stack of equal-priority cards. Interactive requests
+   (permission, question) keep their card — those genuinely need attention. */
+.chat-activity {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-subtle);
+  margin-bottom: 0.1rem;
+}
+
+.chat-activity + .chat-assistant-message,
+.chat-assistant-message + .chat-activity {
+  margin-top: 1.1rem;
+}
+
+.chat-activity[open] {
+  margin-bottom: 0.9rem;
+}
+
+.chat-activity summary {
+  display: flex;
+  align-items: baseline;
+  gap: 0.55rem;
+  padding: 0.2rem 0;
+  cursor: pointer;
+  color: var(--text-subtle);
+  font-size: 0.875rem;
+  list-style: none;
+}
+
+.chat-activity summary::-webkit-details-marker {
+  display: none;
+}
+
+.chat-activity summary > span:first-child {
+  flex: 0 0 auto;
+}
+
+/* Absence of a status IS "completed". Only work still running or actually
+   failed earns a word — labelling every finished step doubled the row's
+   length and drew the eye to the least interesting thing on it. */
+.chat-activity.is-completed > summary > .chat-activity-status {
+  display: none;
+}
+
+.chat-activity.is-failed > summary > .chat-activity-status {
+  color: var(--danger, #cf4f57);
+}
+
+.chat-request summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  cursor: pointer;
+  color: var(--text-strong);
+}
+
+.chat-activity pre {
+  max-height: 24rem;
+  overflow: auto;
+  padding: 0.65rem;
+  /* `pre-wrap` alone only breaks at whitespace, so a long unbroken token —
+     a ripgrep pattern, an absolute path — overruns the card on a phone.
+     `anywhere` lets it break mid-token instead of clipping. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-strong);
+  background: var(--surface);
+  border-radius: 0.35rem;
+}
+
+.chat-activity-status,
+.chat-change-counts {
+  font-size: 0.78rem;
+  color: var(--text-subtle);
+}
+
+.chat-activity-subject {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-subtle);
+  font-family: var(--mono-font-family);
+  font-size: 0.82rem;
+}
+
+.chat-tool-meta {
+  margin: 0.55rem 0 0;
+}
+
+.chat-tool-meta code {
+  word-break: break-all;
+}
+
+.chat-diff {
+  max-height: 24rem;
+  overflow: auto;
+  margin: 0.55rem 0 0;
+  padding: 0.65rem;
+  white-space: pre-wrap;
+  background: var(--surface);
+  border-radius: 0.35rem;
+  font-family: var(--mono-font-family);
+}
+
+.chat-diff-line {
+  display: block;
+}
+
+.chat-diff-line.is-del {
+  color: var(--danger);
+  background: var(--diff-deleted-bg);
+}
+
+.chat-diff-line.is-add {
+  color: var(--success-strong);
+  background: var(--diff-added-bg);
+}
+
+.chat-tool-error {
+  color: var(--danger);
+}
+
+.chat-todo {
+  margin: 0.55rem 0 0;
+  padding-left: 1.2rem;
+}
+
+.chat-todo li.is-done {
+  color: var(--text-subtle);
+  text-decoration: line-through;
+}
+
+.chat-todo li.is-active {
+  font-weight: 600;
+}
+
+.chat-request fieldset {
+  margin: 0.75rem 0;
+  border: 1px solid var(--border-soft);
+  border-radius: 0.4rem;
+}
+
+.chat-request label {
+  display: block;
+  margin: 0.5rem 0;
+}
+
+.chat-primary-button,
+.chat-secondary-button,
+.chat-request button,
+.chat-file-change button,
+.chat-latest {
+  min-height: 2rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.4rem;
+  padding: 0.35rem 0.7rem;
+  color: var(--text-strong);
+  background: var(--surface-raised);
+  cursor: pointer;
+}
+
+.chat-primary-button {
+  border-color: var(--accent);
+  color: white;
+  background: var(--accent);
+}
+
+.chat-send-icon {
+  display: none;
+}
+
+.chat-primary-button:disabled,
+.chat-secondary-button:disabled,
+.chat-request button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.chat-latest {
+  position: absolute;
+  right: 1.25rem;
+  bottom: calc(var(--chat-composer-height, 5rem) + 0.75rem);
+  z-index: 2;
+  box-shadow: var(--shadow, 0 3px 12px rgb(0 0 0 / 20%));
+}
+
+.chat-composer {
+  position: relative;
+  flex: 0 0 auto;
+  padding: 0.75rem max(1rem, calc((100% - 52rem) / 2)) calc(0.75rem + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border-soft);
+  background: var(--surface-raised);
+}
+
+.chat-command-menu {
+  position: absolute;
+  left: max(1rem, calc((100% - 52rem) / 2));
+  right: max(1rem, calc((100% - 52rem) / 2));
+  bottom: calc(100% - 0.25rem);
+  z-index: 5;
+  max-height: min(22rem, 48vh);
+  overflow-y: auto;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.7rem;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow, 0 8px 24px rgb(0 0 0 / 18%));
+}
+
+.chat-command-menu[hidden] {
+  display: none;
+}
+
+.chat-command-option {
+  display: grid;
+  grid-template-columns: minmax(max-content, auto) 1fr;
+  gap: 0.15rem 0.65rem;
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid var(--border-soft);
+  padding: 0.65rem 0.75rem;
+  color: var(--text-strong);
+  background: transparent;
+  text-align: left;
+  font: inherit;
+}
+
+.chat-command-option:last-child {
+  border-bottom: 0;
+}
+
+.chat-command-option.is-active {
+  background: var(--accent-soft);
+}
+
+.chat-command-name {
+  font-weight: 600;
+}
+
+.chat-command-hint,
+.chat-command-description {
+  overflow: hidden;
+  color: var(--text-subtle);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-command-description {
+  grid-column: 1 / -1;
+  font-size: 0.78rem;
+}
+
+.chat-composer textarea {
+  display: block;
+  width: 100%;
+  min-height: 2.7rem;
+  max-height: 12rem;
+  resize: none;
+  padding: 0.7rem 0.8rem;
+  line-height: 1.35;
+}
+
+.chat-composer-actions {
+  justify-content: flex-end;
+  margin-top: 0.45rem;
+}
+
+.chat-model-select {
+  max-width: min(18rem, 42vw);
+  min-height: 2rem;
+  padding: 0.25rem 0.45rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.4rem;
+  color: var(--text-strong);
+  background: var(--surface);
+  font: inherit;
+  font-size: 0.8rem;
+  text-overflow: ellipsis;
+}
+
+.chat-model-select:disabled {
+  opacity: 0.55;
+}
+
+#chat-composer-status {
+  margin-right: auto;
+  color: var(--text-subtle);
+  font-size: 0.8rem;
+}
+
+.chat-file-line-target {
+  background: var(--accent-soft);
+}
+
+.chat-inline-file-ref,
+.chat-file-change button {
+  border: 0;
+  padding: 0;
+  min-height: 0;
+  max-width: 100%;
+  color: var(--accent);
+  background: transparent;
+  text-decoration: underline;
+  text-align: left;
+  overflow-wrap: anywhere;
+  font: inherit;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* --------------------------------------------------------------------------
-   Touch mode: the bottom tab bar and the three one-at-a-time surfaces
+   Touch mode: the bottom tab bar and the four one-at-a-time surfaces
    (touch-tab-navigation). The active surface is keyed on the
    `data-active-tab` attribute stamped on <html> by shell/tab-bar.ts.
    -------------------------------------------------------------------------- */
@@ -4681,6 +5180,10 @@ html[data-ui-mode="touch"] .app-shell {
   padding-bottom: var(--tab-bar-total);
 }
 
+html[data-ui-mode="touch"] .main-surface-switch {
+  display: none;
+}
+
 /* Chrome with no meaning under tabs: the desktop grid's resizer and rail,
    the sidebar's collapse control, and the Terminal toggle row (the Terminal
    tab replaces it). Stored collapse state survives for desktop mode. */
@@ -4776,6 +5279,196 @@ html[data-ui-mode="touch"]:not([data-active-tab="preview"]) .preview-shell {
 html[data-ui-mode="touch"] .preview-shell {
   overflow: visible;
   height: auto;
+}
+
+html[data-ui-mode="touch"]:not([data-active-tab="chat"]) .chat-surface {
+  display: none;
+}
+
+html[data-ui-mode="touch"][data-active-tab="chat"] .chat-surface {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: var(--chat-visual-top, 0px);
+  height: var(--chat-visual-height, calc(100dvh - var(--tab-bar-total)));
+  z-index: 35;
+  padding-top: env(safe-area-inset-top);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+
+html[data-ui-mode="touch"] .chat-header {
+  min-height: 3.5rem;
+  padding: 0.55rem 0.75rem;
+  gap: 0.65rem;
+}
+
+html[data-ui-mode="touch"] .chat-header > div:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Workspace eyebrow, then the conversation picker on its own full-width row.
+   Sharing one row is what crushed the picker to two
+   characters — the title and the select were competing for the same width.
+   The h2 is dropped on touch: the picker beneath it already names the
+   conversation, so the two rows said the same thing twice and a phone has no
+   vertical space to spend on that. */
+html[data-ui-mode="touch"] .chat-header {
+  flex-wrap: wrap;
+  row-gap: 0.4rem;
+}
+
+html[data-ui-mode="touch"] .chat-header h2 {
+  display: none;
+}
+
+html[data-ui-mode="touch"] .chat-conversation-controls {
+  flex: 1 0 100%;
+  min-width: 0;
+}
+
+html[data-ui-mode="touch"] .chat-header h2,
+html[data-ui-mode="touch"] .chat-header .eyebrow {
+  overflow: hidden;
+  margin: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-ui-mode="touch"] .chat-header .eyebrow {
+  font-size: 0.68rem;
+}
+
+html[data-ui-mode="touch"] .chat-conversation-controls select {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+  max-width: none;
+  padding-block: 0.35rem;
+}
+
+html[data-ui-mode="touch"] .chat-timeline {
+  padding: 0.75rem 0.85rem;
+  font-size: 0.9375rem;
+}
+
+/* Activity summaries are chrome, not prose — at full body size a run of tool
+   cards reads louder than the answer it produced. */
+html[data-ui-mode="touch"] .chat-activity summary,
+html[data-ui-mode="touch"] .chat-request summary {
+  font-size: 0.875rem;
+}
+
+html[data-ui-mode="touch"] .chat-composer {
+  margin: 0.5rem 0.65rem calc(0.5rem + env(safe-area-inset-bottom));
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 1rem;
+  background: var(--surface);
+  box-shadow: 0 1px 6px rgb(0 0 0 / 8%);
+}
+
+html[data-ui-mode="touch"] .chat-command-menu {
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 0.35rem);
+  max-height: min(19rem, 42vh);
+}
+
+html[data-ui-mode="touch"] .chat-composer textarea {
+  min-height: 2.35rem;
+  max-height: 8rem;
+  padding: 0.4rem 0.3rem;
+  border: 0;
+  outline: 0;
+  background: transparent;
+}
+
+html[data-ui-mode="touch"] .chat-composer-actions {
+  min-height: 2rem;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+html[data-ui-mode="touch"] #chat-send {
+  display: inline-grid;
+  place-items: center;
+  width: 2.55rem;
+  height: 2.55rem;
+  min-height: 2.55rem;
+  border-radius: 999px;
+  padding: 0;
+  touch-action: manipulation;
+}
+
+html[data-ui-mode="touch"] #chat-send .chat-send-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+html[data-ui-mode="touch"] #chat-send .chat-send-icon {
+  display: block;
+}
+
+html[data-ui-mode="touch"] .chat-model-select {
+  flex: 1 1 8rem;
+  min-width: 0;
+  max-width: 100%;
+}
+
+html[data-ui-mode="touch"] #chat-composer-status {
+  flex: 1 0 100%;
+  order: -1;
+  overflow: hidden;
+  max-width: 100%;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-ui-mode="touch"][data-chat-keyboard] .touch-tab-bar {
+  display: none;
+}
+
+html[data-ui-mode="touch"][data-chat-input-focused] .touch-tab-bar,
+html[data-ui-mode="touch"][data-chat-editing] .touch-tab-bar,
+html[data-ui-mode="touch"]:has(#chat-input:focus) .touch-tab-bar {
+  display: none;
+}
+
+html[data-ui-mode="touch"][data-chat-keyboard] .chat-composer {
+  margin-bottom: 0.4rem;
+}
+
+html[data-ui-mode="touch"] #chat-composer-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+html[data-ui-mode="touch"] .chat-model-select {
+  max-width: 62%;
+  margin-right: auto;
+}
+
+@media (max-width: 420px) {
+  .touch-tab-label { font-size: 0.58rem; }
+  .chat-header h2 { font-size: 1rem; }
+  .chat-conversation-controls { flex: 1; justify-content: flex-end; min-width: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-surface *,
+  .touch-tab { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
 }
 
 /* Scrolling moved to the page, so the sticky-header reservation has to move
@@ -5037,4 +5730,499 @@ body.terminal-transcript-open .touch-tab-bar {
   inset: 0 !important;
   visibility: hidden !important;
   pointer-events: none !important;
+}
+
+/* A message accepted mid-turn: visibly held, not yet acted on. */
+.chat-user-message.is-queued {
+  opacity: 0.82;
+  border: 1px dashed var(--border-medium);
+}
+
+.chat-queued-tag {
+  display: block;
+  margin-top: 0.3rem;
+  color: var(--text-subtle);
+  font-size: 0.75rem;
+}
+
+/* Question options are the primary action, so each is a full-width tap target
+   with its description inline: one pressable row per option. A radio dot
+   beside a line of text is a ~20px target on a phone. */
+.chat-request .chat-question-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  margin-bottom: 0.4rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 0.6rem;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.chat-request .chat-question-option:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.chat-request .chat-question-option input {
+  margin-top: 0.2rem;
+  flex: 0 0 auto;
+}
+
+.chat-question-option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.chat-question-option-label {
+  color: var(--text-strong);
+}
+
+.chat-request fieldset {
+  min-width: 0;
+}
+
+.chat-question-hint {
+  color: var(--text-subtle);
+  font-size: 0.78rem;
+  font-weight: 400;
+}
+
+/* An unanswered question after a submit attempt. */
+.chat-request fieldset.is-missing {
+  border-color: var(--danger, #cf4f57);
+}
+
+.chat-request fieldset.is-missing legend {
+  color: var(--danger, #cf4f57);
+}
+
+/* Question steps: one tab per question, a tick on answered ones. Hidden for a
+   lone question, where a single "1 of 1" tab carries no information. */
+.chat-question-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.7rem;
+}
+
+.chat-question-tab {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0.3rem 0.6rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  color: var(--text-subtle);
+  background: var(--surface);
+  font: inherit;
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-question-tab.is-answered::before {
+  content: "✓ ";
+  color: var(--accent);
+}
+
+.chat-question-tab.is-active {
+  border-color: var(--accent);
+  color: var(--text-strong);
+  background: var(--accent-soft);
+}
+
+.chat-question-panel[hidden] {
+  display: none;
+}
+
+.chat-request .chat-question-panel {
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+
+/* Live task list, pinned above the composer. The timeline badges narrate what
+   changed; this answers "where are we now" without scrolling back to find it.
+   Collapsed to progress plus the task in hand. */
+.chat-task-list {
+  flex: 0 0 auto;
+  margin: 0 max(1rem, calc((100% - 52rem) / 2)) 0.5rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 0.7rem;
+  background: var(--surface-raised);
+  font-size: 0.85rem;
+}
+
+.chat-task-list[hidden] {
+  display: none;
+}
+
+.chat-task-list > summary {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.5rem 0.7rem;
+  color: var(--text-subtle);
+  cursor: pointer;
+  list-style: none;
+}
+
+.chat-task-list > summary::-webkit-details-marker {
+  display: none;
+}
+
+.chat-task-list > summary::before {
+  content: "›";
+  flex: 0 0 auto;
+  color: var(--text-subtle);
+}
+
+.chat-task-list[open] > summary::before {
+  content: "⌄";
+}
+
+#chat-task-list-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#chat-task-list-items {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0 0.7rem 0.6rem 1.75rem;
+  list-style: none;
+}
+
+#chat-task-list-items li {
+  position: relative;
+  color: var(--text-strong);
+}
+
+#chat-task-list-items li::before {
+  position: absolute;
+  left: -1.05rem;
+  content: "○";
+  color: var(--text-subtle);
+}
+
+#chat-task-list-items li.is-active::before {
+  content: "◉";
+  color: var(--accent);
+}
+
+#chat-task-list-items li.is-done {
+  color: var(--text-subtle);
+}
+
+#chat-task-list-items li.is-done::before {
+  content: "✓";
+}
+
+html[data-ui-mode="touch"] .chat-task-list {
+  margin: 0 0.65rem 0.4rem;
+}
+
+/* Subagent track: same pinned, collapsible surface as the task list. Status
+   lives on the row because a fan-out finishes out of order. */
+#chat-subagents-items li.is-running::before,
+#chat-subagents-items li.is-pending::before {
+  content: "◍";
+  color: var(--accent);
+}
+
+#chat-subagents-items li.is-completed::before {
+  content: "✓";
+}
+
+#chat-subagents-items li.is-failed::before,
+#chat-subagents-items li.is-cancelled::before {
+  content: "✕";
+  color: var(--danger, #cf4f57);
+}
+
+#chat-subagents-items li.is-completed,
+#chat-subagents-items li.is-cancelled {
+  color: var(--text-subtle);
+}
+
+#chat-subagents-items {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0 0.7rem 0.6rem 1.75rem;
+  list-style: none;
+}
+
+#chat-subagents-items li {
+  position: relative;
+  color: var(--text-strong);
+}
+
+#chat-subagents-items li::before {
+  position: absolute;
+  left: -1.05rem;
+  content: "○";
+  color: var(--text-subtle);
+}
+
+#chat-subagents-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The pinned panels hold a fixed, small footprint. They never flex-shrink —
+   a shrinkable panel gets crushed to a sliver that clips its own summary
+   line. Instead the expanded list carries a hard cap and scrolls internally,
+   and while the keyboard is up only the summary lines stay. The cap is rem,
+   not vh: with the keyboard open the layout viewport vh is a lie. No flex
+   layout on the <details> itself — iOS Safari does not honor it there, which
+   left the list unclamped and clipped mid-row by overflow. */
+.chat-task-list {
+  flex: 0 0 auto;
+}
+
+#chat-task-list-items,
+#chat-subagents-items {
+  max-height: 8.5rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+html[data-chat-keyboard] #chat-task-list-items,
+html[data-chat-keyboard] #chat-subagents-items {
+  display: none;
+}
+
+.chat-track-dismiss {
+  margin-left: auto;
+  flex: 0 0 auto;
+  border: 0;
+  padding: 0.1rem 0.3rem;
+  color: var(--accent);
+  background: transparent;
+  font: inherit;
+  font-size: 0.78rem;
+}
+
+.chat-track-dismiss[hidden] {
+  display: none;
+}
+
+/* Density pass for touch. The timeline was set at desktop rhythm: prose
+   leading, per-item margins and header padding all sized for a wide window,
+   which on a phone spends most of the screen on whitespace. */
+html[data-ui-mode="touch"] .chat-timeline {
+  padding: 0.6rem 0.75rem;
+  font-size: 0.875rem;
+}
+
+html[data-ui-mode="touch"] .chat-assistant-message {
+  line-height: 1.45;
+}
+
+html[data-ui-mode="touch"] .chat-item {
+  margin-bottom: 0.65rem;
+}
+
+html[data-ui-mode="touch"] .chat-activity {
+  margin-bottom: 0.05rem;
+}
+
+html[data-ui-mode="touch"] .chat-activity + .chat-assistant-message,
+html[data-ui-mode="touch"] .chat-assistant-message + .chat-activity {
+  margin-top: 0.8rem;
+}
+
+html[data-ui-mode="touch"] .chat-activity summary {
+  padding: 0.12rem 0;
+  font-size: 0.8125rem;
+}
+
+html[data-ui-mode="touch"] .chat-user-message {
+  padding: 0.55rem 0.7rem;
+}
+
+html[data-ui-mode="touch"] .chat-header {
+  min-height: 0;
+  padding: 0.45rem 0.7rem;
+  row-gap: 0.4rem;
+}
+
+
+/* Grouped steps: a finished run of activity rows collapses to one line at the
+   same visual weight as a single row — the group is chrome about chrome. */
+.chat-activity-group {
+  margin-bottom: 0.1rem;
+  color: var(--text-subtle);
+}
+
+.chat-activity-group > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 0.55rem;
+  padding: 0.2rem 0;
+  cursor: pointer;
+  font-size: 0.875rem;
+  list-style: none;
+}
+
+.chat-activity-group > summary::-webkit-details-marker {
+  display: none;
+}
+
+.chat-activity-group > summary::before {
+  content: "▸";
+  flex: 0 0 auto;
+  font-size: 0.7rem;
+}
+
+.chat-activity-group[open] > summary::before {
+  content: "▾";
+}
+
+.chat-group-count {
+  flex: 0 0 auto;
+}
+
+.chat-group-items {
+  margin: 0.2rem 0 0.4rem 0.2rem;
+  padding-left: 0.9rem;
+  border-left: 2px solid var(--border-soft);
+}
+
+html[data-ui-mode="touch"] .chat-activity-group > summary {
+  font-size: 0.8125rem;
+}
+
+/* Prompt rail: one dot per user prompt, pinned to the timeline edge. */
+.chat-prompt-rail {
+  position: absolute;
+  right: 0.2rem;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  z-index: 3;
+}
+
+.chat-prompt-rail[hidden] {
+  display: none;
+}
+
+.chat-prompt-dot {
+  display: grid;
+  place-items: center;
+  width: 1.15rem;
+  height: 1.15rem;
+  min-height: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
+}
+
+.chat-prompt-dot::before {
+  content: "";
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 999px;
+  background: var(--border-medium);
+}
+
+.chat-prompt-dot.is-active::before {
+  background: var(--accent);
+  transform: scale(1.35);
+}
+
+.chat-turn-worked {
+  color: var(--text-subtle);
+}
+
+/* A subagent row that opens its child transcript. */
+.chat-subagent-open {
+  border: 0;
+  padding: 0;
+  min-height: 0;
+  max-width: 100%;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: var(--border-medium);
+}
+
+/* The transcript-open affordance inside an agent tool card. */
+.chat-tool-meta [data-open-conversation] {
+  border: 0;
+  padding: 0;
+  min-height: 0;
+  margin-left: 0.4rem;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 0.82rem;
+  text-decoration: underline;
+}
+
+/* Landing flash for prompt-rail jumps: a short exchange barely scrolls, so
+   without this the tap reads as doing nothing. */
+.chat-item.is-jump-target {
+  animation: chat-jump-flash 1.4s ease-out 1;
+}
+
+@keyframes chat-jump-flash {
+  0%, 35% { box-shadow: 0 0 0 3px var(--accent); }
+  100% { box-shadow: 0 0 0 3px transparent; }
+}
+
+/* Keep the rail's strip clear of content so dots never overlay bubbles. */
+html[data-ui-mode="touch"] .chat-surface[data-chat-rail] .chat-timeline {
+  padding-right: 1.5rem;
+}
+
+/* Scrub support: the rail owns its touches (no page scroll while sliding),
+   and the label floats beside the finger with the prompt text. */
+.chat-prompt-rail {
+  touch-action: none;
+}
+
+.chat-prompt-dot.is-scrubbing::before {
+  background: var(--accent);
+  transform: scale(1.7);
+}
+
+.chat-prompt-rail-label {
+  position: absolute;
+  right: 1.9rem;
+  transform: translateY(-50%);
+  z-index: 4;
+  max-width: min(70vw, 22rem);
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.5rem;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow, 0 4px 14px rgb(0 0 0 / 18%));
+  color: var(--text-strong);
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.chat-prompt-rail-label[hidden] {
+  display: none;
 }

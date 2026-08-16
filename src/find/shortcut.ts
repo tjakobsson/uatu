@@ -11,6 +11,7 @@ import { getActiveSurface } from "./active-surface";
 import type { FindEngine } from "./engine";
 import {
   closeFindBar,
+  getChatEngine,
   getPreviewEngine,
   isFindBarOpen,
   openFindBar,
@@ -94,6 +95,9 @@ function activeEngine(): FindEngine | null {
     terminalEngine.isAvailable?.() !== false
   ) {
     return terminalEngine;
+  }
+  if (getActiveSurface() === "chat") {
+    return supportsHighlights() ? getChatEngine() : null;
   }
   if (!supportsHighlights() || !previewIsSearchable()) {
     return null;

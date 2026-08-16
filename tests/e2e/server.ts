@@ -34,6 +34,8 @@ import {
 } from "../../src/server/routes";
 import { terminalBackendAvailable } from "../../src/terminal/backend";
 import { createTerminalServer } from "../../src/terminal/server";
+import { FakeE2EChatService } from "./chat-service";
+import type { ConversationItem, ConversationStatus } from "../../src/chat/types";
 
 // One-shot artificial latency for GET /api/terminal/sessions, armed by tests
 // that need two inventory reads to complete out of order (the switcher's
@@ -51,6 +53,7 @@ let activeFollow = true;
 let activeWorkspaceRoot = E2E_WORKSPACE_ROOT;
 let activeEntries: WatchEntry[] = [];
 let personalState: Record<string, unknown> = { version: 1 };
+const chatService = new FakeE2EChatService();
 const terminalEnabled = await terminalBackendAvailable();
 let watchSession = await createSession({ resetWorkspace: true });
 const terminalServer = terminalEnabled
@@ -78,6 +81,7 @@ async function handleE2EReset(request: Request): Promise<Response> {
   }
 
   terminalSessionsDelay = null;
+  chatService.reset();
 
   // Kill every PTY session so tests are hermetic: with persistent sessions
   // and the session picker, a shell leaked from a previous test would
@@ -146,6 +150,45 @@ async function handleE2EPersonalState(request: Request): Promise<Response> {
   return Response.json(personalState);
 }
 
+async function handleE2EChat(request: Request): Promise<Response> {
+  const body = await request.json() as {
+    action?: string;
+    conversationId?: string;
+    title?: string;
+    item?: ConversationItem;
+    items?: ConversationItem[];
+    older?: ConversationItem[];
+    itemId?: string;
+    delta?: string;
+    status?: ConversationStatus;
+  };
+  switch (body.action) {
+    case "seed":
+      return Response.json(chatService.seed(body.title ?? "Fixture conversation", body.items ?? [], body.older ?? []));
+    case "item":
+      if (body.conversationId && body.item) return Response.json(chatService.publishItem(body.conversationId, body.item));
+      break;
+    case "delta":
+      if (body.conversationId && body.itemId && typeof body.delta === "string") {
+        return Response.json(chatService.publishDelta(body.conversationId, body.itemId, body.delta));
+      }
+      break;
+    case "status":
+      if (body.conversationId && body.status) {
+        chatService.publishStatus(body.conversationId, body.status);
+        return Response.json({ ok: true });
+      }
+      break;
+    case "disconnect":
+      chatService.disconnect();
+      return Response.json({ ok: true });
+    case "resync":
+      chatService.rotateGeneration();
+      return Response.json({ ok: true });
+  }
+  return Response.json({ error: "invalid chat control" }, { status: 400 });
+}
+
 let server: ReturnType<typeof Bun.serve>;
 server = Bun.serve({
   hostname: "127.0.0.1",
@@ -175,8 +218,11 @@ server = Bun.serve({
         },
       },
       getSession: () => watchSession,
+      chatService,
+      getWorkspaceCredential: () => watchSession.getTerminalToken(),
       handleE2EReset,
       handleE2EPersonalState,
+      handleE2EChat,
     }),
   },
   fetch: async (request, srv) => {
@@ -242,6 +288,7 @@ const fetchFallback = buildFetchFallback({
 console.log(`http://127.0.0.1:${server.port}`);
 
 const shutdown = async () => {
+  await chatService.dispose();
   await watchSession.stop();
   await server.stop(true);
   process.exit(0);

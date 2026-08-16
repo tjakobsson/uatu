@@ -12,6 +12,8 @@ import { clampSeed, describeStatus } from "./find-status";
 import { supportsHighlights } from "./highlight";
 import { DEFAULT_MATCH_OPTIONS, type MatchOptions } from "./matcher";
 import { createPreviewEngine } from "./preview-engine";
+import { setActiveTab } from "../shell/tab-bar";
+import { setMainSurface } from "../chat/surface";
 
 const findBarElementMaybe = document.querySelector<HTMLElement>("#find-bar");
 const queryInputMaybe = document.querySelector<HTMLInputElement>("#find-query");
@@ -25,6 +27,10 @@ const closeButtonMaybe = document.querySelector<HTMLButtonElement>("#find-close"
 const previewElementMaybe = document.querySelector<HTMLElement>("#preview");
 const previewShellElementMaybe = document.querySelector<HTMLElement>(".preview-shell");
 const previewFindSlotMaybe = document.querySelector<HTMLElement>("#preview-find-slot");
+const chatItemsMaybe = document.querySelector<HTMLElement>("#chat-items");
+const chatSurfaceMaybe = document.querySelector<HTMLElement>("#chat-surface");
+const chatTimelineMaybe = document.querySelector<HTMLElement>("#chat-timeline");
+const chatFindSlotMaybe = document.querySelector<HTMLElement>("#chat-find-slot");
 
 if (
   !findBarElementMaybe ||
@@ -38,7 +44,11 @@ if (
   !closeButtonMaybe ||
   !previewElementMaybe ||
   !previewShellElementMaybe ||
-  !previewFindSlotMaybe
+  !previewFindSlotMaybe ||
+  !chatItemsMaybe ||
+  !chatSurfaceMaybe ||
+  !chatTimelineMaybe ||
+  !chatFindSlotMaybe
 ) {
   throw new Error("uatu UI failed to initialize (find/find-bar)");
 }
@@ -61,6 +71,14 @@ const previewFindSlot: HTMLElement = previewFindSlotMaybe;
 const SEARCH_DEBOUNCE_MS = 120;
 
 const previewEngine = createPreviewEngine(previewElement, previewShellElement, previewFindSlot);
+const chatEngine = createPreviewEngine(chatItemsMaybe, chatSurfaceMaybe, chatFindSlotMaybe, {
+  label: "chat",
+  revealSurface: () => {
+    setMainSurface("chat");
+    if (document.documentElement.dataset.uiMode === "touch") setActiveTab("chat");
+  },
+  scrollRoot: () => chatTimelineMaybe,
+});
 
 let open = false;
 let engine: FindEngine | null = null;
@@ -79,6 +97,10 @@ export function isFindBarOpen(): boolean {
 
 export function getPreviewEngine(): FindEngine {
   return previewEngine;
+}
+
+export function getChatEngine(): FindEngine {
+  return chatEngine;
 }
 
 function render(): void {

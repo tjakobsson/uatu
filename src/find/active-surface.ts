@@ -26,13 +26,14 @@ import { uiMode } from "../shell/ui-mode";
 // rather than being folded into `preview` by selector, so that the
 // sidebar-means-preview rule stays visible in `surfaceForRoot` instead of
 // hiding inside a selector list.
-export type SurfaceRoot = "preview" | "terminal" | "sidebar";
+export type SurfaceRoot = "preview" | "chat" | "terminal" | "sidebar";
 
 const ROOT_SELECTORS: ReadonlyArray<readonly [SurfaceRoot, string]> = [
   // Terminal first: the panel is a sibling of the preview shell inside
   // `.main-stack`, and checking it first keeps the match unambiguous if the
   // markup is ever nested differently.
   ["terminal", "#terminal-panel"],
+  ["chat", "#chat-surface"],
   ["preview", ".preview-shell"],
   // `.sidebar-rail` is the collapsed sidebar's expand button, which sits
   // outside `.sidebar` but is still sidebar chrome.
@@ -83,6 +84,8 @@ export function surfaceForRoot(root: SurfaceRoot | null): ActiveSurface | null {
   switch (root) {
     case "terminal":
       return "terminal";
+    case "chat":
+      return "chat";
     case "preview":
     case "sidebar":
       return "preview";
@@ -102,7 +105,7 @@ export function resolveSurfaceFromTarget(target: EventTarget | null): ActiveSurf
 export function surfaceForTab(tab: TouchTab): ActiveSurface {
   // Files renders the sidebar pane stack, and directing the sidebar is an act
   // about the document it directs — the same rule `surfaceForRoot` applies.
-  return tab === "terminal" ? "terminal" : "preview";
+  return tab === "terminal" ? "terminal" : tab === "chat" ? "chat" : "preview";
 }
 
 export function getActiveSurface(): ActiveSurface {

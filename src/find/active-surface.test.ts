@@ -38,6 +38,7 @@ function shellOf(): Document {
             </div>
             <article id="preview" class="preview"><p id="para">text</p></article>
           </main>
+          <section id="chat-surface"><textarea id="chat-input"></textarea></section>
           <section id="terminal-panel" class="terminal-panel">
             <div class="terminal-pane"><textarea id="term-input"></textarea></div>
           </section>
@@ -48,6 +49,7 @@ function shellOf(): Document {
       <nav id="touch-tab-bar" class="touch-tab-bar" role="tablist">
         <button id="touch-tab-files" data-tab="files"><svg id="files-glyph"></svg></button>
         <button id="touch-tab-preview" data-tab="preview"><svg id="preview-glyph"></svg></button>
+        <button id="touch-tab-chat" data-tab="chat"><svg id="chat-glyph"></svg></button>
         <button id="touch-tab-terminal" data-tab="terminal"><svg id="terminal-glyph"></svg></button>
       </nav>
     </body></html>`,
@@ -59,6 +61,7 @@ describe("findSurfaceRoot", () => {
   test("locates the root an interaction landed in", () => {
     const document = shellOf();
     expect(findSurfaceRoot(document.querySelector("#para"))).toBe("preview");
+    expect(findSurfaceRoot(document.querySelector("#chat-input"))).toBe("chat");
     expect(findSurfaceRoot(document.querySelector("#term-input"))).toBe("terminal");
     expect(findSurfaceRoot(document.querySelector("#tree"))).toBe("sidebar");
   });
@@ -159,6 +162,10 @@ describe("surfaceForTab", () => {
 
   test("Preview is the preview surface", () => {
     expect(surfaceForTab("preview")).toBe("preview");
+  });
+
+  test("Chat is the chat surface", () => {
+    expect(surfaceForTab("chat")).toBe("chat");
   });
 
   test("Files is the preview surface — the sidebar directs the document", () => {

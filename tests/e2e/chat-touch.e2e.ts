@@ -1,0 +1,139 @@
+import type { APIRequestContext, Page } from "@playwright/test";
+
+import type { ConversationItem } from "../../src/chat/types";
+import { expect, test } from "./fixtures";
+
+test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+async function control(request: APIRequestContext, body: Record<string, unknown>): Promise<any> {
+  const response = await request.post("/__e2e/chat", { data: body });
+  expect(response.ok()).toBe(true);
+  return response.json();
+}
+
+async function boot(page: Page, request: APIRequestContext, seed?: { items: ConversationItem[]; older?: ConversationItem[] }): Promise<string> {
+  await request.post("/__e2e/reset");
+  const snapshot = await control(request, { action: "seed", title: "Touch chat", items: seed?.items ?? [], older: seed?.older ?? [] });
+  const token = await request.get("/__e2e/terminal-token").then(response => response.json()) as { token: string };
+  await page.goto(`/?t=${encodeURIComponent(token.token)}`);
+  await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
+  await page.locator("#touch-tab-chat").click();
+  await expect(page.locator("#chat-surface")).toBeVisible();
+  await expect(page.locator("#chat-conversation-select")).toHaveValue(snapshot.conversation.id);
+  await expect(page.locator("body")).toHaveCSS("overflow", "hidden");
+  await expect(page.locator("#chat-send .chat-send-icon")).toBeVisible();
+  return snapshot.conversation.id as string;
+}
+
+const messages = (prefix: string, count: number, start = 0): ConversationItem[] => Array.from({ length: count }, (_, index) => ({
+  id: `message:${prefix}-${index}`,
+  type: "user_message" as const,
+  createdAt: start + index,
+  text: `${prefix} message ${index} ${"content ".repeat(12)}`,
+}));
+
+test("four tabs preserve chat state and keyboard navigation", async ({ page, request }) => {
+  await boot(page, request);
+  await expect(page.locator("#touch-tab-bar [role=tab]")).toHaveCount(4);
+  await expect(page.locator("#touch-tab-bar .touch-tab-label")).toHaveText(["Files", "Preview", "Chat", "Terminal"]);
+  await page.locator("#chat-input").fill("persistent touch draft");
+  await expect(page.locator("#touch-tab-bar")).toBeHidden();
+  await page.locator("#chat-input").blur();
+  await expect(page.locator("#touch-tab-bar")).toBeVisible();
+  for (const tab of ["files", "preview", "chat"] as const) {
+    await page.locator(`#touch-tab-${tab}`).click();
+    await expect(page.locator(`#touch-tab-${tab}`)).toHaveAttribute("aria-selected", "true");
+  }
+  await expect(page.locator("#chat-input")).toHaveValue("persistent touch draft");
+  await page.locator("#touch-tab-chat").focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator("#touch-tab-terminal")).toBeFocused();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator("#touch-tab-files")).toBeFocused();
+});
+
+test("software-keyboard geometry keeps the composer in the visual viewport", async ({ page, request }) => {
+  await page.addInitScript(() => {
+    const viewport = new EventTarget() as EventTarget & { height: number; offsetTop: number };
+    viewport.height = 844;
+    viewport.offsetTop = 0;
+    Object.defineProperty(window, "visualViewport", { configurable: true, value: viewport });
+  });
+  await boot(page, request);
+  await page.locator("#chat-input").focus();
+  await expect(page.locator("html")).toHaveAttribute("data-chat-editing", "");
+  await expect(page.locator("#touch-tab-bar")).toBeHidden();
+  await page.evaluate(() => {
+    const viewport = window.visualViewport as VisualViewport & { height: number };
+    viewport.height = 460;
+    viewport.dispatchEvent(new Event("resize"));
+  });
+  await expect(page.locator("#chat-surface")).toHaveCSS("--chat-visual-height", "460px");
+  const geometry = await page.evaluate(() => {
+    const composer = document.querySelector("#chat-composer")!.getBoundingClientRect();
+    return { bottom: composer.bottom, visualHeight: window.visualViewport!.height };
+  });
+  expect(geometry.bottom).toBeLessThanOrEqual(geometry.visualHeight + 1);
+});
+
+test("pinned streaming follows while unpinned streaming offers jump to latest", async ({ page, request }) => {
+  const id = await boot(page, request, { items: messages("loaded", 28) });
+  const timeline = page.locator("#chat-timeline");
+  await timeline.evaluate(element => { element.scrollTop = element.scrollHeight; });
+  await control(request, { action: "item", conversationId: id, item: { id: "message:pinned", type: "user_message", createdAt: 100, text: "pinned update" } });
+  await expect(page.locator("#chat-items")).toContainText("pinned update");
+  await expect.poll(() => timeline.evaluate(element => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThan(50);
+
+  await timeline.evaluate(element => { element.scrollTop = 20; element.dispatchEvent(new Event("scroll")); });
+  const before = await timeline.evaluate(element => element.scrollTop);
+  await control(request, { action: "item", conversationId: id, item: { id: "message:unseen", type: "user_message", createdAt: 101, text: "unseen update" } });
+  await expect(page.locator("#chat-latest")).toBeVisible();
+  expect(await timeline.evaluate(element => element.scrollTop)).toBeCloseTo(before, 0);
+  await page.locator("#chat-latest").click();
+  await expect(page.locator("#chat-latest")).toBeHidden();
+  await expect.poll(() => timeline.evaluate(element => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThan(50);
+});
+
+test("history prepend and activity expansion preserve semantic position", async ({ page, request }) => {
+  const latest = messages("latest", 14, 100);
+  await boot(page, request, { items: latest, older: messages("older", 12) });
+  const timeline = page.locator("#chat-timeline");
+  await timeline.evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new Event("scroll")); });
+  const anchor = page.locator(`[data-chat-item-id="${latest[0]!.id}"]`);
+  const before = await anchor.evaluate(element => element.getBoundingClientRect().top);
+  await page.locator("#chat-load-older").click();
+  await expect(page.locator("#chat-items")).toContainText("older message 0");
+  expect(await anchor.evaluate(element => element.getBoundingClientRect().top)).toBeCloseTo(before, 0);
+
+  const id = await page.locator("#chat-conversation-select").inputValue();
+  const activity: ConversationItem = { id: "tool:expand", type: "tool", createdAt: 200, name: "Inspect", status: "completed", output: "detail\n".repeat(30) };
+  await control(request, { action: "item", conversationId: id, item: activity });
+  const details = page.locator('[data-chat-item-id="tool:expand"]');
+  await details.scrollIntoViewIfNeeded();
+  const activityTop = await details.evaluate(element => element.getBoundingClientRect().top);
+  await details.locator("summary").click();
+  await expect(details).toHaveAttribute("open", "");
+  expect(await details.evaluate(element => element.getBoundingClientRect().top)).toBeCloseTo(activityTop, 0);
+});
+
+test("rotation and live mode switching retain Chat without remounting", async ({ page, request }) => {
+  await boot(page, request);
+  await page.locator("#chat-input").fill("rotation draft");
+  const marker = await page.locator("#chat-surface").evaluate(element => {
+    (element as HTMLElement).dataset.e2eMount = "same";
+    return (element as HTMLElement).dataset.e2eMount;
+  });
+  expect(marker).toBe("same");
+  await page.setViewportSize({ width: 844, height: 390 });
+  await expect(page.locator("#chat-input")).toHaveValue("rotation draft");
+  await page.locator("#chat-input").blur();
+  await page.locator("#touch-tab-files").click();
+  await page.locator("#ui-mode-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "desktop");
+  await page.getByRole("radio", { name: "Chat" }).click();
+  await expect(page.locator("#chat-surface")).toHaveAttribute("data-e2e-mount", "same");
+  await expect(page.locator("#chat-input")).toHaveValue("rotation draft");
+  await page.locator("#ui-mode-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
+  await expect(page.locator("#touch-tab-chat")).toHaveAttribute("aria-selected", "true");
+});

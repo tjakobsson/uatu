@@ -67,6 +67,8 @@ function buildTheme(): ITheme {
 //
 // Returns the live token, or `null` if no token has been observed (terminal
 // feature off or first visit predates the URL parameter).
+let credentialPromotion: Promise<boolean> | null = null;
+
 export function captureTerminalToken(): string | null {
   if (typeof window === "undefined") return null;
   try {
@@ -77,7 +79,7 @@ export function captureTerminalToken(): string | null {
       // Promote the URL token into a same-origin auth cookie. Fire-and-forget
       // — failures aren't fatal because the in-memory token is still in
       // sessionStorage and ?t= still works for this tab.
-      void persistTerminalToken(fromUrl);
+      credentialPromotion = persistTerminalToken(fromUrl);
       url.searchParams.delete("t");
       const next = url.pathname + (url.search ? url.search : "") + url.hash;
       window.history.replaceState(null, "", next);
@@ -87,6 +89,13 @@ export function captureTerminalToken(): string | null {
   } catch {
     return null;
   }
+}
+
+/** Wait for a URL credential to become the shared HttpOnly workspace cookie.
+ * Read-only features such as Chat call this before their first authenticated
+ * request so they cannot race the fire-and-forget promotion above. */
+export async function waitForWorkspaceCredential(): Promise<void> {
+  await credentialPromotion;
 }
 
 // Build the WebSocket URL for the terminal endpoint. The `pageUrl` source
