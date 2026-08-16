@@ -185,16 +185,17 @@ export class SdkV2Provider implements OpenCodeProvider {
       session?: { messages?: (input: { sessionID: string; directory: string }) => Promise<Result<unknown>> };
     };
     if (typeof legacy.session?.messages !== "function") return [];
-    try {
-      const result = await legacy.session.messages({ sessionID: sessionId, directory: this.directory });
-      const messages = Array.isArray(result.data) ? result.data as ProviderMessage[] : [];
-      if (messages.length > 0) this.compatibilitySessions.add(sessionId);
-      return messages;
-    } catch {
-      // An OpenCode build without the classic endpoint is not an error; the
-      // v2 store is then the only store.
+    const result = await legacy.session.messages({ sessionID: sessionId, directory: this.directory });
+    // A store miss (404, or a build whose classic route rejects the id) means
+    // the v2 store is the only store; a transient 401/5xx must propagate, or
+    // a compatibility session's whole transcript silently reads as empty.
+    if (result.error !== undefined) {
+      ensureLookupMiss(result);
       return [];
     }
+    const messages = Array.isArray(result.data) ? result.data as ProviderMessage[] : [];
+    if (messages.length > 0) this.compatibilitySessions.add(sessionId);
+    return messages;
   }
 
   async *events(signal: AbortSignal): AsyncIterable<ProviderEvent> {

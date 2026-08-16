@@ -243,7 +243,11 @@ export class OpenCodeChatAdapter {
         renameToFirstPrompt = page.items.length === 0;
       }
       let conversation: ConversationSummary | undefined;
-      projection.statusUpdate("sending");
+      // A steer targets a turn that is already running — the projection keeps
+      // saying so. Downgrading it to "sending" (and to "failed" on a rejected
+      // steer) would hide cancellation for a turn that never stopped.
+      const steering = projection.status === "running";
+      if (!steering) projection.statusUpdate("sending");
       try {
         // A failed command listing propagates: classifying "/compact" as
         // plain prose because the list was momentarily unavailable would
@@ -268,7 +272,7 @@ export class OpenCodeChatAdapter {
         if (projection.status === "sending") projection.statusUpdate("running");
         return { messageId: accepted.messageId, delivery, ...(conversation ? { conversation } : {}) };
       } catch (error) {
-        projection.statusUpdate("failed", errorMessage(error));
+        if (!steering && projection.status === "sending") projection.statusUpdate("failed", errorMessage(error));
         throw error;
       }
     });

@@ -482,16 +482,28 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         try {
           const { events } = await deps.chatService.subscribe(id, { cursor, signal: abort.signal });
           const encoder = new TextEncoder();
+          const iterator = events[Symbol.asyncIterator]();
+          let pending = iterator.next();
+          let finished = false;
+          const finish = async () => {
+            if (finished) return;
+            finished = true;
+            await iterator.return?.().catch(() => undefined);
+            events.cancel();
+            request.signal.removeEventListener("abort", onAbort);
+          };
+          // Pull-driven, one frame per pull: a slow or stalled client stops
+          // pulling and the loop stops consuming — a push loop here buffered
+          // an unbounded queue inside the ReadableStream for as long as an
+          // active agent kept publishing.
           const stream = new ReadableStream<Uint8Array>({
-            async start(controller) {
-              const iterator = events[Symbol.asyncIterator]();
-              let pending = iterator.next();
+            async pull(controller) {
               try {
                 while (!abort.signal.aborted) {
                   const result = await nextChatEvent(pending, CHAT_KEEPALIVE_MS);
                   if (result === "keepalive") {
                     controller.enqueue(encoder.encode(": keepalive\n\n"));
-                    continue;
+                    return;
                   }
                   if (result.done) break;
                   pending = iterator.next();
@@ -499,22 +511,19 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
                   const eventId = encodeReplayCursor({ generation: event.generation, sequence: event.sequence });
                   const eventName = event.type === "resync" ? "resync" : "chat";
                   controller.enqueue(encoder.encode(`id: ${eventId}\nevent: ${eventName}\ndata: ${JSON.stringify(event)}\n\n`));
-                  if (event.type === "resync") break;
+                  if (event.type !== "resync") return;
+                  break;
                 }
               } catch {
                 // A transport cancellation closes the stream without inventing
                 // an in-band provider error.
-              } finally {
-                await iterator.return?.();
-                events.cancel();
-                request.signal.removeEventListener("abort", onAbort);
-                try { controller.close(); } catch { /* consumer cancelled */ }
               }
+              await finish();
+              try { controller.close(); } catch { /* consumer cancelled */ }
             },
             cancel() {
               abort.abort();
-              events.cancel();
-              request.signal.removeEventListener("abort", onAbort);
+              void finish();
             },
           });
           return new Response(stream, {
