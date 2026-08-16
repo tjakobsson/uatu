@@ -8,7 +8,17 @@ describe("chat shell accessibility", () => {
   test("mounts one persistent Chat surface beside Preview", () => {
     expect(document.querySelectorAll("#chat-surface")).toHaveLength(1);
     expect(document.querySelector(".main-stack > #chat-surface")).not.toBeNull();
-    expect(document.querySelectorAll('[data-main-surface="preview"], [data-main-surface="chat"]')).toHaveLength(2);
+    // One switch per surface header — only the visible surface's copy is on
+    // screen, so the control sits top-right without floating over the
+    // terminal dock. The wiring syncs every instance.
+    const groups = Array.from(document.querySelectorAll(".main-surface-switch"));
+    expect(groups).toHaveLength(2);
+    expect(document.querySelector(".preview-header .main-surface-switch")).not.toBeNull();
+    expect(document.querySelector(".chat-header .main-surface-switch")).not.toBeNull();
+    for (const group of groups) {
+      expect(Array.from(group.querySelectorAll("button[data-main-surface]"))
+        .map(button => button.getAttribute("data-main-surface"))).toEqual(["preview", "chat"]);
+    }
   });
 
   test("exposes exactly four ordered touch tabs with selection semantics", () => {

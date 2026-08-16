@@ -131,6 +131,13 @@ test.describe("chat panels and navigation", () => {
 
     await rail.locator(".chat-prompt-dot").first().click();
     await expect(page.locator('[data-chat-item-id="message:u1"]')).toHaveClass(/is-jump-target/);
+
+    // Jumping to the newest prompt marks ITS dot active even though the short
+    // final exchange cannot scroll to the top of the timeline.
+    await rail.locator(".chat-prompt-dot").last().click();
+    await expect(page.locator('[data-chat-item-id="message:u3"]')).toHaveClass(/is-jump-target/);
+    await expect(rail.locator(".chat-prompt-dot").last()).toHaveClass(/is-active/);
+    await expect(rail.locator(".chat-prompt-dot.is-active")).toHaveCount(1);
   });
 
   test("a finished turn reports how long it worked", async ({ page, request }) => {

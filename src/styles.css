@@ -4553,18 +4553,21 @@ html[data-ui-mode="touch"]:not([data-active-tab="preview"]) .uatu-outline {
 
 /* Chat is a persistent main-surface sibling of Preview. Visibility switches
    only at the CSS layer so conversation state, scroll, and terminal attachment
-   survive every Preview/Chat transition. */
+   survive every Preview/Chat transition. Each surface header carries its own
+   switch instance at the top right (the wiring syncs every instance); only
+   the visible surface's copy is on screen, so the control never floats over
+   the terminal dock. */
 .main-surface-switch {
-  position: absolute;
-  top: 0.65rem;
-  left: 50%;
-  z-index: 4;
-  transform: translateX(-50%);
-  display: flex;
+  display: inline-flex;
+  flex-shrink: 0;
   padding: 2px;
   border: 1px solid var(--border-soft);
   border-radius: 0.5rem;
   background: var(--surface-raised);
+}
+
+.chat-conversation-controls .main-surface-switch {
+  margin-left: 0.5rem;
 }
 
 .main-surface-segment {
@@ -4611,6 +4614,32 @@ html[data-ui-mode="desktop"][data-main-surface="preview"] .chat-surface {
   padding: 1rem 1.5rem 0.8rem;
   border-bottom: 1px solid var(--border-soft);
   background: var(--surface-raised);
+}
+
+.chat-header > div:first-child {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.chat-header .eyebrow {
+  overflow: hidden;
+  margin: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The picker names the conversation, so it gets the slack — and gives it
+   back (shrinking, not pushing the surface switch out of the header) when
+   the title is long. */
+.chat-header .chat-conversation-controls {
+  flex: 1 1 auto;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.chat-header .chat-conversation-controls select {
+  flex: 0 1 auto;
+  min-width: 4rem;
 }
 
 .chat-conversation-controls,
@@ -5311,16 +5340,11 @@ html[data-ui-mode="touch"] .chat-header > div:first-child {
 /* Workspace eyebrow, then the conversation picker on its own full-width row.
    Sharing one row is what crushed the picker to two
    characters — the title and the select were competing for the same width.
-   The h2 is dropped on touch: the picker beneath it already names the
-   conversation, so the two rows said the same thing twice and a phone has no
-   vertical space to spend on that. */
+   (The h2 is sr-only everywhere now: the picker already names the
+   conversation, so a visible heading said the same thing twice.) */
 html[data-ui-mode="touch"] .chat-header {
   flex-wrap: wrap;
   row-gap: 0.4rem;
-}
-
-html[data-ui-mode="touch"] .chat-header h2 {
-  display: none;
 }
 
 html[data-ui-mode="touch"] .chat-conversation-controls {
@@ -5328,7 +5352,6 @@ html[data-ui-mode="touch"] .chat-conversation-controls {
   min-width: 0;
 }
 
-html[data-ui-mode="touch"] .chat-header h2,
 html[data-ui-mode="touch"] .chat-header .eyebrow {
   overflow: hidden;
   margin: 0;
@@ -5462,7 +5485,6 @@ html[data-ui-mode="touch"] .chat-model-select {
 
 @media (max-width: 420px) {
   .touch-tab-label { font-size: 0.58rem; }
-  .chat-header h2 { font-size: 1rem; }
   .chat-conversation-controls { flex: 1; justify-content: flex-end; min-width: 0; }
 }
 

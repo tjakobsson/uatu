@@ -268,12 +268,19 @@ export function initChat(): void {
   /** Marks the dot of the prompt currently governing the viewport. */
   const syncPromptRailActive = () => {
     if (!promptRail || promptRail.hidden) return;
-    const bounds = timeline.getBoundingClientRect();
+    const dots = [...promptRail.querySelectorAll<HTMLElement>("[data-prompt-target]")];
     let activeId: string | null = null;
-    const dots = promptRail.querySelectorAll<HTMLElement>("[data-prompt-target]");
-    for (const dot of dots) {
-      const node = items.querySelector(`[data-chat-item-id="${CSS.escape(dot.dataset.promptTarget!)}"]`);
-      if (node && node.getBoundingClientRect().top - bounds.top <= 60) activeId = dot.dataset.promptTarget!;
+    if (timeline.scrollHeight - timeline.clientHeight - timeline.scrollTop <= 48) {
+      // At the end of the timeline the newest exchange governs even when it
+      // is too short to scroll to the top — without this, jumping to the
+      // last prompt leaves the previous dot lit.
+      activeId = dots.at(-1)?.dataset.promptTarget ?? null;
+    } else {
+      const bounds = timeline.getBoundingClientRect();
+      for (const dot of dots) {
+        const node = items.querySelector(`[data-chat-item-id="${CSS.escape(dot.dataset.promptTarget!)}"]`);
+        if (node && node.getBoundingClientRect().top - bounds.top <= 60) activeId = dot.dataset.promptTarget!;
+      }
     }
     for (const dot of dots) dot.classList.toggle("is-active", dot.dataset.promptTarget === activeId);
   };

@@ -417,10 +417,6 @@
       </div>
 
       <div class="main-stack">
-      <div class="main-surface-switch" role="radiogroup" aria-label="Main surface">
-        <button class="main-surface-segment" type="button" role="radio" data-main-surface="preview" aria-checked="true">Preview</button>
-        <button class="main-surface-segment" type="button" role="radio" data-main-surface="chat" aria-checked="false">Chat</button>
-      </div>
       <!-- tabindex="-1" makes the scroll container *able* to hold focus so
            Space / PageUp / PageDown scroll the document and the find bar has
            somewhere to hand focus back to. It is never focused automatically —
@@ -543,6 +539,10 @@
               >A+</button>
             </div>
           </div>
+          <div class="main-surface-switch" role="radiogroup" aria-label="Main surface">
+            <button class="main-surface-segment" type="button" role="radio" data-main-surface="preview" aria-checked="true">Preview</button>
+            <button class="main-surface-segment" type="button" role="radio" data-main-surface="chat" aria-checked="false">Chat</button>
+          </div>
         </header>
 
         <!-- Find-bar slot for the preview. Zero-height and sticky — the same
@@ -636,12 +636,20 @@
           <header class="chat-header">
             <div>
               <p id="chat-context" class="eyebrow">OpenCode</p>
-              <h2 id="chat-title">OpenCode Chat</h2>
+              <!-- The visible conversation name is the picker below — a
+                   visible heading said the same thing twice (the touch header
+                   learned this first). Kept for assistive tech and as the
+                   document-outline entry for the surface. -->
+              <h2 id="chat-title" class="sr-only">OpenCode Chat</h2>
             </div>
             <div class="chat-conversation-controls">
               <label class="sr-only" for="chat-conversation-select">Conversation</label>
               <select id="chat-conversation-select" aria-label="Conversation"></select>
               <button id="chat-new-conversation" class="chat-secondary-button" type="button">New</button>
+              <div class="main-surface-switch" role="radiogroup" aria-label="Main surface">
+                <button class="main-surface-segment" type="button" role="radio" data-main-surface="preview" aria-checked="true">Preview</button>
+                <button class="main-surface-segment" type="button" role="radio" data-main-surface="chat" aria-checked="false">Chat</button>
+              </div>
             </div>
           </header>
           <div id="chat-state" class="chat-state" role="status" aria-live="polite">Loading OpenCode…</div>
