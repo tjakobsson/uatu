@@ -24,6 +24,7 @@ function shellOf(): Document {
     `<!doctype html><html><body>
       <div class="app-shell">
         <aside class="sidebar">
+          <div class="sidebar-header"><button id="ui-mode-toggle"></button></div>
           <div class="sidebar-mode-row"><button id="follow-toggle">Follow</button></div>
           <div class="pane-body"><div id="tree"></div></div>
         </aside>
@@ -89,6 +90,19 @@ describe("findSurfaceRoot", () => {
     setActiveSurface("terminal");
     noteInteraction(document.querySelector("#find-query"));
     expect(appState.activeSurface).toBe("terminal");
+  });
+
+  test("the mode toggle is chrome — pressing it leaves the surface standing", () => {
+    // It lives in sidebar chrome, but switching modes is not a statement
+    // about where the user works. Without the exclusion the sidebar rule
+    // claimed `preview` from the press, so leaving touch mode from the Chat
+    // tab could never land back on Chat: the toggle itself erased the claim
+    // the mode-switch normalization consults.
+    const document = shellOf();
+    expect(findSurfaceRoot(document.querySelector("#ui-mode-toggle"))).toBeNull();
+    setActiveSurface("chat");
+    noteInteraction(document.querySelector("#ui-mode-toggle"));
+    expect(appState.activeSurface).toBe("chat");
   });
 
   test("chrome outside every surface resolves to no root", () => {

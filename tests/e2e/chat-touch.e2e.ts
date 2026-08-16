@@ -1,6 +1,7 @@
 import type { APIRequestContext, Page } from "@playwright/test";
 
 import type { ConversationItem } from "../../src/chat/types";
+import { openChatPanel } from "./chat-helpers";
 import { expect, test } from "./fixtures";
 
 test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
@@ -133,9 +134,13 @@ test("rotation and live mode switching retain Chat without remounting", async ({
   await expect(page.locator("#chat-input")).toHaveValue("rotation draft");
   await page.locator("#chat-input").blur();
   await page.locator("#touch-tab-files").click();
+  // A desktop-capable viewport before escaping touch mode: below the 900px
+  // stacked breakpoint the chat panel's viewport guard keeps it collapsed,
+  // so the split needs iPad-landscape room to present.
+  await page.setViewportSize({ width: 1280, height: 800 });
   await page.locator("#ui-mode-toggle").click();
   await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "desktop");
-  await page.getByRole("radio", { name: "Chat" }).click();
+  await openChatPanel(page);
   await expect(page.locator("#chat-surface")).toHaveAttribute("data-e2e-mount", "same");
   await expect(page.locator("#chat-input")).toHaveValue("rotation draft");
   await page.locator("#ui-mode-toggle").click();

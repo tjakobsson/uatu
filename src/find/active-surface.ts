@@ -70,6 +70,15 @@ export function findSurfaceRoot(target: EventTarget | null): SurfaceRoot | null 
   if (element.closest("#find-bar")) {
     return null;
   }
+  // The UI-mode toggles are app chrome that happens to live in sidebar
+  // chrome (touch-navigation puts the mode switch in the sidebar header).
+  // Switching modes is not a statement about where the user works — and
+  // letting the sidebar rule claim `preview` from the toggle press would
+  // erase the very surface the mode-switch normalization consults to decide
+  // which touch tab to land on.
+  if (element.closest("#ui-mode-toggle, #rail-ui-mode-toggle")) {
+    return null;
+  }
   for (const [root, selector] of ROOT_SELECTORS) {
     if (element.closest(selector)) {
       return root;
