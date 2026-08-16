@@ -6092,9 +6092,11 @@ html[data-ui-mode="touch"] .chat-header {
 }
 
 /* Grouped steps: a finished run of activity rows collapses to one line at the
-   same visual weight as a single row — the group is chrome about chrome. */
+   same visual weight as a single row — the group is chrome about chrome. It
+   sits between prose blocks, so it needs its own vertical air to not read as
+   a line of the paragraph above or a kicker for the heading below. */
 .chat-activity-group {
-  margin-bottom: 0.1rem;
+  margin: 0.65rem 0 1rem;
   color: var(--text-subtle);
 }
 
