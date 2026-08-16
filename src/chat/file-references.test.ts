@@ -18,9 +18,9 @@ describe("workspace file references", () => {
     ];
     expect(resolveWorkspaceFileReference("C:\\work\\one\\src\\app.ts:7", windowsRoots)).toMatchObject({ document: { id: "win:app" }, line: 7 });
     expect(resolveWorkspaceFileReference("C:/work/one/src/app.ts", windowsRoots)).toMatchObject({ document: { id: "win:app" } });
-    // A drive path outside every root stays inert instead of falling into the
-    // relative lookup.
-    expect(resolveWorkspaceFileReference("D:/other/src/app.ts", windowsRoots)).toBeNull();
+    // An absolute path with no matching document tail stays inert instead of
+    // falling into the relative lookup.
+    expect(resolveWorkspaceFileReference("D:/other/src/other.ts", windowsRoots)).toBeNull();
   });
 
   test("keeps ambiguous, traversing, outside, and unresolved references inert", () => {
@@ -28,5 +28,16 @@ describe("workspace file references", () => {
     expect(resolveWorkspaceFileReference("../one/src/app.ts", roots)).toBeNull();
     expect(resolveWorkspaceFileReference("/etc/passwd:1", roots)).toBeNull();
     expect(resolveWorkspaceFileReference("missing.ts", roots)).toBeNull();
+  });
+
+  test("a canonical path from a symlinked root resolves by unique relative suffix", () => {
+    const symlinked: RootGroup[] = [
+      // The watched root is the symlink path; OpenCode reports through the
+      // canonical target, so the prefix never matches.
+      { id: "one", label: "one", path: "/work/link", hiddenCount: 0, docs: [{ id: "one:doc", rootId: "one", name: "notes.md", relativePath: "docs/notes.md", mtimeMs: 1, kind: "text" }] },
+    ];
+    expect(resolveWorkspaceFileReference("/private/real/project/docs/notes.md:3", symlinked)).toMatchObject({ document: { id: "one:doc" }, line: 3 });
+    // A path terminating in the same suffix under BOTH roots stays inert.
+    expect(resolveWorkspaceFileReference("/private/elsewhere/src/app.ts", roots)).toBeNull();
   });
 });

@@ -23,6 +23,18 @@ export function resolveWorkspaceFileReference(raw: string, roots: RootGroup[]): 
       const document = root.docs.find(item => item.relativePath === relative);
       if (document) matches.push(document);
     }
+    // Symlinked roots (and macOS's /tmp → /private/tmp) make the provider
+    // report canonical paths while root.path keeps the presented form, so the
+    // prefix comparison above never matches. Fall back to the unique document
+    // whose full relative path terminates the reference on a real path
+    // boundary — ambiguity (across roots or within one) stays inert.
+    if (matches.length === 0) {
+      for (const root of roots) {
+        for (const document of root.docs) {
+          if (candidate.endsWith(`/${document.relativePath}`)) matches.push(document);
+        }
+      }
+    }
   } else {
     candidate = candidate.replace(/^\.\//, "");
     for (const root of roots) {

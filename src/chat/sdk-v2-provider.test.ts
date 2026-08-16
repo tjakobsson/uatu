@@ -84,6 +84,20 @@ describe("OpenCode v2 identity policy", () => {
     });
   });
 
+  test("session lookup treats 404 as a store miss but propagates other errors", async () => {
+    const client = (classicStatus: number, v2Status: number) => ({
+      session: { get: async () => ({ error: { message: "classic" }, response: { status: classicStatus } }) },
+      v2: { session: { get: async () => ({ error: { message: "v2" }, response: { status: v2Status } }) } },
+    }) as unknown as OpencodeClient;
+
+    // Both stores answer not-found: the session is genuinely absent.
+    expect(await new SdkV2Provider(client(404, 404), "/workspace").getSession("ses_x")).toBeNull();
+    // A transient auth/server failure must surface, not read as missing —
+    // requireSession's pump path relies on the distinction.
+    await expect(new SdkV2Provider(client(401, 404), "/workspace").getSession("ses_x")).rejects.toThrow("session lookup failed");
+    await expect(new SdkV2Provider(client(404, 500), "/workspace").getSession("ses_x")).rejects.toThrow("session lookup failed");
+  });
+
   test("a command rejected within the admission window propagates to the caller", async () => {
     const client = {
       session: {

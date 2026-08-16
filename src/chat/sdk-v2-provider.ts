@@ -127,8 +127,15 @@ export class SdkV2Provider implements OpenCodeProvider {
       if (isCompatibilitySession(classic.data)) this.compatibilitySessions.add(id);
       return toSession(classic.data);
     }
+    // Only a store miss falls through — a transient 401/5xx must surface as a
+    // failure, or the pump misreads it as "conversation gone" and silently
+    // drops frames like completion and permission requests.
+    ensureLookupMiss(classic);
     const result = await this.client.v2.session.get({ sessionID: id }) as Result<unknown>;
-    if (result.error) return null;
+    if (result.error !== undefined) {
+      ensureLookupMiss(result);
+      return null;
+    }
     if (!result.data) return null;
     const response = result.data as { data?: unknown };
     return toSession(response.data ?? response);
@@ -322,6 +329,18 @@ function unwrap<T>(result: Result<T>): T {
 
 function ensureSuccess(result: Result<unknown>): void {
   if (result.error !== undefined) throw new Error(`OpenCode request failed: ${stringify(result.error)}`);
+}
+
+/**
+ * A session lookup answering 404 (or 400 for an id the store rejects) means
+ * "not in this store" and may fall through; any other error — expired auth,
+ * a restarting server — is a provider failure and must propagate.
+ */
+function ensureLookupMiss(result: Result<unknown>): void {
+  if (result.error === undefined) return;
+  const status = (result as { response?: { status?: number } }).response?.status;
+  if (status === 404 || status === 400) return;
+  throw new Error(`OpenCode session lookup failed: ${stringify(result.error)}`);
 }
 
 /** Message identity across both stores: flat `id` (v2) or `info.id` (classic). */
