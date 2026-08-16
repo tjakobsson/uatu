@@ -24,21 +24,25 @@ function shellOf(): Document {
     `<!doctype html><html><body>
       <div class="app-shell">
         <aside class="sidebar">
+          <div class="sidebar-header"><button id="ui-mode-toggle"></button></div>
           <div class="sidebar-mode-row"><button id="follow-toggle">Follow</button></div>
           <div class="pane-body"><div id="tree"></div></div>
         </aside>
         <div id="sidebar-resizer" class="sidebar-resizer"></div>
         <button id="sidebar-expand" class="sidebar-rail"></button>
         <div class="main-stack">
-          <main class="preview-shell" tabindex="-1">
-            <!-- Nested inside the shell, exactly as in index.html — that
-                 nesting is what made the bar claim the preview surface. -->
-            <div id="find-bar" class="find-bar">
-              <div class="find-bar-inner"><input id="find-query" /></div>
-            </div>
-            <article id="preview" class="preview"><p id="para">text</p></article>
-          </main>
-          <section id="chat-surface"><textarea id="chat-input"></textarea></section>
+          <div class="work-row">
+            <main class="preview-shell" tabindex="-1">
+              <!-- Nested inside the shell, exactly as in index.html — that
+                   nesting is what made the bar claim the preview surface. -->
+              <div id="find-bar" class="find-bar">
+                <div class="find-bar-inner"><input id="find-query" /></div>
+              </div>
+              <article id="preview" class="preview"><p id="para">text</p></article>
+            </main>
+            <div id="chat-resizer" class="panel-resizer chat-resizer"></div>
+            <section id="chat-surface"><textarea id="chat-input"></textarea></section>
+          </div>
           <section id="terminal-panel" class="terminal-panel">
             <div class="terminal-pane"><textarea id="term-input"></textarea></div>
           </section>
@@ -86,6 +90,19 @@ describe("findSurfaceRoot", () => {
     setActiveSurface("terminal");
     noteInteraction(document.querySelector("#find-query"));
     expect(appState.activeSurface).toBe("terminal");
+  });
+
+  test("the mode toggle is chrome — pressing it leaves the surface standing", () => {
+    // It lives in sidebar chrome, but switching modes is not a statement
+    // about where the user works. Without the exclusion the sidebar rule
+    // claimed `preview` from the press, so leaving touch mode from the Chat
+    // tab could never land back on Chat: the toggle itself erased the claim
+    // the mode-switch normalization consults.
+    const document = shellOf();
+    expect(findSurfaceRoot(document.querySelector("#ui-mode-toggle"))).toBeNull();
+    setActiveSurface("chat");
+    noteInteraction(document.querySelector("#ui-mode-toggle"));
+    expect(appState.activeSurface).toBe("chat");
   });
 
   test("chrome outside every surface resolves to no root", () => {
@@ -239,58 +256,10 @@ describe("a committed tab change claims its surface", () => {
     }
   });
 
-  // Desktop's Preview/Chat segmented control sits in the chrome outside every
-  // surface root, so no pointer listener can claim from it — the committed
-  // main-surface change is the claim. Driven through the real setMainSurface.
-  test("a committed main-surface change claims the surface on desktop", async () => {
-    const savedDocument = Reflect.get(globalThis, "document");
-    const savedWindow = Reflect.get(globalThis, "window");
-    const store = new Map<string, string>();
-    Reflect.set(globalThis, "document", {
-      documentElement: { setAttribute: () => {} },
-      addEventListener: () => {},
-    });
-    Reflect.set(globalThis, "window", {
-      localStorage: {
-        getItem: (key: string) => store.get(key) ?? null,
-        setItem: (key: string, value: string) => void store.set(key, value),
-        removeItem: (key: string) => void store.delete(key),
-        get length() {
-          return store.size;
-        },
-        key: (index: number) => [...store.keys()][index] ?? null,
-      },
-      // Fine pointer => desktop mode, where the main surface decides.
-      matchMedia: () => ({ matches: false }),
-    });
-    // `uiMode()` caches its first resolution, which an earlier test pinned to
-    // touch — flip through the real setter (and restore) instead.
-    const savedRaf = Reflect.get(globalThis, "requestAnimationFrame");
-    Reflect.set(globalThis, "requestAnimationFrame", () => 0);
-    try {
-      const { initActiveSurfaceTracking, setActiveSurface } = await import("./active-surface");
-      const { setMainSurface } = await import("../chat/surface");
-      const { setUiMode, uiMode } = await import("../shell/ui-mode");
-      const previousMode = uiMode();
-      setUiMode("desktop");
-      try {
-        initActiveSurfaceTracking();
-
-        setActiveSurface("terminal");
-        setMainSurface("chat");
-        expect(appState.activeSurface).toBe("chat");
-
-        setMainSurface("preview");
-        expect(appState.activeSurface).toBe("preview");
-      } finally {
-        setUiMode(previousMode);
-      }
-    } finally {
-      Reflect.set(globalThis, "requestAnimationFrame", savedRaf);
-      Reflect.set(globalThis, "document", savedDocument);
-      Reflect.set(globalThis, "window", savedWindow);
-    }
-  });
+  // Desktop needs no equivalent claim path for Chat: since the
+  // chat-side-panel change it is co-visible beside Preview, so working in it
+  // is an ordinary interaction inside `#chat-surface` that the pointer and
+  // focus listeners cover — asserted by the findSurfaceRoot suite above.
 });
 
 describe("inertness against programmatic selection", () => {
@@ -327,12 +296,13 @@ describe("inertness against programmatic selection", () => {
     expect(offenders).toEqual([]);
   });
 
-  // A committed main-surface change claims its surface too (desktop), so
-  // setMainSurface is a third route to the setter with the same rule.
-  test("no file-event module reaches the main surface either", () => {
+  // Opening the chat panel is a user act about where they work, so the panel
+  // setter gets the same structural rule as the tab: no file-event module may
+  // reach it (a background file change must not pop the panel open).
+  test("no file-event module reaches the chat panel either", () => {
     const offenders = SELECTION_MODULES.filter(relative => {
       const contents = readFileSync(path.join(SRC_ROOT, relative), "utf8");
-      return contents.includes("setMainSurface");
+      return contents.includes("setChatPanelOpen") || contents.includes("expandChatPanel");
     });
     expect(offenders).toEqual([]);
   });

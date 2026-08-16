@@ -12,7 +12,7 @@
 
 import { ACTIVE_TAB_KEY, appState, safeLocalStorage, type TouchTab } from "./state";
 import { onUiModeChange, setUiMode, uiMode } from "./ui-mode";
-import { setMainSurface } from "../chat/surface";
+import { isChatPanelOpen } from "../chat/surface";
 
 export type TabChangeListener = (tab: TouchTab, previous: TouchTab) => void;
 
@@ -54,7 +54,6 @@ export function setActiveTab(tab: TouchTab): void {
   const previous = appState.activeTab;
   if (previous === tab) return;
   appState.activeTab = tab;
-  if (tab === "preview" || tab === "chat") setMainSurface(tab);
   writeActiveTabPreference(tab);
   applyActiveTabToDom();
   for (const listener of listeners) {
@@ -169,8 +168,14 @@ export function initTabBar(): void {
     }
   };
   onUiModeChange(syncModeToggleLabels);
+  // Mode-switch normalization, desktop→touch half: touch presents one
+  // surface at a time, so entering it lands on Chat only when the user was
+  // last working in an open Chat panel; otherwise Preview. The touch→desktop
+  // half (Chat tab opens the panel) lives in chat/surface.ts.
   onUiModeChange(mode => {
-    if (mode === "touch") setActiveTab(appState.mainSurface);
+    if (mode === "touch") {
+      setActiveTab(appState.activeSurface === "chat" && isChatPanelOpen() ? "chat" : "preview");
+    }
   });
   syncModeToggleLabels();
 

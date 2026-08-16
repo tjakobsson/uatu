@@ -1,6 +1,7 @@
 import type { APIRequestContext, Page } from "@playwright/test";
 
 import type { ConversationItem } from "../../src/chat/types";
+import { openChatPanel } from "./chat-helpers";
 import { expect, test } from "./fixtures";
 
 async function bootChat(page: Page, request: APIRequestContext): Promise<void> {
@@ -8,8 +9,7 @@ async function bootChat(page: Page, request: APIRequestContext): Promise<void> {
   const token = await request.get("/__e2e/terminal-token").then(response => response.json()) as { token: string };
   await page.goto(`/?t=${encodeURIComponent(token.token)}`);
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
-  await page.getByRole("radio", { name: "Chat" }).click();
-  await expect(page.locator("#chat-surface")).toBeVisible();
+  await openChatPanel(page);
   await expect(page.locator("#chat-state")).not.toContainText("Loading OpenCode");
 }
 
@@ -22,7 +22,7 @@ async function control(request: APIRequestContext, body: Record<string, unknown>
 async function seedAndOpen(page: Page, request: APIRequestContext, title: string, items: ConversationItem[]): Promise<string> {
   const seeded = await control(request, { action: "seed", title, items }) as { conversation: { id: string } };
   await page.reload();
-  await page.getByRole("radio", { name: "Chat" }).click();
+  await openChatPanel(page);
   await expect(page.locator("#chat-conversation-select")).toHaveValue(seeded.conversation.id);
   return seeded.conversation.id;
 }
@@ -118,7 +118,7 @@ test.describe("chat panels and navigation", () => {
     // Dismissal is a user statement — reloading the conversation must not
     // resurrect the dismissed strip.
     await page.reload();
-    await page.getByRole("radio", { name: "Chat" }).click();
+    await openChatPanel(page);
     await expect(track).toBeVisible();
     await track.locator("summary").click();
     await expect(track.locator("li")).toHaveCount(1);

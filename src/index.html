@@ -37,8 +37,25 @@
           "data-active-tab",
           tab === "files" || tab === "preview" || tab === "chat" || tab === "terminal" ? tab : "preview",
         );
-        const main = read("uatu:main-surface");
-        el.setAttribute("data-main-surface", main === "chat" ? "chat" : "preview");
+        // Desktop chat panel: open/collapsed + split fraction, restated from
+        // chat/surface.ts's readChatPanelPreference (defaults collapsed, 0.4).
+        var panelOpen = false;
+        var panelFraction = 0.4;
+        try {
+          var panel = JSON.parse(read("uatu:chat-panel") || "null");
+          if (panel && typeof panel === "object") {
+            if (typeof panel.open === "boolean") panelOpen = panel.open;
+            if (typeof panel.fraction === "number" && isFinite(panel.fraction)) {
+              panelFraction = Math.min(Math.max(panel.fraction, 0.15), 0.85);
+            }
+          }
+        } catch (error) {
+          /* malformed storage keeps the defaults */
+        }
+        el.setAttribute("data-chat-panel", panelOpen ? "open" : "collapsed");
+        if (el.style && el.style.setProperty) {
+          el.style.setProperty("--chat-fraction", String(panelFraction));
+        }
       })();
     </script>
   </head>
@@ -417,6 +434,12 @@
       </div>
 
       <div class="main-stack">
+      <!-- Desktop work row: Preview and Chat co-visible as a split
+           (chat-side-panel change). The terminal frames this pair from
+           outside — bottom dock below it, right dock beside it — so the
+           main-stack's children stay [content, resizer, panel] and the
+           terminal's dock rules are untouched. -->
+      <div class="work-row">
       <!-- tabindex="-1" makes the scroll container *able* to hold focus so
            Space / PageUp / PageDown scroll the document and the find bar has
            somewhere to hand focus back to. It is never focused automatically —
@@ -539,10 +562,6 @@
               >A+</button>
             </div>
           </div>
-          <div class="main-surface-switch" role="radiogroup" aria-label="Main surface">
-            <button class="main-surface-segment" type="button" role="radio" data-main-surface="preview" aria-checked="true">Preview</button>
-            <button class="main-surface-segment" type="button" role="radio" data-main-surface="chat" aria-checked="false">Chat</button>
-          </div>
         </header>
 
         <!-- Find-bar slot for the preview. Zero-height and sticky — the same
@@ -632,7 +651,34 @@
           <p>Add a directory with supported documents or save a file to get started.</p>
         </article>
       </main>
+        <div
+          id="chat-resizer"
+          class="panel-resizer chat-resizer"
+          data-orientation="vertical"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize chat panel"
+          title="Resize chat panel"
+          tabindex="0"
+        ></div>
         <section id="chat-surface" class="chat-surface" aria-label="Chat" tabindex="-1">
+          <!-- Collapsed presentation: the surface narrows to this strip, so
+               Chat keeps a permanent home at the work row's right edge and
+               reopening is an interaction *inside* the surface (which is what
+               lets active-surface tracking claim it like any other click). -->
+          <button id="chat-expand" class="chat-expand-strip" type="button" aria-label="Open chat panel" title="Open chat panel">
+            <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+              <path
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.6"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M9.5 4.5 6 8l3.5 3.5"
+              />
+            </svg>
+            <span class="chat-expand-label">Chat</span>
+          </button>
           <header class="chat-header">
             <div>
               <p id="chat-context" class="eyebrow">OpenCode</p>
@@ -646,10 +692,18 @@
               <label class="sr-only" for="chat-conversation-select">Conversation</label>
               <select id="chat-conversation-select" aria-label="Conversation"></select>
               <button id="chat-new-conversation" class="chat-secondary-button" type="button">New</button>
-              <div class="main-surface-switch" role="radiogroup" aria-label="Main surface">
-                <button class="main-surface-segment" type="button" role="radio" data-main-surface="preview" aria-checked="true">Preview</button>
-                <button class="main-surface-segment" type="button" role="radio" data-main-surface="chat" aria-checked="false">Chat</button>
-              </div>
+              <button id="chat-collapse" class="icon-button chat-collapse-button" type="button" aria-label="Collapse chat panel" title="Collapse chat panel">
+                <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                  <path
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.6"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    d="M6.5 4.5 10 8l-3.5 3.5"
+                  />
+                </svg>
+              </button>
             </div>
           </header>
           <div id="chat-state" class="chat-state" role="status" aria-live="polite">Loading OpenCode…</div>
@@ -688,6 +742,7 @@
             </div>
           </form>
         </section>
+      </div>
         <div
           id="terminal-resizer"
           class="panel-resizer"

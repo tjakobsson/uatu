@@ -13,7 +13,7 @@ import { supportsHighlights } from "./highlight";
 import { DEFAULT_MATCH_OPTIONS, type MatchOptions } from "./matcher";
 import { createPreviewEngine } from "./preview-engine";
 import { setActiveTab } from "../shell/tab-bar";
-import { setMainSurface } from "../chat/surface";
+import { expandChatPanel } from "../chat/surface";
 
 const findBarElementMaybe = document.querySelector<HTMLElement>("#find-bar");
 const queryInputMaybe = document.querySelector<HTMLInputElement>("#find-query");
@@ -74,7 +74,9 @@ const previewEngine = createPreviewEngine(previewElement, previewShellElement, p
 const chatEngine = createPreviewEngine(chatItemsMaybe, chatSurfaceMaybe, chatFindSlotMaybe, {
   label: "chat",
   revealSurface: () => {
-    setMainSurface("chat");
+    // Desktop: expand a collapsed panel so the search acts on something
+    // visible. Touch: the Chat tab is the only way the surface shows.
+    expandChatPanel();
     if (document.documentElement.dataset.uiMode === "touch") setActiveTab("chat");
   },
   scrollRoot: () => chatTimelineMaybe,

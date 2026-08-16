@@ -371,6 +371,17 @@ html.uatu-desktop-host .preview-shell {
   scroll-padding-top: calc(var(--preview-scroll-inset) + var(--titlebar-inset, 0px));
 }
 
+/* The chat panel (chat-side-panel change) is top-level chrome like the
+   sidebar: its header row — conversation picker, New, collapse — and the
+   collapsed strip's reopen affordance must clear the covered strip. Padding,
+   the sidebar's treatment: the surface background continues into the strip
+   for the frost to sample, and no interactive control sits above the inset.
+   Touch mode's fixed-position chat sets its own safe-area padding at higher
+   specificity, so this cannot leak into the tab presentation. */
+html.uatu-desktop-host .chat-surface {
+  padding-top: var(--titlebar-inset, 0px);
+}
+
 /* Margin, not padding: backgrounds paint through padding, so an inset-padded
    panel fills the covered strip with its opaque surface and the frost above
    smears it into a gradient band across the toolbar. With a margin the panel
@@ -381,20 +392,53 @@ html.uatu-desktop-host .terminal-panel[data-dock="right"] {
 }
 
 /* Fullscreen overlays the main stack from the window top regardless of dock,
-   so it needs the same strip clearance. */
+   so it needs the same strip clearance — and it must outrank the lifted
+   headers below (91): fullscreen replaces the whole work area, chrome
+   included, and at its browser z-index (5) the raised preview header would
+   float over the panel and intercept its exit controls. */
 html.uatu-desktop-host .terminal-panel[data-display="fullscreen"] {
   margin-top: var(--titlebar-inset, 0px);
+  z-index: 92;
 }
 
 /* Like the sidebar, the right-docked terminal is a solid non-scrolling
    surface: nothing of it ever flows under the native chrome, so the frost
    has nothing to frost there and only paints a visible blur seam at the
-   preview/terminal boundary. Cap the strip at the panel's left edge.
-   Fullscreen is excluded — there the panel spans the full width and the
-   strip above it shows only shell background, which the frost may cover. */
+   preview/terminal boundary. Cap the strip at the panel's left edge. */
 html.uatu-desktop-host
   body:has(.terminal-panel[data-dock="right"]:not([hidden]):not([data-display="fullscreen"]))::before {
   right: var(--terminal-panel-width, 360px);
+}
+
+/* Fullscreen terminal: the panel starts at the inset, so the falloff below
+   it would only smear the panel's dark surface — the artifact the
+   right-dock cap exists to prevent. But the covered strip itself still
+   needs the frost: the page behind the overlay peeks through the strip and
+   would read raw under the native glass. Confine the frost to exactly the
+   strip — full height cut at the inset, no ramp — and the cut edge hides
+   under the panel's own top edge. */
+html.uatu-desktop-host
+  body:has(.terminal-panel[data-display="fullscreen"]:not([hidden]))::before {
+  height: var(--titlebar-inset, 0px);
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+
+/* The app's own top chrome renders ABOVE the frost (91 vs. its 90): the
+   frost exists to treat scrolled CONTENT escaping into the covered strip,
+   not the app's controls. Without this the falloff washes the preview
+   header (which already renders its own translucent glass — the desktop
+   frost double-blurred it) and the chat panel's conversation controls.
+   Content flowing above the preview header still frosts: it stacks below
+   the header, and the header's chain has no intervening stacking context. */
+html.uatu-desktop-host .preview-header {
+  z-index: 91;
+}
+
+html.uatu-desktop-host .chat-header,
+html.uatu-desktop-host .chat-expand-strip {
+  position: relative;
+  z-index: 91;
 }
 
 /* The minimized dock-right rail collapses to a fixed 36px strip; the width
@@ -772,6 +816,18 @@ h2 {
   flex-direction: column;
   min-height: 0;
   min-width: 0;
+}
+
+/* Desktop work row (chat-side-panel change): Preview and Chat side by side.
+   A child of .main-stack so the terminal keeps framing the pair from the
+   stack's edge — bottom dock below the row, right dock beside it — and the
+   stack's children stay [content, resizer, panel] for the dock rules. */
+.work-row {
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+  position: relative;
 }
 
 /* Search pane. Result rows are dense on purpose — the value is scanning many
@@ -4551,42 +4607,105 @@ html[data-ui-mode="touch"]:not([data-active-tab="preview"]) .uatu-outline {
   }
 }
 
-/* Chat is a persistent main-surface sibling of Preview. Visibility switches
-   only at the CSS layer so conversation state, scroll, and terminal attachment
-   survive every Preview/Chat transition. Each surface header carries its own
-   switch instance at the top right (the wiring syncs every instance); only
-   the visible surface's copy is on screen, so the control never floats over
-   the terminal dock. */
-.main-surface-switch {
-  display: inline-flex;
-  flex-shrink: 0;
-  padding: 2px;
-  border: 1px solid var(--border-soft);
-  border-radius: 0.5rem;
-  background: var(--surface-raised);
+/* Desktop chat panel (chat-side-panel change): Preview and Chat are
+   co-visible primary surfaces splitting the work row — there is no mode that
+   replaces one with the other. Chat's share is a fraction of the row
+   (--chat-fraction, stamped pre-paint by the boot script) so resizing the
+   window keeps the proportion; the max-width backstop keeps Preview at its
+   minimum even when a fraction persisted on a wide window is replayed on a
+   narrower one. Collapse narrows the surface to the expand strip — the
+   surface stays MOUNTED, which is what preserves the conversation, draft,
+   and reading position across collapse/expand. Touch mode ignores all of
+   this: there Chat is a full-screen tab keyed on data-active-tab. */
+html[data-ui-mode="desktop"] .chat-surface {
+  flex: 0 0 auto;
+  width: calc(var(--chat-fraction, 0.4) * 100%);
+  min-width: 340px;
+  max-width: calc(100% - 364px);
 }
 
-.chat-conversation-controls .main-surface-switch {
-  margin-left: 0.5rem;
+html[data-ui-mode="desktop"][data-chat-panel="collapsed"] .chat-surface {
+  width: auto;
+  min-width: 0;
+  max-width: none;
 }
 
-.main-surface-segment {
+html[data-ui-mode="desktop"][data-chat-panel="collapsed"] .chat-surface > :not(.chat-expand-strip),
+html[data-ui-mode="desktop"][data-chat-panel="collapsed"] .chat-resizer,
+html[data-ui-mode="touch"] .chat-resizer {
+  display: none;
+}
+
+/* The collapsed panel's entire presentation: a slim vertical strip that owns
+   the reopen affordance, keeping Chat's home visible at the work row's right
+   edge. Hidden whenever the panel is open (or in touch mode) by the display
+   default here. */
+.chat-expand-strip {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  flex: 1 1 auto;
+  width: 28px;
+  padding: 0.75rem 0;
   border: 0;
-  border-radius: 0.35rem;
-  padding: 0.3rem 0.75rem;
+  border-left: 1px solid var(--border-soft);
+  background: var(--surface-raised);
   color: var(--text-subtle);
-  background: transparent;
   cursor: pointer;
+  writing-mode: vertical-rl;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
-.main-surface-segment.is-active {
+.chat-expand-strip:hover,
+.chat-expand-strip:focus-visible {
   color: var(--text-strong);
   background: var(--accent-soft);
 }
 
-html[data-ui-mode="desktop"][data-main-surface="chat"] .preview-shell,
-html[data-ui-mode="desktop"][data-main-surface="preview"] .chat-surface {
-  display: none;
+html[data-ui-mode="desktop"][data-chat-panel="collapsed"] .chat-expand-strip {
+  display: flex;
+}
+
+.chat-resizer:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+body.is-resizing-chat {
+  cursor: col-resize;
+  user-select: none;
+}
+
+body.is-resizing-chat .chat-resizer {
+  background: var(--accent-soft);
+}
+
+/* The ≤900px stacked layout gives up side-by-side chrome entirely, so the
+   chat panel presents collapsed regardless of its stored preference. The JS
+   guard (chat/surface.ts) mirrors this breakpoint so the data-chat-panel
+   attribute agrees; these rules are the pre-JS backstop, and they live AFTER
+   the split rules above because equal-specificity order decides the winner. */
+@media (max-width: 900px) {
+  html[data-ui-mode="desktop"] .chat-surface {
+    width: auto;
+    min-width: 0;
+    max-width: none;
+  }
+
+  html[data-ui-mode="desktop"] .chat-surface > :not(.chat-expand-strip) {
+    display: none;
+  }
+
+  html[data-ui-mode="desktop"] .chat-resizer {
+    display: none;
+  }
+
+  html[data-ui-mode="desktop"] .chat-expand-strip {
+    display: flex;
+  }
 }
 
 .chat-surface {
@@ -5209,7 +5328,7 @@ html[data-ui-mode="touch"] .app-shell {
   padding-bottom: var(--tab-bar-total);
 }
 
-html[data-ui-mode="touch"] .main-surface-switch {
+html[data-ui-mode="touch"] .chat-collapse-button {
   display: none;
 }
 

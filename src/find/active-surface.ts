@@ -18,7 +18,6 @@
 // the watcher. `active-surface.test.ts` asserts structurally that no
 // file-event module reaches the setter OR the tab.
 
-import { onMainSurfaceChange } from "../chat/surface";
 import { appState, type ActiveSurface, type TouchTab } from "../shell/state";
 import { onActiveTabChange } from "../shell/tab-bar";
 import { uiMode } from "../shell/ui-mode";
@@ -69,6 +68,15 @@ export function findSurfaceRoot(target: EventTarget | null): SurfaceRoot | null 
   // takes focus — meaning opening find over the terminal silently reassigned
   // the surface, and the *next* ⌘F searched the document instead.
   if (element.closest("#find-bar")) {
+    return null;
+  }
+  // The UI-mode toggles are app chrome that happens to live in sidebar
+  // chrome (touch-navigation puts the mode switch in the sidebar header).
+  // Switching modes is not a statement about where the user works — and
+  // letting the sidebar rule claim `preview` from the toggle press would
+  // erase the very surface the mode-switch normalization consults to decide
+  // which touch tab to land on.
+  if (element.closest("#ui-mode-toggle, #rail-ui-mode-toggle")) {
     return null;
   }
   for (const [root, selector] of ROOT_SELECTORS) {
@@ -164,15 +172,8 @@ export function initActiveSurfaceTracking(): void {
     }
   });
 
-  // Desktop swaps Preview and Chat exclusively through the main-surface
-  // switch, which sits in the chrome outside every surface root — the same
-  // blind spot the tab bar has in touch mode, with the same answer: the
-  // committed change is itself the statement of where the user now works.
-  // Every setMainSurface caller is a user action (segment click, tab commit,
-  // find-bar reveal, chat file link), so the claim stays inert to watchers.
-  onMainSurfaceChange(surface => {
-    if (uiMode() === "desktop") {
-      setActiveSurface(surface);
-    }
-  });
+  // Desktop needs no equivalent subscription: since the chat-side-panel
+  // change, Chat is co-visible beside Preview, so working in it is an
+  // ordinary interaction inside `#chat-surface` — the pointer and focus
+  // listeners above cover it exactly as they cover the terminal panel.
 }

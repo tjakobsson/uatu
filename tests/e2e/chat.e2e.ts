@@ -1,6 +1,7 @@
 import type { APIRequestContext, Page } from "@playwright/test";
 
 import type { ConversationItem } from "../../src/chat/types";
+import { openChatPanel } from "./chat-helpers";
 import { expect, test } from "./fixtures";
 
 async function bootChat(page: Page, request: APIRequestContext): Promise<void> {
@@ -8,8 +9,7 @@ async function bootChat(page: Page, request: APIRequestContext): Promise<void> {
   const token = await request.get("/__e2e/terminal-token").then(response => response.json()) as { token: string };
   await page.goto(`/?t=${encodeURIComponent(token.token)}`);
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
-  await page.getByRole("radio", { name: "Chat" }).click();
-  await expect(page.locator("#chat-surface")).toBeVisible();
+  await openChatPanel(page);
   await expect(page.locator("#chat-state")).not.toContainText("Loading OpenCode");
 }
 
@@ -51,9 +51,13 @@ test.describe("desktop OpenCode chat", () => {
     await expect(page.locator("#chat-items")).toContainText("Use the smaller approach");
 
     await input.fill("draft retained across surfaces");
-    await page.getByRole("radio", { name: "Preview" }).click();
+    // Collapse to the strip and reopen: the surface stays mounted, so the
+    // draft, model choice, and conversation survive — and Preview is
+    // co-visible the whole time.
+    await page.locator("#chat-collapse").click();
+    await expect(page.locator("#chat-timeline")).toBeHidden();
     await expect(page.locator(".preview-shell")).toBeVisible();
-    await page.getByRole("radio", { name: "Chat" }).click();
+    await openChatPanel(page);
     await expect(input).toHaveValue("draft retained across surfaces");
     await expect(modelSelect.locator("option:checked")).toHaveText("OpenAI: GPT-5");
 
@@ -62,7 +66,7 @@ test.describe("desktop OpenCode chat", () => {
     await expect(page.locator("#chat-items")).toContainText("Initial prompt");
 
     await page.reload();
-    await page.getByRole("radio", { name: "Chat" }).click();
+    await openChatPanel(page);
     await expect(modelSelect.locator("option:checked")).toHaveText("OpenAI: GPT-5");
     await expect(page.locator("#chat-title")).toHaveText("Initial prompt");
 
@@ -113,7 +117,7 @@ test.describe("desktop OpenCode chat", () => {
   test("streams Markdown and updates one tool entry in place", async ({ page, request }) => {
     const seeded = await control(request, { action: "seed", title: "Streaming", items: [] }) as { conversation: { id: string } };
     await page.reload();
-    await page.getByRole("radio", { name: "Chat" }).click();
+    await openChatPanel(page);
     const id = seeded.conversation.id;
     const assistant: ConversationItem = { id: "part:answer", type: "assistant_message", createdAt: 10, markdown: "## Result\n\n" };
     await control(request, { action: "item", conversationId: id, item: assistant });
@@ -132,7 +136,7 @@ test.describe("desktop OpenCode chat", () => {
   test("resolves permissions and structured questions once", async ({ page, request }) => {
     const seeded = await control(request, { action: "seed", title: "Interactions", items: [] }) as { conversation: { id: string } };
     await page.reload();
-    await page.getByRole("radio", { name: "Chat" }).click();
+    await openChatPanel(page);
     const id = seeded.conversation.id;
     const permission: ConversationItem = { id: "permission:perm-1", type: "permission", createdAt: 10, requestId: "perm-1", action: "run command", resources: ["bun test"], status: "pending" };
     await control(request, { action: "item", conversationId: id, item: permission });
@@ -154,7 +158,7 @@ test.describe("desktop OpenCode chat", () => {
   test("streaming beside a pending question keeps the answer being typed", async ({ page, request }) => {
     const seeded = await control(request, { action: "seed", title: "Concurrent", items: [] }) as { conversation: { id: string } };
     await page.reload();
-    await page.getByRole("radio", { name: "Chat" }).click();
+    await openChatPanel(page);
     const id = seeded.conversation.id;
     const question: ConversationItem = {
       id: "question:q-2", type: "question", createdAt: 11, requestId: "q-2", status: "pending",
@@ -208,7 +212,7 @@ test.describe("desktop OpenCode chat", () => {
     const first = await control(request, { action: "seed", title: "First", items: [] }) as { conversation: { id: string } };
     const second = await control(request, { action: "seed", title: "Second", items: [] }) as { conversation: { id: string } };
     await page.reload();
-    await page.getByRole("radio", { name: "Chat" }).click();
+    await openChatPanel(page);
     await page.locator("#chat-conversation-select").selectOption(first.conversation.id);
     await control(request, { action: "failPrompt" });
     await page.locator("#chat-input").fill("cross retry");
@@ -235,7 +239,7 @@ test.describe("desktop OpenCode chat", () => {
     const first = await control(request, { action: "seed", title: "First", items: [] }) as { conversation: { id: string } };
     const second = await control(request, { action: "seed", title: "Second", items: [] }) as { conversation: { id: string } };
     await page.reload();
-    await page.getByRole("radio", { name: "Chat" }).click();
+    await openChatPanel(page);
     await page.locator("#chat-conversation-select").selectOption(first.conversation.id);
     await expect(page.locator("#chat-title")).toHaveText("First");
 
@@ -254,7 +258,7 @@ test.describe("desktop OpenCode chat", () => {
   test("replays a missed event, resyncs a stale generation, and opens workspace files", async ({ page, request }) => {
     const seeded = await control(request, { action: "seed", title: "Reconnect", items: [] }) as { conversation: { id: string } };
     await page.reload();
-    await page.getByRole("radio", { name: "Chat" }).click();
+    await openChatPanel(page);
     const id = seeded.conversation.id;
     await expect.poll(async () => (await page.locator("#chat-state").textContent()) ?? "").not.toContain("Loading");
 
@@ -272,22 +276,24 @@ test.describe("desktop OpenCode chat", () => {
 
     await control(request, { action: "item", conversationId: id, item: { id: "part:file", type: "assistant_message", createdAt: 20, markdown: "Open [setup](guides/setup.md:2)." } });
     await page.getByRole("button", { name: "setup" }).click();
-    await expect(page.locator("html")).toHaveAttribute("data-main-surface", "preview");
+    // Navigation happens in the co-visible Preview — the panel must not
+    // collapse or hide the conversation.
     await expect(page.locator("#preview-path")).toHaveText("guides/setup.md");
+    await expect(page.locator("html")).toHaveAttribute("data-chat-panel", "open");
+    await expect(page.locator("#chat-timeline")).toBeVisible();
   });
 });
 
-test("the chat backend starts only when Chat becomes the active surface", async ({ page, request }) => {
+test("the chat backend starts only when the panel opens", async ({ page, request }) => {
   await request.post("/__e2e/reset");
   const token = await request.get("/__e2e/terminal-token").then(response => response.json()) as { token: string };
   await page.goto(`/?t=${encodeURIComponent(token.token)}`);
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
-  // Opening the app on Preview must not touch chat status — in production that
-  // call lazily launches the OpenCode server.
+  // Booting with the panel collapsed must not touch chat status — in
+  // production that call lazily launches the OpenCode server.
   await page.waitForTimeout(250);
   expect(((await control(request, { action: "stats" })) as { statusCalls: number }).statusCalls).toBe(0);
-  await page.getByRole("radio", { name: "Chat" }).click();
-  await expect(page.locator("#chat-surface")).toBeVisible();
+  await openChatPanel(page);
   await expect(page.locator("#chat-state")).not.toContainText("Loading OpenCode");
   await expect.poll(async () => ((await control(request, { action: "stats" })) as { statusCalls: number }).statusCalls).toBeGreaterThan(0);
 });

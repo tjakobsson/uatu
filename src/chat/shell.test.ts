@@ -5,20 +5,31 @@ const html = await Bun.file(`${import.meta.dir}/../index.html`).text();
 const { document } = parseHTML(html);
 
 describe("chat shell accessibility", () => {
-  test("mounts one persistent Chat surface beside Preview", () => {
+  test("mounts one persistent Chat surface beside Preview in the work row", () => {
     expect(document.querySelectorAll("#chat-surface")).toHaveLength(1);
-    expect(document.querySelector(".main-stack > #chat-surface")).not.toBeNull();
-    // One switch per surface header — only the visible surface's copy is on
-    // screen, so the control sits top-right without floating over the
-    // terminal dock. The wiring syncs every instance.
-    const groups = Array.from(document.querySelectorAll(".main-surface-switch"));
-    expect(groups).toHaveLength(2);
-    expect(document.querySelector(".preview-header .main-surface-switch")).not.toBeNull();
-    expect(document.querySelector(".chat-header .main-surface-switch")).not.toBeNull();
-    for (const group of groups) {
-      expect(Array.from(group.querySelectorAll("button[data-main-surface]"))
-        .map(button => button.getAttribute("data-main-surface"))).toEqual(["preview", "chat"]);
-    }
+    // Preview | divider | Chat inside the work row, which is the main-stack's
+    // content child — the terminal resizer/panel stay direct stack children
+    // so the dock rules keep their [content, resizer, panel] shape.
+    expect(document.querySelector(".main-stack > .work-row > #chat-surface")).not.toBeNull();
+    expect(document.querySelector(".main-stack > .work-row > .preview-shell")).not.toBeNull();
+    expect(document.querySelector(".work-row > #chat-resizer + #chat-surface")).not.toBeNull();
+    expect(document.querySelector(".main-stack > #terminal-panel")).not.toBeNull();
+  });
+
+  test("the panel owns collapse and reopen affordances with accessible names", () => {
+    // The strip is the collapsed panel's entire presentation, INSIDE the
+    // surface so activating it is an interaction active-surface tracking can
+    // claim like any other click.
+    expect(document.querySelector("#chat-surface > #chat-expand")?.getAttribute("aria-label")).toBe("Open chat panel");
+    expect(document.querySelector(".chat-header #chat-collapse")?.getAttribute("aria-label")).toBe("Collapse chat panel");
+    const resizer = document.querySelector("#chat-resizer");
+    expect(resizer?.getAttribute("role")).toBe("separator");
+    expect(resizer?.getAttribute("aria-orientation")).toBe("vertical");
+    // Keyboard-operable divider.
+    expect(resizer?.getAttribute("tabindex")).toBe("0");
+    // The segmented Preview/Chat switch is retired — nothing should recreate it.
+    expect(document.querySelector(".main-surface-switch")).toBeNull();
+    expect(document.querySelector("[data-main-surface]")).toBeNull();
   });
 
   test("exposes exactly four ordered touch tabs with selection semantics", () => {
