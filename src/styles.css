@@ -6083,6 +6083,14 @@ html[data-ui-mode="touch"] .chat-header {
 }
 
 
+/* The subagent's report inside an expanded Agent row: prose, separated from
+   the quoted prompt above it. */
+.chat-subagent-result {
+  margin-top: 0.55rem;
+  padding-top: 0.55rem;
+  border-top: 1px solid var(--border-soft);
+}
+
 /* Grouped steps: a finished run of activity rows collapses to one line at the
    same visual weight as a single row — the group is chrome about chrome. */
 .chat-activity-group {

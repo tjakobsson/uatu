@@ -266,12 +266,17 @@ function normalizePart(part: RecordValue, createdAt: number): NormalizedProvider
     // part-level timestamp here would sort reasoning past the text and tool
     // parts it ran between and strand it at the end of the replayed turn.
     // Within-message order comes from the provider's part order instead.
+    const time = record(part.time);
+    const durationMs = typeof time.start === "number" && typeof time.end === "number" && time.end >= time.start
+      ? time.end - time.start
+      : undefined;
     return [{ kind: "upsert", item: {
       id: `part:${id}`,
       type: "reasoning",
       createdAt,
       text: text(part.text),
       status: isFinishedTime(part.time) ? "completed" : "running",
+      ...(durationMs === undefined ? {} : { durationMs }),
     } }];
   }
   if (part.type === "tool") return [normalizeToolPart(part, createdAt)];

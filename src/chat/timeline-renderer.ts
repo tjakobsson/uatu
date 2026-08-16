@@ -259,10 +259,19 @@ function activitySegments(items: readonly ConversationItem[], status: Conversati
 function groupSummary(run: readonly ConversationItem[]): string {
   const counts = new Map<string, number>();
   for (const item of run) {
-    const label = item.type === "command" ? "Shell" : item.type === "reasoning" ? "Thinking" : item.type === "tool" ? describeToolDetail(item).label : item.type;
+    // Grouped reasoning stays "Thought" without a duration: the group line
+    // counts kinds of steps, and per-entry timings belong on the entries.
+    const label = item.type === "command" ? "Shell" : item.type === "reasoning" ? (item.status === "completed" ? "Thought" : "Thinking") : item.type === "tool" ? describeToolDetail(item).label : item.type;
     counts.set(label, (counts.get(label) ?? 0) + 1);
   }
   return [...counts.entries()].map(([label, count]) => count > 1 ? `${label} ×${count}` : label).join(" · ");
+}
+
+/** "Thinking" while it streams; "Thought for 12s" (or just "Thought") after. */
+export function reasoningLabel(item: Extract<ConversationItem, { type: "reasoning" }>): string {
+  if (item.status !== "completed") return "Thinking";
+  const worked = item.durationMs === undefined ? "" : formatWorked(item.durationMs);
+  return worked ? `Thought for ${worked}` : "Thought";
 }
 
 /**
@@ -315,6 +324,8 @@ function patchInPlace(entry: RenderedEntry, item: ConversationItem): boolean {
     entry.node.className = `chat-item chat-activity is-${item.status}`;
     const status = entry.node.querySelector(".chat-activity-status");
     if (status) status.textContent = item.status;
+    const label = entry.node.querySelector("summary > span");
+    if (label) label.textContent = reasoningLabel(item);
     const pre = entry.node.querySelector("pre");
     if (pre) pre.textContent = item.text;
     entry.item = item;
@@ -362,7 +373,7 @@ export function renderItem(item: ConversationItem, open: boolean, activeRequest:
   if (item.type === "command") {
     return activityShell(id, item.status, "Shell", item.command, `<pre>${escapeHtml(item.output ?? "")}</pre>`, open, stamp);
   }
-  return activityShell(id, item.status, "Thinking", undefined, `<pre>${escapeHtml(item.text)}</pre>`, open, stamp);
+  return activityShell(id, item.status, reasoningLabel(item), undefined, `<pre>${escapeHtml(item.text)}</pre>`, open, stamp);
 }
 
 function renderTool(item: ToolItem, open: boolean, todo?: TodoSummary): string {
@@ -396,7 +407,9 @@ function toolBody(detail: ToolDetail, item: ToolItem): string {
     case "question":
       return `${detail.asked.map(entry => `<p class="chat-tool-meta"><strong>${escapeHtml(entry.header)}</strong></p><p>${escapeHtml(entry.prompt)}</p>`).join("")}${detail.answer ? `<p class="chat-request-outcome">${escapeHtml(detail.answer)}</p>` : ""}${error}`;
     case "agent":
-      return `<p class="chat-tool-meta">${detail.subagent ? `<code>${escapeHtml(detail.subagent)}</code> ` : ""}${escapeHtml(detail.description)}${detail.conversationId ? ` <button type="button" data-open-conversation="${escapeHtmlAttribute(detail.conversationId)}">Open transcript</button>` : ""}</p><pre>${escapeHtml(detail.prompt)}</pre>${outputBlock(item)}${error}`;
+      // The result is the subagent's report — prose, rendered like assistant
+      // markdown rather than dumped as the raw task envelope.
+      return `<p class="chat-tool-meta">${detail.subagent ? `<code>${escapeHtml(detail.subagent)}</code> ` : ""}${escapeHtml(detail.description)}${detail.conversationId ? ` <button type="button" data-open-conversation="${escapeHtmlAttribute(detail.conversationId)}">Open transcript</button>` : ""}</p><pre>${escapeHtml(detail.prompt)}</pre>${detail.result ? `<div class="chat-subagent-result markdown-body">${renderChatMarkdown(detail.result)}</div>` : ""}${error}`;
     case "skill":
       return `${outputBlock(item)}${error}`;
     default:

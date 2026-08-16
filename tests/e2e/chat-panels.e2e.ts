@@ -158,11 +158,13 @@ test.describe("chat panels and navigation", () => {
     await expect(page.locator('[data-chat-item-id="status:done"]')).toContainText("worked 7s");
   });
 
-  test("reasoning rows read as Thinking", async ({ page, request }) => {
+  test("reasoning reads Thinking while running and Thought with its time once done", async ({ page, request }) => {
     await seedAndOpen(page, request, "Thinking", [
-      { id: "part:r1", type: "reasoning", createdAt: 1, text: "pondering", status: "completed" },
+      { id: "part:r1", type: "reasoning", createdAt: 1, text: "pondering", status: "running" },
+      { id: "part:r2", type: "reasoning", createdAt: 2, text: "pondered", status: "completed", durationMs: 12_000 },
     ]);
 
     await expect(page.locator('[data-chat-item-id="part:r1"] summary')).toContainText("Thinking");
+    await expect(page.locator('[data-chat-item-id="part:r2"] summary')).toContainText("Thought for 12s");
   });
 });

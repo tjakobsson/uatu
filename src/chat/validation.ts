@@ -159,9 +159,11 @@ export function parseConversationItem(value: unknown): ConversationItem {
       expectOptionalTimestamp(record.completedAt, "completedAt");
       break;
     case "reasoning":
-      expectKeys(record, ["id", "type", "createdAt", "text", "status"], type);
+      expectKeys(record, ["id", "type", "createdAt", "text", "status", "durationMs"], type);
       expectString(record.text, "reasoning text");
       parseActivityStatus(record.status);
+      // A duration validates like a timestamp: finite, non-negative number.
+      expectOptionalTimestamp(record.durationMs, "durationMs");
       break;
     case "tool":
       expectKeys(record, ["id", "type", "createdAt", "name", "status", "input", "output", "error", "childConversationId"], type);

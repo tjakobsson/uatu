@@ -217,11 +217,22 @@ describe("activity grouping", () => {
 });
 
 describe("presentation details", () => {
-  test("reasoning renders under the Thinking label", () => {
+  test("reasoning reads Thinking while streaming and Thought with its time once done", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([{ id: "part:r", type: "reasoning", createdAt: 1, text: "hmm", status: "running" }], { status: "running" }), new Set());
+    expect(host.querySelector("summary")!.textContent).toContain("Thinking");
+    renderer.render(host, projectionWith([{ id: "part:r", type: "reasoning", createdAt: 1, text: "hmm", status: "completed", durationMs: 7_000 }], { status: "idle" }), new Set());
+    expect(host.querySelector("summary")!.textContent).toContain("Thought for 7s");
+  });
+
+  test("finished reasoning without provider timing reads Thought, not Thinking", () => {
     const renderer = new TimelineRenderer();
     const host = target();
     renderer.render(host, projectionWith([{ id: "part:r", type: "reasoning", createdAt: 1, text: "hmm", status: "completed" }], { status: "idle" }), new Set());
-    expect(host.querySelector("summary")!.textContent).toContain("Thinking");
+    const summary = host.querySelector("summary")!.textContent!;
+    expect(summary).toContain("Thought");
+    expect(summary).not.toContain("Thinking");
   });
 
   test("a finished turn reports how long it worked", () => {

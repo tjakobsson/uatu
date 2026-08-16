@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { deriveTodoActivities, describeToolDetail, humanizeToolName, naiveLineDiff, patchDiffLines, patchFiles, todoActivitySummary, toolSubject } from "./tool-detail";
+import { deriveTodoActivities, describeToolDetail, humanizeToolName, naiveLineDiff, patchDiffLines, patchFiles, taskResultText, todoActivitySummary, toolSubject } from "./tool-detail";
 
 describe("describeToolDetail", () => {
   test("classifies edit calls and diffs only the changed region", () => {
@@ -129,6 +129,22 @@ describe("OpenCode-native tool payloads", () => {
       conversationId: "ses_child",
     });
     expect(toolSubject(detail)).toBe("explore · Triage issues");
+  });
+
+  test("a finished task exposes the subagent's report without the machine envelope", () => {
+    const detail = describeToolDetail({
+      name: "task",
+      input: JSON.stringify({ description: "Write poem", prompt: "Go" }),
+      output: '<task id="ses_child" state="completed">\n<task_result>\n**Paper Moon**\n\nNight folds its map.\n</task_result>\n</task>',
+    });
+    expect(detail).toMatchObject({ kind: "agent", result: "**Paper Moon**\n\nNight folds its map." });
+  });
+
+  test("an unwrapped task output passes through and empty output stays absent", () => {
+    expect(taskResultText("plain report")).toBe("plain report");
+    expect(taskResultText("")).toBeUndefined();
+    expect(taskResultText(undefined)).toBeUndefined();
+    expect(taskResultText("<task id='x'><task_result>  </task_result></task>")).toBeUndefined();
   });
 
   test("a skill load is one fact: which skill", () => {

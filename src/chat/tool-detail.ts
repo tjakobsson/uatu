@@ -11,7 +11,7 @@ export type ToolDetail =
   | { kind: "todo"; label: string; entries: Array<{ text: string; state: "pending" | "active" | "done" }> }
   | { kind: "patch"; label: string; files: string[]; diff: DiffLine[] }
   | { kind: "question"; label: string; asked: Array<{ header: string; prompt: string }>; answer?: string }
-  | { kind: "agent"; label: string; description: string; subagent?: string; prompt: string; conversationId?: string }
+  | { kind: "agent"; label: string; description: string; subagent?: string; prompt: string; conversationId?: string; result?: string }
   | { kind: "skill"; label: string; name: string }
   | { kind: "generic"; label: string };
 
@@ -81,6 +81,7 @@ export function describeToolDetail(item: Pick<ToolItem, "name" | "input" | "outp
     case "task": {
       const description = optionalText(input.description);
       if (description === undefined) break;
+      const result = taskResultText(item.output);
       return {
         kind: "agent",
         label: "Agent",
@@ -88,6 +89,7 @@ export function describeToolDetail(item: Pick<ToolItem, "name" | "input" | "outp
         ...(optionalText(input.subagent_type) === undefined ? {} : { subagent: text(input.subagent_type) }),
         prompt: text(input.prompt),
         ...(item.childConversationId === undefined ? {} : { conversationId: item.childConversationId }),
+        ...(result === undefined ? {} : { result }),
       };
     }
     // Loading a skill is one fact — which one. The raw JSON view buried the
@@ -114,6 +116,18 @@ export function describeToolDetail(item: Pick<ToolItem, "name" | "input" | "outp
     }
   }
   return { kind: "generic", label };
+}
+
+/**
+ * The subagent's report from a task tool's output, without the machine
+ * envelope: OpenCode wraps it as <task id=…><task_result>…</task_result></task>,
+ * which reads as debug output when shown verbatim.
+ */
+export function taskResultText(output: string | undefined): string | undefined {
+  if (!output) return undefined;
+  const match = /<task_result>([\s\S]*?)<\/task_result>/.exec(output);
+  const body = (match ? match[1]! : output).trim();
+  return body || undefined;
 }
 
 export function toolSubject(detail: ToolDetail): string | undefined {

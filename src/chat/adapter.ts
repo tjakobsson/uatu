@@ -491,7 +491,11 @@ export class ConversationProjection {
     const textItem = this.timeline.get(update.itemId);
     if (textItem?.type === "reasoning") {
       const status = update.item?.type === "reasoning" ? update.item.status : textItem.status;
-      return this.upsert({ ...textItem, text: currentText, status });
+      // The live stream never reports thinking time, so it is measured here:
+      // the completing event's timestamp against the item's first appearance.
+      const finishedNow = status === "completed" && textItem.status !== "completed" && update.item !== undefined;
+      const durationMs = textItem.durationMs ?? (finishedNow ? Math.max(0, update.item!.createdAt - textItem.createdAt) : undefined);
+      return this.upsert({ ...textItem, text: currentText, status, ...(durationMs === undefined ? {} : { durationMs }) });
     }
     if (wasNew && textItem?.type === "assistant_message") return this.upsert({ ...textItem, markdown: currentText });
     if (update.mode === "cumulative" && before !== currentText && !currentText.startsWith(before)) {

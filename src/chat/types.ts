@@ -54,6 +54,9 @@ export type ReasoningItem = TimelineItemBase & {
   type: "reasoning";
   text: string;
   status: ActivityStatus;
+  // How long the model thought, when the provider reports it (history parts
+  // carry start/end) or the event stream lets us measure it.
+  durationMs?: number;
 };
 
 export type ToolItem = TimelineItemBase & {
