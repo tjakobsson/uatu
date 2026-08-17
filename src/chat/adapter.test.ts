@@ -772,6 +772,48 @@ describe("pending permission recovery", () => {
     expect(snapshot.items.some(item => item.id === "permission:perm_known")).toBe(true);
   });
 
+  test("a failed permission list does not resurrect a question a successful read retired", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    // The question read succeeds and says the question is gone; the
+    // permission read then fails and must not vouch for it anyway.
+    provider.listQuestions = async () => [];
+    provider.listPermissions = async () => { throw new Error("provider unreachable"); };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    applyEvent(adapter, "local", {
+      id: "q", type: "question.v2.asked",
+      data: { id: "que_stale", sessionID: "local", timestamp: 10, questions: [{ question: "Choose", header: "Choice", options: [{ label: "A", description: "A" }], multiple: false, custom: false }] },
+    });
+    applyEvent(adapter, "local", {
+      id: "p", type: "permission.v2.asked",
+      data: { id: "perm_live", sessionID: "local", action: "shell", resources: ["ls"], timestamp: 11 },
+    });
+
+    const snapshot = await adapter.history("local");
+    // The permission survives its failed read; the retired question does not.
+    expect(snapshot.items).toEqual([expect.objectContaining({ id: "permission:perm_live", status: "pending" })]);
+    expect(adapter.projectionForTests("local").has("question:que_stale")).toBe(false);
+  });
+
+  test("a mirrored child question survives the parent's own-question reconciliation", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    // The parent's own-scoped list never carries the child's question, so a
+    // successful empty read cannot vouch that it is gone.
+    provider.listQuestions = async () => [];
+    provider.listPermissions = async () => { throw new Error("provider unreachable"); };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    adapter.projectionForTests("parent").apply({ kind: "upsert", item: {
+      id: "question:que_child", type: "question", createdAt: 10, conversationId: "child", requestId: "que_child",
+      questions: [{ prompt: "Pick", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }],
+      status: "pending",
+    } });
+
+    const snapshot = await adapter.history("parent");
+    expect(snapshot.items).toEqual([expect.objectContaining({ id: "question:que_child", conversationId: "child", status: "pending" })]);
+    expect(adapter.projectionForTests("parent").has("question:que_child")).toBe(true);
+  });
+
   test("a provider without the list simply never recovers, and does not throw", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("local")];

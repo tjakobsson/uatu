@@ -197,11 +197,27 @@ export class OpenCodeChatAdapter {
     // Asking here is what makes an open question answerable at all. A failed
     // list degrades the snapshot (the next refresh republishes) but must not
     // rewrite the published set — that would erase live questions.
+    let questionsReconciled = false;
     try {
       const pendingNow = await this.pendingQuestions(id);
       for (const pending of pendingNow) {
         if (items.some(item => item.id === pending.id)) continue;
         items.push(pending);
+      }
+      if (this.provider.listQuestions) {
+        questionsReconciled = true;
+        // A successful read is authoritative for this conversation's own
+        // questions: one no longer pending was answered elsewhere while its
+        // only live signal was missed. Mirrored child questions are exempt —
+        // this list never carries them, so it cannot vouch for them.
+        const live = new Set(pendingNow.map(item => item.id));
+        const projection = this.projection(id);
+        for (const existing of projection.items()) {
+          if (existing.type !== "question" || existing.status !== "pending" || live.has(existing.id)) continue;
+          if ((existing.conversationId ?? id) !== id) continue;
+          projection.apply({ kind: "remove", itemId: existing.id });
+          this.questionCreatedAt.delete(existing.id);
+        }
       }
       if (pendingNow.length > 0) this.publishedQuestions.set(id, new Set(pendingNow.map(item => item.id)));
       else this.publishedQuestions.delete(id);
@@ -238,10 +254,15 @@ export class OpenCodeChatAdapter {
       // Unknown, not empty. `seed` replaces the timeline from history, and
       // history carries no interaction requests at all — so without carrying
       // the live ones over, a failed list would erase a request the event
-      // stream established and strand the turn waiting on it.
+      // stream established and strand the turn waiting on it. But this
+      // failure only vouches for what its own read governs: permissions,
+      // plus questions the question pass could not account for (its read
+      // failed, or a mirrored child question its own-scoped list never
+      // carries). A question a successful read just retired stays retired.
       for (const existing of this.projection(id).items()) {
-        const unresolved = (existing.type === "permission" || existing.type === "question") && existing.status === "pending";
-        if (unresolved && !items.some(item => item.id === existing.id)) items.push(existing);
+        if ((existing.type !== "permission" && existing.type !== "question") || existing.status !== "pending") continue;
+        const vouchedGone = existing.type === "question" && questionsReconciled && (existing.conversationId ?? id) === id;
+        if (!vouchedGone && !items.some(item => item.id === existing.id)) items.push(existing);
       }
     }
     const projection = this.projection(id);
