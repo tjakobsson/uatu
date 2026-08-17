@@ -13,10 +13,12 @@ class FakeChatService implements WorkspaceChatService {
   readonly conversation: ConversationSummary = { id: "local", title: "Local", createdAt: 1, updatedAt: 1, status: "idle" };
   readonly replay = new ConversationReplay("generation", "local", 10_000);
   prompts = 0;
+  retries = 0;
   private promptResult: { messageId: string; delivery: "steer" | "queue" } | undefined;
   selectedModel: ModelSelection | undefined;
 
   async status(): Promise<ChatAvailability> { return { state: "ready", version: "test" }; }
+  async retry(): Promise<ChatAvailability> { this.retries += 1; return this.status(); }
   async models() { return [{ selection: { providerId: "anthropic", modelId: "claude" }, provider: "Anthropic", name: "Claude" }]; }
   async commands() { return [{ name: "review", description: "Review", argumentHint: "[focus]", kind: "command" as const }]; }
   async listConversations() { return [this.conversation]; }

@@ -105,4 +105,31 @@ describe("LocalProcessBackend stdout parsing", () => {
     },
     30_000,
   );
+
+  test(
+    "a session child inherits the hub's environment, so UATU_OPENCODE_STARTUP_TIMEOUT_MS reaches Chat",
+    async () => {
+      // The hub builds its children's argv itself, so no `uatu serve` flag can
+      // carry an operator's Chat startup budget into a hub-hosted workspace.
+      // Environment inheritance is the only channel — assert it end to end
+      // rather than trusting that the spawn stays env-free.
+      const previous = process.env.UATU_OPENCODE_STARTUP_TIMEOUT_MS;
+      process.env.UATU_OPENCODE_STARTUP_TIMEOUT_MS = "45123";
+      try {
+        const script = 'printf "http://127.0.0.1:43211/s/envcheck/?t=$UATU_OPENCODE_STARTUP_TIMEOUT_MS\n"; sleep 30';
+        const backend = new LocalProcessBackend({ uatuArgv: ["bash", "-c", script] });
+
+        running = await backend.start({ id: "envcheck", path: "/tmp", backend: "local" }, "/s/envcheck/");
+        expect(running.token).toBe("45123");
+
+        const session = running;
+        running = null;
+        await session.stop();
+      } finally {
+        if (previous === undefined) delete process.env.UATU_OPENCODE_STARTUP_TIMEOUT_MS;
+        else process.env.UATU_OPENCODE_STARTUP_TIMEOUT_MS = previous;
+      }
+    },
+    30_000,
+  );
 });

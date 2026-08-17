@@ -16,6 +16,7 @@ import type {
 
 export interface WorkspaceChatService {
   status(): Promise<ChatAvailability>;
+  retry(): Promise<ChatAvailability>;
   models(): Promise<ChatModel[]>;
   commands(): Promise<ChatCommand[]>;
   listConversations(): Promise<ConversationSummary[]>;
@@ -86,6 +87,16 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
         message: "The installed OpenCode version is not compatible with chat.",
       };
     }
+  }
+
+  // User-initiated recovery from a cached startup failure. Drops the adapter
+  // built against the dead runtime so the next call rebuilds against whatever
+  // the retry produced.
+  async retry(): Promise<ChatAvailability> {
+    this.adapterPromise = null;
+    this.adapter = null;
+    await this.runtime.retry();
+    return this.status();
   }
 
   async listConversations() { return (await this.requireAdapter()).listConversations(); }

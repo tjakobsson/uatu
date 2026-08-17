@@ -1118,6 +1118,18 @@ describe("hub end to end", () => {
     await assertContract("POST", "/s/{workspaceId}/api/chat/conversations/{conversationId}/prompts", csrf);
   });
 
+  test("chat retry is authenticated and returns availability without leaking the child endpoint", async () => {
+    const unauthenticated = await fetch(`${origin}/s/myproject/api/chat/retry`, { method: "POST" });
+    expect(unauthenticated.status).toBe(401);
+
+    const response = await fetch(`${origin}/s/myproject/api/chat/retry`, { method: "POST", headers: { cookie } });
+    expect(response.status).toBe(200);
+    await assertContract("POST", "/s/{workspaceId}/api/chat/retry", response);
+    const text = await response.text();
+    expect(text).not.toContain("OPENCODE_SERVER_PASSWORD");
+    expect(text).not.toMatch(/127\.0\.0\.1:\d+/);
+  });
+
   test("workspace folder names with edge whitespace round-trip exactly", async () => {
     const spaced = path.join(tempRoot, "workspaces", " padded ");
     execFileSync("mkdir", ["-p", spaced]);

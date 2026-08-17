@@ -4796,6 +4796,64 @@ body.is-resizing-chat .chat-resizer {
   color: var(--danger, #cf4f57);
 }
 
+/* The unavailable state has to be readable enough that a user pastes it into a
+   bug report rather than paraphrasing it. */
+.chat-unavailable {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.6rem;
+  margin-top: 0.6rem;
+  color: var(--text-subtle);
+}
+
+.chat-unavailable__details {
+  width: 100%;
+}
+
+.chat-unavailable__details summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.chat-unavailable__report {
+  margin: 0.5rem 0;
+  padding: 0.6rem 0.75rem;
+  max-height: 18rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.85em;
+  background: var(--surface-sunken, rgb(0 0 0 / 18%));
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+}
+
+.chat-unavailable__copy,
+.chat-unavailable__retry {
+  padding: 0.35rem 0.8rem;
+  color: inherit;
+  background: transparent;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.chat-unavailable__retry:not(.is-secondary) {
+  color: var(--text-strong, inherit);
+  border-color: var(--border-strong, var(--border-soft));
+}
+
+.chat-unavailable__copy:hover,
+.chat-unavailable__retry:hover {
+  background: var(--surface-raised, rgb(255 255 255 / 6%));
+}
+
+.chat-unavailable__retry[disabled] {
+  cursor: default;
+  opacity: 0.6;
+}
+
 .chat-timeline {
   flex: 1 1 auto;
   min-height: 0;

@@ -18,7 +18,8 @@ import {
   removeAcceptedDraft,
   type ChatProjection,
 } from "./projection";
-import type { ChatCommand, ChatModel, ConversationItem, ConversationSummary, ModelSelection, PermissionOutcome, QuestionOutcome } from "./types";
+import type { ChatAvailability, ChatCommand, ChatModel, ConversationItem, ConversationSummary, ModelSelection, PermissionOutcome, QuestionOutcome } from "./types";
+import { formatDiagnostics } from "./diagnostics";
 
 const PRESENTATION_KEY = "uatu:chat-presentation";
 const SAVE_DEBOUNCE_MS = 400;
@@ -983,16 +984,79 @@ export function initChat(): void {
   // it retries on the next Chat activation and on credential refresh.
   let bootstrapped = false;
   let bootstrapping = false;
+
+  // The unavailable state is the whole point of this surface when OpenCode will
+  // not start: it has to carry enough evidence to diagnose the failure from a
+  // pasted bug report, and offer the retry that makes a fixed environment
+  // recoverable without restarting the workspace.
+  const showUnavailable = (availability: Extract<ChatAvailability, { state: "unavailable" }>) => {
+    form.hidden = true;
+    select.disabled = true;
+    newButton.disabled = true;
+    announce(availability.message, true);
+
+    const panel = document.createElement("div");
+    panel.className = "chat-unavailable";
+
+    if (availability.diagnostics) {
+      const details = document.createElement("details");
+      details.className = "chat-unavailable__details";
+      const summary = document.createElement("summary");
+      summary.textContent = "Diagnostics";
+      const report = document.createElement("pre");
+      report.className = "chat-unavailable__report";
+      report.textContent = formatDiagnostics(availability);
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.className = "chat-unavailable__copy";
+      copy.textContent = "Copy diagnostics";
+      copy.addEventListener("click", () => {
+        void navigator.clipboard?.writeText(report.textContent ?? "").then(
+          () => { copy.textContent = "Copied"; },
+          () => { copy.textContent = "Copy failed"; },
+        );
+      });
+      details.append(summary, report, copy);
+      panel.append(details);
+    }
+
+    // Retry is offered for every unavailable reason — someone who just
+    // installed OpenCode should recover the same way — but for `not-installed`
+    // the install instruction leads and retry is the secondary action.
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "chat-unavailable__retry";
+    retry.textContent = "Retry";
+    if (availability.reason === "not-installed") retry.classList.add("is-secondary");
+    retry.addEventListener("click", async () => {
+      retry.disabled = true;
+      retry.textContent = "Retrying…";
+      panel.remove();
+      announce("Starting OpenCode…");
+      try {
+        const next = await api.retry();
+        if (next.state === "unavailable") {
+          showUnavailable(next);
+          return;
+        }
+        bootstrapped = false;
+        await bootstrap();
+      } catch (error) {
+        announce(messageOf(error), true);
+      }
+    });
+    panel.append(retry);
+    state.append(panel);
+    state.hidden = false;
+  };
+
   const bootstrap = async () => {
     if (bootstrapped || bootstrapping) return;
     bootstrapping = true;
     try {
       const availability = await api.status();
       if (availability.state === "unavailable") {
-        announce(availability.message, true);
-        form.hidden = true;
-        select.disabled = true;
-        newButton.disabled = true;
+        showUnavailable(availability);
         return;
       }
       [models, conversations, commands] = await Promise.all([api.models(), api.conversations(), api.commands().catch(() => [])]);

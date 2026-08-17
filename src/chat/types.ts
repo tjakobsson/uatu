@@ -1,8 +1,43 @@
+// What the last health probe actually did. Four of these used to collapse into
+// one indistinguishable timeout string; they are four different bugs.
+// `unknown` exists so an error shape the classifier does not recognize degrades
+// attribution instead of being misreported as a refusal.
+export type ChatProbeOutcome =
+  | { kind: "none" }
+  | { kind: "refused" }
+  | { kind: "abandoned" }
+  | { kind: "http-status"; status: number }
+  | { kind: "unhealthy-body"; status: number }
+  | { kind: "healthy"; status: number }
+  | { kind: "unknown"; error: string };
+
+// Evidence attached to a failed startup so a bug report diagnoses itself
+// without asking the user to reproduce anything. Assembled on the failure path
+// only. Never carries the ephemeral OpenCode server password.
+export type ChatStartupDiagnostics = {
+  executable: string | null;
+  // Other `opencode` executables found earlier or later on PATH. A Windows
+  // shim shadowing a Linux binary under WSL2 is invisible without this.
+  shadowedExecutables: string[];
+  version: string | null;
+  endpoint: string | null;
+  elapsedMs: number;
+  probes: number;
+  lastProbe: ChatProbeOutcome;
+  stdout: string;
+  stderr: string;
+};
+
 export type ChatAvailability =
   | { state: "idle" }
   | { state: "starting" }
   | { state: "ready"; version: string }
-  | { state: "unavailable"; reason: "not-installed" | "startup-failed" | "unsupported"; message: string };
+  | {
+    state: "unavailable";
+    reason: "not-installed" | "startup-failed" | "unsupported";
+    message: string;
+    diagnostics?: ChatStartupDiagnostics;
+  };
 
 export type ConversationStatus = "idle" | "sending" | "running" | "completed" | "interrupted" | "failed";
 export type ActivityStatus = "pending" | "running" | "completed" | "failed" | "cancelled";

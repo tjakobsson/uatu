@@ -35,7 +35,7 @@ function fixtureRuntime(): OpenCodeService {
   };
   return new OpenCodeService({
     workspacePath: "/workspace",
-    discoverExecutable: async () => "/bin/opencode",
+    discoverCandidates: async () => ["/bin/opencode"],
     allocatePort: async () => 43210,
     spawn: () => child,
     fetch: async () => Response.json({ healthy: true, version: "test" }),

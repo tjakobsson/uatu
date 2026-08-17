@@ -187,6 +187,9 @@ async function handleE2EChat(request: Request): Promise<Response> {
     case "failPrompt":
       chatService.failPrompt();
       return Response.json({ ok: true });
+    case "failStartup":
+      chatService.failStartup();
+      return Response.json({ ok: true });
     case "resync":
       chatService.rotateGeneration();
       return Response.json({ ok: true });

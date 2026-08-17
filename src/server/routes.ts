@@ -424,6 +424,11 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
     [p("/api/chat/status")]: {
       GET: async (request: Request) => authenticated(request) ?? run(() => deps.chatService.status()),
     },
+    // POST, not a query on /status: retry spawns a process, so it must not sit
+    // behind a safe method.
+    [p("/api/chat/retry")]: {
+      POST: async (request: Request) => authenticated(request) ?? run(() => deps.chatService.retry()),
+    },
     [p("/api/chat/models")]: {
       GET: async (request: Request) => authenticated(request) ?? run(async () => ({
         models: await deps.chatService.models(),

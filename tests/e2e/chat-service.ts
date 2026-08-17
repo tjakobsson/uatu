@@ -34,10 +34,38 @@ export class FakeE2EChatService implements WorkspaceChatService {
   // enough of a window for a test to deterministically switch conversations
   // while the request is in flight.
   private failNextPrompt = false;
+  // When set, status() reports a failed startup carrying diagnostics, so the
+  // suite can drive the unavailable surface. A retry clears it, which is the
+  // recovery path a user takes after fixing their environment.
+  private unavailable: Extract<ChatAvailability, { state: "unavailable" }> | null = null;
 
   async status(): Promise<ChatAvailability> {
     this.statusCalls += 1;
-    return { state: "ready", version: "e2e" };
+    return this.unavailable ?? { state: "ready", version: "e2e" };
+  }
+
+  async retry(): Promise<ChatAvailability> {
+    this.unavailable = null;
+    return this.status();
+  }
+
+  failStartup(): void {
+    this.unavailable = {
+      state: "unavailable",
+      reason: "startup-failed",
+      message: "OpenCode did not become ready. OpenCode never accepted a health request at http://127.0.0.1:41823 within 30000ms (connection refused).",
+      diagnostics: {
+        executable: "/mnt/c/Users/x/AppData/Roaming/npm/opencode",
+        shadowedExecutables: ["/home/linuxbrew/.linuxbrew/bin/opencode"],
+        version: null,
+        endpoint: "http://127.0.0.1:41823",
+        elapsedMs: 30_000,
+        probes: 97,
+        lastProbe: { kind: "refused" },
+        stdout: "opencode server listening on http://127.0.0.1:41823",
+        stderr: "",
+      },
+    };
   }
 
   failPrompt(): void {
@@ -106,6 +134,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.promptAttempts.push(requestId);
     if (this.failNextPrompt) {
       this.failNextPrompt = false;
+    this.unavailable = null;
       await new Promise(resolve => setTimeout(resolve, 500));
       throw new Error("prompt rejected by fixture");
     }

@@ -46,6 +46,12 @@ export class ChatApiClient {
     return this.get(appUrl("/api/chat/status"), parseChatAvailability);
   }
 
+  // POST with no body: retry spawns a process, so it must not sit behind a safe
+  // method, and the contract declares no request media types for it.
+  retry(): Promise<ChatAvailability> {
+    return this.request(appUrl("/api/chat/retry"), { method: "POST" }, parseChatAvailability);
+  }
+
   async conversations(): Promise<ConversationSummary[]> {
     const value = await this.get(appUrl("/api/chat/conversations"), value => value as { conversations?: unknown });
     if (!Array.isArray(value.conversations)) throw new ChatTransportError("Chat returned an invalid conversation list");

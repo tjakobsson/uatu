@@ -4,6 +4,7 @@ import type {
   ChatCommand,
   ChatEvent,
   ChatModel,
+  ChatStartupDiagnostics,
   ConversationItem,
   ConversationSnapshot,
   ConversationStatus,
@@ -38,14 +39,57 @@ export function parseChatAvailability(value: unknown): ChatAvailability {
       expectNonEmptyString(record.version, "version");
       break;
     case "unavailable":
-      expectKeys(record, ["state", "reason", "message"], "chat availability");
+      expectKeys(record, ["state", "reason", "message", "diagnostics"], "chat availability");
       expectOneOf(record.reason, ["not-installed", "startup-failed", "unsupported"], "unavailable reason");
       expectNonEmptyString(record.message, "unavailable message");
+      // Optional: present on a failed startup, absent when there is nothing to
+      // report (a missing executable never reached a probe).
+      if (record.diagnostics !== undefined) parseChatStartupDiagnostics(record.diagnostics);
       break;
     default:
       throw new Error(`invalid chat availability state: ${state}`);
   }
   return value as ChatAvailability;
+}
+
+function parseChatStartupDiagnostics(value: unknown): ChatStartupDiagnostics {
+  const record = expectRecord(value, "chat startup diagnostics");
+  expectKeys(record, [
+    "executable",
+    "shadowedExecutables",
+    "version",
+    "endpoint",
+    "elapsedMs",
+    "probes",
+    "lastProbe",
+    "stdout",
+    "stderr",
+  ], "chat startup diagnostics");
+  expectNullableString(record.executable, "diagnostics executable");
+  expectStringArray(record.shadowedExecutables, "diagnostics shadowed executables", false);
+  expectNullableString(record.version, "diagnostics version");
+  expectNullableString(record.endpoint, "diagnostics endpoint");
+  expectTimestamp(record.elapsedMs, "diagnostics elapsed");
+  expectTimestamp(record.probes, "diagnostics probe count");
+  expectString(record.stdout, "diagnostics stdout");
+  expectString(record.stderr, "diagnostics stderr");
+
+  const probe = expectRecord(record.lastProbe, "diagnostics last probe");
+  const kind = expectOneOf(
+    probe.kind,
+    ["none", "refused", "abandoned", "http-status", "unhealthy-body", "healthy", "unknown"],
+    "probe outcome kind",
+  );
+  if (kind === "http-status" || kind === "unhealthy-body" || kind === "healthy") {
+    expectKeys(probe, ["kind", "status"], "diagnostics last probe");
+    expectTimestamp(probe.status, "probe status");
+  } else if (kind === "unknown") {
+    expectKeys(probe, ["kind", "error"], "diagnostics last probe");
+    expectString(probe.error, "probe error");
+  } else {
+    expectKeys(probe, ["kind"], "diagnostics last probe");
+  }
+  return value as ChatStartupDiagnostics;
 }
 
 export function parseChatModel(value: unknown): ChatModel {
@@ -334,6 +378,10 @@ function expectTimestamp(value: unknown, field: string): void {
 
 function expectOptionalTimestamp(value: unknown, field: string): void {
   if (value !== undefined) expectTimestamp(value, field);
+}
+
+function expectNullableString(value: unknown, field: string): void {
+  if (value !== null) expectNonEmptyString(value, field);
 }
 
 function expectOptionalString(value: unknown, field: string): void {

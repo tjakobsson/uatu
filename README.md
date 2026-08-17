@@ -268,6 +268,27 @@ Diagnostic files live under `$XDG_CACHE_HOME/uatu/` (or `~/.cache/uatu/`):
 heartbeat, snapshot, optional debug ring-buffer, and forensic dumps on
 freeze. With `--debug`, `GET /debug/metrics` returns the live counters.
 
+### Chat startup
+
+Chat starts OpenCode lazily, waits for it to answer at all, then waits a
+shorter slice for it to report healthy. A cold OpenCode start on a slow
+filesystem can exceed the 30-second default; widen it with an environment
+variable rather than a flag, because the hub builds its session children's
+argv itself and a flag cannot reach a hub-hosted workspace:
+
+```bash
+UATU_OPENCODE_STARTUP_TIMEOUT_MS=60000 uatu serve   # or: … uatu hub
+```
+
+An empty, non-numeric, or non-positive value is ignored and the default
+stands — a typo here must not stop documents from being served. When startup
+does fail, the Chat surface reports which phase failed and offers a
+**Diagnostics** block (resolved executable, shadowed candidates on `PATH`,
+version, probed endpoint, elapsed time, probe count, last probe outcome, and
+OpenCode's own stdout/stderr) plus a **Retry** that recovers a fixed
+environment without restarting the workspace. The ephemeral OpenCode server
+password never appears in that block.
+
 > **Privacy note:** forensic dumps include absolute repo paths from `lsof`
 > (macOS) or `/proc/<pid>/fd/` (Linux). Review before sharing.
 

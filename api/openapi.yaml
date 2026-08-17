@@ -367,6 +367,17 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '502': { $ref: '#/components/responses/SessionUnreachable' }
         '503': { $ref: '#/components/responses/WorkspaceStopped' }
+  /s/{workspaceId}/api/chat/retry:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
+    post:
+      operationId: workspaceRetryChat
+      tags: [Chat]
+      summary: Discard a cached Chat startup failure and start OpenCode again
+      responses:
+        '200': { description: Chat availability after the retry, content: { application/json: { schema: { $ref: '#/components/schemas/ChatAvailability' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
+        '503': { $ref: '#/components/responses/WorkspaceStopped' }
   /s/{workspaceId}/api/chat/models:
     parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
     get:
@@ -826,7 +837,18 @@ components:
       oneOf:
         - { type: object, required: [state], properties: { state: { enum: [idle, starting] } }, additionalProperties: false }
         - { type: object, required: [state, version], properties: { state: { const: ready }, version: { type: string, minLength: 1 } }, additionalProperties: false }
-        - { type: object, required: [state, reason, message], properties: { state: { const: unavailable }, reason: { enum: [not-installed, startup-failed, unsupported] }, message: { type: string, minLength: 1 } }, additionalProperties: false }
+        - { type: object, required: [state, reason, message], properties: { state: { const: unavailable }, reason: { enum: [not-installed, startup-failed, unsupported] }, message: { type: string, minLength: 1 }, diagnostics: { $ref: '#/components/schemas/ChatStartupDiagnostics' } }, additionalProperties: false }
+    ChatProbeOutcome:
+      oneOf:
+        - { type: object, required: [kind], properties: { kind: { enum: [none, refused, abandoned] } }, additionalProperties: false }
+        - { type: object, required: [kind, status], properties: { kind: { enum: [http-status, unhealthy-body, healthy] }, status: { type: integer, minimum: 100, maximum: 599 } }, additionalProperties: false }
+        - { type: object, required: [kind, error], properties: { kind: { const: unknown }, error: { type: string } }, additionalProperties: false }
+    ChatStartupDiagnostics:
+      type: object
+      description: Evidence attached to a failed Chat startup. Never contains the ephemeral OpenCode server password.
+      required: [executable, shadowedExecutables, version, endpoint, elapsedMs, probes, lastProbe, stdout, stderr]
+      properties: { executable: { type: [string, 'null'] }, shadowedExecutables: { type: array, items: { type: string } }, version: { type: [string, 'null'] }, endpoint: { type: [string, 'null'] }, elapsedMs: { type: number, minimum: 0 }, probes: { type: integer, minimum: 0 }, lastProbe: { $ref: '#/components/schemas/ChatProbeOutcome' }, stdout: { type: string }, stderr: { type: string } }
+      additionalProperties: false
     ConversationStatus: { enum: [idle, sending, running, completed, interrupted, failed] }
     ModelSelection: { type: object, required: [providerId, modelId], properties: { providerId: { type: string, minLength: 1, maxLength: 512 }, modelId: { type: string, minLength: 1, maxLength: 512 } }, additionalProperties: false }
     ChatModel: { type: object, required: [selection, provider, name], properties: { selection: { $ref: '#/components/schemas/ModelSelection' }, provider: { type: string, minLength: 1 }, name: { type: string, minLength: 1 } }, additionalProperties: false }
