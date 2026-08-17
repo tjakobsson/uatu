@@ -34,21 +34,36 @@ export class TimelineRenderer {
     }
     const dirty: HTMLElement[] = [];
     const ordered: HTMLElement[] = [];
-    const activeRequest = [...projection.items].reverse()
-      .find(item => (item.type === "permission" || item.type === "question") && item.status === "pending")?.id;
+    // Answerable is decided per owning conversation, not per timeline. With one
+    // conversation's items this is exactly the old rule — the newest pending
+    // request wins. With a subagent's request shown alongside the parent's,
+    // each conversation gets its own active slot, so one cannot block the
+    // other. `requirePending` applies the same rule server-side, per owner.
+    const activeRequests = new Set<string>();
+    const seenOwners = new Set<string>();
+    for (const item of [...projection.items].reverse()) {
+      if (item.type !== "permission" && item.type !== "question") continue;
+      if (item.status !== "pending") continue;
+      const owner = item.conversationId ?? projection.conversationId;
+      if (seenOwners.has(owner)) continue;
+      seenOwners.add(owner);
+      activeRequests.add(item.id);
+    }
 
     const todoLabels = todoActivityLabels(projection.items);
     const durations = turnDurations(projection.items);
 
     const nodes = new Map<string, HTMLElement>();
     for (const item of projection.items) {
-      const active = item.id === activeRequest;
+      const active = activeRequests.has(item.id);
       const todo = todoLabels.get(item.id);
       const isQueued = queued.has(item.id);
       const duration = durations.get(item.id);
       // Everything outside the item itself that changes its markup, so a
       // cached node is only reused when it would render identically.
-      const variant = [todo?.label ?? "", todo?.task ?? "", String(isQueued), duration === undefined ? "" : String(duration)].join("\u0001");
+      const foreign = (item.type === "permission" || item.type === "question")
+        && item.conversationId !== undefined && item.conversationId !== projection.conversationId;
+      const variant = [todo?.label ?? "", todo?.task ?? "", String(isQueued), duration === undefined ? "" : String(duration), String(foreign)].join("\u0001");
       const entry = this.entries.get(item.id);
       if (entry && entry.item === item && entry.active === active && entry.variant === variant) {
         nodes.set(item.id, entry.node);
@@ -60,7 +75,7 @@ export class TimelineRenderer {
         continue;
       }
       const open = entry ? entry.node.hasAttribute("open") : expanded.has(item.id);
-      const node = buildNode(renderItem(item, open, active, todo, isQueued, duration));
+      const node = buildNode(renderItem(item, open, active, todo, isQueued, duration, foreign));
       entry?.node.remove();
       this.entries.set(item.id, { node, item, active, variant });
       nodes.set(item.id, node);
@@ -349,7 +364,7 @@ function renderDraft(draft: AcceptedDraft): string {
   return `<article class="chat-item chat-user-message is-pending" data-chat-item-id="draft-${escapeHtmlAttribute(draft.requestId)}"><p>${escapeHtml(draft.text)}</p><small>${label}</small></article>`;
 }
 
-export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, queued = false, durationMs?: number): string {
+export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, queued = false, durationMs?: number, foreign = false): string {
   const id = escapeHtmlAttribute(item.id);
   const stamp = timestampAttribute(item.createdAt);
   // A message sent mid-turn is accepted but not yet acted on. Without a mark
@@ -364,8 +379,8 @@ export function renderItem(item: ConversationItem, open: boolean, activeRequest:
   if (item.type === "file_change") {
     return `<article class="chat-item chat-file-change" data-chat-item-id="${id}"${stamp}><span>${escapeHtml(item.operation)}</span> <button type="button" data-file-ref="${escapeHtmlAttribute(item.path)}">${escapeHtml(item.path)}</button>${counts(item.additions, item.deletions)}</article>`;
   }
-  if (item.type === "permission") return renderPermission(item, open, activeRequest);
-  if (item.type === "question") return renderQuestion(item, open, activeRequest);
+  if (item.type === "permission") return renderPermission(item, open, activeRequest, foreign);
+  if (item.type === "question") return renderQuestion(item, open, activeRequest, foreign);
   if (item.type === "tool") return renderTool(item, open, todo);
   // A command's text is the subject, not the label. As a label it lands in the
   // summary's non-shrinking slot, so a long pipeline overruns the row instead
@@ -444,7 +459,40 @@ function activityShell(id: string, status: string, label: string, subject: strin
   return `<details class="chat-item chat-activity is-${status}" data-chat-item-id="${id}"${stamp}${open ? " open" : ""}><summary><span>${escapeHtml(label)}</span>${subjectHtml}<span class="chat-activity-status">${escapeHtml(status)}</span></summary>${body}</details>`;
 }
 
-function renderPermission(item: Extract<ConversationItem, { type: "permission" }>, open: boolean, active: boolean): string {
+// A request's state, as data rather than something CSS has to re-derive: the
+// card styling, the badge, and the outstanding count all read this one value.
+// "queued" is a request that will need an answer once the active one is
+// resolved — calling it superseded told users to ignore work they had to
+// return to.
+export type RequestState = "needs-answer" | "queued" | "resolved";
+
+export function requestState(status: "pending" | "resolved", active: boolean): RequestState {
+  if (status !== "pending") return "resolved";
+  return active ? "needs-answer" : "queued";
+}
+
+// Text, not only colour. A colour-only signal disappears for colour-blind
+// users, in high-contrast mode, and in a greyscale screenshot — and this is
+// the one signal a user must not miss.
+function requestBadge(state: RequestState): string {
+  if (state === "needs-answer") return `<span class="chat-request-badge">Needs your answer</span>`;
+  if (state === "queued") return `<span class="chat-request-badge is-queued">Waiting its turn</span>`;
+  return "";
+}
+
+function requestAttributes(state: RequestState): string {
+  return ` data-request-state="${state}"`;
+}
+
+// A request surfaced from a subagent looks identical to one the conversation
+// raised itself, which undercuts the reason for surfacing it: the user is being
+// asked to make a decision — one that reaches their other conversations — and
+// needs to know who is asking.
+function requestOrigin(foreign: boolean): string {
+  return foreign ? `<p class="chat-request-origin">Requested by a subagent of this conversation.</p>` : "";
+}
+
+function renderPermission(item: Extract<ConversationItem, { type: "permission" }>, open: boolean, active: boolean, foreign = false): string {
   const pending = item.status === "pending";
   // `approved-session` is the transported value and stays. Verified against a
   // live OpenCode 1.18.18: this reply carries past the request into every later
@@ -455,11 +503,12 @@ function renderPermission(item: Extract<ConversationItem, { type: "permission" }
   // conversation; the card now states the reach that was actually being given.
   const outcome = pending && active
     ? `<div class="chat-request-actions"><button type="button" data-permission-outcome="approved-once">Allow once</button><button type="button" data-permission-outcome="approved-session">Allow always</button><button type="button" data-permission-outcome="rejected">Reject</button></div><p class="chat-request-scope">“Allow always” also covers later conversations, and similar requests — until OpenCode restarts.</p>`
-    : pending ? `<p class="chat-request-outcome">Superseded by a newer request</p>` : `<p class="chat-request-outcome">Resolved: ${escapeHtml(item.outcome ?? "resolved")}</p>`;
-  return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}><summary>Permission: ${escapeHtml(item.action)}</summary><ul>${item.resources.map(resource => `<li><code>${escapeHtml(resource)}</code></li>`).join("")}</ul>${outcome}</details>`;
+    : pending ? `<p class="chat-request-outcome">Waiting its turn — answer the newest request first.</p>` : `<p class="chat-request-outcome">Resolved: ${escapeHtml(item.outcome ?? "resolved")}</p>`;
+  const state = requestState(item.status, active);
+  return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${requestAttributes(state)}${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}><summary>Permission: ${escapeHtml(item.action)}${requestBadge(state)}</summary>${requestOrigin(foreign)}<ul>${item.resources.map(resource => `<li><code>${escapeHtml(resource)}</code></li>`).join("")}</ul>${outcome}</details>`;
 }
 
-function renderQuestion(item: QuestionRequest, open: boolean, active: boolean): string {
+function renderQuestion(item: QuestionRequest, open: boolean, active: boolean, foreign = false): string {
   const pending = item.status === "pending";
   // Questions are stepped through one at a time behind a tab strip, the way
   // OpenCode's own client presents them. Stacking every question at once buries
@@ -472,8 +521,9 @@ function renderQuestion(item: QuestionRequest, open: boolean, active: boolean): 
   // legend says which it is — otherwise there is nothing telling you more than
   // one answer is allowed.
   const questions = item.questions.map((question, index) => `<fieldset class="chat-question-panel" data-question-panel="${index}"${index === 0 ? "" : " hidden"}><legend${stepped ? ` class="sr-only"` : ""}>${escapeHtml(question.header)}</legend><p>${escapeHtml(question.prompt)}${question.multiple ? ` <span class="chat-question-hint">choose one or more</span>` : ""}</p>${question.options.map(option => `<label class="chat-question-option"><input type="${question.multiple ? "checkbox" : "radio"}" name="q-${index}" value="${escapeHtmlAttribute(option.label)}"><span class="chat-question-option-text"><span class="chat-question-option-label">${escapeHtml(option.label)}</span>${option.description ? `<small>${escapeHtml(option.description)}</small>` : ""}</span></label>`).join("")}${question.allowFreeForm ? `<label class="chat-question-freeform">Other <input name="q-${index}" type="text"></label>` : ""}</fieldset>`).join("");
-  const body = pending && active ? `<form data-question-form>${tabs}${questions}<div class="chat-request-actions"><button type="submit" data-question-primary disabled>${stepped ? "Next" : "Answer"}</button><button type="button" data-question-reject>Reject</button></div></form>` : pending ? `<p class="chat-request-outcome">Superseded by a newer request</p>` : `<p class="chat-request-outcome">${item.outcome?.kind === "rejected" ? "Rejected" : "Answered"}</p>`;
-  return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}><summary>Question from OpenCode</summary>${body}</details>`;
+  const body = pending && active ? `<form data-question-form>${tabs}${questions}<div class="chat-request-actions"><button type="submit" data-question-primary disabled>${stepped ? "Next" : "Answer"}</button><button type="button" data-question-reject>Reject</button></div></form>` : pending ? `<p class="chat-request-outcome">Waiting its turn — answer the newest request first.</p>` : `<p class="chat-request-outcome">${item.outcome?.kind === "rejected" ? "Rejected" : "Answered"}</p>`;
+  const state = requestState(item.status, active);
+  return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${requestAttributes(state)}${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}><summary>Question from OpenCode${requestBadge(state)}</summary>${requestOrigin(foreign)}${body}</details>`;
 }
 
 export function decorateFileLinks(container: HTMLElement): void {

@@ -189,6 +189,7 @@ export function initChat(): void {
   const subagentsLabel = document.querySelector<HTMLElement>("#chat-subagents-label");
   const subagentsItems = document.querySelector<HTMLElement>("#chat-subagents-items");
   const dismissButton = document.querySelector<HTMLButtonElement>("#chat-subagents-dismiss");
+  const requestsJump = document.querySelector<HTMLButtonElement>("#chat-requests-jump");
   // Finished subagents stay until explicitly dismissed — nothing retires
   // them on a timer. Dismissals persist with the rest of the per-conversation
   // presentation, so a reload does not resurrect an already-dismissed strip.
@@ -208,6 +209,7 @@ export function initChat(): void {
     presentation.dismissedSubagents[projection.conversationId] = [...dismissed];
     save();
     syncSubagents();
+    syncOutstandingRequests();
   });
 
   /**
@@ -215,6 +217,41 @@ export function initChat(): void {
    * three agents is three rows that would otherwise scroll away, and while
    * they run there is nothing else saying how many are still going.
    */
+  /**
+   * Outstanding requests, pinned so they cannot scroll away. Ten permissions in
+   * one turn left a user unable to tell which still needed them; per-card
+   * styling alone does not answer that in a long transcript, because you still
+   * have to scroll and count. This says how many and takes you to one.
+   */
+  const syncOutstandingRequests = () => {
+    if (!requestsJump) return;
+    const outstanding = projection
+      ? projection.items.filter(item => (item.type === "permission" || item.type === "question") && item.status === "pending")
+      : [];
+    if (outstanding.length === 0) {
+      requestsJump.hidden = true;
+      requestsJump.textContent = "";
+      delete requestsJump.dataset.requestTarget;
+      return;
+    }
+    const noun = outstanding.length === 1 ? "request needs" : "requests need";
+    requestsJump.hidden = false;
+    requestsJump.textContent = `${outstanding.length} ${noun} your answer`;
+    // The answerable one is the newest; that is where the jump lands, because
+    // it is the only one a user can act on right now.
+    requestsJump.dataset.requestTarget = outstanding[outstanding.length - 1]!.id;
+  };
+
+  requestsJump?.addEventListener("click", () => {
+    const id = requestsJump.dataset.requestTarget;
+    if (!id) return;
+    const card = items.querySelector(`[data-chat-item-id="${CSS.escape(id)}"]`);
+    if (!(card instanceof HTMLElement)) return;
+    if (card instanceof HTMLDetailsElement) card.open = true;
+    card.scrollIntoView({ block: "center" });
+    card.focus?.();
+  });
+
   const syncSubagents = () => {
     if (!subagents || !subagentsLabel || !subagentsItems) return;
     const all = projection ? subagentEntries(projection.items) : [];
@@ -420,6 +457,7 @@ export function initChat(): void {
     rendering = false;
     syncTaskList();
     syncSubagents();
+    syncOutstandingRequests();
     syncPromptRail();
     timeline.scrollTop = anchor.afterMutation(geometry(), newContent);
     latestButton.hidden = !anchor.hasUnseen();
@@ -798,7 +836,10 @@ export function initChat(): void {
     const item = projection.items.find(candidate => candidate.id === itemId);
     if (!item || item.type !== "permission" || item.status !== "pending") return;
     disableCard(itemId, true);
-    try { await api.permission(projection.conversationId, item.requestId, newRequestId(), outcome); }
+    // Addressed to the conversation that owns the request, not the one on
+    // screen: a subagent's request shown in its parent must be answered for the
+    // subagent, so the child's requirePending guard and receipt key govern it.
+    try { await api.permission(item.conversationId ?? projection.conversationId, item.requestId, newRequestId(), outcome); }
     catch (error) { announce(messageOf(error), true); disableCard(itemId, false); }
   };
 
@@ -807,7 +848,7 @@ export function initChat(): void {
     const item = projection.items.find(candidate => candidate.id === itemId);
     if (!item || item.type !== "question" || item.status !== "pending") return;
     disableCard(itemId, true);
-    try { await api.question(projection.conversationId, item.requestId, newRequestId(), outcome); }
+    try { await api.question(item.conversationId ?? projection.conversationId, item.requestId, newRequestId(), outcome); }
     catch (error) { announce(messageOf(error), true); disableCard(itemId, false); }
   };
 

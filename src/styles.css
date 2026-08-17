@@ -4769,8 +4769,54 @@ body.is-resizing-chat .chat-resizer {
   gap: 0.5rem;
 }
 
-/* The consequence of "Allow always", stated where the choice is made: it is a
-   project-scoped rule, not a per-conversation one. Quiet enough not to shout
+/* Request states. A user with ten requests could not tell which still needed
+   them: every card rendered identically and the queued ones claimed to be
+   superseded. State is carried as data so the card, the badge, and the
+   outstanding count cannot disagree — and it is never colour alone, so the
+   signal survives colour-blindness, high contrast, and greyscale. */
+.chat-request[data-request-state="needs-answer"] {
+  border-color: var(--accent, #3b7dd8);
+  border-left-width: 3px;
+  background: var(--surface-raised);
+  color: var(--text-strong);
+}
+
+.chat-request[data-request-state="queued"] {
+  border-style: dashed;
+}
+
+.chat-request[data-request-state="resolved"] {
+  opacity: 0.72;
+}
+
+.chat-request-origin {
+  margin: 0.35rem 0 0;
+  font-size: 0.85em;
+  color: var(--text-subtle);
+}
+
+.chat-request-badge {
+  margin-left: 0.5rem;
+  padding: 0.05rem 0.4rem;
+  border: 1px solid var(--accent, #3b7dd8);
+  border-radius: 0.35rem;
+  font-size: 0.75em;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--accent, #3b7dd8);
+  white-space: nowrap;
+}
+
+.chat-request-badge.is-queued {
+  border-color: var(--border-medium);
+  font-weight: 500;
+  color: var(--text-subtle);
+}
+
+/* The consequence of "Allow always", stated where the choice is made. Measured
+   against a live OpenCode 1.18.18: it reaches later conversations and the
+   request's saved pattern, and dies with the OpenCode instance — it is not the
+   project-persistent rule its type shape suggests. Quiet enough not to shout
    over the request, present enough to be read before clicking. */
 .chat-request-scope {
   margin: 0.45rem 0 0;
@@ -5131,6 +5177,31 @@ body.is-resizing-chat .chat-resizer {
   bottom: calc(var(--chat-composer-height, 5rem) + 0.75rem);
   z-index: 2;
   box-shadow: var(--shadow, 0 3px 12px rgb(0 0 0 / 20%));
+}
+
+/* Pinned beside "Latest", above the composer: with requests outstanding the
+   count must not scroll away, because scrolling to count them is exactly the
+   problem. Accented like the card that needs answering so the two read as one
+   signal, and it carries its own text rather than relying on colour. */
+.chat-requests-jump {
+  position: absolute;
+  left: 1.25rem;
+  bottom: calc(var(--chat-composer-height, 5rem) + 0.75rem);
+  z-index: 2;
+  min-height: 2rem;
+  padding: 0.35rem 0.7rem;
+  border: 1px solid var(--accent, #3b7dd8);
+  border-radius: 0.4rem;
+  color: var(--accent, #3b7dd8);
+  background: var(--surface-raised);
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: var(--shadow, 0 3px 12px rgb(0 0 0 / 20%));
+}
+
+.chat-requests-jump:hover {
+  color: white;
+  background: var(--accent, #3b7dd8);
 }
 
 .chat-composer {

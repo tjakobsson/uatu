@@ -162,9 +162,9 @@ test.describe("desktop OpenCode chat", () => {
     };
     await control(request, { action: "item", conversationId: id, item: question });
     await page.getByRole("radio", { name: "Minimal Small change" }).check();
-    await page.getByRole("button", { name: "Answer" }).click();
+    await page.getByRole("button", { name: "Answer", exact: true }).click();
     await expect(page.locator('[data-chat-item-id="question:q-1"]')).toContainText("Answered");
-    await expect(page.getByRole("button", { name: "Answer" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Answer", exact: true })).toHaveCount(0);
   });
 
   test("streaming beside a pending question keeps the answer being typed", async ({ page, request }) => {
@@ -198,7 +198,7 @@ test.describe("desktop OpenCode chat", () => {
     await expect(page.locator('[data-chat-item-id="part:stream"]')).toContainText("Thinking about your question");
     await expect(page.getByRole("radio", { name: "Minimal Small change" })).toBeChecked();
 
-    await page.getByRole("button", { name: "Answer" }).click();
+    await page.getByRole("button", { name: "Answer", exact: true }).click();
     await expect(page.locator('[data-chat-item-id="question:q-2"]')).toContainText("Answered");
   });
 

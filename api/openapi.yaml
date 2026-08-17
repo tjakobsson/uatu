@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: UatuCode public API
-  version: 1.2.0-experimental
+  version: 1.3.0-experimental
   license: { name: MIT, identifier: MIT }
-  summary: Hub revision 1 and workspace revision 2
+  summary: Hub revision 1 and workspace revision 3
   description: |
     Canonical HTTP contract for the UatuCode Hub and workspace APIs. Workspace
     operations use their externally visible Hub proxy paths. Streaming message
@@ -15,7 +15,7 @@ info:
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
     hubApiRevision: 1
-    workspaceApiRevision: 2
+    workspaceApiRevision: 3
 servers:
   - url: https://{hubHost}
     variables:
@@ -79,8 +79,8 @@ paths:
               example:
                 version: 0.5.1 (abcdef0)
                 hubApiRevision: 1
-                workspaceApiRevision: 2
-                workspaces: [{ id: uatu, path: /src/uatu, backend: local, running: true, workspaceApiRevision: 2, shells: [{ attached: false, label: zsh }] }]
+                workspaceApiRevision: 3
+                workspaces: [{ id: uatu, path: /src/uatu, backend: local, running: true, workspaceApiRevision: 3, shells: [{ attached: false, label: zsh }] }]
         '401': { $ref: '#/components/responses/Error' }
   /api/hub/browse:
     get:
@@ -272,7 +272,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/WorkspaceState' }
-              example: { workspaceApiRevision: 2, roots: [], repositories: [], compareTarget: base, initialFollow: true, defaultDocumentId: null, changedId: null, generatedAt: 0, build: { version: 0.5.1, branch: main, commitSha: abcdef, commitShort: abcdef, release: false, identifier: 0.5.1, bundledWebRevision: 1 }, scope: { kind: folder }, unscopedFingerprint: 3f2a, terminal: enabled }
+              example: { workspaceApiRevision: 3, roots: [], repositories: [], compareTarget: base, initialFollow: true, defaultDocumentId: null, changedId: null, generatedAt: 0, build: { version: 0.5.1, branch: main, commitSha: abcdef, commitShort: abcdef, release: false, identifier: 0.5.1, bundledWebRevision: 1 }, scope: { kind: folder }, unscopedFingerprint: 3f2a, terminal: enabled }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
@@ -874,13 +874,13 @@ components:
         - { $ref: '#/components/schemas/QuestionItem' }
         - { type: object, required: [id, type, createdAt, status], properties: { id: { type: string }, type: { const: turn_status }, createdAt: { type: number }, status: { $ref: '#/components/schemas/ConversationStatus' }, message: { type: string } }, additionalProperties: false }
         - { type: object, required: [id, type, createdAt, level, message], properties: { id: { type: string }, type: { const: notice }, createdAt: { type: number }, level: { enum: [info, warning, error] }, message: { type: string } }, additionalProperties: false }
-    PermissionItem: { type: object, required: [id, type, createdAt, requestId, action, resources, status], properties: { id: { type: string }, type: { const: permission }, createdAt: { type: number }, requestId: { type: string }, action: { type: string }, resources: { type: array, items: { type: string } }, status: { enum: [pending, resolved] }, outcome: { enum: [approved-once, approved-session, rejected] } }, additionalProperties: false }
+    PermissionItem: { type: object, required: [id, type, createdAt, requestId, action, resources, status], properties: { id: { type: string }, type: { const: permission }, createdAt: { type: number }, requestId: { type: string }, conversationId: { type: string, minLength: 1, maxLength: 512, description: "Conversation that owns this request. Differs from the containing conversation when a subagent's request is shown in the conversation that launched it; answers are addressed here." }, action: { type: string }, resources: { type: array, items: { type: string } }, status: { enum: [pending, resolved] }, outcome: { enum: [approved-once, approved-session, rejected] } }, additionalProperties: false }
     StructuredQuestion: { type: object, required: [prompt, header, options, multiple, allowFreeForm], properties: { prompt: { type: string }, header: { type: string }, options: { type: array, items: { type: object, required: [label, description], properties: { label: { type: string }, description: { type: string } }, additionalProperties: false } }, multiple: { type: boolean }, allowFreeForm: { type: boolean } }, additionalProperties: false }
     QuestionOutcome:
       oneOf:
         - { type: object, required: [kind], properties: { kind: { const: rejected } }, additionalProperties: false }
         - { type: object, required: [kind, answers], properties: { kind: { const: answered }, answers: { type: array, maxItems: 32, items: { type: array, maxItems: 32, items: { type: string, minLength: 1, maxLength: 4096 } } } }, additionalProperties: false }
-    QuestionItem: { type: object, required: [id, type, createdAt, requestId, questions, status], properties: { id: { type: string }, type: { const: question }, createdAt: { type: number }, requestId: { type: string }, questions: { type: array, items: { $ref: '#/components/schemas/StructuredQuestion' } }, status: { enum: [pending, resolved] }, outcome: { $ref: '#/components/schemas/QuestionOutcome' } }, additionalProperties: false }
+    QuestionItem: { type: object, required: [id, type, createdAt, requestId, questions, status], properties: { id: { type: string }, type: { const: question }, createdAt: { type: number }, requestId: { type: string }, conversationId: { type: string, minLength: 1, maxLength: 512, description: "Conversation that owns this request. See PermissionItem.conversationId." }, questions: { type: array, items: { $ref: '#/components/schemas/StructuredQuestion' } }, status: { enum: [pending, resolved] }, outcome: { $ref: '#/components/schemas/QuestionOutcome' } }, additionalProperties: false }
     ConversationSnapshot: { type: object, required: [conversation, generation, cursor, items], properties: { conversation: { $ref: '#/components/schemas/ConversationSummary' }, generation: { type: string }, cursor: { type: string }, items: { type: array, items: { $ref: '#/components/schemas/ConversationItem' } }, olderCursor: { type: string } }, additionalProperties: false }
     ChatMutationRequest: { type: object, required: [requestId], properties: { requestId: { type: string, minLength: 1, maxLength: 512 } }, additionalProperties: false }
     ChatPromptRequest: { type: object, required: [requestId, text], properties: { requestId: { type: string, minLength: 1, maxLength: 512 }, text: { type: string, minLength: 1, maxLength: 65536 }, model: { $ref: '#/components/schemas/ModelSelection' } }, additionalProperties: false }

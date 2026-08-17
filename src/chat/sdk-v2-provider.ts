@@ -281,7 +281,7 @@ export class SdkV2Provider implements OpenCodeProvider {
     unwrap(await this.client.v2.session.permission.reply({ sessionID: sessionId, requestID: requestId, reply }));
   }
 
-  async listPermissions(sessionId: string): Promise<PendingPermission[]> {
+  async listPermissions(): Promise<PendingPermission[]> {
     // Same route choice and reasoning as listQuestions below: the global list
     // filtered here. Tolerates either envelope, and either naming generation's
     // field names, because the classic bridge renames action/resources to
@@ -291,12 +291,13 @@ export class SdkV2Provider implements OpenCodeProvider {
     return response.flatMap(value => {
       const request = asRecord(value);
       const requestId = typeof request.id === "string" ? request.id : undefined;
-      if (!requestId || request.sessionID !== sessionId) return [];
+      const owner = typeof request.sessionID === "string" ? request.sessionID : undefined;
+      if (!requestId || !owner) return [];
       const action = typeof request.action === "string" ? request.action
         : typeof request.permission === "string" ? request.permission : "permission";
       const raw = Array.isArray(request.resources) ? request.resources
         : Array.isArray(request.patterns) ? request.patterns : [];
-      return [{ requestId, action, resources: raw.filter((item): item is string => typeof item === "string") }];
+      return [{ requestId, conversationId: owner, action, resources: raw.filter((item): item is string => typeof item === "string") }];
     });
   }
 

@@ -321,3 +321,29 @@ describe("compaction and revert stop the transcript from lying", () => {
     expect(normalizeProviderEvent({ id: "x", type: "session.next.something.new", data: { sessionID: "s" } }).outcome).toBe("unrecognized");
   });
 });
+
+describe("interaction items name the conversation that owns them", () => {
+  // Answers are addressed to the owner, so an item without one would send a
+  // reply to whichever conversation happened to be on screen.
+  const events = [
+    { id: "e", type: "permission.v2.asked", data: { id: "p1", sessionID: "s9", action: "bash", resources: ["ls"] } },
+    { id: "e", type: "permission.asked", properties: { id: "p2", sessionID: "s9", permission: "bash", patterns: ["ls"] } },
+    { id: "e", type: "permission.v2.replied", data: { sessionID: "s9", requestID: "p1", reply: "once" } },
+    { id: "e", type: "permission.replied", properties: { sessionID: "s9", requestID: "p2", reply: "once" } },
+    { id: "e", type: "question.v2.asked", data: { id: "q1", sessionID: "s9", questions: [] } },
+    { id: "e", type: "question.asked", properties: { id: "q2", sessionID: "s9", questions: [] } },
+    { id: "e", type: "question.v2.replied", data: { sessionID: "s9", requestID: "q1", answers: [["a"]] } },
+    { id: "e", type: "question.rejected", properties: { sessionID: "s9", requestID: "q2" } },
+  ];
+
+  test("every event path stamps the owner, in both naming generations", () => {
+    for (const event of events) {
+      const updates = normalizeProviderEvent(event).updates;
+      expect(updates.length).toBeGreaterThan(0);
+      for (const update of updates) {
+        if (update.kind !== "upsert") continue;
+        expect(update.item).toEqual(expect.objectContaining({ conversationId: "s9" }));
+      }
+    }
+  });
+});

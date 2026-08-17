@@ -127,6 +127,11 @@ export type PermissionOutcome = "approved-once" | "approved-session" | "rejected
 export type PermissionRequest = TimelineItemBase & {
   type: "permission";
   requestId: string;
+  // The conversation that owns this request — its own, except when a subagent's
+  // request is shown in the conversation that launched it. Answers are always
+  // addressed here, so one `requirePending` guard and one receipt key govern
+  // the reply however many places showed the card.
+  conversationId?: string;
   action: string;
   resources: string[];
   status: "pending" | "resolved";
@@ -153,6 +158,8 @@ export type QuestionOutcome =
 export type QuestionRequest = TimelineItemBase & {
   type: "question";
   requestId: string;
+  // See PermissionRequest.conversationId.
+  conversationId?: string;
   questions: StructuredQuestion[];
   status: "pending" | "resolved";
   outcome?: QuestionOutcome;

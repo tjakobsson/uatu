@@ -336,3 +336,102 @@ describe("permission choices state the authority they grant", () => {
     expect(host.textContent).toContain("approved-session");
   });
 });
+
+describe("a request's state is visible without reading it", () => {
+  const base = { type: "permission" as const, action: "bash", resources: ["rm -rf build"] };
+  function stack(): HTMLElement {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([
+      { ...base, id: "permission:done", createdAt: 1, requestId: "done", status: "resolved", outcome: "approved-once" },
+      { ...base, id: "permission:queued", createdAt: 2, requestId: "queued", status: "pending" },
+      { ...base, id: "permission:active", createdAt: 3, requestId: "active", status: "pending" },
+    ]), new Set());
+    return host;
+  }
+
+  test("each state is carried as data, so styling and counting cannot disagree", () => {
+    const host = stack();
+    const states = [...host.querySelectorAll("[data-request-state]")]
+      .map(node => (node as HTMLElement).dataset.requestState);
+    // Newest pending is answerable; the older pending one waits its turn.
+    expect(states).toEqual(["resolved", "queued", "needs-answer"]);
+  });
+
+  test("the distinction is not colour alone", () => {
+    const host = stack();
+    const active = host.querySelector('[data-chat-item-id="permission:active"]')!;
+    const queued = host.querySelector('[data-chat-item-id="permission:queued"]')!;
+    const resolved = host.querySelector('[data-chat-item-id="permission:done"]')!;
+    expect(active.querySelector(".chat-request-badge")?.textContent).toBe("Needs your answer");
+    expect(queued.querySelector(".chat-request-badge")?.textContent).toBe("Waiting its turn");
+    expect(resolved.querySelector(".chat-request-badge")).toBeNull();
+  });
+
+  test("a queued request is never described as obsolete", () => {
+    const queued = stack().querySelector('[data-chat-item-id="permission:queued"]')!;
+    const text = queued.textContent ?? "";
+    expect(text).toContain("Waiting its turn");
+    for (const lie of ["Superseded", "superseded", "obsolete", "Resolved"]) {
+      expect(text).not.toContain(lie);
+    }
+  });
+
+  test("questions carry the same states as permissions", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([
+      { ...question, id: "question:older", createdAt: 1, requestId: "older" },
+      { ...question, id: "question:newer", createdAt: 2, requestId: "newer" },
+    ]), new Set());
+    const states = [...host.querySelectorAll("[data-request-state]")]
+      .map(node => (node as HTMLElement).dataset.requestState);
+    expect(states).toEqual(["queued", "needs-answer"]);
+    expect(host.querySelector('[data-chat-item-id="question:older"]')?.textContent).toContain("Waiting its turn");
+  });
+});
+
+describe("requests owned by different conversations do not block each other", () => {
+  const perm = { type: "permission" as const, action: "bash", resources: ["ls"], status: "pending" as const };
+
+  test("each owner gets its own answerable request", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([
+      // The parent's own older request, then its newer one, then a subagent's.
+      { ...perm, id: "permission:own-old", createdAt: 1, requestId: "own-old" },
+      { ...perm, id: "permission:own-new", createdAt: 2, requestId: "own-new" },
+      { ...perm, id: "permission:child", createdAt: 3, requestId: "child", conversationId: "sub-1" },
+    ]), new Set());
+    const state = (id: string) => (host.querySelector(`[data-chat-item-id="${id}"]`) as HTMLElement).dataset.requestState;
+    // The parent's newest is answerable, and so is the subagent's — one does
+    // not consume the other's slot.
+    expect(state("permission:own-new")).toBe("needs-answer");
+    expect(state("permission:child")).toBe("needs-answer");
+    expect(state("permission:own-old")).toBe("queued");
+  });
+
+  test("a surfaced subagent request says who is asking", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([
+      { ...perm, id: "permission:own", createdAt: 1, requestId: "own" },
+      { ...perm, id: "permission:sub", createdAt: 2, requestId: "sub", conversationId: "child-1" },
+    ]), new Set());
+    // The decision reaches the user's other conversations, so who is asking is
+    // part of what they need to decide.
+    expect(host.querySelector('[data-chat-item-id="permission:sub"]')?.textContent).toContain("Requested by a subagent");
+    expect(host.querySelector('[data-chat-item-id="permission:own"]')?.textContent).not.toContain("Requested by a subagent");
+  });
+
+  test("a single-owner timeline behaves exactly as before", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([
+      { ...perm, id: "permission:a", createdAt: 1, requestId: "a", conversationId: "c1" },
+      { ...perm, id: "permission:b", createdAt: 2, requestId: "b", conversationId: "c1" },
+    ]), new Set());
+    const states = [...host.querySelectorAll("[data-request-state]")].map(n => (n as HTMLElement).dataset.requestState);
+    expect(states).toEqual(["queued", "needs-answer"]);
+  });
+});

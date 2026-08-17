@@ -151,9 +151,10 @@ export function parsePermissionRequest(value: unknown): PermissionRequest {
   const record = expectRecord(value, "permission request");
   expectKeys(
     record,
-    ["id", "type", "createdAt", "requestId", "action", "resources", "status", "outcome"],
+    ["id", "type", "createdAt", "requestId", "conversationId", "action", "resources", "status", "outcome"],
     "permission request",
   );
+  expectOptionalIdentity(record.conversationId, "permission owning conversation");
   expectTimelineBase(record, "permission");
   expectIdentity(record.requestId, "permission request id");
   expectNonEmptyString(record.action, "permission action");
@@ -170,7 +171,8 @@ export function parsePermissionRequest(value: unknown): PermissionRequest {
 
 export function parseQuestionRequest(value: unknown): QuestionRequest {
   const record = expectRecord(value, "question request");
-  expectKeys(record, ["id", "type", "createdAt", "requestId", "questions", "status", "outcome"], "question request");
+  expectKeys(record, ["id", "type", "createdAt", "requestId", "conversationId", "questions", "status", "outcome"], "question request");
+  expectOptionalIdentity(record.conversationId, "question owning conversation");
   expectTimelineBase(record, "question");
   expectIdentity(record.requestId, "question request id");
   if (!Array.isArray(record.questions) || record.questions.length === 0) {

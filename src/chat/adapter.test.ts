@@ -618,7 +618,7 @@ describe("pending permission recovery", () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("local")];
     // The pump never saw this: OpenCode raised it while the stream was down.
-    provider.listPermissions = async () => [{ requestId: "perm_1", action: "skill", resources: ["review-code"] }];
+    provider.listPermissions = async () => [{ requestId: "perm_1", conversationId: "local", action: "skill", resources: ["review-code"] }];
     const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
 
     const snapshot = await adapter.history("local");
@@ -637,7 +637,7 @@ describe("pending permission recovery", () => {
   test("a recovered request that also arrives live stays one entry", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("local")];
-    provider.listPermissions = async () => [{ requestId: "perm_1", action: "skill", resources: ["review-code"] }];
+    provider.listPermissions = async () => [{ requestId: "perm_1", conversationId: "local", action: "skill", resources: ["review-code"] }];
     const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
 
     await adapter.history("local");
@@ -673,5 +673,134 @@ describe("pending permission recovery", () => {
     provider.sessions = [fixtureSession("local")];
     const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     expect((await adapter.history("local")).items).toEqual([]);
+  });
+});
+
+describe("a subagent's request reaches the conversation that launched it", () => {
+  function withChild() {
+    const provider = new FakeProvider();
+    provider.sessions = [
+      fixtureSession("parent"),
+      { ...fixtureSession("child"), parentId: "parent" },
+    ];
+    return provider;
+  }
+  const asked = (id: string) => ({
+    id, type: "permission.v2.asked",
+    data: { id, sessionID: "child", action: "bash", resources: ["rm -rf build"], timestamp: 10 },
+  });
+
+  test("appears in the parent, owned by the child, and is answerable there", async () => {
+    const provider = withChild();
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push(asked("perm-1") as never);
+    while (adapter.projectionForTests("parent").items().length === 0) await Bun.sleep(1);
+
+    const mirrored = adapter.projectionForTests("parent").items()[0]!;
+    expect(mirrored).toEqual(expect.objectContaining({
+      id: "permission:perm-1",
+      type: "permission",
+      // The child owns it — that is what routes the answer correctly.
+      conversationId: "child",
+      status: "pending",
+    }));
+    // It is in the child's own transcript too.
+    expect(adapter.projectionForTests("child").items()).toHaveLength(1);
+
+    // Answering addresses the child, and replies exactly once.
+    await adapter.respondPermission("child", "perm-1", "client-1", "approved-once");
+    expect(provider.permissionReplies).toEqual([{ sessionId: "child", requestId: "perm-1", reply: "once" }]);
+
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("resolving in the child clears the parent's copy", async () => {
+    const provider = withChild();
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push(asked("perm-2") as never);
+    while (adapter.projectionForTests("parent").items().length === 0) await Bun.sleep(1);
+
+    provider.eventQueue.push({
+      id: "replied", type: "permission.v2.replied",
+      data: { sessionID: "child", requestID: "perm-2", reply: "once", timestamp: 11 },
+    } as never);
+    const permissionStatus = (conversation: string) => {
+      const item = adapter.projectionForTests(conversation).items()[0];
+      return item?.type === "permission" ? item.status : undefined;
+    };
+    while (permissionStatus("parent") !== "resolved") await Bun.sleep(1);
+
+    for (const conversation of ["parent", "child"]) {
+      const item = adapter.projectionForTests(conversation).items()[0]!;
+      expect(item).toEqual(expect.objectContaining({ status: "resolved" }));
+    }
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("a request from a parentless conversation is not mirrored anywhere", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("solo")];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push({
+      id: "perm-3", type: "permission.v2.asked",
+      data: { id: "perm-3", sessionID: "solo", action: "bash", resources: ["ls"], timestamp: 10 },
+    } as never);
+    while (adapter.projectionForTests("solo").items().length === 0) await Bun.sleep(1);
+    expect(adapter.projectionForTests("solo").items()[0]).toEqual(expect.objectContaining({ conversationId: "solo" }));
+    await adapter.stopEventPump();
+    await pump;
+  });
+});
+
+describe("a subagent's pending request is reconciled into its parent", () => {
+  // The live-event path is not enough: OpenCode does not deliver a subagent's
+  // permission on the main stream, so the parent must find it by asking.
+  function withPendingChildRequest() {
+    const provider = new FakeProvider();
+    provider.sessions = [
+      fixtureSession("parent"),
+      { ...fixtureSession("child"), parentId: "parent" },
+    ];
+    provider.listPermissions = async () => [
+      { requestId: "perm-child", conversationId: "child", action: "bash", resources: ["echo from-subagent"] },
+    ];
+    return provider;
+  }
+
+  test("appears in the parent on load, owned by the child", async () => {
+    const provider = withPendingChildRequest();
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const snapshot = await adapter.history("parent");
+    expect(snapshot.items).toEqual([expect.objectContaining({
+      id: "permission:perm-child",
+      type: "permission",
+      conversationId: "child",
+      action: "bash",
+      status: "pending",
+    })]);
+  });
+
+  test("answering it from the parent replies once, for the child", async () => {
+    const provider = withPendingChildRequest();
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    await adapter.history("parent");
+    // The client addresses the owner, which is what the item carries.
+    await adapter.respondPermission("child", "perm-child", "client-1", "approved-once");
+    expect(provider.permissionReplies).toEqual([{ sessionId: "child", requestId: "perm-child", reply: "once" }]);
+  });
+
+  test("an unrelated conversation's request is not pulled in", async () => {
+    const provider = withPendingChildRequest();
+    provider.sessions.push({ ...fixtureSession("stranger") });
+    provider.listPermissions = async () => [
+      { requestId: "perm-other", conversationId: "stranger", action: "bash", resources: ["ls"] },
+    ];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    expect((await adapter.history("parent")).items).toEqual([]);
   });
 });
