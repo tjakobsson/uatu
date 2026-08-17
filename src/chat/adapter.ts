@@ -230,8 +230,26 @@ export class OpenCodeChatAdapter {
           this.questionCreatedAt.delete(existing.id);
         }
       }
-      if (pendingNow.length > 0) this.publishedQuestions.set(id, new Set(pendingNow.map(item => item.id)));
-      else this.publishedQuestions.delete(id);
+      if (pendingNow.length > 0) {
+        this.publishedQuestions.set(id, new Set(pendingNow.map(item => item.id)));
+        // A recovered child question is ALSO recorded under its owning child:
+        // the child's next question-tool update computes removals against
+        // that set, and the pump mirrors them into this conversation. Keyed
+        // only under the parent, an answer given elsewhere left the parent
+        // offering a question OpenCode no longer had — 409 until reload.
+        // The sweep is child-inclusive, so each subset is that child's full
+        // current pending set and overwriting is safe.
+        const byChild = new Map<string, Set<string>>();
+        for (const item of pendingNow) {
+          if (item.type !== "question") continue;
+          const owner = item.conversationId ?? id;
+          if (owner === id) continue;
+          const set = byChild.get(owner) ?? new Set<string>();
+          set.add(item.id);
+          byChild.set(owner, set);
+        }
+        for (const [owner, ids] of byChild) this.publishedQuestions.set(owner, ids);
+      } else this.publishedQuestions.delete(id);
     } catch { /* unknown, not empty */ }
     // A permission is otherwise knowable only from a live event: it has no
     // history representation, so one raised while the pump was restarting

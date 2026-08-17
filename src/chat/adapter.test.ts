@@ -834,6 +834,34 @@ describe("pending permission recovery", () => {
     expect(adapter.projectionForTests("parent").has("question:que_child")).toBe(false);
   });
 
+  test("a recovered child question answered elsewhere clears live, not just on reload", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    let pending = [{
+      requestId: "que_gone",
+      conversationId: "child",
+      questions: [{ prompt: "Pick", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }],
+    }];
+    provider.listQuestions = async () => pending;
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    // Recovered through the parent's snapshot — the child transcript is
+    // never opened, so only this bookkeeping can seed the removal path.
+    await adapter.history("parent");
+    expect(adapter.projectionForTests("parent").has("question:que_gone")).toBe(true);
+
+    // Answered from another client; the reply event was missed, and the next
+    // question-tool update on the child is the only live signal.
+    pending = [];
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push({
+      id: "t1", type: "session.next.tool.success",
+      data: { sessionID: "child", callID: "c1", tool: "question" },
+    } as never);
+    while (adapter.projectionForTests("parent").has("question:que_gone")) await Bun.sleep(1);
+    await adapter.stopEventPump();
+    await pump;
+  });
+
   test("a child question answered from the parent seeds an empty owning projection", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
