@@ -450,10 +450,17 @@ class BoundedTextCapture {
   }
 
   snapshot(): string {
-    // The password is base64url, so its literal form is the only encoding that
-    // can appear here — there is no quoted or percent-encoded variant to match.
     const text = this.decoded();
-    return this.secret ? text.split(this.secret).join("[redacted]") : text;
+    if (!this.secret) return text;
+    // The literal (base64url, so no quoted or percent-encoded variant exists)
+    // and the Basic credential the health probe sends: an OpenCode that
+    // echoes request headers would otherwise leak the password in its
+    // base64 form.
+    let scrubbed = text;
+    for (const encoding of [this.secret, Buffer.from(`opencode:${this.secret}`).toString("base64")]) {
+      scrubbed = scrubbed.split(encoding).join("[redacted]");
+    }
+    return scrubbed;
   }
 
   private decoded(): string {

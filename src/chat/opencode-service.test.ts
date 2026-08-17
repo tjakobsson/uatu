@@ -336,7 +336,9 @@ describe("OpenCodeService failure diagnostics", () => {
     const { service } = fixture({
       ...clock.options,
       ...respawning({
-        stderr: "env OPENCODE_SERVER_PASSWORD=secret-password\n",
+        // The literal, and the Basic credential the health probe sends — a
+        // request-header echo carries the password base64-encoded.
+        stderr: `env OPENCODE_SERVER_PASSWORD=secret-password\nauthorization: Basic ${Buffer.from("opencode:secret-password").toString("base64")}\n`,
         stdout: "starting with secret-password in view\n",
       }),
       fetch: async () => { throw refusal(); },
@@ -346,6 +348,7 @@ describe("OpenCodeService failure diagnostics", () => {
     const status = await service.status();
     if (status.state !== "unavailable") throw new Error("expected unavailable");
     expect(JSON.stringify(status)).not.toContain("secret-password");
+    expect(JSON.stringify(status)).not.toContain(Buffer.from("opencode:secret-password").toString("base64"));
     expect(status.diagnostics?.stderr).toContain("[redacted]");
     expect(status.diagnostics?.stdout).toContain("[redacted]");
   });

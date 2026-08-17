@@ -105,9 +105,10 @@ A Chat startup failure SHALL NOT be permanent for the life of the workspace proc
 - **WHEN** a user triggers retry and startup fails again
 - **THEN** Chat reports the unavailable state with diagnostics from the new attempt, not the previous one
 
-#### Scenario: Retry is not offered when OpenCode is absent
+#### Scenario: Installation guidance leads when OpenCode is absent
 - **WHEN** Chat is unavailable because no `opencode` executable could be resolved
-- **THEN** the surface explains that OpenCode must be installed rather than presenting retry as the remedy
+- **THEN** the surface leads with the instruction to install OpenCode rather than presenting retry as the remedy
+- **AND** retry remains available as a secondary action, because the workspace caches the unavailable state and a completed installation must be discoverable without restarting the workspace
 
 #### Scenario: Concurrent retries are joined
 - **WHEN** a retry is in flight and another retry is triggered
