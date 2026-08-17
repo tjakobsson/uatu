@@ -121,6 +121,16 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
     // (compatibility probe, startup race) leaves the runtime "ready", and
     // re-probing the same process can never pick up a replaced binary.
     await this.runtime.restart();
+    // Any adapter another request built while the runtime was being torn
+    // down bound to the old, now-dead endpoint. Retire it too — otherwise
+    // the status() below would reuse its adapterPromise and report Chat
+    // ready on a connection that no longer exists.
+    // Not narrowed to null by the assignment above: ensureAdapter can have
+    // repopulated the reference while the awaits yielded.
+    const stray = this.adapter as OpenCodeChatAdapter | null;
+    this.adapterPromise = null;
+    this.adapter = null;
+    await stray?.stopEventPump().catch(() => undefined);
     return this.status();
   }
 

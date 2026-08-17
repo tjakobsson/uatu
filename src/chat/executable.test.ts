@@ -3,7 +3,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { discoverExecutable, discoverExecutableCandidates } from "./executable";
+import { discoverExecutable, discoverExecutableCandidates, withinBudget } from "./executable";
 
 const temporaryDirectories: string[] = [];
 
@@ -42,6 +42,15 @@ describe("executable discovery", () => {
     temporaryDirectories.push(empty);
     expect(await discoverExecutableCandidates("opencode", { PATH: empty }, "darwin")).toEqual([]);
     expect(await discoverExecutableCandidates("opencode", {}, "darwin")).toEqual([]);
+  });
+
+  test("a check that cannot answer within the budget reports absent, not hangs", async () => {
+    // Models a stat against a hung network mount: the promise never settles,
+    // and the scan must not let it block startup.
+    const hung = new Promise<boolean>(() => {});
+    expect(await withinBudget(hung, 5)).toBe(false);
+    expect(await withinBudget(Promise.resolve(true), 1_000)).toBe(true);
+    expect(await withinBudget(Promise.reject(new Error("io error")), 1_000)).toBe(false);
   });
 
   test("ignores non-executable files and reports a missing PATH", async () => {
