@@ -237,6 +237,43 @@ describe("OpenCode conversation inventory and history", () => {
     expect(await adapter.getConversation("created")).toEqual(expect.objectContaining({ id: "created" }));
   });
 
+  test("stale running activity from a dead server is closed out on load", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    // OpenCode died mid-turn (hub quit): the store never received a terminal
+    // state for these parts, so they still read as running.
+    provider.pages.set("first", { items: [{
+      info: { id: "m1", role: "assistant", time: { created: 10 } },
+      parts: [
+        { id: "p1", type: "tool", tool: "task", state: { status: "running", input: { description: "Audit styles" } } },
+        { id: "p2", type: "tool", tool: "task", state: { status: "completed" } },
+        { id: "p3", type: "reasoning", text: "thinking", time: { start: 10 } },
+      ],
+    } as never] });
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+
+    const items = (await adapter.history("local")).items;
+    expect(items).toEqual([
+      expect.objectContaining({ id: "tool:p1", status: "cancelled" }),
+      expect.objectContaining({ id: "tool:p2", status: "completed" }),
+      expect.objectContaining({ id: "part:p3", type: "reasoning", status: "cancelled" }),
+    ]);
+  });
+
+  test("a live turn keeps its running activity across a reload", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    provider.pages.set("first", { items: [{
+      info: { id: "m1", role: "assistant", time: { created: 10 } },
+      parts: [{ id: "p1", type: "tool", tool: "task", state: { status: "running", input: { description: "Audit styles" } } }],
+    } as never] });
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    adapter.projectionForTests("local").statusUpdate("running");
+
+    const items = (await adapter.history("local")).items;
+    expect(items).toEqual([expect.objectContaining({ id: "tool:p1", status: "running" })]);
+  });
+
   test("uses opaque stable provider page boundaries without duplicate or reordered items", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];

@@ -173,6 +173,20 @@ export class OpenCodeChatAdapter {
     // order (the order `flatMap` already produced). Comparing ids instead
     // reorders a turn alphabetically on replay.
     items.sort((left, right) => left.createdAt - right.createdAt);
+    // The store is not the truth about liveness: a tool part stays "running"
+    // forever when OpenCode dies before writing a terminal state (quitting the
+    // hub mid-turn), and on reload that renders agents as still working. A
+    // turn cannot outlive the server, so when no turn is live here the stale
+    // activity is closed out as cancelled. A genuinely running turn keeps its
+    // statuses — the projection says "running" while one is underway.
+    if (this.projection(id).status !== "running" && this.projection(id).status !== "sending") {
+      for (let index = 0; index < items.length; index += 1) {
+        const item = items[index]!;
+        if ((item.type === "tool" || item.type === "command" || item.type === "reasoning") && (item.status === "running" || item.status === "pending")) {
+          items[index] = { ...item, status: "cancelled" };
+        }
+      }
+    }
     // OpenCode 1.18 never emits `question.v2.asked`, so a pending question is
     // invisible to the event stream and only the provider knows about it.
     // Asking here is what makes an open question answerable at all. A failed
