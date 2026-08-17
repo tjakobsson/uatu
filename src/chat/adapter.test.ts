@@ -12,6 +12,7 @@ import type {
 } from "./provider";
 import type { ChatEvent, ChatModel, ModelSelection } from "./types";
 import { ConversationNotFoundError } from "./workspace";
+import { MetricsRegistry } from "../debug/metrics";
 
 class EventQueue implements AsyncIterable<ProviderEvent> {
   private values: ProviderEvent[] = [];
@@ -57,6 +58,7 @@ class FakeProvider implements OpenCodeProvider {
   interrupts: string[] = [];
   modelSwitches: Array<{ sessionId: string; selection: ModelSelection }> = [];
   renameSession?: OpenCodeProvider["renameSession"];
+  listPermissions?: OpenCodeProvider["listPermissions"];
 
   async listCommands() { return this.commands; }
   async listModels() { return this.models; }
@@ -488,5 +490,188 @@ describe("prompt, abort, permission, and question mutations", () => {
       expect.objectContaining({ requestId: "free", answers: [["Other"]] }),
       expect.objectContaining({ requestId: "reject", rejected: true }),
     ]);
+  });
+});
+
+describe("discarded event accounting", () => {
+  function counters() {
+    const values: Record<string, number> = {};
+    return { values, inc: (name: string, delta = 1) => { values[name] = (values[name] ?? 0) + delta; } };
+  }
+
+  test("an unrecognized event is counted by type and the stream keeps flowing", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    const metrics = counters();
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), metrics, coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+
+    provider.eventQueue.push({ id: "u1", type: "totally.unknown.event", data: { sessionID: "local" } } as never);
+    provider.eventQueue.push({ id: "d1", type: "session.next.text.delta", data: { sessionID: "local", partID: "p", delta: "after" } });
+    while (adapter.projectionForTests("local").items().length === 0) await Bun.sleep(1);
+
+    expect(metrics.values["chat.event.unrecognized.totally.unknown.event"]).toBe(1);
+    // The event after the unrecognized one still landed.
+    expect(JSON.stringify(adapter.projectionForTests("local").items())).toContain("after");
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("a malformed payload of a known type costs one event, not the pump", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    const metrics = counters();
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), metrics, coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+
+    // `permission.v2.asked` requires an id; without one its accessor throws.
+    provider.eventQueue.push({ id: "bad", type: "permission.v2.asked", data: { sessionID: "local" } } as never);
+    provider.eventQueue.push({ id: "d1", type: "session.next.text.delta", data: { sessionID: "local", partID: "p", delta: "survived" } });
+    while (adapter.projectionForTests("local").items().length === 0) await Bun.sleep(1);
+
+    expect(metrics.values["chat.event.unparseable.permission.v2.asked"]).toBe(1);
+    expect(JSON.stringify(adapter.projectionForTests("local").items())).toContain("survived");
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("an intentionally ignored type is not counted as a discard", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    const metrics = counters();
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), metrics, coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+
+    provider.eventQueue.push({ id: "hb", type: "server.heartbeat", data: {} } as never);
+    provider.eventQueue.push({ id: "cd", type: "session.next.compaction.delta", data: { sessionID: "local" } } as never);
+    provider.eventQueue.push({ id: "d1", type: "session.next.text.delta", data: { sessionID: "local", partID: "p", delta: "ok" } });
+    while (adapter.projectionForTests("local").items().length === 0) await Bun.sleep(1);
+
+    expect(Object.keys(metrics.values).filter(key => key.startsWith("chat.event."))).toEqual([]);
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("the counted type space is bounded, folding overflow into `other`", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    const metrics = counters();
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), metrics, coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+
+    for (let index = 0; index < 70; index += 1) {
+      provider.eventQueue.push({ id: `u${index}`, type: `unknown.type.${index}`, data: { sessionID: "local" } } as never);
+    }
+    provider.eventQueue.push({ id: "d1", type: "session.next.text.delta", data: { sessionID: "local", partID: "p", delta: "last" } });
+    while (adapter.projectionForTests("local").items().length === 0) await Bun.sleep(1);
+
+    const keys = Object.keys(metrics.values).filter(key => key.startsWith("chat.event.unrecognized."));
+    expect(keys.length).toBe(65);
+    expect(metrics.values["chat.event.unrecognized.other"]).toBe(6);
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("discards land in the registry snapshot the workspace writes without --debug", async () => {
+    // cli.ts writes `snapshot-<pid>.json` from MetricsRegistry.snapshot() on an
+    // unconditional 1Hz tick; --debug only adds the NDJSON history. Driving the
+    // real registry here guards the property that makes these counters readable
+    // on the machine where chat broke, with no restart and no flag.
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    const registry = new MetricsRegistry();
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), metrics: registry, coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+
+    provider.eventQueue.push({ id: "u1", type: "question.asked.someday", data: { sessionID: "local" } } as never);
+    provider.eventQueue.push({ id: "d1", type: "session.next.text.delta", data: { sessionID: "local", partID: "p", delta: "ok" } });
+    while (adapter.projectionForTests("local").items().length === 0) await Bun.sleep(1);
+
+    expect(registry.snapshot().counters["chat.event.unrecognized.question.asked.someday"]).toBe(1);
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("no counter key or value carries an event payload", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    const metrics = counters();
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), metrics, coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+
+    provider.eventQueue.push({
+      id: "secret",
+      type: "unknown.secret.carrier",
+      data: { sessionID: "local", contents: "PRIVATE-FILE-CONTENTS" },
+    } as never);
+    provider.eventQueue.push({ id: "d1", type: "session.next.text.delta", data: { sessionID: "local", partID: "p", delta: "ok" } });
+    while (adapter.projectionForTests("local").items().length === 0) await Bun.sleep(1);
+
+    expect(JSON.stringify(metrics.values)).not.toContain("PRIVATE-FILE-CONTENTS");
+    await adapter.stopEventPump();
+    await pump;
+  });
+});
+
+describe("pending permission recovery", () => {
+  test("a permission the event stream never delivered appears on load and is answerable", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    // The pump never saw this: OpenCode raised it while the stream was down.
+    provider.listPermissions = async () => [{ requestId: "perm_1", action: "skill", resources: ["review-code"] }];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+
+    const snapshot = await adapter.history("local");
+    expect(snapshot.items).toEqual([expect.objectContaining({
+      id: "permission:perm_1",
+      type: "permission",
+      action: "skill",
+      resources: ["review-code"],
+      status: "pending",
+    })]);
+
+    await adapter.respondPermission("local", "perm_1", "req-1", "approved-once");
+    expect(provider.permissionReplies).toEqual([{ sessionId: "local", requestId: "perm_1", reply: "once" }]);
+  });
+
+  test("a recovered request that also arrives live stays one entry", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    provider.listPermissions = async () => [{ requestId: "perm_1", action: "skill", resources: ["review-code"] }];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+
+    await adapter.history("local");
+    applyEvent(adapter, "local", {
+      id: "live",
+      type: "permission.v2.asked",
+      data: { id: "perm_1", sessionID: "local", action: "skill", resources: ["review-code"] },
+    } as never);
+
+    const items = adapter.projectionForTests("local").items().filter(item => item.type === "permission");
+    expect(items).toHaveLength(1);
+  });
+
+  test("a failing permission list leaves already-known requests visible", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    provider.listPermissions = async () => { throw new Error("provider unreachable"); };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+
+    applyEvent(adapter, "local", {
+      id: "live",
+      type: "permission.v2.asked",
+      data: { id: "perm_known", sessionID: "local", action: "shell", resources: ["ls"] },
+    } as never);
+
+    // The snapshot degrades rather than erasing what the stream established.
+    const snapshot = await adapter.history("local");
+    expect(snapshot.items.some(item => item.id === "permission:perm_known")).toBe(true);
+  });
+
+  test("a provider without the list simply never recovers, and does not throw", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    expect((await adapter.history("local")).items).toEqual([]);
   });
 });

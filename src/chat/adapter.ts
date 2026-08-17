@@ -36,6 +36,15 @@ export class InvalidModelSelectionError extends Error {
   }
 }
 
+// Just the slice of MetricsRegistry the adapter needs, so chat does not depend
+// on the debug module's shape.
+export type ChatEventMetrics = { inc(name: string, delta?: number): void };
+
+// Event type strings come from a local trusted process, but the counter key
+// space must still be bounded — a future OpenCode emitting per-request type
+// names must not grow the registry without limit.
+const MAX_COUNTED_EVENT_TYPES = 64;
+
 export type ChatAdapterOptions = {
   provider: OpenCodeProvider;
   workspacePath: string;
@@ -46,6 +55,9 @@ export type ChatAdapterOptions = {
   receiptTtlMs?: number;
   maxProjections?: number;
   coalesceWindowMs?: number;
+  // Optional diagnostic sink. When present the pump counts events it could not
+  // use, so an operator can discover what a live workspace is discarding.
+  metrics?: ChatEventMetrics;
   now?: () => number;
   id?: () => string;
 };
@@ -63,8 +75,11 @@ export class OpenCodeChatAdapter {
   private readonly publishedQuestions = new Map<string, Set<string>>();
   private readonly questionRefreshes = new Set<string>();
   private readonly questionCreatedAt = new Map<string, number>();
+  private readonly permissionCreatedAt = new Map<string, number>();
   private readonly maxProjections: number;
   private readonly coalesceWindowMs: number | undefined;
+  private readonly metrics: ChatEventMetrics | undefined;
+  private readonly countedEventTypes = new Set<string>();
   private readonly lastModel = new Map<string, ModelSelection>();
   private readonly providerMessageRoles = new Map<string, string>();
   private pumpController: AbortController | null = null;
@@ -77,6 +92,7 @@ export class OpenCodeChatAdapter {
     this.replayBytes = options.replayBytes ?? 256 * 1024;
     this.maxProjections = options.maxProjections ?? 64;
     this.coalesceWindowMs = options.coalesceWindowMs;
+    this.metrics = options.metrics;
     this.id = options.id ?? randomUUID;
     this.receipts = new IdempotencyReceipts({
       maxEntries: options.receiptEntries ?? 1_000,
@@ -168,6 +184,27 @@ export class OpenCodeChatAdapter {
       if (pendingNow.length > 0) this.publishedQuestions.set(id, new Set(pendingNow.map(item => item.id)));
       else this.publishedQuestions.delete(id);
     } catch { /* unknown, not empty */ }
+    // A permission is otherwise knowable only from a live event: it has no
+    // history representation, so one raised while the pump was restarting
+    // would strand its turn with nothing on screen. Reconciling here — the
+    // moment a user is actually looking at the conversation — makes it
+    // answerable. Ids match the event path's, so a request that also arrives
+    // live converges on one entry instead of rendering twice.
+    try {
+      for (const pending of await this.pendingPermissions(id)) {
+        if (items.some(item => item.id === pending.id)) continue;
+        items.push(pending);
+      }
+    } catch {
+      // Unknown, not empty. `seed` replaces the timeline from history, and
+      // history carries no interaction requests at all — so without carrying
+      // the live ones over, a failed list would erase a request the event
+      // stream established and strand the turn waiting on it.
+      for (const existing of this.projection(id).items()) {
+        const unresolved = (existing.type === "permission" || existing.type === "question") && existing.status === "pending";
+        if (unresolved && !items.some(item => item.id === existing.id)) items.push(existing);
+      }
+    }
     const projection = this.projection(id);
     projection.seed(items);
     return {
@@ -318,6 +355,19 @@ export class OpenCodeChatAdapter {
     });
   }
 
+  // Counts an event the pump could not use, by type. Never records a payload:
+  // a payload can carry file contents, and the count is what is actionable.
+  private countDiscard(outcome: "unrecognized" | "unparseable", eventType: string): void {
+    if (!this.metrics) return;
+    const type = eventType || "unknown";
+    let key = type;
+    if (!this.countedEventTypes.has(type)) {
+      if (this.countedEventTypes.size >= MAX_COUNTED_EVENT_TYPES) key = "other";
+      else this.countedEventTypes.add(type);
+    }
+    this.metrics.inc(`chat.event.${outcome}.${key}`);
+  }
+
   projectionForTests(id: string): ConversationProjection {
     return this.projection(id);
   }
@@ -335,7 +385,19 @@ export class OpenCodeChatAdapter {
     try {
       for await (const event of this.provider.events(signal)) {
         if (signal.aborted) break;
-      const normalized = normalizeProviderEvent(event, this.providerMessageRoles);
+        // Inside the loop, never above it: normalization resolves every failure
+        // to an outcome, and anything that still escapes must cost one event
+        // rather than ending the pump and losing the whole restart gap.
+        let normalized;
+        try {
+          normalized = normalizeProviderEvent(event, this.providerMessageRoles);
+        } catch {
+          this.countDiscard("unparseable", "");
+          continue;
+        }
+        if (normalized.outcome === "unrecognized" || normalized.outcome === "unparseable") {
+          this.countDiscard(normalized.outcome, normalized.eventType);
+        }
         if (!normalized.conversationId || normalized.updates.length === 0) continue;
         // Confinement is checked per event as it arrives, never at flush time:
         // a session that moves out of the workspace must stop publishing from
@@ -368,6 +430,28 @@ export class OpenCodeChatAdapter {
    * shape so an event-emitting provider and this fallback converge on one
    * item rather than rendering the same question twice.
    */
+  /** Throws on provider failure — an errored list is unknown, not empty. */
+  private async pendingPermissions(id: string): Promise<ConversationItem[]> {
+    if (!this.provider.listPermissions) return [];
+    const requests = await this.provider.listPermissions(id);
+    return requests.map(request => {
+      const itemId = `permission:${request.requestId}`;
+      // Stable createdAt for the same reason questions keep one: a fresh
+      // Date.now() on every reconciliation would keep moving the card.
+      const createdAt = this.permissionCreatedAt.get(itemId) ?? Date.now();
+      this.permissionCreatedAt.set(itemId, createdAt);
+      return {
+        id: itemId,
+        type: "permission" as const,
+        createdAt,
+        requestId: request.requestId,
+        action: request.action,
+        resources: request.resources,
+        status: "pending" as const,
+      };
+    });
+  }
+
   /** Throws on provider failure — an errored list is unknown, not empty. */
   private async pendingQuestions(id: string): Promise<ConversationItem[]> {
     if (!this.provider.listQuestions) return [];

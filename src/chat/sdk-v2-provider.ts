@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 
 import type {
   OpenCodeProvider,
+  PendingPermission,
   PendingQuestion,
   ProviderEvent,
   ProviderMessage,
@@ -278,6 +279,25 @@ export class SdkV2Provider implements OpenCodeProvider {
       return;
     }
     unwrap(await this.client.v2.session.permission.reply({ sessionID: sessionId, requestID: requestId, reply }));
+  }
+
+  async listPermissions(sessionId: string): Promise<PendingPermission[]> {
+    // Same route choice and reasoning as listQuestions below: the global list
+    // filtered here. Tolerates either envelope, and either naming generation's
+    // field names, because the classic bridge renames action/resources to
+    // permission/patterns.
+    const payload = unwrap(await this.client.permission.list({ directory: this.directory })) as unknown;
+    const response = Array.isArray(payload) ? payload : asArray(asRecord(payload).data);
+    return response.flatMap(value => {
+      const request = asRecord(value);
+      const requestId = typeof request.id === "string" ? request.id : undefined;
+      if (!requestId || request.sessionID !== sessionId) return [];
+      const action = typeof request.action === "string" ? request.action
+        : typeof request.permission === "string" ? request.permission : "permission";
+      const raw = Array.isArray(request.resources) ? request.resources
+        : Array.isArray(request.patterns) ? request.patterns : [];
+      return [{ requestId, action, resources: raw.filter((item): item is string => typeof item === "string") }];
+    });
   }
 
   async listQuestions(sessionId: string): Promise<PendingQuestion[]> {

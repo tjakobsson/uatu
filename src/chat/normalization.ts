@@ -8,6 +8,71 @@ export type NormalizedProviderUpdate =
   | { kind: "remove"; itemId: string }
   | { kind: "status"; status: ConversationStatus; message?: string };
 
+// Why an event produced no updates. Without this an unrecognized event and one
+// we deliberately ignore are the same empty value to the caller, so a counter
+// over them would either miss real drops or inflate on expected ones.
+export type NormalizedEventOutcome =
+  | "handled"
+  // Recognized, and correctly produced nothing (a status we already hold, a
+  // streaming frame whose start and end are enough).
+  | "ignored"
+  // No case matched: the workspace does not know this event type at all.
+  | "unrecognized"
+  // A case matched but the payload did not carry what that case requires.
+  | "unparseable";
+
+export type NormalizedProviderEvent = {
+  conversationId?: string;
+  updates: NormalizedProviderUpdate[];
+  outcome: NormalizedEventOutcome;
+  // The event's own type, so a caller can count drops per type. Never a
+  // payload — a payload can carry file contents.
+  eventType: string;
+};
+
+// Event types recognized as deliberately carrying nothing for the timeline.
+// Listed rather than lumped with `unrecognized` so the drop counter stays
+// honest about what the workspace genuinely does not understand.
+const INTENTIONALLY_IGNORED = new Set([
+  // Streaming progress for an operation whose started/ended pair is enough.
+  "session.next.compaction.delta",
+  "session.next.tool.input.started",
+  "session.next.tool.input.delta",
+  "session.next.tool.input.ended",
+  // Server and workspace lifecycle with no conversation meaning.
+  "server.connected",
+  "server.heartbeat",
+  "server.instance.disposed",
+  "global.disposed",
+  "installation.updated",
+  "installation.update.available",
+  "catalog.updated",
+  "plugin.added",
+  "integration.updated",
+  "integration.connection.updated",
+  "project.updated",
+  "project.directories.updated",
+  "file.watcher.updated",
+  "reference.updated",
+  "lsp.updated",
+  "mcp.tools.changed",
+  "mcp.browser.open.failed",
+  "vcs.branch.updated",
+  "workspace.ready",
+  "workspace.failed",
+  "workspace.status",
+  "worktree.ready",
+  "worktree.failed",
+  "pty.created",
+  "pty.updated",
+  "pty.exited",
+  "pty.deleted",
+  "tui.prompt.append",
+  "tui.command.execute",
+  "tui.toast.show",
+  "tui.session.select",
+]);
+
 export function normalizeProviderMessage(value: unknown): ConversationItem[] {
   const envelope = record(value);
   const info = record(envelope.info);
@@ -41,7 +106,36 @@ export function normalizeProviderMessage(value: unknown): ConversationItem[] {
   }
 }
 
-export function normalizeProviderEvent(value: unknown, messageRoles?: Map<string, string>): { conversationId?: string; updates: NormalizedProviderUpdate[] } {
+// Public boundary. Every failure mode resolves to an outcome rather than an
+// exception, so one malformed payload costs one event instead of the pump.
+export function normalizeProviderEvent(value: unknown, messageRoles?: Map<string, string>): NormalizedProviderEvent {
+  const eventType = optionalString(record(value).type) ?? "";
+  try {
+    const matched = normalizeKnownEvent(value, messageRoles);
+    if (matched) return { ...matched, outcome: matched.updates.length > 0 ? "handled" : "ignored", eventType };
+    return {
+      conversationId: conversationIdOf(value),
+      updates: [],
+      outcome: INTENTIONALLY_IGNORED.has(eventType) ? "ignored" : "unrecognized",
+      eventType,
+    };
+  } catch {
+    // A recognized type whose payload lacks what its case requires. Reported,
+    // never rethrown: the caller must keep consuming the stream.
+    return { conversationId: conversationIdOf(value), updates: [], outcome: "unparseable", eventType };
+  }
+}
+
+function conversationIdOf(value: unknown): string | undefined {
+  try {
+    const data = record(record(value).data ?? record(value).properties);
+    return optionalString(data.sessionID) ?? optionalString(data.sessionId);
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeKnownEvent(value: unknown, messageRoles?: Map<string, string>): { conversationId?: string; updates: NormalizedProviderUpdate[] } | undefined {
   const event = record(value);
   const data = record(event.data ?? event.properties);
   const conversationId = optionalString(data.sessionID) ?? optionalString(data.sessionId);
@@ -118,8 +212,70 @@ export function normalizeProviderEvent(value: unknown, messageRoles?: Map<string
     case "session.next.tool.success":
     case "session.next.tool.failed":
       return normalizeToolEvent(event, data, conversationId, eventId, createdAt);
+    // Compaction and revert both change what the transcript means. Unmapped,
+    // a compacted conversation looks like it silently lost content and
+    // reverted work keeps rendering as though it still applies. Notices rather
+    // than a new item type: the requirement is that the transcript stop lying,
+    // and a new type would drag the published ConversationItem schema — and an
+    // API revision — into a change that otherwise needs none.
+    case "session.next.compaction.started":
+      return { conversationId, updates: [{ kind: "upsert", item: {
+        id: `notice:${eventId}`,
+        type: "notice",
+        createdAt,
+        level: "info",
+        message: "Compacting conversation context…",
+      } }] };
+    case "session.next.compaction.ended":
+      return { conversationId, updates: [{ kind: "upsert", item: {
+        id: `notice:${eventId}`,
+        type: "notice",
+        createdAt,
+        level: "info",
+        message: text(data.summary) || "Conversation context compacted. Earlier turns are summarized.",
+      } }] };
+    case "session.next.revert.staged":
+    case "session.next.revert.committed":
+    case "session.next.revert.cleared":
+      return { conversationId, updates: [{ kind: "upsert", item: {
+        id: `notice:${eventId}`,
+        type: "notice",
+        createdAt,
+        level: "warning",
+        message: event.type === "session.next.revert.cleared"
+          ? "Revert cleared. Earlier changes apply again."
+          : event.type === "session.next.revert.committed"
+            ? "Changes reverted. Work shown above this point no longer applies."
+            : "Revert staged. Work shown above this point is pending reversal.",
+      } }] };
     case "session.next.step.ended":
       return { conversationId, updates: normalizeDiffs(data, createdAt) };
+    // OpenCode 1.18 announces one request under two naming generations: v2 is
+    // native and the classic name is bridged from it (`action`→`permission`,
+    // `resources`→`patterns`, `save`→`always`). Both carry the same request id,
+    // so mapping both onto `permission:<id>` makes the projection upsert the
+    // dedupe — whichever arrives second merges into the same entry.
+    case "permission.asked":
+      return { conversationId, updates: [{ kind: "upsert", item: {
+        id: `permission:${string(data.id, "permission id")}`,
+        type: "permission",
+        createdAt,
+        requestId: string(data.id, "permission id"),
+        action: text(data.permission),
+        resources: stringArray(data.patterns),
+        status: "pending",
+      } }] };
+    case "permission.replied":
+      return { conversationId, updates: [{ kind: "upsert", item: {
+        id: `permission:${string(data.requestID, "permission id")}`,
+        type: "permission",
+        createdAt,
+        requestId: string(data.requestID, "permission id"),
+        action: "permission",
+        resources: [],
+        status: "resolved",
+        outcome: permissionOutcome(data.reply),
+      } }] };
     case "permission.v2.asked":
       return { conversationId, updates: [{ kind: "upsert", item: {
         id: `permission:${string(data.id, "permission id")}`,
@@ -141,6 +297,35 @@ export function normalizeProviderEvent(value: unknown, messageRoles?: Map<string
         resources: [],
         status: "resolved",
         outcome: permissionOutcome(data.reply),
+      } }] };
+    }
+    // Same two-generation story as permissions. This one matters more: the
+    // workspace previously saw no live question signal at all and fell back to
+    // polling, because it was listening only for the v2 name.
+    case "question.asked": {
+      const requestId = string(data.id, "question id");
+      return { conversationId, updates: [{ kind: "upsert", item: {
+        id: `question:${requestId}`,
+        type: "question",
+        createdAt,
+        requestId,
+        questions: array(data.questions).map(normalizeQuestion),
+        status: "pending",
+      } }] };
+    }
+    case "question.replied":
+    case "question.rejected": {
+      const requestId = string(data.requestID, "question id");
+      return { conversationId, updates: [{ kind: "upsert", item: {
+        id: `question:${requestId}`,
+        type: "question",
+        createdAt,
+        requestId,
+        questions: [],
+        status: "resolved",
+        outcome: event.type === "question.rejected"
+          ? { kind: "rejected" }
+          : { kind: "answered", answers: array(data.answers).map(stringArray) },
       } }] };
     }
     case "question.v2.asked": {
@@ -223,7 +408,8 @@ export function normalizeProviderEvent(value: unknown, messageRoles?: Map<string
       return { conversationId, updates: partId ? [{ kind: "remove", itemId: `part:${partId}` }] : [] };
     }
     default:
-      return { conversationId, updates: [] };
+      // No case matched. The wrapper decides whether that is expected.
+      return undefined;
   }
 }
 

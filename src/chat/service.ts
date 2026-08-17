@@ -1,4 +1,4 @@
-import { OpenCodeChatAdapter, type ChatAdapterOptions } from "./adapter";
+import { OpenCodeChatAdapter, type ChatAdapterOptions, type ChatEventMetrics } from "./adapter";
 import { OpenCodeService, type OpenCodeServiceOptions } from "./opencode-service";
 import { createSdkV2Provider } from "./sdk-v2-provider";
 import type { OpenCodeProvider } from "./provider";
@@ -48,6 +48,9 @@ export type LazyOpenCodeChatServiceOptions = OpenCodeServiceOptions & {
   runtime?: OpenCodeService;
   createProvider?: (options: { endpoint: string; password: string; directory: string }) => OpenCodeProvider;
   createAdapter?: (options: ChatAdapterOptions) => OpenCodeChatAdapter;
+  // Passed through to the adapter's event pump so discarded-event counts land
+  // in the workspace's diagnostic registry.
+  metrics?: ChatEventMetrics;
 };
 
 export class LazyOpenCodeChatService implements WorkspaceChatService {
@@ -55,6 +58,7 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
   private readonly workspacePath: string;
   private readonly createProvider: NonNullable<LazyOpenCodeChatServiceOptions["createProvider"]>;
   private readonly createAdapter: NonNullable<LazyOpenCodeChatServiceOptions["createAdapter"]>;
+  private readonly metrics: ChatEventMetrics | undefined;
   private adapterPromise: Promise<OpenCodeChatAdapter> | null = null;
   private adapter: OpenCodeChatAdapter | null = null;
   private disposed = false;
@@ -64,6 +68,7 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
     this.runtime = options.runtime ?? new OpenCodeService(options);
     this.createProvider = options.createProvider ?? createSdkV2Provider;
     this.createAdapter = options.createAdapter ?? (adapterOptions => new OpenCodeChatAdapter(adapterOptions));
+    this.metrics = options.metrics;
   }
 
   async status(): Promise<ChatAvailability> {
@@ -140,7 +145,7 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
       // pump failures are swallowed by the supervisor — without a probe an
       // incompatible server reports "ready" and then fails every operation.
       await provider.listModels();
-      const adapter = this.createAdapter({ provider, workspacePath: this.workspacePath });
+      const adapter = this.createAdapter({ provider, workspacePath: this.workspacePath, metrics: this.metrics });
       this.adapter = adapter;
       this.superviseEventPump(adapter);
       return adapter;

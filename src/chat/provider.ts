@@ -1,6 +1,7 @@
 import type { ChatCommand, ChatModel, ModelSelection, StructuredQuestion } from "./types";
 
 export type PendingQuestion = { requestId: string; questions: StructuredQuestion[] };
+export type PendingPermission = { requestId: string; action: string; resources: string[] };
 
 export type ProviderSession = {
   id: string;
@@ -37,6 +38,13 @@ export interface OpenCodeProvider {
   command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection }): Promise<{ messageId: string }>;
   interrupt(sessionId: string): Promise<void>;
   replyPermission(sessionId: string, requestId: string, reply: ProviderPermissionReply): Promise<void>;
+  /**
+   * Pending permission requests owned by a session. A permission is otherwise
+   * knowable only from a live event, so one raised while the event pump was
+   * restarting is unrecoverable and its turn waits forever. Optional: a
+   * provider without it simply never recovers a missed request.
+   */
+  listPermissions?(sessionId: string): Promise<PendingPermission[]>;
   /**
    * Pending question requests owned by a session. OpenCode 1.18 never emits
    * `question.v2.asked` over the event stream, so a pending question is only
