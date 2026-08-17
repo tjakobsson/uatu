@@ -235,6 +235,11 @@ describe("OpenCode v2 identity policy", () => {
           { name: "plan", description: "Read-only", mode: "all" },
           { name: "explore", description: "Task-tool only", mode: "subagent" },
           { name: "build", description: "duplicate", mode: "primary" },
+          // System agents are primary-mode but hidden on the wire — the field
+          // the SDK type omits. They run OpenCode's own bookkeeping turns.
+          { name: "title", description: "Names sessions", mode: "primary", hidden: true },
+          { name: "compaction", description: "Compacts context", mode: "primary", hidden: true },
+          { name: "summary", description: "Summarizes", mode: "primary", hidden: true },
         ] }),
       },
       session: {

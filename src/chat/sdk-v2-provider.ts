@@ -72,8 +72,12 @@ export class SdkV2Provider implements OpenCodeProvider {
     for (const value of response) {
       const agent = asRecord(value);
       const name = typeof agent.name === "string" ? agent.name : "";
-      // Subagents are spawned by the task tool, never chosen for a prompt.
-      if (!name || names.has(name) || agent.mode === "subagent") continue;
+      // Subagents are spawned by the task tool, never chosen for a prompt —
+      // and OpenCode's system agents (title, compaction, summary) are
+      // `mode: "primary"` but carry `hidden: true` on the wire (a field the
+      // pinned SDK's type does not declare; verified against a live server).
+      // Without the hidden check they all appear in the picker.
+      if (!name || names.has(name) || agent.mode === "subagent" || agent.hidden === true) continue;
       names.add(name);
       agents.push({ name, description: typeof agent.description === "string" ? agent.description : "" });
     }
