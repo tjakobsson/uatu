@@ -376,6 +376,7 @@ paths:
       responses:
         '200': { description: Chat availability after the retry, content: { application/json: { schema: { $ref: '#/components/schemas/ChatAvailability' } } } }
         '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
         '502': { $ref: '#/components/responses/SessionUnreachable' }
         '503': { $ref: '#/components/responses/WorkspaceStopped' }
   /s/{workspaceId}/api/chat/models:

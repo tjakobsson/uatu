@@ -349,7 +349,7 @@ export class OpenCodeChatAdapter {
 
   respondPermission(conversationId: string, requestId: string, clientRequestId: string, outcome: PermissionOutcome): Promise<{ outcome: PermissionOutcome }> {
     return this.receipts.run(`permission:${conversationId}:${requestId}:${clientRequestId}`, async () => {
-      await this.requireSession(conversationId);
+      const session = await this.requireSession(conversationId);
       const projection = this.projection(conversationId);
       // A subagent's request can be answered from the parent without its own
       // transcript ever having been opened, so the owning projection may be
@@ -360,21 +360,37 @@ export class OpenCodeChatAdapter {
       const reply: ProviderPermissionReply = outcome === "approved-once" ? "once" : outcome === "approved-session" ? "always" : "reject";
       await this.provider.replyPermission(conversationId, requestId, reply);
       projection.resolvePermission(requestId, outcome);
+      this.resolveMirroredCopy(session.parentId, `permission:${requestId}`, parent => parent.resolvePermission(requestId, outcome));
       return { outcome };
     });
   }
 
   respondQuestion(conversationId: string, requestId: string, clientRequestId: string, outcome: QuestionOutcome): Promise<{ outcome: QuestionOutcome }> {
     return this.receipts.run(`question:${conversationId}:${requestId}:${clientRequestId}`, async () => {
-      await this.requireSession(conversationId);
+      const session = await this.requireSession(conversationId);
       const projection = this.projection(conversationId);
       projection.requirePending(requestId, "question");
       projection.validateQuestionOutcome(requestId, outcome);
       if (outcome.kind === "rejected") await this.provider.rejectQuestion(conversationId, requestId);
       else await this.provider.replyQuestion(conversationId, requestId, outcome.answers);
       projection.resolveQuestion(requestId, outcome);
+      this.resolveMirroredCopy(session.parentId, `question:${requestId}`, parent => parent.resolveQuestion(requestId, outcome));
       return { outcome };
     });
+  }
+
+  /**
+   * Resolves the parent's mirrored copy of a subagent's request after the
+   * provider accepted the answer. The live path mirrors resolutions through
+   * the pump, but a request that was *recovered* from the pending list — its
+   * events never reached us, which is why reconciliation exists — may produce
+   * no replied event either. Without this the parent keeps counting an
+   * already-answered request forever, and every further click conflicts.
+   */
+  private resolveMirroredCopy(parentId: string | undefined, itemId: string, resolve: (parent: ConversationProjection) => void): void {
+    if (!parentId) return;
+    const parent = this.projections.get(parentId);
+    if (parent?.has(itemId)) resolve(parent);
   }
 
   // Counts an event the pump could not use, by type. Never records a payload:

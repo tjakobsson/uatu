@@ -103,7 +103,10 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
     this.adapterPromise = null;
     this.adapter = null;
     await previous?.stopEventPump().catch(() => undefined);
-    await this.runtime.retry();
+    // A full restart, not a bare runtime retry: an adapter-level failure
+    // (compatibility probe, startup race) leaves the runtime "ready", and
+    // re-probing the same process can never pick up a replaced binary.
+    await this.runtime.restart();
     return this.status();
   }
 

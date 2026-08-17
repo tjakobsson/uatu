@@ -1129,6 +1129,7 @@ describe("hub end to end", () => {
       headers: { cookie, origin: "https://attacker.example" },
     });
     expect(csrf.status).toBe(403);
+    await assertContract("POST", "/s/{workspaceId}/api/chat/retry", csrf);
 
     const response = await fetch(`${origin}/s/myproject/api/chat/retry`, { method: "POST", headers: { cookie } });
     expect(response.status).toBe(200);

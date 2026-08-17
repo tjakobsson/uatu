@@ -241,6 +241,26 @@ export class OpenCodeService {
     return this.status();
   }
 
+  /**
+   * Terminates any current OpenCode and starts over. This is the retry path
+   * for adapter-level incompatibility: the runtime itself still reports
+   * "ready" then, so a bare `retry()` would re-probe the same process — and
+   * with it the same binary the user may have just replaced on disk.
+   */
+  async restart(): Promise<ChatAvailability> {
+    if (this.closed) return this.availability;
+    await this.startPromise?.catch(() => undefined);
+    // Detached before terminating so the exit reads as commanded, not
+    // unexpected — `handleUnexpectedExit` ignores a non-current process.
+    const active = this.process;
+    this.process = null;
+    this.connection = null;
+    if (active) await active.terminate();
+    if (this.closed) return this.stoppedAvailability();
+    this.availability = { state: "idle" };
+    return this.status();
+  }
+
   private async waitUntilReady(
     endpoint: string,
     password: string,

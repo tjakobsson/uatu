@@ -872,6 +872,19 @@ describe("a subagent's pending request is reconciled into its parent", () => {
     expect(provider.permissionReplies).toEqual([{ sessionId: "child", requestId: "perm-child", reply: "once" }]);
   });
 
+  test("answering also resolves the parent's mirrored copy, not just the child's", async () => {
+    const provider = withPendingChildRequest();
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    await adapter.history("parent");
+    await adapter.respondPermission("child", "perm-child", "client-1", "approved-once");
+    // A recovered request may never produce a replied event for the pump to
+    // mirror, so the answer itself must clear the parent's copy — otherwise
+    // the parent counts an already-answered request forever.
+    expect(adapter.projectionForTests("parent").items()).toEqual([
+      expect.objectContaining({ id: "permission:perm-child", status: "resolved", outcome: "approved-once" }),
+    ]);
+  });
+
   test("a transient parent-lookup failure does not permanently hide the child's request", async () => {
     const provider = withPendingChildRequest();
     const lookup = provider.getSession.bind(provider);

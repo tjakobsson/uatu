@@ -25,21 +25,27 @@ function provider(): OpenCodeProvider {
 }
 
 function fixtureRuntime(): OpenCodeService {
-  let resolveExit!: (code: number) => void;
-  const exited = new Promise<number>(resolve => { resolveExit = resolve; });
-  const child: SpawnedOpenCode = {
-    pid: 42,
-    exited,
-    stderr: new ReadableStream({ start(controller) { controller.close(); } }),
-    kill() { resolveExit(143); },
-  };
+  // Fresh child per spawn: restart() terminates the old process and spawns a
+  // replacement, which a single shared child (whose `exited` promise has
+  // already resolved) cannot model.
+  const exits: Array<(code: number) => void> = [];
   return new OpenCodeService({
     workspacePath: "/workspace",
     discoverCandidates: async () => ["/bin/opencode"],
     allocatePort: async () => 43210,
-    spawn: () => child,
+    spawn: (): SpawnedOpenCode => {
+      let resolveExit!: (code: number) => void;
+      const exited = new Promise<number>(resolve => { resolveExit = resolve; });
+      exits.push(resolveExit);
+      return {
+        pid: 42,
+        exited,
+        stderr: new ReadableStream({ start(controller) { controller.close(); } }),
+        kill() { resolveExit(143); },
+      };
+    },
     fetch: async () => Response.json({ healthy: true, version: "test" }),
-    killGroup: () => resolveExit(143),
+    killGroup: () => { for (const resolve of exits) resolve(143); },
   });
 }
 
@@ -153,6 +159,59 @@ describe("LazyOpenCodeChatService", () => {
     await Bun.sleep(2_500);
     expect(pumpStarts).toBe(afterDispose);
   }, 10_000);
+
+  test("retry restarts the runtime so a replaced binary is picked up", async () => {
+    // Models an incompatible install that the user then fixes: the runtime is
+    // "ready" the whole time, so only a real process restart re-probes the
+    // binary that is actually on disk now.
+    let spawns = 0;
+    const exits: Array<(code: number) => void> = [];
+    const runtime = new OpenCodeService({
+      workspacePath: "/workspace",
+      discoverCandidates: async () => ["/bin/opencode"],
+      allocatePort: async () => 43210,
+      spawn: (): SpawnedOpenCode => {
+        spawns += 1;
+        let resolveExit!: (code: number) => void;
+        const exited = new Promise<number>(resolve => { resolveExit = resolve; });
+        exits.push(resolveExit);
+        return {
+          pid: 42,
+          exited,
+          stderr: new ReadableStream({ start(controller) { controller.close(); } }),
+          kill() { resolveExit(143); },
+        };
+      },
+      fetch: async () => Response.json({ healthy: true, version: "test" }),
+      killGroup: () => { for (const resolve of exits) resolve(143); },
+    });
+    let probes = 0;
+    const service = new LazyOpenCodeChatService({
+      workspacePath: "/workspace",
+      runtime,
+      createProvider: () => ({
+        ...provider(),
+        async listModels() {
+          probes += 1;
+          if (probes === 1) throw new Error("404 not found");
+          return [];
+        },
+      } satisfies OpenCodeProvider),
+      createAdapter: options => new OpenCodeChatAdapter({ ...options, generation: "test" }),
+    });
+
+    expect(await service.status()).toEqual({
+      state: "unavailable",
+      reason: "unsupported",
+      message: "The installed OpenCode version is not compatible with chat.",
+    });
+    expect(spawns).toBe(1);
+    expect(await service.retry()).toEqual({ state: "ready", version: "test" });
+    // The incompatible process was replaced, not merely re-probed.
+    expect(spawns).toBe(2);
+    expect(probes).toBe(2);
+    await service.dispose();
+  });
 
   test("retry retires the previous adapter's supervisor instead of leaking it", async () => {
     const pumpStarts: number[] = [];
