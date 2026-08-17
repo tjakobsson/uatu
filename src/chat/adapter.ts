@@ -206,15 +206,13 @@ export class OpenCodeChatAdapter {
       }
       if (this.provider.listQuestions) {
         questionsReconciled = true;
-        // A successful read is authoritative for this conversation's own
-        // questions: one no longer pending was answered elsewhere while its
-        // only live signal was missed. Mirrored child questions are exempt —
-        // this list never carries them, so it cannot vouch for them.
+        // A successful read is authoritative: it carries this conversation's
+        // own questions and its children's, so one absent from it was
+        // answered elsewhere while its only live signal was missed.
         const live = new Set(pendingNow.map(item => item.id));
         const projection = this.projection(id);
         for (const existing of projection.items()) {
           if (existing.type !== "question" || existing.status !== "pending" || live.has(existing.id)) continue;
-          if ((existing.conversationId ?? id) !== id) continue;
           projection.apply({ kind: "remove", itemId: existing.id });
           this.questionCreatedAt.delete(existing.id);
         }
@@ -256,12 +254,11 @@ export class OpenCodeChatAdapter {
       // the live ones over, a failed list would erase a request the event
       // stream established and strand the turn waiting on it. But this
       // failure only vouches for what its own read governs: permissions,
-      // plus questions the question pass could not account for (its read
-      // failed, or a mirrored child question its own-scoped list never
-      // carries). A question a successful read just retired stays retired.
+      // plus questions only when the question read failed too. A question a
+      // successful read just retired stays retired.
       for (const existing of this.projection(id).items()) {
         if ((existing.type !== "permission" && existing.type !== "question") || existing.status !== "pending") continue;
-        const vouchedGone = existing.type === "question" && questionsReconciled && (existing.conversationId ?? id) === id;
+        const vouchedGone = existing.type === "question" && questionsReconciled;
         if (!vouchedGone && !items.some(item => item.id === existing.id)) items.push(existing);
       }
     }
@@ -412,6 +409,12 @@ export class OpenCodeChatAdapter {
     return this.receipts.run(`question:${conversationId}:${requestId}:${clientRequestId}`, async () => {
       const session = await this.requireSession(conversationId);
       const projection = this.projection(conversationId);
+      // Same reconciliation as permissions: a subagent's question answered
+      // from the parent may target a projection that was never populated (the
+      // child transcript never opened, or LRU-evicted). The card is visible
+      // and answerable, so judge it against OpenCode's pending set, not
+      // against an empty projection.
+      if (!projection.has(`question:${requestId}`)) await this.seedPendingQuestions(conversationId);
       projection.requirePending(requestId, "question");
       projection.validateQuestionOutcome(requestId, outcome);
       if (outcome.kind === "rejected") await this.provider.rejectQuestion(conversationId, requestId);
@@ -614,24 +617,43 @@ export class OpenCodeChatAdapter {
   /** Throws on provider failure — an errored list is unknown, not empty. */
   private async pendingQuestions(id: string): Promise<ConversationItem[]> {
     if (!this.provider.listQuestions) return [];
-    const pending = await this.provider.listQuestions(id);
-    return pending.map(request => {
+    const pending = await this.provider.listQuestions();
+    const items: ConversationItem[] = [];
+    for (const request of pending) {
+      // This conversation's own, or a subagent's it launched — the same
+      // parentage rule as permissions, and for the same reason: a question
+      // asked while the pump was down is otherwise invisible in the only
+      // conversation the user actually has open.
+      if (request.conversationId !== id && !await this.isChildOf(request.conversationId, id)) continue;
       const itemId = `question:${request.requestId}`;
       // First-seen time, remembered: the provider gives no timestamp, and a
       // fresh Date.now() on every republish would keep moving the question
       // down the timeline as its tool part ticks over.
       const createdAt = this.questionCreatedAt.get(itemId) ?? Date.now();
       this.questionCreatedAt.set(itemId, createdAt);
-      return {
+      items.push({
         id: itemId,
         type: "question" as const,
         createdAt,
-        conversationId: id,
+        // The owner, never the conversation being rendered — what routes an
+        // answer given from the parent to the subagent.
+        conversationId: request.conversationId,
         requestId: request.requestId,
         questions: request.questions,
         status: "pending" as const,
-      };
-    });
+      });
+    }
+    return items;
+  }
+
+  /** Publishes a conversation's pending questions into its projection. */
+  private async seedPendingQuestions(conversationId: string): Promise<void> {
+    try {
+      const projection = this.projection(conversationId);
+      for (const item of await this.pendingQuestions(conversationId)) {
+        if (!projection.has(item.id)) projection.apply({ kind: "upsert", item });
+      }
+    } catch { /* unknown, not empty — requirePending still decides */ }
   }
 
   /**

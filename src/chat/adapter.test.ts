@@ -197,6 +197,7 @@ describe("OpenCode conversation inventory and history", () => {
     provider.pages.set("first", { items: [] });
     (provider as FakeProvider & { listQuestions?: unknown }).listQuestions = async () => [{
       requestId: "que_1",
+      conversationId: "session",
       questions: [{ prompt: "Proceed?", header: "Next", options: [{ label: "Yes", description: "" }], multiple: false, allowFreeForm: false }],
     }];
     const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd() });
@@ -795,23 +796,46 @@ describe("pending permission recovery", () => {
     expect(adapter.projectionForTests("local").has("question:que_stale")).toBe(false);
   });
 
-  test("a mirrored child question survives the parent's own-question reconciliation", async () => {
+  test("the global question read vouches for mirrored child questions both ways", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
-    // The parent's own-scoped list never carries the child's question, so a
-    // successful empty read cannot vouch that it is gone.
-    provider.listQuestions = async () => [];
+    const childQuestion = {
+      requestId: "que_child",
+      conversationId: "child",
+      questions: [{ prompt: "Pick", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }],
+    };
+    let pending = [childQuestion];
+    provider.listQuestions = async () => pending;
     provider.listPermissions = async () => { throw new Error("provider unreachable"); };
     const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
-    adapter.projectionForTests("parent").apply({ kind: "upsert", item: {
-      id: "question:que_child", type: "question", createdAt: 10, conversationId: "child", requestId: "que_child",
-      questions: [{ prompt: "Pick", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }],
-      status: "pending",
-    } });
 
-    const snapshot = await adapter.history("parent");
+    // Present in the read: the child's question asked while the pump was down
+    // surfaces on parent load, owned by the child.
+    let snapshot = await adapter.history("parent");
     expect(snapshot.items).toEqual([expect.objectContaining({ id: "question:que_child", conversationId: "child", status: "pending" })]);
-    expect(adapter.projectionForTests("parent").has("question:que_child")).toBe(true);
+
+    // Absent from a later successful read: answered elsewhere, so the
+    // parent's mirrored copy retires even while the permission read fails.
+    pending = [];
+    snapshot = await adapter.history("parent");
+    expect(snapshot.items).toEqual([]);
+    expect(adapter.projectionForTests("parent").has("question:que_child")).toBe(false);
+  });
+
+  test("a child question answered from the parent seeds an empty owning projection", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.listQuestions = async () => [{
+      requestId: "que_child",
+      conversationId: "child",
+      questions: [{ prompt: "Pick", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }],
+    }];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    // The parent shows the card; the child's transcript was never opened, so
+    // its projection is empty when the answer arrives.
+    await adapter.history("parent");
+    await adapter.respondQuestion("child", "que_child", "client-1", { kind: "answered", answers: [["A"]] });
+    expect(provider.questionReplies).toEqual([{ sessionId: "child", requestId: "que_child", answers: [["A"]] }]);
   });
 
   test("a provider without the list simply never recovers, and does not throw", async () => {
@@ -906,9 +930,10 @@ describe("a subagent's request reaches the conversation that launched it", () =>
     const provider = withChild();
     let pending = [{
       requestId: "que-1",
+      conversationId: "child",
       questions: [{ prompt: "Pick one", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }],
     }];
-    provider.listQuestions = async id => (id === "child" ? pending : []);
+    provider.listQuestions = async () => pending;
     const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
     const pump = adapter.startEventPump();
     // The question tool part is the only live signal a question exists; the

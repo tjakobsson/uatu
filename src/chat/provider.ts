@@ -1,6 +1,9 @@
 import type { ChatCommand, ChatModel, ModelSelection, StructuredQuestion } from "./types";
 
-export type PendingQuestion = { requestId: string; questions: StructuredQuestion[] };
+// `conversationId` is the owning session, like PendingPermission's: the global
+// list is filtered by the adapter, which is what lets a parent discover its
+// children's pending questions.
+export type PendingQuestion = { requestId: string; conversationId: string; questions: StructuredQuestion[] };
 export type PendingPermission = { requestId: string; conversationId: string; action: string; resources: string[] };
 
 export type ProviderSession = {
@@ -48,12 +51,13 @@ export interface OpenCodeProvider {
    */
   listPermissions?(): Promise<PendingPermission[]>;
   /**
-   * Pending question requests owned by a session. OpenCode 1.18 never emits
-   * `question.v2.asked` over the event stream, so a pending question is only
-   * discoverable by asking. Optional: a provider without it simply never
-   * surfaces questions.
+   * Every pending question request, each carrying its owning session.
+   * OpenCode 1.18 never emits `question.v2.asked` over the event stream, so a
+   * pending question is only discoverable by asking — and the adapter filters
+   * the global list, which is what lets a parent recover a subagent's
+   * question. Optional: a provider without it simply never surfaces questions.
    */
-  listQuestions?(sessionId: string): Promise<PendingQuestion[]>;
+  listQuestions?(): Promise<PendingQuestion[]>;
   replyQuestion(sessionId: string, requestId: string, answers: string[][]): Promise<void>;
   rejectQuestion(sessionId: string, requestId: string): Promise<void>;
 }

@@ -330,20 +330,22 @@ export class SdkV2Provider implements OpenCodeProvider {
     });
   }
 
-  async listQuestions(sessionId: string): Promise<PendingQuestion[]> {
-    // Deliberately the global list, filtered here, rather than the
-    // session-scoped `v2.session.question.list`: on OpenCode 1.18 the
-    // session-scoped route answers `{"data":[]}` for a session that the
-    // global route reports a live pending question for. Verified against a
-    // running server. Both envelopes are tolerated so this keeps working if
-    // that route starts answering.
+  async listQuestions(): Promise<PendingQuestion[]> {
+    // Deliberately the global list, rather than the session-scoped
+    // `v2.session.question.list`: on OpenCode 1.18 the session-scoped route
+    // answers `{"data":[]}` for a session that the global route reports a
+    // live pending question for. Verified against a running server. Both
+    // envelopes are tolerated so this keeps working if that route starts
+    // answering. Filtering is the adapter's job — the owner rides along, the
+    // same shape as listPermissions, so a parent can find its children's.
     const payload = unwrap(await this.client.question.list({ directory: this.directory })) as unknown;
     const response = Array.isArray(payload) ? payload : asArray(asRecord(payload).data);
     return response.flatMap(value => {
       const request = asRecord(value);
       const requestId = typeof request.id === "string" ? request.id : undefined;
-      if (!requestId || request.sessionID !== sessionId) return [];
-      return [{ requestId, questions: asArray(request.questions).map(normalizeQuestion) }];
+      const owner = typeof request.sessionID === "string" ? request.sessionID : undefined;
+      if (!requestId || !owner) return [];
+      return [{ requestId, conversationId: owner, questions: asArray(request.questions).map(normalizeQuestion) }];
     });
   }
 
