@@ -89,6 +89,7 @@ export class OpenCodeService {
   private connection: OpenCodeConnection | null = null;
   private process: ManagedProcess | null = null;
   private startPromise: Promise<ChatAvailability> | null = null;
+  private restartPromise: Promise<ChatAvailability> | null = null;
   private disposePromise: Promise<void> | null = null;
   private closed = false;
 
@@ -260,9 +261,21 @@ export class OpenCodeService {
    * for adapter-level incompatibility: the runtime itself still reports
    * "ready" then, so a bare `retry()` would re-probe the same process — and
    * with it the same binary the user may have just replaced on disk.
+   *
+   * Coalesced like disposal: two uncoalesced restarts can interleave so one
+   * call's freshly started replacement is detached by the other and never
+   * terminated — a leaked OpenCode. Joining keeps "only one process is
+   * started" true for concurrent retries.
    */
-  async restart(): Promise<ChatAvailability> {
-    if (this.closed) return this.availability;
+  restart(): Promise<ChatAvailability> {
+    if (this.closed) return Promise.resolve(this.availability);
+    this.restartPromise ??= this.performRestart().finally(() => {
+      this.restartPromise = null;
+    });
+    return this.restartPromise;
+  }
+
+  private async performRestart(): Promise<ChatAvailability> {
     await this.startPromise?.catch(() => undefined);
     // Detached before terminating so the exit reads as commanded, not
     // unexpected — `handleUnexpectedExit` ignores a non-current process.

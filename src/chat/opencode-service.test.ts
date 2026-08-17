@@ -395,6 +395,28 @@ describe("OpenCodeService retry", () => {
     expect(second.state === "unavailable" && second.diagnostics?.lastProbe).toEqual({ kind: "abandoned" });
   });
 
+  test("concurrent restarts join one replacement instead of leaking a process", async () => {
+    const clock = fakeClock();
+    let spawns = 0;
+    const spawner = respawning();
+    const { service } = fixture({
+      ...clock.options,
+      spawn: () => { spawns += 1; return spawner.spawn(); },
+      killGroup: spawner.killGroup,
+      startupTimeoutMs: 500,
+    });
+    expect(await service.status()).toEqual({ state: "ready", version: "1.18.18" });
+    expect(spawns).toBe(1);
+
+    const [first, second] = await Promise.all([service.restart(), service.restart()]);
+    expect(first).toEqual({ state: "ready", version: "1.18.18" });
+    expect(second).toEqual(first);
+    // One replacement for both callers — an uncoalesced pair could detach the
+    // other's fresh process and leave it running untracked.
+    expect(spawns).toBe(2);
+    await service.dispose();
+  });
+
   test("concurrent retries join one attempt instead of spawning twice", async () => {
     const { service, calls } = fixture();
     await service.status();
