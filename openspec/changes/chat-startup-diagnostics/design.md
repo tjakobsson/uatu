@@ -97,7 +97,7 @@ Implementation reuses the existing `startPromise` join in `OpenCodeService.statu
 
 The endpoint clears any unavailable state, including `not-installed` — a user who just installed OpenCode should recover the same way. The spec's constraint is about *presentation*: the surface leads with the install instruction for `not-installed` and offers retry as a secondary action, rather than presenting retry as the remedy for a missing binary.
 
-Both the `ChatAvailability` schema field and the new operation are additive, so under `api/CONVENTIONS.md` no revision increment or changelog migration section is required — but `api/openapi.yaml`, `api/contract.json`, `api/operations.yaml`, and `api/route-coverage.test.ts` must move together or the `contract-fast` gate fails.
+The new operation is additive. The `ChatAvailability` field is **not**: `contract-fast` classifies adding a property to a closed (`additionalProperties: false`) response object as breaking, because a strict old client validator rejects the unknown field. That is the repo's policy and it is right — so this increments `workspaceApiRevision` 1 → 2 and adds an `api/CHANGELOG.md` migration section naming the workspace domain. `api/openapi.yaml`, `api/contract.json`, `api/operations.yaml`, `src/shared/version.ts`, and `api/route-coverage.test.ts` must move together or the gate fails.
 
 ## Risks / Trade-offs
 
@@ -107,7 +107,7 @@ Both the `ChatAvailability` schema field and the new operation are additive, so 
 - **Diagnostics become a new place to leak secrets** → Decision 5, plus a test that asserts the password appears in no field of a failed availability, including captures seeded with it.
 - **Unbounded capture growth from a looping OpenCode** → Both captures reuse the existing bounded-capture behavior already applied to stderr.
 - **The version subprocess hangs on the failure path** → Bounded by its own short timeout; on expiry the field records that the version could not be determined and the original error is still reported.
-- **Contract artifacts drift from the implementation** → `contract-fast` already gates this; the tasks keep the API edits adjacent to the route edits.
+- **Contract artifacts drift from the implementation** → `contract-fast` already gates this; the tasks keep the API edits adjacent to the route edits. It also caught that the diagnostics field is breaking under the closed-object rule, which this design originally got wrong.
 
 ## Migration Plan
 

@@ -44,7 +44,7 @@
 - [x] 6.1 Add the diagnostics field to the `ChatAvailability` schema in `api/openapi.yaml`
 - [x] 6.2 Add the retry operation to `api/openapi.yaml` and `api/operations.yaml`
 - [x] 6.3 Regenerate/update `api/contract.json` and extend `api/route-coverage.test.ts` for the new route
-- [x] 6.4 Confirm both additions are additive so no revision increment or changelog migration section is needed under `api/CONVENTIONS.md`; run `bun run api:validate` and `bun run test:api`
+- [x] 6.4 Increment `workspaceApiRevision` 1 → 2 (`src/shared/version.ts`, `api/contract.json`, `api/openapi.yaml`) and add an `api/CHANGELOG.md` migration section naming the workspace domain — the closed-object rule makes the new `diagnostics` property breaking; run `bun run api:validate`, `bun run test:api`, and the `contract-fast` compatibility gate
 
 ## 7. Chat surface
 

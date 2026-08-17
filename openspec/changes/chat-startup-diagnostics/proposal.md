@@ -36,7 +36,7 @@ None.
 - `src/server/routes.ts` — `/api/chat/status` response gains the diagnostics field; the retry needs an endpoint.
 
 **Published API contract**
-- `api/openapi.yaml` (`ChatAvailability` schema, plus a new retry operation), `api/contract.json`, `api/operations.yaml`, and `api/route-coverage.test.ts`. Both changes are additive, so under `api/CONVENTIONS.md` no revision increment or changelog migration section is required — but the contract artifacts and the `contract-fast` gate must still be updated in step.
+- `api/openapi.yaml` (`ChatAvailability` schema, plus a new retry operation), `api/contract.json`, `api/operations.yaml`, `api/CHANGELOG.md`, `src/shared/version.ts`, and `api/route-coverage.test.ts`. The new operation is additive, but adding `diagnostics` to the closed `ChatAvailability` response object is breaking under `contract-fast`'s rule (a strict old validator rejects the unknown property), so this increments `workspaceApiRevision` 1 → 2 with a changelog migration section naming the workspace domain.
 
 **Release notes**
 - Chat shipped in `8410b08` and `#258`, which are in no `v*` tag; the latest stable is `v0.5.1`. Per the release-note discipline in `CLAUDE.md`, this correction stabilizes unreleased work, so the PR keeps its truthful `fix(...)` title but its body must carry a `BEGIN_COMMIT_OVERRIDE` / `END_COMMIT_OVERRIDE` block rewriting it to `chore(chat): ...` before squash merge.

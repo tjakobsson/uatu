@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: UatuCode public API
-  version: 1.1.0-experimental
+  version: 1.2.0-experimental
   license: { name: MIT, identifier: MIT }
-  summary: Hub revision 1 and workspace revision 1
+  summary: Hub revision 1 and workspace revision 2
   description: |
     Canonical HTTP contract for the UatuCode Hub and workspace APIs. Workspace
     operations use their externally visible Hub proxy paths. Streaming message
@@ -15,7 +15,7 @@ info:
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
     hubApiRevision: 1
-    workspaceApiRevision: 1
+    workspaceApiRevision: 2
 servers:
   - url: https://{hubHost}
     variables:
@@ -79,8 +79,8 @@ paths:
               example:
                 version: 0.5.1 (abcdef0)
                 hubApiRevision: 1
-                workspaceApiRevision: 1
-                workspaces: [{ id: uatu, path: /src/uatu, backend: local, running: true, workspaceApiRevision: 1, shells: [{ attached: false, label: zsh }] }]
+                workspaceApiRevision: 2
+                workspaces: [{ id: uatu, path: /src/uatu, backend: local, running: true, workspaceApiRevision: 2, shells: [{ attached: false, label: zsh }] }]
         '401': { $ref: '#/components/responses/Error' }
   /api/hub/browse:
     get:
@@ -272,7 +272,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/WorkspaceState' }
-              example: { workspaceApiRevision: 1, roots: [], repositories: [], compareTarget: base, initialFollow: true, defaultDocumentId: null, changedId: null, generatedAt: 0, build: { version: 0.5.1, branch: main, commitSha: abcdef, commitShort: abcdef, release: false, identifier: 0.5.1, bundledWebRevision: 1 }, scope: { kind: folder }, unscopedFingerprint: 3f2a, terminal: enabled }
+              example: { workspaceApiRevision: 2, roots: [], repositories: [], compareTarget: base, initialFollow: true, defaultDocumentId: null, changedId: null, generatedAt: 0, build: { version: 0.5.1, branch: main, commitSha: abcdef, commitShort: abcdef, release: false, identifier: 0.5.1, bundledWebRevision: 1 }, scope: { kind: folder }, unscopedFingerprint: 3f2a, terminal: enabled }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
