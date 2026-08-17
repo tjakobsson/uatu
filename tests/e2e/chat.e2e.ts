@@ -96,6 +96,10 @@ test.describe("desktop OpenCode chat", () => {
     const switched = page.waitForResponse(response => response.url().endsWith("/prompts"));
     await input.press("Enter");
     expect((await switched).request().postDataJSON()).toMatchObject({ agent: "build" });
+
+    // No way back to "default": the agent is session state in OpenCode, so a
+    // prompt omitting it would keep Build while the picker claimed default.
+    await expect(agentSelect.locator('option[value=""]')).toBeDisabled();
   });
 
   test("completes slash commands at the caret without sending prematurely", async ({ page }) => {

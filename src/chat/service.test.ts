@@ -213,6 +213,47 @@ describe("LazyOpenCodeChatService", () => {
     await service.dispose();
   });
 
+  test("concurrent service retries join one sequence instead of double-restarting", async () => {
+    let spawns = 0;
+    const exits: Array<(code: number) => void> = [];
+    const runtime = new OpenCodeService({
+      workspacePath: "/workspace",
+      discoverCandidates: async () => ["/bin/opencode"],
+      allocatePort: async () => 43210,
+      spawn: (): SpawnedOpenCode => {
+        spawns += 1;
+        let resolveExit!: (code: number) => void;
+        const exited = new Promise<number>(resolve => { resolveExit = resolve; });
+        exits.push(resolveExit);
+        return {
+          pid: 42,
+          exited,
+          stderr: new ReadableStream({ start(controller) { controller.close(); } }),
+          kill() { resolveExit(143); },
+        };
+      },
+      fetch: async () => Response.json({ healthy: true, version: "test" }),
+      killGroup: () => { for (const resolve of exits) resolve(143); },
+    });
+    const service = new LazyOpenCodeChatService({
+      workspacePath: "/workspace",
+      runtime,
+      createProvider: () => provider(),
+      createAdapter: options => new OpenCodeChatAdapter({ ...options, generation: "test" }),
+    });
+
+    await service.status();
+    expect(spawns).toBe(1);
+    // Runtime-level joining cannot help two retries that reach it at
+    // different times — the first can stall on pump shutdown and then
+    // restart the runtime the second one just built.
+    const [first, second] = await Promise.all([service.retry(), service.retry()]);
+    expect(first).toEqual({ state: "ready", version: "test" });
+    expect(second).toEqual(first);
+    expect(spawns).toBe(2);
+    await service.dispose();
+  });
+
   test("retry retires the previous adapter's supervisor instead of leaking it", async () => {
     const pumpStarts: number[] = [];
     const service = new LazyOpenCodeChatService({

@@ -577,9 +577,14 @@ export function initChat(): void {
   const applyAgent = (conversationId: string | undefined) => {
     if (!agentSelect || agents.length === 0) return;
     const known = (name: string | undefined) => (name && agents.some(agent => agent.name === name) ? name : undefined);
-    agentSelect.value = known(conversationId ? presentation.agents[conversationId] : undefined)
-      ?? known(presentation.agent)
-      ?? "";
+    const chosen = known(conversationId ? presentation.agents[conversationId] : undefined);
+    // Once a named agent has been chosen for this conversation there is no
+    // default to go back to: the agent is session state in OpenCode, and a
+    // prompt that omits it keeps the previous choice — offering "default"
+    // then would display one agent and run another.
+    const defaultOption = agentSelect.options[0];
+    if (defaultOption && defaultOption.value === "") defaultOption.disabled = chosen !== undefined;
+    agentSelect.value = chosen ?? known(presentation.agent) ?? "";
   };
 
   /**
@@ -679,6 +684,9 @@ export function initChat(): void {
       else delete presentation.agents[projection.conversationId];
     }
     save();
+    // Re-derives the default option's availability: choosing a named agent
+    // locks "default" for this conversation from now on.
+    applyAgent(projection?.conversationId ?? presentation.selectedId);
   });
   newButton.addEventListener("click", async () => {
     newButton.disabled = true;

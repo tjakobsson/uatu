@@ -63,6 +63,7 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
   private readonly metrics: ChatEventMetrics | undefined;
   private adapterPromise: Promise<OpenCodeChatAdapter> | null = null;
   private adapter: OpenCodeChatAdapter | null = null;
+  private retryPromise: Promise<ChatAvailability> | null = null;
   private disposed = false;
 
   constructor(options: LazyOpenCodeChatServiceOptions) {
@@ -100,7 +101,18 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
   // built against the dead runtime so the next call rebuilds against whatever
   // the retry produced — and retires it first, or its supervisor would keep
   // reconnecting the dead endpoint forever, one leaked loop per retry.
-  async retry(): Promise<ChatAvailability> {
+  //
+  // Coalesced across the WHOLE sequence: runtime-level joining cannot help
+  // two retries that reach it at different times — the first can stall on
+  // pump shutdown and then restart the runtime the second one just built.
+  retry(): Promise<ChatAvailability> {
+    this.retryPromise ??= this.performRetry().finally(() => {
+      this.retryPromise = null;
+    });
+    return this.retryPromise;
+  }
+
+  private async performRetry(): Promise<ChatAvailability> {
     const previous = this.adapter;
     this.adapterPromise = null;
     this.adapter = null;
