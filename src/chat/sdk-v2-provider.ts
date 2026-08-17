@@ -13,7 +13,7 @@ import type {
   ProviderSession,
 } from "./provider";
 import { normalizeQuestion } from "./normalization";
-import type { ChatCommand, ChatModel, ModelSelection } from "./types";
+import type { ChatAgent, ChatCommand, ChatModel, ModelSelection } from "./types";
 
 type Result<T> = { data?: T; error?: unknown };
 
@@ -62,6 +62,22 @@ export class SdkV2Provider implements OpenCodeProvider {
       if (!names.has(builtin.name)) result.push(builtin);
     }
     return result;
+  }
+
+  async listAgents(): Promise<ChatAgent[]> {
+    const payload = unwrap(await this.client.app.agents({ directory: this.directory })) as unknown;
+    const response = Array.isArray(payload) ? payload : asArray(asRecord(payload).data);
+    const agents: ChatAgent[] = [];
+    const names = new Set<string>();
+    for (const value of response) {
+      const agent = asRecord(value);
+      const name = typeof agent.name === "string" ? agent.name : "";
+      // Subagents are spawned by the task tool, never chosen for a prompt.
+      if (!name || names.has(name) || agent.mode === "subagent") continue;
+      names.add(name);
+      agents.push({ name, description: typeof agent.description === "string" ? agent.description : "" });
+    }
+    return agents;
   }
 
   async listModels(): Promise<ChatModel[]> {
@@ -236,7 +252,7 @@ export class SdkV2Provider implements OpenCodeProvider {
     yield* mergeProviderEvents([native.stream, classic.stream], signal);
   }
 
-  async prompt(sessionId: string, input: { id: string; text: string; delivery: "steer" | "queue"; model?: ModelSelection }): Promise<{ messageId: string }> {
+  async prompt(sessionId: string, input: { id: string; text: string; delivery: "steer" | "queue"; model?: ModelSelection; agent?: string }): Promise<{ messageId: string }> {
     const messageId = stableProviderId("msg", input.id);
     if (this.compatibilitySessions.has(sessionId)) {
       ensureSuccess(await this.client.session.promptAsync({
@@ -245,6 +261,7 @@ export class SdkV2Provider implements OpenCodeProvider {
         messageID: messageId,
         parts: [{ type: "text", text: input.text }],
         ...(input.model ? { model: { providerID: input.model.providerId, modelID: input.model.modelId } } : {}),
+        ...(input.agent ? { agent: input.agent } : {}),
       }));
       return { messageId };
     }
@@ -255,6 +272,7 @@ export class SdkV2Provider implements OpenCodeProvider {
       prompt: { text: input.text },
       delivery: input.delivery,
       resume: true,
+      ...(input.agent ? { agent: input.agent } : {}),
     }));
     return { messageId: admitted.data.id };
   }
@@ -267,7 +285,7 @@ export class SdkV2Provider implements OpenCodeProvider {
    * while a healthy turn outlives the window, detaches, and reports failures
    * through the event stream like any running turn.
    */
-  async command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection }): Promise<{ messageId: string }> {
+  async command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; agent?: string }): Promise<{ messageId: string }> {
     const messageId = stableProviderId("msg", input.id);
     const dispatch = input.name === "compact" || input.name === "summarize"
       ? (async () => ensureSuccess(await this.client.session.summarize({
@@ -283,6 +301,7 @@ export class SdkV2Provider implements OpenCodeProvider {
           command: input.name,
           arguments: input.arguments,
           ...(input.model ? { model: `${input.model.providerId}/${input.model.modelId}` } : {}),
+          ...(input.agent ? { agent: input.agent } : {}),
         })); })();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {

@@ -226,6 +226,34 @@ describe("OpenCode v2 identity policy", () => {
     expect(stableProviderId("msg", "msg_existing")).toBe("msg_existing");
   });
 
+  test("lists primary agents only and sends the chosen agent with the prompt", async () => {
+    let promptInput: Record<string, unknown> | undefined;
+    const client = {
+      app: {
+        agents: async () => ({ data: [
+          { name: "build", description: "Writes code", mode: "primary" },
+          { name: "plan", description: "Read-only", mode: "all" },
+          { name: "explore", description: "Task-tool only", mode: "subagent" },
+          { name: "build", description: "duplicate", mode: "primary" },
+        ] }),
+      },
+      session: {
+        create: async () => ({ data: { ...session("ses_agenty"), directory: "/workspace" } }),
+        promptAsync: async (input: Record<string, unknown>) => { promptInput = input; return { data: undefined }; },
+      },
+    } as unknown as OpencodeClient;
+    const provider = new SdkV2Provider(client, "/workspace");
+
+    expect(await provider.listAgents()).toEqual([
+      { name: "build", description: "Writes code" },
+      { name: "plan", description: "Read-only" },
+    ]);
+
+    await provider.createSession("client-uuid");
+    await provider.prompt("ses_agenty", { id: "client-uuid", text: "hello", delivery: "queue", agent: "build" });
+    expect(promptInput).toEqual(expect.objectContaining({ agent: "build" }));
+  });
+
   test("answers a subagent's permission through its parent's store", async () => {
     const replies: string[] = [];
     const client = {

@@ -77,6 +77,27 @@ test.describe("desktop OpenCode chat", () => {
     await expect(input).toHaveValue("draft retained across surfaces");
   });
 
+  test("switches the agent for a prompt and defaults to OpenCode's own", async ({ page }) => {
+    await page.getByRole("button", { name: "New" }).click();
+    const agentSelect = page.locator("#chat-agent-select");
+    await expect(agentSelect.locator("option")).toHaveText(["Agent: default", "Agent: Build", "Agent: Plan"]);
+    await expect(agentSelect).toHaveValue("");
+
+    const input = page.locator("#chat-input");
+    await input.fill("stay on the default agent");
+    const defaulted = page.waitForResponse(response => response.url().endsWith("/prompts"));
+    await input.press("Enter");
+    expect((await defaulted).request().postDataJSON()).not.toHaveProperty("agent");
+
+    // Stuck in a read-only agent is the whole point: choosing Build must
+    // reach the provider with the next prompt.
+    await agentSelect.selectOption({ label: "Agent: Build" });
+    await input.fill("now write some code");
+    const switched = page.waitForResponse(response => response.url().endsWith("/prompts"));
+    await input.press("Enter");
+    expect((await switched).request().postDataJSON()).toMatchObject({ agent: "build" });
+  });
+
   test("completes slash commands at the caret without sending prematurely", async ({ page }) => {
     await page.getByRole("button", { name: "New" }).click();
     const input = page.locator("#chat-input");

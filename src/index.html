@@ -729,6 +729,8 @@
             <textarea id="chat-input" rows="1" placeholder="Ask OpenCode…" aria-describedby="chat-composer-status" aria-controls="chat-command-menu" aria-expanded="false" aria-autocomplete="list"></textarea>
             <div class="chat-composer-actions">
               <span id="chat-composer-status" role="status" aria-live="polite">Ready</span>
+              <label class="sr-only" for="chat-agent-select">Agent</label>
+              <select id="chat-agent-select" class="chat-model-select" aria-label="Chat agent" hidden></select>
               <label class="sr-only" for="chat-model-select">Model</label>
               <select id="chat-model-select" class="chat-model-select" aria-label="Chat model" disabled>
                 <option>Loading models...</option>

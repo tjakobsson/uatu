@@ -60,6 +60,13 @@ export type ChatCommand = {
   kind: "command" | "skill";
 };
 
+// A primary OpenCode agent (Build, Plan, ...) a prompt can run under.
+// Subagents are excluded — they are spawned by the task tool, not chosen.
+export type ChatAgent = {
+  name: string;
+  description: string;
+};
+
 export type ConversationSummary = {
   id: string;
   title: string;

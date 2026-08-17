@@ -4,6 +4,7 @@ import { createSdkV2Provider } from "./sdk-v2-provider";
 import type { OpenCodeProvider } from "./provider";
 import type { ReplaySubscription } from "./replay";
 import type {
+  ChatAgent,
   ChatAvailability,
   ChatCommand,
   ChatModel,
@@ -18,6 +19,7 @@ export interface WorkspaceChatService {
   status(): Promise<ChatAvailability>;
   retry(): Promise<ChatAvailability>;
   models(): Promise<ChatModel[]>;
+  agents(): Promise<ChatAgent[]>;
   commands(): Promise<ChatCommand[]>;
   listConversations(): Promise<ConversationSummary[]>;
   createConversation(): Promise<ConversationSnapshot>;
@@ -26,7 +28,7 @@ export interface WorkspaceChatService {
     snapshot: ConversationSnapshot;
     events: ReplaySubscription;
   }>;
-  prompt(id: string, requestId: string, text: string, model?: ModelSelection): Promise<{
+  prompt(id: string, requestId: string, text: string, model?: ModelSelection, agent?: string): Promise<{
     messageId: string;
     delivery: "steer" | "queue";
     conversation?: ConversationSummary;
@@ -112,11 +114,12 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
 
   async listConversations() { return (await this.requireAdapter()).listConversations(); }
   async models() { return (await this.requireAdapter()).models(); }
+  async agents() { return (await this.requireAdapter()).agents(); }
   async commands() { return (await this.requireAdapter()).commands(); }
   async createConversation() { return (await this.requireAdapter()).createConversation(); }
   async history(id: string, options?: { cursor?: string; limit?: number }) { return (await this.requireAdapter()).history(id, options); }
   async subscribe(id: string, options?: { cursor?: string; signal?: AbortSignal }) { return (await this.requireAdapter()).subscribe(id, options); }
-  async prompt(id: string, requestId: string, text: string, model?: ModelSelection) { return (await this.requireAdapter()).prompt(id, requestId, text, model); }
+  async prompt(id: string, requestId: string, text: string, model?: ModelSelection, agent?: string) { return (await this.requireAdapter()).prompt(id, requestId, text, model, agent); }
   async cancel(id: string, requestId: string) { return (await this.requireAdapter()).abort(id, requestId); }
   async respondPermission(id: string, interactionId: string, requestId: string, outcome: PermissionOutcome) {
     return (await this.requireAdapter()).respondPermission(id, interactionId, requestId, outcome);

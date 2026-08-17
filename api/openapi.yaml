@@ -391,6 +391,18 @@ paths:
         '500': { $ref: '#/components/responses/Error' }
         '502': { $ref: '#/components/responses/SessionUnreachable' }
         '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
+  /s/{workspaceId}/api/chat/agents:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
+    get:
+      operationId: workspaceListChatAgents
+      tags: [Chat]
+      summary: List primary OpenCode agents a prompt can run under
+      responses:
+        '200': { description: Available chat agents, content: { application/json: { schema: { $ref: '#/components/schemas/ChatAgentList' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
+        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
   /s/{workspaceId}/api/chat/commands:
     parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
     get:
@@ -854,6 +866,8 @@ components:
     ModelSelection: { type: object, required: [providerId, modelId], properties: { providerId: { type: string, minLength: 1, maxLength: 512 }, modelId: { type: string, minLength: 1, maxLength: 512 } }, additionalProperties: false }
     ChatModel: { type: object, required: [selection, provider, name], properties: { selection: { $ref: '#/components/schemas/ModelSelection' }, provider: { type: string, minLength: 1 }, name: { type: string, minLength: 1 } }, additionalProperties: false }
     ChatModelList: { type: object, required: [models], properties: { models: { type: array, items: { $ref: '#/components/schemas/ChatModel' } } }, additionalProperties: false }
+    ChatAgent: { type: object, required: [name, description], properties: { name: { type: string, minLength: 1, maxLength: 512 }, description: { type: string } }, additionalProperties: false }
+    ChatAgentList: { type: object, required: [agents], properties: { agents: { type: array, items: { $ref: '#/components/schemas/ChatAgent' } } }, additionalProperties: false }
     ChatCommand: { type: object, required: [name, description, argumentHint, kind], properties: { name: { type: string, minLength: 1, maxLength: 512, pattern: '^[^\s/]+$' }, description: { type: string }, argumentHint: { type: string }, kind: { enum: [command, skill] } }, additionalProperties: false }
     ChatCommandList: { type: object, required: [commands], properties: { commands: { type: array, items: { $ref: '#/components/schemas/ChatCommand' } } }, additionalProperties: false }
     ConversationSummary:
@@ -884,7 +898,7 @@ components:
     QuestionItem: { type: object, required: [id, type, createdAt, requestId, questions, status], properties: { id: { type: string }, type: { const: question }, createdAt: { type: number }, requestId: { type: string }, conversationId: { type: string, minLength: 1, maxLength: 512, description: "Conversation that owns this request. See PermissionItem.conversationId." }, questions: { type: array, items: { $ref: '#/components/schemas/StructuredQuestion' } }, status: { enum: [pending, resolved] }, outcome: { $ref: '#/components/schemas/QuestionOutcome' } }, additionalProperties: false }
     ConversationSnapshot: { type: object, required: [conversation, generation, cursor, items], properties: { conversation: { $ref: '#/components/schemas/ConversationSummary' }, generation: { type: string }, cursor: { type: string }, items: { type: array, items: { $ref: '#/components/schemas/ConversationItem' } }, olderCursor: { type: string } }, additionalProperties: false }
     ChatMutationRequest: { type: object, required: [requestId], properties: { requestId: { type: string, minLength: 1, maxLength: 512 } }, additionalProperties: false }
-    ChatPromptRequest: { type: object, required: [requestId, text], properties: { requestId: { type: string, minLength: 1, maxLength: 512 }, text: { type: string, minLength: 1, maxLength: 65536 }, model: { $ref: '#/components/schemas/ModelSelection' } }, additionalProperties: false }
+    ChatPromptRequest: { type: object, required: [requestId, text], properties: { requestId: { type: string, minLength: 1, maxLength: 512 }, text: { type: string, minLength: 1, maxLength: 65536 }, model: { $ref: '#/components/schemas/ModelSelection' }, agent: { type: string, minLength: 1, maxLength: 512 } }, additionalProperties: false }
     ChatPromptAccepted: { type: object, required: [messageId, delivery], properties: { messageId: { type: string }, delivery: { enum: [steer, queue] }, conversation: { $ref: '#/components/schemas/ConversationSummary' } }, additionalProperties: false }
     ChatCancelResult: { type: object, required: [cancelled], properties: { cancelled: { const: true } }, additionalProperties: false }
     PermissionResponseRequest: { type: object, required: [requestId, outcome], properties: { requestId: { type: string, minLength: 1, maxLength: 512 }, outcome: { enum: [approved-once, approved-session, rejected] } }, additionalProperties: false }

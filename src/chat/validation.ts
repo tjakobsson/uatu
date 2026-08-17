@@ -1,5 +1,6 @@
 import type {
   ActivityStatus,
+  ChatAgent,
   ChatAvailability,
   ChatCommand,
   ChatEvent,
@@ -102,6 +103,14 @@ export function parseChatModel(value: unknown): ChatModel {
   expectNonEmptyString(record.provider, "model provider");
   expectNonEmptyString(record.name, "model name");
   return value as ChatModel;
+}
+
+export function parseChatAgent(value: unknown): ChatAgent {
+  const record = expectRecord(value, "chat agent");
+  expectKeys(record, ["name", "description"], "chat agent");
+  expectIdentity(record.name, "agent name");
+  expectString(record.description, "agent description");
+  return value as ChatAgent;
 }
 
 export function parseChatCommand(value: unknown): ChatCommand {

@@ -18,7 +18,7 @@ import {
   removeAcceptedDraft,
   type ChatProjection,
 } from "./projection";
-import type { ChatAvailability, ChatCommand, ChatModel, ConversationItem, ConversationSummary, ModelSelection, PermissionOutcome, QuestionOutcome } from "./types";
+import type { ChatAgent, ChatAvailability, ChatCommand, ChatModel, ConversationItem, ConversationSummary, ModelSelection, PermissionOutcome, QuestionOutcome } from "./types";
 import { formatDiagnostics } from "./diagnostics";
 
 const PRESENTATION_KEY = "uatu:chat-presentation";
@@ -35,12 +35,16 @@ type Presentation = {
   // claim whatever was last chosen anywhere, for every conversation.
   model?: ModelSelection;
   models: Record<string, ModelSelection>;
+  // Same shape for the agent (Build/Plan/...). Empty means "OpenCode's
+  // default": the picker never claims to know a session's current agent.
+  agent?: string;
+  agents: Record<string, string>;
   // Dismissed finished-subagent entry ids, per conversation — dismissal is a
   // user statement that must survive reload.
   dismissedSubagents: Record<string, string[]>;
 };
 
-const EMPTY_PRESENTATION: Presentation = { drafts: {}, expanded: [], anchors: {}, workingSince: {}, models: {}, dismissedSubagents: {} };
+const EMPTY_PRESENTATION: Presentation = { drafts: {}, expanded: [], anchors: {}, workingSince: {}, models: {}, agents: {}, dismissedSubagents: {} };
 
 export function initChat(): void {
   const surface = document.querySelector<HTMLElement>("#chat-surface");
@@ -57,6 +61,7 @@ export function initChat(): void {
   const send = document.querySelector<HTMLButtonElement>("#chat-send");
   const sendLabel = document.querySelector<HTMLElement>("#chat-send .chat-send-label");
   const modelSelect = document.querySelector<HTMLSelectElement>("#chat-model-select");
+  const agentSelect = document.querySelector<HTMLSelectElement>("#chat-agent-select");
   const cancel = document.querySelector<HTMLButtonElement>("#chat-cancel");
   const composerStatus = document.querySelector<HTMLElement>("#chat-composer-status");
   const chatTitle = document.querySelector<HTMLElement>("#chat-title");
@@ -70,6 +75,7 @@ export function initChat(): void {
   let presentation = readPresentation();
   let conversations: ConversationSummary[] = [];
   let models: ChatModel[] = [];
+  let agents: ChatAgent[] = [];
   let commands: ChatCommand[] = [];
   let projection: ChatProjection | null = null;
   let stream: ChatEventStream | null = null;
@@ -517,6 +523,7 @@ export function initChat(): void {
     send.setAttribute("aria-label", `${action} message`);
     send.title = `${action} message`;
     modelSelect.disabled = submitting || models.length === 0;
+    if (agentSelect) agentSelect.disabled = submitting || agents.length === 0;
     cancel.hidden = !running;
     olderButton.hidden = !projection?.olderCursor;
     composerStatus.textContent = composerNote ?? workingText();
@@ -547,6 +554,35 @@ export function initChat(): void {
   };
 
   /**
+   * The agent picker leads with "default" rather than claiming a value: the
+   * session's current agent is OpenCode's state, not ours, and a session
+   * stuck in a read-only agent is exactly the case where lying would hurt.
+   * Choosing a named agent sends it with every prompt from then on.
+   */
+  const renderAgents = () => {
+    if (!agentSelect) return;
+    agentSelect.replaceChildren();
+    agentSelect.hidden = agents.length === 0;
+    if (agents.length === 0) return;
+    agentSelect.append(new Option("Agent: default", ""));
+    for (const agent of agents) {
+      const option = new Option(agentLabel(agent.name), agent.name);
+      if (agent.description) option.title = agent.description;
+      agentSelect.append(option);
+    }
+    applyAgent(projection?.conversationId ?? presentation.selectedId);
+    syncControls();
+  };
+
+  const applyAgent = (conversationId: string | undefined) => {
+    if (!agentSelect || agents.length === 0) return;
+    const known = (name: string | undefined) => (name && agents.some(agent => agent.name === name) ? name : undefined);
+    agentSelect.value = known(conversationId ? presentation.agents[conversationId] : undefined)
+      ?? known(presentation.agent)
+      ?? "";
+  };
+
+  /**
    * Points the picker at the conversation's own model, falling back to the
    * global default and then the first available model. A stored selection the
    * server no longer offers is ignored rather than shown as a live choice.
@@ -573,6 +609,7 @@ export function initChat(): void {
     }
     presentation.selectedId = id;
     applyModel(id);
+    applyAgent(id);
     const conversation = conversations.find(item => item.id === id);
     if (chatTitle) chatTitle.textContent = conversation ? displayConversationTitle(conversation) : "OpenCode Chat";
     form.hidden = false;
@@ -630,6 +667,17 @@ export function initChat(): void {
     if (!selection) return;
     presentation.model = selection;
     if (projection) presentation.models[projection.conversationId] = selection;
+    save();
+  });
+  agentSelect?.addEventListener("change", () => {
+    const name = agentSelect.value || undefined;
+    if (name && !agents.some(agent => agent.name === name)) return;
+    if (name) presentation.agent = name;
+    else delete presentation.agent;
+    if (projection) {
+      if (name) presentation.agents[projection.conversationId] = name;
+      else delete presentation.agents[projection.conversationId];
+    }
     save();
   });
   newButton.addEventListener("click", async () => {
@@ -939,6 +987,7 @@ export function initChat(): void {
     const retry = retryRequests.get(conversationId);
     const requestId = retry?.text === text ? retry.requestId : newRequestId();
     const selectedModel = models.find(model => modelValue(model.selection) === modelSelect.value)?.selection;
+    const selectedAgent = agentSelect?.value || undefined;
     const wasRunning = projection.status === "running" || projection.status === "sending";
     submitting = true;
     // Optimistic send: the message shows immediately and the input clears;
@@ -952,7 +1001,7 @@ export function initChat(): void {
     syncControls();
     scheduleRender(true);
     try {
-      const accepted = await api.prompt(conversationId, requestId, text, selectedModel);
+      const accepted = await api.prompt(conversationId, requestId, text, selectedModel, selectedAgent);
       retryRequests.delete(conversationId);
       if (accepted.conversation) {
         conversations = conversations.map(conversation => conversation.id === accepted.conversation!.id ? accepted.conversation! : conversation);
@@ -1103,11 +1152,19 @@ export function initChat(): void {
         showUnavailable(availability);
         return;
       }
-      [models, conversations, commands] = await Promise.all([api.models(), api.conversations(), api.commands().catch(() => [])]);
+      // The agent list is an enhancement: a provider without it hides the
+      // picker rather than blocking chat.
+      [models, conversations, commands, agents] = await Promise.all([
+        api.models(),
+        api.conversations(),
+        api.commands().catch(() => []),
+        api.agents().catch(() => [] as ChatAgent[]),
+      ]);
       form.hidden = false;
       select.disabled = false;
       newButton.disabled = false;
       renderModels();
+      renderAgents();
       announce(conversations.length ? "" : "No conversations yet. Create one to start.");
       renderChooser();
       bootstrapped = true;
@@ -1155,9 +1212,16 @@ function readPresentation(): Presentation {
       workingSince: parseStoredTimestamps(value.workingSince),
       model: parseStoredModel(value.model),
       models: parseStoredModels(value.models),
+      agent: typeof value.agent === "string" ? value.agent : undefined,
+      agents: parseStoredNames(value.agents),
       dismissedSubagents: parseStoredIdLists(value.dismissedSubagents),
     };
   } catch { return structuredClone(EMPTY_PRESENTATION); }
+}
+
+function parseStoredNames(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
 }
 
 function parseStoredIdLists(value: unknown): Record<string, string[]> {
@@ -1191,6 +1255,10 @@ function parseStoredModels(value: unknown): Record<string, ModelSelection> {
 
 function modelValue(model: ModelSelection): string {
   return JSON.stringify([model.providerId, model.modelId]);
+}
+
+function agentLabel(name: string): string {
+  return `Agent: ${name.charAt(0).toUpperCase()}${name.slice(1)}`;
 }
 
 function sameModel(left: ModelSelection, right: ModelSelection): boolean {

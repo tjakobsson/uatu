@@ -30,6 +30,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
   // assert that a retry after an ambiguous failure reuses the id (the
   // at-most-once contract) instead of minting a fresh one.
   promptAttempts: string[] = [];
+  promptAgents: string[] = [];
   // When set, the next prompt stalls half a second and then rejects —
   // enough of a window for a test to deterministically switch conversations
   // while the request is in flight.
@@ -79,6 +80,13 @@ export class FakeE2EChatService implements WorkspaceChatService {
     ];
   }
 
+  async agents() {
+    return [
+      { name: "build", description: "Full read-write agent" },
+      { name: "plan", description: "Read-only planning agent" },
+    ];
+  }
+
   async commands() {
     return [
       { name: "review", description: "Review the current work", argumentHint: "[focus]", kind: "command" as const },
@@ -122,11 +130,12 @@ export class FakeE2EChatService implements WorkspaceChatService {
     return { snapshot: await handoff.snapshot, events: handoff.subscription };
   }
 
-  async prompt(id: string, requestId: string, text: string, model?: ModelSelection): Promise<{
+  async prompt(id: string, requestId: string, text: string, model?: ModelSelection, agent?: string): Promise<{
     messageId: string;
     delivery: "steer" | "queue";
     conversation?: ConversationSummary;
   }> {
+    if (agent) this.promptAgents.push(agent);
     const key = `prompt:${id}:${requestId}`;
     const existing = this.receipts.get(key) as { messageId: string; delivery: "steer" | "queue"; conversation?: ConversationSummary } | undefined;
     if (existing) return existing;
@@ -200,6 +209,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.disconnect();
     this.statusCalls = 0;
     this.promptAttempts = [];
+    this.promptAgents = [];
     this.failNextPrompt = false;
     this.generation = `e2e-chat-${this.nextId++}`;
     this.conversations.clear();
