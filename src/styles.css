@@ -5179,13 +5179,15 @@ body.is-resizing-chat .chat-resizer {
   box-shadow: var(--shadow, 0 3px 12px rgb(0 0 0 / 20%));
 }
 
-/* Pinned beside "Latest", above the composer: with requests outstanding the
+/* Pinned at the right edge, above the composer: with requests outstanding the
    count must not scroll away, because scrolling to count them is exactly the
-   problem. Accented like the card that needs answering so the two read as one
+   problem. Right-aligned because the pinned task-list and subagent strips
+   read from the left — a left-anchored pill sat on top of their labels.
+   Accented like the card that needs answering so the two read as one
    signal, and it carries its own text rather than relying on colour. */
 .chat-requests-jump {
   position: absolute;
-  left: 1.25rem;
+  right: 1.25rem;
   bottom: calc(var(--chat-composer-height, 5rem) + 0.75rem);
   z-index: 2;
   min-height: 2rem;
@@ -5202,6 +5204,12 @@ body.is-resizing-chat .chat-resizer {
 .chat-requests-jump:hover {
   color: white;
   background: var(--accent, #3b7dd8);
+}
+
+/* Both share the right edge; when "Latest" is up the pill steps one row
+   higher instead of covering it. */
+.chat-latest:not([hidden]) + .chat-requests-jump {
+  bottom: calc(var(--chat-composer-height, 5rem) + 3.5rem);
 }
 
 .chat-composer {
