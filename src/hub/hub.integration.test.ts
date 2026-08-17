@@ -1122,6 +1122,14 @@ describe("hub end to end", () => {
     const unauthenticated = await fetch(`${origin}/s/myproject/api/chat/retry`, { method: "POST" });
     expect(unauthenticated.status).toBe(401);
 
+    // Retry spawns a process, so it takes the same origin gate as the other
+    // chat mutations — a cookie alone must not be enough for a foreign page.
+    const csrf = await fetch(`${origin}/s/myproject/api/chat/retry`, {
+      method: "POST",
+      headers: { cookie, origin: "https://attacker.example" },
+    });
+    expect(csrf.status).toBe(403);
+
     const response = await fetch(`${origin}/s/myproject/api/chat/retry`, { method: "POST", headers: { cookie } });
     expect(response.status).toBe(200);
     await assertContract("POST", "/s/{workspaceId}/api/chat/retry", response);

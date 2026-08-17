@@ -1083,7 +1083,10 @@ export function initChat(): void {
         bootstrapped = false;
         await bootstrap();
       } catch (error) {
-        announce(messageOf(error), true);
+        // The retry POST itself failed (network, proxy, credential refresh) —
+        // announce() alone would wipe the panel and leave the surface with no
+        // Retry control at all, so rebuild it around the transport error.
+        showUnavailable({ ...availability, message: `Retry failed: ${messageOf(error)}` });
       }
     });
     panel.append(retry);

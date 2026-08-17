@@ -425,9 +425,11 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
       GET: async (request: Request) => authenticated(request) ?? run(() => deps.chatService.status()),
     },
     // POST, not a query on /status: retry spawns a process, so it must not sit
-    // behind a safe method.
+    // behind a safe method — and it takes the mutation gate, because a
+    // same-site page riding the workspace cookie must not be able to spawn
+    // OpenCode either.
     [p("/api/chat/retry")]: {
-      POST: async (request: Request) => authenticated(request) ?? run(() => deps.chatService.retry()),
+      POST: async (request: Request) => mutationGate(request) ?? run(() => deps.chatService.retry()),
     },
     [p("/api/chat/models")]: {
       GET: async (request: Request) => authenticated(request) ?? run(async () => ({
