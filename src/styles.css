@@ -4769,6 +4769,16 @@ body.is-resizing-chat .chat-resizer {
   gap: 0.5rem;
 }
 
+/* The consequence of "Allow always", stated where the choice is made: it is a
+   project-scoped rule, not a per-conversation one. Quiet enough not to shout
+   over the request, present enough to be read before clicking. */
+.chat-request-scope {
+  margin: 0.45rem 0 0;
+  font-size: 0.85em;
+  line-height: 1.4;
+  color: var(--text-subtle);
+}
+
 .chat-conversation-controls select,
 .chat-model-select,
 .chat-composer textarea,

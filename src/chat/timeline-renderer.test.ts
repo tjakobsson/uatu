@@ -289,3 +289,50 @@ describe("presentation details", () => {
     expect(host.querySelector('input[type="checkbox"]')).not.toBeNull();
   });
 });
+
+describe("permission choices state the authority they grant", () => {
+  const permission: ConversationItem = {
+    id: "permission:p1",
+    type: "permission",
+    createdAt: 3,
+    requestId: "p1",
+    action: "skill",
+    resources: ["review-code"],
+    status: "pending",
+  };
+
+  function renderPending(): HTMLElement {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([permission]), new Set());
+    return host;
+  }
+
+  test("offers all three choices, and the persistent one keeps its wire value", () => {
+    const host = renderPending();
+    const outcomes = [...host.querySelectorAll("[data-permission-outcome]")]
+      .map(node => (node as HTMLElement).dataset.permissionOutcome);
+    expect(outcomes).toEqual(["approved-once", "approved-session", "rejected"]);
+
+    // The transported value is unchanged — only the human-facing text moved.
+    const persistent = host.querySelector('[data-permission-outcome="approved-session"]') as HTMLElement;
+    expect(persistent.textContent).toBe("Allow always");
+  });
+
+  test("states project scope and never calls the persistent choice session-limited", () => {
+    const text = renderPending().textContent ?? "";
+    expect(text).toContain("whole project");
+    expect(text).toContain("future conversations");
+    // The mislabel this change exists to remove, in any of its shapes.
+    expect(text).not.toContain("Allow session");
+    expect(text).not.toMatch(/only (this|the current) (session|conversation)\b/i);
+  });
+
+  test("a resolved request states its outcome without offering choices again", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([{ ...permission, status: "resolved", outcome: "approved-session" }]), new Set());
+    expect(host.querySelectorAll("[data-permission-outcome]")).toHaveLength(0);
+    expect(host.textContent).toContain("approved-session");
+  });
+});

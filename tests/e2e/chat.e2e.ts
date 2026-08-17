@@ -140,6 +140,17 @@ test.describe("desktop OpenCode chat", () => {
     const id = seeded.conversation.id;
     const permission: ConversationItem = { id: "permission:perm-1", type: "permission", createdAt: 10, requestId: "perm-1", action: "run command", resources: ["bun test"], status: "pending" };
     await control(request, { action: "item", conversationId: id, item: permission });
+
+    // OpenCode saves the persistent reply as a project-scoped rule that
+    // outlives this conversation, so the surface must say so where the choice
+    // is made — and must not offer the old "Allow session" wording, which
+    // understated what the user was granting.
+    const card = page.locator('[data-chat-item-id="permission:perm-1"]');
+    await expect(card.getByRole("button", { name: "Allow always" })).toBeVisible();
+    await expect(card.getByRole("button", { name: "Allow session" })).toHaveCount(0);
+    await expect(card).toContainText("whole project");
+    await expect(card).toContainText("future conversations");
+
     await page.getByRole("button", { name: "Allow once" }).click();
     await expect(page.locator('[data-chat-item-id="permission:perm-1"]')).toContainText("Resolved: approved-once");
     await expect(page.getByRole("button", { name: "Allow once" })).toHaveCount(0);
