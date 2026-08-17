@@ -79,6 +79,10 @@ export class OpenCodeChatAdapter {
   private readonly questionCreatedAt = new Map<string, number>();
   private readonly permissionCreatedAt = new Map<string, number>();
   private readonly sessionParents = new Map<string, string | null>();
+  // Conversations with a turn in flight, tracked at the adapter so the fact
+  // survives projection eviction. This is what distinguishes "the store says
+  // running because OpenCode died mid-turn" from "running right now".
+  private readonly liveTurns = new Set<string>();
   private readonly maxProjections: number;
   private readonly coalesceWindowMs: number | undefined;
   private readonly metrics: ChatEventMetrics | undefined;
@@ -177,9 +181,10 @@ export class OpenCodeChatAdapter {
     // forever when OpenCode dies before writing a terminal state (quitting the
     // hub mid-turn), and on reload that renders agents as still working. A
     // turn cannot outlive the server, so when no turn is live here the stale
-    // activity is closed out as cancelled. A genuinely running turn keeps its
-    // statuses — the projection says "running" while one is underway.
-    if (this.projection(id).status !== "running" && this.projection(id).status !== "sending") {
+    // activity is closed out as cancelled. Liveness comes from the adapter's
+    // own set rather than the projection's status, because a projection can
+    // be LRU-evicted mid-turn and come back fresh while the turn still runs.
+    if (!this.liveTurns.has(id)) {
       for (let index = 0; index < items.length; index += 1) {
         const item = items[index]!;
         if ((item.type === "tool" || item.type === "command" || item.type === "reasoning") && (item.status === "running" || item.status === "pending")) {
@@ -419,8 +424,11 @@ export class OpenCodeChatAdapter {
     updates: NormalizedProviderUpdate[],
     coalescer: ProviderUpdateCoalescer,
   ): Promise<void> {
-    const interactions = updates.filter((update): update is Extract<NormalizedProviderUpdate, { kind: "upsert" }> =>
-      update.kind === "upsert" && (update.item.type === "permission" || update.item.type === "question"));
+    // Removals mirror too: a question withdrawn in the child (answered from
+    // the CLI, no longer pending) must also leave the parent's timeline.
+    const interactions = updates.filter(update =>
+      (update.kind === "upsert" && (update.item.type === "permission" || update.item.type === "question"))
+      || (update.kind === "remove" && /^(?:permission|question):/.test(update.itemId)));
     if (interactions.length === 0) return;
     let parentId: string | undefined;
     try {
@@ -429,12 +437,14 @@ export class OpenCodeChatAdapter {
       return; // Unknown parentage is not a reason to drop the child's own copy.
     }
     if (!parentId) return;
-    coalescer.push(parentId, interactions.map(update => ({
-      ...update,
-      // Owner preserved deliberately: this is a view of the child's request,
-      // not a second request the parent owns.
-      item: { ...update.item, conversationId },
-    })));
+    coalescer.push(parentId, interactions.map(update => update.kind === "upsert"
+      ? {
+        ...update,
+        // Owner preserved deliberately: this is a view of the child's request,
+        // not a second request the parent owns.
+        item: { ...update.item, conversationId },
+      }
+      : update));
   }
 
   projectionForTests(id: string): ConversationProjection {
@@ -608,7 +618,14 @@ export class OpenCodeChatAdapter {
         }
         if (live.size > 0) this.publishedQuestions.set(conversationId, live);
         else this.publishedQuestions.delete(conversationId);
-        if (updates.length > 0) coalescer.push(conversationId, updates);
+        if (updates.length > 0) {
+          coalescer.push(conversationId, updates);
+          // This fallback is the only path that discovers a subagent's
+          // question at all (no asked event exists), and the pump's mirror
+          // only sees the original tool update — so without mirroring here
+          // the parent shows a task running and no sign anything is waiting.
+          await this.mirrorToParent(conversationId, updates, coalescer);
+        }
       }
       // A failed refresh must reach THIS catch with the published set intact:
       // treating it as an empty pending list would remove live questions and
@@ -635,7 +652,10 @@ export class OpenCodeChatAdapter {
       this.projections.set(id, existing);
       return existing;
     }
-    const projection = new ConversationProjection(new ConversationReplay(this.generation, id, this.replayBytes));
+    const projection = new ConversationProjection(new ConversationReplay(this.generation, id, this.replayBytes), status => {
+      if (status === "running" || status === "sending") this.liveTurns.add(id);
+      else this.liveTurns.delete(id);
+    });
     this.projections.set(id, projection);
     for (const [candidateId, candidate] of this.projections) {
       if (this.projections.size <= this.maxProjections) break;
@@ -686,7 +706,12 @@ export class ConversationProjection {
   private readonly timeline = new Map<string, ConversationItem>();
   private readonly text = new ProviderTextReconciler();
 
-  constructor(readonly replay: ConversationReplay) {}
+  constructor(
+    readonly replay: ConversationReplay,
+    // Every status change flows through statusUpdate, so this single hook is
+    // how the adapter keeps its eviction-proof live-turn set accurate.
+    private readonly onStatus?: (status: ConversationStatus) => void,
+  ) {}
 
   has(itemId: string): boolean {
     return this.timeline.has(itemId);
@@ -760,6 +785,7 @@ export class ConversationProjection {
 
   statusUpdate(status: ConversationStatus, message?: string): ChatEvent {
     this.status = status;
+    this.onStatus?.(status);
     return this.replay.publish({ type: "conversation.status", status, message });
   }
 

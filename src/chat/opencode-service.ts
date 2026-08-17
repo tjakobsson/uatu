@@ -182,7 +182,21 @@ export class OpenCodeService {
         } as Parameters<typeof Bun.spawn>[1]);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        return this.setUnavailable("startup-failed", `OpenCode could not be started: ${message}`);
+        // Same structured evidence as a failed probe loop: a binary that was
+        // removed, lost its execute bit, or cannot spawn is exactly the case
+        // a pasted Diagnostics block needs to attribute.
+        const version = await this.probeVersion(executable).catch(() => null);
+        return this.setUnavailable("startup-failed", `OpenCode could not be started: ${message}`, {
+          executable,
+          shadowedExecutables: candidates.slice(1),
+          version,
+          endpoint,
+          elapsedMs: this.now() - startedAt,
+          probes: 0,
+          lastProbe: { kind: "none" },
+          stdout: "",
+          stderr: "",
+        });
       }
 
       const managed = new ManagedProcess(spawned, capture, this.killGroup, this.sleep, this.termGraceMs);
@@ -296,7 +310,11 @@ export class OpenCodeService {
         // on and what distinguishes "never bound" from "bound but unhealthy".
         if (!progress.answered) {
           progress.answered = true;
-          deadline = Math.min(deadline, this.now() + HEALTH_PHASE_MS);
+          // The full slice even when the first answer lands late in the bind
+          // budget: the health phase exists to shorten the wait after binding,
+          // not to shrink into whatever remainder happens to be left. Worst
+          // case the total runs one health phase past the bind budget.
+          deadline = this.now() + HEALTH_PHASE_MS;
         }
         if (response.ok) {
           const body = await response.json().catch(() => null) as { healthy?: unknown; version?: unknown } | null;

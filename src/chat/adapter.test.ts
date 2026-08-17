@@ -59,6 +59,7 @@ class FakeProvider implements OpenCodeProvider {
   modelSwitches: Array<{ sessionId: string; selection: ModelSelection }> = [];
   renameSession?: OpenCodeProvider["renameSession"];
   listPermissions?: OpenCodeProvider["listPermissions"];
+  listQuestions?: OpenCodeProvider["listQuestions"];
 
   async listCommands() { return this.commands; }
   async listModels() { return this.models; }
@@ -269,6 +270,23 @@ describe("OpenCode conversation inventory and history", () => {
     } as never] });
     const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     adapter.projectionForTests("local").statusUpdate("running");
+
+    const items = (await adapter.history("local")).items;
+    expect(items).toEqual([expect.objectContaining({ id: "tool:p1", status: "running" })]);
+  });
+
+  test("an evicted projection does not cancel a turn that is still running", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local"), fixtureSession("other")];
+    provider.pages.set("first", { items: [{
+      info: { id: "m1", role: "assistant", time: { created: 10 } },
+      parts: [{ id: "p1", type: "tool", tool: "task", state: { status: "running", input: { description: "Audit styles" } } }],
+    } as never] });
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", maxProjections: 1 });
+    adapter.projectionForTests("local").statusUpdate("running");
+    // Touching another conversation evicts "local"; its projection comes back
+    // fresh ("idle") while the turn still runs. Liveness must survive that.
+    adapter.projectionForTests("other");
 
     const items = (await adapter.history("local")).items;
     expect(items).toEqual([expect.objectContaining({ id: "tool:p1", status: "running" })]);
@@ -789,6 +807,40 @@ describe("a subagent's request reaches the conversation that launched it", () =>
       const item = adapter.projectionForTests(conversation).items()[0]!;
       expect(item).toEqual(expect.objectContaining({ status: "resolved" }));
     }
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("a reconciled subagent question reaches the parent and clears when withdrawn", async () => {
+    const provider = withChild();
+    let pending = [{
+      requestId: "que-1",
+      questions: [{ prompt: "Pick one", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }],
+    }];
+    provider.listQuestions = async id => (id === "child" ? pending : []);
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+    // The question tool part is the only live signal a question exists; the
+    // asked event never fires, so this fallback is the parent's only chance.
+    provider.eventQueue.push({
+      id: "t1", type: "session.next.tool.called",
+      data: { sessionID: "child", callID: "c1", tool: "question" },
+    } as never);
+    const parentQuestion = () => adapter.projectionForTests("parent").items().find(item => item.type === "question");
+    while (!parentQuestion()) await Bun.sleep(1);
+    expect(parentQuestion()).toEqual(expect.objectContaining({
+      id: "question:que-1",
+      conversationId: "child",
+      status: "pending",
+    }));
+
+    // Withdrawn (answered from the CLI): the parent's copy must clear too.
+    pending = [];
+    provider.eventQueue.push({
+      id: "t2", type: "session.next.tool.success",
+      data: { sessionID: "child", callID: "c1", tool: "question" },
+    } as never);
+    while (parentQuestion()) await Bun.sleep(1);
     await adapter.stopEventPump();
     await pump;
   });

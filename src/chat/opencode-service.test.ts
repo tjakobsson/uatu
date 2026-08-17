@@ -204,6 +204,28 @@ describe("OpenCodeService phase attribution", () => {
     expect(clock.elapsed()).toBeLessThan(10_000);
   });
 
+  test("a bind that answers late still gets the full health slice", async () => {
+    const clock = fakeClock();
+    let answered = false;
+    const { service } = fixture({
+      ...clock.options,
+      startupTimeoutMs: 1_000,
+      fetch: async () => {
+        // Refused until just before the bind budget expires, then bound but
+        // briefly unhealthy — recovering within the health slice, which must
+        // not have shrunk to the sliver left of the bind budget.
+        if (clock.elapsed() < 900) throw refusal();
+        if (!answered) {
+          answered = true;
+          return new Response("starting", { status: 503 });
+        }
+        return Response.json({ healthy: true, version: "1.18.18" });
+      },
+      bindAttempts: 1,
+    });
+    expect(await service.status()).toEqual({ state: "ready", version: "1.18.18" });
+  });
+
   test("an accepted-but-unanswered connection still yields repeated probes", async () => {
     const clock = fakeClock();
     const { service } = fixture({
@@ -273,6 +295,25 @@ describe("OpenCodeService failure diagnostics", () => {
     expect(diagnostics.probes).toBeGreaterThan(0);
     expect(diagnostics.stdout).toContain("listening on");
     expect(diagnostics.stderr).toContain("boot failed");
+  });
+
+  test("a spawn failure still carries structured diagnostics", async () => {
+    const { service } = fixture({
+      spawn: () => { throw new Error("EACCES: permission denied"); },
+      probeVersion: async () => "1.18.18",
+    });
+    const status = await service.status();
+    if (status.state !== "unavailable") throw new Error("expected unavailable");
+    expect(status.reason).toBe("startup-failed");
+    expect(status.message).toContain("EACCES");
+    expect(status.diagnostics).toEqual(expect.objectContaining({
+      executable: "/bin/opencode",
+      shadowedExecutables: [],
+      version: "1.18.18",
+      endpoint: "http://127.0.0.1:43210",
+      probes: 0,
+      lastProbe: { kind: "none" },
+    }));
   });
 
   test("a version that cannot be determined does not mask the original error", async () => {
