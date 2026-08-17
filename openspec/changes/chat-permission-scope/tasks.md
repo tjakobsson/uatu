@@ -1,7 +1,7 @@
 ## 1. Tell the truth about what the choice grants
 
 - [x] 1.1 In `renderPermission` (`src/chat/timeline-renderer.ts`), relabel the `approved-session` button from "Allow session" to "Allow always", keeping the `data-permission-outcome="approved-session"` value so the wire contract and every handler are untouched
-- [x] 1.2 State the scope in the card where the choice is made — that persistent approval applies to the whole project and outlives this conversation — rather than relying on the button text alone
+- [x] 1.2 State the reach in the card where the choice is made — that persistent approval covers later conversations and similar requests, and lasts until OpenCode restarts — rather than relying on the button text alone. (Corrected after measurement: an earlier wording claimed project-wide persistence, which a live 1.18.18 disproved.)
 - [x] 1.3 Style the scope note in `src/styles.css` so it reads as a consequence of the choice without crowding the request card
 
 ## 2. Prove it

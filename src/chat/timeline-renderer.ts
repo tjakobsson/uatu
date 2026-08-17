@@ -446,13 +446,15 @@ function activityShell(id: string, status: string, label: string, subject: strin
 
 function renderPermission(item: Extract<ConversationItem, { type: "permission" }>, open: boolean, active: boolean): string {
   const pending = item.status === "pending";
-  // `approved-session` is the transported value and stays — but OpenCode saves
-  // this reply as a project-scoped rule (`PermissionSavedInfo` carries a
-  // `projectID`) that outlives the request, the conversation, and the workspace
-  // process. Labelling it "session" understated the authority being granted, so
-  // the card now states the scope where the choice is made.
+  // `approved-session` is the transported value and stays. Verified against a
+  // live OpenCode 1.18.18: this reply carries past the request into every later
+  // conversation the same OpenCode server handles, and is lost when that server
+  // restarts (it never reaches `/api/permission/saved`). It also grants the
+  // request's `always` pattern — `echo *` for a literal `echo scoped` — so it
+  // covers more than the resource on the card. "Allow session" implied one
+  // conversation; the card now states the reach that was actually being given.
   const outcome = pending && active
-    ? `<div class="chat-request-actions"><button type="button" data-permission-outcome="approved-once">Allow once</button><button type="button" data-permission-outcome="approved-session">Allow always</button><button type="button" data-permission-outcome="rejected">Reject</button></div><p class="chat-request-scope">“Allow always” saves this for the whole project — it applies to future conversations too, not just this one.</p>`
+    ? `<div class="chat-request-actions"><button type="button" data-permission-outcome="approved-once">Allow once</button><button type="button" data-permission-outcome="approved-session">Allow always</button><button type="button" data-permission-outcome="rejected">Reject</button></div><p class="chat-request-scope">“Allow always” also covers later conversations, and similar requests — until OpenCode restarts.</p>`
     : pending ? `<p class="chat-request-outcome">Superseded by a newer request</p>` : `<p class="chat-request-outcome">Resolved: ${escapeHtml(item.outcome ?? "resolved")}</p>`;
   return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}><summary>Permission: ${escapeHtml(item.action)}</summary><ul>${item.resources.map(resource => `<li><code>${escapeHtml(resource)}</code></li>`).join("")}</ul>${outcome}</details>`;
 }

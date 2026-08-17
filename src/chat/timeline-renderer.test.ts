@@ -319,10 +319,10 @@ describe("permission choices state the authority they grant", () => {
     expect(persistent.textContent).toBe("Allow always");
   });
 
-  test("states project scope and never calls the persistent choice session-limited", () => {
+  test("states the reach of persistent approval and never calls it session-limited", () => {
     const text = renderPending().textContent ?? "";
-    expect(text).toContain("whole project");
-    expect(text).toContain("future conversations");
+    expect(text).toContain("later conversations");
+    expect(text).toContain("until OpenCode restarts");
     // The mislabel this change exists to remove, in any of its shapes.
     expect(text).not.toContain("Allow session");
     expect(text).not.toMatch(/only (this|the current) (session|conversation)\b/i);
