@@ -96,10 +96,13 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
 
   // User-initiated recovery from a cached startup failure. Drops the adapter
   // built against the dead runtime so the next call rebuilds against whatever
-  // the retry produced.
+  // the retry produced — and retires it first, or its supervisor would keep
+  // reconnecting the dead endpoint forever, one leaked loop per retry.
   async retry(): Promise<ChatAvailability> {
+    const previous = this.adapter;
     this.adapterPromise = null;
     this.adapter = null;
+    await previous?.stopEventPump().catch(() => undefined);
     await this.runtime.retry();
     return this.status();
   }
@@ -163,14 +166,16 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
   private superviseEventPump(adapter: OpenCodeChatAdapter): void {
     void (async () => {
       let failures = 0;
-      while (!this.disposed) {
+      // `this.adapter === adapter` retires the loop when retry() replaces the
+      // adapter: dispose() is not the only way an adapter stops being current.
+      while (!this.disposed && this.adapter === adapter) {
         const startedAt = Date.now();
         try {
           await adapter.startEventPump();
         } catch {
           // fall through to the retry delay
         }
-        if (this.disposed) return;
+        if (this.disposed || this.adapter !== adapter) return;
         failures = Date.now() - startedAt > 60_000 ? 0 : failures + 1;
         await new Promise<void>(resolve => {
           const timer = setTimeout(resolve, Math.min(1_000 * 2 ** (failures - 1), 30_000));

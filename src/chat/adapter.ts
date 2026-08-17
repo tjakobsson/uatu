@@ -15,8 +15,10 @@ import type {
   ConversationStatus,
   ConversationSummary,
   PermissionOutcome,
+  PermissionRequest,
   ModelSelection,
   QuestionOutcome,
+  QuestionRequest,
 } from "./types";
 import { ConversationNotFoundError, isSessionInWorkspace } from "./workspace";
 
@@ -521,7 +523,11 @@ export class OpenCodeChatAdapter {
     if (candidate === parentId) return false;
     let known = this.sessionParents.get(candidate);
     if (known === undefined) {
-      known = (await this.provider.getSession(candidate).catch(() => null))?.parentId ?? null;
+      // A failed lookup propagates instead of caching as "no parent": the
+      // callers already treat an errored sweep as unknown-not-empty, and a
+      // cached null would permanently hide a subagent's requests from its
+      // parent after one transient provider error.
+      known = (await this.provider.getSession(candidate))?.parentId ?? null;
       this.sessionParents.set(candidate, known);
     }
     return known === parentId;
@@ -712,6 +718,10 @@ export class ConversationProjection {
     // empty questions array fails client validation — publishing it would
     // trade one lost frame for a stream resync loop.
     if (merged.type === "question" && merged.questions.length === 0) return undefined;
+    // Same for a permission resolution whose ask was never projected: the
+    // classic `permission.replied` event carries no action or resources, and
+    // an empty resources array fails client validation the same way.
+    if (merged.type === "permission" && merged.resources.length === 0) return undefined;
     this.timeline.set(item.id, merged);
     if (merged.type === "assistant_message") this.text.seed(merged.id.replace(/^part:/, ""), merged.markdown);
     if (merged.type === "reasoning") this.text.seed(merged.id.replace(/^part:|^reasoning:/, ""), merged.text);
@@ -725,10 +735,21 @@ export class ConversationProjection {
 
   requirePending(requestId: string, type: "permission" | "question"): void {
     const item = this.timeline.get(`${type}:${requestId}`);
+    if (!item || (item.type !== "permission" && item.type !== "question") || item.type !== type || item.status !== "pending") {
+      throw new InteractionConflictError();
+    }
+    // Answerable is decided per owning conversation, matching the renderer: a
+    // parent shows its own requests next to mirrored subagent ones, and a
+    // newer mirrored request must not make the parent's own request refuse
+    // the answer its enabled buttons just offered.
+    const own = this.replay.conversationId;
+    const owner = item.conversationId ?? own;
     const pending = [...this.timeline.values()]
-      .filter(candidate => (candidate.type === "permission" || candidate.type === "question") && candidate.status === "pending")
+      .filter((candidate): candidate is PermissionRequest | QuestionRequest =>
+        (candidate.type === "permission" || candidate.type === "question") && candidate.status === "pending")
+      .filter(candidate => (candidate.conversationId ?? own) === owner)
       .sort((left, right) => right.createdAt - left.createdAt || right.id.localeCompare(left.id));
-    if (!item || item.type !== type || item.status !== "pending" || pending[0]?.id !== item.id) throw new InteractionConflictError();
+    if (pending[0]?.id !== item.id) throw new InteractionConflictError();
   }
 
   validateQuestionOutcome(requestId: string, outcome: QuestionOutcome): void {

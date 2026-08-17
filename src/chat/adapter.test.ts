@@ -674,6 +674,21 @@ describe("pending permission recovery", () => {
     const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     expect((await adapter.history("local")).items).toEqual([]);
   });
+
+  test("a resolution whose ask was never projected is suppressed, not published invalid", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    // The classic replied event carries no action or resources; without the
+    // ask to merge into, publishing it would fail client validation and force
+    // a resync on every snapshot that repeats the item.
+    applyEvent(adapter, "local", {
+      id: "orphan",
+      type: "permission.replied",
+      data: { sessionID: "local", requestID: "perm_ghost", reply: "once", timestamp: 10 },
+    } as never);
+    expect(adapter.projectionForTests("local").items()).toEqual([]);
+  });
 });
 
 describe("a subagent's request reaches the conversation that launched it", () => {
@@ -741,6 +756,32 @@ describe("a subagent's request reaches the conversation that launched it", () =>
     await pump;
   });
 
+  test("a newer subagent request does not block answering the parent's own", async () => {
+    const provider = withChild();
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push({
+      id: "own", type: "permission.v2.asked",
+      data: { id: "perm-own", sessionID: "parent", action: "bash", resources: ["bun test"], timestamp: 10 },
+    } as never);
+    provider.eventQueue.push({
+      id: "mirrored", type: "permission.v2.asked",
+      data: { id: "perm-late", sessionID: "child", action: "bash", resources: ["rm -rf build"], timestamp: 20 },
+    } as never);
+    while (adapter.projectionForTests("parent").items().length < 2) await Bun.sleep(1);
+
+    // The renderer enables one request per owning conversation; the guard
+    // must admit the same set, not just the globally newest.
+    await adapter.respondPermission("parent", "perm-own", "client-own", "approved-once");
+    await adapter.respondPermission("child", "perm-late", "client-late", "rejected");
+    expect(provider.permissionReplies).toEqual([
+      { sessionId: "parent", requestId: "perm-own", reply: "once" },
+      { sessionId: "child", requestId: "perm-late", reply: "reject" },
+    ]);
+    await adapter.stopEventPump();
+    await pump;
+  });
+
   test("a request from a parentless conversation is not mirrored anywhere", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("solo")];
@@ -792,6 +833,24 @@ describe("a subagent's pending request is reconciled into its parent", () => {
     // The client addresses the owner, which is what the item carries.
     await adapter.respondPermission("child", "perm-child", "client-1", "approved-once");
     expect(provider.permissionReplies).toEqual([{ sessionId: "child", requestId: "perm-child", reply: "once" }]);
+  });
+
+  test("a transient parent-lookup failure does not permanently hide the child's request", async () => {
+    const provider = withPendingChildRequest();
+    const lookup = provider.getSession.bind(provider);
+    let failing = true;
+    provider.getSession = async (id: string) => {
+      if (failing && id === "child") throw new Error("provider unreachable");
+      return lookup(id);
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    // Degraded while the provider errors — unknown, not empty…
+    expect((await adapter.history("parent")).items).toEqual([]);
+    failing = false;
+    // …and recovered on the next load, rather than cached as "no parent".
+    expect((await adapter.history("parent")).items).toEqual([
+      expect.objectContaining({ id: "permission:perm-child", conversationId: "child", status: "pending" }),
+    ]);
   });
 
   test("an unrelated conversation's request is not pulled in", async () => {

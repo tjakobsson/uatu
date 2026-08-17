@@ -153,4 +153,38 @@ describe("LazyOpenCodeChatService", () => {
     await Bun.sleep(2_500);
     expect(pumpStarts).toBe(afterDispose);
   }, 10_000);
+
+  test("retry retires the previous adapter's supervisor instead of leaking it", async () => {
+    const pumpStarts: number[] = [];
+    const service = new LazyOpenCodeChatService({
+      workspacePath: "/workspace",
+      runtime: fixtureRuntime(),
+      createProvider: () => {
+        const index = pumpStarts.push(0) - 1;
+        return {
+          ...provider(),
+          async *events() {
+            pumpStarts[index] += 1;
+            throw new Error("stream closed");
+          },
+        } satisfies OpenCodeProvider;
+      },
+      createAdapter: options => new OpenCodeChatAdapter({ ...options, generation: "test" }),
+    });
+
+    await service.status();
+    await Bun.sleep(1);
+    expect(pumpStarts[0]).toBeGreaterThanOrEqual(1);
+
+    await service.retry();
+    await Bun.sleep(1);
+    const stale = pumpStarts[0]!;
+    // The retired supervisor never reconnects the dead adapter, while the
+    // replacement's supervisor runs — one loop per retry must not accumulate.
+    await Bun.sleep(2_500);
+    expect(pumpStarts[0]).toBe(stale);
+    expect(pumpStarts[1]).toBeGreaterThan(0);
+
+    await service.dispose();
+  }, 10_000);
 });
