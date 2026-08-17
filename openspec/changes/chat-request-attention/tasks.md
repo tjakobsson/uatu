@@ -47,7 +47,7 @@
 - [x] 7.3 Run `bun test:e2e`; the pre-existing `find.e2e.ts` "⌘G steps matches without focus" failure is unrelated and stays out of scope
 - [x] 7.4 Screenshot a stack of mixed-state requests and a hoisted subagent request before trusting the suite — whether a user spots what needs them is the entire point, and no assertion establishes it
 - [x] 7.5 Drive a real subagent permission against live OpenCode and confirm it appears in the parent, since that is the case the user could not verify
-- [ ] 7.6 Commit onto `fix/chat-startup-diagnostics`, push so it lands in PR #260, and describe it in that PR's body
+- [x] 7.6 Commit onto `fix/chat-startup-diagnostics`, push so it lands in PR #260, and describe it in that PR's body
 
 > **Archive ordering (not a task).** `chat-event-coverage`, `chat-permission-scope`,
 > and this change all modify the same requirement. This delta is written on top

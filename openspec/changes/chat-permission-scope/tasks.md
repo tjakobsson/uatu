@@ -16,7 +16,7 @@
 - [x] 3.2 Run `bun run test:api` and confirm no contract artifact changed — the `approved-session` enum stays, so this must need no revision increment
 - [x] 3.3 Run `bun test:e2e`; the pre-existing `find.e2e.ts` "⌘G steps matches without focus" failure is unrelated and stays out of scope
 - [x] 3.4 Look at the rendered permission card before trusting the suite — the entire point is whether a user reads the scope correctly, which a passing assertion does not establish
-- [ ] 3.5 Commit onto `fix/chat-startup-diagnostics` and push so the fix lands in PR #260, and describe it in that PR's body
+- [x] 3.5 Commit onto `fix/chat-startup-diagnostics` and push so the fix lands in PR #260, and describe it in that PR's body
 
 > **Archive ordering (not a task).** `chat-event-coverage` modifies the same
 > requirement. This delta was written on top of that one's updated text, so

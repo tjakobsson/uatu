@@ -34,4 +34,4 @@
 - [x] 5.3 Run the real-OpenCode integration test (`UATU_REAL_OPENCODE=1`)
 - [x] 5.4 Run `bun test:e2e`; the pre-existing `find.e2e.ts` "⌘G steps matches without focus" failure is unrelated and stays out of scope
 - [x] 5.5 Drive a real OpenCode turn with `permission: {bash: "ask"}` and read `chat.event.unhandled.*` from the snapshot file to confirm the counters answer the question that motivated this change
-- [ ] 5.6 Commit onto `fix/chat-startup-diagnostics` and push so the fixes land in PR #260; update that PR's body to describe them
+- [x] 5.6 Commit onto `fix/chat-startup-diagnostics` and push so the fixes land in PR #260; update that PR's body to describe them
