@@ -110,6 +110,15 @@ export class SdkV2Provider implements OpenCodeProvider {
       }
       cursor = page.cursor.next;
     } while (cursor);
+    // Children may list before their parents, so inheritance runs to a
+    // fixpoint over the whole inventory rather than per row.
+    let flagged = true;
+    while (flagged) {
+      flagged = false;
+      for (const session of sessions.values()) {
+        if (this.inheritTransport(session)) flagged = true;
+      }
+    }
     return [...sessions.values()];
   }
 
@@ -126,7 +135,9 @@ export class SdkV2Provider implements OpenCodeProvider {
     const classic = await this.client.session.get({ sessionID: id, directory: this.directory }) as Result<unknown>;
     if (classic.data) {
       if (isCompatibilitySession(classic.data)) this.compatibilitySessions.add(id);
-      return toSession(classic.data);
+      const session = toSession(classic.data);
+      this.inheritTransport(session);
+      return session;
     }
     // Only a store miss falls through — a transient 401/5xx must surface as a
     // failure, or the pump misreads it as "conversation gone" and silently
@@ -139,7 +150,25 @@ export class SdkV2Provider implements OpenCodeProvider {
     }
     if (!result.data) return null;
     const response = result.data as { data?: unknown };
-    return toSession(response.data ?? response);
+    const session = toSession(response.data ?? response);
+    this.inheritTransport(session);
+    return session;
+  }
+
+  /**
+   * A subagent child is created by OpenCode itself, never through
+   * `createSession`, so it carries no compatibility metadata — but it lives in
+   * whichever store its parent lives in. Without inheriting the flag, a child
+   * of a compatibility session is routed to the v2 endpoints (permission
+   * replies, prompts, interrupts), which fail against the classic store; that
+   * is exactly the path taken when a subagent's permission is answered from
+   * the parent conversation, where the child's transcript was never loaded.
+   */
+  private inheritTransport(session: ProviderSession): boolean {
+    if (!session.parentId || this.compatibilitySessions.has(session.id)) return false;
+    if (!this.compatibilitySessions.has(session.parentId)) return false;
+    this.compatibilitySessions.add(session.id);
+    return true;
   }
 
   /**

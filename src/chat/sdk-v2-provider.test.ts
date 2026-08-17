@@ -226,6 +226,67 @@ describe("OpenCode v2 identity policy", () => {
     expect(stableProviderId("msg", "msg_existing")).toBe("msg_existing");
   });
 
+  test("answers a subagent's permission through its parent's store", async () => {
+    const replies: string[] = [];
+    const client = {
+      session: {
+        create: async () => ({ data: { ...session("ses_parent"), directory: "/workspace" } }),
+        get: async (input: { sessionID: string }) => ({
+          data: input.sessionID === "ses_child"
+            ? { ...session("ses_child"), parentID: "ses_parent" }
+            : session("ses_parent"),
+        }),
+      },
+      permission: {
+        reply: async (input: Record<string, unknown>) => { replies.push(`classic:${input.requestID}`); return { data: undefined }; },
+      },
+      v2: {
+        session: {
+          permission: {
+            reply: async () => { replies.push("v2"); return { error: { message: "no such session in the v2 store" } }; },
+          },
+        },
+      },
+    } as unknown as OpencodeClient;
+    const provider = new SdkV2Provider(client, "/workspace");
+
+    await provider.createSession("client-uuid");
+    // The adapter always resolves the session before replying; that lookup is
+    // where the child learns it lives in its parent's store.
+    await provider.getSession("ses_child");
+    await provider.replyPermission("ses_child", "perm_1", "once");
+    expect(replies).toEqual(["classic:perm_1"]);
+  });
+
+  test("inherits the compatibility store across the inventory even when children list first", async () => {
+    const replies: string[] = [];
+    const client = {
+      session: {
+        list: async () => ({ data: [
+          { ...session("ses_grandchild"), parentID: "ses_child" },
+          { ...session("ses_child"), parentID: "ses_parent" },
+          { ...session("ses_parent"), metadata: { "uatu.transport": "compatibility" } },
+        ] }),
+      },
+      permission: {
+        reply: async (input: Record<string, unknown>) => { replies.push(`classic:${input.requestID}`); return { data: undefined }; },
+      },
+      v2: {
+        session: {
+          list: async () => ({ data: { data: [], cursor: { next: null } } }),
+          permission: {
+            reply: async () => { replies.push("v2"); return { error: { message: "no such session in the v2 store" } }; },
+          },
+        },
+      },
+    } as unknown as OpencodeClient;
+    const provider = new SdkV2Provider(client, "/workspace");
+
+    await provider.listSessions();
+    await provider.replyPermission("ses_grandchild", "perm_2", "reject");
+    expect(replies).toEqual(["classic:perm_2"]);
+  });
+
   test("lists connected provider models and switches with provider IDs intact", async () => {
     let switchInput: Record<string, unknown> | undefined;
     const client = {
