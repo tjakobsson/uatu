@@ -205,7 +205,10 @@ export class OpenCodeService {
       capture.consume(spawned.stderr);
       if (spawned.stdout) stdoutCapture.consume(spawned.stdout);
       else stdoutCapture.close();
-      progress = newProbeProgress();
+      // Phase state resets per attempt, but the probe count accumulates:
+      // `elapsedMs` spans the whole startup, so a bind-race retry that only
+      // reported its final attempt's probes would understate the evidence.
+      progress = { ...newProbeProgress(), attempts: progress.attempts };
       try {
         const version = await this.waitUntilReady(endpoint, password, spawned.exited, progress);
         if (this.closed) {

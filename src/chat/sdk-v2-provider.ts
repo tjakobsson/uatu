@@ -266,13 +266,17 @@ export class SdkV2Provider implements OpenCodeProvider {
       return { messageId };
     }
     if (input.model) await this.switchModel(sessionId, input.model);
+    // Session-level, not a prompt field: the generated v2 prompt serializer
+    // passes through only id/prompt/delivery/resume, so an `agent` property
+    // there is silently dropped — the selection would look accepted while the
+    // session kept its previous agent.
+    if (input.agent) ensureSuccess(await this.client.v2.session.switchAgent({ sessionID: sessionId, agent: input.agent }));
     const admitted = unwrap(await this.client.v2.session.prompt({
       sessionID: sessionId,
       id: messageId,
       prompt: { text: input.text },
       delivery: input.delivery,
       resume: true,
-      ...(input.agent ? { agent: input.agent } : {}),
     }));
     return { messageId: admitted.data.id };
   }

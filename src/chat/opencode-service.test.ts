@@ -158,6 +158,40 @@ describe("OpenCodeService startup", () => {
     expect(service.currentConnection()).toEqual({ endpoint: "http://127.0.0.1:41001", password: "second-secret" });
   });
 
+  test("probe attempts accumulate across bind retries", async () => {
+    const clock = fakeClock();
+    let spawnCount = 0;
+    const survivor = deferred<number | null>();
+    const service = new OpenCodeService({
+      workspacePath: "/workspace",
+      discoverCandidates: async () => ["/bin/opencode"],
+      probeVersion: async () => null,
+      allocatePort: async () => 41000 + spawnCount,
+      spawn() {
+        const index = spawnCount++;
+        // The first binds into a race; the second stays up but never answers.
+        return {
+          pid: 60 + index,
+          exited: index === 0 ? Promise.resolve(1) : survivor.promise,
+          stderr: stream(index === 0 ? "EADDRINUSE" : ""),
+          kill() { survivor.resolve(143); },
+        };
+      },
+      fetch: async () => { throw refusal(); },
+      killGroup: pid => { if (pid === 61) survivor.resolve(143); },
+      ...clock.options,
+      startupTimeoutMs: 500,
+      termGraceMs: 0,
+      bindAttempts: 2,
+    });
+
+    const status = await service.status();
+    if (status.state !== "unavailable") throw new Error("expected unavailable");
+    // `elapsedMs` spans both attempts, so the probe count must too — the
+    // second attempt alone fits at most five 100ms probes in a 500ms budget.
+    expect(status.diagnostics?.probes).toBeGreaterThan(5);
+  });
+
   test("bounds captured output", async () => {
     const exit = Promise.resolve(1);
     const { service } = fixture({

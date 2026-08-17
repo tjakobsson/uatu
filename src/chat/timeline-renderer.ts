@@ -38,17 +38,22 @@ export class TimelineRenderer {
     // conversation's items this is exactly the old rule — the newest pending
     // request wins. With a subagent's request shown alongside the parent's,
     // each conversation gets its own active slot, so one cannot block the
-    // other. `requirePending` applies the same rule server-side, per owner.
-    const activeRequests = new Set<string>();
-    const seenOwners = new Set<string>();
-    for (const item of [...projection.items].reverse()) {
+    // other. `requirePending` applies the same rule server-side, per owner —
+    // and the SAME COMPARATOR: newest createdAt, ties broken by id. Array
+    // order is not that comparator (reconciled requests share one Date.now()
+    // and keep provider order), and disagreeing with the server enables a
+    // card whose every answer gets a stale-interaction conflict.
+    const activeByOwner = new Map<string, { id: string; createdAt: number }>();
+    for (const item of projection.items) {
       if (item.type !== "permission" && item.type !== "question") continue;
       if (item.status !== "pending") continue;
       const owner = item.conversationId ?? projection.conversationId;
-      if (seenOwners.has(owner)) continue;
-      seenOwners.add(owner);
-      activeRequests.add(item.id);
+      const current = activeByOwner.get(owner);
+      if (!current || item.createdAt > current.createdAt || (item.createdAt === current.createdAt && item.id > current.id)) {
+        activeByOwner.set(owner, { id: item.id, createdAt: item.createdAt });
+      }
     }
+    const activeRequests = new Set<string>([...activeByOwner.values()].map(entry => entry.id));
 
     const todoLabels = todoActivityLabels(projection.items);
     const durations = turnDurations(projection.items);

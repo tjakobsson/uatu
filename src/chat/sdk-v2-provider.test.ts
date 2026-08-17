@@ -254,6 +254,27 @@ describe("OpenCode v2 identity policy", () => {
     expect(promptInput).toEqual(expect.objectContaining({ agent: "build" }));
   });
 
+  test("switches a v2 session's agent at the session level, not on the prompt", async () => {
+    // The generated v2 prompt serializer passes through only
+    // id/prompt/delivery/resume — an agent property there is silently
+    // dropped, so the switch must be its own call.
+    const calls: Array<[string, Record<string, unknown>]> = [];
+    const client = {
+      v2: {
+        session: {
+          switchAgent: async (input: Record<string, unknown>) => { calls.push(["switchAgent", input]); return { data: undefined }; },
+          prompt: async (input: Record<string, unknown>) => { calls.push(["prompt", input]); return { data: { data: { id: "msg_native" } } }; },
+        },
+      },
+    } as unknown as OpencodeClient;
+    const provider = new SdkV2Provider(client, "/workspace");
+
+    await provider.prompt("ses_native", { id: "client-uuid", text: "go", delivery: "queue", agent: "build" });
+    expect(calls[0]).toEqual(["switchAgent", { sessionID: "ses_native", agent: "build" }]);
+    expect(calls[1]![0]).toBe("prompt");
+    expect(calls[1]![1]).not.toHaveProperty("agent");
+  });
+
   test("answers a subagent's permission through its parent's store", async () => {
     const replies: string[] = [];
     const client = {

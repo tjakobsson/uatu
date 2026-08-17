@@ -411,6 +411,22 @@ describe("requests owned by different conversations do not block each other", ()
     expect(state("permission:own-old")).toBe("queued");
   });
 
+  test("timestamp ties resolve by id, matching the server's admission rule", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    // Reconciled requests share one Date.now(); provider order put the
+    // server-losing candidate LAST, which array order would wrongly enable.
+    renderer.render(host, projectionWith([
+      { ...perm, id: "permission:req-b", createdAt: 5, requestId: "req-b" },
+      { ...perm, id: "permission:req-a", createdAt: 5, requestId: "req-a" },
+    ]), new Set());
+    const state = (id: string) => (host.querySelector(`[data-chat-item-id="${id}"]`) as HTMLElement).dataset.requestState;
+    // requirePending breaks the tie toward the greater id — the UI must too,
+    // or every enabled answer is refused as stale.
+    expect(state("permission:req-b")).toBe("needs-answer");
+    expect(state("permission:req-a")).toBe("queued");
+  });
+
   test("a surfaced subagent request says who is asking", () => {
     const renderer = new TimelineRenderer();
     const host = target();
