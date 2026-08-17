@@ -515,6 +515,37 @@ describe("prompt, abort, permission, and question mutations", () => {
     expect(provider.permissionReplies.map(reply => reply.reply)).toEqual(["once", "always", "reject"]);
   });
 
+  test("a late ask alias does not reopen a resolved interaction", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    applyEvent(adapter, "session", { id: "ask", type: "permission.v2.asked", data: { id: "perm_1", sessionID: "session", action: "shell", resources: ["ls"], timestamp: 10 } });
+    await adapter.respondPermission("session", "perm_1", "c1", "approved-once");
+    // The classic stream's alias of the same ask, delivered after the reply:
+    // the merged streams only preserve order within themselves.
+    applyEvent(adapter, "session", { id: "alias", type: "permission.asked", data: { id: "perm_1", sessionID: "session", permission: "shell", patterns: ["ls"], timestamp: 9 } });
+
+    expect(adapter.projectionForTests("session").items()[0]).toEqual(expect.objectContaining({
+      id: "permission:perm_1",
+      status: "resolved",
+      outcome: "approved-once",
+    }));
+    await expect(adapter.respondPermission("session", "perm_1", "c2", "rejected")).rejects.toBeInstanceOf(InteractionConflictError);
+
+    applyEvent(adapter, "session", {
+      id: "q-ask", type: "question.v2.asked",
+      data: { id: "que_1", sessionID: "session", timestamp: 10, questions: [{ question: "Choose", header: "Choice", options: [{ label: "A", description: "A" }], multiple: false, custom: false }] },
+    });
+    await adapter.respondQuestion("session", "que_1", "c3", { kind: "answered", answers: [["A"]] });
+    applyEvent(adapter, "session", {
+      id: "q-alias", type: "question.v2.asked",
+      data: { id: "que_1", sessionID: "session", timestamp: 9, questions: [{ question: "Choose", header: "Choice", options: [{ label: "A", description: "A" }], multiple: false, custom: false }] },
+    });
+    expect(adapter.projectionForTests("session").items().find(item => item.id === "question:que_1")).toEqual(
+      expect.objectContaining({ status: "resolved", outcome: { kind: "answered", answers: [["A"]] } }),
+    );
+  });
+
   test("supports option, multi-option, free-form, and rejection answers and refuses invalid or stale responses", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];

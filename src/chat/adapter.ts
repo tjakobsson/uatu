@@ -862,11 +862,29 @@ function mergeInteraction(current: ConversationItem | undefined, incoming: Conve
     // not a blanking instruction.
     if (!incoming.text) return { ...incoming, text: current.text };
   }
+  // Resolved interactions are terminal. The merged provider streams preserve
+  // order only within themselves, so a delayed classic alias of an ask can
+  // land after the native reply — accepting its "pending" would reopen a card
+  // OpenCode no longer accepts an answer for (and carry the old outcome onto
+  // a pending item, which fails client validation).
   if (current.type === "permission" && incoming.type === "permission") {
-    return { ...current, ...incoming, action: incoming.action === "permission" ? current.action : incoming.action, resources: incoming.resources.length ? incoming.resources : current.resources };
+    const reopened = current.status === "resolved" && incoming.status === "pending";
+    return {
+      ...current,
+      ...incoming,
+      action: incoming.action === "permission" ? current.action : incoming.action,
+      resources: incoming.resources.length ? incoming.resources : current.resources,
+      ...(reopened ? { status: "resolved" as const, outcome: current.outcome } : {}),
+    };
   }
   if (current.type === "question" && incoming.type === "question") {
-    return { ...current, ...incoming, questions: incoming.questions.length ? incoming.questions : current.questions };
+    const reopened = current.status === "resolved" && incoming.status === "pending";
+    return {
+      ...current,
+      ...incoming,
+      questions: incoming.questions.length ? incoming.questions : current.questions,
+      ...(reopened ? { status: "resolved" as const, outcome: current.outcome } : {}),
+    };
   }
   if (current.type === "tool" && incoming.type === "tool") {
     const keepTerminal = current.status === "completed" || current.status === "failed" || current.status === "cancelled";
