@@ -405,7 +405,10 @@ describe("OpenCodeService retry", () => {
 describe("OpenCodeService startup budget", () => {
   test("honors UATU_OPENCODE_STARTUP_TIMEOUT_MS and rejects unusable values", () => {
     expect(resolveStartupTimeoutMs({ UATU_OPENCODE_STARTUP_TIMEOUT_MS: "60000" })).toBe(60_000);
-    for (const value of ["", "abc", "0", "-1", " "]) {
+    expect(resolveStartupTimeoutMs({ UATU_OPENCODE_STARTUP_TIMEOUT_MS: " 60000 " })).toBe(60_000);
+    // Partially numeric typos must fall back too: parseInt would read "1ms"
+    // as 1 and collapse the startup window instead of leaving the default.
+    for (const value of ["", "abc", "0", "-1", " ", "1ms", "30s", "1e4", "10.5"]) {
       expect(resolveStartupTimeoutMs({ UATU_OPENCODE_STARTUP_TIMEOUT_MS: value })).toBeUndefined();
     }
     expect(resolveStartupTimeoutMs({})).toBeUndefined();

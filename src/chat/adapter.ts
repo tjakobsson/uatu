@@ -213,9 +213,26 @@ export class OpenCodeChatAdapter {
     // answerable. Ids match the event path's, so a request that also arrives
     // live converges on one entry instead of rendering twice.
     try {
-      for (const pending of await this.pendingPermissions(id)) {
+      const pendingNow = await this.pendingPermissions(id);
+      for (const pending of pendingNow) {
         if (items.some(item => item.id === pending.id)) continue;
         items.push(pending);
+      }
+      // A successful read is authoritative the other way too: a known pending
+      // permission absent from it was answered somewhere else while its reply
+      // event was missed, and the card must be revoked — otherwise a
+      // reconnecting client could answer a request OpenCode no longer has.
+      // Skipped entirely when the provider cannot list at all: that is
+      // unknown, not empty. Mirrored child copies survive correctly because
+      // pendingPermissions includes the children's requests.
+      if (this.provider.listPermissions) {
+        const live = new Set(pendingNow.map(item => item.id));
+        const projection = this.projection(id);
+        for (const existing of projection.items()) {
+          if (existing.type !== "permission" || existing.status !== "pending" || live.has(existing.id)) continue;
+          projection.apply({ kind: "remove", itemId: existing.id });
+          this.permissionCreatedAt.delete(existing.id);
+        }
       }
     } catch {
       // Unknown, not empty. `seed` replaces the timeline from history, and

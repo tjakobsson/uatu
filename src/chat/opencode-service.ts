@@ -381,11 +381,15 @@ export class OpenCodeService {
 // `UATU_OPENCODE_STARTUP_TIMEOUT_MS` lets an operator widen the budget on a
 // build already in the field. An unusable value falls back to the default
 // rather than failing: Chat is optional to a workspace, so a typo here must not
-// stop documents from being served. Mirrors `parseTimeout` in watchdog/main.ts.
+// stop documents from being served. Stricter than watchdog/main.ts's
+// `parseTimeout`: the whole value must be numeric, because `parseInt` would
+// read a typo like "1ms" as 1 and collapse the startup window — the opposite
+// of the fallback promised above.
 export function resolveStartupTimeoutMs(env: NodeJS.ProcessEnv): number | undefined {
   const value = env.UATU_OPENCODE_STARTUP_TIMEOUT_MS;
   if (value === undefined || value === "") return undefined;
-  const parsed = Number.parseInt(value, 10);
+  if (!/^\d+$/.test(value.trim())) return undefined;
+  const parsed = Number.parseInt(value.trim(), 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
   return parsed;
 }

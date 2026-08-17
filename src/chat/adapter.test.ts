@@ -706,6 +706,24 @@ describe("pending permission recovery", () => {
     expect(items).toHaveLength(1);
   });
 
+  test("a permission answered elsewhere is revoked on load, not left answerable", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    // Answered through another client while its reply event was missed: the
+    // successful pending list no longer carries it.
+    provider.listPermissions = async () => [];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    applyEvent(adapter, "local", {
+      id: "live",
+      type: "permission.v2.asked",
+      data: { id: "perm_gone", sessionID: "local", action: "shell", resources: ["ls"] },
+    } as never);
+
+    const snapshot = await adapter.history("local");
+    expect(snapshot.items).toEqual([]);
+    expect(adapter.projectionForTests("local").has("permission:perm_gone")).toBe(false);
+  });
+
   test("a failing permission list leaves already-known requests visible", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("local")];
