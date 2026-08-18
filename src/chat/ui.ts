@@ -129,6 +129,16 @@ export function initChat(): void {
    * merely unavailable right now, which is a different and untrue statement.
    * Only applied once the agent has declared itself — before that, nothing is
    * known and nothing is removed.
+   *
+   * Only the proactive pickers the user opens are removed here. The reactive
+   * controls — answering a question, approving a permission, opening a
+   * subagent — appear only when the agent raises one, so an agent that does
+   * not declare `questions`/`permissions`/`subagents` produces no such item
+   * and the control has nothing to render for. Belt-and-suspenders gating of
+   * those surfaces (against a stale record from a differently-capable agent)
+   * lands with the waves that own their renderers, so the outstanding-request
+   * count and the subagent track stay gated in lockstep with them rather than
+   * half-gated here.
    */
   const applyCapabilities = () => {
     if (!agent) return;

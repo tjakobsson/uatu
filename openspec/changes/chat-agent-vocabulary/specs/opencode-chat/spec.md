@@ -43,7 +43,7 @@ The surface SHALL name the agent it is talking to, taking that name from what th
 
 The way of working a prompt runs under SHALL be presented as a **mode** — the agent's own named ways of working, such as building or planning. It SHALL NOT be called an agent, because that word names the program Chat talks to.
 
-A control SHALL be presented only when the agent declares the capability behind it. Where a capability is undeclared, its control SHALL be absent rather than shown inert, shown empty, or shown with an error. Absence of a capability SHALL NOT degrade any capability the agent does declare.
+A control the surface offers the user to start an operation — a picker such as the mode or model chooser — SHALL be presented only when the agent declares the capability behind it. Where that capability is undeclared, the control SHALL be absent rather than shown inert, shown empty, or shown with an error. Reactive interaction controls — those that appear only in response to an agent-raised request, governed by "Users can resolve agent interaction requests in context" — are not covered here: an agent that lacks a capability raises no request of that kind, so the control has nothing to appear for. Absence of a capability SHALL NOT degrade any capability the agent does declare.
 
 #### Scenario: Empty prompt is not submitted
 - **WHEN** the composer contains only whitespace
@@ -68,7 +68,7 @@ A control SHALL be presented only when the agent declares the capability behind 
 - **THEN** the user selects between them as modes
 - **AND** they are not labelled agents
 
-#### Scenario: An undeclared capability leaves no control behind
-- **WHEN** the agent does not declare a capability the surface can present
+#### Scenario: An undeclared proactive control leaves nothing behind
+- **WHEN** the agent does not declare the capability behind a control the surface offers the user to start an operation, such as a mode or model picker
 - **THEN** that control is absent from the surface
 - **AND** the controls for declared capabilities are unaffected
