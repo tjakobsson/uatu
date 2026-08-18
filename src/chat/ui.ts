@@ -109,7 +109,11 @@ export function initChat(): void {
   // Before the agent reports itself there is nothing truthful to name, so the
   // copy stays neutral rather than guessing.
   const nameAgent = () => {
-    if (chatContext) chatContext.textContent = appState.roots[0]?.label ?? agent?.name ?? "Chat";
+    // Both, not one or the other: the workspace label answers "where am I"
+    // and the agent name answers "who am I talking to". A nullish chain would
+    // have hidden the agent on every workspace that has a root — which is all
+    // of them — leaving the composer as the only place it was named.
+    if (chatContext) chatContext.textContent = [appState.roots[0]?.label, agent?.name].filter(Boolean).join(" · ") || "Chat";
     if (inputLabel) inputLabel.textContent = agent ? `Message ${agent.name}` : "Send a message";
     if (input) input.placeholder = agent ? `Ask ${agent.name}…` : "Send a message…";
   };
@@ -1244,6 +1248,14 @@ function autosize(input: HTMLTextAreaElement): void {
   input.style.height = `${Math.min(input.scrollHeight, 192)}px`;
 }
 
+// The shape this key had before agent/mode/subagent were separated.
+type LegacyPresentation = { agent?: unknown; agents?: unknown };
+
+function stringOrLegacy(value: unknown, legacy: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  return typeof legacy === "string" ? legacy : undefined;
+}
+
 function readPresentation(): Presentation {
   try {
     const raw = presentationLocalStorage()?.getItem(PRESENTATION_KEY);
@@ -1257,8 +1269,13 @@ function readPresentation(): Presentation {
       workingSince: parseStoredTimestamps(value.workingSince),
       model: parseStoredModel(value.model),
       models: parseStoredModels(value.models),
-      mode: typeof value.mode === "string" ? value.mode : undefined,
-      modes: parseStoredNames(value.modes),
+      // `agent`/`agents` are this key's pre-rename names. Dropping them would
+      // reset a saved mode to "default" while the agent's session still runs
+      // the old one — the picker would display one mode and run another, which
+      // is the exact lie applyMode() exists to prevent. Read once; the next
+      // save writes only the new names.
+      mode: stringOrLegacy(value.mode, (value as LegacyPresentation).agent),
+      modes: parseStoredNames(value.modes ?? (value as LegacyPresentation).agents),
       dismissedSubagents: parseStoredIdLists(value.dismissedSubagents),
     };
   } catch { return structuredClone(EMPTY_PRESENTATION); }

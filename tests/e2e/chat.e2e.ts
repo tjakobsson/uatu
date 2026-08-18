@@ -107,6 +107,9 @@ test.describe("desktop OpenCode chat", () => {
   test("names the agent it is talking to", async ({ page }) => {
     await expect(page.locator("#chat-title")).toHaveText("Fixture Agent Chat");
     await expect(page.locator("#chat-input")).toHaveAttribute("placeholder", "Ask Fixture Agent…");
+    // The visible header, not only the assistive one: a workspace always has a
+    // root label, so the agent has to sit beside it rather than behind it.
+    await expect(page.locator("#chat-context")).toContainText("Fixture Agent");
   });
 
   // The one path a workspace with a single real agent can never reach: an
