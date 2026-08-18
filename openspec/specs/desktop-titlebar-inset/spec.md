@@ -29,10 +29,11 @@ update the announced inset in place.
 
 ### Requirement: The SPA lays out its chrome below the inset
 When the inset marker is present, the SPA SHALL offset its top-level chrome —
-the sidebar header and the preview pane's sticky header zone — down by the
-announced inset so no interactive control sits under the native chrome, while
-scrolled document content still flows beneath the floating toolbar. When the
-marker is absent (plain browser or PWA), layout MUST be unchanged.
+the sidebar header, the preview pane's sticky header zone, and the chat
+panel's header row and collapsed strip — down by the announced inset so no
+interactive control sits under the native chrome, while scrolled document
+content still flows beneath the floating toolbar. When the marker is absent
+(plain browser or PWA), layout MUST be unchanged.
 
 #### Scenario: Chrome clears the floating toolbar
 - **WHEN** the SPA renders in the desktop wrapper with a non-zero inset
@@ -40,6 +41,12 @@ marker is absent (plain browser or PWA), layout MUST be unchanged.
   native toolbar
 - **AND** scrolling the document moves content beneath the toolbar, where the
   native glass samples it
+
+#### Scenario: Chat panel chrome clears the floating toolbar
+- **WHEN** the SPA renders in the desktop wrapper with a non-zero inset and
+  the chat panel is open or collapsed
+- **THEN** the panel's conversation controls and the collapsed strip's reopen
+  affordance render fully below the native toolbar
 
 #### Scenario: No inset outside the desktop
 - **WHEN** the SPA loads in a plain browser or as a PWA
@@ -53,10 +60,14 @@ native chrome reads as blurred glass rather than raw content (the web view
 cannot render the system scroll-edge effect for chrome it does not know
 about). The frost SHALL only cover regions where scrolled content can flow
 under the chrome. Solid, non-scrolling app surfaces — the sidebar column
-and the right-docked terminal panel column — SHALL be excluded: they are
-inset-padded surfaces that never scroll under the chrome, and frosting
-them only washes the brand mark or smears the panel's opaque background
-into a gradient band across the toolbar.
+and the right-docked terminal panel column — SHALL be excluded, and over a
+fullscreen terminal the frost SHALL be confined to the covered strip with
+no falloff onto the panel: these are inset-cleared surfaces that never
+scroll under the chrome, and frosting them only washes the brand mark or
+smears an opaque surface into a gradient band. The app's own top chrome —
+the preview header and the chat panel's header and collapsed strip — SHALL
+render above the frost so its controls stay crisp while content beneath
+them still frosts.
 
 #### Scenario: Scrolled content under the titlebar reads as glass
 - **WHEN** dark or saturated document content scrolls into the covered strip
@@ -73,6 +84,19 @@ into a gradient band across the toolbar.
 - **THEN** the covered strip above the terminal column shows no blurred or
   gradient-smeared rendering of the panel's dark surface, and the boundary
   between the preview and terminal columns stays sharp under the toolbar
+
+#### Scenario: A fullscreen terminal is not smeared
+- **WHEN** the terminal panel enters fullscreen in the desktop wrapper
+- **THEN** no frost or falloff renders over the panel's surface
+- **AND** the covered strip above the panel still frosts the page content
+  peeking through it
+
+#### Scenario: App headers stay crisp under the falloff
+- **WHEN** the frost strip is active with the preview and chat surfaces
+  visible
+- **THEN** the preview header and the chat panel's conversation controls
+  render sharp, unblurred by the falloff, while document content scrolling
+  above the preview header still reads as frosted glass
 
 ### Requirement: The split-browser pane honors the inset
 The in-app split browser pane SHALL position its tab strip below the covered
@@ -108,4 +132,3 @@ unchanged.
   browser or PWA
 - **THEN** the terminal panel's layout and background are unchanged from
   pre-change behavior
-

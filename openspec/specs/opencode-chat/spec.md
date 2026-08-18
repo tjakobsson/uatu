@@ -8,6 +8,10 @@ Define workspace-scoped OpenCode conversations and the responsive web chat surfa
 ### Requirement: Chat uses the workspace's OpenCode installation and identity
 When chat is first needed in a running workspace, UatuCode SHALL discover the `opencode` executable available to that workspace process and start a loopback-only OpenCode service whose lifetime is owned by the workspace server. The service SHALL use OpenCode's existing user configuration and authentication; UatuCode MUST NOT request, copy, persist, or transmit provider API keys. If OpenCode is unavailable, cannot start, or is not authenticated, the workspace and all non-chat capabilities SHALL remain usable and the Chat surface SHALL report an actionable unavailable state.
 
+Startup SHALL be observed as two separately bounded phases, distinguished by whether OpenCode has answered at the protocol level rather than by any text it emits. Until a probe receives an HTTP response, the generous bind budget applies; from the first HTTP response onward, a shorter health budget applies. A startup that fails SHALL be attributed to the phase that failed: if no probe ever received an HTTP response, the failure SHALL report that OpenCode never accepted a health request at the probed endpoint; if any probe did, the failure SHALL report that OpenCode answered but never became healthy, naming the endpoint and the last status observed. A health probe SHALL be individually bounded so that a connection which is accepted but never answered does not consume the whole budget.
+
+UatuCode MUST NOT depend on the format of any text OpenCode writes to its standard output or standard error in order to determine readiness. Such output MAY be captured as diagnostic evidence, but a change to its format MUST NOT affect whether Chat becomes ready.
+
 #### Scenario: Existing OpenCode authentication is reused
 - **WHEN** the workspace user has already authenticated OpenCode and opens Chat
 - **THEN** UatuCode connects using that existing OpenCode identity without asking for a provider API key
@@ -21,6 +25,98 @@ When chat is first needed in a running workspace, UatuCode SHALL discover the `o
 - **WHEN** the workspace server shuts down while its OpenCode service is running
 - **THEN** the OpenCode service and any active turn it owns are terminated before workspace shutdown completes
 - **AND** persisted OpenCode conversation history remains available for a later workspace start
+
+#### Scenario: OpenCode never accepts a health request
+- **WHEN** OpenCode is spawned and stays alive but every probe is refused before the bind budget elapses
+- **THEN** Chat reports an unavailable state attributed to the bind phase
+- **AND** the reported message distinguishes this from a health-check failure
+
+#### Scenario: OpenCode answers but never becomes healthy
+- **WHEN** a probe receives an HTTP response and no subsequent probe reports a healthy body before the health budget elapses
+- **THEN** Chat reports an unavailable state attributed to the health phase
+- **AND** the reported message identifies the probed endpoint and the last status observed
+
+#### Scenario: An answering-but-unhealthy server fails on the short budget
+- **WHEN** OpenCode answers the first probe immediately and then answers every probe with a non-healthy response
+- **THEN** Chat reports unavailable after the health budget rather than after the full startup budget
+
+#### Scenario: Readiness does not depend on emitted text
+- **WHEN** OpenCode becomes healthy at the probed endpoint but writes nothing recognizable to its standard output
+- **THEN** Chat becomes ready
+
+#### Scenario: A single unanswered probe does not exhaust the budget
+- **WHEN** a probe connects to the endpoint and the connection is accepted but never answered
+- **THEN** that probe is abandoned before the budget elapses
+- **AND** further probes are attempted while the budget remains
+
+### Requirement: A failed Chat startup reports actionable diagnostics
+When Chat becomes unavailable because OpenCode could not be started or could not become healthy, the reported unavailable state SHALL carry the evidence needed to diagnose the failure from the report alone, without asking the user to reproduce it. That evidence SHALL include the resolved `opencode` executable path, any other executables of that name that were passed over on the search path, the OpenCode version when it could be determined, the endpoint that was probed, the elapsed time and number of probes attempted, the concrete outcome of the last probe, and bounded captures of OpenCode's standard output and standard error.
+
+The diagnostics MUST NOT contain the ephemeral OpenCode server password, in any field or capture, in any encoding. Captures SHALL be bounded so a verbose or looping OpenCode cannot grow the workspace process's memory without limit.
+
+#### Scenario: A timed-out startup names its own evidence
+- **WHEN** OpenCode fails to become ready and Chat reports unavailable
+- **THEN** the reported state includes the resolved executable path, the probed endpoint, the elapsed time, and the last probe's concrete outcome
+- **AND** a user can attach that report to a bug report without running any further commands
+
+#### Scenario: The last probe outcome distinguishes failure kinds
+- **WHEN** the last health probe failed
+- **THEN** the reported outcome distinguishes a refused connection from an abandoned unanswered connection from an HTTP status response from a malformed or unhealthy body
+- **AND** an HTTP status response reports the status code
+
+#### Scenario: An unrecognized probe failure is not misattributed
+- **WHEN** a probe fails in a way that matches none of the known outcome kinds
+- **THEN** the outcome is recorded as unknown along with the underlying error
+- **AND** it is not counted as a refused connection
+
+#### Scenario: Shadowed executables on the search path are reported
+- **WHEN** more than one `opencode` executable is present on the workspace process's search path
+- **THEN** the diagnostics report the one that was chosen and the ones that were passed over
+
+#### Scenario: The server password never appears in diagnostics
+- **WHEN** any unavailable state carrying diagnostics is produced
+- **THEN** no field or capture contains the ephemeral OpenCode server password
+
+#### Scenario: Captured output is bounded
+- **WHEN** OpenCode writes more output than the capture limit before failing
+- **THEN** the diagnostics retain a bounded portion of that output rather than all of it
+
+### Requirement: The Chat startup budget is operator-overridable
+The workspace SHALL accept an environment variable `UATU_OPENCODE_STARTUP_TIMEOUT_MS` that overrides the default Chat startup budget for that workspace process. An absent, empty, non-numeric, or non-positive value SHALL leave the default in effect rather than failing workspace startup, because Chat is not required for the workspace to be usable. The default budget SHALL be generous enough to tolerate a cold OpenCode start on a slow filesystem.
+
+#### Scenario: An operator widens the budget without a new build
+- **WHEN** a workspace process runs with `UATU_OPENCODE_STARTUP_TIMEOUT_MS` set to a larger value than the default
+- **THEN** Chat startup waits up to that value before reporting unavailable
+
+#### Scenario: The override reaches a hub-hosted workspace
+- **WHEN** the hub runs with `UATU_OPENCODE_STARTUP_TIMEOUT_MS` set and starts a session for a workspace
+- **THEN** that session's Chat startup uses the overridden budget
+
+#### Scenario: An invalid override is ignored
+- **WHEN** a workspace process runs with `UATU_OPENCODE_STARTUP_TIMEOUT_MS` set to an empty, non-numeric, or non-positive value
+- **THEN** the default budget is used
+- **AND** the workspace starts normally
+
+### Requirement: A failed Chat startup can be retried without restarting the workspace
+A Chat startup failure SHALL NOT be permanent for the life of the workspace process. The Chat surface SHALL offer a user-initiated retry whenever it is unavailable for a startup reason, and that retry SHALL discard the cached failure and attempt startup again. Retry SHALL be user-initiated rather than automatic, so that a slow start is not multiplied by unattended attempts. A retry already in flight SHALL NOT start a second concurrent OpenCode process.
+
+#### Scenario: A user recovers after fixing their environment
+- **WHEN** Chat is unavailable because OpenCode failed to start, the user corrects the cause, and the user triggers retry
+- **THEN** Chat attempts startup again and becomes ready without the workspace being restarted
+
+#### Scenario: A retry that fails reports fresh diagnostics
+- **WHEN** a user triggers retry and startup fails again
+- **THEN** Chat reports the unavailable state with diagnostics from the new attempt, not the previous one
+
+#### Scenario: Installation guidance leads when OpenCode is absent
+- **WHEN** Chat is unavailable because no `opencode` executable could be resolved
+- **THEN** the surface leads with the instruction to install OpenCode rather than presenting retry as the remedy
+- **AND** retry remains available as a secondary action, because the workspace caches the unavailable state and a completed installation must be discoverable without restarting the workspace
+
+#### Scenario: Concurrent retries are joined
+- **WHEN** a retry is in flight and another retry is triggered
+- **THEN** the second retry joins the in-flight attempt
+- **AND** only one OpenCode process is started
 
 ### Requirement: Every conversation is confined to the server-selected workspace directory
 The chat backend SHALL select the workspace's canonical first watch root as the OpenCode working directory and SHALL use that directory for conversation discovery, creation, history, prompts, and tools. Browser requests MUST NOT provide or override a filesystem working directory. Before exposing or resuming an OpenCode session, UatuCode SHALL verify that the session's canonical directory matches the selected workspace directory; a session belonging to another directory MUST NOT be exposed, resumed, or mutated through that workspace.
@@ -73,7 +169,11 @@ The workspace API SHALL provide authenticated operations to list, create, and re
 - **AND** the hub proxies it without exposing the loopback OpenCode service
 
 ### Requirement: Conversation updates are structured and reconnectable
-The server SHALL normalize OpenCode activity into ordered conversation events covering user and assistant content, reasoning, tool lifecycle, permission requests and resolutions, structured questions and resolutions, turn status, cancellation, completion, warnings, and errors. A history snapshot SHALL identify a stream cursor; reconnecting from a retained cursor SHALL replay every later event in order before delivering live events. If the cursor is no longer replayable or belongs to an earlier server generation, the server SHALL explicitly require a fresh snapshot. Applying a snapshot followed by its event stream MUST NOT duplicate message content or tool entries.
+The server SHALL normalize OpenCode activity into ordered conversation events covering user and assistant content, reasoning, tool lifecycle, permission requests and resolutions, structured questions and resolutions, context compaction, reverted work, turn status, cancellation, completion, warnings, and errors. Normalization SHALL recognize each of these regardless of which of OpenCode's event-naming generations announced it, and when one logical occurrence is announced more than once the timeline SHALL contain a single entry for it.
+
+An event the server does not recognize, or whose payload it cannot parse, SHALL be skipped without ending or restarting the event stream, and SHALL be counted by type so an operator can discover what a running workspace is discarding. Counting MUST NOT record event payloads.
+
+A history snapshot SHALL identify a stream cursor; reconnecting from a retained cursor SHALL replay every later event in order before delivering live events. If the cursor is no longer replayable or belongs to an earlier server generation, the server SHALL explicitly require a fresh snapshot. Applying a snapshot followed by its event stream MUST NOT duplicate message content or tool entries.
 
 #### Scenario: Stream reconnect replays missed output
 - **WHEN** the event connection drops during an assistant response and reconnects with a retained cursor
@@ -86,6 +186,37 @@ The server SHALL normalize OpenCode activity into ordered conversation events co
 #### Scenario: Cumulative and incremental provider updates do not duplicate text
 - **WHEN** OpenCode reports overlapping cumulative part state and text deltas for one assistant part
 - **THEN** the normalized timeline contains each text segment exactly once
+
+#### Scenario: An interaction announced under either naming generation is recognized
+- **WHEN** OpenCode announces a permission request or a structured question using either its current or its legacy event name
+- **THEN** the request appears in the conversation that raised it and can be answered
+
+#### Scenario: One occurrence announced twice yields one entry
+- **WHEN** a single permission request or question reaches the server under both naming generations
+- **THEN** the conversation shows one entry for it
+- **AND** answering it sends exactly one response to OpenCode
+
+#### Scenario: An unrecognized event does not end the stream
+- **WHEN** OpenCode emits an event type the server does not handle
+- **THEN** the event is skipped, the stream continues delivering later events, and the occurrence is counted by type
+
+#### Scenario: An unparseable event costs one event, not the stream
+- **WHEN** an event of a recognized type carries a payload the server cannot parse
+- **THEN** only that event is dropped and counted
+- **AND** subsequent events for that conversation are still delivered
+
+#### Scenario: Discarded-event counts are observable
+- **WHEN** an operator inspects the workspace's diagnostic counters after events were discarded
+- **THEN** the counts are reported per event type
+- **AND** no event payload is included
+
+#### Scenario: A compacted conversation says so
+- **WHEN** OpenCode compacts a conversation's context
+- **THEN** the timeline records that compaction occurred rather than appearing to lose content without explanation
+
+#### Scenario: Reverted work stops being presented as current
+- **WHEN** OpenCode reports that work in a conversation was reverted
+- **THEN** the timeline reflects the revert rather than continuing to present the reverted work as though it still applies
 
 ### Requirement: Chat presents turns as readable conversation with inspectable activity
 The web Chat surface SHALL render user prompts and streamed assistant Markdown as the primary conversation, with safe code rendering consistent with UatuCode's existing rendering posture. Reasoning, tool calls, command execution, file changes, and tool results SHALL be represented as subordinate, inspectable activity with running, completed, failed, and cancelled states rather than flattened into assistant prose. Untrusted Markdown, tool output, filenames, and errors MUST NOT create active markup or script execution.
@@ -104,12 +235,26 @@ The web Chat surface SHALL render user prompts and streamed assistant Markdown a
 - **THEN** the rendered conversation does not execute it or expose an active unsafe link
 
 ### Requirement: Users can resolve agent interaction requests in context
-An unresolved OpenCode permission request SHALL appear in the conversation that raised it with the available one-time approval, session approval, and rejection choices supported by OpenCode. A structured OpenCode question SHALL render its prompt, options, multi-selection behavior, and free-form response when supported. A resolved request SHALL become non-interactive and record its outcome. Only the active unresolved request MAY accept a response, and submitting a response more than once MUST NOT produce multiple provider replies.
+An unresolved OpenCode permission request SHALL appear in the conversation that raised it with the approval and rejection choices OpenCode supports for it: approving the single occurrence, approving persistently, and rejecting. A structured OpenCode question SHALL render its prompt, options, multi-selection behavior, and free-form response when supported. A resolved request SHALL become non-interactive and record its outcome. Only the active unresolved request MAY accept a response, and submitting a response more than once MUST NOT produce multiple provider replies.
+
+A choice that grants authority beyond the request being answered SHALL state the scope and lifetime of that authority where the choice is offered, so a user learns what they are granting before granting it rather than afterwards. In particular, OpenCode's persistent approval carries past the answered request into later conversations served by the same OpenCode instance and covers the request's saved pattern rather than only the resource displayed, and it is lost when that instance restarts. It MUST NOT be presented as limited to the current conversation, nor as outliving the OpenCode instance that granted it.
+
+A pending request SHALL remain discoverable and answerable even when the server did not observe its live announcement — because the event stream was interrupted, restarted, or the conversation was not being tracked at the time. Loading a conversation SHALL reconcile its unresolved requests against OpenCode's own pending set, so a request that OpenCode is still waiting on is never permanently invisible.
 
 #### Scenario: Permission is approved once
 - **WHEN** OpenCode requests permission for a command and the user chooses one-time approval
 - **THEN** the response is sent once to the matching pending request
 - **AND** the card records that the request was approved for that occurrence
+
+#### Scenario: Persistent approval states the authority it grants
+- **WHEN** a permission request offers the persistent approval choice
+- **THEN** the surface states that choosing it reaches beyond this conversation and beyond this exact request, and that it lasts until OpenCode restarts
+- **AND** it is not described as applying only to this conversation, nor as permanent
+
+#### Scenario: Persistent approval is still sent as OpenCode's persistent reply
+- **WHEN** the user chooses persistent approval
+- **THEN** OpenCode receives its persistent-approval reply once for that request
+- **AND** the recorded outcome is unchanged from before this correction
 
 #### Scenario: User rejects a structured question
 - **WHEN** OpenCode asks a structured question and the user rejects or dismisses it
@@ -119,6 +264,19 @@ An unresolved OpenCode permission request SHALL appear in the conversation that 
 #### Scenario: Stale request response is refused
 - **WHEN** a client attempts to answer a request that is already resolved or no longer active
 - **THEN** the server rejects it without forwarding another response to OpenCode
+
+#### Scenario: A request missed by the event stream is recovered on load
+- **WHEN** OpenCode raised a permission request while the server's event stream was interrupted, and the user then opens that conversation
+- **THEN** the pending request appears and can be answered
+- **AND** answering it resolves the request OpenCode is waiting on
+
+#### Scenario: Recovered and live announcements do not double up
+- **WHEN** a pending request is recovered on load and OpenCode also announces it over the event stream
+- **THEN** the conversation shows one entry for that request
+
+#### Scenario: Reconciliation failure preserves what is already shown
+- **WHEN** the server cannot read OpenCode's pending set while loading a conversation
+- **THEN** requests already known to the conversation remain visible and answerable
 
 ### Requirement: Users can prompt, steer, and cancel the active conversation
 The Chat composer SHALL submit non-empty text to the selected conversation and clearly distinguish ready, sending, running, interrupted, and failed states. While OpenCode supports steering a running session, a subsequent submitted prompt SHALL be presented as a steer of the active turn rather than an unrelated concurrent turn. The user SHALL be able to cancel an active turn without deleting its completed history, and transport failure SHALL preserve the draft until acceptance is known.
@@ -156,25 +314,96 @@ The Chat timeline SHALL remain pinned to the latest content only while the user 
 - **WHEN** the user expands or collapses a tool entry away from the timeline end
 - **THEN** the chosen entry remains anchored in the viewport
 
-### Requirement: Chat adapts to desktop, touch, and software-keyboard viewports
-In desktop mode Chat SHALL occupy the main content surface while preserving the existing sidebar and independently dockable terminal. A visible workspace control SHALL switch between Preview and Chat without remounting or losing either surface's state. In touch mode Chat SHALL occupy its own full-screen tab surface. The composer SHALL remain reachable above the visual viewport and safe-area inset while the software keyboard is present, and keyboard opening, resizing, or dismissal MUST NOT hide the input or cause the current reading position to jump.
+### Requirement: Desktop presents Preview and Chat as a persistent split
+In desktop mode the work area SHALL present Preview and Chat side by side with
+a draggable divider between them; Chat SHALL NOT be movable or dockable. The
+split position SHALL be persisted as a fraction of the work-area width so
+window resizing preserves the proportion, and it SHALL be restored across
+reloads. A collapsed Chat SHALL render as a slim strip at the work area's
+right edge carrying a visible reopen affordance, and expanding SHALL restore
+the retained fraction. When the viewport is too narrow to present both
+surfaces at their minimum usable widths, Chat SHALL auto-collapse with its
+open preference preserved and SHALL be restored when the viewport grows.
+Chat panel state MUST NOT alter the terminal's dock, sizing, visibility, or
+persistence behavior: a bottom-docked terminal SHALL span beneath both
+Preview and Chat, and a right-docked terminal SHALL keep the work area's
+right edge, with Chat between Preview and the terminal.
 
-#### Scenario: Desktop switches between Preview and Chat
-- **WHEN** a desktop user switches from an open conversation to Preview and back
-- **THEN** the same conversation, draft, loaded history, and reading position are retained
+#### Scenario: Split proportion survives reload and resize
+- **WHEN** a desktop user drags the divider to a new position, resizes the
+  window, and reloads the page
+- **THEN** Preview and Chat retain their fractional share of the work area
+  throughout, subject to each surface's minimum width
+
+#### Scenario: Collapsed panel reopens at its prior share
+- **WHEN** the user collapses Chat and later activates the strip's reopen
+  affordance
+- **THEN** Chat expands to the fraction it had before collapsing
+
+#### Scenario: Narrow viewport yields to Preview
+- **WHEN** the viewport shrinks below the width needed for both surfaces and
+  later grows past it again
+- **THEN** Chat auto-collapses while Preview remains usable
+- **AND** Chat reopens automatically because the open preference was preserved
+
+#### Scenario: Right-docked terminal keeps the right edge
+- **WHEN** the terminal is docked right and Chat is open
+- **THEN** the terminal occupies the work area's right edge exactly as it does
+  with Chat collapsed
+- **AND** Chat sits between Preview and the terminal
+
+#### Scenario: Revealing chat content expands a collapsed panel
+- **WHEN** an action that presents Chat content (such as find-in-chat) targets
+  a collapsed panel
+- **THEN** the panel expands to its retained fraction rather than acting on an
+  invisible surface
+
+### Requirement: Chat adapts to the desktop split, touch, and software-keyboard viewports
+In desktop mode Preview and Chat SHALL be co-visible primary surfaces sharing
+the main work area alongside the existing sidebar and independently dockable
+terminal; there SHALL NOT be a mode that replaces Preview with Chat.
+Collapsing, expanding, or resizing the Chat panel MUST NOT remount either
+surface or lose its state. In touch mode Chat SHALL occupy its own
+full-screen tab surface. The composer SHALL remain reachable above the visual
+viewport and safe-area inset while the software keyboard is present, and
+keyboard opening, resizing, or dismissal MUST NOT hide the input or cause the
+current reading position to jump.
+
+#### Scenario: Preview updates while the conversation stays visible
+- **WHEN** a desktop user prompts the agent and it modifies the currently
+  previewed document
+- **THEN** the live preview updates while the conversation, its streaming
+  output, and the composer remain visible
+
+#### Scenario: Desktop collapse and reopen preserves both surfaces
+- **WHEN** a desktop user collapses the Chat panel and reopens it
+- **THEN** the same conversation, draft, loaded history, and reading position
+  are retained
+- **AND** the Preview document and scroll position are unchanged
 - **AND** terminal attachment and visibility are unchanged
 
 #### Scenario: iPhone keyboard keeps composer visible
-- **WHEN** a touch user focuses the Chat composer and the software keyboard reduces the visual viewport
-- **THEN** the composer remains fully visible above the keyboard and bottom safe area
-- **AND** the timeline resizes without placing the active content behind the composer
+- **WHEN** a touch user focuses the Chat composer and the software keyboard
+  reduces the visual viewport
+- **THEN** the composer remains fully visible above the keyboard and bottom
+  safe area
+- **AND** the timeline resizes without placing the active content behind the
+  composer
 
 ### Requirement: Conversation file references navigate through UatuCode safely
-Workspace-relative file references in assistant content or normalized file-change activity SHALL offer navigation to the corresponding UatuCode document preview when the target is within the watched roots. Activating such a reference SHALL switch to Preview and reveal the referenced line when supplied. Absolute paths outside the watched roots, traversal attempts, and unresolved targets MUST NOT be exposed as navigable workspace links.
+Workspace-relative file references in assistant content or normalized
+file-change activity SHALL offer navigation to the corresponding UatuCode
+document preview when the target is within the watched roots. Activating such
+a reference SHALL open the document in Preview and reveal the referenced line
+when supplied; in desktop mode this MUST NOT hide, collapse, or resize the
+Chat panel, and in touch mode it SHALL switch to the Preview tab. Absolute
+paths outside the watched roots, traversal attempts, and unresolved targets
+MUST NOT be exposed as navigable workspace links.
 
 #### Scenario: Assistant references a watched source line
 - **WHEN** assistant content references `src/app.ts:42` and that file is in the watched workspace
 - **THEN** activating the reference opens that document in Preview at line 42
+- **AND** in desktop mode the conversation remains visible beside it
 
 #### Scenario: Outside path is not navigable
 - **WHEN** provider output references an absolute path outside every watched root or contains traversal outside the workspace
