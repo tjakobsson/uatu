@@ -506,6 +506,12 @@ function renderPermission(item: Extract<ConversationItem, { type: "permission" }
   // request's `always` pattern — `echo *` for a literal `echo scoped` — so it
   // covers more than the resource on the card. "Allow session" implied one
   // conversation; the card now states the reach that was actually being given.
+  // "OpenCode" is named on purpose in the scope line below and is not
+  // neutralized like the rest of the agent copy: the sentence states
+  // OpenCode's own persistent-approval lifetime (see the opencode-chat
+  // permission spec), which is agent-specific behavior, not just an agent
+  // name. A second agent that persists grants differently needs its own
+  // statement here, not a find-and-replace.
   const outcome = pending && active
     ? `<div class="chat-request-actions"><button type="button" data-permission-outcome="approved-once">Allow once</button><button type="button" data-permission-outcome="approved-session">Allow always</button><button type="button" data-permission-outcome="rejected">Reject</button></div><p class="chat-request-scope">“Allow always” also covers later conversations, and similar requests — until OpenCode restarts.</p>`
     : pending ? `<p class="chat-request-outcome">Waiting its turn — answer the newest request first.</p>` : `<p class="chat-request-outcome">Resolved: ${escapeHtml(item.outcome ?? "resolved")}</p>`;
