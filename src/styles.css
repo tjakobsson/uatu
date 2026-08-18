@@ -5109,6 +5109,38 @@ body.is-resizing-chat .chat-resizer {
   border-radius: 0.35rem;
 }
 
+/* A running tool's live tail: the same block as its finished output, marked so
+   it reads as in-progress rather than settled. It updates in place as progress
+   arrives, and its own max-height keeps a chatty tool from taking the row. */
+.chat-tool-stream {
+  border-left: 2px solid var(--accent, #3b7dd8);
+}
+
+/* What the tail dropped off the top while running, and the show-more that
+   reveals a finished tool's remaining output — both quiet, both secondary to
+   the output they bound. */
+.chat-output-elided {
+  margin: 0 0 0.3rem;
+  color: var(--text-subtle);
+  font-size: 0.85em;
+}
+
+.chat-output-more > summary {
+  padding: 0.25rem 0;
+  color: var(--accent, #3b7dd8);
+  cursor: pointer;
+  list-style: none;
+  font-size: 0.9em;
+}
+
+.chat-output-more > summary::-webkit-details-marker {
+  display: none;
+}
+
+.chat-output-more[open] > summary {
+  color: var(--text-subtle);
+}
+
 .chat-activity-status,
 .chat-change-counts {
   font-size: 0.89em;

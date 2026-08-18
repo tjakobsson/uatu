@@ -481,3 +481,42 @@ describe("requests owned by different conversations do not block each other", ()
     expect(states).toEqual(["queued", "needs-answer"]);
   });
 });
+
+describe("tool output is streamed live and bounded when finished", () => {
+  const lines = (n: number) => Array.from({ length: n }, (_, i) => `line ${i + 1}`).join("\n");
+
+  test("a running tool shows its tail live and opens itself", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const item: ConversationItem = { id: "tool:t1", type: "tool", createdAt: 1, name: "bash", status: "running", output: lines(30) };
+    renderer.render(host, projectionWith([item]), new Set());
+    const row = host.querySelector('[data-chat-item-id="tool:t1"]') as HTMLDetailsElement;
+    expect(row.hasAttribute("open")).toBe(true);
+    // The tail is shown; the earliest lines are elided with a count.
+    expect(host.querySelector(".chat-tool-stream")!.textContent).toContain("line 30");
+    expect(host.querySelector(".chat-tool-stream")!.textContent).not.toContain("line 1\n");
+    expect(host.querySelector(".chat-output-elided")!.textContent).toContain("18 earlier lines");
+  });
+
+  test("a finished tool bounds long output behind a show-more, keeping the rest", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const item: ConversationItem = { id: "tool:t2", type: "tool", createdAt: 1, name: "bash", status: "completed", output: lines(30) };
+    renderer.render(host, projectionWith([item]), new Set());
+    // Preview shown, the rest behind a native show-more that still holds it.
+    expect(host.querySelector(".chat-tool-stream")).toBeNull();
+    const more = host.querySelector(".chat-output-more") as HTMLDetailsElement;
+    expect(more.querySelector("summary")!.textContent).toContain("Show 18 more lines");
+    expect(more.hasAttribute("open")).toBe(false);
+    expect(more.textContent).toContain("line 30");
+  });
+
+  test("a finished tool with short output shows it whole", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const item: ConversationItem = { id: "tool:t3", type: "tool", createdAt: 1, name: "bash", status: "completed", output: lines(4) };
+    renderer.render(host, projectionWith([item]), new Set());
+    expect(host.querySelector(".chat-output-more")).toBeNull();
+    expect(host.querySelector('[data-chat-item-id="tool:t3"] pre')!.textContent).toContain("line 4");
+  });
+});

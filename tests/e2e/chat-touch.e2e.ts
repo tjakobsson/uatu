@@ -117,7 +117,7 @@ test("history prepend and activity expansion preserve semantic position", async 
   await timeline.evaluate(element => { element.scrollTop = element.scrollHeight - element.clientHeight - 80; element.dispatchEvent(new Event("scroll")); });
   await expect(details).toBeInViewport();
   const activityTop = await details.evaluate(element => element.getBoundingClientRect().top);
-  await details.locator("summary").click();
+  await details.locator("> summary").click();
   await expect(details).toHaveAttribute("open", "");
   expect(await details.evaluate(element => element.getBoundingClientRect().top)).toBeCloseTo(activityTop, 0);
 });

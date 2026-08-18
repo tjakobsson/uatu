@@ -4,7 +4,7 @@ import { renderChatMarkdown } from "./markdown";
 import { resolveWorkspaceFileReference } from "./file-references";
 import { describeToolDetail, deriveTodoActivities, patchDiffLines, todoActivitySummary, toolSubject, type DiffLine, type TodoEntry, type TodoSummary, type ToolDetail } from "./tool-detail";
 import type { AcceptedDraft, ChatProjection } from "./projection";
-import type { ConversationItem, ConversationStatus, PermissionOutcome, QuestionRequest, ToolItem } from "./types";
+import type { ActivityStatus, ConversationItem, ConversationStatus, PermissionOutcome, QuestionRequest, ToolItem } from "./types";
 
 type RenderedEntry = { node: HTMLElement; item: ConversationItem; active: boolean; variant: string };
 
@@ -399,9 +399,41 @@ export function renderItem(item: ConversationItem, open: boolean, activeRequest:
   // summary's non-shrinking slot, so a long pipeline overruns the row instead
   // of truncating; "Shell" names the step and the command ellipsizes beside it.
   if (item.type === "command") {
-    return activityShell(id, item.status, "Shell", item.command, `<pre>${escapeHtml(item.output ?? "")}</pre>`, open, stamp);
+    return activityShell(id, item.status, "Shell", item.command, renderActivityOutput(item.output, item.status), streamOpen(open, item.status, item.output), stamp);
   }
   return activityShell(id, item.status, reasoningLabel(item), undefined, `<pre>${escapeHtml(item.text)}</pre>`, open, stamp);
+}
+
+// How much of a tool's output to show before it becomes a show-more (finished)
+// or an elided tail (running). Chosen to keep a chatty tool from taking over
+// the transcript while still showing enough to read what it did.
+const OUTPUT_LINE_LIMIT = 12;
+
+// A running tool's row opens itself once it has output, so its live tail is
+// visible without the reader hunting for it — the way OpenCode's own client
+// shows a command working. A finished tool follows the normal collapse rules.
+function streamOpen(open: boolean, status: ActivityStatus, output: string | undefined): boolean {
+  return open || (status === "running" && !!output);
+}
+
+// One rendering for a tool or command's output. While it runs, the tail is
+// shown live so progress is visible; once finished, a long output is bounded to
+// a preview with a native show-more that reveals the rest — never dumped whole,
+// never dropped. The full text is always present in the DOM.
+function renderActivityOutput(output: string | undefined, status: ActivityStatus): string {
+  if (!output) return "";
+  const lines = output.split("\n");
+  if (status === "running") {
+    const tail = lines.slice(-OUTPUT_LINE_LIMIT);
+    const elided = lines.length - tail.length;
+    const note = elided > 0 ? `<p class="chat-output-elided">…${elided} earlier ${elided === 1 ? "line" : "lines"}</p>` : "";
+    return `${note}<pre class="chat-tool-stream">${escapeHtml(tail.join("\n"))}</pre>`;
+  }
+  if (lines.length <= OUTPUT_LINE_LIMIT) return `<pre>${escapeHtml(output)}</pre>`;
+  const preview = lines.slice(0, OUTPUT_LINE_LIMIT).join("\n");
+  const rest = lines.slice(OUTPUT_LINE_LIMIT).join("\n");
+  const more = lines.length - OUTPUT_LINE_LIMIT;
+  return `<pre>${escapeHtml(preview)}</pre><details class="chat-output-more"><summary>Show ${more} more ${more === 1 ? "line" : "lines"}</summary><pre>${escapeHtml(rest)}</pre></details>`;
 }
 
 function renderTool(item: ToolItem, open: boolean, todo?: TodoSummary): string {
@@ -412,7 +444,7 @@ function renderTool(item: ToolItem, open: boolean, todo?: TodoSummary): string {
   // list each time reprints it verbatim on every tool call.
   const label = detail.kind === "todo" && todo ? todo.label : detail.label;
   const subject = detail.kind === "todo" ? todo?.task : toolSubject(detail);
-  return activityShell(escapeHtmlAttribute(item.id), item.status, label, subject, body, open, timestampAttribute(item.createdAt));
+  return activityShell(escapeHtmlAttribute(item.id), item.status, label, subject, body, streamOpen(open, item.status, item.output), timestampAttribute(item.createdAt));
 }
 
 // One rendering for every diff the chat shows — a tool's edit, a patch, and a
@@ -447,12 +479,13 @@ function toolBody(detail: ToolDetail, item: ToolItem): string {
     case "skill":
       return `${outputBlock(item)}${error}`;
     default:
-      return `<pre>${escapeHtml([item.input, item.output, item.error].filter(Boolean).join("\n\n"))}</pre>`;
+      // An unknown tool: show its input, then bound its output like any other.
+      return `${item.input ? `<pre>${escapeHtml(item.input)}</pre>` : ""}${outputBlock(item)}${error}`;
   }
 }
 
 function outputBlock(item: ToolItem): string {
-  return item.output ? `<pre>${escapeHtml(item.output)}</pre>` : "";
+  return renderActivityOutput(item.output, item.status);
 }
 
 function fileButton(reference: string): string {

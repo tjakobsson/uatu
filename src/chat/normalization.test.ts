@@ -182,6 +182,19 @@ describe("provider text reconciliation", () => {
     ]);
     expect(projection.replay.latestCursor()).not.toBe("");
   });
+
+  // The live tail the renderer shows comes from `output` being kept as the tool
+  // runs: a progress event carries the content so far, and it lands on the same
+  // running tool entry, updated in place rather than added as a new row.
+  test("a running tool's progress content lands on its output, in place", () => {
+    const projection = new ConversationProjection(new ConversationReplay("g", "s", 10_000));
+    const running = { id: "p1", type: "session.next.tool.progress", data: { sessionID: "s", callID: "call", timestamp: 1, name: "grep", content: [{ type: "text", text: "line one" }] } };
+    const more = { id: "p2", type: "session.next.tool.progress", data: { sessionID: "s", callID: "call", timestamp: 1, name: "grep", content: [{ type: "text", text: "line one\nline two" }] } };
+    for (const event of [running, more]) for (const update of normalizeProviderEvent(event).updates) projection.apply(update);
+    expect(projection.items()).toEqual([
+      expect.objectContaining({ type: "tool", status: "running", output: "line one\nline two" }),
+    ]);
+  });
 });
 
 describe("both OpenCode event naming generations", () => {
