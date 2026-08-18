@@ -36,3 +36,34 @@ test("outstanding requests are counted, reachable, and clear at zero", async ({ 
   }
   await expect(jump).toBeHidden();
 });
+
+test("a pending edit permission shows its diff, and a resolved one recedes", async ({ page, request }) => {
+  await request.post("/__e2e/reset");
+  const token = await request.get("/__e2e/terminal-token").then(r => r.json()) as { token: string };
+  const seeded = await request.post("/__e2e/chat", { data: { action: "seed", title: "Review", items: [] } })
+    .then(r => r.json()) as { conversation: { id: string } };
+  await page.goto(`/?t=${encodeURIComponent(token.token)}`);
+  await openChatPanel(page);
+  const id = seeded.conversation.id;
+
+  // A pending edit permission shows the change it would apply, beside its choices.
+  const edit: ConversationItem = {
+    id: "permission:edit", type: "permission", createdAt: 20, requestId: "edit",
+    action: "edit", resources: ["src/app.ts"], status: "pending",
+    diff: "@@ -1 +1 @@\n-const a = 1;\n+const a = 2;",
+  };
+  await request.post("/__e2e/chat", { data: { action: "item", conversationId: id, item: edit } });
+  const card = page.locator('[data-chat-item-id="permission:edit"]');
+  await expect(card.locator(".chat-request-change .chat-diff")).toContainText("const a = 2;");
+  await expect(card.locator('[data-permission-outcome="approved-once"]')).toBeVisible();
+
+  // Resolve it: the card recedes to a one-line trace, its diff gone, its resource
+  // still reachable in the collapsed body.
+  await request.post("/__e2e/chat", { data: { action: "item", conversationId: id, item: {
+    ...edit, status: "resolved", outcome: "approved-once",
+  } } });
+  await expect(card.locator(".chat-request-trace")).toHaveText("Allowed once");
+  await expect(card.locator(".chat-request-change")).toHaveCount(0);
+  await expect(card).not.toHaveAttribute("open", /.*/);
+  await expect(card.locator("ul code")).toContainText("src/app.ts");
+});

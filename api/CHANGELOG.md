@@ -2,6 +2,18 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required.
 
+## Hub 1 / Workspace 5 - Unreleased
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- `PermissionItem` gained an optional `diff`: the unified diff a file-edit permission would apply, when the agent attaches one (OpenCode reports it on the permission's `metadata.diff`). It is absent for a permission with nothing to show — a command, a fetch.
+
+### Migration
+
+A workspace client that validates conversation items against a closed schema must accept the new optional `diff` on permission items, or it will reject an otherwise valid timeline. Clients that ignore unknown properties need no change. No existing field changed meaning, type, or nullability.
+
 ## Hub 1 / Workspace 4 - Unreleased
 
 Compatibility: breaking (workspace)

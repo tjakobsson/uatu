@@ -218,6 +218,18 @@ describe("both OpenCode event naming generations", () => {
     })]);
   });
 
+  // OpenCode attaches an edit's pending change on the permission's
+  // `metadata.diff` — a `@@`-hunk unified diff, the shape observed in the
+  // 1.18 binary. A permission without one carries no diff.
+  test("an edit permission keeps its pending diff, a plain one carries none", () => {
+    const edit = { id: "e3", type: "permission.v2.asked", data: { id: "perm_2", sessionID: "s", action: "edit", resources: ["src/app.ts"], metadata: { diff: "@@ -1 +1 @@\n-old\n+new" } } };
+    const [item] = apply([edit]).items();
+    expect(item).toEqual(expect.objectContaining({ id: "permission:perm_2", diff: "@@ -1 +1 @@\n-old\n+new" }));
+
+    const [plain] = apply([v2Asked]).items();
+    expect(plain).not.toHaveProperty("diff");
+  });
+
   test("the same request under both generations settles as one entry, either order", () => {
     for (const order of [[v2Asked, classicAsked], [classicAsked, v2Asked]]) {
       const items = apply(order).items();

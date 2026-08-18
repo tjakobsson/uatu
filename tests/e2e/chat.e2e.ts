@@ -201,7 +201,7 @@ test.describe("desktop OpenCode chat", () => {
     await expect(card).toContainText("until OpenCode restarts");
 
     await page.getByRole("button", { name: "Allow once" }).click();
-    await expect(page.locator('[data-chat-item-id="permission:perm-1"]')).toContainText("Resolved: approved-once");
+    await expect(page.locator('[data-chat-item-id="permission:perm-1"]')).toContainText("Allowed once");
     await expect(page.getByRole("button", { name: "Allow once" })).toHaveCount(0);
 
     const question: ConversationItem = {

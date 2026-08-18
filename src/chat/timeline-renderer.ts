@@ -2,9 +2,9 @@ import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
 import { appState } from "../shell/state";
 import { renderChatMarkdown } from "./markdown";
 import { resolveWorkspaceFileReference } from "./file-references";
-import { describeToolDetail, deriveTodoActivities, todoActivitySummary, toolSubject, type TodoEntry, type TodoSummary, type ToolDetail } from "./tool-detail";
+import { describeToolDetail, deriveTodoActivities, patchDiffLines, todoActivitySummary, toolSubject, type DiffLine, type TodoEntry, type TodoSummary, type ToolDetail } from "./tool-detail";
 import type { AcceptedDraft, ChatProjection } from "./projection";
-import type { ConversationItem, ConversationStatus, QuestionRequest, ToolItem } from "./types";
+import type { ConversationItem, ConversationStatus, PermissionOutcome, QuestionRequest, ToolItem } from "./types";
 
 type RenderedEntry = { node: HTMLElement; item: ConversationItem; active: boolean; variant: string };
 
@@ -79,7 +79,15 @@ export class TimelineRenderer {
         dirty.push(entry.node);
         continue;
       }
-      const open = entry ? entry.node.hasAttribute("open") : expanded.has(item.id);
+      // A request does not take its open state from `expanded`: a pending one
+      // is force-open (below), and force-opening it fires a toggle that records
+      // it as "expanded" — so honouring that set would keep it open once it
+      // resolves and defeat the receding. Instead a pending request opens and a
+      // resolved one starts closed; a resolved card the user opens by hand stays
+      // open because a stable item is patched in place, never rebuilt. Every
+      // other item preserves its DOM open state across re-renders as before.
+      const isRequest = item.type === "permission" || item.type === "question";
+      const open = isRequest ? false : entry ? entry.node.hasAttribute("open") : expanded.has(item.id);
       const node = buildNode(renderItem(item, open, active, todo, isQueued, duration, foreign));
       entry?.node.remove();
       this.entries.set(item.id, { node, item, active, variant });
@@ -407,11 +415,17 @@ function renderTool(item: ToolItem, open: boolean, todo?: TodoSummary): string {
   return activityShell(escapeHtmlAttribute(item.id), item.status, label, subject, body, open, timestampAttribute(item.createdAt));
 }
 
+// One rendering for every diff the chat shows — a tool's edit, a patch, and a
+// permission's pending change all read the same way.
+function chatDiffMarkup(diff: DiffLine[]): string {
+  return `<pre class="chat-diff">${diff.map(line => `<span class="chat-diff-line is-${line.sign === "-" ? "del" : "add"}">${escapeHtml(`${line.sign} ${line.text}`)}</span>`).join("\n")}</pre>`;
+}
+
 function toolBody(detail: ToolDetail, item: ToolItem): string {
   const error = item.error ? `<pre class="chat-tool-error">${escapeHtml(item.error)}</pre>` : "";
   switch (detail.kind) {
     case "edit":
-      return `${fileButton(detail.path)}<pre class="chat-diff">${detail.diff.map(line => `<span class="chat-diff-line is-${line.sign === "-" ? "del" : "add"}">${escapeHtml(`${line.sign} ${line.text}`)}</span>`).join("\n")}</pre>${error}`;
+      return `${fileButton(detail.path)}${chatDiffMarkup(detail.diff)}${error}`;
     case "write":
       return `${fileButton(detail.path)}<pre>${escapeHtml(detail.content)}</pre>${error}`;
     case "read":
@@ -423,7 +437,7 @@ function toolBody(detail: ToolDetail, item: ToolItem): string {
     case "todo":
       return `<ul class="chat-todo">${detail.entries.map(entry => `<li class="is-${entry.state}">${escapeHtml(entry.text)}</li>`).join("")}</ul>${error}`;
     case "patch":
-      return `${detail.files.map(file => fileButton(file)).join("")}<pre class="chat-diff">${detail.diff.map(line => `<span class="chat-diff-line is-${line.sign === "-" ? "del" : "add"}">${escapeHtml(`${line.sign} ${line.text}`)}</span>`).join("\n")}</pre>${error}`;
+      return `${detail.files.map(file => fileButton(file)).join("")}${chatDiffMarkup(detail.diff)}${error}`;
     case "question":
       return `${detail.asked.map(entry => `<p class="chat-tool-meta"><strong>${escapeHtml(entry.header)}</strong></p><p>${escapeHtml(entry.prompt)}</p>`).join("")}${detail.answer ? `<p class="chat-request-outcome">${escapeHtml(detail.answer)}</p>` : ""}${error}`;
     case "agent":
@@ -512,11 +526,28 @@ function renderPermission(item: Extract<ConversationItem, { type: "permission" }
   // permission spec), which is agent-specific behavior, not just an agent
   // name. A second agent that persists grants differently needs its own
   // statement here, not a find-and-replace.
-  const outcome = pending && active
+  // A resolved request recedes: the outcome moves into the summary so it stays
+  // legible at a glance, the choices and their scope note fall away, and the
+  // resources it named stay in the collapsed body for a user auditing what was
+  // granted. Only a pending request keeps its full footprint.
+  const body = pending && active
     ? `<div class="chat-request-actions"><button type="button" data-permission-outcome="approved-once">Allow once</button><button type="button" data-permission-outcome="approved-session">Allow always</button><button type="button" data-permission-outcome="rejected">Reject</button></div><p class="chat-request-scope">“Allow always” also covers later conversations, and similar requests — until OpenCode restarts.</p>`
-    : pending ? `<p class="chat-request-outcome">Waiting its turn — answer the newest request first.</p>` : `<p class="chat-request-outcome">Resolved: ${escapeHtml(item.outcome ?? "resolved")}</p>`;
+    : pending ? `<p class="chat-request-outcome">Waiting its turn — answer the newest request first.</p>` : "";
   const state = requestState(item.status, active);
-  return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${requestAttributes(state)}${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}><summary>Permission: ${escapeHtml(item.action)}${requestBadge(state)}</summary>${requestOrigin(foreign)}<ul>${item.resources.map(resource => `<li><code>${escapeHtml(resource)}</code></li>`).join("")}</ul>${outcome}</details>`;
+  const summaryTrace = state === "resolved" ? ` <span class="chat-request-trace">${escapeHtml(permissionOutcomeLabel(item.outcome))}</span>` : requestBadge(state);
+  // What "Allow" would apply, shown where the choice is made. Only while the
+  // request is still open — a receded, resolved card does not re-show the diff.
+  const changePreview = pending && item.diff ? `<div class="chat-request-change">${chatDiffMarkup(patchDiffLines(item.diff))}</div>` : "";
+  return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${requestAttributes(state)}${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}><summary>Permission: ${escapeHtml(item.action)}${summaryTrace}</summary>${requestOrigin(foreign)}<ul>${item.resources.map(resource => `<li><code>${escapeHtml(resource)}</code></li>`).join("")}</ul>${changePreview}${body}</details>`;
+}
+
+// The receded form's label — what was decided, in words, since the summary no
+// longer sits beside the choices that produced it.
+function permissionOutcomeLabel(outcome: PermissionOutcome | undefined): string {
+  if (outcome === "approved-once") return "Allowed once";
+  if (outcome === "approved-session") return "Allowed always";
+  if (outcome === "rejected") return "Rejected";
+  return "Resolved";
 }
 
 function renderQuestion(item: QuestionRequest, open: boolean, active: boolean, foreign = false): string {
@@ -532,9 +563,14 @@ function renderQuestion(item: QuestionRequest, open: boolean, active: boolean, f
   // legend says which it is — otherwise there is nothing telling you more than
   // one answer is allowed.
   const questions = item.questions.map((question, index) => `<fieldset class="chat-question-panel" data-question-panel="${index}"${index === 0 ? "" : " hidden"}><legend${stepped ? ` class="sr-only"` : ""}>${escapeHtml(question.header)}</legend><p>${escapeHtml(question.prompt)}${question.multiple ? ` <span class="chat-question-hint">choose one or more</span>` : ""}</p>${question.options.map(option => `<label class="chat-question-option"><input type="${question.multiple ? "checkbox" : "radio"}" name="q-${index}" value="${escapeHtmlAttribute(option.label)}"><span class="chat-question-option-text"><span class="chat-question-option-label">${escapeHtml(option.label)}</span>${option.description ? `<small>${escapeHtml(option.description)}</small>` : ""}</span></label>`).join("")}${question.allowFreeForm ? `<label class="chat-question-freeform">Other <input name="q-${index}" type="text"></label>` : ""}</fieldset>`).join("");
-  const body = pending && active ? `<form data-question-form>${tabs}${questions}<div class="chat-request-actions"><button type="submit" data-question-primary disabled>${stepped ? "Next" : "Answer"}</button><button type="button" data-question-reject>Reject</button></div></form>` : pending ? `<p class="chat-request-outcome">Waiting its turn — answer the newest request first.</p>` : `<p class="chat-request-outcome">${item.outcome?.kind === "rejected" ? "Rejected" : "Answered"}</p>`;
+  // Same receding as a permission: a resolved question carries its outcome in
+  // the summary and drops the answered form. Its prompts stay in the collapsed
+  // body so what was asked remains reachable.
+  const resolvedBody = item.questions.map(question => `<p class="chat-request-asked">${escapeHtml(question.prompt)}</p>`).join("");
+  const body = pending && active ? `<form data-question-form>${tabs}${questions}<div class="chat-request-actions"><button type="submit" data-question-primary disabled>${stepped ? "Next" : "Answer"}</button><button type="button" data-question-reject>Reject</button></div></form>` : pending ? `<p class="chat-request-outcome">Waiting its turn — answer the newest request first.</p>` : resolvedBody;
   const state = requestState(item.status, active);
-  return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${requestAttributes(state)}${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}><summary>Question${requestBadge(state)}</summary>${requestOrigin(foreign)}${body}</details>`;
+  const summaryTrace = state === "resolved" ? ` <span class="chat-request-trace">${item.outcome?.kind === "rejected" ? "Rejected" : "Answered"}</span>` : requestBadge(state);
+  return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${requestAttributes(state)}${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}><summary>Question${summaryTrace}</summary>${requestOrigin(foreign)}${body}</details>`;
 }
 
 export function decorateFileLinks(container: HTMLElement): void {

@@ -265,6 +265,7 @@ function normalizeKnownEvent(value: unknown, messageRoles?: Map<string, string>)
         action: text(data.permission),
         resources: stringArray(data.patterns),
         status: "pending",
+        ...permissionDiff(data),
       } }] };
     case "permission.replied":
       return { conversationId, updates: [{ kind: "upsert", item: {
@@ -288,6 +289,7 @@ function normalizeKnownEvent(value: unknown, messageRoles?: Map<string, string>)
         action: text(data.action),
         resources: stringArray(data.resources),
         status: "pending",
+        ...permissionDiff(data),
       } }] };
     case "permission.v2.replied": {
       const requestId = string(data.requestID, "permission id");
@@ -585,6 +587,15 @@ export function normalizeQuestion(value: unknown): StructuredQuestion {
 
 function permissionOutcome(value: unknown): "approved-once" | "approved-session" | "rejected" {
   return value === "once" ? "approved-once" : value === "always" ? "approved-session" : "rejected";
+}
+
+// The change a file-edit permission would apply, when the agent attaches one.
+// OpenCode puts a unified diff on the permission's `metadata.diff` — the same
+// string its own edit-tool renderer reads. A permission with none (a command,
+// a fetch) yields nothing to spread.
+function permissionDiff(data: RecordValue): { diff?: string } {
+  const diff = optionalString(record(data.metadata).diff);
+  return diff && diff.trim() ? { diff } : {};
 }
 
 function activityStatus(value: unknown): "pending" | "running" | "completed" | "failed" {

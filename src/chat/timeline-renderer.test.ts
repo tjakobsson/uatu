@@ -116,7 +116,9 @@ describe("TimelineRenderer", () => {
     renderer.render(host, projectionWith([{ ...question, status: "resolved", outcome: { kind: "answered", answers: [["a"]] } }]), new Set());
 
     expect(host.querySelector("form[data-question-form]")).toBeNull();
-    expect(host.querySelector(".chat-request-outcome")!.textContent).toBe("Answered");
+    // The outcome recedes into the summary; the form is gone.
+    expect(host.querySelector(".chat-request-trace")!.textContent).toBe("Answered");
+    expect(host.querySelector("details.chat-request")!.hasAttribute("open")).toBe(false);
   });
 
   test("drafts render, update their label, and disappear when reconciled", () => {
@@ -328,12 +330,40 @@ describe("permission choices state the authority they grant", () => {
     expect(text).not.toMatch(/only (this|the current) (session|conversation)\b/i);
   });
 
+  test("a pending edit permission shows its diff where the choices are; a plain one shows none", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([{ ...permission, diff: "@@ -1 +1 @@\n-old line\n+new line" }]), new Set());
+    const change = host.querySelector(".chat-request-change .chat-diff");
+    expect(change).not.toBeNull();
+    expect(change!.textContent).toContain("- old line");
+    expect(change!.textContent).toContain("+ new line");
+    // The diff sits with the approve/reject actions, in the same card.
+    expect(host.querySelector(".chat-request .chat-request-actions")).not.toBeNull();
+
+    const bare = target();
+    renderer.render(bare, projectionWith([permission]), new Set());
+    expect(bare.querySelector(".chat-request-change")).toBeNull();
+  });
+
+  test("a resolved edit permission does not re-show its diff", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([{ ...permission, status: "resolved", outcome: "approved-once", diff: "@@ -1 +1 @@\n-a\n+b" }]), new Set());
+    expect(host.querySelector(".chat-request-change")).toBeNull();
+    expect(host.querySelector(".chat-request-trace")!.textContent).toBe("Allowed once");
+  });
+
   test("a resolved request states its outcome without offering choices again", () => {
     const renderer = new TimelineRenderer();
     const host = target();
     renderer.render(host, projectionWith([{ ...permission, status: "resolved", outcome: "approved-session" }]), new Set());
     expect(host.querySelectorAll("[data-permission-outcome]")).toHaveLength(0);
-    expect(host.textContent).toContain("approved-session");
+    // Receded: the outcome is stated in words in the summary trace, the card is
+    // closed, and the resources it named are still in the collapsed body.
+    expect(host.querySelector(".chat-request-trace")!.textContent).toBe("Allowed always");
+    expect(host.querySelector("details.chat-request")!.hasAttribute("open")).toBe(false);
+    expect(host.querySelector("details.chat-request ul code")!.textContent).toContain("review-code");
   });
 });
 

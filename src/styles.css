@@ -4811,8 +4811,30 @@ body.is-resizing-chat .chat-resizer {
   border-style: dashed;
 }
 
+/* A resolved request recedes to a one-line trace: no accent, tighter padding,
+   and a summary that reads as a settled fact rather than a card awaiting a
+   decision. Its body (resources, or the question's prompts) stays in the
+   collapsed <details>, one disclosure away for anyone auditing what happened. */
 .chat-request[data-request-state="resolved"] {
-  opacity: 0.72;
+  border-color: var(--border-soft);
+  padding: 0.3rem 0.6rem;
+  color: var(--text-subtle);
+}
+
+.chat-request[data-request-state="resolved"] > summary {
+  color: var(--text-subtle);
+  font-weight: 400;
+}
+
+.chat-request-trace {
+  margin-left: 0.4rem;
+  color: var(--text-subtle);
+  font-weight: 500;
+}
+
+.chat-request-asked {
+  margin: 0.3rem 0 0;
+  color: var(--text-subtle);
 }
 
 .chat-request-origin {

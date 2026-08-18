@@ -216,7 +216,10 @@ export function patchFiles(patch: string): string[] {
  */
 export function patchDiffLines(patch: string): DiffLine[] {
   return patch.split("\n").flatMap((line): DiffLine[] => {
-    if (line.startsWith("***") || line.startsWith("@@")) return [];
+    // Unified-diff headers, not content: a git diff carries `diff --git`,
+    // `index`, and the `--- a/…` / `+++ b/…` file markers, which would
+    // otherwise render as deleted/added lines.
+    if (line.startsWith("***") || line.startsWith("@@") || line.startsWith("diff ") || line.startsWith("index ") || line.startsWith("--- ") || line.startsWith("+++ ")) return [];
     if (line.startsWith("+")) return [{ sign: "+", text: line.slice(1) }];
     if (line.startsWith("-")) return [{ sign: "-", text: line.slice(1) }];
     return [];

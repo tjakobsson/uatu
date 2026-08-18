@@ -169,6 +169,10 @@ export type PermissionRequest = TimelineItemBase & {
   resources: string[];
   status: "pending" | "resolved";
   outcome?: PermissionOutcome;
+  // A unified diff of the change a file-edit permission would apply, when the
+  // agent attaches one (OpenCode puts it on the permission's `metadata.diff`).
+  // Absent for a permission with nothing to show — a command, a fetch.
+  diff?: string;
 };
 
 export type QuestionOption = {

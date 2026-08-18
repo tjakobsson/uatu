@@ -177,7 +177,7 @@ export function parsePermissionRequest(value: unknown): PermissionRequest {
   const record = expectRecord(value, "permission request");
   expectKeys(
     record,
-    ["id", "type", "createdAt", "requestId", "conversationId", "action", "resources", "status", "outcome"],
+    ["id", "type", "createdAt", "requestId", "conversationId", "action", "resources", "status", "outcome", "diff"],
     "permission request",
   );
   expectOptionalIdentity(record.conversationId, "permission owning conversation");
@@ -192,6 +192,7 @@ export function parsePermissionRequest(value: unknown): PermissionRequest {
   if (record.status === "resolved") {
     expectOneOf(record.outcome, ["approved-once", "approved-session", "rejected"], "permission outcome");
   }
+  if (record.diff !== undefined) expectString(record.diff, "permission diff");
   return value as PermissionRequest;
 }
 
