@@ -2,6 +2,20 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required.
 
+## Hub 1 / Workspace 4 - Unreleased
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- Renamed `workspaceListChatAgents` to `workspaceListChatModes`, and its route from `GET /s/{workspaceId}/api/chat/agents` to `GET /s/{workspaceId}/api/chat/modes`. The response envelope key changed from `agents` to `modes`, and the item schema `ChatAgent` was renamed to `ChatMode`. The operation always listed OpenCode's Build/Plan ways of working, which this API now calls **modes**; **agent** now names the program Chat talks to.
+- `ChatPromptRequest`'s optional `agent` property was renamed to `mode`, for the same reason. It still carries a mode name such as `build`.
+- `ChatAvailability`'s `ready` variant gained an optional `agent` object — the new `ChatAgent` schema — carrying the agent's `id`, its display `name`, and the `capabilities` it declares. Capabilities are declared positively: a capability appears in the list or the agent does not have it. There is no `false` and no `unknown`. The capability list is open: a client MUST ignore a name it does not recognize rather than reject the agent, so a later revision can add a capability without another breaking change.
+
+### Migration
+
+A workspace client that lists ways of working must call `/api/chat/modes` and read the `modes` key; the `agents` route and key are gone, not deprecated. A client that sends a mode with a prompt must rename the request property from `agent` to `mode`; the accepted values are unchanged. A client that validates `ChatAvailability` against a closed schema must accept the new optional `agent` on the `ready` variant, or it will reject an otherwise valid status. Clients that ignore unknown properties need no change for that last item. A client SHOULD present a control only when the agent declares the matching capability, and MUST treat an absent capability as unsupported rather than as an error or an empty result.
+
 ## Hub 1 / Workspace 3 - Unreleased
 
 Compatibility: breaking (workspace)

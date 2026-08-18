@@ -28,10 +28,35 @@ export type ChatStartupDiagnostics = {
   stderr: string;
 };
 
+// A capability the surface can present. Positively declared only: a capability
+// is in an agent's list or the agent does not have it. No `false` and no
+// `unknown` — two ways to say "no" eventually disagree, and the surface would
+// have to pick one to believe. Extended one key at a time, by the change that
+// adds the feature behind it.
+export type ChatCapability =
+  | "modes"
+  | "models"
+  | "commands"
+  | "questions"
+  | "permissions"
+  | "subagents";
+
+// What Chat is talking to. One agent per workspace today, but the surface
+// takes its name and its controls from this record rather than from fixed
+// copy, so a second agent changes what is reported and not what is written.
+export type ChatAgent = {
+  id: string;
+  name: string;
+  capabilities: ChatCapability[];
+};
+
 export type ChatAvailability =
   | { state: "idle" }
   | { state: "starting" }
-  | { state: "ready"; version: string }
+  // `agent` is absent for the moment between the runtime reporting ready and
+  // the adapter existing to describe it. A surface that has no agent yet says
+  // nothing about one rather than guessing a name.
+  | { state: "ready"; version: string; agent?: ChatAgent }
   | {
     state: "unavailable";
     reason: "not-installed" | "startup-failed" | "unsupported";
@@ -60,9 +85,10 @@ export type ChatCommand = {
   kind: "command" | "skill";
 };
 
-// A primary OpenCode agent (Build, Plan, ...) a prompt can run under.
-// Subagents are excluded — they are spawned by the task tool, not chosen.
-export type ChatAgent = {
+// A way of working a prompt can run under — the agent's own named modes
+// (Build, Plan, ...). Not the agent itself, and not a subagent: subagents are
+// spawned by the task tool, never chosen.
+export type ChatMode = {
   name: string;
   description: string;
 };

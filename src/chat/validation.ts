@@ -1,6 +1,7 @@
 import type {
   ActivityStatus,
   ChatAgent,
+  ChatMode,
   ChatAvailability,
   ChatCommand,
   ChatEvent,
@@ -36,8 +37,11 @@ export function parseChatAvailability(value: unknown): ChatAvailability {
       expectKeys(record, ["state"], "chat availability");
       break;
     case "ready":
-      expectKeys(record, ["state", "version"], "chat availability");
+      expectKeys(record, ["state", "version", "agent"], "chat availability");
       expectNonEmptyString(record.version, "version");
+      // Optional: absent for the moment between the runtime reporting ready
+      // and the adapter existing to describe the agent.
+      if (record.agent !== undefined) parseChatAgent(record.agent);
       break;
     case "unavailable":
       expectKeys(record, ["state", "reason", "message", "diagnostics"], "chat availability");
@@ -105,12 +109,25 @@ export function parseChatModel(value: unknown): ChatModel {
   return value as ChatModel;
 }
 
+// Capabilities are declared positively, so an unknown name is not an error —
+// it is a capability this client does not present. Rejecting it would make a
+// newer agent unusable by an older client for no reason.
 export function parseChatAgent(value: unknown): ChatAgent {
   const record = expectRecord(value, "chat agent");
-  expectKeys(record, ["name", "description"], "chat agent");
-  expectIdentity(record.name, "agent name");
-  expectString(record.description, "agent description");
+  expectKeys(record, ["id", "name", "capabilities"], "chat agent");
+  expectIdentity(record.id, "agent id");
+  expectNonEmptyString(record.name, "agent name");
+  if (!Array.isArray(record.capabilities)) throw new Error("invalid agent capabilities");
+  for (const capability of record.capabilities) expectNonEmptyString(capability, "agent capability");
   return value as ChatAgent;
+}
+
+export function parseChatMode(value: unknown): ChatMode {
+  const record = expectRecord(value, "chat mode");
+  expectKeys(record, ["name", "description"], "chat mode");
+  expectIdentity(record.name, "mode name");
+  expectString(record.description, "mode description");
+  return value as ChatMode;
 }
 
 export function parseChatCommand(value: unknown): ChatCommand {

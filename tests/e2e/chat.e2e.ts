@@ -10,7 +10,7 @@ async function bootChat(page: Page, request: APIRequestContext): Promise<void> {
   await page.goto(`/?t=${encodeURIComponent(token.token)}`);
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
   await openChatPanel(page);
-  await expect(page.locator("#chat-state")).not.toContainText("Loading OpenCode");
+  await expect(page.locator("#chat-state")).not.toContainText("Loading chat");
 }
 
 async function control(request: APIRequestContext, body: Record<string, unknown>): Promise<unknown> {
@@ -77,29 +77,52 @@ test.describe("desktop OpenCode chat", () => {
     await expect(input).toHaveValue("draft retained across surfaces");
   });
 
-  test("switches the agent for a prompt and defaults to OpenCode's own", async ({ page }) => {
+  test("switches the mode for a prompt and defaults to the agent's own", async ({ page }) => {
     await page.getByRole("button", { name: "New" }).click();
-    const agentSelect = page.locator("#chat-agent-select");
-    await expect(agentSelect.locator("option")).toHaveText(["Agent: default", "Agent: Build", "Agent: Plan"]);
-    await expect(agentSelect).toHaveValue("");
+    const modeSelect = page.locator("#chat-mode-select");
+    await expect(modeSelect.locator("option")).toHaveText(["Mode: default", "Mode: Build", "Mode: Plan"]);
+    await expect(modeSelect).toHaveValue("");
 
     const input = page.locator("#chat-input");
-    await input.fill("stay on the default agent");
+    await input.fill("stay on the default mode");
     const defaulted = page.waitForResponse(response => response.url().endsWith("/prompts"));
     await input.press("Enter");
-    expect((await defaulted).request().postDataJSON()).not.toHaveProperty("agent");
+    expect((await defaulted).request().postDataJSON()).not.toHaveProperty("mode");
 
-    // Stuck in a read-only agent is the whole point: choosing Build must
+    // Stuck in a read-only mode is the whole point: choosing Build must
     // reach the provider with the next prompt.
-    await agentSelect.selectOption({ label: "Agent: Build" });
+    await modeSelect.selectOption({ label: "Mode: Build" });
     await input.fill("now write some code");
     const switched = page.waitForResponse(response => response.url().endsWith("/prompts"));
     await input.press("Enter");
-    expect((await switched).request().postDataJSON()).toMatchObject({ agent: "build" });
+    expect((await switched).request().postDataJSON()).toMatchObject({ mode: "build" });
 
-    // No way back to "default": the agent is session state in OpenCode, so a
+    // No way back to "default": the mode is session state in the agent, so a
     // prompt omitting it would keep Build while the picker claimed default.
-    await expect(agentSelect.locator('option[value=""]')).toBeDisabled();
+    await expect(modeSelect.locator('option[value=""]')).toBeDisabled();
+  });
+
+  // The surface takes its name from what the agent reported, so a workspace
+  // with a different agent renames itself without a line of copy changing.
+  test("names the agent it is talking to", async ({ page }) => {
+    await expect(page.locator("#chat-title")).toHaveText("Fixture Agent Chat");
+    await expect(page.locator("#chat-input")).toHaveAttribute("placeholder", "Ask Fixture Agent…");
+    // The visible header, not only the assistive one: a workspace always has a
+    // root label, so the agent has to sit beside it rather than behind it.
+    await expect(page.locator("#chat-context")).toContainText("Fixture Agent");
+  });
+
+  // The one path a workspace with a single real agent can never reach: an
+  // agent that offers less. The control must be gone, not disabled — a
+  // disabled control claims the feature exists and is merely unavailable now.
+  test("removes a control the agent does not declare", async ({ page, request }) => {
+    await control(request, { action: "declareOnly", capabilities: ["models", "commands", "permissions"] });
+    await page.reload();
+    await openChatPanel(page);
+    await expect(page.locator("#chat-state")).not.toContainText("Loading chat");
+    await page.getByRole("button", { name: "New" }).click();
+    await expect(page.locator("#chat-model-select")).toBeVisible();
+    await expect(page.locator("#chat-mode-select")).toHaveCount(0);
   });
 
   test("completes slash commands at the caret without sending prematurely", async ({ page }) => {
@@ -127,7 +150,7 @@ test.describe("desktop OpenCode chat", () => {
     const firstId = await page.locator("#chat-conversation-select").inputValue();
     await page.locator("#chat-input").fill("Keep timing this turn");
     await page.locator("#chat-input").press("Enter");
-    await expect(page.locator("#chat-composer-status")).toContainText("OpenCode is working");
+    await expect(page.locator("#chat-composer-status")).toContainText("Working");
     await page.waitForTimeout(1_100);
     const before = elapsedSeconds(await page.locator("#chat-composer-status").textContent());
     expect(before).toBeGreaterThanOrEqual(1);
@@ -135,7 +158,7 @@ test.describe("desktop OpenCode chat", () => {
     await page.getByRole("button", { name: "New" }).click();
     await expect(page.locator("#chat-conversation-select")).not.toHaveValue(firstId);
     await page.locator("#chat-conversation-select").selectOption(firstId);
-    await expect(page.locator("#chat-composer-status")).toContainText("OpenCode is working");
+    await expect(page.locator("#chat-composer-status")).toContainText("Working");
     expect(elapsedSeconds(await page.locator("#chat-composer-status").textContent())).toBeGreaterThanOrEqual(before);
   });
 
@@ -331,7 +354,7 @@ test("the chat backend starts only when the panel opens", async ({ page, request
   await page.waitForTimeout(250);
   expect(((await control(request, { action: "stats" })) as { statusCalls: number }).statusCalls).toBe(0);
   await openChatPanel(page);
-  await expect(page.locator("#chat-state")).not.toContainText("Loading OpenCode");
+  await expect(page.locator("#chat-state")).not.toContainText("Loading chat");
   await expect.poll(async () => ((await control(request, { action: "stats" })) as { statusCalls: number }).statusCalls).toBeGreaterThan(0);
 });
 

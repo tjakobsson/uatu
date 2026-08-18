@@ -165,7 +165,7 @@ function normalizeKnownEvent(value: unknown, messageRoles?: Map<string, string>)
         type: "notice",
         createdAt,
         level: "info",
-        message: text(data.text) || "OpenCode context updated",
+        message: text(data.text) || "Context updated",
       } }] };
     case "session.next.text.started":
       return textUpdate(data, eventId, createdAt, "cumulative", "");
@@ -371,7 +371,7 @@ function normalizeKnownEvent(value: unknown, messageRoles?: Map<string, string>)
       return { conversationId, updates: [{ kind: "status", status: "completed" }] };
     case "session.error":
     case "session.next.step.failed": {
-      const message = errorMessage(data.error) || text(data.message) || "OpenCode turn failed";
+      const message = errorMessage(data.error) || text(data.message) || "The turn failed";
       return { conversationId, updates: [
         { kind: "upsert", item: { id: `notice:${eventId}`, type: "notice", createdAt, level: "error", message } },
         { kind: "status", status: "failed", message },
@@ -383,7 +383,7 @@ function normalizeKnownEvent(value: unknown, messageRoles?: Map<string, string>)
         type: "notice",
         createdAt,
         level: "warning",
-        message: text(data.message) || errorMessage(data.error) || "OpenCode is retrying the turn",
+        message: text(data.message) || errorMessage(data.error) || "Retrying the turn",
       } }] };
     case "message.updated": {
       const info = record(data.info ?? data.message);

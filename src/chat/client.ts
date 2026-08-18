@@ -1,6 +1,6 @@
 import { appUrl } from "../shared/app-url";
 import type {
-  ChatAgent,
+  ChatMode,
   ChatAvailability,
   ChatCommand,
   ChatEvent,
@@ -12,7 +12,7 @@ import type {
   QuestionOutcome,
 } from "./types";
 import {
-  parseChatAgent,
+  parseChatMode,
   parseChatAvailability,
   parseChatCommand,
   parseChatEvent,
@@ -72,10 +72,10 @@ export class ChatApiClient {
     return value.commands.map(parseChatCommand);
   }
 
-  async agents(): Promise<ChatAgent[]> {
-    const value = await this.get(appUrl("/api/chat/agents"), value => value as { agents?: unknown });
-    if (!Array.isArray(value.agents)) throw new ChatTransportError("Chat returned an invalid agent list");
-    return value.agents.map(parseChatAgent);
+  async modes(): Promise<ChatMode[]> {
+    const value = await this.get(appUrl("/api/chat/modes"), value => value as { modes?: unknown });
+    if (!Array.isArray(value.modes)) throw new ChatTransportError("Chat returned an invalid mode list");
+    return value.modes.map(parseChatMode);
   }
 
   createConversation(): Promise<ConversationSnapshot> {
@@ -88,14 +88,14 @@ export class ChatApiClient {
     return this.get(appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}?${query}`), parseConversationSnapshot);
   }
 
-  prompt(conversationId: string, requestId: string, text: string, model?: ModelSelection, agent?: string): Promise<{
+  prompt(conversationId: string, requestId: string, text: string, model?: ModelSelection, mode?: string): Promise<{
     messageId: string;
     delivery: "steer" | "queue";
     conversation?: ConversationSummary;
   }> {
     return this.mutate(
       appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/prompts`),
-      { requestId, text, ...(model ? { model } : {}), ...(agent ? { agent } : {}) },
+      { requestId, text, ...(model ? { model } : {}), ...(mode ? { mode } : {}) },
       value => {
         const result = value as { messageId: string; delivery: "steer" | "queue"; conversation?: unknown };
         return {

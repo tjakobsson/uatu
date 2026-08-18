@@ -506,6 +506,12 @@ function renderPermission(item: Extract<ConversationItem, { type: "permission" }
   // request's `always` pattern — `echo *` for a literal `echo scoped` — so it
   // covers more than the resource on the card. "Allow session" implied one
   // conversation; the card now states the reach that was actually being given.
+  // "OpenCode" is named on purpose in the scope line below and is not
+  // neutralized like the rest of the agent copy: the sentence states
+  // OpenCode's own persistent-approval lifetime (see the opencode-chat
+  // permission spec), which is agent-specific behavior, not just an agent
+  // name. A second agent that persists grants differently needs its own
+  // statement here, not a find-and-replace.
   const outcome = pending && active
     ? `<div class="chat-request-actions"><button type="button" data-permission-outcome="approved-once">Allow once</button><button type="button" data-permission-outcome="approved-session">Allow always</button><button type="button" data-permission-outcome="rejected">Reject</button></div><p class="chat-request-scope">“Allow always” also covers later conversations, and similar requests — until OpenCode restarts.</p>`
     : pending ? `<p class="chat-request-outcome">Waiting its turn — answer the newest request first.</p>` : `<p class="chat-request-outcome">Resolved: ${escapeHtml(item.outcome ?? "resolved")}</p>`;
@@ -528,7 +534,7 @@ function renderQuestion(item: QuestionRequest, open: boolean, active: boolean, f
   const questions = item.questions.map((question, index) => `<fieldset class="chat-question-panel" data-question-panel="${index}"${index === 0 ? "" : " hidden"}><legend${stepped ? ` class="sr-only"` : ""}>${escapeHtml(question.header)}</legend><p>${escapeHtml(question.prompt)}${question.multiple ? ` <span class="chat-question-hint">choose one or more</span>` : ""}</p>${question.options.map(option => `<label class="chat-question-option"><input type="${question.multiple ? "checkbox" : "radio"}" name="q-${index}" value="${escapeHtmlAttribute(option.label)}"><span class="chat-question-option-text"><span class="chat-question-option-label">${escapeHtml(option.label)}</span>${option.description ? `<small>${escapeHtml(option.description)}</small>` : ""}</span></label>`).join("")}${question.allowFreeForm ? `<label class="chat-question-freeform">Other <input name="q-${index}" type="text"></label>` : ""}</fieldset>`).join("");
   const body = pending && active ? `<form data-question-form>${tabs}${questions}<div class="chat-request-actions"><button type="submit" data-question-primary disabled>${stepped ? "Next" : "Answer"}</button><button type="button" data-question-reject>Reject</button></div></form>` : pending ? `<p class="chat-request-outcome">Waiting its turn — answer the newest request first.</p>` : `<p class="chat-request-outcome">${item.outcome?.kind === "rejected" ? "Rejected" : "Answered"}</p>`;
   const state = requestState(item.status, active);
-  return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${requestAttributes(state)}${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}><summary>Question from OpenCode${requestBadge(state)}</summary>${requestOrigin(foreign)}${body}</details>`;
+  return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${requestAttributes(state)}${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}><summary>Question${requestBadge(state)}</summary>${requestOrigin(foreign)}${body}</details>`;
 }
 
 export function decorateFileLinks(container: HTMLElement): void {
@@ -578,7 +584,7 @@ export function decorateFileLinks(container: HTMLElement): void {
 }
 
 export function statusLabel(status: ConversationStatus): string {
-  return ({ idle: "Ready", sending: "Sending", running: "OpenCode is working", completed: "Completed", interrupted: "Cancelled", failed: "Failed" })[status];
+  return ({ idle: "Ready", sending: "Sending", running: "Working", completed: "Completed", interrupted: "Cancelled", failed: "Failed" })[status];
 }
 
 function counts(additions?: number, deletions?: number): string {

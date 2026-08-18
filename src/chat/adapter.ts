@@ -8,6 +8,7 @@ import { ConversationReplay, type ReplaySubscription } from "./replay";
 import { ProviderTextReconciler } from "./text-reconciler";
 import type {
   ChatAgent,
+  ChatMode,
   ChatEvent,
   ChatCommand,
   ChatModel,
@@ -39,10 +40,10 @@ export class InvalidModelSelectionError extends Error {
   }
 }
 
-export class InvalidAgentSelectionError extends Error {
+export class InvalidModeSelectionError extends Error {
   constructor() {
-    super("selected agent is not available");
-    this.name = "InvalidAgentSelectionError";
+    super("selected mode is not available");
+    this.name = "InvalidModeSelectionError";
   }
 }
 
@@ -96,7 +97,7 @@ export class OpenCodeChatAdapter {
   private readonly metrics: ChatEventMetrics | undefined;
   private readonly countedEventTypes = new Set<string>();
   private readonly lastModel = new Map<string, ModelSelection>();
-  private readonly lastAgent = new Map<string, string>();
+  private readonly lastMode = new Map<string, string>();
   private readonly providerMessageRoles = new Map<string, string>();
   private pumpController: AbortController | null = null;
   private pumpPromise: Promise<void> | null = null;
@@ -150,8 +151,12 @@ export class OpenCodeChatAdapter {
     return this.provider.listModels();
   }
 
-  async agents(): Promise<ChatAgent[]> {
-    return this.provider.listAgents ? this.provider.listAgents() : [];
+  agent(): ChatAgent {
+    return this.provider.describe();
+  }
+
+  async modes(): Promise<ChatMode[]> {
+    return this.provider.listModes ? this.provider.listModes() : [];
   }
 
   commands(): Promise<ChatCommand[]> {
@@ -341,7 +346,7 @@ export class OpenCodeChatAdapter {
     });
   }
 
-  async prompt(conversationId: string, requestId: string, text: string, model?: ModelSelection, agent?: string): Promise<{
+  async prompt(conversationId: string, requestId: string, text: string, model?: ModelSelection, mode?: string): Promise<{
     messageId: string;
     delivery: "steer" | "queue";
     conversation?: ConversationSummary;
@@ -361,10 +366,10 @@ export class OpenCodeChatAdapter {
       // Same freshness rule as the model: only a change pays the list round
       // trip, and an unknown name is refused rather than passed through for
       // OpenCode to interpret.
-      if (agent && this.lastAgent.get(conversationId) !== agent) {
-        const agents = await this.agents();
-        if (!agents.some(candidate => candidate.name === agent)) throw new InvalidAgentSelectionError();
-        this.lastAgent.set(conversationId, agent);
+      if (mode && this.lastMode.get(conversationId) !== mode) {
+        const modes = await this.modes();
+        if (!modes.some(candidate => candidate.name === mode)) throw new InvalidModeSelectionError();
+        this.lastMode.set(conversationId, mode);
       }
       // Emptiness is checked before dispatch (afterwards the store already
       // holds this prompt), but the rename itself waits for admission — a
@@ -389,8 +394,8 @@ export class OpenCodeChatAdapter {
           ? parseSlashCommand(text, await this.provider.listCommands())
           : undefined;
         const accepted = slash
-          ? await this.provider.command(conversationId, { id: messageId, name: slash.name, arguments: slash.arguments, model, agent })
-          : await this.provider.prompt(conversationId, { id: messageId, text, delivery, model, agent });
+          ? await this.provider.command(conversationId, { id: messageId, name: slash.name, arguments: slash.arguments, model, mode })
+          : await this.provider.prompt(conversationId, { id: messageId, text, delivery, model, mode });
         if (renameToFirstPrompt) {
           try {
             session = await this.provider.renameSession!(conversationId, deriveConversationTitle(text));
@@ -763,7 +768,7 @@ export class OpenCodeChatAdapter {
       // stale cursor resolves to a retention-gap resync, which is safe.
       this.projections.delete(candidateId);
       this.lastModel.delete(candidateId);
-      this.lastAgent.delete(candidateId);
+      this.lastMode.delete(candidateId);
     }
     return projection;
   }

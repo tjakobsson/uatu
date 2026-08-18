@@ -1197,7 +1197,7 @@ describe("hub end to end", () => {
     // documented stopped-workspace response before any child/provider access.
     const stoppedOperations: Array<[string, string, string, unknown?]> = [
       ["GET", "/s/myproject/api/chat/models", "/s/{workspaceId}/api/chat/models"],
-      ["GET", "/s/myproject/api/chat/agents", "/s/{workspaceId}/api/chat/agents"],
+      ["GET", "/s/myproject/api/chat/modes", "/s/{workspaceId}/api/chat/modes"],
       ["GET", "/s/myproject/api/chat/commands", "/s/{workspaceId}/api/chat/commands"],
       ["GET", "/s/myproject/api/chat/conversations", "/s/{workspaceId}/api/chat/conversations"],
       ["POST", "/s/myproject/api/chat/conversations", "/s/{workspaceId}/api/chat/conversations", {}],
