@@ -80,10 +80,10 @@ test.describe("chat panels and navigation", () => {
   });
 
   test("subagents pin as a track, dismiss finished, and open their transcript", async ({ page, request }) => {
-    const child = await control(request, { action: "seed", title: "Child transcript", items: [
+    const child = await control(request, { action: "seed", title: "Child transcript", child: true, items: [
       { id: "part:child", type: "assistant_message", createdAt: 1, markdown: "child findings" },
     ] }) as { conversation: { id: string } };
-    await seedAndOpen(page, request, "Fan-out", [
+    const parent = await seedAndOpen(page, request, "Fan-out", [
       { id: "tool:agent1", type: "tool", createdAt: 2, name: "task", status: "completed", input: JSON.stringify({ description: "Review renderer", subagent_type: "explore", prompt: "go" }), childConversationId: child.conversation.id },
       { id: "tool:agent2", type: "tool", createdAt: 3, name: "task", status: "running", input: JSON.stringify({ description: "Audit styles", subagent_type: "general", prompt: "go" }) },
     ]);
@@ -95,11 +95,52 @@ test.describe("chat panels and navigation", () => {
     await track.locator("summary").click();
     await expect(track.locator("li")).toHaveCount(2);
     await track.getByRole("button", { name: "explore · Review renderer" }).click();
-    await expect(page.locator("#chat-items")).toContainText("child findings");
-    // The e2e fake lists every conversation, so the child is selected via its
-    // existing option; the real adapter hides children and inserts an
-    // interim "↳" option instead. Either way the picker tracks the child.
-    await expect(page.locator("#chat-conversation-select")).toHaveValue(child.conversation.id);
+
+    // A drill-down over the parent, not a conversation switch: the child's
+    // transcript renders in its own layer and the picker never moves.
+    const drilldown = page.locator("#chat-drilldown");
+    await expect(drilldown).toBeVisible();
+    await expect(page.locator("#chat-drilldown-items")).toContainText("child findings");
+    await expect(page.locator("#chat-drilldown-title")).toHaveText("explore · Review renderer");
+    await expect(page.locator("#chat-conversation-select")).toHaveValue(parent);
+    // The picker lists conversations you can start and resume; a subagent's
+    // transcript is neither, so it is absent from it entirely.
+    await expect(page.locator(`#chat-conversation-select option[value="${child.conversation.id}"]`)).toHaveCount(0);
+    await expect(page.locator("#chat-conversation-select option")).toHaveCount(1);
+
+    // Returning is first-class and does not re-select anything: the parent is
+    // still there, still selected, with its own transcript back in view.
+    await page.locator("#chat-drilldown-back").click();
+    await expect(drilldown).toBeHidden();
+    await expect(page.locator("#chat-items")).toContainText("Review renderer");
+    await expect(page.locator("#chat-conversation-select")).toHaveValue(parent);
+  });
+
+  test("a request the parent is waiting on stays answerable behind an open subagent", async ({ page, request }) => {
+    const child = await control(request, { action: "seed", title: "Child transcript", child: true, items: [
+      { id: "part:child", type: "assistant_message", createdAt: 1, markdown: "child findings" },
+    ] }) as { conversation: { id: string } };
+    await seedAndOpen(page, request, "Answerable", [
+      { id: "tool:agent1", type: "tool", createdAt: 2, name: "task", status: "completed", input: JSON.stringify({ description: "Review renderer", subagent_type: "explore", prompt: "go" }), childConversationId: child.conversation.id },
+      { id: "permission:p1", type: "permission", createdAt: 3, requestId: "p1", status: "pending", action: "bash", resources: ["rm -rf build"] },
+    ]);
+
+    // Left of the summary: the outstanding-request pill is pinned over its
+    // right end, and that pill is the subject of this test.
+    await page.locator("#chat-subagents summary").click({ position: { x: 8, y: 8 } });
+    await page.getByRole("button", { name: "explore · Review renderer" }).click();
+    await expect(page.locator("#chat-drilldown")).toBeVisible();
+
+    // The parent's pinned request pill is not covered by the child, and taking
+    // it returns to the parent with the card in view and answerable.
+    const jump = page.locator("#chat-requests-jump");
+    await expect(jump).toBeVisible();
+    await jump.click();
+    await expect(page.locator("#chat-drilldown")).toBeHidden();
+    const card = page.locator('[data-chat-item-id="permission:p1"]');
+    await expect(card).toBeVisible();
+    await card.getByRole("button", { name: "Allow once" }).click();
+    await expect(jump).toBeHidden();
   });
 
   test("dismiss finished clears completed subagents but keeps running ones", async ({ page, request }) => {

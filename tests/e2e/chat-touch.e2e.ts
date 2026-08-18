@@ -53,6 +53,43 @@ test("four tabs preserve chat state and keyboard navigation", async ({ page, req
   await expect(page.locator("#touch-tab-files")).toBeFocused();
 });
 
+test("a subagent transcript pushes as a screen and the back gesture pops it", async ({ page, request }) => {
+  // `boot` resets the service, so the child is seeded after it and the row
+  // that points at it is published once both conversations exist.
+  const parent = await boot(page, request);
+  const child = await control(request, { action: "seed", title: "Child transcript", child: true, items: [
+    { id: "part:child", type: "assistant_message", createdAt: 1, markdown: "child findings" },
+  ] });
+  await control(request, { action: "item", conversationId: parent, item: {
+    id: "tool:agent1", type: "tool", createdAt: 2, name: "task", status: "completed",
+    input: JSON.stringify({ description: "Review renderer", subagent_type: "explore", prompt: "go" }),
+    childConversationId: child.conversation.id,
+  } });
+
+  await expect(page.locator("#chat-subagents")).toBeVisible();
+  await page.locator("#chat-subagents summary").click();
+  await page.getByRole("button", { name: "explore · Review renderer" }).click();
+
+  const drilldown = page.locator("#chat-drilldown");
+  await expect(drilldown).toBeVisible();
+  await expect(page.locator("#chat-drilldown-items")).toContainText("child findings");
+  // A layer within the Chat tab, not a way out of it: the tab bar is still
+  // there and Chat is still the selected tab.
+  await expect(page.locator("#touch-tab-bar")).toBeVisible();
+  await expect(page.locator("#touch-tab-chat")).toHaveAttribute("aria-selected", "true");
+  // The picker is behind the pushed screen and still on the parent — a
+  // subagent is never one of its entries.
+  await expect(page.locator("#chat-conversation-select")).toHaveValue(parent);
+  await expect(page.locator("#chat-conversation-select option")).toHaveCount(1);
+
+  // The platform back gesture pops the screen rather than leaving the app or
+  // navigating the document behind it.
+  await page.goBack();
+  await expect(drilldown).toBeHidden();
+  await expect(page.locator("#chat-surface")).toBeVisible();
+  await expect(page.locator("#chat-conversation-select")).toHaveValue(parent);
+});
+
 test("software-keyboard geometry keeps the composer in the visual viewport", async ({ page, request }) => {
   await page.addInitScript(() => {
     const viewport = new EventTarget() as EventTarget & { height: number; offsetTop: number };

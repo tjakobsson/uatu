@@ -4795,95 +4795,6 @@ body.is-resizing-chat .chat-resizer {
   gap: 0.5rem;
 }
 
-/* Request states. A user with ten requests could not tell which still needed
-   them: every card rendered identically and the queued ones claimed to be
-   superseded. State is carried as data so the card, the badge, and the
-   outstanding count cannot disagree — and it is never colour alone, so the
-   signal survives colour-blindness, high contrast, and greyscale. */
-.chat-request[data-request-state="needs-answer"] {
-  border-color: var(--accent, #3b7dd8);
-  border-left-width: 3px;
-  background: var(--surface-raised);
-  color: var(--text-strong);
-}
-
-.chat-request[data-request-state="queued"] {
-  border-style: dashed;
-}
-
-/* A resolved request recedes to a one-line trace: no accent, tighter padding,
-   and a summary that reads as a settled fact rather than a card awaiting a
-   decision. Its body (resources, or the question's prompts) stays in the
-   collapsed <details>, one disclosure away for anyone auditing what happened. */
-.chat-request[data-request-state="resolved"] {
-  border-color: var(--border-soft);
-  padding: 0.3rem 0.6rem;
-  color: var(--text-subtle);
-}
-
-.chat-request[data-request-state="resolved"] > summary {
-  color: var(--text-subtle);
-  font-weight: 400;
-}
-
-.chat-request-trace {
-  margin-left: 0.4rem;
-  color: var(--text-subtle);
-  font-weight: 500;
-}
-
-.chat-request-asked {
-  margin: 0.3rem 0 0;
-  color: var(--text-subtle);
-}
-
-.chat-request-origin {
-  margin: 0.35rem 0 0;
-  font-size: 0.85em;
-  color: var(--text-subtle);
-}
-
-.chat-request-badge {
-  margin-left: 0.5rem;
-  padding: 0.05rem 0.4rem;
-  border: 1px solid var(--accent, #3b7dd8);
-  border-radius: 0.35rem;
-  font-size: 0.75em;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-  color: var(--accent, #3b7dd8);
-  white-space: nowrap;
-}
-
-.chat-request-badge.is-queued {
-  border-color: var(--border-medium);
-  font-weight: 500;
-  color: var(--text-subtle);
-}
-
-/* The consequence of "Allow always", stated where the choice is made. Measured
-   against a live OpenCode 1.18.18: it reaches later conversations and the
-   request's saved pattern, and dies with the OpenCode instance — it is not the
-   project-persistent rule its type shape suggests. Quiet enough not to shout
-   over the request, present enough to be read before clicking. */
-.chat-request-scope {
-  margin: 0.45rem 0 0;
-  font-size: 0.85em;
-  line-height: 1.4;
-  color: var(--text-subtle);
-}
-
-.chat-conversation-controls select,
-.chat-model-select,
-.chat-composer textarea,
-.chat-request input[type="text"] {
-  border: 1px solid var(--border-medium);
-  border-radius: 0.45rem;
-  color: var(--text-strong);
-  background: var(--surface);
-  font: inherit;
-}
-
 .chat-conversation-controls select {
   min-width: min(18rem, 38vw);
   padding: 0.4rem 0.55rem;
@@ -4969,10 +4880,111 @@ body.is-resizing-chat .chat-resizer {
 }
 
 #chat-items,
+#chat-drilldown-items,
 .chat-item,
 .chat-assistant-message {
   min-width: 0;
   max-width: 100%;
+}
+
+/* The transcript box: the parent's timeline and, over it, the subagent
+   drill-down. Everything else in the surface — the picker, the pinned tracks,
+   the outstanding-request pill, the composer — sits outside this box and
+   stays the parent's, which is what keeps the parent answerable while a
+   child is open. */
+.chat-transcript-area {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* One navigation model, two chromes. On the desktop split the child is an
+   inline drill-down laid over the parent's transcript — inset at the top and
+   shadowed, so the parent is visibly still there behind it rather than
+   replaced. Touch overrides this into a pushed screen further down. */
+.chat-drilldown {
+  position: absolute;
+  inset: 1.75rem 0 0;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-top: 1px solid var(--border-medium);
+  border-radius: 0.75rem 0.75rem 0 0;
+  background: var(--surface);
+  box-shadow: 0 -6px 20px rgb(0 0 0 / 18%);
+}
+
+.chat-drilldown[hidden] {
+  display: none;
+}
+
+.chat-drilldown-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border-soft);
+  border-radius: 0.75rem 0.75rem 0 0;
+  background: var(--surface-raised);
+}
+
+/* Returning is the layer's primary action, so it leads the header and reads
+   as a control rather than a hint. */
+.chat-drilldown-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  min-height: 2rem;
+  padding: 0.25rem 0.5rem 0.25rem 0.35rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.4rem;
+  color: var(--text-strong);
+  background: var(--surface);
+  font: inherit;
+  cursor: pointer;
+}
+
+.chat-drilldown-back:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.chat-drilldown-title {
+  overflow: hidden;
+  margin: 0;
+  color: var(--text-muted, inherit);
+  font-size: 0.8125em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-drilldown-state {
+  flex: 0 0 auto;
+}
+
+.chat-drilldown-state[hidden] {
+  display: none;
+}
+
+.chat-drilldown-timeline {
+  border-radius: 0;
+}
+
+/* The rail and the Latest button read the parent's timeline, which the child
+   is covering — they would be pointing at content that is not on screen. The
+   request pill is the opposite case: it is how the parent stays answerable,
+   so it stays up and above the layer. */
+.chat-surface[data-chat-drilldown] #chat-prompt-rail,
+.chat-surface[data-chat-drilldown] #chat-latest {
+  display: none;
+}
+
+.chat-surface[data-chat-drilldown] #chat-requests-jump {
+  z-index: 5;
 }
 
 .chat-assistant-message {
@@ -5670,6 +5682,51 @@ html[data-ui-mode="touch"][data-active-tab="chat"] .chat-surface {
   padding-top: env(safe-area-inset-top);
   padding-left: env(safe-area-inset-left);
   padding-right: env(safe-area-inset-right);
+}
+
+/* Touch navigates as a stack, so the same drill-down state renders as a
+   pushed screen rather than an inline layer: it takes the chat surface's own
+   fixed box (one z-index above it, so the tab bar below is untouched and Chat
+   is still the tab you are in) and the platform back gesture pops it — the
+   history entry pushed on open is what makes that gesture land here. */
+html[data-ui-mode="touch"] .chat-drilldown {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: var(--chat-visual-top, 0px);
+  bottom: auto;
+  height: var(--chat-visual-height, calc(100dvh - var(--tab-bar-total)));
+  z-index: 36;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  padding-top: env(safe-area-inset-top);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+  animation: chat-drilldown-push 180ms ease-out;
+}
+
+@keyframes chat-drilldown-push {
+  from {
+    transform: translateX(15%);
+    opacity: 0.35;
+  }
+
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+html[data-ui-mode="touch"] .chat-drilldown-header {
+  min-height: 3rem;
+  padding: 0.5rem 0.65rem;
+  border-radius: 0;
+}
+
+html[data-ui-mode="touch"] .chat-drilldown-back {
+  min-height: 2.5rem;
+  padding-inline: 0.6rem 0.75rem;
 }
 
 html[data-ui-mode="touch"] .chat-header {

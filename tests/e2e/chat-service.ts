@@ -22,6 +22,10 @@ export class FakeE2EChatService implements WorkspaceChatService {
   private readonly replay = new Map<string, ConversationReplay>();
   private readonly receipts = new Map<string, unknown>();
   private readonly olderItems = new Map<string, ConversationItem[]>();
+  // Conversations a subagent runs as. The real adapter keeps them out of the
+  // picker (a child session has a parentId), and Chat's drill-down navigation
+  // depends on that, so the fake has to keep the same shape.
+  private readonly children = new Set<string>();
   private readonly subscriptions = new Set<{ cancel(): void }>();
   // Counted so the suite can assert Chat's lazy backend startup: in production
   // status() launches the OpenCode server, so a page load that never opens
@@ -110,7 +114,9 @@ export class FakeE2EChatService implements WorkspaceChatService {
   }
 
   async listConversations(): Promise<ConversationSummary[]> {
-    return [...this.conversations.values()].sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
+    return [...this.conversations.values()]
+      .filter(conversation => !this.children.has(conversation.id))
+      .sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
   }
 
   async createConversation(): Promise<ConversationSnapshot> {
@@ -233,9 +239,10 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.replay.clear();
     this.receipts.clear();
     this.olderItems.clear();
+    this.children.clear();
   }
 
-  seed(title: string, items: ConversationItem[], older: ConversationItem[] = []): ConversationSnapshot {
+  seed(title: string, items: ConversationItem[], older: ConversationItem[] = [], child = false): ConversationSnapshot {
     const id = `conversation-${this.nextId++}`;
     const conversation: ConversationSummary = {
       id,
@@ -245,6 +252,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
       status: "idle",
     };
     this.conversations.set(id, conversation);
+    if (child) this.children.add(id);
     this.items.set(id, new Map(items.map(item => [item.id, item])));
     this.replay.set(id, new ConversationReplay(this.generation, id, 64 * 1024));
     if (older.length) this.olderItems.set(id, older);

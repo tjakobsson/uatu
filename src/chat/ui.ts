@@ -1,6 +1,7 @@
 import { escapeHtml } from "../shared/html";
 import { appState } from "../shell/state";
 import { presentationLocalStorage } from "../shell/presentation-storage";
+import { registerBackInterceptor } from "../shell/history";
 import { onWorkspaceCredentialRefresh } from "../terminal/client";
 import { ChatApiClient, ChatTransportError, type ChatEventStream } from "./client";
 import { TimelineAnchorController, type AnchorGeometry, type TimelineAnchor } from "./anchor";
@@ -72,6 +73,15 @@ export function initChat(): void {
   const chatTitle = document.querySelector<HTMLElement>("#chat-title");
   const chatContext = document.querySelector<HTMLElement>("#chat-context");
   const inputLabel = document.querySelector<HTMLElement>("#chat-input-label");
+  // The subagent drill-down's own box: a transcript over the parent's, with
+  // its own back affordance. Every use is guarded rather than joining the
+  // required-element check below, so a shell without it still runs Chat.
+  const drilldown = document.querySelector<HTMLElement>("#chat-drilldown");
+  const drilldownItems = document.querySelector<HTMLElement>("#chat-drilldown-items");
+  const drilldownTimeline = document.querySelector<HTMLElement>("#chat-drilldown-timeline");
+  const drilldownTitle = document.querySelector<HTMLElement>("#chat-drilldown-title");
+  const drilldownState = document.querySelector<HTMLElement>("#chat-drilldown-state");
+  const drilldownBack = document.querySelector<HTMLButtonElement>("#chat-drilldown-back");
   if (!surface || !timeline || !items || !state || !select || !newButton || !olderButton || !latestButton || !form || !input || !commandMenu || !send || !sendLabel || !modelSelect || !cancel || !composerStatus) return;
 
   const api = new ChatApiClient();
@@ -86,6 +96,26 @@ export function initChat(): void {
   let projection: ChatProjection | null = null;
   let stream: ChatEventStream | null = null;
   let selectionGeneration = 0;
+  // Viewing child X of parent Y. A subagent transcript is a drill-down into a
+  // turn, not a conversation: this state never reaches the picker, the
+  // inventory, or the stored per-conversation presentation, so returning to
+  // the parent is clearing it rather than re-selecting anything.
+  type Drilldown = {
+    conversationId: string;
+    label: string;
+    projection: ChatProjection | null;
+    stream: ChatEventStream | null;
+    // Touch pushes a history entry so the platform back gesture pops the
+    // child; the desktop split does not, because its return control is
+    // on screen beside the parent and a history entry there would put a
+    // transient view layer into the document back stack.
+    pushedHistory: boolean;
+  };
+  let child: Drilldown | null = null;
+  let childGeneration = 0;
+  const childRenderer = new TimelineRenderer();
+  const childAnchor = new TimelineAnchorController();
+  let releaseChildBack: (() => void) | null = null;
   let rendering = false;
   let renderFrame: number | null = null;
   let submitting = false;
@@ -159,13 +189,13 @@ export function initChat(): void {
     state.hidden = !message;
   };
 
-  const geometry = (): AnchorGeometry => {
-    const bounds = timeline.getBoundingClientRect();
+  const geometryOf = (scroller: HTMLElement, container: HTMLElement): AnchorGeometry => {
+    const bounds = scroller.getBoundingClientRect();
     return {
-      scrollTop: timeline.scrollTop,
-      clientHeight: timeline.clientHeight,
-      scrollHeight: timeline.scrollHeight,
-      items: Array.from(items.querySelectorAll<HTMLElement>("[data-chat-item-id]")).map(element => {
+      scrollTop: scroller.scrollTop,
+      clientHeight: scroller.clientHeight,
+      scrollHeight: scroller.scrollHeight,
+      items: Array.from(container.querySelectorAll<HTMLElement>("[data-chat-item-id]")).map(element => {
         const rect = element.getBoundingClientRect();
         return { id: element.dataset.chatItemId!, top: rect.top - bounds.top, bottom: rect.bottom - bounds.top };
       // Members of a collapsed activity group are not rendered and report
@@ -174,18 +204,19 @@ export function initChat(): void {
     };
   };
 
+  const geometry = (): AnchorGeometry => geometryOf(timeline, items);
+  const childGeometry = (): AnchorGeometry =>
+    drilldownTimeline && drilldownItems ? geometryOf(drilldownTimeline, drilldownItems) : geometryOf(timeline, items);
+
   const flushSave = () => {
     if (saveTimer !== null) {
       clearTimeout(saveTimer);
       saveTimer = null;
     }
-    // The picker options join the inventory: an opened subagent child is
-    // deliberately absent from `conversations` but present as a temporary
-    // option, and pruning it while open would delete its live draft.
-    const known = new Set([
-      ...conversations.map(conversation => conversation.id),
-      ...Array.from(select.options, option => option.value),
-    ]);
+    // The inventory is the whole truth about what may keep stored state: a
+    // subagent's transcript is a drill-down, never a picker option and never
+    // a conversation, so it has no draft here to protect.
+    const known = new Set(conversations.map(conversation => conversation.id));
     if (projection) known.add(projection.conversationId);
     // Prune only once the inventory has actually loaded — an empty list at
     // boot must not wipe every stored draft.
@@ -302,6 +333,9 @@ export function initChat(): void {
   requestsJump?.addEventListener("click", () => {
     const id = requestsJump.dataset.requestTarget;
     if (!id) return;
+    // The count is the parent's, so the jump is too: an open drill-down closes
+    // first rather than scrolling a timeline the child is covering.
+    closeChildConversation();
     const card = items.querySelector(`[data-chat-item-id="${CSS.escape(id)}"]`);
     if (!(card instanceof HTMLElement)) return;
     if (card instanceof HTMLDetailsElement) card.open = true;
@@ -681,6 +715,9 @@ export function initChat(): void {
   };
 
   const selectConversation = async (id: string) => {
+    // Choosing a conversation is leaving whatever turn was being drilled into:
+    // the drill-down is a view over the parent, and the parent is changing.
+    closeChildConversation();
     const token = ++selectionGeneration;
     stream?.close();
     stream = null;
@@ -824,57 +861,26 @@ export function initChat(): void {
     latestButton.hidden = true;
   });
 
-  items.addEventListener("toggle", event => {
-    const details = event.target as HTMLDetailsElement;
-    if (!details.matches("details[data-chat-item-id]")) return;
-    anchor.beforeMutation(geometry(), details.dataset.chatItemId);
-    if (details.open) expanded.add(details.dataset.chatItemId!); else expanded.delete(details.dataset.chatItemId!);
-    save();
-    requestAnimationFrame(() => { timeline.scrollTop = anchor.afterMutation(geometry()); });
-  }, true);
-
   /**
-   * Opens a subagent's child session as the viewed conversation. Children are
-   * filtered out of the picker, so a temporary option is inserted first —
-   * without one the select cannot show where you are, and re-choosing the
-   * parent would be a no-op change event.
+   * Expanding an activity group inside a transcript, for whichever timeline
+   * it belongs to. `expanded` is shared: an item id names one item wherever
+   * it is shown, so a group opened in a subagent's transcript stays open.
    */
-  const openChildConversation = (id: string, label: string) => {
-    if (!Array.from(select.options).some(option => option.value === id)) {
-      select.append(new Option(`↳ ${label}`, id));
-    }
-    select.value = id;
-    void selectConversation(id);
+  const wireExpansionToggle = (
+    container: HTMLElement,
+    scroller: HTMLElement,
+    controller: TimelineAnchorController,
+    measure: () => AnchorGeometry,
+  ) => {
+    container.addEventListener("toggle", event => {
+      const details = event.target as HTMLDetailsElement;
+      if (!details.matches("details[data-chat-item-id]")) return;
+      controller.beforeMutation(measure(), details.dataset.chatItemId);
+      if (details.open) expanded.add(details.dataset.chatItemId!); else expanded.delete(details.dataset.chatItemId!);
+      save();
+      requestAnimationFrame(() => { scroller.scrollTop = controller.afterMutation(measure()); });
+    }, true);
   };
-
-  items.addEventListener("click", event => {
-    const target = (event.target as Element).closest<HTMLElement>("[data-file-ref], [data-permission-outcome], [data-question-reject], [data-open-conversation]");
-    if (!target || !projection) return;
-    if (target.dataset.openConversation) {
-      openChildConversation(target.dataset.openConversation, target.closest("details")?.querySelector(".chat-activity-subject")?.textContent ?? "Subagent");
-      return;
-    }
-    if (target.dataset.fileRef) {
-      const reference = resolveWorkspaceFileReference(target.dataset.fileRef, appState.roots);
-      if (reference) void navigateWorkspaceFileReference(reference);
-      return;
-    }
-    const itemElement = target.closest<HTMLElement>("[data-chat-item-id]");
-    const item = projection.items.find(candidate => candidate.id === itemElement?.dataset.chatItemId);
-    if (!item || item.type === "user_message" || item.type === "assistant_message") return;
-    if (item.type === "permission" && target.dataset.permissionOutcome) {
-      void resolvePermission(item.id, target.dataset.permissionOutcome as PermissionOutcome);
-    } else if (item.type === "question" && target.dataset.questionReject !== undefined) {
-      void resolveQuestion(item.id, { kind: "rejected" });
-    }
-  });
-  items.addEventListener("keydown", event => {
-    const target = (event.target as Element).closest<HTMLElement>("[role=button][data-file-ref]");
-    if (target && (event.key === "Enter" || event.key === " ")) {
-      event.preventDefault();
-      target.click();
-    }
-  });
 
   /** A question is answered once any option is ticked or free-form text typed. */
   const panelAnswered = (panel: HTMLElement): boolean =>
@@ -920,82 +926,256 @@ export function initChat(): void {
     }
   };
 
-  items.addEventListener("change", event => {
-    const input = event.target as HTMLInputElement;
-    const form = input.form;
-    if (!form?.matches("form[data-question-form]")) return;
-    enforceSingleChoice(input, form);
-    syncQuestionForm(form);
-    // A lone single-choice question needs no confirmation step: picking the
-    // option is the answer. Anything with more questions, multiple allowed
-    // answers, or a free-form field keeps its explicit step.
-    if (input.type !== "radio") return;
-    const item = projection?.items.find(candidate => candidate.id === input.closest<HTMLElement>("[data-chat-item-id]")?.dataset.chatItemId);
-    if (!item || item.type !== "question" || item.questions.length !== 1) return;
-    const question = item.questions[0]!;
-    if (question.multiple || question.allowFreeForm) return;
-    void resolveQuestion(item.id, { kind: "answered", answers: [[input.value]] });
-  });
-  items.addEventListener("input", event => {
-    const input = event.target as HTMLInputElement;
-    const form = input.form;
-    if (!form?.matches("form[data-question-form]")) return;
-    enforceSingleChoice(input, form);
-    syncQuestionForm(form);
-  });
-  items.addEventListener("click", event => {
-    const tab = (event.target as Element).closest<HTMLButtonElement>("[data-question-tab]");
-    if (!tab?.form) return;
-    showQuestionPanel(tab.form, Number(tab.dataset.questionTab));
-  });
-
-  items.addEventListener("submit", event => {
-    const questionForm = event.target as HTMLFormElement;
-    if (!questionForm.matches("form[data-question-form]")) return;
-    event.preventDefault();
-    const item = projection?.items.find(candidate => candidate.id === questionForm.closest<HTMLElement>("[data-chat-item-id]")?.dataset.chatItemId);
-    if (!item || item.type !== "question") return;
-    const panels = [...questionForm.querySelectorAll<HTMLElement>("[data-question-panel]")];
-    const activeIndex = Math.max(0, panels.findIndex(panel => !panel.hidden));
-    // Not on the last step yet: advance instead of submitting. The primary
-    // button is "Next" here, so submitting the form means "go on".
-    if (activeIndex < panels.length - 1) {
-      showQuestionPanel(questionForm, activeIndex + 1);
-      return;
-    }
-    const data = new FormData(questionForm);
-    const answers = item.questions.map((_, index) => data.getAll(`q-${index}`).map(String).filter(Boolean));
-    // The button is disabled until every step is satisfied, so this only
-    // catches a form submitted some other way (Enter in the free-form field).
-    const missing = answers.flatMap((answer, index) => answer.length === 0 ? [index] : []);
-    if (missing.length > 0) {
-      showQuestionPanel(questionForm, missing[0]!);
-      announce(`Still to answer: ${missing.map(index => item.questions[index]!.header).filter(Boolean).join(", ")}`, true);
-      return;
-    }
-    void resolveQuestion(item.id, { kind: "answered", answers });
-  });
-
-  const resolvePermission = async (itemId: string, outcome: PermissionOutcome) => {
-    if (!projection) return;
-    const item = projection.items.find(candidate => candidate.id === itemId);
+  const resolvePermission = async (source: ChatProjection, itemId: string, outcome: PermissionOutcome) => {
+    const item = source.items.find(candidate => candidate.id === itemId);
     if (!item || item.type !== "permission" || item.status !== "pending") return;
     disableCard(itemId, true);
     // Addressed to the conversation that owns the request, not the one on
     // screen: a subagent's request shown in its parent must be answered for the
     // subagent, so the child's requirePending guard and receipt key govern it.
-    try { await api.permission(item.conversationId ?? projection.conversationId, item.requestId, newRequestId(), outcome); }
+    try { await api.permission(item.conversationId ?? source.conversationId, item.requestId, newRequestId(), outcome); }
     catch (error) { announce(messageOf(error), true); disableCard(itemId, false); }
   };
 
-  const resolveQuestion = async (itemId: string, outcome: QuestionOutcome) => {
-    if (!projection) return;
-    const item = projection.items.find(candidate => candidate.id === itemId);
+  const resolveQuestion = async (source: ChatProjection, itemId: string, outcome: QuestionOutcome) => {
+    const item = source.items.find(candidate => candidate.id === itemId);
     if (!item || item.type !== "question" || item.status !== "pending") return;
     disableCard(itemId, true);
-    try { await api.question(item.conversationId ?? projection.conversationId, item.requestId, newRequestId(), outcome); }
+    try { await api.question(item.conversationId ?? source.conversationId, item.requestId, newRequestId(), outcome); }
     catch (error) { announce(messageOf(error), true); disableCard(itemId, false); }
   };
+
+  /**
+   * Every interaction a rendered transcript offers, wired once per timeline.
+   * The parent's items and the drill-down's are the same markup rendered from
+   * different projections, so the projection they read is the only difference:
+   * a request in a subagent's transcript resolves against the subagent, one in
+   * the parent's against the parent — which is what keeps the parent
+   * answerable while a child is open.
+   */
+  const wireItemInteractions = (container: HTMLElement, sourceProjection: () => ChatProjection | null) => {
+    container.addEventListener("click", event => {
+      const target = (event.target as Element).closest<HTMLElement>("[data-file-ref], [data-permission-outcome], [data-question-reject], [data-open-conversation]");
+      const source = sourceProjection();
+      if (!target || !source) return;
+      if (target.dataset.openConversation) {
+        openChildConversation(target.dataset.openConversation, target.closest("details")?.querySelector(".chat-activity-subject")?.textContent ?? "Subagent");
+        return;
+      }
+      if (target.dataset.fileRef) {
+        const reference = resolveWorkspaceFileReference(target.dataset.fileRef, appState.roots);
+        if (reference) void navigateWorkspaceFileReference(reference);
+        return;
+      }
+      const itemElement = target.closest<HTMLElement>("[data-chat-item-id]");
+      const item = source.items.find(candidate => candidate.id === itemElement?.dataset.chatItemId);
+      if (!item || item.type === "user_message" || item.type === "assistant_message") return;
+      if (item.type === "permission" && target.dataset.permissionOutcome) {
+        void resolvePermission(source, item.id, target.dataset.permissionOutcome as PermissionOutcome);
+      } else if (item.type === "question" && target.dataset.questionReject !== undefined) {
+        void resolveQuestion(source, item.id, { kind: "rejected" });
+      }
+    });
+    container.addEventListener("keydown", event => {
+      const target = (event.target as Element).closest<HTMLElement>("[role=button][data-file-ref]");
+      if (target && (event.key === "Enter" || event.key === " ")) {
+        event.preventDefault();
+        target.click();
+      }
+    });
+    container.addEventListener("change", event => {
+      const input = event.target as HTMLInputElement;
+      const form = input.form;
+      if (!form?.matches("form[data-question-form]")) return;
+      enforceSingleChoice(input, form);
+      syncQuestionForm(form);
+      // A lone single-choice question needs no confirmation step: picking the
+      // option is the answer. Anything with more questions, multiple allowed
+      // answers, or a free-form field keeps its explicit step.
+      if (input.type !== "radio") return;
+      const source = sourceProjection();
+      const item = source?.items.find(candidate => candidate.id === input.closest<HTMLElement>("[data-chat-item-id]")?.dataset.chatItemId);
+      if (!source || !item || item.type !== "question" || item.questions.length !== 1) return;
+      const question = item.questions[0]!;
+      if (question.multiple || question.allowFreeForm) return;
+      void resolveQuestion(source, item.id, { kind: "answered", answers: [[input.value]] });
+    });
+    container.addEventListener("input", event => {
+      const input = event.target as HTMLInputElement;
+      const form = input.form;
+      if (!form?.matches("form[data-question-form]")) return;
+      enforceSingleChoice(input, form);
+      syncQuestionForm(form);
+    });
+    container.addEventListener("click", event => {
+      const tab = (event.target as Element).closest<HTMLButtonElement>("[data-question-tab]");
+      if (!tab?.form) return;
+      showQuestionPanel(tab.form, Number(tab.dataset.questionTab));
+    });
+    container.addEventListener("submit", event => {
+      const questionForm = event.target as HTMLFormElement;
+      if (!questionForm.matches("form[data-question-form]")) return;
+      event.preventDefault();
+      const source = sourceProjection();
+      const item = source?.items.find(candidate => candidate.id === questionForm.closest<HTMLElement>("[data-chat-item-id]")?.dataset.chatItemId);
+      if (!source || !item || item.type !== "question") return;
+      const panels = [...questionForm.querySelectorAll<HTMLElement>("[data-question-panel]")];
+      const activeIndex = Math.max(0, panels.findIndex(panel => !panel.hidden));
+      // Not on the last step yet: advance instead of submitting. The primary
+      // button is "Next" here, so submitting the form means "go on".
+      if (activeIndex < panels.length - 1) {
+        showQuestionPanel(questionForm, activeIndex + 1);
+        return;
+      }
+      const data = new FormData(questionForm);
+      const answers = item.questions.map((_, index) => data.getAll(`q-${index}`).map(String).filter(Boolean));
+      // The button is disabled until every step is satisfied, so this only
+      // catches a form submitted some other way (Enter in the free-form field).
+      const missing = answers.flatMap((answer, index) => answer.length === 0 ? [index] : []);
+      if (missing.length > 0) {
+        showQuestionPanel(questionForm, missing[0]!);
+        announce(`Still to answer: ${missing.map(index => item.questions[index]!.header).filter(Boolean).join(", ")}`, true);
+        return;
+      }
+      void resolveQuestion(source, item.id, { kind: "answered", answers });
+    });
+  };
+
+  const announceChild = (message: string, error = false) => {
+    if (!drilldownState) return;
+    drilldownState.textContent = message;
+    drilldownState.classList.toggle("is-error", error);
+    drilldownState.hidden = !message;
+  };
+
+  const renderChild = (newContent: boolean) => {
+    if (!drilldownItems || !drilldownTimeline) return;
+    childAnchor.beforeMutation(childGeometry());
+    const dirty = childRenderer.render(drilldownItems, child?.projection ?? null, expanded);
+    drilldownTimeline.scrollTop = childAnchor.afterMutation(childGeometry(), newContent);
+    for (const node of dirty) {
+      decorateFileLinks(node);
+      node.querySelectorAll<HTMLFormElement>("form[data-question-form]").forEach(syncQuestionForm);
+    }
+  };
+
+  /**
+   * Leaves the drill-down. Not a conversation switch: the picker never moved
+   * off the parent and the parent's projection, composer, and stream stayed
+   * mounted behind the child, so returning is clearing this state.
+   *
+   * `popped` says the platform back gesture delivered us here. Otherwise, when
+   * a history entry was pushed for the layer and is still the current one, the
+   * pop is asked for instead of finishing directly — leaving a back-stack
+   * entry for a layer that is no longer open would make the next back press a
+   * no-op.
+   */
+  const closeChildConversation = (popped = false) => {
+    const open = child;
+    if (!open) return;
+    if (!popped && open.pushedHistory && (history.state as { chatDrilldown?: boolean } | null)?.chatDrilldown === true) {
+      child = { ...open, pushedHistory: false };
+      history.back();
+      return;
+    }
+    child = null;
+    childGeneration += 1;
+    open.stream?.close();
+    releaseChildBack?.();
+    releaseChildBack = null;
+    if (drilldownItems) childRenderer.render(drilldownItems, null, expanded);
+    if (drilldown) drilldown.hidden = true;
+    if (drilldownTitle) drilldownTitle.textContent = "";
+    announceChild("");
+    surface.removeAttribute("data-chat-drilldown");
+    // Back to the parent at its live position: it never unmounted, so this is
+    // only re-asserting the anchor the timeline was already holding.
+    timeline.scrollTop = anchor.afterMutation(geometry());
+    timeline.focus({ preventScroll: true });
+  };
+
+  /**
+   * Opens a subagent's transcript as a drill-down over the parent. The picker
+   * keeps showing the parent — a subagent is a detail of a turn, not a
+   * conversation anyone can start or resume, so it is reached from the row
+   * that launched it and from nowhere else.
+   *
+   * A subagent opened from inside another subagent's transcript replaces the
+   * one on screen: the drill-down is one level deep by design, and back
+   * returns to the conversation the picker still shows.
+   */
+  const openChildConversation = (id: string, label: string) => {
+    if (!drilldown || !drilldownItems || !drilldownTimeline) return;
+    const generation = ++childGeneration;
+    const previous = child;
+    previous?.stream?.close();
+    const next: Drilldown = { conversationId: id, label, projection: null, stream: null, pushedHistory: previous?.pushedHistory ?? false };
+    child = next;
+    // Touch navigates as a stack, so the child is a pushed screen and the
+    // platform back gesture is what pops it. The desktop split keeps the
+    // parent beside the child and returns with the control in the layer's
+    // header, so it puts nothing in the document back stack.
+    if (document.documentElement.dataset.uiMode === "touch" && !next.pushedHistory) {
+      try {
+        history.pushState({ ...(history.state as Record<string, unknown> | null), chatDrilldown: true }, "", location.href);
+        next.pushedHistory = true;
+      } catch { /* history is best effort; the header control still returns */ }
+    }
+    releaseChildBack ??= registerBackInterceptor(() => {
+      if (!child) return false;
+      closeChildConversation(true);
+      return true;
+    });
+    if (drilldownTitle) drilldownTitle.textContent = label;
+    drilldown.hidden = false;
+    surface.setAttribute("data-chat-drilldown", "open");
+    childRenderer.render(drilldownItems, null, expanded);
+    childAnchor.restore(null);
+    announceChild("Loading transcript…");
+    drilldownBack?.focus();
+    void (async () => {
+      try {
+        const snapshot = await api.snapshot(id);
+        if (generation !== childGeneration || child !== next) return;
+        next.projection = projectionFromSnapshot(snapshot, []);
+        announceChild(snapshot.items.length ? "" : "This subagent has not reported anything yet.");
+        renderChild(false);
+        next.stream = api.stream(id, snapshot.cursor, {
+          event: (event, cursor) => {
+            if (generation !== childGeneration || !next.projection) return;
+            const result = applyChatEvent(next.projection, event, cursor);
+            // A gap in a drill-down is refetched in place; it is a view over a
+            // turn, so there is no selection to re-run.
+            if (result.outcome === "gap" || result.outcome === "resync") {
+              openChildConversation(id, label);
+              return;
+            }
+            next.projection = result.projection;
+            if (result.outcome === "applied") { announceChild(""); renderChild(true); }
+          },
+          resync: () => { if (generation === childGeneration) openChildConversation(id, label); },
+          error: error => { if (generation === childGeneration) announceChild(error.message, true); },
+        });
+      } catch (error) {
+        if (generation === childGeneration) announceChild(messageOf(error), true);
+      }
+    })();
+  };
+
+  drilldownBack?.addEventListener("click", () => closeChildConversation());
+  drilldown?.addEventListener("keydown", event => {
+    if (event.key !== "Escape") return;
+    event.stopPropagation();
+    closeChildConversation();
+  });
+
+  wireExpansionToggle(items, timeline, anchor, geometry);
+  wireItemInteractions(items, () => projection);
+  if (drilldownItems && drilldownTimeline) {
+    wireExpansionToggle(drilldownItems, drilldownTimeline, childAnchor, childGeometry);
+    wireItemInteractions(drilldownItems, () => child?.projection ?? null);
+    drilldownTimeline.addEventListener("scroll", () => { childAnchor.observe(childGeometry()); }, { passive: true });
+  }
 
   const closeCommandMenu = () => {
     commandMatch = null;
@@ -1158,6 +1338,7 @@ export function initChat(): void {
   window.addEventListener("pagehide", () => {
     flushSave();
     stream?.close();
+    child?.stream?.close();
     observer?.disconnect();
     surfaceObserver.disconnect();
     viewport.stop();
@@ -1373,6 +1554,11 @@ function parseStoredModels(value: unknown): Record<string, ModelSelection> {
   return Object.fromEntries(entries);
 }
 
+/**
+ * Token counts at a glance: `840`, `12.4k`, `1.2M`. The exact figure is always
+ * one hover or one expansion away (the title attribute and the breakdown), so
+ * the compact form never has to be the only statement.
+ */
 function modelValue(model: ModelSelection): string {
   return JSON.stringify([model.providerId, model.modelId]);
 }
