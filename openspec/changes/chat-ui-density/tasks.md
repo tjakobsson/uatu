@@ -20,4 +20,4 @@
 ## 4. Finish
 
 - [x] 4.1 Run `bun test`, then `bun test:e2e`
-- [ ] 4.2 Open the PR with the `BEGIN_COMMIT_OVERRIDE` block — this corrects unreleased presentation, not a stable regression
+- [x] 4.2 Open the PR with the `BEGIN_COMMIT_OVERRIDE` block — this corrects unreleased presentation, not a stable regression
