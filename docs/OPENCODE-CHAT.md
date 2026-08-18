@@ -48,7 +48,7 @@ workspace credential and proxies Chat HTTP and SSE traffic under
 `/s/<workspace-id>/`; it does not expose the loopback OpenCode endpoint. Hub
 users share the authority of the operating-system account running the hub.
 
-An OpenCode agent can read files, execute commands, and modify anything that
+An agent can read files, execute commands, and modify anything that
 the daemon's OS user can access. uatu workspace membership and OpenCode
 permission prompts are not an OS sandbox. Do not give mutually untrusted users
 access to one hub account or daemon user. See [Self-hosting](./SELF-HOSTING.md)
@@ -76,13 +76,31 @@ for the complete trust model and network guidance.
 - **Hub Chat is unauthorized:** sign in again and verify the workspace is
   running. Do not proxy a child session directly or rewrite its base path.
 
+## Vocabulary
+
+Three words, three meanings. They are used this way in the UI, in the specs,
+and in the route table.
+
+- **agent** — the program Chat talks to. OpenCode is the only one today.
+- **mode** — how that agent is asked to work: Build, Plan, and whatever else
+  the agent offers. Listed at `/api/chat/modes`. OpenCode calls these agents on
+  its own wire; uatu does not, because the word is taken.
+- **subagent** — an agent the agent spawned inside a turn. What the pinned
+  bottom track shows.
+
+An agent declares what it can do, and Chat presents a control only when the
+capability behind it is declared. A capability is declared positively: it is in
+the agent's list, or the agent does not have it. There is no "false" and no
+"unknown", so an absent control means the agent cannot do that thing — not that
+it failed, and not that it is empty.
+
 ## Scope
 
-This integration is OpenCode-only. It does not implement ACP, Claude Code,
-Codex, session sharing/fork/revert, image attachments, or a native SwiftUI chat
-renderer. Other providers may be added later behind uatu's normalized API;
-OpenCode's own provider support remains configured and authenticated through
-OpenCode today.
+OpenCode is the only agent currently declared. This integration does not
+implement ACP, Claude Code, Codex, session sharing/fork/revert, image
+attachments, or a native SwiftUI chat renderer. Another agent may be added
+later behind uatu's normalized API; OpenCode's own provider support remains
+configured and authenticated through OpenCode today.
 
 Chat does surface the models OpenCode already has configured, so a conversation
 can pick among them, and it offers OpenCode's own slash commands. Neither adds

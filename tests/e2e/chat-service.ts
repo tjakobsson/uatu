@@ -3,6 +3,7 @@ import { deriveConversationTitle } from "../../src/chat/adapter";
 import type { WorkspaceChatService } from "../../src/chat/service";
 import { ConversationNotFoundError } from "../../src/chat/workspace";
 import type {
+  ChatCapability,
   ChatEvent,
   ChatAvailability,
   ConversationItem,
@@ -30,7 +31,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
   // assert that a retry after an ambiguous failure reuses the id (the
   // at-most-once contract) instead of minting a fresh one.
   promptAttempts: string[] = [];
-  promptAgents: string[] = [];
+  promptModes: string[] = [];
   // When set, the next prompt stalls half a second and then rejects —
   // enough of a window for a test to deterministically switch conversations
   // while the request is in flight.
@@ -39,10 +40,22 @@ export class FakeE2EChatService implements WorkspaceChatService {
   // suite can drive the unavailable surface. A retry clears it, which is the
   // recovery path a user takes after fixing their environment.
   private unavailable: Extract<ChatAvailability, { state: "unavailable" }> | null = null;
+  // The capabilities this fake declares. A test can narrow them to drive the
+  // surface an agent that offers less produces — the one path a workspace with
+  // a single real agent can never reach on its own.
+  private capabilities: ChatCapability[] = ["modes", "models", "commands", "questions", "permissions", "subagents"];
 
   async status(): Promise<ChatAvailability> {
     this.statusCalls += 1;
-    return this.unavailable ?? { state: "ready", version: "e2e" };
+    return this.unavailable ?? {
+      state: "ready",
+      version: "e2e",
+      agent: { id: "e2e", name: "Fixture Agent", capabilities: this.capabilities },
+    };
+  }
+
+  declareOnly(capabilities: ChatCapability[]): void {
+    this.capabilities = capabilities;
   }
 
   async retry(): Promise<ChatAvailability> {
@@ -80,10 +93,10 @@ export class FakeE2EChatService implements WorkspaceChatService {
     ];
   }
 
-  async agents() {
+  async modes() {
     return [
-      { name: "build", description: "Full read-write agent" },
-      { name: "plan", description: "Read-only planning agent" },
+      { name: "build", description: "Full read-write mode" },
+      { name: "plan", description: "Read-only planning mode" },
     ];
   }
 
@@ -130,12 +143,12 @@ export class FakeE2EChatService implements WorkspaceChatService {
     return { snapshot: await handoff.snapshot, events: handoff.subscription };
   }
 
-  async prompt(id: string, requestId: string, text: string, model?: ModelSelection, agent?: string): Promise<{
+  async prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string): Promise<{
     messageId: string;
     delivery: "steer" | "queue";
     conversation?: ConversationSummary;
   }> {
-    if (agent) this.promptAgents.push(agent);
+    if (mode) this.promptModes.push(mode);
     const key = `prompt:${id}:${requestId}`;
     const existing = this.receipts.get(key) as { messageId: string; delivery: "steer" | "queue"; conversation?: ConversationSummary } | undefined;
     if (existing) return existing;
@@ -209,7 +222,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.disconnect();
     this.statusCalls = 0;
     this.promptAttempts = [];
-    this.promptAgents = [];
+    this.promptModes = [];
     this.failNextPrompt = false;
     this.generation = `e2e-chat-${this.nextId++}`;
     this.conversations.clear();

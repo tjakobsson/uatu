@@ -681,12 +681,12 @@
           </button>
           <header class="chat-header">
             <div>
-              <p id="chat-context" class="eyebrow">OpenCode</p>
+              <p id="chat-context" class="eyebrow">Chat</p>
               <!-- The visible conversation name is the picker below — a
                    visible heading said the same thing twice (the touch header
                    learned this first). Kept for assistive tech and as the
                    document-outline entry for the surface. -->
-              <h2 id="chat-title" class="sr-only">OpenCode Chat</h2>
+              <h2 id="chat-title" class="sr-only">Chat</h2>
             </div>
             <div class="chat-conversation-controls">
               <label class="sr-only" for="chat-conversation-select">Conversation</label>
@@ -706,7 +706,7 @@
               </button>
             </div>
           </header>
-          <div id="chat-state" class="chat-state" role="status" aria-live="polite">Loading OpenCode…</div>
+          <div id="chat-state" class="chat-state" role="status" aria-live="polite">Loading chat…</div>
           <div id="chat-find-slot" class="find-slot"></div>
           <div id="chat-timeline" class="chat-timeline" role="log" aria-live="polite" aria-relevant="additions text" tabindex="0">
             <button id="chat-load-older" class="chat-secondary-button chat-load-older" type="button" hidden>Load older messages</button>
@@ -724,13 +724,13 @@
             <ul id="chat-task-list-items"></ul>
           </details>
           <form id="chat-composer" class="chat-composer" hidden>
-            <label class="sr-only" for="chat-input">Message OpenCode</label>
+            <label class="sr-only" id="chat-input-label" for="chat-input">Send a message</label>
             <div id="chat-command-menu" class="chat-command-menu" role="listbox" aria-label="Slash commands" hidden></div>
-            <textarea id="chat-input" rows="1" placeholder="Ask OpenCode…" aria-describedby="chat-composer-status" aria-controls="chat-command-menu" aria-expanded="false" aria-autocomplete="list"></textarea>
+            <textarea id="chat-input" rows="1" placeholder="Send a message…" aria-describedby="chat-composer-status" aria-controls="chat-command-menu" aria-expanded="false" aria-autocomplete="list"></textarea>
             <div class="chat-composer-actions">
               <span id="chat-composer-status" role="status" aria-live="polite">Ready</span>
-              <label class="sr-only" for="chat-agent-select">Agent</label>
-              <select id="chat-agent-select" class="chat-model-select" aria-label="Chat agent" hidden></select>
+              <label class="sr-only" for="chat-mode-select">Mode</label>
+              <select id="chat-mode-select" class="chat-model-select" aria-label="Chat mode" hidden></select>
               <label class="sr-only" for="chat-model-select">Model</label>
               <select id="chat-model-select" class="chat-model-select" aria-label="Chat model" disabled>
                 <option>Loading models...</option>

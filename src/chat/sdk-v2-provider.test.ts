@@ -249,20 +249,20 @@ describe("OpenCode v2 identity policy", () => {
     } as unknown as OpencodeClient;
     const provider = new SdkV2Provider(client, "/workspace");
 
-    expect(await provider.listAgents()).toEqual([
+    expect(await provider.listModes()).toEqual([
       { name: "build", description: "Writes code" },
       { name: "plan", description: "Read-only" },
     ]);
 
     await provider.createSession("client-uuid");
-    await provider.prompt("ses_agenty", { id: "client-uuid", text: "hello", delivery: "queue", agent: "build" });
+    await provider.prompt("ses_agenty", { id: "client-uuid", text: "hello", delivery: "queue", mode: "build" });
     expect(promptInput).toEqual(expect.objectContaining({ agent: "build" }));
   });
 
-  test("switches a v2 session's agent at the session level, not on the prompt", async () => {
+  test("switches a v2 session's mode at the session level, not on the prompt", async () => {
     // The generated v2 prompt serializer passes through only
-    // id/prompt/delivery/resume — an agent property there is silently
-    // dropped, so the switch must be its own call.
+    // id/prompt/delivery/resume — the mode (OpenCode's `agent` field) there is
+    // silently dropped, so the switch must be its own call.
     const calls: Array<[string, Record<string, unknown>]> = [];
     const client = {
       v2: {
@@ -274,7 +274,7 @@ describe("OpenCode v2 identity policy", () => {
     } as unknown as OpencodeClient;
     const provider = new SdkV2Provider(client, "/workspace");
 
-    await provider.prompt("ses_native", { id: "client-uuid", text: "go", delivery: "queue", agent: "build" });
+    await provider.prompt("ses_native", { id: "client-uuid", text: "go", delivery: "queue", mode: "build" });
     expect(calls[0]).toEqual(["switchAgent", { sessionID: "ses_native", agent: "build" }]);
     expect(calls[1]![0]).toBe("prompt");
     expect(calls[1]![1]).not.toHaveProperty("agent");

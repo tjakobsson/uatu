@@ -15,7 +15,7 @@ info:
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
     hubApiRevision: 1
-    workspaceApiRevision: 3
+    workspaceApiRevision: 4
 servers:
   - url: https://{hubHost}
     variables:
@@ -79,8 +79,8 @@ paths:
               example:
                 version: 0.5.1 (abcdef0)
                 hubApiRevision: 1
-                workspaceApiRevision: 3
-                workspaces: [{ id: uatu, path: /src/uatu, backend: local, running: true, workspaceApiRevision: 3, shells: [{ attached: false, label: zsh }] }]
+                workspaceApiRevision: 4
+                workspaces: [{ id: uatu, path: /src/uatu, backend: local, running: true, workspaceApiRevision: 4, shells: [{ attached: false, label: zsh }] }]
         '401': { $ref: '#/components/responses/Error' }
   /api/hub/browse:
     get:
@@ -272,7 +272,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/WorkspaceState' }
-              example: { workspaceApiRevision: 3, roots: [], repositories: [], compareTarget: base, initialFollow: true, defaultDocumentId: null, changedId: null, generatedAt: 0, build: { version: 0.5.1, branch: main, commitSha: abcdef, commitShort: abcdef, release: false, identifier: 0.5.1, bundledWebRevision: 1 }, scope: { kind: folder }, unscopedFingerprint: 3f2a, terminal: enabled }
+              example: { workspaceApiRevision: 4, roots: [], repositories: [], compareTarget: base, initialFollow: true, defaultDocumentId: null, changedId: null, generatedAt: 0, build: { version: 0.5.1, branch: main, commitSha: abcdef, commitShort: abcdef, release: false, identifier: 0.5.1, bundledWebRevision: 1 }, scope: { kind: folder }, unscopedFingerprint: 3f2a, terminal: enabled }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
@@ -391,14 +391,14 @@ paths:
         '500': { $ref: '#/components/responses/Error' }
         '502': { $ref: '#/components/responses/SessionUnreachable' }
         '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
-  /s/{workspaceId}/api/chat/agents:
+  /s/{workspaceId}/api/chat/modes:
     parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
     get:
-      operationId: workspaceListChatAgents
+      operationId: workspaceListChatModes
       tags: [Chat]
-      summary: List primary OpenCode agents a prompt can run under
+      summary: List the modes a prompt can run under
       responses:
-        '200': { description: Available chat agents, content: { application/json: { schema: { $ref: '#/components/schemas/ChatAgentList' } } } }
+        '200': { description: Available chat modes, content: { application/json: { schema: { $ref: '#/components/schemas/ChatModeList' } } } }
         '401': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
         '502': { $ref: '#/components/responses/SessionUnreachable' }
@@ -849,7 +849,7 @@ components:
     ChatAvailability:
       oneOf:
         - { type: object, required: [state], properties: { state: { enum: [idle, starting] } }, additionalProperties: false }
-        - { type: object, required: [state, version], properties: { state: { const: ready }, version: { type: string, minLength: 1 } }, additionalProperties: false }
+        - { type: object, required: [state, version], properties: { state: { const: ready }, version: { type: string, minLength: 1 }, agent: { $ref: '#/components/schemas/ChatAgent' } }, additionalProperties: false }
         - { type: object, required: [state, reason, message], properties: { state: { const: unavailable }, reason: { enum: [not-installed, startup-failed, unsupported] }, message: { type: string, minLength: 1 }, diagnostics: { $ref: '#/components/schemas/ChatStartupDiagnostics' } }, additionalProperties: false }
     ChatProbeOutcome:
       oneOf:
@@ -866,8 +866,9 @@ components:
     ModelSelection: { type: object, required: [providerId, modelId], properties: { providerId: { type: string, minLength: 1, maxLength: 512 }, modelId: { type: string, minLength: 1, maxLength: 512 } }, additionalProperties: false }
     ChatModel: { type: object, required: [selection, provider, name], properties: { selection: { $ref: '#/components/schemas/ModelSelection' }, provider: { type: string, minLength: 1 }, name: { type: string, minLength: 1 } }, additionalProperties: false }
     ChatModelList: { type: object, required: [models], properties: { models: { type: array, items: { $ref: '#/components/schemas/ChatModel' } } }, additionalProperties: false }
-    ChatAgent: { type: object, required: [name, description], properties: { name: { type: string, minLength: 1, maxLength: 512 }, description: { type: string } }, additionalProperties: false }
-    ChatAgentList: { type: object, required: [agents], properties: { agents: { type: array, items: { $ref: '#/components/schemas/ChatAgent' } } }, additionalProperties: false }
+    ChatAgent: { type: object, required: [id, name, capabilities], description: "The agent Chat is talking to. Capabilities are declared positively: a capability is listed or the agent does not have it.", properties: { id: { type: string, minLength: 1, maxLength: 512 }, name: { type: string, minLength: 1, maxLength: 512 }, capabilities: { type: array, items: { enum: [modes, models, commands, questions, permissions, subagents] } } }, additionalProperties: false }
+    ChatMode: { type: object, required: [name, description], properties: { name: { type: string, minLength: 1, maxLength: 512 }, description: { type: string } }, additionalProperties: false }
+    ChatModeList: { type: object, required: [modes], properties: { modes: { type: array, items: { $ref: '#/components/schemas/ChatMode' } } }, additionalProperties: false }
     ChatCommand: { type: object, required: [name, description, argumentHint, kind], properties: { name: { type: string, minLength: 1, maxLength: 512, pattern: '^[^\s/]+$' }, description: { type: string }, argumentHint: { type: string }, kind: { enum: [command, skill] } }, additionalProperties: false }
     ChatCommandList: { type: object, required: [commands], properties: { commands: { type: array, items: { $ref: '#/components/schemas/ChatCommand' } } }, additionalProperties: false }
     ConversationSummary:
@@ -898,7 +899,7 @@ components:
     QuestionItem: { type: object, required: [id, type, createdAt, requestId, questions, status], properties: { id: { type: string }, type: { const: question }, createdAt: { type: number }, requestId: { type: string }, conversationId: { type: string, minLength: 1, maxLength: 512, description: "Conversation that owns this request. See PermissionItem.conversationId." }, questions: { type: array, items: { $ref: '#/components/schemas/StructuredQuestion' } }, status: { enum: [pending, resolved] }, outcome: { $ref: '#/components/schemas/QuestionOutcome' } }, additionalProperties: false }
     ConversationSnapshot: { type: object, required: [conversation, generation, cursor, items], properties: { conversation: { $ref: '#/components/schemas/ConversationSummary' }, generation: { type: string }, cursor: { type: string }, items: { type: array, items: { $ref: '#/components/schemas/ConversationItem' } }, olderCursor: { type: string } }, additionalProperties: false }
     ChatMutationRequest: { type: object, required: [requestId], properties: { requestId: { type: string, minLength: 1, maxLength: 512 } }, additionalProperties: false }
-    ChatPromptRequest: { type: object, required: [requestId, text], properties: { requestId: { type: string, minLength: 1, maxLength: 512 }, text: { type: string, minLength: 1, maxLength: 65536 }, model: { $ref: '#/components/schemas/ModelSelection' }, agent: { type: string, minLength: 1, maxLength: 512 } }, additionalProperties: false }
+    ChatPromptRequest: { type: object, required: [requestId, text], properties: { requestId: { type: string, minLength: 1, maxLength: 512 }, text: { type: string, minLength: 1, maxLength: 65536 }, model: { $ref: '#/components/schemas/ModelSelection' }, mode: { type: string, minLength: 1, maxLength: 512 } }, additionalProperties: false }
     ChatPromptAccepted: { type: object, required: [messageId, delivery], properties: { messageId: { type: string }, delivery: { enum: [steer, queue] }, conversation: { $ref: '#/components/schemas/ConversationSummary' } }, additionalProperties: false }
     ChatCancelResult: { type: object, required: [cancelled], properties: { cancelled: { const: true } }, additionalProperties: false }
     PermissionResponseRequest: { type: object, required: [requestId, outcome], properties: { requestId: { type: string, minLength: 1, maxLength: 512 }, outcome: { enum: [approved-once, approved-session, rejected] } }, additionalProperties: false }

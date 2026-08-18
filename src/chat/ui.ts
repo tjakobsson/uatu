@@ -18,7 +18,7 @@ import {
   removeAcceptedDraft,
   type ChatProjection,
 } from "./projection";
-import type { ChatAgent, ChatAvailability, ChatCommand, ChatModel, ConversationItem, ConversationSummary, ModelSelection, PermissionOutcome, QuestionOutcome } from "./types";
+import type { ChatAgent, ChatCapability, ChatMode, ChatAvailability, ChatCommand, ChatModel, ConversationItem, ConversationSummary, ModelSelection, PermissionOutcome, QuestionOutcome } from "./types";
 import { formatDiagnostics } from "./diagnostics";
 
 const PRESENTATION_KEY = "uatu:chat-presentation";
@@ -35,16 +35,16 @@ type Presentation = {
   // claim whatever was last chosen anywhere, for every conversation.
   model?: ModelSelection;
   models: Record<string, ModelSelection>;
-  // Same shape for the agent (Build/Plan/...). Empty means "OpenCode's
-  // default": the picker never claims to know a session's current agent.
-  agent?: string;
-  agents: Record<string, string>;
+  // Same shape for the mode (Build/Plan/...). Empty means the agent's own
+  // default: the picker never claims to know a session's current mode.
+  mode?: string;
+  modes: Record<string, string>;
   // Dismissed finished-subagent entry ids, per conversation — dismissal is a
   // user statement that must survive reload.
   dismissedSubagents: Record<string, string[]>;
 };
 
-const EMPTY_PRESENTATION: Presentation = { drafts: {}, expanded: [], anchors: {}, workingSince: {}, models: {}, agents: {}, dismissedSubagents: {} };
+const EMPTY_PRESENTATION: Presentation = { drafts: {}, expanded: [], anchors: {}, workingSince: {}, models: {}, modes: {}, dismissedSubagents: {} };
 
 export function initChat(): void {
   const surface = document.querySelector<HTMLElement>("#chat-surface");
@@ -61,11 +61,12 @@ export function initChat(): void {
   const send = document.querySelector<HTMLButtonElement>("#chat-send");
   const sendLabel = document.querySelector<HTMLElement>("#chat-send .chat-send-label");
   const modelSelect = document.querySelector<HTMLSelectElement>("#chat-model-select");
-  const agentSelect = document.querySelector<HTMLSelectElement>("#chat-agent-select");
+  const modeSelect = document.querySelector<HTMLSelectElement>("#chat-mode-select");
   const cancel = document.querySelector<HTMLButtonElement>("#chat-cancel");
   const composerStatus = document.querySelector<HTMLElement>("#chat-composer-status");
   const chatTitle = document.querySelector<HTMLElement>("#chat-title");
   const chatContext = document.querySelector<HTMLElement>("#chat-context");
+  const inputLabel = document.querySelector<HTMLElement>("#chat-input-label");
   if (!surface || !timeline || !items || !state || !select || !newButton || !olderButton || !latestButton || !form || !input || !commandMenu || !send || !sendLabel || !modelSelect || !cancel || !composerStatus) return;
 
   const api = new ChatApiClient();
@@ -75,7 +76,7 @@ export function initChat(): void {
   let presentation = readPresentation();
   let conversations: ConversationSummary[] = [];
   let models: ChatModel[] = [];
-  let agents: ChatAgent[] = [];
+  let modes: ChatMode[] = [];
   let commands: ChatCommand[] = [];
   let projection: ChatProjection | null = null;
   let stream: ChatEventStream | null = null;
@@ -101,7 +102,36 @@ export function initChat(): void {
   // Messages accepted while a turn was already running. They are cleared when
   // the turn ends, which is the moment the agent has actually taken them.
   const queued = new Set<string>();
-  if (chatContext) chatContext.textContent = appState.roots[0]?.label ?? "OpenCode";
+  // The agent Chat is talking to, once it has said so. Every name and every
+  // capability-gated control reads this rather than fixed copy, so installing
+  // a different agent changes what is shown and not what is written here.
+  let agent: ChatAgent | undefined;
+  // Before the agent reports itself there is nothing truthful to name, so the
+  // copy stays neutral rather than guessing.
+  const nameAgent = () => {
+    if (chatContext) chatContext.textContent = appState.roots[0]?.label ?? agent?.name ?? "Chat";
+    if (inputLabel) inputLabel.textContent = agent ? `Message ${agent.name}` : "Send a message";
+    if (input) input.placeholder = agent ? `Ask ${agent.name}…` : "Send a message…";
+  };
+  const chatHeading = () => (agent ? `${agent.name} Chat` : "Chat");
+  // An agent that declared itself is believed exactly: a capability it did not
+  // list is one it does not have. When no agent has been reported at all — an
+  // older workspace, or the moment before the adapter exists — nothing is
+  // known, so nothing is withheld.
+  const declares = (capability: ChatCapability) => agent?.capabilities.includes(capability) ?? true;
+  /**
+   * A control the agent has no capability for is taken out of the surface, not
+   * left disabled. A disabled control still claims the feature exists and is
+   * merely unavailable right now, which is a different and untrue statement.
+   * Only applied once the agent has declared itself — before that, nothing is
+   * known and nothing is removed.
+   */
+  const applyCapabilities = () => {
+    if (!agent) return;
+    if (!declares("modes")) modeSelect?.remove();
+    if (!declares("models")) modelSelect.remove();
+  };
+  nameAgent();
 
   const announce = (message: string, error = false) => {
     state.textContent = message;
@@ -220,7 +250,7 @@ export function initChat(): void {
 
   /**
    * Running and finished subagents, pinned beside the task list. A fan-out of
-   * three agents is three rows that would otherwise scroll away, and while
+   * three subagents is three rows that would otherwise scroll away, and while
    * they run there is nothing else saying how many are still going.
    */
   /**
@@ -272,7 +302,7 @@ export function initChat(): void {
       return;
     }
     const running = entries.filter(entry => entry.status === "running" || entry.status === "pending");
-    const noun = entries.length === 1 ? "agent" : "agents";
+    const noun = entries.length === 1 ? "subagent" : "subagents";
     subagentsLabel.textContent = running.length > 0
       ? `${running.length} of ${entries.length} ${noun} working · ${running[0]!.description}`
       : `${entries.length} ${noun} finished`;
@@ -523,7 +553,7 @@ export function initChat(): void {
     send.setAttribute("aria-label", `${action} message`);
     send.title = `${action} message`;
     modelSelect.disabled = submitting || models.length === 0;
-    if (agentSelect) agentSelect.disabled = submitting || agents.length === 0;
+    if (modeSelect?.isConnected) modeSelect.disabled = submitting || modes.length === 0;
     cancel.hidden = !running;
     olderButton.hidden = !projection?.olderCursor;
     composerStatus.textContent = composerNote ?? workingText();
@@ -554,37 +584,37 @@ export function initChat(): void {
   };
 
   /**
-   * The agent picker leads with "default" rather than claiming a value: the
-   * session's current agent is OpenCode's state, not ours, and a session
-   * stuck in a read-only agent is exactly the case where lying would hurt.
-   * Choosing a named agent sends it with every prompt from then on.
+   * The mode picker leads with "default" rather than claiming a value: the
+   * session's current mode is the agent's state, not ours, and a session
+   * stuck in a read-only mode is exactly the case where lying would hurt.
+   * Choosing a named mode sends it with every prompt from then on.
    */
-  const renderAgents = () => {
-    if (!agentSelect) return;
-    agentSelect.replaceChildren();
-    agentSelect.hidden = agents.length === 0;
-    if (agents.length === 0) return;
-    agentSelect.append(new Option("Agent: default", ""));
-    for (const agent of agents) {
-      const option = new Option(agentLabel(agent.name), agent.name);
-      if (agent.description) option.title = agent.description;
-      agentSelect.append(option);
+  const renderModes = () => {
+    if (!modeSelect) return;
+    modeSelect.replaceChildren();
+    modeSelect.hidden = modes.length === 0;
+    if (modes.length === 0) return;
+    modeSelect.append(new Option("Mode: default", ""));
+    for (const mode of modes) {
+      const option = new Option(modeLabel(mode.name), mode.name);
+      if (mode.description) option.title = mode.description;
+      modeSelect.append(option);
     }
-    applyAgent(projection?.conversationId ?? presentation.selectedId);
+    applyMode(projection?.conversationId ?? presentation.selectedId);
     syncControls();
   };
 
-  const applyAgent = (conversationId: string | undefined) => {
-    if (!agentSelect || agents.length === 0) return;
-    const known = (name: string | undefined) => (name && agents.some(agent => agent.name === name) ? name : undefined);
-    const chosen = known(conversationId ? presentation.agents[conversationId] : undefined);
-    // Once a named agent has been chosen for this conversation there is no
-    // default to go back to: the agent is session state in OpenCode, and a
+  const applyMode = (conversationId: string | undefined) => {
+    if (!modeSelect || modes.length === 0) return;
+    const known = (name: string | undefined) => (name && modes.some(mode => mode.name === name) ? name : undefined);
+    const chosen = known(conversationId ? presentation.modes[conversationId] : undefined);
+    // Once a named mode has been chosen for this conversation there is no
+    // default to go back to: the mode is session state in the agent, and a
     // prompt that omits it keeps the previous choice — offering "default"
-    // then would display one agent and run another.
-    const defaultOption = agentSelect.options[0];
+    // then would display one mode and run another.
+    const defaultOption = modeSelect.options[0];
     if (defaultOption && defaultOption.value === "") defaultOption.disabled = chosen !== undefined;
-    agentSelect.value = chosen ?? known(presentation.agent) ?? "";
+    modeSelect.value = chosen ?? known(presentation.mode) ?? "";
   };
 
   /**
@@ -614,9 +644,9 @@ export function initChat(): void {
     }
     presentation.selectedId = id;
     applyModel(id);
-    applyAgent(id);
+    applyMode(id);
     const conversation = conversations.find(item => item.id === id);
-    if (chatTitle) chatTitle.textContent = conversation ? displayConversationTitle(conversation) : "OpenCode Chat";
+    if (chatTitle) chatTitle.textContent = conversation ? displayConversationTitle(conversation) : chatHeading();
     form.hidden = false;
     save();
     projection = null;
@@ -656,7 +686,7 @@ export function initChat(): void {
       select.append(new Option("No conversations", ""));
       select.disabled = true;
       form.hidden = true;
-      if (chatTitle) chatTitle.textContent = "OpenCode Chat";
+      if (chatTitle) chatTitle.textContent = chatHeading();
       return;
     }
     select.disabled = false;
@@ -674,19 +704,19 @@ export function initChat(): void {
     if (projection) presentation.models[projection.conversationId] = selection;
     save();
   });
-  agentSelect?.addEventListener("change", () => {
-    const name = agentSelect.value || undefined;
-    if (name && !agents.some(agent => agent.name === name)) return;
-    if (name) presentation.agent = name;
-    else delete presentation.agent;
+  modeSelect?.addEventListener("change", () => {
+    const name = modeSelect.value || undefined;
+    if (name && !modes.some(mode => mode.name === name)) return;
+    if (name) presentation.mode = name;
+    else delete presentation.mode;
     if (projection) {
-      if (name) presentation.agents[projection.conversationId] = name;
-      else delete presentation.agents[projection.conversationId];
+      if (name) presentation.modes[projection.conversationId] = name;
+      else delete presentation.modes[projection.conversationId];
     }
     save();
-    // Re-derives the default option's availability: choosing a named agent
+    // Re-derives the default option's availability: choosing a named mode
     // locks "default" for this conversation from now on.
-    applyAgent(projection?.conversationId ?? presentation.selectedId);
+    applyMode(projection?.conversationId ?? presentation.selectedId);
   });
   newButton.addEventListener("click", async () => {
     newButton.disabled = true;
@@ -995,7 +1025,7 @@ export function initChat(): void {
     const retry = retryRequests.get(conversationId);
     const requestId = retry?.text === text ? retry.requestId : newRequestId();
     const selectedModel = models.find(model => modelValue(model.selection) === modelSelect.value)?.selection;
-    const selectedAgent = agentSelect?.value || undefined;
+    const selectedMode = modeSelect?.value || undefined;
     const wasRunning = projection.status === "running" || projection.status === "sending";
     submitting = true;
     // Optimistic send: the message shows immediately and the input clears;
@@ -1009,7 +1039,7 @@ export function initChat(): void {
     syncControls();
     scheduleRender(true);
     try {
-      const accepted = await api.prompt(conversationId, requestId, text, selectedModel, selectedAgent);
+      const accepted = await api.prompt(conversationId, requestId, text, selectedModel, selectedMode);
       retryRequests.delete(conversationId);
       if (accepted.conversation) {
         conversations = conversations.map(conversation => conversation.id === accepted.conversation!.id ? accepted.conversation! : conversation);
@@ -1130,7 +1160,7 @@ export function initChat(): void {
       retry.disabled = true;
       retry.textContent = "Retrying…";
       panel.remove();
-      announce("Starting OpenCode…");
+      announce(agent ? `Starting ${agent.name}…` : "Starting the agent…");
       try {
         const next = await api.retry();
         if (next.state === "unavailable") {
@@ -1160,19 +1190,26 @@ export function initChat(): void {
         showUnavailable(availability);
         return;
       }
-      // The agent list is an enhancement: a provider without it hides the
-      // picker rather than blocking chat.
-      [models, conversations, commands, agents] = await Promise.all([
-        api.models(),
+      // Named before anything is fetched: every later render reads the agent,
+      // and a control that appeared unnamed and then renamed itself would be
+      // the pop-in this seam exists to avoid.
+      if (availability.state === "ready") agent = availability.agent;
+      nameAgent();
+      applyCapabilities();
+      // A capability the agent does not declare is not fetched at all. The
+      // mode list stays fault-tolerant on top of that: a declared list that
+      // fails to load hides the picker rather than blocking chat.
+      [models, conversations, commands, modes] = await Promise.all([
+        declares("models") ? api.models() : Promise.resolve([] as ChatModel[]),
         api.conversations(),
-        api.commands().catch(() => []),
-        api.agents().catch(() => [] as ChatAgent[]),
+        declares("commands") ? api.commands().catch(() => []) : Promise.resolve([] as ChatCommand[]),
+        declares("modes") ? api.modes().catch(() => [] as ChatMode[]) : Promise.resolve([] as ChatMode[]),
       ]);
       form.hidden = false;
       select.disabled = false;
       newButton.disabled = false;
       renderModels();
-      renderAgents();
+      renderModes();
       announce(conversations.length ? "" : "No conversations yet. Create one to start.");
       renderChooser();
       bootstrapped = true;
@@ -1220,8 +1257,8 @@ function readPresentation(): Presentation {
       workingSince: parseStoredTimestamps(value.workingSince),
       model: parseStoredModel(value.model),
       models: parseStoredModels(value.models),
-      agent: typeof value.agent === "string" ? value.agent : undefined,
-      agents: parseStoredNames(value.agents),
+      mode: typeof value.mode === "string" ? value.mode : undefined,
+      modes: parseStoredNames(value.modes),
       dismissedSubagents: parseStoredIdLists(value.dismissedSubagents),
     };
   } catch { return structuredClone(EMPTY_PRESENTATION); }
@@ -1265,8 +1302,8 @@ function modelValue(model: ModelSelection): string {
   return JSON.stringify([model.providerId, model.modelId]);
 }
 
-function agentLabel(name: string): string {
-  return `Agent: ${name.charAt(0).toUpperCase()}${name.slice(1)}`;
+function modeLabel(name: string): string {
+  return `Mode: ${name.charAt(0).toUpperCase()}${name.slice(1)}`;
 }
 
 function sameModel(left: ModelSelection, right: ModelSelection): boolean {

@@ -528,7 +528,7 @@ function renderQuestion(item: QuestionRequest, open: boolean, active: boolean, f
   const questions = item.questions.map((question, index) => `<fieldset class="chat-question-panel" data-question-panel="${index}"${index === 0 ? "" : " hidden"}><legend${stepped ? ` class="sr-only"` : ""}>${escapeHtml(question.header)}</legend><p>${escapeHtml(question.prompt)}${question.multiple ? ` <span class="chat-question-hint">choose one or more</span>` : ""}</p>${question.options.map(option => `<label class="chat-question-option"><input type="${question.multiple ? "checkbox" : "radio"}" name="q-${index}" value="${escapeHtmlAttribute(option.label)}"><span class="chat-question-option-text"><span class="chat-question-option-label">${escapeHtml(option.label)}</span>${option.description ? `<small>${escapeHtml(option.description)}</small>` : ""}</span></label>`).join("")}${question.allowFreeForm ? `<label class="chat-question-freeform">Other <input name="q-${index}" type="text"></label>` : ""}</fieldset>`).join("");
   const body = pending && active ? `<form data-question-form>${tabs}${questions}<div class="chat-request-actions"><button type="submit" data-question-primary disabled>${stepped ? "Next" : "Answer"}</button><button type="button" data-question-reject>Reject</button></div></form>` : pending ? `<p class="chat-request-outcome">Waiting its turn — answer the newest request first.</p>` : `<p class="chat-request-outcome">${item.outcome?.kind === "rejected" ? "Rejected" : "Answered"}</p>`;
   const state = requestState(item.status, active);
-  return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${requestAttributes(state)}${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}><summary>Question from OpenCode${requestBadge(state)}</summary>${requestOrigin(foreign)}${body}</details>`;
+  return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${requestAttributes(state)}${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}><summary>Question${requestBadge(state)}</summary>${requestOrigin(foreign)}${body}</details>`;
 }
 
 export function decorateFileLinks(container: HTMLElement): void {
@@ -578,7 +578,7 @@ export function decorateFileLinks(container: HTMLElement): void {
 }
 
 export function statusLabel(status: ConversationStatus): string {
-  return ({ idle: "Ready", sending: "Sending", running: "OpenCode is working", completed: "Completed", interrupted: "Cancelled", failed: "Failed" })[status];
+  return ({ idle: "Ready", sending: "Sending", running: "Working", completed: "Completed", interrupted: "Cancelled", failed: "Failed" })[status];
 }
 
 function counts(additions?: number, deletions?: number): string {

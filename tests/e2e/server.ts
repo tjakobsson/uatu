@@ -35,7 +35,7 @@ import {
 import { terminalBackendAvailable } from "../../src/terminal/backend";
 import { createTerminalServer } from "../../src/terminal/server";
 import { FakeE2EChatService } from "./chat-service";
-import type { ConversationItem, ConversationStatus } from "../../src/chat/types";
+import type { ChatCapability, ConversationItem, ConversationStatus } from "../../src/chat/types";
 
 // One-shot artificial latency for GET /api/terminal/sessions, armed by tests
 // that need two inventory reads to complete out of order (the switcher's
@@ -161,6 +161,7 @@ async function handleE2EChat(request: Request): Promise<Response> {
     itemId?: string;
     delta?: string;
     status?: ConversationStatus;
+    capabilities?: ChatCapability[];
   };
   switch (body.action) {
     case "seed":
@@ -183,12 +184,15 @@ async function handleE2EChat(request: Request): Promise<Response> {
       chatService.disconnect();
       return Response.json({ ok: true });
     case "stats":
-      return Response.json({ statusCalls: chatService.statusCalls, promptAttempts: chatService.promptAttempts, promptAgents: chatService.promptAgents });
+      return Response.json({ statusCalls: chatService.statusCalls, promptAttempts: chatService.promptAttempts, promptModes: chatService.promptModes });
     case "failPrompt":
       chatService.failPrompt();
       return Response.json({ ok: true });
     case "failStartup":
       chatService.failStartup();
+      return Response.json({ ok: true });
+    case "declareOnly":
+      chatService.declareOnly(body.capabilities ?? []);
       return Response.json({ ok: true });
     case "resync":
       chatService.rotateGeneration();

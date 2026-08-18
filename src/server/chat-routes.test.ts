@@ -21,7 +21,7 @@ class FakeChatService implements WorkspaceChatService {
   async status(): Promise<ChatAvailability> { return { state: "ready", version: "test" }; }
   async retry(): Promise<ChatAvailability> { this.retries += 1; return this.status(); }
   async models() { return [{ selection: { providerId: "anthropic", modelId: "claude" }, provider: "Anthropic", name: "Claude" }]; }
-  async agents() { return [{ name: "build", description: "Full read-write agent" }, { name: "plan", description: "Read-only planning agent" }]; }
+  async modes() { return [{ name: "build", description: "Full read-write mode" }, { name: "plan", description: "Read-only planning mode" }]; }
   async commands() { return [{ name: "review", description: "Review", argumentHint: "[focus]", kind: "command" as const }]; }
   async listConversations() { return [this.conversation]; }
   async createConversation() { return this.snapshot(); }
@@ -147,18 +147,18 @@ describe("workspace chat routes", () => {
     expect(service.selectedModel).toEqual({ providerId: "anthropic", modelId: "claude" });
   });
 
-  test("lists agents and forwards a well-formed agent selection to the service", async () => {
+  test("lists modes and forwards a well-formed mode selection to the service", async () => {
     const service = new FakeChatService();
     const table = routes(service);
-    const agents = table["/api/chat/agents"] as { GET(request: Request): Promise<Response> };
-    expect(await (await agents.GET(request("/api/chat/agents"))).json()).toEqual({
-      agents: [expect.objectContaining({ name: "build" }), expect.objectContaining({ name: "plan" })],
+    const modes = table["/api/chat/modes"] as { GET(request: Request): Promise<Response> };
+    expect(await (await modes.GET(request("/api/chat/modes"))).json()).toEqual({
+      modes: [expect.objectContaining({ name: "build" }), expect.objectContaining({ name: "plan" })],
     });
     const handler = table["/api/chat/conversations/:conversationId/prompts"] as { POST(request: Request & { params: Record<string, string> }): Promise<Response> };
-    const send = (agent: unknown) => handler.POST(request("/api/chat/conversations/local/prompts", {
+    const send = (mode: unknown) => handler.POST(request("/api/chat/conversations/local/prompts", {
       method: "POST",
       headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" },
-      body: JSON.stringify({ requestId: crypto.randomUUID(), text: "hello", agent }),
+      body: JSON.stringify({ requestId: crypto.randomUUID(), text: "hello", mode }),
     }, { conversationId: "local" }) as never);
     expect((await send(42)).status).toBe(400);
     expect((await send("")).status).toBe(400);

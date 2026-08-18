@@ -4,7 +4,7 @@ import { createSdkV2Provider } from "./sdk-v2-provider";
 import type { OpenCodeProvider } from "./provider";
 import type { ReplaySubscription } from "./replay";
 import type {
-  ChatAgent,
+  ChatMode,
   ChatAvailability,
   ChatCommand,
   ChatModel,
@@ -19,7 +19,7 @@ export interface WorkspaceChatService {
   status(): Promise<ChatAvailability>;
   retry(): Promise<ChatAvailability>;
   models(): Promise<ChatModel[]>;
-  agents(): Promise<ChatAgent[]>;
+  modes(): Promise<ChatMode[]>;
   commands(): Promise<ChatCommand[]>;
   listConversations(): Promise<ConversationSummary[]>;
   createConversation(): Promise<ConversationSnapshot>;
@@ -28,7 +28,7 @@ export interface WorkspaceChatService {
     snapshot: ConversationSnapshot;
     events: ReplaySubscription;
   }>;
-  prompt(id: string, requestId: string, text: string, model?: ModelSelection, agent?: string): Promise<{
+  prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string): Promise<{
     messageId: string;
     delivery: "steer" | "queue";
     conversation?: ConversationSummary;
@@ -78,8 +78,11 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
     const availability = await this.runtime.status();
     if (availability.state !== "ready") return availability;
     try {
-      await this.ensureAdapter();
-      return availability;
+      // The agent is attached here rather than in the runtime: the runtime
+      // knows a process is up, and only the adapter's provider knows who it
+      // is and what it offers.
+      const adapter = await this.ensureAdapter();
+      return { ...availability, agent: adapter.agent() };
     } catch (error) {
       // Deliberately not cached: ensureAdapter forgets a rejected attempt, so
       // the next status() call rebuilds and re-probes. A transient failure — a
@@ -136,12 +139,12 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
 
   async listConversations() { return (await this.requireAdapter()).listConversations(); }
   async models() { return (await this.requireAdapter()).models(); }
-  async agents() { return (await this.requireAdapter()).agents(); }
+  async modes() { return (await this.requireAdapter()).modes(); }
   async commands() { return (await this.requireAdapter()).commands(); }
   async createConversation() { return (await this.requireAdapter()).createConversation(); }
   async history(id: string, options?: { cursor?: string; limit?: number }) { return (await this.requireAdapter()).history(id, options); }
   async subscribe(id: string, options?: { cursor?: string; signal?: AbortSignal }) { return (await this.requireAdapter()).subscribe(id, options); }
-  async prompt(id: string, requestId: string, text: string, model?: ModelSelection, agent?: string) { return (await this.requireAdapter()).prompt(id, requestId, text, model, agent); }
+  async prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string) { return (await this.requireAdapter()).prompt(id, requestId, text, model, mode); }
   async cancel(id: string, requestId: string) { return (await this.requireAdapter()).abort(id, requestId); }
   async respondPermission(id: string, interactionId: string, requestId: string, outcome: PermissionOutcome) {
     return (await this.requireAdapter()).respondPermission(id, interactionId, requestId, outcome);

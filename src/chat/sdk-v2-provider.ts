@@ -13,7 +13,7 @@ import type {
   ProviderSession,
 } from "./provider";
 import { normalizeQuestion } from "./normalization";
-import type { ChatAgent, ChatCommand, ChatModel, ModelSelection } from "./types";
+import type { ChatAgent, ChatMode, ChatCommand, ChatModel, ModelSelection } from "./types";
 
 type Result<T> = { data?: T; error?: unknown };
 
@@ -64,24 +64,36 @@ export class SdkV2Provider implements OpenCodeProvider {
     return result;
   }
 
-  async listAgents(): Promise<ChatAgent[]> {
+  // Everything below is implemented against a live OpenCode server, so all six
+  // are declared. A capability this codebase has not built yet is not listed
+  // here: the change that builds it adds its key.
+  describe(): ChatAgent {
+    return {
+      id: "opencode",
+      name: "OpenCode",
+      capabilities: ["modes", "models", "commands", "questions", "permissions", "subagents"],
+    };
+  }
+
+  async listModes(): Promise<ChatMode[]> {
     const payload = unwrap(await this.client.app.agents({ directory: this.directory })) as unknown;
     const response = Array.isArray(payload) ? payload : asArray(asRecord(payload).data);
-    const agents: ChatAgent[] = [];
+    const modes: ChatMode[] = [];
     const names = new Set<string>();
     for (const value of response) {
-      const agent = asRecord(value);
-      const name = typeof agent.name === "string" ? agent.name : "";
-      // Subagents are spawned by the task tool, never chosen for a prompt —
-      // and OpenCode's system agents (title, compaction, summary) are
-      // `mode: "primary"` but carry `hidden: true` on the wire (a field the
-      // pinned SDK's type does not declare; verified against a live server).
-      // Without the hidden check they all appear in the picker.
-      if (!name || names.has(name) || agent.mode === "subagent" || agent.hidden === true) continue;
+      const entry = asRecord(value);
+      const name = typeof entry.name === "string" ? entry.name : "";
+      // OpenCode calls these agents on the wire; they are what this codebase
+      // calls modes. Subagents are spawned by the task tool, never chosen for
+      // a prompt — and OpenCode's system agents (title, compaction, summary)
+      // are `mode: "primary"` but carry `hidden: true` on the wire (a field
+      // the pinned SDK's type does not declare; verified against a live
+      // server). Without the hidden check they all appear in the picker.
+      if (!name || names.has(name) || entry.mode === "subagent" || entry.hidden === true) continue;
       names.add(name);
-      agents.push({ name, description: typeof agent.description === "string" ? agent.description : "" });
+      modes.push({ name, description: typeof entry.description === "string" ? entry.description : "" });
     }
-    return agents;
+    return modes;
   }
 
   async listModels(): Promise<ChatModel[]> {
@@ -256,7 +268,7 @@ export class SdkV2Provider implements OpenCodeProvider {
     yield* mergeProviderEvents([native.stream, classic.stream], signal);
   }
 
-  async prompt(sessionId: string, input: { id: string; text: string; delivery: "steer" | "queue"; model?: ModelSelection; agent?: string }): Promise<{ messageId: string }> {
+  async prompt(sessionId: string, input: { id: string; text: string; delivery: "steer" | "queue"; model?: ModelSelection; mode?: string }): Promise<{ messageId: string }> {
     const messageId = stableProviderId("msg", input.id);
     if (this.compatibilitySessions.has(sessionId)) {
       ensureSuccess(await this.client.session.promptAsync({
@@ -265,7 +277,7 @@ export class SdkV2Provider implements OpenCodeProvider {
         messageID: messageId,
         parts: [{ type: "text", text: input.text }],
         ...(input.model ? { model: { providerID: input.model.providerId, modelID: input.model.modelId } } : {}),
-        ...(input.agent ? { agent: input.agent } : {}),
+        ...(input.mode ? { agent: input.mode } : {}),
       }));
       return { messageId };
     }
@@ -274,7 +286,7 @@ export class SdkV2Provider implements OpenCodeProvider {
     // passes through only id/prompt/delivery/resume, so an `agent` property
     // there is silently dropped — the selection would look accepted while the
     // session kept its previous agent.
-    if (input.agent) ensureSuccess(await this.client.v2.session.switchAgent({ sessionID: sessionId, agent: input.agent }));
+    if (input.mode) ensureSuccess(await this.client.v2.session.switchAgent({ sessionID: sessionId, agent: input.mode }));
     const admitted = unwrap(await this.client.v2.session.prompt({
       sessionID: sessionId,
       id: messageId,
@@ -293,7 +305,7 @@ export class SdkV2Provider implements OpenCodeProvider {
    * while a healthy turn outlives the window, detaches, and reports failures
    * through the event stream like any running turn.
    */
-  async command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; agent?: string }): Promise<{ messageId: string }> {
+  async command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; mode?: string }): Promise<{ messageId: string }> {
     const messageId = stableProviderId("msg", input.id);
     const dispatch = input.name === "compact" || input.name === "summarize"
       ? (async () => ensureSuccess(await this.client.session.summarize({
@@ -309,7 +321,7 @@ export class SdkV2Provider implements OpenCodeProvider {
           command: input.name,
           arguments: input.arguments,
           ...(input.model ? { model: `${input.model.providerId}/${input.model.modelId}` } : {}),
-          ...(input.agent ? { agent: input.agent } : {}),
+          ...(input.mode ? { agent: input.mode } : {}),
         })); })();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {

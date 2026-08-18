@@ -10,7 +10,7 @@ async function bootChat(page: Page, request: APIRequestContext): Promise<void> {
   await page.goto(`/?t=${encodeURIComponent(token.token)}`);
   await expect(page.locator("#connection-state .connection-label")).toHaveText("Connected");
   await openChatPanel(page);
-  await expect(page.locator("#chat-state")).not.toContainText("Loading OpenCode");
+  await expect(page.locator("#chat-state")).not.toContainText("Loading chat");
 }
 
 async function control(request: APIRequestContext, body: Record<string, unknown>): Promise<unknown> {
@@ -90,7 +90,7 @@ test.describe("chat panels and navigation", () => {
 
     const track = page.locator("#chat-subagents");
     await expect(track).toBeVisible();
-    await expect(track.locator("summary")).toContainText("1 of 2 agents working · Audit styles");
+    await expect(track.locator("summary")).toContainText("1 of 2 subagents working · Audit styles");
 
     await track.locator("summary").click();
     await expect(track.locator("li")).toHaveCount(2);
@@ -113,7 +113,7 @@ test.describe("chat panels and navigation", () => {
     await expect(track.locator("li")).toHaveCount(2);
     await page.getByRole("button", { name: "Dismiss finished" }).click();
     await expect(track.locator("li")).toHaveCount(1);
-    await expect(track.locator("summary")).toContainText("1 of 1 agent working · Still going");
+    await expect(track.locator("summary")).toContainText("1 of 1 subagent working · Still going");
 
     // Dismissal is a user statement — reloading the conversation must not
     // resurrect the dismissed strip.
@@ -122,7 +122,7 @@ test.describe("chat panels and navigation", () => {
     await expect(track).toBeVisible();
     await track.locator("summary").click();
     await expect(track.locator("li")).toHaveCount(1);
-    await expect(track.locator("summary")).toContainText("1 of 1 agent working · Still going");
+    await expect(track.locator("summary")).toContainText("1 of 1 subagent working · Still going");
   });
 
   test("the prompt rail jumps to a prompt and flashes the landing", async ({ page, request }) => {

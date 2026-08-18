@@ -1,12 +1,18 @@
 import { describe, expect, test } from "bun:test";
 
 import type { OpenCodeProvider } from "./provider";
+import type { ChatAgent } from "./types";
+
+// What `provider()` below declares — the ready state carries it once the
+// adapter exists, so every ready assertion names it.
+const FAKE_AGENT: ChatAgent = { id: "opencode", name: "OpenCode", capabilities: ["models", "commands", "permissions"] };
 import { OpenCodeChatAdapter } from "./adapter";
 import { OpenCodeService, type SpawnedOpenCode } from "./opencode-service";
 import { LazyOpenCodeChatService } from "./service";
 
 function provider(): OpenCodeProvider {
   return {
+    describe(): ChatAgent { return FAKE_AGENT; },
     async listCommands() { return []; },
     async listModels() { return []; },
     async switchModel() {},
@@ -70,7 +76,7 @@ describe("LazyOpenCodeChatService", () => {
 
     expect(providerCalls).toBe(0);
     expect(adapterCalls).toBe(0);
-    expect(await service.status()).toEqual({ state: "ready", version: "test" });
+    expect(await service.status()).toEqual({ state: "ready", version: "test", agent: FAKE_AGENT });
     expect(providerCalls).toBe(1);
     expect(adapterCalls).toBe(1);
     expect(await service.models()).toEqual([]);
@@ -102,7 +108,7 @@ describe("LazyOpenCodeChatService", () => {
       reason: "unsupported",
       message: "The installed OpenCode version is not compatible with chat.",
     });
-    expect(await service.status()).toEqual({ state: "ready", version: "test" });
+    expect(await service.status()).toEqual({ state: "ready", version: "test", agent: FAKE_AGENT });
     expect(probes).toBe(2);
     expect(await service.models()).toEqual([]);
     await service.dispose();
@@ -206,7 +212,7 @@ describe("LazyOpenCodeChatService", () => {
       message: "The installed OpenCode version is not compatible with chat.",
     });
     expect(spawns).toBe(1);
-    expect(await service.retry()).toEqual({ state: "ready", version: "test" });
+    expect(await service.retry()).toEqual({ state: "ready", version: "test", agent: FAKE_AGENT });
     // The incompatible process was replaced, not merely re-probed.
     expect(spawns).toBe(2);
     expect(probes).toBe(2);
@@ -248,7 +254,7 @@ describe("LazyOpenCodeChatService", () => {
     // different times — the first can stall on pump shutdown and then
     // restart the runtime the second one just built.
     const [first, second] = await Promise.all([service.retry(), service.retry()]);
-    expect(first).toEqual({ state: "ready", version: "test" });
+    expect(first).toEqual({ state: "ready", version: "test", agent: FAKE_AGENT });
     expect(second).toEqual(first);
     expect(spawns).toBe(2);
     await service.dispose();
@@ -305,7 +311,7 @@ describe("LazyOpenCodeChatService", () => {
     const during = service.status();
     await Bun.sleep(5);
     (releasePump as unknown as () => void)();
-    expect(await retrying).toEqual({ state: "ready", version: "test" });
+    expect(await retrying).toEqual({ state: "ready", version: "test", agent: FAKE_AGENT });
     await during;
 
     // Initial, the stray built mid-teardown, and the post-restart rebuild —
