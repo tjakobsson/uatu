@@ -92,6 +92,14 @@
   --surface: light-dark(#ffffff, #0d1117);
   --surface-raised: light-dark(#ffffff, #161b22);
   --surface-subtle: light-dark(#f6f8fa, #161b22);
+  /* The pinned chat progress tracks (todo list, subagents) sit against this
+     rather than --surface-raised. It has to differ from --surface-raised in
+     BOTH schemes so the tracks read as their own tier: in dark, the three
+     existing tiers collapse onto #161b22, so re-pointing at an existing token
+     would look identical there. A touch lighter than the page in light, a
+     touch lighter than the raised cards in dark; colour is not the only cue —
+     the tracks stay pinned, bordered, and behind a caret. */
+  --surface-track: light-dark(#eef1f4, #1c222b);
   /* Semantic state colors (GitHub light/dark pairs). */
   --success: light-dark(#2da44e, #3fb950);
   --success-strong: light-dark(#1a7f37, #3fb950);
@@ -4654,7 +4662,7 @@ html[data-ui-mode="touch"] .chat-resizer {
   color: var(--text-subtle);
   cursor: pointer;
   writing-mode: vertical-rl;
-  font-size: 0.72rem;
+  font-size: 0.72em;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
@@ -4717,6 +4725,24 @@ body.is-resizing-chat .chat-resizer {
   flex-direction: column;
   overflow: hidden;
   background: var(--surface);
+  /* Chat's own reading scale, denser than the document preview's. It lives
+     here, on the surface, because that is the one place the desktop split,
+     touch mode, and the native WebView zoom all compose against without any
+     of them needing to know about it. Descendants size in `em` so they
+     inherit it; the vendored `.markdown-body` is pinned at an absolute 16px
+     and is overridden separately below. Touch mode sets its own base on
+     `.chat-timeline`, which wins here in that mode. */
+  font-size: 0.9rem;
+}
+
+/* Assistant messages render into `.markdown-body`, which github-markdown-css
+   pins at an absolute `font-size: 16px` — no scale on the surface can reach
+   it. Scoped to the chat surface (0,2,0 beats the vendored 0,1,0, and we sit
+   after the @import, so no !important), it takes the surface's scale instead;
+   github-markdown-css sizes its own internals in em/%, so headings, code, and
+   the rest follow proportionally. `.markdown-body` outside Chat is untouched. */
+.chat-surface .markdown-body {
+  font-size: inherit;
 }
 
 .chat-surface:focus-visible {
@@ -5016,7 +5042,7 @@ body.is-resizing-chat .chat-resizer {
   padding: 0.2rem 0;
   cursor: pointer;
   color: var(--text-subtle);
-  font-size: 0.875rem;
+  font-size: 0.875em;
   list-style: none;
 }
 
@@ -5063,7 +5089,7 @@ body.is-resizing-chat .chat-resizer {
 
 .chat-activity-status,
 .chat-change-counts {
-  font-size: 0.78rem;
+  font-size: 0.89em;
   color: var(--text-subtle);
 }
 
@@ -5075,7 +5101,7 @@ body.is-resizing-chat .chat-resizer {
   white-space: nowrap;
   color: var(--text-subtle);
   font-family: var(--mono-font-family);
-  font-size: 0.82rem;
+  font-size: 0.94em;
 }
 
 .chat-tool-meta {
@@ -5274,7 +5300,7 @@ body.is-resizing-chat .chat-resizer {
 
 .chat-command-description {
   grid-column: 1 / -1;
-  font-size: 0.78rem;
+  font-size: 0.78em;
 }
 
 .chat-composer textarea {
@@ -5301,7 +5327,7 @@ body.is-resizing-chat .chat-resizer {
   color: var(--text-strong);
   background: var(--surface);
   font: inherit;
-  font-size: 0.8rem;
+  font-size: 0.8em;
   text-overflow: ellipsis;
 }
 
@@ -5312,7 +5338,7 @@ body.is-resizing-chat .chat-resizer {
 #chat-composer-status {
   margin-right: auto;
   color: var(--text-subtle);
-  font-size: 0.8rem;
+  font-size: 0.8em;
 }
 
 .chat-file-line-target {
@@ -6030,7 +6056,7 @@ body.terminal-transcript-open .touch-tab-bar {
   display: block;
   margin-top: 0.3rem;
   color: var(--text-subtle);
-  font-size: 0.75rem;
+  font-size: 0.75em;
 }
 
 /* Question options are the primary action, so each is a full-width tap target
@@ -6075,7 +6101,7 @@ body.terminal-transcript-open .touch-tab-bar {
 
 .chat-question-hint {
   color: var(--text-subtle);
-  font-size: 0.78rem;
+  font-size: 0.78em;
   font-weight: 400;
 }
 
@@ -6107,7 +6133,7 @@ body.terminal-transcript-open .touch-tab-bar {
   color: var(--text-subtle);
   background: var(--surface);
   font: inherit;
-  font-size: 0.8rem;
+  font-size: 0.8em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -6142,8 +6168,11 @@ body.terminal-transcript-open .touch-tab-bar {
   margin: 0 max(1rem, calc((100% - 52rem) / 2)) 0.5rem;
   border: 1px solid var(--border-soft);
   border-radius: 0.7rem;
-  background: var(--surface-raised);
-  font-size: 0.85rem;
+  /* Its own tier, not --surface-raised: the pinned tracks are where "where are
+     we now" lives, and against the raised timeline cards they need somewhere
+     for the eye to land. Covers both the todo list and the subagent track. */
+  background: var(--surface-track);
+  font-size: 0.85em;
 }
 
 .chat-task-list[hidden] {
@@ -6301,7 +6330,7 @@ html[data-chat-keyboard] #chat-subagents-items {
   color: var(--accent);
   background: transparent;
   font: inherit;
-  font-size: 0.78rem;
+  font-size: 0.78em;
 }
 
 .chat-track-dismiss[hidden] {
@@ -6372,7 +6401,7 @@ html[data-ui-mode="touch"] .chat-header {
   gap: 0.55rem;
   padding: 0.2rem 0;
   cursor: pointer;
-  font-size: 0.875rem;
+  font-size: 0.875em;
   list-style: none;
 }
 
@@ -6383,7 +6412,7 @@ html[data-ui-mode="touch"] .chat-header {
 .chat-activity-group > summary::before {
   content: "▸";
   flex: 0 0 auto;
-  font-size: 0.7rem;
+  font-size: 0.8em;
 }
 
 .chat-activity-group[open] > summary::before {
@@ -6471,7 +6500,7 @@ html[data-ui-mode="touch"] .chat-activity-group > summary {
   background: transparent;
   color: var(--accent);
   font: inherit;
-  font-size: 0.82rem;
+  font-size: 0.82em;
   text-decoration: underline;
 }
 
@@ -6514,7 +6543,7 @@ html[data-ui-mode="touch"] .chat-surface[data-chat-rail] .chat-timeline {
   background: var(--surface-raised);
   box-shadow: var(--shadow, 0 4px 14px rgb(0 0 0 / 18%));
   color: var(--text-strong);
-  font-size: 0.8rem;
+  font-size: 0.8em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
