@@ -7,6 +7,7 @@ import { IdempotencyReceipts } from "./receipts";
 import { ConversationReplay, type ReplaySubscription } from "./replay";
 import { ProviderTextReconciler } from "./text-reconciler";
 import type {
+  ChatAgent,
   ChatEvent,
   ChatCommand,
   ChatModel,
@@ -15,8 +16,10 @@ import type {
   ConversationStatus,
   ConversationSummary,
   PermissionOutcome,
+  PermissionRequest,
   ModelSelection,
   QuestionOutcome,
+  QuestionRequest,
 } from "./types";
 import { ConversationNotFoundError, isSessionInWorkspace } from "./workspace";
 
@@ -36,6 +39,22 @@ export class InvalidModelSelectionError extends Error {
   }
 }
 
+export class InvalidAgentSelectionError extends Error {
+  constructor() {
+    super("selected agent is not available");
+    this.name = "InvalidAgentSelectionError";
+  }
+}
+
+// Just the slice of MetricsRegistry the adapter needs, so chat does not depend
+// on the debug module's shape.
+export type ChatEventMetrics = { inc(name: string, delta?: number): void };
+
+// Event type strings come from a local trusted process, but the counter key
+// space must still be bounded — a future OpenCode emitting per-request type
+// names must not grow the registry without limit.
+const MAX_COUNTED_EVENT_TYPES = 64;
+
 export type ChatAdapterOptions = {
   provider: OpenCodeProvider;
   workspacePath: string;
@@ -46,6 +65,9 @@ export type ChatAdapterOptions = {
   receiptTtlMs?: number;
   maxProjections?: number;
   coalesceWindowMs?: number;
+  // Optional diagnostic sink. When present the pump counts events it could not
+  // use, so an operator can discover what a live workspace is discarding.
+  metrics?: ChatEventMetrics;
   now?: () => number;
   id?: () => string;
 };
@@ -63,9 +85,18 @@ export class OpenCodeChatAdapter {
   private readonly publishedQuestions = new Map<string, Set<string>>();
   private readonly questionRefreshes = new Set<string>();
   private readonly questionCreatedAt = new Map<string, number>();
+  private readonly permissionCreatedAt = new Map<string, number>();
+  private readonly sessionParents = new Map<string, string | null>();
+  // Conversations with a turn in flight, tracked at the adapter so the fact
+  // survives projection eviction. This is what distinguishes "the store says
+  // running because OpenCode died mid-turn" from "running right now".
+  private readonly liveTurns = new Set<string>();
   private readonly maxProjections: number;
   private readonly coalesceWindowMs: number | undefined;
+  private readonly metrics: ChatEventMetrics | undefined;
+  private readonly countedEventTypes = new Set<string>();
   private readonly lastModel = new Map<string, ModelSelection>();
+  private readonly lastAgent = new Map<string, string>();
   private readonly providerMessageRoles = new Map<string, string>();
   private pumpController: AbortController | null = null;
   private pumpPromise: Promise<void> | null = null;
@@ -77,6 +108,7 @@ export class OpenCodeChatAdapter {
     this.replayBytes = options.replayBytes ?? 256 * 1024;
     this.maxProjections = options.maxProjections ?? 64;
     this.coalesceWindowMs = options.coalesceWindowMs;
+    this.metrics = options.metrics;
     this.id = options.id ?? randomUUID;
     this.receipts = new IdempotencyReceipts({
       maxEntries: options.receiptEntries ?? 1_000,
@@ -118,6 +150,10 @@ export class OpenCodeChatAdapter {
     return this.provider.listModels();
   }
 
+  async agents(): Promise<ChatAgent[]> {
+    return this.provider.listAgents ? this.provider.listAgents() : [];
+  }
+
   commands(): Promise<ChatCommand[]> {
     return this.provider.listCommands();
   }
@@ -154,20 +190,109 @@ export class OpenCodeChatAdapter {
     // order (the order `flatMap` already produced). Comparing ids instead
     // reorders a turn alphabetically on replay.
     items.sort((left, right) => left.createdAt - right.createdAt);
+    // The store is not the truth about liveness: a tool part stays "running"
+    // forever when OpenCode dies before writing a terminal state (quitting the
+    // hub mid-turn), and on reload that renders agents as still working. A
+    // turn cannot outlive the server, so when no turn is live here the stale
+    // activity is closed out as cancelled. Liveness comes from the adapter's
+    // own set rather than the projection's status, because a projection can
+    // be LRU-evicted mid-turn and come back fresh while the turn still runs.
+    if (!this.liveTurns.has(id)) {
+      for (let index = 0; index < items.length; index += 1) {
+        const item = items[index]!;
+        if ((item.type === "tool" || item.type === "command" || item.type === "reasoning") && (item.status === "running" || item.status === "pending")) {
+          items[index] = { ...item, status: "cancelled" };
+        }
+      }
+    }
     // OpenCode 1.18 never emits `question.v2.asked`, so a pending question is
     // invisible to the event stream and only the provider knows about it.
     // Asking here is what makes an open question answerable at all. A failed
     // list degrades the snapshot (the next refresh republishes) but must not
     // rewrite the published set — that would erase live questions.
+    let questionsReconciled = false;
     try {
       const pendingNow = await this.pendingQuestions(id);
       for (const pending of pendingNow) {
         if (items.some(item => item.id === pending.id)) continue;
         items.push(pending);
       }
-      if (pendingNow.length > 0) this.publishedQuestions.set(id, new Set(pendingNow.map(item => item.id)));
-      else this.publishedQuestions.delete(id);
+      if (this.provider.listQuestions) {
+        questionsReconciled = true;
+        // A successful read is authoritative: it carries this conversation's
+        // own questions and its children's, so one absent from it was
+        // answered elsewhere while its only live signal was missed.
+        const live = new Set(pendingNow.map(item => item.id));
+        const projection = this.projection(id);
+        for (const existing of projection.items()) {
+          if (existing.type !== "question" || existing.status !== "pending" || live.has(existing.id)) continue;
+          projection.apply({ kind: "remove", itemId: existing.id });
+          this.questionCreatedAt.delete(existing.id);
+        }
+      }
+      if (pendingNow.length > 0) {
+        this.publishedQuestions.set(id, new Set(pendingNow.map(item => item.id)));
+        // A recovered child question is ALSO recorded under its owning child:
+        // the child's next question-tool update computes removals against
+        // that set, and the pump mirrors them into this conversation. Keyed
+        // only under the parent, an answer given elsewhere left the parent
+        // offering a question OpenCode no longer had — 409 until reload.
+        // The sweep is child-inclusive, so each subset is that child's full
+        // current pending set and overwriting is safe.
+        const byChild = new Map<string, Set<string>>();
+        for (const item of pendingNow) {
+          if (item.type !== "question") continue;
+          const owner = item.conversationId ?? id;
+          if (owner === id) continue;
+          const set = byChild.get(owner) ?? new Set<string>();
+          set.add(item.id);
+          byChild.set(owner, set);
+        }
+        for (const [owner, ids] of byChild) this.publishedQuestions.set(owner, ids);
+      } else this.publishedQuestions.delete(id);
     } catch { /* unknown, not empty */ }
+    // A permission is otherwise knowable only from a live event: it has no
+    // history representation, so one raised while the pump was restarting
+    // would strand its turn with nothing on screen. Reconciling here — the
+    // moment a user is actually looking at the conversation — makes it
+    // answerable. Ids match the event path's, so a request that also arrives
+    // live converges on one entry instead of rendering twice.
+    try {
+      const pendingNow = await this.pendingPermissions(id);
+      for (const pending of pendingNow) {
+        if (items.some(item => item.id === pending.id)) continue;
+        items.push(pending);
+      }
+      // A successful read is authoritative the other way too: a known pending
+      // permission absent from it was answered somewhere else while its reply
+      // event was missed, and the card must be revoked — otherwise a
+      // reconnecting client could answer a request OpenCode no longer has.
+      // Skipped entirely when the provider cannot list at all: that is
+      // unknown, not empty. Mirrored child copies survive correctly because
+      // pendingPermissions includes the children's requests.
+      if (this.provider.listPermissions) {
+        const live = new Set(pendingNow.map(item => item.id));
+        const projection = this.projection(id);
+        for (const existing of projection.items()) {
+          if (existing.type !== "permission" || existing.status !== "pending" || live.has(existing.id)) continue;
+          projection.apply({ kind: "remove", itemId: existing.id });
+          this.permissionCreatedAt.delete(existing.id);
+        }
+      }
+    } catch {
+      // Unknown, not empty. `seed` replaces the timeline from history, and
+      // history carries no interaction requests at all — so without carrying
+      // the live ones over, a failed list would erase a request the event
+      // stream established and strand the turn waiting on it. But this
+      // failure only vouches for what its own read governs: permissions,
+      // plus questions only when the question read failed too. A question a
+      // successful read just retired stays retired.
+      for (const existing of this.projection(id).items()) {
+        if ((existing.type !== "permission" && existing.type !== "question") || existing.status !== "pending") continue;
+        const vouchedGone = existing.type === "question" && questionsReconciled;
+        if (!vouchedGone && !items.some(item => item.id === existing.id)) items.push(existing);
+      }
+    }
     const projection = this.projection(id);
     projection.seed(items);
     return {
@@ -216,7 +341,7 @@ export class OpenCodeChatAdapter {
     });
   }
 
-  async prompt(conversationId: string, requestId: string, text: string, model?: ModelSelection): Promise<{
+  async prompt(conversationId: string, requestId: string, text: string, model?: ModelSelection, agent?: string): Promise<{
     messageId: string;
     delivery: "steer" | "queue";
     conversation?: ConversationSummary;
@@ -232,6 +357,14 @@ export class OpenCodeChatAdapter {
         const models = await this.provider.listModels();
         if (!models.some(candidate => sameSelection(candidate.selection, model))) throw new InvalidModelSelectionError();
         this.lastModel.set(conversationId, model);
+      }
+      // Same freshness rule as the model: only a change pays the list round
+      // trip, and an unknown name is refused rather than passed through for
+      // OpenCode to interpret.
+      if (agent && this.lastAgent.get(conversationId) !== agent) {
+        const agents = await this.agents();
+        if (!agents.some(candidate => candidate.name === agent)) throw new InvalidAgentSelectionError();
+        this.lastAgent.set(conversationId, agent);
       }
       // Emptiness is checked before dispatch (afterwards the store already
       // holds this prompt), but the rename itself waits for admission — a
@@ -256,8 +389,8 @@ export class OpenCodeChatAdapter {
           ? parseSlashCommand(text, await this.provider.listCommands())
           : undefined;
         const accepted = slash
-          ? await this.provider.command(conversationId, { id: messageId, name: slash.name, arguments: slash.arguments, model })
-          : await this.provider.prompt(conversationId, { id: messageId, text, delivery, model });
+          ? await this.provider.command(conversationId, { id: messageId, name: slash.name, arguments: slash.arguments, model, agent })
+          : await this.provider.prompt(conversationId, { id: messageId, text, delivery, model, agent });
         if (renameToFirstPrompt) {
           try {
             session = await this.provider.renameSession!(conversationId, deriveConversationTitle(text));
@@ -295,27 +428,103 @@ export class OpenCodeChatAdapter {
 
   respondPermission(conversationId: string, requestId: string, clientRequestId: string, outcome: PermissionOutcome): Promise<{ outcome: PermissionOutcome }> {
     return this.receipts.run(`permission:${conversationId}:${requestId}:${clientRequestId}`, async () => {
-      await this.requireSession(conversationId);
+      const session = await this.requireSession(conversationId);
       const projection = this.projection(conversationId);
+      // A subagent's request can be answered from the parent without its own
+      // transcript ever having been opened, so the owning projection may be
+      // empty. Reconcile it against OpenCode's pending set before judging the
+      // request stale — otherwise the card is visible, answerable, and refused.
+      if (!projection.has(`permission:${requestId}`)) await this.seedPendingPermissions(conversationId);
       projection.requirePending(requestId, "permission");
       const reply: ProviderPermissionReply = outcome === "approved-once" ? "once" : outcome === "approved-session" ? "always" : "reject";
       await this.provider.replyPermission(conversationId, requestId, reply);
       projection.resolvePermission(requestId, outcome);
+      this.resolveMirroredCopy(session.parentId, `permission:${requestId}`, parent => parent.resolvePermission(requestId, outcome));
       return { outcome };
     });
   }
 
   respondQuestion(conversationId: string, requestId: string, clientRequestId: string, outcome: QuestionOutcome): Promise<{ outcome: QuestionOutcome }> {
     return this.receipts.run(`question:${conversationId}:${requestId}:${clientRequestId}`, async () => {
-      await this.requireSession(conversationId);
+      const session = await this.requireSession(conversationId);
       const projection = this.projection(conversationId);
+      // Same reconciliation as permissions: a subagent's question answered
+      // from the parent may target a projection that was never populated (the
+      // child transcript never opened, or LRU-evicted). The card is visible
+      // and answerable, so judge it against OpenCode's pending set, not
+      // against an empty projection.
+      if (!projection.has(`question:${requestId}`)) await this.seedPendingQuestions(conversationId);
       projection.requirePending(requestId, "question");
       projection.validateQuestionOutcome(requestId, outcome);
       if (outcome.kind === "rejected") await this.provider.rejectQuestion(conversationId, requestId);
       else await this.provider.replyQuestion(conversationId, requestId, outcome.answers);
       projection.resolveQuestion(requestId, outcome);
+      this.resolveMirroredCopy(session.parentId, `question:${requestId}`, parent => parent.resolveQuestion(requestId, outcome));
       return { outcome };
     });
+  }
+
+  /**
+   * Resolves the parent's mirrored copy of a subagent's request after the
+   * provider accepted the answer. The live path mirrors resolutions through
+   * the pump, but a request that was *recovered* from the pending list — its
+   * events never reached us, which is why reconciliation exists — may produce
+   * no replied event either. Without this the parent keeps counting an
+   * already-answered request forever, and every further click conflicts.
+   */
+  private resolveMirroredCopy(parentId: string | undefined, itemId: string, resolve: (parent: ConversationProjection) => void): void {
+    if (!parentId) return;
+    const parent = this.projections.get(parentId);
+    if (parent?.has(itemId)) resolve(parent);
+  }
+
+  // Counts an event the pump could not use, by type. Never records a payload:
+  // a payload can carry file contents, and the count is what is actionable.
+  private countDiscard(outcome: "unrecognized" | "unparseable", eventType: string): void {
+    if (!this.metrics) return;
+    const type = eventType || "unknown";
+    let key = type;
+    if (!this.countedEventTypes.has(type)) {
+      if (this.countedEventTypes.size >= MAX_COUNTED_EVENT_TYPES) key = "other";
+      else this.countedEventTypes.add(type);
+    }
+    this.metrics.inc(`chat.event.${outcome}.${key}`);
+  }
+
+  /**
+   * Mirrors a subagent's interaction requests into the conversation that
+   * launched it. The child stays the owner: the mirrored item keeps the child's
+   * `conversationId`, so answering from either place addresses the child and
+   * one `requirePending` guard and receipt key govern the reply.
+   *
+   * Resolutions mirror too, so answering in the child clears the parent's copy.
+   */
+  private async mirrorToParent(
+    conversationId: string,
+    updates: NormalizedProviderUpdate[],
+    coalescer: ProviderUpdateCoalescer,
+  ): Promise<void> {
+    // Removals mirror too: a question withdrawn in the child (answered from
+    // the CLI, no longer pending) must also leave the parent's timeline.
+    const interactions = updates.filter(update =>
+      (update.kind === "upsert" && (update.item.type === "permission" || update.item.type === "question"))
+      || (update.kind === "remove" && /^(?:permission|question):/.test(update.itemId)));
+    if (interactions.length === 0) return;
+    let parentId: string | undefined;
+    try {
+      parentId = (await this.provider.getSession(conversationId))?.parentId;
+    } catch {
+      return; // Unknown parentage is not a reason to drop the child's own copy.
+    }
+    if (!parentId) return;
+    coalescer.push(parentId, interactions.map(update => update.kind === "upsert"
+      ? {
+        ...update,
+        // Owner preserved deliberately: this is a view of the child's request,
+        // not a second request the parent owns.
+        item: { ...update.item, conversationId },
+      }
+      : update));
   }
 
   projectionForTests(id: string): ConversationProjection {
@@ -335,7 +544,19 @@ export class OpenCodeChatAdapter {
     try {
       for await (const event of this.provider.events(signal)) {
         if (signal.aborted) break;
-      const normalized = normalizeProviderEvent(event, this.providerMessageRoles);
+        // Inside the loop, never above it: normalization resolves every failure
+        // to an outcome, and anything that still escapes must cost one event
+        // rather than ending the pump and losing the whole restart gap.
+        let normalized;
+        try {
+          normalized = normalizeProviderEvent(event, this.providerMessageRoles);
+        } catch {
+          this.countDiscard("unparseable", "");
+          continue;
+        }
+        if (normalized.outcome === "unrecognized" || normalized.outcome === "unparseable") {
+          this.countDiscard(normalized.outcome, normalized.eventType);
+        }
         if (!normalized.conversationId || normalized.updates.length === 0) continue;
         // Confinement is checked per event as it arrives, never at flush time:
         // a session that moves out of the workspace must stop publishing from
@@ -356,6 +577,13 @@ export class OpenCodeChatAdapter {
         if (normalized.updates.some(isQuestionToolUpdate)) {
           this.refreshQuestions(normalized.conversationId, coalescer);
         }
+        // A subagent's request is otherwise only visible inside the child's
+        // transcript — excluded from the picker, reachable solely through the
+        // parent's subagent row — so the parent shows a task running and no
+        // sign that anything is waiting. Mirror it into the launching
+        // conversation, carrying the child's id so the answer still goes to
+        // the child.
+        await this.mirrorToParent(normalized.conversationId, normalized.updates, coalescer);
       }
     } finally {
       coalescer.dispose();
@@ -369,25 +597,102 @@ export class OpenCodeChatAdapter {
    * item rather than rendering the same question twice.
    */
   /** Throws on provider failure — an errored list is unknown, not empty. */
+  private async pendingPermissions(id: string): Promise<ConversationItem[]> {
+    if (!this.provider.listPermissions) return [];
+    const pending = await this.provider.listPermissions();
+    const items: ConversationItem[] = [];
+    for (const request of pending) {
+      // This conversation's own request, or one owned by a subagent it
+      // launched. OpenCode does not deliver a subagent's request on the main
+      // event stream, so without the parentage check the parent shows a task
+      // running and no sign that anything is waiting on the user.
+      if (request.conversationId !== id && !await this.isChildOf(request.conversationId, id)) continue;
+      const itemId = `permission:${request.requestId}`;
+      // Stable createdAt for the same reason questions keep one: a fresh
+      // Date.now() on every reconciliation would keep moving the card.
+      const createdAt = this.permissionCreatedAt.get(itemId) ?? Date.now();
+      this.permissionCreatedAt.set(itemId, createdAt);
+      items.push({
+        id: itemId,
+        type: "permission" as const,
+        createdAt,
+        // The owner, never the conversation being rendered: this is what makes
+        // an answer given from the parent reach the subagent.
+        conversationId: request.conversationId,
+        requestId: request.requestId,
+        action: request.action,
+        resources: request.resources,
+        status: "pending" as const,
+      });
+    }
+    return items;
+  }
+
+  /** Publishes a conversation's own pending permissions into its projection. */
+  private async seedPendingPermissions(conversationId: string): Promise<void> {
+    try {
+      const projection = this.projection(conversationId);
+      for (const item of await this.pendingPermissions(conversationId)) {
+        if (!projection.has(item.id)) projection.apply({ kind: "upsert", item });
+      }
+    } catch { /* unknown, not empty — requirePending still decides */ }
+  }
+
+  /** Cached because a reconciliation may ask about the same session twice. */
+  private async isChildOf(candidate: string, parentId: string): Promise<boolean> {
+    if (candidate === parentId) return false;
+    let known = this.sessionParents.get(candidate);
+    if (known === undefined) {
+      // A failed lookup propagates instead of caching as "no parent": the
+      // callers already treat an errored sweep as unknown-not-empty, and a
+      // cached null would permanently hide a subagent's requests from its
+      // parent after one transient provider error.
+      known = (await this.provider.getSession(candidate))?.parentId ?? null;
+      this.sessionParents.set(candidate, known);
+    }
+    return known === parentId;
+  }
+
+  /** Throws on provider failure — an errored list is unknown, not empty. */
   private async pendingQuestions(id: string): Promise<ConversationItem[]> {
     if (!this.provider.listQuestions) return [];
-    const pending = await this.provider.listQuestions(id);
-    return pending.map(request => {
+    const pending = await this.provider.listQuestions();
+    const items: ConversationItem[] = [];
+    for (const request of pending) {
+      // This conversation's own, or a subagent's it launched — the same
+      // parentage rule as permissions, and for the same reason: a question
+      // asked while the pump was down is otherwise invisible in the only
+      // conversation the user actually has open.
+      if (request.conversationId !== id && !await this.isChildOf(request.conversationId, id)) continue;
       const itemId = `question:${request.requestId}`;
       // First-seen time, remembered: the provider gives no timestamp, and a
       // fresh Date.now() on every republish would keep moving the question
       // down the timeline as its tool part ticks over.
       const createdAt = this.questionCreatedAt.get(itemId) ?? Date.now();
       this.questionCreatedAt.set(itemId, createdAt);
-      return {
+      items.push({
         id: itemId,
         type: "question" as const,
         createdAt,
+        // The owner, never the conversation being rendered — what routes an
+        // answer given from the parent to the subagent.
+        conversationId: request.conversationId,
         requestId: request.requestId,
         questions: request.questions,
         status: "pending" as const,
-      };
-    });
+      });
+    }
+    return items;
+  }
+
+  /** Publishes a conversation's pending questions into its projection. */
+  private async seedPendingQuestions(conversationId: string): Promise<void> {
+    try {
+      const projection = this.projection(conversationId);
+      for (const item of await this.pendingQuestions(conversationId)) {
+        if (!projection.has(item.id)) projection.apply({ kind: "upsert", item });
+      }
+    } catch { /* unknown, not empty — requirePending still decides */ }
   }
 
   /**
@@ -412,7 +717,14 @@ export class OpenCodeChatAdapter {
         }
         if (live.size > 0) this.publishedQuestions.set(conversationId, live);
         else this.publishedQuestions.delete(conversationId);
-        if (updates.length > 0) coalescer.push(conversationId, updates);
+        if (updates.length > 0) {
+          coalescer.push(conversationId, updates);
+          // This fallback is the only path that discovers a subagent's
+          // question at all (no asked event exists), and the pump's mirror
+          // only sees the original tool update — so without mirroring here
+          // the parent shows a task running and no sign anything is waiting.
+          await this.mirrorToParent(conversationId, updates, coalescer);
+        }
       }
       // A failed refresh must reach THIS catch with the published set intact:
       // treating it as an empty pending list would remove live questions and
@@ -439,7 +751,10 @@ export class OpenCodeChatAdapter {
       this.projections.set(id, existing);
       return existing;
     }
-    const projection = new ConversationProjection(new ConversationReplay(this.generation, id, this.replayBytes));
+    const projection = new ConversationProjection(new ConversationReplay(this.generation, id, this.replayBytes), status => {
+      if (status === "running" || status === "sending") this.liveTurns.add(id);
+      else this.liveTurns.delete(id);
+    });
     this.projections.set(id, projection);
     for (const [candidateId, candidate] of this.projections) {
       if (this.projections.size <= this.maxProjections) break;
@@ -448,6 +763,7 @@ export class OpenCodeChatAdapter {
       // stale cursor resolves to a retention-gap resync, which is safe.
       this.projections.delete(candidateId);
       this.lastModel.delete(candidateId);
+      this.lastAgent.delete(candidateId);
     }
     return projection;
   }
@@ -490,7 +806,16 @@ export class ConversationProjection {
   private readonly timeline = new Map<string, ConversationItem>();
   private readonly text = new ProviderTextReconciler();
 
-  constructor(readonly replay: ConversationReplay) {}
+  constructor(
+    readonly replay: ConversationReplay,
+    // Every status change flows through statusUpdate, so this single hook is
+    // how the adapter keeps its eviction-proof live-turn set accurate.
+    private readonly onStatus?: (status: ConversationStatus) => void,
+  ) {}
+
+  has(itemId: string): boolean {
+    return this.timeline.has(itemId);
+  }
 
   items(): ConversationItem[] {
     return [...this.timeline.values()].sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
@@ -548,6 +873,10 @@ export class ConversationProjection {
     // empty questions array fails client validation — publishing it would
     // trade one lost frame for a stream resync loop.
     if (merged.type === "question" && merged.questions.length === 0) return undefined;
+    // Same for a permission resolution whose ask was never projected: the
+    // classic `permission.replied` event carries no action or resources, and
+    // an empty resources array fails client validation the same way.
+    if (merged.type === "permission" && merged.resources.length === 0) return undefined;
     this.timeline.set(item.id, merged);
     if (merged.type === "assistant_message") this.text.seed(merged.id.replace(/^part:/, ""), merged.markdown);
     if (merged.type === "reasoning") this.text.seed(merged.id.replace(/^part:|^reasoning:/, ""), merged.text);
@@ -556,15 +885,27 @@ export class ConversationProjection {
 
   statusUpdate(status: ConversationStatus, message?: string): ChatEvent {
     this.status = status;
+    this.onStatus?.(status);
     return this.replay.publish({ type: "conversation.status", status, message });
   }
 
   requirePending(requestId: string, type: "permission" | "question"): void {
     const item = this.timeline.get(`${type}:${requestId}`);
+    if (!item || (item.type !== "permission" && item.type !== "question") || item.type !== type || item.status !== "pending") {
+      throw new InteractionConflictError();
+    }
+    // Answerable is decided per owning conversation, matching the renderer: a
+    // parent shows its own requests next to mirrored subagent ones, and a
+    // newer mirrored request must not make the parent's own request refuse
+    // the answer its enabled buttons just offered.
+    const own = this.replay.conversationId;
+    const owner = item.conversationId ?? own;
     const pending = [...this.timeline.values()]
-      .filter(candidate => (candidate.type === "permission" || candidate.type === "question") && candidate.status === "pending")
+      .filter((candidate): candidate is PermissionRequest | QuestionRequest =>
+        (candidate.type === "permission" || candidate.type === "question") && candidate.status === "pending")
+      .filter(candidate => (candidate.conversationId ?? own) === owner)
       .sort((left, right) => right.createdAt - left.createdAt || right.id.localeCompare(left.id));
-    if (!item || item.type !== type || item.status !== "pending" || pending[0]?.id !== item.id) throw new InteractionConflictError();
+    if (pending[0]?.id !== item.id) throw new InteractionConflictError();
   }
 
   validateQuestionOutcome(requestId: string, outcome: QuestionOutcome): void {
@@ -604,11 +945,29 @@ function mergeInteraction(current: ConversationItem | undefined, incoming: Conve
     // not a blanking instruction.
     if (!incoming.text) return { ...incoming, text: current.text };
   }
+  // Resolved interactions are terminal. The merged provider streams preserve
+  // order only within themselves, so a delayed classic alias of an ask can
+  // land after the native reply — accepting its "pending" would reopen a card
+  // OpenCode no longer accepts an answer for (and carry the old outcome onto
+  // a pending item, which fails client validation).
   if (current.type === "permission" && incoming.type === "permission") {
-    return { ...current, ...incoming, action: incoming.action === "permission" ? current.action : incoming.action, resources: incoming.resources.length ? incoming.resources : current.resources };
+    const reopened = current.status === "resolved" && incoming.status === "pending";
+    return {
+      ...current,
+      ...incoming,
+      action: incoming.action === "permission" ? current.action : incoming.action,
+      resources: incoming.resources.length ? incoming.resources : current.resources,
+      ...(reopened ? { status: "resolved" as const, outcome: current.outcome } : {}),
+    };
   }
   if (current.type === "question" && incoming.type === "question") {
-    return { ...current, ...incoming, questions: incoming.questions.length ? incoming.questions : current.questions };
+    const reopened = current.status === "resolved" && incoming.status === "pending";
+    return {
+      ...current,
+      ...incoming,
+      questions: incoming.questions.length ? incoming.questions : current.questions,
+      ...(reopened ? { status: "resolved" as const, outcome: current.outcome } : {}),
+    };
   }
   if (current.type === "tool" && incoming.type === "tool") {
     const keepTerminal = current.status === "completed" || current.status === "failed" || current.status === "cancelled";

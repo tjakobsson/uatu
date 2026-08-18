@@ -226,6 +226,121 @@ describe("OpenCode v2 identity policy", () => {
     expect(stableProviderId("msg", "msg_existing")).toBe("msg_existing");
   });
 
+  test("lists primary agents only and sends the chosen agent with the prompt", async () => {
+    let promptInput: Record<string, unknown> | undefined;
+    const client = {
+      app: {
+        agents: async () => ({ data: [
+          { name: "build", description: "Writes code", mode: "primary" },
+          { name: "plan", description: "Read-only", mode: "all" },
+          { name: "explore", description: "Task-tool only", mode: "subagent" },
+          { name: "build", description: "duplicate", mode: "primary" },
+          // System agents are primary-mode but hidden on the wire — the field
+          // the SDK type omits. They run OpenCode's own bookkeeping turns.
+          { name: "title", description: "Names sessions", mode: "primary", hidden: true },
+          { name: "compaction", description: "Compacts context", mode: "primary", hidden: true },
+          { name: "summary", description: "Summarizes", mode: "primary", hidden: true },
+        ] }),
+      },
+      session: {
+        create: async () => ({ data: { ...session("ses_agenty"), directory: "/workspace" } }),
+        promptAsync: async (input: Record<string, unknown>) => { promptInput = input; return { data: undefined }; },
+      },
+    } as unknown as OpencodeClient;
+    const provider = new SdkV2Provider(client, "/workspace");
+
+    expect(await provider.listAgents()).toEqual([
+      { name: "build", description: "Writes code" },
+      { name: "plan", description: "Read-only" },
+    ]);
+
+    await provider.createSession("client-uuid");
+    await provider.prompt("ses_agenty", { id: "client-uuid", text: "hello", delivery: "queue", agent: "build" });
+    expect(promptInput).toEqual(expect.objectContaining({ agent: "build" }));
+  });
+
+  test("switches a v2 session's agent at the session level, not on the prompt", async () => {
+    // The generated v2 prompt serializer passes through only
+    // id/prompt/delivery/resume — an agent property there is silently
+    // dropped, so the switch must be its own call.
+    const calls: Array<[string, Record<string, unknown>]> = [];
+    const client = {
+      v2: {
+        session: {
+          switchAgent: async (input: Record<string, unknown>) => { calls.push(["switchAgent", input]); return { data: undefined }; },
+          prompt: async (input: Record<string, unknown>) => { calls.push(["prompt", input]); return { data: { data: { id: "msg_native" } } }; },
+        },
+      },
+    } as unknown as OpencodeClient;
+    const provider = new SdkV2Provider(client, "/workspace");
+
+    await provider.prompt("ses_native", { id: "client-uuid", text: "go", delivery: "queue", agent: "build" });
+    expect(calls[0]).toEqual(["switchAgent", { sessionID: "ses_native", agent: "build" }]);
+    expect(calls[1]![0]).toBe("prompt");
+    expect(calls[1]![1]).not.toHaveProperty("agent");
+  });
+
+  test("answers a subagent's permission through its parent's store", async () => {
+    const replies: string[] = [];
+    const client = {
+      session: {
+        create: async () => ({ data: { ...session("ses_parent"), directory: "/workspace" } }),
+        get: async (input: { sessionID: string }) => ({
+          data: input.sessionID === "ses_child"
+            ? { ...session("ses_child"), parentID: "ses_parent" }
+            : session("ses_parent"),
+        }),
+      },
+      permission: {
+        reply: async (input: Record<string, unknown>) => { replies.push(`classic:${input.requestID}`); return { data: undefined }; },
+      },
+      v2: {
+        session: {
+          permission: {
+            reply: async () => { replies.push("v2"); return { error: { message: "no such session in the v2 store" } }; },
+          },
+        },
+      },
+    } as unknown as OpencodeClient;
+    const provider = new SdkV2Provider(client, "/workspace");
+
+    await provider.createSession("client-uuid");
+    // The adapter always resolves the session before replying; that lookup is
+    // where the child learns it lives in its parent's store.
+    await provider.getSession("ses_child");
+    await provider.replyPermission("ses_child", "perm_1", "once");
+    expect(replies).toEqual(["classic:perm_1"]);
+  });
+
+  test("inherits the compatibility store across the inventory even when children list first", async () => {
+    const replies: string[] = [];
+    const client = {
+      session: {
+        list: async () => ({ data: [
+          { ...session("ses_grandchild"), parentID: "ses_child" },
+          { ...session("ses_child"), parentID: "ses_parent" },
+          { ...session("ses_parent"), metadata: { "uatu.transport": "compatibility" } },
+        ] }),
+      },
+      permission: {
+        reply: async (input: Record<string, unknown>) => { replies.push(`classic:${input.requestID}`); return { data: undefined }; },
+      },
+      v2: {
+        session: {
+          list: async () => ({ data: { data: [], cursor: { next: null } } }),
+          permission: {
+            reply: async () => { replies.push("v2"); return { error: { message: "no such session in the v2 store" } }; },
+          },
+        },
+      },
+    } as unknown as OpencodeClient;
+    const provider = new SdkV2Provider(client, "/workspace");
+
+    await provider.listSessions();
+    await provider.replyPermission("ses_grandchild", "perm_2", "reject");
+    expect(replies).toEqual(["classic:perm_2"]);
+  });
+
   test("lists connected provider models and switches with provider IDs intact", async () => {
     let switchInput: Record<string, unknown> | undefined;
     const client = {

@@ -30,14 +30,43 @@ export class FakeE2EChatService implements WorkspaceChatService {
   // assert that a retry after an ambiguous failure reuses the id (the
   // at-most-once contract) instead of minting a fresh one.
   promptAttempts: string[] = [];
+  promptAgents: string[] = [];
   // When set, the next prompt stalls half a second and then rejects —
   // enough of a window for a test to deterministically switch conversations
   // while the request is in flight.
   private failNextPrompt = false;
+  // When set, status() reports a failed startup carrying diagnostics, so the
+  // suite can drive the unavailable surface. A retry clears it, which is the
+  // recovery path a user takes after fixing their environment.
+  private unavailable: Extract<ChatAvailability, { state: "unavailable" }> | null = null;
 
   async status(): Promise<ChatAvailability> {
     this.statusCalls += 1;
-    return { state: "ready", version: "e2e" };
+    return this.unavailable ?? { state: "ready", version: "e2e" };
+  }
+
+  async retry(): Promise<ChatAvailability> {
+    this.unavailable = null;
+    return this.status();
+  }
+
+  failStartup(): void {
+    this.unavailable = {
+      state: "unavailable",
+      reason: "startup-failed",
+      message: "OpenCode did not become ready. OpenCode never accepted a health request at http://127.0.0.1:41823 within 30000ms (connection refused).",
+      diagnostics: {
+        executable: "/mnt/c/Users/x/AppData/Roaming/npm/opencode",
+        shadowedExecutables: ["/home/linuxbrew/.linuxbrew/bin/opencode"],
+        version: null,
+        endpoint: "http://127.0.0.1:41823",
+        elapsedMs: 30_000,
+        probes: 97,
+        lastProbe: { kind: "refused" },
+        stdout: "opencode server listening on http://127.0.0.1:41823",
+        stderr: "",
+      },
+    };
   }
 
   failPrompt(): void {
@@ -48,6 +77,13 @@ export class FakeE2EChatService implements WorkspaceChatService {
     return [
       { selection: { providerId: "anthropic", modelId: "claude-sonnet" }, provider: "Anthropic", name: "Claude Sonnet" },
       { selection: { providerId: "openai", modelId: "gpt-5" }, provider: "OpenAI", name: "GPT-5" },
+    ];
+  }
+
+  async agents() {
+    return [
+      { name: "build", description: "Full read-write agent" },
+      { name: "plan", description: "Read-only planning agent" },
     ];
   }
 
@@ -94,11 +130,12 @@ export class FakeE2EChatService implements WorkspaceChatService {
     return { snapshot: await handoff.snapshot, events: handoff.subscription };
   }
 
-  async prompt(id: string, requestId: string, text: string, model?: ModelSelection): Promise<{
+  async prompt(id: string, requestId: string, text: string, model?: ModelSelection, agent?: string): Promise<{
     messageId: string;
     delivery: "steer" | "queue";
     conversation?: ConversationSummary;
   }> {
+    if (agent) this.promptAgents.push(agent);
     const key = `prompt:${id}:${requestId}`;
     const existing = this.receipts.get(key) as { messageId: string; delivery: "steer" | "queue"; conversation?: ConversationSummary } | undefined;
     if (existing) return existing;
@@ -106,6 +143,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.promptAttempts.push(requestId);
     if (this.failNextPrompt) {
       this.failNextPrompt = false;
+    this.unavailable = null;
       await new Promise(resolve => setTimeout(resolve, 500));
       throw new Error("prompt rejected by fixture");
     }
@@ -171,6 +209,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.disconnect();
     this.statusCalls = 0;
     this.promptAttempts = [];
+    this.promptAgents = [];
     this.failNextPrompt = false;
     this.generation = `e2e-chat-${this.nextId++}`;
     this.conversations.clear();

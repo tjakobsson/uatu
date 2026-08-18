@@ -1,5 +1,6 @@
 import { appUrl } from "../shared/app-url";
 import type {
+  ChatAgent,
   ChatAvailability,
   ChatCommand,
   ChatEvent,
@@ -11,6 +12,7 @@ import type {
   QuestionOutcome,
 } from "./types";
 import {
+  parseChatAgent,
   parseChatAvailability,
   parseChatCommand,
   parseChatEvent,
@@ -46,6 +48,12 @@ export class ChatApiClient {
     return this.get(appUrl("/api/chat/status"), parseChatAvailability);
   }
 
+  // POST with no body: retry spawns a process, so it must not sit behind a safe
+  // method, and the contract declares no request media types for it.
+  retry(): Promise<ChatAvailability> {
+    return this.request(appUrl("/api/chat/retry"), { method: "POST" }, parseChatAvailability);
+  }
+
   async conversations(): Promise<ConversationSummary[]> {
     const value = await this.get(appUrl("/api/chat/conversations"), value => value as { conversations?: unknown });
     if (!Array.isArray(value.conversations)) throw new ChatTransportError("Chat returned an invalid conversation list");
@@ -64,6 +72,12 @@ export class ChatApiClient {
     return value.commands.map(parseChatCommand);
   }
 
+  async agents(): Promise<ChatAgent[]> {
+    const value = await this.get(appUrl("/api/chat/agents"), value => value as { agents?: unknown });
+    if (!Array.isArray(value.agents)) throw new ChatTransportError("Chat returned an invalid agent list");
+    return value.agents.map(parseChatAgent);
+  }
+
   createConversation(): Promise<ConversationSnapshot> {
     return this.mutate(appUrl("/api/chat/conversations"), {}, parseConversationSnapshot);
   }
@@ -74,14 +88,14 @@ export class ChatApiClient {
     return this.get(appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}?${query}`), parseConversationSnapshot);
   }
 
-  prompt(conversationId: string, requestId: string, text: string, model?: ModelSelection): Promise<{
+  prompt(conversationId: string, requestId: string, text: string, model?: ModelSelection, agent?: string): Promise<{
     messageId: string;
     delivery: "steer" | "queue";
     conversation?: ConversationSummary;
   }> {
     return this.mutate(
       appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/prompts`),
-      { requestId, text, ...(model ? { model } : {}) },
+      { requestId, text, ...(model ? { model } : {}), ...(agent ? { agent } : {}) },
       value => {
         const result = value as { messageId: string; delivery: "steer" | "queue"; conversation?: unknown };
         return {

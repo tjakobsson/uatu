@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { deriveConversationTitle, InteractionConflictError, InvalidModelSelectionError, OpenCodeChatAdapter, parseSlashCommand } from "./adapter";
+import { deriveConversationTitle, InteractionConflictError, InvalidAgentSelectionError, InvalidModelSelectionError, OpenCodeChatAdapter, parseSlashCommand } from "./adapter";
 import { normalizeProviderEvent } from "./normalization";
 import type {
   OpenCodeProvider,
@@ -12,6 +12,7 @@ import type {
 } from "./provider";
 import type { ChatEvent, ChatModel, ModelSelection } from "./types";
 import { ConversationNotFoundError } from "./workspace";
+import { MetricsRegistry } from "../debug/metrics";
 
 class EventQueue implements AsyncIterable<ProviderEvent> {
   private values: ProviderEvent[] = [];
@@ -50,13 +51,16 @@ class FakeProvider implements OpenCodeProvider {
   sessions: ProviderSession[] = [];
   pages = new Map<string, ProviderPage<ProviderMessage>>();
   eventQueue = new EventQueue();
-  prompts: Array<{ sessionId: string; id: string; text: string; delivery: "steer" | "queue" }> = [];
+  prompts: Array<{ sessionId: string; id: string; text: string; delivery: "steer" | "queue"; agent?: string }> = [];
   commandCalls: Array<{ sessionId: string; id: string; name: string; arguments: string; model?: ModelSelection }> = [];
   permissionReplies: Array<{ sessionId: string; requestId: string; reply: ProviderPermissionReply }> = [];
   questionReplies: Array<{ sessionId: string; requestId: string; answers?: string[][]; rejected?: true }> = [];
   interrupts: string[] = [];
   modelSwitches: Array<{ sessionId: string; selection: ModelSelection }> = [];
   renameSession?: OpenCodeProvider["renameSession"];
+  listPermissions?: OpenCodeProvider["listPermissions"];
+  listQuestions?: OpenCodeProvider["listQuestions"];
+  listAgents?: OpenCodeProvider["listAgents"];
 
   async listCommands() { return this.commands; }
   async listModels() { return this.models; }
@@ -194,6 +198,7 @@ describe("OpenCode conversation inventory and history", () => {
     provider.pages.set("first", { items: [] });
     (provider as FakeProvider & { listQuestions?: unknown }).listQuestions = async () => [{
       requestId: "que_1",
+      conversationId: "session",
       questions: [{ prompt: "Proceed?", header: "Next", options: [{ label: "Yes", description: "" }], multiple: false, allowFreeForm: false }],
     }];
     const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd() });
@@ -233,6 +238,60 @@ describe("OpenCode conversation inventory and history", () => {
       items: [],
     }));
     expect(await adapter.getConversation("created")).toEqual(expect.objectContaining({ id: "created" }));
+  });
+
+  test("stale running activity from a dead server is closed out on load", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    // OpenCode died mid-turn (hub quit): the store never received a terminal
+    // state for these parts, so they still read as running.
+    provider.pages.set("first", { items: [{
+      info: { id: "m1", role: "assistant", time: { created: 10 } },
+      parts: [
+        { id: "p1", type: "tool", tool: "task", state: { status: "running", input: { description: "Audit styles" } } },
+        { id: "p2", type: "tool", tool: "task", state: { status: "completed" } },
+        { id: "p3", type: "reasoning", text: "thinking", time: { start: 10 } },
+      ],
+    } as never] });
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+
+    const items = (await adapter.history("local")).items;
+    expect(items).toEqual([
+      expect.objectContaining({ id: "tool:p1", status: "cancelled" }),
+      expect.objectContaining({ id: "tool:p2", status: "completed" }),
+      expect.objectContaining({ id: "part:p3", type: "reasoning", status: "cancelled" }),
+    ]);
+  });
+
+  test("a live turn keeps its running activity across a reload", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    provider.pages.set("first", { items: [{
+      info: { id: "m1", role: "assistant", time: { created: 10 } },
+      parts: [{ id: "p1", type: "tool", tool: "task", state: { status: "running", input: { description: "Audit styles" } } }],
+    } as never] });
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    adapter.projectionForTests("local").statusUpdate("running");
+
+    const items = (await adapter.history("local")).items;
+    expect(items).toEqual([expect.objectContaining({ id: "tool:p1", status: "running" })]);
+  });
+
+  test("an evicted projection does not cancel a turn that is still running", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local"), fixtureSession("other")];
+    provider.pages.set("first", { items: [{
+      info: { id: "m1", role: "assistant", time: { created: 10 } },
+      parts: [{ id: "p1", type: "tool", tool: "task", state: { status: "running", input: { description: "Audit styles" } } }],
+    } as never] });
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", maxProjections: 1 });
+    adapter.projectionForTests("local").statusUpdate("running");
+    // Touching another conversation evicts "local"; its projection comes back
+    // fresh ("idle") while the turn still runs. Liveness must survive that.
+    adapter.projectionForTests("other");
+
+    const items = (await adapter.history("local")).items;
+    expect(items).toEqual([expect.objectContaining({ id: "tool:p1", status: "running" })]);
   });
 
   test("uses opaque stable provider page boundaries without duplicate or reordered items", async () => {
@@ -404,6 +463,17 @@ describe("prompt, abort, permission, and question mutations", () => {
       .rejects.toBeInstanceOf(InvalidModelSelectionError);
   });
 
+  test("passes a listed agent through and refuses an unknown one", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    provider.listAgents = async () => [{ name: "build", description: "" }, { name: "plan", description: "" }];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+
+    await adapter.prompt("session", "r1", "switch me", undefined, "build");
+    expect(provider.prompts[0]).toEqual(expect.objectContaining({ agent: "build" }));
+    await expect(adapter.prompt("session", "r2", "nope", undefined, "reviewer")).rejects.toBeInstanceOf(InvalidAgentSelectionError);
+  });
+
   test("joins duplicate prompts, steers while running, and preserves content on abort", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
@@ -458,6 +528,37 @@ describe("prompt, abort, permission, and question mutations", () => {
     expect(provider.permissionReplies.map(reply => reply.reply)).toEqual(["once", "always", "reject"]);
   });
 
+  test("a late ask alias does not reopen a resolved interaction", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    applyEvent(adapter, "session", { id: "ask", type: "permission.v2.asked", data: { id: "perm_1", sessionID: "session", action: "shell", resources: ["ls"], timestamp: 10 } });
+    await adapter.respondPermission("session", "perm_1", "c1", "approved-once");
+    // The classic stream's alias of the same ask, delivered after the reply:
+    // the merged streams only preserve order within themselves.
+    applyEvent(adapter, "session", { id: "alias", type: "permission.asked", data: { id: "perm_1", sessionID: "session", permission: "shell", patterns: ["ls"], timestamp: 9 } });
+
+    expect(adapter.projectionForTests("session").items()[0]).toEqual(expect.objectContaining({
+      id: "permission:perm_1",
+      status: "resolved",
+      outcome: "approved-once",
+    }));
+    await expect(adapter.respondPermission("session", "perm_1", "c2", "rejected")).rejects.toBeInstanceOf(InteractionConflictError);
+
+    applyEvent(adapter, "session", {
+      id: "q-ask", type: "question.v2.asked",
+      data: { id: "que_1", sessionID: "session", timestamp: 10, questions: [{ question: "Choose", header: "Choice", options: [{ label: "A", description: "A" }], multiple: false, custom: false }] },
+    });
+    await adapter.respondQuestion("session", "que_1", "c3", { kind: "answered", answers: [["A"]] });
+    applyEvent(adapter, "session", {
+      id: "q-alias", type: "question.v2.asked",
+      data: { id: "que_1", sessionID: "session", timestamp: 9, questions: [{ question: "Choose", header: "Choice", options: [{ label: "A", description: "A" }], multiple: false, custom: false }] },
+    });
+    expect(adapter.projectionForTests("session").items().find(item => item.id === "question:que_1")).toEqual(
+      expect.objectContaining({ status: "resolved", outcome: { kind: "answered", answers: [["A"]] } }),
+    );
+  });
+
   test("supports option, multi-option, free-form, and rejection answers and refuses invalid or stale responses", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
@@ -488,5 +589,535 @@ describe("prompt, abort, permission, and question mutations", () => {
       expect.objectContaining({ requestId: "free", answers: [["Other"]] }),
       expect.objectContaining({ requestId: "reject", rejected: true }),
     ]);
+  });
+});
+
+describe("discarded event accounting", () => {
+  function counters() {
+    const values: Record<string, number> = {};
+    return { values, inc: (name: string, delta = 1) => { values[name] = (values[name] ?? 0) + delta; } };
+  }
+
+  test("an unrecognized event is counted by type and the stream keeps flowing", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    const metrics = counters();
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), metrics, coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+
+    provider.eventQueue.push({ id: "u1", type: "totally.unknown.event", data: { sessionID: "local" } } as never);
+    provider.eventQueue.push({ id: "d1", type: "session.next.text.delta", data: { sessionID: "local", partID: "p", delta: "after" } });
+    while (adapter.projectionForTests("local").items().length === 0) await Bun.sleep(1);
+
+    expect(metrics.values["chat.event.unrecognized.totally.unknown.event"]).toBe(1);
+    // The event after the unrecognized one still landed.
+    expect(JSON.stringify(adapter.projectionForTests("local").items())).toContain("after");
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("a malformed payload of a known type costs one event, not the pump", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    const metrics = counters();
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), metrics, coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+
+    // `permission.v2.asked` requires an id; without one its accessor throws.
+    provider.eventQueue.push({ id: "bad", type: "permission.v2.asked", data: { sessionID: "local" } } as never);
+    provider.eventQueue.push({ id: "d1", type: "session.next.text.delta", data: { sessionID: "local", partID: "p", delta: "survived" } });
+    while (adapter.projectionForTests("local").items().length === 0) await Bun.sleep(1);
+
+    expect(metrics.values["chat.event.unparseable.permission.v2.asked"]).toBe(1);
+    expect(JSON.stringify(adapter.projectionForTests("local").items())).toContain("survived");
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("an intentionally ignored type is not counted as a discard", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    const metrics = counters();
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), metrics, coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+
+    provider.eventQueue.push({ id: "hb", type: "server.heartbeat", data: {} } as never);
+    provider.eventQueue.push({ id: "cd", type: "session.next.compaction.delta", data: { sessionID: "local" } } as never);
+    provider.eventQueue.push({ id: "d1", type: "session.next.text.delta", data: { sessionID: "local", partID: "p", delta: "ok" } });
+    while (adapter.projectionForTests("local").items().length === 0) await Bun.sleep(1);
+
+    expect(Object.keys(metrics.values).filter(key => key.startsWith("chat.event."))).toEqual([]);
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("the counted type space is bounded, folding overflow into `other`", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    const metrics = counters();
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), metrics, coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+
+    for (let index = 0; index < 70; index += 1) {
+      provider.eventQueue.push({ id: `u${index}`, type: `unknown.type.${index}`, data: { sessionID: "local" } } as never);
+    }
+    provider.eventQueue.push({ id: "d1", type: "session.next.text.delta", data: { sessionID: "local", partID: "p", delta: "last" } });
+    while (adapter.projectionForTests("local").items().length === 0) await Bun.sleep(1);
+
+    const keys = Object.keys(metrics.values).filter(key => key.startsWith("chat.event.unrecognized."));
+    expect(keys.length).toBe(65);
+    expect(metrics.values["chat.event.unrecognized.other"]).toBe(6);
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("discards land in the registry snapshot the workspace writes without --debug", async () => {
+    // cli.ts writes `snapshot-<pid>.json` from MetricsRegistry.snapshot() on an
+    // unconditional 1Hz tick; --debug only adds the NDJSON history. Driving the
+    // real registry here guards the property that makes these counters readable
+    // on the machine where chat broke, with no restart and no flag.
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    const registry = new MetricsRegistry();
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), metrics: registry, coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+
+    provider.eventQueue.push({ id: "u1", type: "question.asked.someday", data: { sessionID: "local" } } as never);
+    provider.eventQueue.push({ id: "d1", type: "session.next.text.delta", data: { sessionID: "local", partID: "p", delta: "ok" } });
+    while (adapter.projectionForTests("local").items().length === 0) await Bun.sleep(1);
+
+    expect(registry.snapshot().counters["chat.event.unrecognized.question.asked.someday"]).toBe(1);
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("no counter key or value carries an event payload", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    const metrics = counters();
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), metrics, coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+
+    provider.eventQueue.push({
+      id: "secret",
+      type: "unknown.secret.carrier",
+      data: { sessionID: "local", contents: "PRIVATE-FILE-CONTENTS" },
+    } as never);
+    provider.eventQueue.push({ id: "d1", type: "session.next.text.delta", data: { sessionID: "local", partID: "p", delta: "ok" } });
+    while (adapter.projectionForTests("local").items().length === 0) await Bun.sleep(1);
+
+    expect(JSON.stringify(metrics.values)).not.toContain("PRIVATE-FILE-CONTENTS");
+    await adapter.stopEventPump();
+    await pump;
+  });
+});
+
+describe("pending permission recovery", () => {
+  test("a permission the event stream never delivered appears on load and is answerable", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    // The pump never saw this: OpenCode raised it while the stream was down.
+    provider.listPermissions = async () => [{ requestId: "perm_1", conversationId: "local", action: "skill", resources: ["review-code"] }];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+
+    const snapshot = await adapter.history("local");
+    expect(snapshot.items).toEqual([expect.objectContaining({
+      id: "permission:perm_1",
+      type: "permission",
+      action: "skill",
+      resources: ["review-code"],
+      status: "pending",
+    })]);
+
+    await adapter.respondPermission("local", "perm_1", "req-1", "approved-once");
+    expect(provider.permissionReplies).toEqual([{ sessionId: "local", requestId: "perm_1", reply: "once" }]);
+  });
+
+  test("a recovered request that also arrives live stays one entry", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    provider.listPermissions = async () => [{ requestId: "perm_1", conversationId: "local", action: "skill", resources: ["review-code"] }];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+
+    await adapter.history("local");
+    applyEvent(adapter, "local", {
+      id: "live",
+      type: "permission.v2.asked",
+      data: { id: "perm_1", sessionID: "local", action: "skill", resources: ["review-code"] },
+    } as never);
+
+    const items = adapter.projectionForTests("local").items().filter(item => item.type === "permission");
+    expect(items).toHaveLength(1);
+  });
+
+  test("a permission answered elsewhere is revoked on load, not left answerable", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    // Answered through another client while its reply event was missed: the
+    // successful pending list no longer carries it.
+    provider.listPermissions = async () => [];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    applyEvent(adapter, "local", {
+      id: "live",
+      type: "permission.v2.asked",
+      data: { id: "perm_gone", sessionID: "local", action: "shell", resources: ["ls"] },
+    } as never);
+
+    const snapshot = await adapter.history("local");
+    expect(snapshot.items).toEqual([]);
+    expect(adapter.projectionForTests("local").has("permission:perm_gone")).toBe(false);
+  });
+
+  test("a failing permission list leaves already-known requests visible", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    provider.listPermissions = async () => { throw new Error("provider unreachable"); };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+
+    applyEvent(adapter, "local", {
+      id: "live",
+      type: "permission.v2.asked",
+      data: { id: "perm_known", sessionID: "local", action: "shell", resources: ["ls"] },
+    } as never);
+
+    // The snapshot degrades rather than erasing what the stream established.
+    const snapshot = await adapter.history("local");
+    expect(snapshot.items.some(item => item.id === "permission:perm_known")).toBe(true);
+  });
+
+  test("a failed permission list does not resurrect a question a successful read retired", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    // The question read succeeds and says the question is gone; the
+    // permission read then fails and must not vouch for it anyway.
+    provider.listQuestions = async () => [];
+    provider.listPermissions = async () => { throw new Error("provider unreachable"); };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    applyEvent(adapter, "local", {
+      id: "q", type: "question.v2.asked",
+      data: { id: "que_stale", sessionID: "local", timestamp: 10, questions: [{ question: "Choose", header: "Choice", options: [{ label: "A", description: "A" }], multiple: false, custom: false }] },
+    });
+    applyEvent(adapter, "local", {
+      id: "p", type: "permission.v2.asked",
+      data: { id: "perm_live", sessionID: "local", action: "shell", resources: ["ls"], timestamp: 11 },
+    });
+
+    const snapshot = await adapter.history("local");
+    // The permission survives its failed read; the retired question does not.
+    expect(snapshot.items).toEqual([expect.objectContaining({ id: "permission:perm_live", status: "pending" })]);
+    expect(adapter.projectionForTests("local").has("question:que_stale")).toBe(false);
+  });
+
+  test("the global question read vouches for mirrored child questions both ways", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    const childQuestion = {
+      requestId: "que_child",
+      conversationId: "child",
+      questions: [{ prompt: "Pick", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }],
+    };
+    let pending = [childQuestion];
+    provider.listQuestions = async () => pending;
+    provider.listPermissions = async () => { throw new Error("provider unreachable"); };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+
+    // Present in the read: the child's question asked while the pump was down
+    // surfaces on parent load, owned by the child.
+    let snapshot = await adapter.history("parent");
+    expect(snapshot.items).toEqual([expect.objectContaining({ id: "question:que_child", conversationId: "child", status: "pending" })]);
+
+    // Absent from a later successful read: answered elsewhere, so the
+    // parent's mirrored copy retires even while the permission read fails.
+    pending = [];
+    snapshot = await adapter.history("parent");
+    expect(snapshot.items).toEqual([]);
+    expect(adapter.projectionForTests("parent").has("question:que_child")).toBe(false);
+  });
+
+  test("a recovered child question answered elsewhere clears live, not just on reload", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    let pending = [{
+      requestId: "que_gone",
+      conversationId: "child",
+      questions: [{ prompt: "Pick", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }],
+    }];
+    provider.listQuestions = async () => pending;
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    // Recovered through the parent's snapshot — the child transcript is
+    // never opened, so only this bookkeeping can seed the removal path.
+    await adapter.history("parent");
+    expect(adapter.projectionForTests("parent").has("question:que_gone")).toBe(true);
+
+    // Answered from another client; the reply event was missed, and the next
+    // question-tool update on the child is the only live signal.
+    pending = [];
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push({
+      id: "t1", type: "session.next.tool.success",
+      data: { sessionID: "child", callID: "c1", tool: "question" },
+    } as never);
+    while (adapter.projectionForTests("parent").has("question:que_gone")) await Bun.sleep(1);
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("a child question answered from the parent seeds an empty owning projection", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.listQuestions = async () => [{
+      requestId: "que_child",
+      conversationId: "child",
+      questions: [{ prompt: "Pick", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }],
+    }];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    // The parent shows the card; the child's transcript was never opened, so
+    // its projection is empty when the answer arrives.
+    await adapter.history("parent");
+    await adapter.respondQuestion("child", "que_child", "client-1", { kind: "answered", answers: [["A"]] });
+    expect(provider.questionReplies).toEqual([{ sessionId: "child", requestId: "que_child", answers: [["A"]] }]);
+  });
+
+  test("a provider without the list simply never recovers, and does not throw", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    expect((await adapter.history("local")).items).toEqual([]);
+  });
+
+  test("a resolution whose ask was never projected is suppressed, not published invalid", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("local")];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    // The classic replied event carries no action or resources; without the
+    // ask to merge into, publishing it would fail client validation and force
+    // a resync on every snapshot that repeats the item.
+    applyEvent(adapter, "local", {
+      id: "orphan",
+      type: "permission.replied",
+      data: { sessionID: "local", requestID: "perm_ghost", reply: "once", timestamp: 10 },
+    } as never);
+    expect(adapter.projectionForTests("local").items()).toEqual([]);
+  });
+});
+
+describe("a subagent's request reaches the conversation that launched it", () => {
+  function withChild() {
+    const provider = new FakeProvider();
+    provider.sessions = [
+      fixtureSession("parent"),
+      { ...fixtureSession("child"), parentId: "parent" },
+    ];
+    return provider;
+  }
+  const asked = (id: string) => ({
+    id, type: "permission.v2.asked",
+    data: { id, sessionID: "child", action: "bash", resources: ["rm -rf build"], timestamp: 10 },
+  });
+
+  test("appears in the parent, owned by the child, and is answerable there", async () => {
+    const provider = withChild();
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push(asked("perm-1") as never);
+    while (adapter.projectionForTests("parent").items().length === 0) await Bun.sleep(1);
+
+    const mirrored = adapter.projectionForTests("parent").items()[0]!;
+    expect(mirrored).toEqual(expect.objectContaining({
+      id: "permission:perm-1",
+      type: "permission",
+      // The child owns it — that is what routes the answer correctly.
+      conversationId: "child",
+      status: "pending",
+    }));
+    // It is in the child's own transcript too.
+    expect(adapter.projectionForTests("child").items()).toHaveLength(1);
+
+    // Answering addresses the child, and replies exactly once.
+    await adapter.respondPermission("child", "perm-1", "client-1", "approved-once");
+    expect(provider.permissionReplies).toEqual([{ sessionId: "child", requestId: "perm-1", reply: "once" }]);
+
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("resolving in the child clears the parent's copy", async () => {
+    const provider = withChild();
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push(asked("perm-2") as never);
+    while (adapter.projectionForTests("parent").items().length === 0) await Bun.sleep(1);
+
+    provider.eventQueue.push({
+      id: "replied", type: "permission.v2.replied",
+      data: { sessionID: "child", requestID: "perm-2", reply: "once", timestamp: 11 },
+    } as never);
+    const permissionStatus = (conversation: string) => {
+      const item = adapter.projectionForTests(conversation).items()[0];
+      return item?.type === "permission" ? item.status : undefined;
+    };
+    while (permissionStatus("parent") !== "resolved") await Bun.sleep(1);
+
+    for (const conversation of ["parent", "child"]) {
+      const item = adapter.projectionForTests(conversation).items()[0]!;
+      expect(item).toEqual(expect.objectContaining({ status: "resolved" }));
+    }
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("a reconciled subagent question reaches the parent and clears when withdrawn", async () => {
+    const provider = withChild();
+    let pending = [{
+      requestId: "que-1",
+      conversationId: "child",
+      questions: [{ prompt: "Pick one", header: "Choice", options: [{ label: "A", description: "" }], multiple: false, allowFreeForm: false }],
+    }];
+    provider.listQuestions = async () => pending;
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+    // The question tool part is the only live signal a question exists; the
+    // asked event never fires, so this fallback is the parent's only chance.
+    provider.eventQueue.push({
+      id: "t1", type: "session.next.tool.called",
+      data: { sessionID: "child", callID: "c1", tool: "question" },
+    } as never);
+    const parentQuestion = () => adapter.projectionForTests("parent").items().find(item => item.type === "question");
+    while (!parentQuestion()) await Bun.sleep(1);
+    expect(parentQuestion()).toEqual(expect.objectContaining({
+      id: "question:que-1",
+      conversationId: "child",
+      status: "pending",
+    }));
+
+    // Withdrawn (answered from the CLI): the parent's copy must clear too.
+    pending = [];
+    provider.eventQueue.push({
+      id: "t2", type: "session.next.tool.success",
+      data: { sessionID: "child", callID: "c1", tool: "question" },
+    } as never);
+    while (parentQuestion()) await Bun.sleep(1);
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("a newer subagent request does not block answering the parent's own", async () => {
+    const provider = withChild();
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push({
+      id: "own", type: "permission.v2.asked",
+      data: { id: "perm-own", sessionID: "parent", action: "bash", resources: ["bun test"], timestamp: 10 },
+    } as never);
+    provider.eventQueue.push({
+      id: "mirrored", type: "permission.v2.asked",
+      data: { id: "perm-late", sessionID: "child", action: "bash", resources: ["rm -rf build"], timestamp: 20 },
+    } as never);
+    while (adapter.projectionForTests("parent").items().length < 2) await Bun.sleep(1);
+
+    // The renderer enables one request per owning conversation; the guard
+    // must admit the same set, not just the globally newest.
+    await adapter.respondPermission("parent", "perm-own", "client-own", "approved-once");
+    await adapter.respondPermission("child", "perm-late", "client-late", "rejected");
+    expect(provider.permissionReplies).toEqual([
+      { sessionId: "parent", requestId: "perm-own", reply: "once" },
+      { sessionId: "child", requestId: "perm-late", reply: "reject" },
+    ]);
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("a request from a parentless conversation is not mirrored anywhere", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("solo")];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push({
+      id: "perm-3", type: "permission.v2.asked",
+      data: { id: "perm-3", sessionID: "solo", action: "bash", resources: ["ls"], timestamp: 10 },
+    } as never);
+    while (adapter.projectionForTests("solo").items().length === 0) await Bun.sleep(1);
+    expect(adapter.projectionForTests("solo").items()[0]).toEqual(expect.objectContaining({ conversationId: "solo" }));
+    await adapter.stopEventPump();
+    await pump;
+  });
+});
+
+describe("a subagent's pending request is reconciled into its parent", () => {
+  // The live-event path is not enough: OpenCode does not deliver a subagent's
+  // permission on the main stream, so the parent must find it by asking.
+  function withPendingChildRequest() {
+    const provider = new FakeProvider();
+    provider.sessions = [
+      fixtureSession("parent"),
+      { ...fixtureSession("child"), parentId: "parent" },
+    ];
+    provider.listPermissions = async () => [
+      { requestId: "perm-child", conversationId: "child", action: "bash", resources: ["echo from-subagent"] },
+    ];
+    return provider;
+  }
+
+  test("appears in the parent on load, owned by the child", async () => {
+    const provider = withPendingChildRequest();
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const snapshot = await adapter.history("parent");
+    expect(snapshot.items).toEqual([expect.objectContaining({
+      id: "permission:perm-child",
+      type: "permission",
+      conversationId: "child",
+      action: "bash",
+      status: "pending",
+    })]);
+  });
+
+  test("answering it from the parent replies once, for the child", async () => {
+    const provider = withPendingChildRequest();
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    await adapter.history("parent");
+    // The client addresses the owner, which is what the item carries.
+    await adapter.respondPermission("child", "perm-child", "client-1", "approved-once");
+    expect(provider.permissionReplies).toEqual([{ sessionId: "child", requestId: "perm-child", reply: "once" }]);
+  });
+
+  test("answering also resolves the parent's mirrored copy, not just the child's", async () => {
+    const provider = withPendingChildRequest();
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    await adapter.history("parent");
+    await adapter.respondPermission("child", "perm-child", "client-1", "approved-once");
+    // A recovered request may never produce a replied event for the pump to
+    // mirror, so the answer itself must clear the parent's copy — otherwise
+    // the parent counts an already-answered request forever.
+    expect(adapter.projectionForTests("parent").items()).toEqual([
+      expect.objectContaining({ id: "permission:perm-child", status: "resolved", outcome: "approved-once" }),
+    ]);
+  });
+
+  test("a transient parent-lookup failure does not permanently hide the child's request", async () => {
+    const provider = withPendingChildRequest();
+    const lookup = provider.getSession.bind(provider);
+    let failing = true;
+    provider.getSession = async (id: string) => {
+      if (failing && id === "child") throw new Error("provider unreachable");
+      return lookup(id);
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    // Degraded while the provider errors — unknown, not empty…
+    expect((await adapter.history("parent")).items).toEqual([]);
+    failing = false;
+    // …and recovered on the next load, rather than cached as "no parent".
+    expect((await adapter.history("parent")).items).toEqual([
+      expect.objectContaining({ id: "permission:perm-child", conversationId: "child", status: "pending" }),
+    ]);
+  });
+
+  test("an unrelated conversation's request is not pulled in", async () => {
+    const provider = withPendingChildRequest();
+    provider.sessions.push({ ...fixtureSession("stranger") });
+    provider.listPermissions = async () => [
+      { requestId: "perm-other", conversationId: "stranger", action: "bash", resources: ["ls"] },
+    ];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    expect((await adapter.history("parent")).items).toEqual([]);
   });
 });

@@ -25,21 +25,27 @@ function provider(): OpenCodeProvider {
 }
 
 function fixtureRuntime(): OpenCodeService {
-  let resolveExit!: (code: number) => void;
-  const exited = new Promise<number>(resolve => { resolveExit = resolve; });
-  const child: SpawnedOpenCode = {
-    pid: 42,
-    exited,
-    stderr: new ReadableStream({ start(controller) { controller.close(); } }),
-    kill() { resolveExit(143); },
-  };
+  // Fresh child per spawn: restart() terminates the old process and spawns a
+  // replacement, which a single shared child (whose `exited` promise has
+  // already resolved) cannot model.
+  const exits: Array<(code: number) => void> = [];
   return new OpenCodeService({
     workspacePath: "/workspace",
-    discoverExecutable: async () => "/bin/opencode",
+    discoverCandidates: async () => ["/bin/opencode"],
     allocatePort: async () => 43210,
-    spawn: () => child,
+    spawn: (): SpawnedOpenCode => {
+      let resolveExit!: (code: number) => void;
+      const exited = new Promise<number>(resolve => { resolveExit = resolve; });
+      exits.push(resolveExit);
+      return {
+        pid: 42,
+        exited,
+        stderr: new ReadableStream({ start(controller) { controller.close(); } }),
+        kill() { resolveExit(143); },
+      };
+    },
     fetch: async () => Response.json({ healthy: true, version: "test" }),
-    killGroup: () => resolveExit(143),
+    killGroup: () => { for (const resolve of exits) resolve(143); },
   });
 }
 
@@ -152,5 +158,194 @@ describe("LazyOpenCodeChatService", () => {
     const afterDispose = pumpStarts;
     await Bun.sleep(2_500);
     expect(pumpStarts).toBe(afterDispose);
+  }, 10_000);
+
+  test("retry restarts the runtime so a replaced binary is picked up", async () => {
+    // Models an incompatible install that the user then fixes: the runtime is
+    // "ready" the whole time, so only a real process restart re-probes the
+    // binary that is actually on disk now.
+    let spawns = 0;
+    const exits: Array<(code: number) => void> = [];
+    const runtime = new OpenCodeService({
+      workspacePath: "/workspace",
+      discoverCandidates: async () => ["/bin/opencode"],
+      allocatePort: async () => 43210,
+      spawn: (): SpawnedOpenCode => {
+        spawns += 1;
+        let resolveExit!: (code: number) => void;
+        const exited = new Promise<number>(resolve => { resolveExit = resolve; });
+        exits.push(resolveExit);
+        return {
+          pid: 42,
+          exited,
+          stderr: new ReadableStream({ start(controller) { controller.close(); } }),
+          kill() { resolveExit(143); },
+        };
+      },
+      fetch: async () => Response.json({ healthy: true, version: "test" }),
+      killGroup: () => { for (const resolve of exits) resolve(143); },
+    });
+    let probes = 0;
+    const service = new LazyOpenCodeChatService({
+      workspacePath: "/workspace",
+      runtime,
+      createProvider: () => ({
+        ...provider(),
+        async listModels() {
+          probes += 1;
+          if (probes === 1) throw new Error("404 not found");
+          return [];
+        },
+      } satisfies OpenCodeProvider),
+      createAdapter: options => new OpenCodeChatAdapter({ ...options, generation: "test" }),
+    });
+
+    expect(await service.status()).toEqual({
+      state: "unavailable",
+      reason: "unsupported",
+      message: "The installed OpenCode version is not compatible with chat.",
+    });
+    expect(spawns).toBe(1);
+    expect(await service.retry()).toEqual({ state: "ready", version: "test" });
+    // The incompatible process was replaced, not merely re-probed.
+    expect(spawns).toBe(2);
+    expect(probes).toBe(2);
+    await service.dispose();
+  });
+
+  test("concurrent service retries join one sequence instead of double-restarting", async () => {
+    let spawns = 0;
+    const exits: Array<(code: number) => void> = [];
+    const runtime = new OpenCodeService({
+      workspacePath: "/workspace",
+      discoverCandidates: async () => ["/bin/opencode"],
+      allocatePort: async () => 43210,
+      spawn: (): SpawnedOpenCode => {
+        spawns += 1;
+        let resolveExit!: (code: number) => void;
+        const exited = new Promise<number>(resolve => { resolveExit = resolve; });
+        exits.push(resolveExit);
+        return {
+          pid: 42,
+          exited,
+          stderr: new ReadableStream({ start(controller) { controller.close(); } }),
+          kill() { resolveExit(143); },
+        };
+      },
+      fetch: async () => Response.json({ healthy: true, version: "test" }),
+      killGroup: () => { for (const resolve of exits) resolve(143); },
+    });
+    const service = new LazyOpenCodeChatService({
+      workspacePath: "/workspace",
+      runtime,
+      createProvider: () => provider(),
+      createAdapter: options => new OpenCodeChatAdapter({ ...options, generation: "test" }),
+    });
+
+    await service.status();
+    expect(spawns).toBe(1);
+    // Runtime-level joining cannot help two retries that reach it at
+    // different times — the first can stall on pump shutdown and then
+    // restart the runtime the second one just built.
+    const [first, second] = await Promise.all([service.retry(), service.retry()]);
+    expect(first).toEqual({ state: "ready", version: "test" });
+    expect(second).toEqual(first);
+    expect(spawns).toBe(2);
+    await service.dispose();
+  });
+
+  test("an adapter built during retry teardown is retired, not published", async () => {
+    let spawnIndex = 0;
+    const exits: Array<(code: number) => void> = [];
+    const runtime = new OpenCodeService({
+      workspacePath: "/workspace",
+      discoverCandidates: async () => ["/bin/opencode"],
+      allocatePort: async () => 43200 + spawnIndex,
+      spawn: (): SpawnedOpenCode => {
+        spawnIndex += 1;
+        let resolveExit!: (code: number) => void;
+        const exited = new Promise<number>(resolve => { resolveExit = resolve; });
+        exits.push(resolveExit);
+        return {
+          pid: 42,
+          exited,
+          stderr: new ReadableStream({ start(controller) { controller.close(); } }),
+          kill() { resolveExit(143); },
+        };
+      },
+      fetch: async () => Response.json({ healthy: true, version: "test" }),
+      killGroup: () => { for (const resolve of exits) resolve(143); },
+    });
+    const endpoints: string[] = [];
+    let releasePump: (() => void) | null = null;
+    const service = new LazyOpenCodeChatService({
+      workspacePath: "/workspace",
+      runtime,
+      createProvider: options => { endpoints.push(options.endpoint); return provider(); },
+      createAdapter: options => {
+        const adapter = new OpenCodeChatAdapter({ ...options, generation: "test" });
+        if (endpoints.length === 1) {
+          // The first adapter's pump stop stalls, widening the teardown
+          // window another request can race into.
+          const original = adapter.stopEventPump.bind(adapter);
+          adapter.stopEventPump = async () => {
+            await new Promise<void>(resolve => { releasePump = resolve; });
+            await original();
+          };
+        }
+        return adapter;
+      },
+    });
+
+    await service.status();
+    const retrying = service.retry();
+    while (!releasePump) await Bun.sleep(1);
+    // Another client asks while the retry is tearing down: this builds an
+    // adapter against the old endpoint, which must not survive the restart.
+    const during = service.status();
+    await Bun.sleep(5);
+    (releasePump as unknown as () => void)();
+    expect(await retrying).toEqual({ state: "ready", version: "test" });
+    await during;
+
+    // Initial, the stray built mid-teardown, and the post-restart rebuild —
+    // and what is current now is the post-restart connection, not the stray.
+    expect(endpoints).toHaveLength(3);
+    expect(endpoints.at(-1)).toBe(runtime.currentConnection()?.endpoint);
+    await service.dispose();
+  });
+
+  test("retry retires the previous adapter's supervisor instead of leaking it", async () => {
+    const pumpStarts: number[] = [];
+    const service = new LazyOpenCodeChatService({
+      workspacePath: "/workspace",
+      runtime: fixtureRuntime(),
+      createProvider: () => {
+        const index = pumpStarts.push(0) - 1;
+        return {
+          ...provider(),
+          async *events() {
+            pumpStarts[index] += 1;
+            throw new Error("stream closed");
+          },
+        } satisfies OpenCodeProvider;
+      },
+      createAdapter: options => new OpenCodeChatAdapter({ ...options, generation: "test" }),
+    });
+
+    await service.status();
+    await Bun.sleep(1);
+    expect(pumpStarts[0]).toBeGreaterThanOrEqual(1);
+
+    await service.retry();
+    await Bun.sleep(1);
+    const stale = pumpStarts[0]!;
+    // The retired supervisor never reconnects the dead adapter, while the
+    // replacement's supervisor runs — one loop per retry must not accumulate.
+    await Bun.sleep(2_500);
+    expect(pumpStarts[0]).toBe(stale);
+    expect(pumpStarts[1]).toBeGreaterThan(0);
+
+    await service.dispose();
   }, 10_000);
 });

@@ -1,6 +1,10 @@
-import type { ChatCommand, ChatModel, ModelSelection, StructuredQuestion } from "./types";
+import type { ChatAgent, ChatCommand, ChatModel, ModelSelection, StructuredQuestion } from "./types";
 
-export type PendingQuestion = { requestId: string; questions: StructuredQuestion[] };
+// `conversationId` is the owning session, like PendingPermission's: the global
+// list is filtered by the adapter, which is what lets a parent discover its
+// children's pending questions.
+export type PendingQuestion = { requestId: string; conversationId: string; questions: StructuredQuestion[] };
+export type PendingPermission = { requestId: string; conversationId: string; action: string; resources: string[] };
 
 export type ProviderSession = {
   id: string;
@@ -26,6 +30,12 @@ export type ProviderPermissionReply = "once" | "always" | "reject";
 export interface OpenCodeProvider {
   listCommands(): Promise<ChatCommand[]>;
   listModels(): Promise<ChatModel[]>;
+  /**
+   * Primary agents a prompt can run under (Build, Plan, ...). Optional: a
+   * provider without it simply never offers a choice. Without the choice a
+   * session stuck in a read-only agent is stuck for good.
+   */
+  listAgents?(): Promise<ChatAgent[]>;
   switchModel(sessionId: string, selection: ModelSelection): Promise<void>;
   renameSession?(sessionId: string, title: string): Promise<ProviderSession>;
   listSessions(): Promise<ProviderSession[]>;
@@ -33,17 +43,27 @@ export interface OpenCodeProvider {
   getSession(id: string): Promise<ProviderSession | null>;
   listMessages(sessionId: string, options: { cursor?: string; limit: number }): Promise<ProviderPage<ProviderMessage>>;
   events(signal: AbortSignal): AsyncIterable<ProviderEvent>;
-  prompt(sessionId: string, input: { id: string; text: string; delivery: "steer" | "queue"; model?: ModelSelection }): Promise<{ messageId: string }>;
-  command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection }): Promise<{ messageId: string }>;
+  prompt(sessionId: string, input: { id: string; text: string; delivery: "steer" | "queue"; model?: ModelSelection; agent?: string }): Promise<{ messageId: string }>;
+  command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; agent?: string }): Promise<{ messageId: string }>;
   interrupt(sessionId: string): Promise<void>;
   replyPermission(sessionId: string, requestId: string, reply: ProviderPermissionReply): Promise<void>;
   /**
-   * Pending question requests owned by a session. OpenCode 1.18 never emits
-   * `question.v2.asked` over the event stream, so a pending question is only
-   * discoverable by asking. Optional: a provider without it simply never
-   * surfaces questions.
+   * Every pending permission request the server holds, each naming the session
+   * that owns it. Unfiltered on purpose: a permission is otherwise knowable
+   * only from a live event, and OpenCode does not deliver a subagent's request
+   * on the main stream — so the caller must be able to see requests owned by a
+   * conversation's children, not just its own. Optional: a provider without it
+   * simply never recovers a missed request.
    */
-  listQuestions?(sessionId: string): Promise<PendingQuestion[]>;
+  listPermissions?(): Promise<PendingPermission[]>;
+  /**
+   * Every pending question request, each carrying its owning session.
+   * OpenCode 1.18 never emits `question.v2.asked` over the event stream, so a
+   * pending question is only discoverable by asking — and the adapter filters
+   * the global list, which is what lets a parent recover a subagent's
+   * question. Optional: a provider without it simply never surfaces questions.
+   */
+  listQuestions?(): Promise<PendingQuestion[]>;
   replyQuestion(sessionId: string, requestId: string, answers: string[][]): Promise<void>;
   rejectQuestion(sessionId: string, requestId: string): Promise<void>;
 }

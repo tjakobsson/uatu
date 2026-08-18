@@ -714,6 +714,7 @@
           </div>
           <nav id="chat-prompt-rail" class="chat-prompt-rail" aria-label="Jump to a prompt" hidden></nav>
           <button id="chat-latest" class="chat-latest" type="button" aria-label="Jump to latest messages" hidden>Latest</button>
+          <button id="chat-requests-jump" class="chat-requests-jump" type="button" hidden></button>
           <details id="chat-subagents" class="chat-task-list chat-subagents" hidden>
             <summary><span id="chat-subagents-label"></span><button id="chat-subagents-dismiss" class="chat-track-dismiss" type="button" hidden>Dismiss finished</button></summary>
             <ul id="chat-subagents-items"></ul>
@@ -728,6 +729,8 @@
             <textarea id="chat-input" rows="1" placeholder="Ask OpenCode…" aria-describedby="chat-composer-status" aria-controls="chat-command-menu" aria-expanded="false" aria-autocomplete="list"></textarea>
             <div class="chat-composer-actions">
               <span id="chat-composer-status" role="status" aria-live="polite">Ready</span>
+              <label class="sr-only" for="chat-agent-select">Agent</label>
+              <select id="chat-agent-select" class="chat-model-select" aria-label="Chat agent" hidden></select>
               <label class="sr-only" for="chat-model-select">Model</label>
               <select id="chat-model-select" class="chat-model-select" aria-label="Chat model" disabled>
                 <option>Loading models...</option>

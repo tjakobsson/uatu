@@ -1,9 +1,11 @@
 import type {
   ActivityStatus,
+  ChatAgent,
   ChatAvailability,
   ChatCommand,
   ChatEvent,
   ChatModel,
+  ChatStartupDiagnostics,
   ConversationItem,
   ConversationSnapshot,
   ConversationStatus,
@@ -38,14 +40,57 @@ export function parseChatAvailability(value: unknown): ChatAvailability {
       expectNonEmptyString(record.version, "version");
       break;
     case "unavailable":
-      expectKeys(record, ["state", "reason", "message"], "chat availability");
+      expectKeys(record, ["state", "reason", "message", "diagnostics"], "chat availability");
       expectOneOf(record.reason, ["not-installed", "startup-failed", "unsupported"], "unavailable reason");
       expectNonEmptyString(record.message, "unavailable message");
+      // Optional: present on a failed startup, absent when there is nothing to
+      // report (a missing executable never reached a probe).
+      if (record.diagnostics !== undefined) parseChatStartupDiagnostics(record.diagnostics);
       break;
     default:
       throw new Error(`invalid chat availability state: ${state}`);
   }
   return value as ChatAvailability;
+}
+
+function parseChatStartupDiagnostics(value: unknown): ChatStartupDiagnostics {
+  const record = expectRecord(value, "chat startup diagnostics");
+  expectKeys(record, [
+    "executable",
+    "shadowedExecutables",
+    "version",
+    "endpoint",
+    "elapsedMs",
+    "probes",
+    "lastProbe",
+    "stdout",
+    "stderr",
+  ], "chat startup diagnostics");
+  expectNullableString(record.executable, "diagnostics executable");
+  expectStringArray(record.shadowedExecutables, "diagnostics shadowed executables", false);
+  expectNullableString(record.version, "diagnostics version");
+  expectNullableString(record.endpoint, "diagnostics endpoint");
+  expectTimestamp(record.elapsedMs, "diagnostics elapsed");
+  expectTimestamp(record.probes, "diagnostics probe count");
+  expectString(record.stdout, "diagnostics stdout");
+  expectString(record.stderr, "diagnostics stderr");
+
+  const probe = expectRecord(record.lastProbe, "diagnostics last probe");
+  const kind = expectOneOf(
+    probe.kind,
+    ["none", "refused", "abandoned", "http-status", "unhealthy-body", "healthy", "unknown"],
+    "probe outcome kind",
+  );
+  if (kind === "http-status" || kind === "unhealthy-body" || kind === "healthy") {
+    expectKeys(probe, ["kind", "status"], "diagnostics last probe");
+    expectTimestamp(probe.status, "probe status");
+  } else if (kind === "unknown") {
+    expectKeys(probe, ["kind", "error"], "diagnostics last probe");
+    expectString(probe.error, "probe error");
+  } else {
+    expectKeys(probe, ["kind"], "diagnostics last probe");
+  }
+  return value as ChatStartupDiagnostics;
 }
 
 export function parseChatModel(value: unknown): ChatModel {
@@ -58,6 +103,14 @@ export function parseChatModel(value: unknown): ChatModel {
   expectNonEmptyString(record.provider, "model provider");
   expectNonEmptyString(record.name, "model name");
   return value as ChatModel;
+}
+
+export function parseChatAgent(value: unknown): ChatAgent {
+  const record = expectRecord(value, "chat agent");
+  expectKeys(record, ["name", "description"], "chat agent");
+  expectIdentity(record.name, "agent name");
+  expectString(record.description, "agent description");
+  return value as ChatAgent;
 }
 
 export function parseChatCommand(value: unknown): ChatCommand {
@@ -107,9 +160,10 @@ export function parsePermissionRequest(value: unknown): PermissionRequest {
   const record = expectRecord(value, "permission request");
   expectKeys(
     record,
-    ["id", "type", "createdAt", "requestId", "action", "resources", "status", "outcome"],
+    ["id", "type", "createdAt", "requestId", "conversationId", "action", "resources", "status", "outcome"],
     "permission request",
   );
+  expectOptionalIdentity(record.conversationId, "permission owning conversation");
   expectTimelineBase(record, "permission");
   expectIdentity(record.requestId, "permission request id");
   expectNonEmptyString(record.action, "permission action");
@@ -126,7 +180,8 @@ export function parsePermissionRequest(value: unknown): PermissionRequest {
 
 export function parseQuestionRequest(value: unknown): QuestionRequest {
   const record = expectRecord(value, "question request");
-  expectKeys(record, ["id", "type", "createdAt", "requestId", "questions", "status", "outcome"], "question request");
+  expectKeys(record, ["id", "type", "createdAt", "requestId", "conversationId", "questions", "status", "outcome"], "question request");
+  expectOptionalIdentity(record.conversationId, "question owning conversation");
   expectTimelineBase(record, "question");
   expectIdentity(record.requestId, "question request id");
   if (!Array.isArray(record.questions) || record.questions.length === 0) {
@@ -334,6 +389,10 @@ function expectTimestamp(value: unknown, field: string): void {
 
 function expectOptionalTimestamp(value: unknown, field: string): void {
   if (value !== undefined) expectTimestamp(value, field);
+}
+
+function expectNullableString(value: unknown, field: string): void {
+  if (value !== null) expectNonEmptyString(value, field);
 }
 
 function expectOptionalString(value: unknown, field: string): void {

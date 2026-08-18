@@ -89,6 +89,11 @@ export class LocalProcessBackend implements SessionBackend {
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
+      // Explicit rather than implicit: Bun's default inherit snapshots the
+      // environment at process start and does not see later mutations. The hub
+      // builds this argv itself, so environment is the only channel an operator
+      // knob (UATU_OPENCODE_STARTUP_TIMEOUT_MS) has into a session's Chat.
+      env: process.env,
     });
 
     const stderrTail = collectTail(child.stderr);

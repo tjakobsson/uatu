@@ -163,7 +163,7 @@ async function runWatch(options: WatchOptions) {
   const chatRoot = await selectCanonicalChatRoot(rootEntries);
 
   try {
-    chatService = new LazyOpenCodeChatService({ workspacePath: chatRoot });
+    chatService = new LazyOpenCodeChatService({ workspacePath: chatRoot, metrics });
     watchSession = createWatchSession(rootEntries, options.follow, {
       respectGitignore: options.respectGitignore,
       terminalEnabled,

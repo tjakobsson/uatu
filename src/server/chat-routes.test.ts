@@ -13,11 +13,15 @@ class FakeChatService implements WorkspaceChatService {
   readonly conversation: ConversationSummary = { id: "local", title: "Local", createdAt: 1, updatedAt: 1, status: "idle" };
   readonly replay = new ConversationReplay("generation", "local", 10_000);
   prompts = 0;
+  retries = 0;
   private promptResult: { messageId: string; delivery: "steer" | "queue" } | undefined;
   selectedModel: ModelSelection | undefined;
+  selectedAgent: string | undefined;
 
   async status(): Promise<ChatAvailability> { return { state: "ready", version: "test" }; }
+  async retry(): Promise<ChatAvailability> { this.retries += 1; return this.status(); }
   async models() { return [{ selection: { providerId: "anthropic", modelId: "claude" }, provider: "Anthropic", name: "Claude" }]; }
+  async agents() { return [{ name: "build", description: "Full read-write agent" }, { name: "plan", description: "Read-only planning agent" }]; }
   async commands() { return [{ name: "review", description: "Review", argumentHint: "[focus]", kind: "command" as const }]; }
   async listConversations() { return [this.conversation]; }
   async createConversation() { return this.snapshot(); }
@@ -27,9 +31,10 @@ class FakeChatService implements WorkspaceChatService {
     const handoff = this.replay.handoff(() => this.snapshot(), options.cursor, options.signal);
     return { snapshot: handoff.snapshot, events: handoff.subscription };
   }
-  async prompt(id: string, requestId: string, _text: string, model?: ModelSelection) {
+  async prompt(id: string, requestId: string, _text: string, model?: ModelSelection, agent?: string) {
     this.require(id);
     this.selectedModel = model;
+    this.selectedAgent = agent;
     if (!this.promptResult) {
       this.prompts += 1;
       this.promptResult = { messageId: requestId, delivery: "queue" };
@@ -140,6 +145,25 @@ describe("workspace chat routes", () => {
     expect((await send({ providerId: "anthropic", modelId: "claude", variant: "fast" })).status).toBe(400);
     expect((await send({ providerId: "anthropic", modelId: "claude" })).status).toBe(202);
     expect(service.selectedModel).toEqual({ providerId: "anthropic", modelId: "claude" });
+  });
+
+  test("lists agents and forwards a well-formed agent selection to the service", async () => {
+    const service = new FakeChatService();
+    const table = routes(service);
+    const agents = table["/api/chat/agents"] as { GET(request: Request): Promise<Response> };
+    expect(await (await agents.GET(request("/api/chat/agents"))).json()).toEqual({
+      agents: [expect.objectContaining({ name: "build" }), expect.objectContaining({ name: "plan" })],
+    });
+    const handler = table["/api/chat/conversations/:conversationId/prompts"] as { POST(request: Request & { params: Record<string, string> }): Promise<Response> };
+    const send = (agent: unknown) => handler.POST(request("/api/chat/conversations/local/prompts", {
+      method: "POST",
+      headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" },
+      body: JSON.stringify({ requestId: crypto.randomUUID(), text: "hello", agent }),
+    }, { conversationId: "local" }) as never);
+    expect((await send(42)).status).toBe(400);
+    expect((await send("")).status).toBe(400);
+    expect((await send("build")).status).toBe(202);
+    expect(service.selectedAgent).toBe("build");
   });
 
   test("returns identical non-revealing errors for unknown and foreign conversation identities", async () => {

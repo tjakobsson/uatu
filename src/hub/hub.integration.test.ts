@@ -1118,6 +1118,27 @@ describe("hub end to end", () => {
     await assertContract("POST", "/s/{workspaceId}/api/chat/conversations/{conversationId}/prompts", csrf);
   });
 
+  test("chat retry is authenticated and returns availability without leaking the child endpoint", async () => {
+    const unauthenticated = await fetch(`${origin}/s/myproject/api/chat/retry`, { method: "POST" });
+    expect(unauthenticated.status).toBe(401);
+
+    // Retry spawns a process, so it takes the same origin gate as the other
+    // chat mutations — a cookie alone must not be enough for a foreign page.
+    const csrf = await fetch(`${origin}/s/myproject/api/chat/retry`, {
+      method: "POST",
+      headers: { cookie, origin: "https://attacker.example" },
+    });
+    expect(csrf.status).toBe(403);
+    await assertContract("POST", "/s/{workspaceId}/api/chat/retry", csrf);
+
+    const response = await fetch(`${origin}/s/myproject/api/chat/retry`, { method: "POST", headers: { cookie } });
+    expect(response.status).toBe(200);
+    await assertContract("POST", "/s/{workspaceId}/api/chat/retry", response);
+    const text = await response.text();
+    expect(text).not.toContain("OPENCODE_SERVER_PASSWORD");
+    expect(text).not.toMatch(/127\.0\.0\.1:\d+/);
+  });
+
   test("workspace folder names with edge whitespace round-trip exactly", async () => {
     const spaced = path.join(tempRoot, "workspaces", " padded ");
     execFileSync("mkdir", ["-p", spaced]);
@@ -1176,6 +1197,7 @@ describe("hub end to end", () => {
     // documented stopped-workspace response before any child/provider access.
     const stoppedOperations: Array<[string, string, string, unknown?]> = [
       ["GET", "/s/myproject/api/chat/models", "/s/{workspaceId}/api/chat/models"],
+      ["GET", "/s/myproject/api/chat/agents", "/s/{workspaceId}/api/chat/agents"],
       ["GET", "/s/myproject/api/chat/commands", "/s/{workspaceId}/api/chat/commands"],
       ["GET", "/s/myproject/api/chat/conversations", "/s/{workspaceId}/api/chat/conversations"],
       ["POST", "/s/myproject/api/chat/conversations", "/s/{workspaceId}/api/chat/conversations", {}],

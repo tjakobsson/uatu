@@ -183,3 +183,167 @@ describe("provider text reconciliation", () => {
     expect(projection.replay.latestCursor()).not.toBe("");
   });
 });
+
+describe("both OpenCode event naming generations", () => {
+  function apply(events: Array<Record<string, unknown>>) {
+    const projection = new ConversationProjection(new ConversationReplay("g", "s", 10_000));
+    for (const event of events) {
+      for (const update of normalizeProviderEvent(event).updates) projection.apply(update);
+    }
+    return projection;
+  }
+
+  // The exact bridged shape observed in the OpenCode 1.18 binary:
+  // action → permission, resources → patterns, save → always.
+  const classicAsked = {
+    id: "e1",
+    type: "permission.asked",
+    properties: { id: "perm_1", sessionID: "s", permission: "skill", patterns: ["review-code"], always: [], metadata: {} },
+  };
+  const v2Asked = {
+    id: "e2",
+    type: "permission.v2.asked",
+    data: { id: "perm_1", sessionID: "s", action: "skill", resources: ["review-code"] },
+  };
+
+  test("a classic permission ask renders as a pending request", () => {
+    const items = apply([classicAsked]).items();
+    expect(items).toEqual([expect.objectContaining({
+      id: "permission:perm_1",
+      type: "permission",
+      requestId: "perm_1",
+      action: "skill",
+      resources: ["review-code"],
+      status: "pending",
+    })]);
+  });
+
+  test("the same request under both generations settles as one entry, either order", () => {
+    for (const order of [[v2Asked, classicAsked], [classicAsked, v2Asked]]) {
+      const items = apply(order).items();
+      expect(items).toHaveLength(1);
+      expect(items[0]).toEqual(expect.objectContaining({
+        id: "permission:perm_1",
+        action: "skill",
+        resources: ["review-code"],
+        status: "pending",
+      }));
+    }
+  });
+
+  test("a classic reply resolves the entry its ask created", () => {
+    const items = apply([
+      classicAsked,
+      { id: "e3", type: "permission.replied", properties: { sessionID: "s", requestID: "perm_1", reply: "once" } },
+    ]).items();
+    expect(items).toHaveLength(1);
+    expect(items[0]).toEqual(expect.objectContaining({
+      status: "resolved",
+      outcome: "approved-once",
+      // The reply carries no action or resources; the merge keeps the ask's.
+      action: "skill",
+      resources: ["review-code"],
+    }));
+  });
+
+  test("a classic question ask renders and resolves", () => {
+    const asked = {
+      id: "q1",
+      type: "question.asked",
+      properties: {
+        id: "que_1",
+        sessionID: "s",
+        questions: [{ prompt: "Proceed?", header: "Skill", options: [{ label: "Yes" }, { label: "No" }] }],
+      },
+    };
+    const pending = apply([asked]).items();
+    expect(pending).toEqual([expect.objectContaining({ id: "question:que_1", type: "question", status: "pending" })]);
+
+    const resolved = apply([
+      asked,
+      { id: "q2", type: "question.replied", properties: { sessionID: "s", requestID: "que_1", answers: [["Yes"]] } },
+    ]).items();
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0]).toEqual(expect.objectContaining({
+      status: "resolved",
+      outcome: { kind: "answered", answers: [["Yes"]] },
+    }));
+  });
+
+  test("a classic question rejection records the rejection", () => {
+    const items = apply([
+      { id: "q1", type: "question.asked", properties: { id: "que_2", sessionID: "s", questions: [{ prompt: "Go?", options: [] }] } },
+      { id: "q2", type: "question.rejected", properties: { sessionID: "s", requestID: "que_2" } },
+    ]).items();
+    expect(items[0]).toEqual(expect.objectContaining({ status: "resolved", outcome: { kind: "rejected" } }));
+  });
+
+  test("classic interaction events are recognized, not counted as discards", () => {
+    for (const event of [classicAsked, { id: "q", type: "question.asked", properties: { id: "q1", sessionID: "s", questions: [] } }]) {
+      expect(normalizeProviderEvent(event).outcome).toBe("handled");
+    }
+  });
+});
+
+describe("compaction and revert stop the transcript from lying", () => {
+  function items(event: Record<string, unknown>) {
+    const projection = new ConversationProjection(new ConversationReplay("g", "s", 10_000));
+    for (const update of normalizeProviderEvent(event).updates) projection.apply(update);
+    return projection.items();
+  }
+
+  test("a compacted conversation says so instead of appearing to lose content", () => {
+    expect(items({ id: "c1", type: "session.next.compaction.started", data: { sessionID: "s" } })[0])
+      .toEqual(expect.objectContaining({ type: "notice", level: "info", message: expect.stringContaining("Compacting") }));
+
+    expect(items({ id: "c2", type: "session.next.compaction.ended", data: { sessionID: "s", summary: "Summarized 40 turns" } })[0])
+      .toEqual(expect.objectContaining({ type: "notice", message: "Summarized 40 turns" }));
+
+    // No summary in the payload still explains what happened.
+    expect(items({ id: "c3", type: "session.next.compaction.ended", data: { sessionID: "s" } })[0])
+      .toEqual(expect.objectContaining({ type: "notice", message: expect.stringContaining("compacted") }));
+  });
+
+  test("reverted work is not presented as current", () => {
+    for (const [type, fragment] of [
+      ["session.next.revert.staged", "pending reversal"],
+      ["session.next.revert.committed", "no longer applies"],
+      ["session.next.revert.cleared", "apply again"],
+    ] as const) {
+      expect(items({ id: type, type, data: { sessionID: "s" } })[0])
+        .toEqual(expect.objectContaining({ type: "notice", level: "warning", message: expect.stringContaining(fragment) }));
+    }
+  });
+
+  test("compaction delta is intentionally ignored, not counted as a discard", () => {
+    expect(normalizeProviderEvent({ id: "d", type: "session.next.compaction.delta", data: { sessionID: "s" } }).outcome).toBe("ignored");
+    // While a genuinely unknown type stays countable.
+    expect(normalizeProviderEvent({ id: "x", type: "session.next.something.new", data: { sessionID: "s" } }).outcome).toBe("unrecognized");
+  });
+});
+
+describe("interaction items name the conversation that owns them", () => {
+  // Answers are addressed to the owner, so an item without one would send a
+  // reply to whichever conversation happened to be on screen.
+  const events = [
+    { id: "e", type: "permission.v2.asked", data: { id: "p1", sessionID: "s9", action: "bash", resources: ["ls"] } },
+    { id: "e", type: "permission.asked", properties: { id: "p2", sessionID: "s9", permission: "bash", patterns: ["ls"] } },
+    { id: "e", type: "permission.v2.replied", data: { sessionID: "s9", requestID: "p1", reply: "once" } },
+    { id: "e", type: "permission.replied", properties: { sessionID: "s9", requestID: "p2", reply: "once" } },
+    { id: "e", type: "question.v2.asked", data: { id: "q1", sessionID: "s9", questions: [] } },
+    { id: "e", type: "question.asked", properties: { id: "q2", sessionID: "s9", questions: [] } },
+    { id: "e", type: "question.v2.replied", data: { sessionID: "s9", requestID: "q1", answers: [["a"]] } },
+    { id: "e", type: "question.rejected", properties: { sessionID: "s9", requestID: "q2" } },
+  ];
+
+  test("every event path stamps the owner, in both naming generations", () => {
+    for (const event of events) {
+      const updates = normalizeProviderEvent(event).updates;
+      expect(updates.length).toBeGreaterThan(0);
+      for (const update of updates) {
+        if (update.kind !== "upsert") continue;
+        expect(update.item).toEqual(expect.objectContaining({ conversationId: "s9" }));
+      }
+    }
+  });
+});

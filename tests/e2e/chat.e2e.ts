@@ -77,6 +77,31 @@ test.describe("desktop OpenCode chat", () => {
     await expect(input).toHaveValue("draft retained across surfaces");
   });
 
+  test("switches the agent for a prompt and defaults to OpenCode's own", async ({ page }) => {
+    await page.getByRole("button", { name: "New" }).click();
+    const agentSelect = page.locator("#chat-agent-select");
+    await expect(agentSelect.locator("option")).toHaveText(["Agent: default", "Agent: Build", "Agent: Plan"]);
+    await expect(agentSelect).toHaveValue("");
+
+    const input = page.locator("#chat-input");
+    await input.fill("stay on the default agent");
+    const defaulted = page.waitForResponse(response => response.url().endsWith("/prompts"));
+    await input.press("Enter");
+    expect((await defaulted).request().postDataJSON()).not.toHaveProperty("agent");
+
+    // Stuck in a read-only agent is the whole point: choosing Build must
+    // reach the provider with the next prompt.
+    await agentSelect.selectOption({ label: "Agent: Build" });
+    await input.fill("now write some code");
+    const switched = page.waitForResponse(response => response.url().endsWith("/prompts"));
+    await input.press("Enter");
+    expect((await switched).request().postDataJSON()).toMatchObject({ agent: "build" });
+
+    // No way back to "default": the agent is session state in OpenCode, so a
+    // prompt omitting it would keep Build while the picker claimed default.
+    await expect(agentSelect.locator('option[value=""]')).toBeDisabled();
+  });
+
   test("completes slash commands at the caret without sending prematurely", async ({ page }) => {
     await page.getByRole("button", { name: "New" }).click();
     const input = page.locator("#chat-input");
@@ -140,6 +165,18 @@ test.describe("desktop OpenCode chat", () => {
     const id = seeded.conversation.id;
     const permission: ConversationItem = { id: "permission:perm-1", type: "permission", createdAt: 10, requestId: "perm-1", action: "run command", resources: ["bun test"], status: "pending" };
     await control(request, { action: "item", conversationId: id, item: permission });
+
+    // The persistent reply reaches past this conversation into every later one
+    // the same OpenCode server handles, and covers the request's `always`
+    // pattern rather than only the resource shown. The surface must say so
+    // where the choice is made, and must not offer the old "Allow session"
+    // wording, which implied a single conversation.
+    const card = page.locator('[data-chat-item-id="permission:perm-1"]');
+    await expect(card.getByRole("button", { name: "Allow always" })).toBeVisible();
+    await expect(card.getByRole("button", { name: "Allow session" })).toHaveCount(0);
+    await expect(card).toContainText("later conversations");
+    await expect(card).toContainText("until OpenCode restarts");
+
     await page.getByRole("button", { name: "Allow once" }).click();
     await expect(page.locator('[data-chat-item-id="permission:perm-1"]')).toContainText("Resolved: approved-once");
     await expect(page.getByRole("button", { name: "Allow once" })).toHaveCount(0);
@@ -150,9 +187,9 @@ test.describe("desktop OpenCode chat", () => {
     };
     await control(request, { action: "item", conversationId: id, item: question });
     await page.getByRole("radio", { name: "Minimal Small change" }).check();
-    await page.getByRole("button", { name: "Answer" }).click();
+    await page.getByRole("button", { name: "Answer", exact: true }).click();
     await expect(page.locator('[data-chat-item-id="question:q-1"]')).toContainText("Answered");
-    await expect(page.getByRole("button", { name: "Answer" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Answer", exact: true })).toHaveCount(0);
   });
 
   test("streaming beside a pending question keeps the answer being typed", async ({ page, request }) => {
@@ -186,7 +223,7 @@ test.describe("desktop OpenCode chat", () => {
     await expect(page.locator('[data-chat-item-id="part:stream"]')).toContainText("Thinking about your question");
     await expect(page.getByRole("radio", { name: "Minimal Small change" })).toBeChecked();
 
-    await page.getByRole("button", { name: "Answer" }).click();
+    await page.getByRole("button", { name: "Answer", exact: true }).click();
     await expect(page.locator('[data-chat-item-id="question:q-2"]')).toContainText("Answered");
   });
 

@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 
 import type {
   OpenCodeProvider,
+  PendingPermission,
   PendingQuestion,
   ProviderEvent,
   ProviderMessage,
@@ -12,7 +13,7 @@ import type {
   ProviderSession,
 } from "./provider";
 import { normalizeQuestion } from "./normalization";
-import type { ChatCommand, ChatModel, ModelSelection } from "./types";
+import type { ChatAgent, ChatCommand, ChatModel, ModelSelection } from "./types";
 
 type Result<T> = { data?: T; error?: unknown };
 
@@ -63,6 +64,26 @@ export class SdkV2Provider implements OpenCodeProvider {
     return result;
   }
 
+  async listAgents(): Promise<ChatAgent[]> {
+    const payload = unwrap(await this.client.app.agents({ directory: this.directory })) as unknown;
+    const response = Array.isArray(payload) ? payload : asArray(asRecord(payload).data);
+    const agents: ChatAgent[] = [];
+    const names = new Set<string>();
+    for (const value of response) {
+      const agent = asRecord(value);
+      const name = typeof agent.name === "string" ? agent.name : "";
+      // Subagents are spawned by the task tool, never chosen for a prompt —
+      // and OpenCode's system agents (title, compaction, summary) are
+      // `mode: "primary"` but carry `hidden: true` on the wire (a field the
+      // pinned SDK's type does not declare; verified against a live server).
+      // Without the hidden check they all appear in the picker.
+      if (!name || names.has(name) || agent.mode === "subagent" || agent.hidden === true) continue;
+      names.add(name);
+      agents.push({ name, description: typeof agent.description === "string" ? agent.description : "" });
+    }
+    return agents;
+  }
+
   async listModels(): Promise<ChatModel[]> {
     const response = unwrap(await this.client.provider.list({ directory: this.directory }));
     const connected = new Set(response.connected);
@@ -109,6 +130,15 @@ export class SdkV2Provider implements OpenCodeProvider {
       }
       cursor = page.cursor.next;
     } while (cursor);
+    // Children may list before their parents, so inheritance runs to a
+    // fixpoint over the whole inventory rather than per row.
+    let flagged = true;
+    while (flagged) {
+      flagged = false;
+      for (const session of sessions.values()) {
+        if (this.inheritTransport(session)) flagged = true;
+      }
+    }
     return [...sessions.values()];
   }
 
@@ -125,7 +155,9 @@ export class SdkV2Provider implements OpenCodeProvider {
     const classic = await this.client.session.get({ sessionID: id, directory: this.directory }) as Result<unknown>;
     if (classic.data) {
       if (isCompatibilitySession(classic.data)) this.compatibilitySessions.add(id);
-      return toSession(classic.data);
+      const session = toSession(classic.data);
+      this.inheritTransport(session);
+      return session;
     }
     // Only a store miss falls through — a transient 401/5xx must surface as a
     // failure, or the pump misreads it as "conversation gone" and silently
@@ -138,7 +170,25 @@ export class SdkV2Provider implements OpenCodeProvider {
     }
     if (!result.data) return null;
     const response = result.data as { data?: unknown };
-    return toSession(response.data ?? response);
+    const session = toSession(response.data ?? response);
+    this.inheritTransport(session);
+    return session;
+  }
+
+  /**
+   * A subagent child is created by OpenCode itself, never through
+   * `createSession`, so it carries no compatibility metadata — but it lives in
+   * whichever store its parent lives in. Without inheriting the flag, a child
+   * of a compatibility session is routed to the v2 endpoints (permission
+   * replies, prompts, interrupts), which fail against the classic store; that
+   * is exactly the path taken when a subagent's permission is answered from
+   * the parent conversation, where the child's transcript was never loaded.
+   */
+  private inheritTransport(session: ProviderSession): boolean {
+    if (!session.parentId || this.compatibilitySessions.has(session.id)) return false;
+    if (!this.compatibilitySessions.has(session.parentId)) return false;
+    this.compatibilitySessions.add(session.id);
+    return true;
   }
 
   /**
@@ -206,7 +256,7 @@ export class SdkV2Provider implements OpenCodeProvider {
     yield* mergeProviderEvents([native.stream, classic.stream], signal);
   }
 
-  async prompt(sessionId: string, input: { id: string; text: string; delivery: "steer" | "queue"; model?: ModelSelection }): Promise<{ messageId: string }> {
+  async prompt(sessionId: string, input: { id: string; text: string; delivery: "steer" | "queue"; model?: ModelSelection; agent?: string }): Promise<{ messageId: string }> {
     const messageId = stableProviderId("msg", input.id);
     if (this.compatibilitySessions.has(sessionId)) {
       ensureSuccess(await this.client.session.promptAsync({
@@ -215,10 +265,16 @@ export class SdkV2Provider implements OpenCodeProvider {
         messageID: messageId,
         parts: [{ type: "text", text: input.text }],
         ...(input.model ? { model: { providerID: input.model.providerId, modelID: input.model.modelId } } : {}),
+        ...(input.agent ? { agent: input.agent } : {}),
       }));
       return { messageId };
     }
     if (input.model) await this.switchModel(sessionId, input.model);
+    // Session-level, not a prompt field: the generated v2 prompt serializer
+    // passes through only id/prompt/delivery/resume, so an `agent` property
+    // there is silently dropped — the selection would look accepted while the
+    // session kept its previous agent.
+    if (input.agent) ensureSuccess(await this.client.v2.session.switchAgent({ sessionID: sessionId, agent: input.agent }));
     const admitted = unwrap(await this.client.v2.session.prompt({
       sessionID: sessionId,
       id: messageId,
@@ -237,7 +293,7 @@ export class SdkV2Provider implements OpenCodeProvider {
    * while a healthy turn outlives the window, detaches, and reports failures
    * through the event stream like any running turn.
    */
-  async command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection }): Promise<{ messageId: string }> {
+  async command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; agent?: string }): Promise<{ messageId: string }> {
     const messageId = stableProviderId("msg", input.id);
     const dispatch = input.name === "compact" || input.name === "summarize"
       ? (async () => ensureSuccess(await this.client.session.summarize({
@@ -253,6 +309,7 @@ export class SdkV2Provider implements OpenCodeProvider {
           command: input.name,
           arguments: input.arguments,
           ...(input.model ? { model: `${input.model.providerId}/${input.model.modelId}` } : {}),
+          ...(input.agent ? { agent: input.agent } : {}),
         })); })();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -280,20 +337,42 @@ export class SdkV2Provider implements OpenCodeProvider {
     unwrap(await this.client.v2.session.permission.reply({ sessionID: sessionId, requestID: requestId, reply }));
   }
 
-  async listQuestions(sessionId: string): Promise<PendingQuestion[]> {
-    // Deliberately the global list, filtered here, rather than the
-    // session-scoped `v2.session.question.list`: on OpenCode 1.18 the
-    // session-scoped route answers `{"data":[]}` for a session that the
-    // global route reports a live pending question for. Verified against a
-    // running server. Both envelopes are tolerated so this keeps working if
-    // that route starts answering.
+  async listPermissions(): Promise<PendingPermission[]> {
+    // Same route choice and reasoning as listQuestions below: the global list
+    // filtered here. Tolerates either envelope, and either naming generation's
+    // field names, because the classic bridge renames action/resources to
+    // permission/patterns.
+    const payload = unwrap(await this.client.permission.list({ directory: this.directory })) as unknown;
+    const response = Array.isArray(payload) ? payload : asArray(asRecord(payload).data);
+    return response.flatMap(value => {
+      const request = asRecord(value);
+      const requestId = typeof request.id === "string" ? request.id : undefined;
+      const owner = typeof request.sessionID === "string" ? request.sessionID : undefined;
+      if (!requestId || !owner) return [];
+      const action = typeof request.action === "string" ? request.action
+        : typeof request.permission === "string" ? request.permission : "permission";
+      const raw = Array.isArray(request.resources) ? request.resources
+        : Array.isArray(request.patterns) ? request.patterns : [];
+      return [{ requestId, conversationId: owner, action, resources: raw.filter((item): item is string => typeof item === "string") }];
+    });
+  }
+
+  async listQuestions(): Promise<PendingQuestion[]> {
+    // Deliberately the global list, rather than the session-scoped
+    // `v2.session.question.list`: on OpenCode 1.18 the session-scoped route
+    // answers `{"data":[]}` for a session that the global route reports a
+    // live pending question for. Verified against a running server. Both
+    // envelopes are tolerated so this keeps working if that route starts
+    // answering. Filtering is the adapter's job — the owner rides along, the
+    // same shape as listPermissions, so a parent can find its children's.
     const payload = unwrap(await this.client.question.list({ directory: this.directory })) as unknown;
     const response = Array.isArray(payload) ? payload : asArray(asRecord(payload).data);
     return response.flatMap(value => {
       const request = asRecord(value);
       const requestId = typeof request.id === "string" ? request.id : undefined;
-      if (!requestId || request.sessionID !== sessionId) return [];
-      return [{ requestId, questions: asArray(request.questions).map(normalizeQuestion) }];
+      const owner = typeof request.sessionID === "string" ? request.sessionID : undefined;
+      if (!requestId || !owner) return [];
+      return [{ requestId, conversationId: owner, questions: asArray(request.questions).map(normalizeQuestion) }];
     });
   }
 

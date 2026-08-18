@@ -1,9 +1,10 @@
-import { OpenCodeChatAdapter, type ChatAdapterOptions } from "./adapter";
+import { OpenCodeChatAdapter, type ChatAdapterOptions, type ChatEventMetrics } from "./adapter";
 import { OpenCodeService, type OpenCodeServiceOptions } from "./opencode-service";
 import { createSdkV2Provider } from "./sdk-v2-provider";
 import type { OpenCodeProvider } from "./provider";
 import type { ReplaySubscription } from "./replay";
 import type {
+  ChatAgent,
   ChatAvailability,
   ChatCommand,
   ChatModel,
@@ -16,7 +17,9 @@ import type {
 
 export interface WorkspaceChatService {
   status(): Promise<ChatAvailability>;
+  retry(): Promise<ChatAvailability>;
   models(): Promise<ChatModel[]>;
+  agents(): Promise<ChatAgent[]>;
   commands(): Promise<ChatCommand[]>;
   listConversations(): Promise<ConversationSummary[]>;
   createConversation(): Promise<ConversationSnapshot>;
@@ -25,7 +28,7 @@ export interface WorkspaceChatService {
     snapshot: ConversationSnapshot;
     events: ReplaySubscription;
   }>;
-  prompt(id: string, requestId: string, text: string, model?: ModelSelection): Promise<{
+  prompt(id: string, requestId: string, text: string, model?: ModelSelection, agent?: string): Promise<{
     messageId: string;
     delivery: "steer" | "queue";
     conversation?: ConversationSummary;
@@ -47,6 +50,9 @@ export type LazyOpenCodeChatServiceOptions = OpenCodeServiceOptions & {
   runtime?: OpenCodeService;
   createProvider?: (options: { endpoint: string; password: string; directory: string }) => OpenCodeProvider;
   createAdapter?: (options: ChatAdapterOptions) => OpenCodeChatAdapter;
+  // Passed through to the adapter's event pump so discarded-event counts land
+  // in the workspace's diagnostic registry.
+  metrics?: ChatEventMetrics;
 };
 
 export class LazyOpenCodeChatService implements WorkspaceChatService {
@@ -54,8 +60,10 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
   private readonly workspacePath: string;
   private readonly createProvider: NonNullable<LazyOpenCodeChatServiceOptions["createProvider"]>;
   private readonly createAdapter: NonNullable<LazyOpenCodeChatServiceOptions["createAdapter"]>;
+  private readonly metrics: ChatEventMetrics | undefined;
   private adapterPromise: Promise<OpenCodeChatAdapter> | null = null;
   private adapter: OpenCodeChatAdapter | null = null;
+  private retryPromise: Promise<ChatAvailability> | null = null;
   private disposed = false;
 
   constructor(options: LazyOpenCodeChatServiceOptions) {
@@ -63,6 +71,7 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
     this.runtime = options.runtime ?? new OpenCodeService(options);
     this.createProvider = options.createProvider ?? createSdkV2Provider;
     this.createAdapter = options.createAdapter ?? (adapterOptions => new OpenCodeChatAdapter(adapterOptions));
+    this.metrics = options.metrics;
   }
 
   async status(): Promise<ChatAvailability> {
@@ -88,13 +97,51 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
     }
   }
 
+  // User-initiated recovery from a cached startup failure. Drops the adapter
+  // built against the dead runtime so the next call rebuilds against whatever
+  // the retry produced — and retires it first, or its supervisor would keep
+  // reconnecting the dead endpoint forever, one leaked loop per retry.
+  //
+  // Coalesced across the WHOLE sequence: runtime-level joining cannot help
+  // two retries that reach it at different times — the first can stall on
+  // pump shutdown and then restart the runtime the second one just built.
+  retry(): Promise<ChatAvailability> {
+    this.retryPromise ??= this.performRetry().finally(() => {
+      this.retryPromise = null;
+    });
+    return this.retryPromise;
+  }
+
+  private async performRetry(): Promise<ChatAvailability> {
+    const previous = this.adapter;
+    this.adapterPromise = null;
+    this.adapter = null;
+    await previous?.stopEventPump().catch(() => undefined);
+    // A full restart, not a bare runtime retry: an adapter-level failure
+    // (compatibility probe, startup race) leaves the runtime "ready", and
+    // re-probing the same process can never pick up a replaced binary.
+    await this.runtime.restart();
+    // Any adapter another request built while the runtime was being torn
+    // down bound to the old, now-dead endpoint. Retire it too — otherwise
+    // the status() below would reuse its adapterPromise and report Chat
+    // ready on a connection that no longer exists.
+    // Not narrowed to null by the assignment above: ensureAdapter can have
+    // repopulated the reference while the awaits yielded.
+    const stray = this.adapter as OpenCodeChatAdapter | null;
+    this.adapterPromise = null;
+    this.adapter = null;
+    await stray?.stopEventPump().catch(() => undefined);
+    return this.status();
+  }
+
   async listConversations() { return (await this.requireAdapter()).listConversations(); }
   async models() { return (await this.requireAdapter()).models(); }
+  async agents() { return (await this.requireAdapter()).agents(); }
   async commands() { return (await this.requireAdapter()).commands(); }
   async createConversation() { return (await this.requireAdapter()).createConversation(); }
   async history(id: string, options?: { cursor?: string; limit?: number }) { return (await this.requireAdapter()).history(id, options); }
   async subscribe(id: string, options?: { cursor?: string; signal?: AbortSignal }) { return (await this.requireAdapter()).subscribe(id, options); }
-  async prompt(id: string, requestId: string, text: string, model?: ModelSelection) { return (await this.requireAdapter()).prompt(id, requestId, text, model); }
+  async prompt(id: string, requestId: string, text: string, model?: ModelSelection, agent?: string) { return (await this.requireAdapter()).prompt(id, requestId, text, model, agent); }
   async cancel(id: string, requestId: string) { return (await this.requireAdapter()).abort(id, requestId); }
   async respondPermission(id: string, interactionId: string, requestId: string, outcome: PermissionOutcome) {
     return (await this.requireAdapter()).respondPermission(id, interactionId, requestId, outcome);
@@ -129,7 +176,7 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
       // pump failures are swallowed by the supervisor — without a probe an
       // incompatible server reports "ready" and then fails every operation.
       await provider.listModels();
-      const adapter = this.createAdapter({ provider, workspacePath: this.workspacePath });
+      const adapter = this.createAdapter({ provider, workspacePath: this.workspacePath, metrics: this.metrics });
       this.adapter = adapter;
       this.superviseEventPump(adapter);
       return adapter;
@@ -147,14 +194,16 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
   private superviseEventPump(adapter: OpenCodeChatAdapter): void {
     void (async () => {
       let failures = 0;
-      while (!this.disposed) {
+      // `this.adapter === adapter` retires the loop when retry() replaces the
+      // adapter: dispose() is not the only way an adapter stops being current.
+      while (!this.disposed && this.adapter === adapter) {
         const startedAt = Date.now();
         try {
           await adapter.startEventPump();
         } catch {
           // fall through to the retry delay
         }
-        if (this.disposed) return;
+        if (this.disposed || this.adapter !== adapter) return;
         failures = Date.now() - startedAt > 60_000 ? 0 : failures + 1;
         await new Promise<void>(resolve => {
           const timer = setTimeout(resolve, Math.min(1_000 * 2 ** (failures - 1), 30_000));

@@ -1,8 +1,43 @@
+// What the last health probe actually did. Four of these used to collapse into
+// one indistinguishable timeout string; they are four different bugs.
+// `unknown` exists so an error shape the classifier does not recognize degrades
+// attribution instead of being misreported as a refusal.
+export type ChatProbeOutcome =
+  | { kind: "none" }
+  | { kind: "refused" }
+  | { kind: "abandoned" }
+  | { kind: "http-status"; status: number }
+  | { kind: "unhealthy-body"; status: number }
+  | { kind: "healthy"; status: number }
+  | { kind: "unknown"; error: string };
+
+// Evidence attached to a failed startup so a bug report diagnoses itself
+// without asking the user to reproduce anything. Assembled on the failure path
+// only. Never carries the ephemeral OpenCode server password.
+export type ChatStartupDiagnostics = {
+  executable: string | null;
+  // Other `opencode` executables found earlier or later on PATH. A Windows
+  // shim shadowing a Linux binary under WSL2 is invisible without this.
+  shadowedExecutables: string[];
+  version: string | null;
+  endpoint: string | null;
+  elapsedMs: number;
+  probes: number;
+  lastProbe: ChatProbeOutcome;
+  stdout: string;
+  stderr: string;
+};
+
 export type ChatAvailability =
   | { state: "idle" }
   | { state: "starting" }
   | { state: "ready"; version: string }
-  | { state: "unavailable"; reason: "not-installed" | "startup-failed" | "unsupported"; message: string };
+  | {
+    state: "unavailable";
+    reason: "not-installed" | "startup-failed" | "unsupported";
+    message: string;
+    diagnostics?: ChatStartupDiagnostics;
+  };
 
 export type ConversationStatus = "idle" | "sending" | "running" | "completed" | "interrupted" | "failed";
 export type ActivityStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
@@ -23,6 +58,13 @@ export type ChatCommand = {
   description: string;
   argumentHint: string;
   kind: "command" | "skill";
+};
+
+// A primary OpenCode agent (Build, Plan, ...) a prompt can run under.
+// Subagents are excluded — they are spawned by the task tool, not chosen.
+export type ChatAgent = {
+  name: string;
+  description: string;
 };
 
 export type ConversationSummary = {
@@ -92,6 +134,11 @@ export type PermissionOutcome = "approved-once" | "approved-session" | "rejected
 export type PermissionRequest = TimelineItemBase & {
   type: "permission";
   requestId: string;
+  // The conversation that owns this request — its own, except when a subagent's
+  // request is shown in the conversation that launched it. Answers are always
+  // addressed here, so one `requirePending` guard and one receipt key govern
+  // the reply however many places showed the card.
+  conversationId?: string;
   action: string;
   resources: string[];
   status: "pending" | "resolved";
@@ -118,6 +165,8 @@ export type QuestionOutcome =
 export type QuestionRequest = TimelineItemBase & {
   type: "question";
   requestId: string;
+  // See PermissionRequest.conversationId.
+  conversationId?: string;
   questions: StructuredQuestion[];
   status: "pending" | "resolved";
   outcome?: QuestionOutcome;

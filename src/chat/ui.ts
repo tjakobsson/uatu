@@ -18,7 +18,8 @@ import {
   removeAcceptedDraft,
   type ChatProjection,
 } from "./projection";
-import type { ChatCommand, ChatModel, ConversationItem, ConversationSummary, ModelSelection, PermissionOutcome, QuestionOutcome } from "./types";
+import type { ChatAgent, ChatAvailability, ChatCommand, ChatModel, ConversationItem, ConversationSummary, ModelSelection, PermissionOutcome, QuestionOutcome } from "./types";
+import { formatDiagnostics } from "./diagnostics";
 
 const PRESENTATION_KEY = "uatu:chat-presentation";
 const SAVE_DEBOUNCE_MS = 400;
@@ -34,12 +35,16 @@ type Presentation = {
   // claim whatever was last chosen anywhere, for every conversation.
   model?: ModelSelection;
   models: Record<string, ModelSelection>;
+  // Same shape for the agent (Build/Plan/...). Empty means "OpenCode's
+  // default": the picker never claims to know a session's current agent.
+  agent?: string;
+  agents: Record<string, string>;
   // Dismissed finished-subagent entry ids, per conversation — dismissal is a
   // user statement that must survive reload.
   dismissedSubagents: Record<string, string[]>;
 };
 
-const EMPTY_PRESENTATION: Presentation = { drafts: {}, expanded: [], anchors: {}, workingSince: {}, models: {}, dismissedSubagents: {} };
+const EMPTY_PRESENTATION: Presentation = { drafts: {}, expanded: [], anchors: {}, workingSince: {}, models: {}, agents: {}, dismissedSubagents: {} };
 
 export function initChat(): void {
   const surface = document.querySelector<HTMLElement>("#chat-surface");
@@ -56,6 +61,7 @@ export function initChat(): void {
   const send = document.querySelector<HTMLButtonElement>("#chat-send");
   const sendLabel = document.querySelector<HTMLElement>("#chat-send .chat-send-label");
   const modelSelect = document.querySelector<HTMLSelectElement>("#chat-model-select");
+  const agentSelect = document.querySelector<HTMLSelectElement>("#chat-agent-select");
   const cancel = document.querySelector<HTMLButtonElement>("#chat-cancel");
   const composerStatus = document.querySelector<HTMLElement>("#chat-composer-status");
   const chatTitle = document.querySelector<HTMLElement>("#chat-title");
@@ -69,6 +75,7 @@ export function initChat(): void {
   let presentation = readPresentation();
   let conversations: ConversationSummary[] = [];
   let models: ChatModel[] = [];
+  let agents: ChatAgent[] = [];
   let commands: ChatCommand[] = [];
   let projection: ChatProjection | null = null;
   let stream: ChatEventStream | null = null;
@@ -188,6 +195,7 @@ export function initChat(): void {
   const subagentsLabel = document.querySelector<HTMLElement>("#chat-subagents-label");
   const subagentsItems = document.querySelector<HTMLElement>("#chat-subagents-items");
   const dismissButton = document.querySelector<HTMLButtonElement>("#chat-subagents-dismiss");
+  const requestsJump = document.querySelector<HTMLButtonElement>("#chat-requests-jump");
   // Finished subagents stay until explicitly dismissed — nothing retires
   // them on a timer. Dismissals persist with the rest of the per-conversation
   // presentation, so a reload does not resurrect an already-dismissed strip.
@@ -207,6 +215,7 @@ export function initChat(): void {
     presentation.dismissedSubagents[projection.conversationId] = [...dismissed];
     save();
     syncSubagents();
+    syncOutstandingRequests();
   });
 
   /**
@@ -214,6 +223,41 @@ export function initChat(): void {
    * three agents is three rows that would otherwise scroll away, and while
    * they run there is nothing else saying how many are still going.
    */
+  /**
+   * Outstanding requests, pinned so they cannot scroll away. Ten permissions in
+   * one turn left a user unable to tell which still needed them; per-card
+   * styling alone does not answer that in a long transcript, because you still
+   * have to scroll and count. This says how many and takes you to one.
+   */
+  const syncOutstandingRequests = () => {
+    if (!requestsJump) return;
+    const outstanding = projection
+      ? projection.items.filter(item => (item.type === "permission" || item.type === "question") && item.status === "pending")
+      : [];
+    if (outstanding.length === 0) {
+      requestsJump.hidden = true;
+      requestsJump.textContent = "";
+      delete requestsJump.dataset.requestTarget;
+      return;
+    }
+    const noun = outstanding.length === 1 ? "request needs" : "requests need";
+    requestsJump.hidden = false;
+    requestsJump.textContent = `${outstanding.length} ${noun} your answer`;
+    // The answerable one is the newest; that is where the jump lands, because
+    // it is the only one a user can act on right now.
+    requestsJump.dataset.requestTarget = outstanding[outstanding.length - 1]!.id;
+  };
+
+  requestsJump?.addEventListener("click", () => {
+    const id = requestsJump.dataset.requestTarget;
+    if (!id) return;
+    const card = items.querySelector(`[data-chat-item-id="${CSS.escape(id)}"]`);
+    if (!(card instanceof HTMLElement)) return;
+    if (card instanceof HTMLDetailsElement) card.open = true;
+    card.scrollIntoView({ block: "center" });
+    card.focus?.();
+  });
+
   const syncSubagents = () => {
     if (!subagents || !subagentsLabel || !subagentsItems) return;
     const all = projection ? subagentEntries(projection.items) : [];
@@ -419,6 +463,7 @@ export function initChat(): void {
     rendering = false;
     syncTaskList();
     syncSubagents();
+    syncOutstandingRequests();
     syncPromptRail();
     timeline.scrollTop = anchor.afterMutation(geometry(), newContent);
     latestButton.hidden = !anchor.hasUnseen();
@@ -478,6 +523,7 @@ export function initChat(): void {
     send.setAttribute("aria-label", `${action} message`);
     send.title = `${action} message`;
     modelSelect.disabled = submitting || models.length === 0;
+    if (agentSelect) agentSelect.disabled = submitting || agents.length === 0;
     cancel.hidden = !running;
     olderButton.hidden = !projection?.olderCursor;
     composerStatus.textContent = composerNote ?? workingText();
@@ -508,6 +554,40 @@ export function initChat(): void {
   };
 
   /**
+   * The agent picker leads with "default" rather than claiming a value: the
+   * session's current agent is OpenCode's state, not ours, and a session
+   * stuck in a read-only agent is exactly the case where lying would hurt.
+   * Choosing a named agent sends it with every prompt from then on.
+   */
+  const renderAgents = () => {
+    if (!agentSelect) return;
+    agentSelect.replaceChildren();
+    agentSelect.hidden = agents.length === 0;
+    if (agents.length === 0) return;
+    agentSelect.append(new Option("Agent: default", ""));
+    for (const agent of agents) {
+      const option = new Option(agentLabel(agent.name), agent.name);
+      if (agent.description) option.title = agent.description;
+      agentSelect.append(option);
+    }
+    applyAgent(projection?.conversationId ?? presentation.selectedId);
+    syncControls();
+  };
+
+  const applyAgent = (conversationId: string | undefined) => {
+    if (!agentSelect || agents.length === 0) return;
+    const known = (name: string | undefined) => (name && agents.some(agent => agent.name === name) ? name : undefined);
+    const chosen = known(conversationId ? presentation.agents[conversationId] : undefined);
+    // Once a named agent has been chosen for this conversation there is no
+    // default to go back to: the agent is session state in OpenCode, and a
+    // prompt that omits it keeps the previous choice — offering "default"
+    // then would display one agent and run another.
+    const defaultOption = agentSelect.options[0];
+    if (defaultOption && defaultOption.value === "") defaultOption.disabled = chosen !== undefined;
+    agentSelect.value = chosen ?? known(presentation.agent) ?? "";
+  };
+
+  /**
    * Points the picker at the conversation's own model, falling back to the
    * global default and then the first available model. A stored selection the
    * server no longer offers is ignored rather than shown as a live choice.
@@ -534,6 +614,7 @@ export function initChat(): void {
     }
     presentation.selectedId = id;
     applyModel(id);
+    applyAgent(id);
     const conversation = conversations.find(item => item.id === id);
     if (chatTitle) chatTitle.textContent = conversation ? displayConversationTitle(conversation) : "OpenCode Chat";
     form.hidden = false;
@@ -592,6 +673,20 @@ export function initChat(): void {
     presentation.model = selection;
     if (projection) presentation.models[projection.conversationId] = selection;
     save();
+  });
+  agentSelect?.addEventListener("change", () => {
+    const name = agentSelect.value || undefined;
+    if (name && !agents.some(agent => agent.name === name)) return;
+    if (name) presentation.agent = name;
+    else delete presentation.agent;
+    if (projection) {
+      if (name) presentation.agents[projection.conversationId] = name;
+      else delete presentation.agents[projection.conversationId];
+    }
+    save();
+    // Re-derives the default option's availability: choosing a named agent
+    // locks "default" for this conversation from now on.
+    applyAgent(projection?.conversationId ?? presentation.selectedId);
   });
   newButton.addEventListener("click", async () => {
     newButton.disabled = true;
@@ -797,7 +892,10 @@ export function initChat(): void {
     const item = projection.items.find(candidate => candidate.id === itemId);
     if (!item || item.type !== "permission" || item.status !== "pending") return;
     disableCard(itemId, true);
-    try { await api.permission(projection.conversationId, item.requestId, newRequestId(), outcome); }
+    // Addressed to the conversation that owns the request, not the one on
+    // screen: a subagent's request shown in its parent must be answered for the
+    // subagent, so the child's requirePending guard and receipt key govern it.
+    try { await api.permission(item.conversationId ?? projection.conversationId, item.requestId, newRequestId(), outcome); }
     catch (error) { announce(messageOf(error), true); disableCard(itemId, false); }
   };
 
@@ -806,7 +904,7 @@ export function initChat(): void {
     const item = projection.items.find(candidate => candidate.id === itemId);
     if (!item || item.type !== "question" || item.status !== "pending") return;
     disableCard(itemId, true);
-    try { await api.question(projection.conversationId, item.requestId, newRequestId(), outcome); }
+    try { await api.question(item.conversationId ?? projection.conversationId, item.requestId, newRequestId(), outcome); }
     catch (error) { announce(messageOf(error), true); disableCard(itemId, false); }
   };
 
@@ -897,6 +995,7 @@ export function initChat(): void {
     const retry = retryRequests.get(conversationId);
     const requestId = retry?.text === text ? retry.requestId : newRequestId();
     const selectedModel = models.find(model => modelValue(model.selection) === modelSelect.value)?.selection;
+    const selectedAgent = agentSelect?.value || undefined;
     const wasRunning = projection.status === "running" || projection.status === "sending";
     submitting = true;
     // Optimistic send: the message shows immediately and the input clears;
@@ -910,7 +1009,7 @@ export function initChat(): void {
     syncControls();
     scheduleRender(true);
     try {
-      const accepted = await api.prompt(conversationId, requestId, text, selectedModel);
+      const accepted = await api.prompt(conversationId, requestId, text, selectedModel, selectedAgent);
       retryRequests.delete(conversationId);
       if (accepted.conversation) {
         conversations = conversations.map(conversation => conversation.id === accepted.conversation!.id ? accepted.conversation! : conversation);
@@ -983,23 +1082,97 @@ export function initChat(): void {
   // it retries on the next Chat activation and on credential refresh.
   let bootstrapped = false;
   let bootstrapping = false;
+
+  // The unavailable state is the whole point of this surface when OpenCode will
+  // not start: it has to carry enough evidence to diagnose the failure from a
+  // pasted bug report, and offer the retry that makes a fixed environment
+  // recoverable without restarting the workspace.
+  const showUnavailable = (availability: Extract<ChatAvailability, { state: "unavailable" }>) => {
+    form.hidden = true;
+    select.disabled = true;
+    newButton.disabled = true;
+    announce(availability.message, true);
+
+    const panel = document.createElement("div");
+    panel.className = "chat-unavailable";
+
+    if (availability.diagnostics) {
+      const details = document.createElement("details");
+      details.className = "chat-unavailable__details";
+      const summary = document.createElement("summary");
+      summary.textContent = "Diagnostics";
+      const report = document.createElement("pre");
+      report.className = "chat-unavailable__report";
+      report.textContent = formatDiagnostics(availability);
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.className = "chat-unavailable__copy";
+      copy.textContent = "Copy diagnostics";
+      copy.addEventListener("click", () => {
+        void navigator.clipboard?.writeText(report.textContent ?? "").then(
+          () => { copy.textContent = "Copied"; },
+          () => { copy.textContent = "Copy failed"; },
+        );
+      });
+      details.append(summary, report, copy);
+      panel.append(details);
+    }
+
+    // Retry is offered for every unavailable reason — someone who just
+    // installed OpenCode should recover the same way — but for `not-installed`
+    // the install instruction leads and retry is the secondary action.
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "chat-unavailable__retry";
+    retry.textContent = "Retry";
+    if (availability.reason === "not-installed") retry.classList.add("is-secondary");
+    retry.addEventListener("click", async () => {
+      retry.disabled = true;
+      retry.textContent = "Retrying…";
+      panel.remove();
+      announce("Starting OpenCode…");
+      try {
+        const next = await api.retry();
+        if (next.state === "unavailable") {
+          showUnavailable(next);
+          return;
+        }
+        bootstrapped = false;
+        await bootstrap();
+      } catch (error) {
+        // The retry POST itself failed (network, proxy, credential refresh) —
+        // announce() alone would wipe the panel and leave the surface with no
+        // Retry control at all, so rebuild it around the transport error.
+        showUnavailable({ ...availability, message: `Retry failed: ${messageOf(error)}` });
+      }
+    });
+    panel.append(retry);
+    state.append(panel);
+    state.hidden = false;
+  };
+
   const bootstrap = async () => {
     if (bootstrapped || bootstrapping) return;
     bootstrapping = true;
     try {
       const availability = await api.status();
       if (availability.state === "unavailable") {
-        announce(availability.message, true);
-        form.hidden = true;
-        select.disabled = true;
-        newButton.disabled = true;
+        showUnavailable(availability);
         return;
       }
-      [models, conversations, commands] = await Promise.all([api.models(), api.conversations(), api.commands().catch(() => [])]);
+      // The agent list is an enhancement: a provider without it hides the
+      // picker rather than blocking chat.
+      [models, conversations, commands, agents] = await Promise.all([
+        api.models(),
+        api.conversations(),
+        api.commands().catch(() => []),
+        api.agents().catch(() => [] as ChatAgent[]),
+      ]);
       form.hidden = false;
       select.disabled = false;
       newButton.disabled = false;
       renderModels();
+      renderAgents();
       announce(conversations.length ? "" : "No conversations yet. Create one to start.");
       renderChooser();
       bootstrapped = true;
@@ -1047,9 +1220,16 @@ function readPresentation(): Presentation {
       workingSince: parseStoredTimestamps(value.workingSince),
       model: parseStoredModel(value.model),
       models: parseStoredModels(value.models),
+      agent: typeof value.agent === "string" ? value.agent : undefined,
+      agents: parseStoredNames(value.agents),
       dismissedSubagents: parseStoredIdLists(value.dismissedSubagents),
     };
   } catch { return structuredClone(EMPTY_PRESENTATION); }
+}
+
+function parseStoredNames(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
 }
 
 function parseStoredIdLists(value: unknown): Record<string, string[]> {
@@ -1083,6 +1263,10 @@ function parseStoredModels(value: unknown): Record<string, ModelSelection> {
 
 function modelValue(model: ModelSelection): string {
   return JSON.stringify([model.providerId, model.modelId]);
+}
+
+function agentLabel(name: string): string {
+  return `Agent: ${name.charAt(0).toUpperCase()}${name.slice(1)}`;
 }
 
 function sameModel(left: ModelSelection, right: ModelSelection): boolean {

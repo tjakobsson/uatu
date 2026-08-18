@@ -35,7 +35,6 @@ describe.skipIf(!enabled)("real OpenCode integration", () => {
         OPENCODE_CONFIG: configPath,
         OPENCODE_CONFIG_DIR: configDirectory,
       },
-      startupTimeoutMs: 20_000,
     });
     const service = new LazyOpenCodeChatService({ workspacePath: workspace, runtime });
     let endpoint = "";

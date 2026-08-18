@@ -11,7 +11,7 @@
 
 import type { Serve } from "bun";
 
-import { InteractionConflictError, InvalidModelSelectionError } from "../chat/adapter";
+import { InteractionConflictError, InvalidAgentSelectionError, InvalidModelSelectionError } from "../chat/adapter";
 import { encodeReplayCursor } from "../chat/replay";
 import { ChatUnavailableError, type WorkspaceChatService } from "../chat/service";
 import type { ModelSelection, PermissionOutcome, QuestionOutcome } from "../chat/types";
@@ -424,9 +424,21 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
     [p("/api/chat/status")]: {
       GET: async (request: Request) => authenticated(request) ?? run(() => deps.chatService.status()),
     },
+    // POST, not a query on /status: retry spawns a process, so it must not sit
+    // behind a safe method — and it takes the mutation gate, because a
+    // same-site page riding the workspace cookie must not be able to spawn
+    // OpenCode either.
+    [p("/api/chat/retry")]: {
+      POST: async (request: Request) => mutationGate(request) ?? run(() => deps.chatService.retry()),
+    },
     [p("/api/chat/models")]: {
       GET: async (request: Request) => authenticated(request) ?? run(async () => ({
         models: await deps.chatService.models(),
+      })),
+    },
+    [p("/api/chat/agents")]: {
+      GET: async (request: Request) => authenticated(request) ?? run(async () => ({
+        agents: await deps.chatService.agents(),
       })),
     },
     [p("/api/chat/commands")]: {
@@ -540,14 +552,16 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
       },
     },
     [p("/api/chat/conversations/:conversationId/prompts")]: {
-      POST: async (request: RouteRequest) => chatMutation(request, ["requestId", "text", "model"], async (id, body) => {
+      POST: async (request: RouteRequest) => chatMutation(request, ["requestId", "text", "model", "agent"], async (id, body) => {
         const requestId = bodyIdentity(body, "requestId");
         if (requestId instanceof Response) return requestId;
         if (typeof body.text !== "string" || !body.text.trim()) return chatError(400, "text must not be empty");
         if (Buffer.byteLength(body.text) > CHAT_PROMPT_BYTES) return chatError(413, "text is too large");
         const model = parseModelSelection(body.model);
         if (model instanceof Response) return model;
-        return run(() => deps.chatService.prompt(id, requestId, body.text as string, model), 202);
+        const agent = parseAgentSelection(body.agent);
+        if (agent instanceof Response) return agent;
+        return run(() => deps.chatService.prompt(id, requestId, body.text as string, model, agent), 202);
       }),
     },
     [p("/api/chat/conversations/:conversationId/cancel")]: {
@@ -667,10 +681,18 @@ function parseModelSelection(value: unknown): ModelSelection | undefined | Respo
     : chatError(400, "invalid model selection");
 }
 
+function parseAgentSelection(value: unknown): string | undefined | Response {
+  if (value === undefined) return undefined;
+  return typeof value === "string" && validIdentity(value)
+    ? value
+    : chatError(400, "invalid agent selection");
+}
+
 function normalizedChatError(error: unknown): Response {
   if (error instanceof ConversationNotFoundError) return chatError(404, "conversation not found");
   if (error instanceof InteractionConflictError) return chatError(409, error.message);
   if (error instanceof InvalidModelSelectionError) return chatError(400, error.message);
+  if (error instanceof InvalidAgentSelectionError) return chatError(400, error.message);
   if (error instanceof ChatUnavailableError) return chatError(503, "chat is unavailable");
   if (error instanceof Error && /invalid history cursor/.test(error.message)) return chatError(400, "invalid cursor");
   return chatError(500, "chat operation failed");
