@@ -166,6 +166,77 @@ test.describe("chat panels and navigation", () => {
     await expect(track.locator("summary")).toContainText("1 of 1 subagent working · Still going");
   });
 
+  // A conversation gave no sign of how full its context window was until it
+  // overflowed. The figure has to read without opening anything — opening it
+  // only adds the breakdown.
+  test("the context indicator reads the fill on open and expands to the breakdown", async ({ page, request }) => {
+    await seedAndOpen(page, request, "Context", [
+      { id: "message:u1", type: "user_message", createdAt: 1, text: "summarize the repo" },
+      { id: "part:a1", type: "assistant_message", createdAt: 2, markdown: "An earlier answer.", usage: { input: 4_000, output: 100 } },
+      { id: "part:a2", type: "assistant_message", createdAt: 3, markdown: "The latest answer.", usage: { input: 30_000, output: 1_200, reasoning: 400, cacheRead: 20_000, cacheWrite: 2_000 } },
+    ]);
+
+    // Populated from history, before any new turn — and from the newest
+    // assistant message, not the first one.
+    const indicator = page.locator("#chat-context-usage");
+    await expect(indicator).toBeVisible();
+    // 30k + 20k cache read + 2k cache write = 52k of the fixture model's 200k.
+    // Output is excluded: it is what came back, not what occupies the window.
+    await expect(page.locator("#chat-context-usage-label")).toHaveText("52k/200k · 26%");
+
+    await indicator.locator("summary").click();
+    const breakdown = page.locator("#chat-context-usage-breakdown");
+    await expect(breakdown).toBeVisible();
+    await expect(breakdown.locator("dt")).toHaveText(["Input", "Cache read", "Cache write", "Reasoning", "Output"]);
+    await expect(breakdown.locator("dd")).toHaveText(["30,000", "20,000", "2,000", "400", "1,200"]);
+  });
+
+  test("a conversation with no reported usage claims nothing", async ({ page, request }) => {
+    await seedAndOpen(page, request, "No usage", [
+      { id: "part:a1", type: "assistant_message", createdAt: 2, markdown: "An answer, unmeasured." },
+    ]);
+    // Hidden, not zeroed: an empty meter would be a claim about the
+    // conversation rather than an absence of data about it.
+    await expect(page.locator("#chat-context-usage")).toBeHidden();
+  });
+
+  test("an agent that does not declare context reporting leaves no readout behind", async ({ page, request }) => {
+    await control(request, { action: "declareOnly", capabilities: ["models", "subagents"] });
+    await seedAndOpen(page, request, "Undeclared", [
+      { id: "part:a1", type: "assistant_message", createdAt: 2, markdown: "An answer.", usage: { input: 30_000 } },
+      { id: "tool:agent1", type: "tool", createdAt: 3, name: "task", status: "completed", model: "claude-sonnet-4-5", usage: { input: 900, output: 100 }, input: JSON.stringify({ description: "Review renderer", subagent_type: "explore", prompt: "go" }) },
+    ]);
+    // Absent, not empty — and what the agent does declare is unaffected.
+    await expect(page.locator("#chat-context-usage")).toHaveCount(0);
+    await expect(page.locator("#chat-model-select")).toBeVisible();
+    const track = page.locator("#chat-subagents");
+    await track.locator("summary").click();
+    await expect(track.locator("li")).toContainText("explore · Review renderer");
+    // The model still names itself; only the token figure is gated.
+    await expect(track.locator(".chat-subagent-attribution")).toHaveText("claude-sonnet-4-5");
+    // Restored before leaving: this worker's service is shared with whatever
+    // runs next against it, and a narrowed agent is this test's setup only.
+    await control(request, { action: "declareOnly", capabilities: ["modes", "models", "commands", "questions", "permissions", "subagents", "variants", "context"] });
+  });
+
+  test("a subagent row names the model it ran and the tokens it consumed", async ({ page, request }) => {
+    await seedAndOpen(page, request, "Attribution", [
+      { id: "tool:agent1", type: "tool", createdAt: 2, name: "task", status: "completed", model: "claude-sonnet-4-5", usage: { input: 12_000, output: 800, cacheRead: 4_000 }, input: JSON.stringify({ description: "Review renderer", subagent_type: "explore", prompt: "go" }) },
+      { id: "tool:agent2", type: "tool", createdAt: 3, name: "task", status: "running", input: JSON.stringify({ description: "Audit styles", subagent_type: "general", prompt: "go" }) },
+    ]);
+
+    const track = page.locator("#chat-subagents");
+    await track.locator("summary").click();
+    const rows = track.locator("li");
+    await expect(rows).toHaveCount(2);
+    // Spend, so output counts here — unlike the context fill, which asks what
+    // occupies the window right now.
+    await expect(rows.nth(0)).toContainText("claude-sonnet-4-5 · 17k tokens");
+    // The unattributed one stays a readable row and asserts no figure.
+    await expect(rows.nth(1)).toContainText("general · Audit styles");
+    await expect(rows.nth(1).locator(".chat-subagent-attribution")).toHaveCount(0);
+  });
+
   test("the prompt rail jumps to a prompt and flashes the landing", async ({ page, request }) => {
     await seedAndOpen(page, request, "Rail", [
       { id: "message:u1", type: "user_message", createdAt: 1, text: "first question" },

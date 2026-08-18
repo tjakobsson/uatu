@@ -1,4 +1,4 @@
-import type { ConversationItem, ConversationStatus, StructuredQuestion } from "./types";
+import type { ConversationItem, ConversationStatus, StructuredQuestion, TokenUsage } from "./types";
 
 type RecordValue = Record<string, unknown>;
 
@@ -21,6 +21,61 @@ export type NormalizedEventOutcome =
   // A case matched but the payload did not carry what that case requires.
   | "unparseable";
 
+/**
+ * What normalizing one event needs to remember from earlier ones. Bounded on
+ * every map: a long session must not grow any of these without limit.
+ *
+ * - `roles` — a part's sender, which only `message.updated` states.
+ * - `lastAssistantPart` — the item a message's token usage decorates. Usage
+ *   arrives on `message.updated`, which carries no part, so without this the
+ *   only place to put it would be a new usage-only item — and `renderItem`
+ *   draws any `assistant_message` as a bubble, so that is a stray empty
+ *   message on the timeline.
+ * - `pendingUsage` — usage that arrived before the message had any text part,
+ *   flushed onto the first one that appears.
+ */
+export type ProviderEventMemory = {
+  roles: Map<string, string>;
+  lastAssistantPart: Map<string, string>;
+  pendingUsage: Map<string, TokenUsage>;
+};
+
+export function createProviderEventMemory(): ProviderEventMemory {
+  return { roles: new Map(), lastAssistantPart: new Map(), pendingUsage: new Map() };
+}
+
+const MEMORY_LIMIT = 2_048;
+
+function remember<T>(map: Map<string, T>, key: string, value: T): void {
+  map.set(key, value);
+  if (map.size > MEMORY_LIMIT) map.delete(map.keys().next().value!);
+}
+
+/**
+ * The tokens the agent reported, as our own shape. Missing components stay
+ * missing rather than becoming zero: "the agent did not report cache reads"
+ * and "there were none" are different statements, and only one of them lets a
+ * readout claim a figure.
+ *
+ * `tokens.total` is deliberately not read — it counts output, so it is not
+ * what occupies the context window.
+ */
+export function tokensToUsage(value: unknown): TokenUsage | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const tokens = value as RecordValue;
+  const cache = record(tokens.cache);
+  const usage: TokenUsage = {};
+  const put = (key: keyof TokenUsage, raw: unknown) => {
+    if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) usage[key] = raw;
+  };
+  put("input", tokens.input);
+  put("output", tokens.output);
+  put("reasoning", tokens.reasoning);
+  put("cacheRead", cache.read);
+  put("cacheWrite", cache.write);
+  return Object.keys(usage).length > 0 ? usage : undefined;
+}
+
 export type NormalizedProviderEvent = {
   conversationId?: string;
   updates: NormalizedProviderUpdate[];
@@ -28,6 +83,11 @@ export type NormalizedProviderEvent = {
   // The event's own type, so a caller can count drops per type. Never a
   // payload — a payload can carry file contents.
   eventType: string;
+  // The model the assistant message ran, when the event states it. Reported on
+  // the envelope rather than on an item: it belongs to the message, and the
+  // one thing that needs it — attributing a subagent on its parent's row —
+  // reads it from the child's event stream, not from the child's timeline.
+  assistantModel?: string;
 };
 
 // Event types recognized as deliberately carrying nothing for the timeline.
@@ -108,10 +168,10 @@ export function normalizeProviderMessage(value: unknown): ConversationItem[] {
 
 // Public boundary. Every failure mode resolves to an outcome rather than an
 // exception, so one malformed payload costs one event instead of the pump.
-export function normalizeProviderEvent(value: unknown, messageRoles?: Map<string, string>): NormalizedProviderEvent {
+export function normalizeProviderEvent(value: unknown, memory?: ProviderEventMemory): NormalizedProviderEvent {
   const eventType = optionalString(record(value).type) ?? "";
   try {
-    const matched = normalizeKnownEvent(value, messageRoles);
+    const matched = normalizeKnownEvent(value, memory);
     if (matched) return { ...matched, outcome: matched.updates.length > 0 ? "handled" : "ignored", eventType };
     return {
       conversationId: conversationIdOf(value),
@@ -135,7 +195,7 @@ function conversationIdOf(value: unknown): string | undefined {
   }
 }
 
-function normalizeKnownEvent(value: unknown, messageRoles?: Map<string, string>): { conversationId?: string; updates: NormalizedProviderUpdate[] } | undefined {
+function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): { conversationId?: string; updates: NormalizedProviderUpdate[]; assistantModel?: string } | undefined {
   const event = record(value);
   const data = record(event.data ?? event.properties);
   const conversationId = optionalString(data.sessionID) ?? optionalString(data.sessionId);
@@ -390,20 +450,31 @@ function normalizeKnownEvent(value: unknown, messageRoles?: Map<string, string>)
     case "message.updated": {
       const info = record(data.info ?? data.message);
       const messageId = optionalString(info.id);
-      const role = optionalString(info.role);
-      if (messageId && role && messageRoles) {
-        messageRoles.set(messageId, role);
-        if (messageRoles.size > 2_048) messageRoles.delete(messageRoles.keys().next().value!);
+      const role = optionalString(info.role) ?? optionalString(info.type);
+      if (messageId && role && memory) remember(memory.roles, messageId, role);
+      const updates: NormalizedProviderUpdate[] = normalizeProviderMessage({ info, parts: [] })
+        .map(item => ({ kind: "upsert" as const, item }));
+      // The message's token usage decorates the last text part it produced —
+      // an item that already renders — rather than becoming an item of its
+      // own. Before any part exists it waits in `pendingUsage`; a `message.updated`
+      // is not evidence that a bubble should appear.
+      const usage = role === "assistant" ? tokensToUsage(info.tokens) : undefined;
+      if (usage && messageId && memory) {
+        const partId = memory.lastAssistantPart.get(messageId);
+        if (partId) updates.push(usageUpsert(partId, timestamp(record(info.time).created, createdAt), usage));
+        else remember(memory.pendingUsage, messageId, usage);
       }
+      const assistantModel = role === "assistant" ? optionalString(info.modelID ?? info.modelId) : undefined;
       return {
         conversationId: conversationId ?? optionalString(info.sessionID),
-        updates: normalizeProviderMessage({ info, parts: [] }).map(item => ({ kind: "upsert", item })),
+        updates,
+        ...(assistantModel === undefined ? {} : { assistantModel }),
       };
     }
     case "message.part.updated": {
       const part = record(data.part);
       const messageId = optionalString(part.messageID);
-      if (part.type === "text" && messageId && messageRoles?.get(messageId) === "user") {
+      if (part.type === "text" && messageId && memory?.roles.get(messageId) === "user") {
         return { conversationId: conversationId ?? optionalString(part.sessionID), updates: [{ kind: "upsert", item: {
           id: `message:${messageId}`,
           type: "user_message",
@@ -411,7 +482,20 @@ function normalizeKnownEvent(value: unknown, messageRoles?: Map<string, string>)
           text: text(part.text),
         } }] };
       }
-      return { conversationId: conversationId ?? optionalString(part.sessionID), updates: normalizePart(part, timestamp(record(data.message).time, createdAt)) };
+      const partCreatedAt = timestamp(record(data.message).time, createdAt);
+      const updates = normalizePart(part, partCreatedAt);
+      const partId = optionalString(part.id);
+      if (part.type === "text" && messageId && partId && memory) {
+        remember(memory.lastAssistantPart, messageId, `part:${partId}`);
+        // Usage that beat the first part to the stream lands here, on the part
+        // it was always meant to decorate.
+        const pending = memory.pendingUsage.get(messageId);
+        if (pending) {
+          memory.pendingUsage.delete(messageId);
+          updates.push(usageUpsert(`part:${partId}`, partCreatedAt, pending));
+        }
+      }
+      return { conversationId: conversationId ?? optionalString(part.sessionID), updates };
     }
     case "message.part.removed": {
       const partId = optionalString(data.partID);
@@ -423,6 +507,16 @@ function normalizeKnownEvent(value: unknown, messageRoles?: Map<string, string>)
   }
 }
 
+/**
+ * A usage-only decoration of an existing assistant part. Empty markdown is the
+ * signal that this carries no text: `mergeInteraction` and the client
+ * projection both keep the streamed answer rather than blanking it, and keep
+ * the part's own timestamp rather than resorting the timeline.
+ */
+function usageUpsert(itemId: string, createdAt: number, usage: TokenUsage): NormalizedProviderUpdate {
+  return { kind: "upsert", item: { id: itemId, type: "assistant_message", createdAt, markdown: "", usage } };
+}
+
 function normalizeStoredMessage(info: RecordValue, parts: unknown[]): ConversationItem[] {
   const id = string(info.id, "message id");
   const createdAt = timestamp(record(info.time).created, 0);
@@ -431,7 +525,7 @@ function normalizeStoredMessage(info: RecordValue, parts: unknown[]): Conversati
     return [{ id: `message:${id}`, type: "user_message", createdAt, text: body }];
   }
   if (info.role === "assistant") {
-    return normalizeAssistant({ content: parts, error: info.error, snapshot: info.snapshot }, id, createdAt);
+    return normalizeAssistant({ content: parts, error: info.error, snapshot: info.snapshot, tokens: info.tokens }, id, createdAt);
   }
   return [];
 }
@@ -442,6 +536,19 @@ function normalizeAssistant(message: RecordValue, messageId: string, createdAt: 
     if (update.kind === "text" && update.item) return [update.item];
     return [];
   });
+  // The stored message states what the turn spent; it goes on the last text
+  // part, which is the item on screen when the turn is read back. This is the
+  // authoritative path — it is what populates the indicator on opening a
+  // conversation, before any new turn is taken.
+  const usage = tokensToUsage(message.tokens);
+  if (usage) {
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      const item = items[index]!;
+      if (item.type !== "assistant_message") continue;
+      items[index] = { ...item, usage };
+      break;
+    }
+  }
   const error = errorMessage(message.error);
   if (error) items.push({ id: `notice:${messageId}:error`, type: "notice", createdAt, level: "error", message: error });
   for (const path of stringArray(record(message.snapshot).files)) {

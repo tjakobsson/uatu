@@ -70,9 +70,7 @@ export function applyChatEvent(current: ChatProjection, event: ChatEvent, cursor
   if (event.type === "item.upsert") {
     const index = items.findIndex(item => item.id === event.item.id);
     const existing = index < 0 ? undefined : items[index];
-    const incoming = existing?.type === "user_message" && event.item.type === "user_message" && existing.requestId && !event.item.requestId
-      ? { ...event.item, text: existing.text, requestId: existing.requestId }
-      : event.item;
+    const incoming = mergeUpsert(existing, event.item);
     items = index < 0 ? [...items, incoming] : items.map((item, at) => at === index ? incoming : item);
   } else if (event.type === "item.remove") {
     items = items.filter(item => item.id !== event.itemId);
@@ -92,6 +90,36 @@ export function applyChatEvent(current: ChatProjection, event: ChatEvent, cursor
     },
     outcome: "applied",
   };
+}
+
+/**
+ * What an upsert keeps from the item it replaces. Two cases, both about an
+ * upsert that carries less than what is already on screen:
+ *
+ * - A `message.updated` for a user message normalizes with empty parts, and an
+ *   optimistically-sent message holds a requestId the server echo lacks.
+ * - A token-usage upsert decorates an assistant part rather than replacing it:
+ *   it carries no markdown, and taking its empty text would blank the answer
+ *   mid-stream.
+ */
+function mergeUpsert(existing: ConversationItem | undefined, incoming: ConversationItem): ConversationItem {
+  if (!existing || existing.type !== incoming.type) return incoming;
+  if (existing.type === "user_message" && incoming.type === "user_message") {
+    return existing.requestId && !incoming.requestId
+      ? { ...incoming, text: existing.text, requestId: existing.requestId }
+      : incoming;
+  }
+  if (existing.type === "assistant_message" && incoming.type === "assistant_message") {
+    const usageOnly = incoming.markdown === "";
+    return {
+      ...existing,
+      ...incoming,
+      createdAt: usageOnly ? existing.createdAt : incoming.createdAt,
+      markdown: incoming.markdown || existing.markdown,
+      ...(existing.usage || incoming.usage ? { usage: { ...existing.usage, ...incoming.usage } } : {}),
+    };
+  }
+  return incoming;
 }
 
 function appendDelta(item: ConversationItem, delta: string): ConversationItem {

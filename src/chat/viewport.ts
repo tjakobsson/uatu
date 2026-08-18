@@ -38,7 +38,6 @@ export class ChatViewportController {
     document.documentElement.toggleAttribute("data-chat-keyboard", metrics.keyboardVisible);
     this.surface.style.setProperty("--chat-visual-top", `${top}px`);
     this.surface.style.setProperty("--chat-visual-height", `${metrics.height}px`);
-    this.surface.style.setProperty("--chat-composer-height", `${this.composer.offsetHeight}px`);
     if (this.anchor.isPinned()) this.timeline.scrollTop = Math.max(0, this.timeline.scrollHeight - this.timeline.clientHeight);
   }
 }

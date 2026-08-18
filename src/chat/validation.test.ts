@@ -131,6 +131,21 @@ describe("chat domain validation", () => {
     for (const parse of invalid) expect(parse).toThrow();
   });
 
+  test("token usage parses on assistant and tool items and stays a closed shape", () => {
+    const usage = { input: 12_000, output: 400, reasoning: 90, cacheRead: 8_000, cacheWrite: 512 };
+    expect(parseConversationItem({ ...items[1], usage })).toBeDefined();
+    expect(parseConversationItem({ ...items[3], model: "anthropic/claude-sonnet", usage: { input: 5 } })).toBeDefined();
+    // An agent reports what it measures, so every component is optional — but
+    // the readouts do arithmetic on these, so a component that is present must
+    // be a count and no other key may ride along.
+    expect(parseConversationItem({ ...items[1], usage: {} })).toBeDefined();
+    expect(() => parseConversationItem({ ...items[1], usage: { input: -1 } })).toThrow(/non-negative/);
+    expect(() => parseConversationItem({ ...items[1], usage: { input: "12000" } })).toThrow(/non-negative/);
+    expect(() => parseConversationItem({ ...items[1], usage: { total: 12_400 } })).toThrow(/unknown/);
+    expect(() => parseConversationItem({ ...items[1], usage: 12_400 })).toThrow();
+    expect(() => parseConversationItem({ ...items[3], model: 5 })).toThrow();
+  });
+
   test("rejects contradictory interaction request state and unsafe extra fields", () => {
     expect(() => parseInteractionRequest({ ...items[6], outcome: "approved-once" })).toThrow(/pending/);
     expect(() => parseInteractionRequest({ ...items[6], status: "resolved" })).toThrow(/outcome/);

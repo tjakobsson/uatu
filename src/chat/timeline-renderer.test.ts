@@ -8,7 +8,7 @@ beforeAll(() => {
   (globalThis as Record<string, unknown>).document = dom.document;
 });
 
-const { TimelineRenderer } = await import("./timeline-renderer");
+const { TimelineRenderer, subagentEntries } = await import("./timeline-renderer");
 
 function projectionWith(items: ConversationItem[], overrides: Partial<ChatProjection> = {}): ChatProjection {
   return {
@@ -289,6 +289,44 @@ describe("presentation details", () => {
     expect(panels[1]!.hasAttribute("hidden")).toBe(true);
     expect(host.querySelector("[data-question-primary]")!.textContent).toBe("Next");
     expect(host.querySelector('input[type="checkbox"]')).not.toBeNull();
+  });
+});
+
+describe("subagent entries", () => {
+  const task = (id: string, extra: Partial<Extract<ConversationItem, { type: "tool" }>> = {}): ConversationItem => ({
+    id: `tool:${id}`, type: "tool", createdAt: 1, name: "task", status: "completed",
+    input: JSON.stringify({ description: "Review renderer", subagent_type: "explore", prompt: "go" }),
+    ...extra,
+  });
+
+  test("an entry carries the model and usage the adapter mirrored onto its row", () => {
+    const [entry] = subagentEntries([task("a", {
+      childConversationId: "child",
+      model: "claude-sonnet-4-5",
+      usage: { input: 1_200, output: 340, cacheRead: 800 },
+    })]);
+    expect(entry).toEqual({
+      id: "tool:a",
+      description: "Review renderer",
+      subagent: "explore",
+      status: "completed",
+      conversationId: "child",
+      model: "claude-sonnet-4-5",
+      usage: { input: 1_200, output: 340, cacheRead: 800 },
+    });
+  });
+
+  test("an unattributed subagent is still an entry, asserting neither figure", () => {
+    const [entry] = subagentEntries([task("b")]);
+    expect(entry).toEqual({ id: "tool:b", description: "Review renderer", subagent: "explore", status: "completed" });
+    expect(entry).not.toHaveProperty("model");
+    expect(entry).not.toHaveProperty("usage");
+  });
+
+  test("a model known before any usage is reported still names the model", () => {
+    const [entry] = subagentEntries([task("c", { status: "running", model: "gpt-5" })]);
+    expect(entry).toEqual(expect.objectContaining({ status: "running", model: "gpt-5" }));
+    expect(entry).not.toHaveProperty("usage");
   });
 });
 

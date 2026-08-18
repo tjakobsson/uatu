@@ -48,7 +48,8 @@ export class FakeE2EChatService implements WorkspaceChatService {
   // The capabilities this fake declares. A test can narrow them to drive the
   // surface an agent that offers less produces — the one path a workspace with
   // a single real agent can never reach on its own.
-  private capabilities: ChatCapability[] = ["modes", "models", "commands", "questions", "permissions", "subagents", "variants"];
+  private static readonly DEFAULT_CAPABILITIES: ChatCapability[] = ["modes", "models", "commands", "questions", "permissions", "subagents", "variants", "context"];
+  private capabilities: ChatCapability[] = [...FakeE2EChatService.DEFAULT_CAPABILITIES];
 
   async status(): Promise<ChatAvailability> {
     this.statusCalls += 1;
@@ -240,6 +241,9 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.receipts.clear();
     this.olderItems.clear();
     this.children.clear();
+    // A narrowed agent is one test's setup, not the fixture's resting state:
+    // left in place it reaches whichever test boots against this worker next.
+    this.capabilities = [...FakeE2EChatService.DEFAULT_CAPABILITIES];
   }
 
   seed(title: string, items: ConversationItem[], older: ConversationItem[] = [], child = false): ConversationSnapshot {

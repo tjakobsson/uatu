@@ -216,6 +216,21 @@ export function parseQuestionRequest(value: unknown): QuestionRequest {
   return value as QuestionRequest;
 }
 
+/**
+ * Token usage, closed like every other item field. Each component is optional
+ * because an agent reports what it measures — but an absent component must
+ * stay absent, not arrive as some other type, since the readouts do
+ * arithmetic on these.
+ */
+function expectTokenUsage(value: unknown, label: string): void {
+  if (value === undefined) return;
+  const usage = expectRecord(value, label);
+  expectKeys(usage, ["input", "output", "reasoning", "cacheRead", "cacheWrite"], label);
+  for (const key of ["input", "output", "reasoning", "cacheRead", "cacheWrite"] as const) {
+    expectOptionalCount(usage[key], `${label} ${key}`);
+  }
+}
+
 export function parseConversationItem(value: unknown): ConversationItem {
   const record = expectRecord(value, "conversation item");
   const type = expectString(record.type, "conversation item type");
@@ -229,9 +244,10 @@ export function parseConversationItem(value: unknown): ConversationItem {
       expectOptionalIdentity(record.requestId, "user message request id");
       break;
     case "assistant_message":
-      expectKeys(record, ["id", "type", "createdAt", "markdown", "completedAt"], type);
+      expectKeys(record, ["id", "type", "createdAt", "markdown", "completedAt", "usage"], type);
       expectString(record.markdown, "assistant markdown");
       expectOptionalTimestamp(record.completedAt, "completedAt");
+      expectTokenUsage(record.usage, "assistant usage");
       break;
     case "reasoning":
       expectKeys(record, ["id", "type", "createdAt", "text", "status", "durationMs"], type);
@@ -241,13 +257,15 @@ export function parseConversationItem(value: unknown): ConversationItem {
       expectOptionalTimestamp(record.durationMs, "durationMs");
       break;
     case "tool":
-      expectKeys(record, ["id", "type", "createdAt", "name", "status", "input", "output", "error", "childConversationId"], type);
+      expectKeys(record, ["id", "type", "createdAt", "name", "status", "input", "output", "error", "childConversationId", "model", "usage"], type);
       expectNonEmptyString(record.name, "tool name");
       parseActivityStatus(record.status);
       expectOptionalString(record.input, "tool input");
       expectOptionalString(record.output, "tool output");
       expectOptionalString(record.error, "tool error");
       expectOptionalString(record.childConversationId, "tool child conversation id");
+      expectOptionalString(record.model, "tool model");
+      expectTokenUsage(record.usage, "tool usage");
       break;
     case "command":
       expectKeys(record, ["id", "type", "createdAt", "command", "status", "output", "exitCode"], type);

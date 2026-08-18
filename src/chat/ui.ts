@@ -19,7 +19,7 @@ import {
   removeAcceptedDraft,
   type ChatProjection,
 } from "./projection";
-import type { ChatAgent, ChatCapability, ChatMode, ChatAvailability, ChatCommand, ChatModel, ConversationItem, ConversationSummary, ModelSelection, PermissionOutcome, QuestionOutcome } from "./types";
+import type { ChatAgent, ChatCapability, ChatMode, ChatAvailability, ChatCommand, ChatModel, ConversationItem, ConversationSummary, ModelSelection, PermissionOutcome, QuestionOutcome, TokenUsage } from "./types";
 import { formatDiagnostics } from "./diagnostics";
 
 const PRESENTATION_KEY = "uatu:chat-presentation";
@@ -70,6 +70,10 @@ export function initChat(): void {
   const variantSelect = document.querySelector<HTMLSelectElement>("#chat-variant-select");
   const cancel = document.querySelector<HTMLButtonElement>("#chat-cancel");
   const composerStatus = document.querySelector<HTMLElement>("#chat-composer-status");
+  const contextUsage = document.querySelector<HTMLDetailsElement>("#chat-context-usage");
+  const contextUsageFill = document.querySelector<HTMLElement>("#chat-context-usage-meter .chat-context-meter-fill");
+  const contextUsageLabel = document.querySelector<HTMLElement>("#chat-context-usage-label");
+  const contextUsageBreakdown = document.querySelector<HTMLElement>("#chat-context-usage-breakdown");
   const chatTitle = document.querySelector<HTMLElement>("#chat-title");
   const chatContext = document.querySelector<HTMLElement>("#chat-context");
   const inputLabel = document.querySelector<HTMLElement>("#chat-input-label");
@@ -180,6 +184,9 @@ export function initChat(): void {
     if (!declares("modes")) modeSelect?.remove();
     if (!declares("models")) modelSelect.remove();
     if (!declares("variants")) variantSelect?.remove();
+    // An agent that does not report token usage has no context readout to
+    // show, and a permanently empty meter would claim otherwise.
+    if (!declares("context")) contextUsage?.remove();
   };
   nameAgent();
 
@@ -373,11 +380,80 @@ export function initChat(): void {
         open.textContent = text;
         row.append(open);
       } else {
-        row.textContent = text;
+        const label = document.createElement("span");
+        label.className = "chat-subagent-label";
+        label.textContent = text;
+        row.append(label);
+      }
+      // What it ran and what it cost, after the description so the row still
+      // leads with what the subagent is doing. The model shows whenever the
+      // agent named it; the token figure only where the agent declares it
+      // reports usage, and only once it has reported some — an unattributed
+      // subagent stays a readable row rather than one asserting a zero.
+      const attribution = [
+        entry.model,
+        declares("context") && entry.usage ? `${formatTokens(subagentTokens(entry.usage))} tokens` : undefined,
+      ].filter(Boolean).join(" · ");
+      if (attribution) {
+        const note = document.createElement("span");
+        note.className = "chat-subagent-attribution";
+        note.textContent = attribution;
+        row.append(note);
       }
       return row;
     }));
     subagents.hidden = false;
+  };
+
+  /**
+   * How full the context window is. Occupancy is `input + cache read + cache
+   * write` of the newest assistant message that reported any — that is the
+   * prompt the most recent request carried, which already includes the
+   * conversation so far. `output` is what came back rather than what is
+   * sitting in the window, so it belongs in the breakdown and not the fill.
+   *
+   * Nothing reported means nothing is shown: an empty meter would be a claim
+   * about a conversation, not an absence of data about it.
+   */
+  const syncContextIndicator = () => {
+    if (!contextUsage?.isConnected || !contextUsageFill || !contextUsageLabel || !contextUsageBreakdown) return;
+    const usage = projection?.items.reduce<TokenUsage | undefined>(
+      (latest, item) => (item.type === "assistant_message" && item.usage ? item.usage : latest),
+      undefined,
+    );
+    if (!usage) {
+      contextUsage.hidden = true;
+      contextUsage.open = false;
+      return;
+    }
+    const used = (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
+    const limit = models.find(model => modelValue(model.selection) === modelSelect.value)?.contextLimit;
+    const fraction = limit && limit > 0 ? Math.min(1, used / limit) : undefined;
+    contextUsageFill.style.width = `${Math.round((fraction ?? 0) * 100)}%`;
+    // The figure states the fill in words as well as in width, so the tier
+    // colouring below is emphasis on something already legible rather than
+    // the only signal.
+    contextUsageLabel.textContent = fraction === undefined
+      ? `${formatTokens(used)} in context`
+      : `${formatTokens(used)}/${formatTokens(limit!)} · ${Math.round(fraction * 100)}%`;
+    contextUsage.dataset.fill = fraction === undefined ? "unknown" : fraction >= 0.9 ? "full" : fraction >= 0.75 ? "high" : "normal";
+    contextUsage.title = fraction === undefined
+      ? `${used.toLocaleString()} tokens in the context window`
+      : `${used.toLocaleString()} of ${limit!.toLocaleString()} tokens in the context window`;
+    const rows: Array<[string, number]> = [];
+    if (usage.input !== undefined) rows.push(["Input", usage.input]);
+    if (usage.cacheRead !== undefined) rows.push(["Cache read", usage.cacheRead]);
+    if (usage.cacheWrite !== undefined) rows.push(["Cache write", usage.cacheWrite]);
+    if (usage.reasoning !== undefined) rows.push(["Reasoning", usage.reasoning]);
+    if (usage.output !== undefined) rows.push(["Output", usage.output]);
+    contextUsageBreakdown.replaceChildren(...rows.flatMap(([label, value]) => {
+      const term = document.createElement("dt");
+      term.textContent = label;
+      const detail = document.createElement("dd");
+      detail.textContent = value.toLocaleString();
+      return [term, detail];
+    }));
+    contextUsage.hidden = false;
   };
 
   const promptRail = document.querySelector<HTMLElement>("#chat-prompt-rail");
@@ -549,6 +625,7 @@ export function initChat(): void {
     syncTaskList();
     syncSubagents();
     syncOutstandingRequests();
+    syncContextIndicator();
     syncPromptRail();
     timeline.scrollTop = anchor.afterMutation(geometry(), newContent);
     latestButton.hidden = !anchor.hasUnseen();
@@ -790,6 +867,9 @@ export function initChat(): void {
     presentation.model = selection;
     if (projection) presentation.models[projection.conversationId] = selection;
     save();
+    // The fill is measured against the selected model's window, so choosing a
+    // different model restates it rather than leaving the old percentage up.
+    syncContextIndicator();
   });
   variantSelect?.addEventListener("change", () => {
     const name = variantSelect.value || undefined;
@@ -1559,6 +1639,22 @@ function parseStoredModels(value: unknown): Record<string, ModelSelection> {
  * one hover or one expansion away (the title attribute and the breakdown), so
  * the compact form never has to be the only statement.
  */
+/**
+ * What a subagent burned: every component the agent reported, output included.
+ * Unlike the context indicator — which asks how full the window is right now
+ * and so counts only what occupies it — this is a spend figure, and reasoning
+ * and output tokens were spent.
+ */
+function subagentTokens(usage: TokenUsage): number {
+  return (usage.input ?? 0) + (usage.output ?? 0) + (usage.reasoning ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
+}
+
+function formatTokens(value: number): string {
+  if (value < 1_000) return String(value);
+  if (value < 1_000_000) return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)}k`;
+  return `${(value / 1_000_000).toFixed(1)}M`;
+}
+
 function modelValue(model: ModelSelection): string {
   return JSON.stringify([model.providerId, model.modelId]);
 }

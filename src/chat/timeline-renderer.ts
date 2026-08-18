@@ -4,7 +4,7 @@ import { renderChatMarkdown } from "./markdown";
 import { resolveWorkspaceFileReference } from "./file-references";
 import { describeToolDetail, deriveTodoActivities, patchDiffLines, todoActivitySummary, toolSubject, type DiffLine, type TodoEntry, type TodoSummary, type ToolDetail } from "./tool-detail";
 import type { AcceptedDraft, ChatProjection } from "./projection";
-import type { ActivityStatus, ConversationItem, ConversationStatus, PermissionOutcome, QuestionRequest, ToolItem } from "./types";
+import type { ActivityStatus, ConversationItem, ConversationStatus, PermissionOutcome, QuestionRequest, TokenUsage, ToolItem } from "./types";
 
 type RenderedEntry = { node: HTMLElement; item: ConversationItem; active: boolean; variant: string };
 
@@ -222,7 +222,19 @@ export function latestTodoEntries(items: readonly ConversationItem[]): TodoEntry
   return [];
 }
 
-export type SubagentEntry = { id: string; description: string; subagent?: string; status: ConversationStatus | string; conversationId?: string };
+// `model` and `usage` come from the child session the subagent ran as,
+// mirrored onto this tool item by the adapter — the client holds one
+// conversation's projection and can never read a child's. Both are optional:
+// a subagent that has not reported them still has a row to render.
+export type SubagentEntry = {
+  id: string;
+  description: string;
+  subagent?: string;
+  status: ConversationStatus | string;
+  conversationId?: string;
+  model?: string;
+  usage?: TokenUsage;
+};
 
 /**
  * Subagents launched in this conversation, in the order they started. Unlike
@@ -241,6 +253,8 @@ export function subagentEntries(items: readonly ConversationItem[]): SubagentEnt
       ...(detail.subagent === undefined ? {} : { subagent: detail.subagent }),
       status: item.status,
       ...(detail.conversationId === undefined ? {} : { conversationId: detail.conversationId }),
+      ...(item.model === undefined ? {} : { model: item.model }),
+      ...(item.usage === undefined ? {} : { usage: item.usage }),
     });
   }
   return entries;

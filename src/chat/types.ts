@@ -41,7 +41,10 @@ export type ChatCapability =
   | "permissions"
   | "subagents"
   // The selected model offers named reasoning variants (thinking harder/faster).
-  | "variants";
+  | "variants"
+  // The agent reports token usage per message, so Chat can say how full the
+  // context window is and what each subagent cost.
+  | "context";
 
 // What Chat is talking to. One agent per workspace today, but the surface
 // takes its name and its controls from this record rather than from fixed
@@ -119,10 +122,34 @@ export type UserMessageItem = TimelineItemBase & {
   requestId?: string;
 };
 
+/**
+ * What a message spent, as the agent reports it. Absent fields mean the agent
+ * did not report that component — never zero, because "no cache read" and "not
+ * told" are different statements and a readout that conflates them asserts a
+ * figure it does not have.
+ *
+ * The window fill is `input + cacheRead + cacheWrite`: the prompt the most
+ * recent request carried, which already includes the conversation so far. It
+ * deliberately excludes `output`, which is what came back rather than what is
+ * occupying the window.
+ */
+export type TokenUsage = {
+  input?: number;
+  output?: number;
+  reasoning?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+};
+
 export type AssistantMessageItem = TimelineItemBase & {
   type: "assistant_message";
   markdown: string;
   completedAt?: number;
+  // The tokens the message this part belongs to consumed, when the agent
+  // reports them. Carried on the last part of a message, so the item that
+  // holds it is one that renders on its own — a usage-only bubble would be a
+  // stray empty message on the timeline.
+  usage?: TokenUsage;
 };
 
 export type ReasoningItem = TimelineItemBase & {
@@ -144,6 +171,12 @@ export type ToolItem = TimelineItemBase & {
   // The child session a `task` tool ran as, when the provider reports one —
   // what makes a subagent transcript openable as its own conversation.
   childConversationId?: string;
+  // A subagent's own model and token cost, aggregated from its child session
+  // and mirrored here — the client holds one conversation's projection and can
+  // never read a child's, so the attribution has to be materialized onto the
+  // row that launched it. Absent until the child has reported something.
+  model?: string;
+  usage?: TokenUsage;
 };
 
 export type CommandItem = TimelineItemBase & {

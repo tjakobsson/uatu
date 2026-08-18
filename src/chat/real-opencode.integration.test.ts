@@ -61,4 +61,65 @@ describe.skipIf(!enabled)("real OpenCode integration", () => {
     expect(runtime.currentConnection()).toBeNull();
     if (endpoint) await expect(fetch(`${endpoint}/global/health`)).rejects.toThrow();
   }, 60_000);
+
+  /**
+   * The one thing a fake cannot answer: whether OpenCode's live
+   * `message.updated` (which carries the message's tokens but no part) reliably
+   * arrives after a first text part. If it does, usage decorates the streamed
+   * bubble; if it does not, the early-arrival buffer is what saves it. Either
+   * way the assertions below must hold — and crucially, no usage-only bubble
+   * may appear on the timeline, which is what a wrong answer would produce.
+   *
+   * Runs a real turn against a real provider, so it costs a model call.
+   */
+  test("a completed turn reports token usage on an assistant part, and mints no bubble for it", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-real-opencode-usage-"));
+    temporaryRoots.push(root);
+    const workspace = path.join(root, "workspace");
+    const configDirectory = path.join(root, "config");
+    const dataDirectory = path.join(root, "data");
+    await Promise.all([mkdir(workspace), mkdir(configDirectory), mkdir(dataDirectory)]);
+    await writeFile(path.join(workspace, "README.md"), "# Isolated OpenCode usage smoke\n", "utf8");
+    const configPath = path.join(configDirectory, "opencode.json");
+    await writeFile(configPath, process.env.UATU_REAL_OPENCODE_CONFIG_CONTENT ?? JSON.stringify({ autoupdate: false, share: "disabled" }), "utf8");
+
+    const runtime = new OpenCodeService({
+      workspacePath: workspace,
+      env: {
+        ...process.env,
+        HOME: root,
+        XDG_CONFIG_HOME: configDirectory,
+        XDG_DATA_HOME: dataDirectory,
+        OPENCODE_CONFIG: configPath,
+        OPENCODE_CONFIG_DIR: configDirectory,
+      },
+    });
+    const service = new LazyOpenCodeChatService({ workspacePath: workspace, runtime });
+    try {
+      expect((await service.status()).state).toBe("ready");
+      const created = await service.createConversation();
+      await service.prompt(created.conversation.id, crypto.randomUUID(), "Reply with the single word: smoke.");
+
+      // Poll the history rather than the stream: the assertion is about what a
+      // client sees when it opens the conversation, which is the authoritative
+      // path the design leans on.
+      const deadline = Date.now() + 90_000;
+      let items = (await service.history(created.conversation.id)).items;
+      while (Date.now() < deadline && !items.some(item => item.type === "assistant_message" && item.usage)) {
+        await Bun.sleep(500);
+        items = (await service.history(created.conversation.id)).items;
+      }
+
+      const withUsage = items.filter(item => item.type === "assistant_message" && item.usage);
+      expect(withUsage.length).toBeGreaterThan(0);
+      const usage = withUsage.at(-1)!.type === "assistant_message" ? (withUsage.at(-1) as { usage?: Record<string, number> }).usage! : {};
+      // Occupancy has to be a real figure, or the indicator would read 0%.
+      expect((usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0)).toBeGreaterThan(0);
+      // Usage decorates a part that says something; it never becomes a bubble
+      // of its own.
+      for (const item of withUsage) expect(item.type === "assistant_message" && item.markdown.length).toBeGreaterThan(0);
+    } finally {
+      await service.dispose();
+    }
+  }, 120_000);
 });

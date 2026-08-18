@@ -4795,6 +4795,110 @@ body.is-resizing-chat .chat-resizer {
   gap: 0.5rem;
 }
 
+/* The row wraps rather than overflowing. Its items have content floors the
+   selects will not shrink past, and `#chat-composer-status`'s auto margin
+   turns the resulting negative free space into a leftward spill — the row
+   escaped the panel entirely, over the preview beside it. One more readout in
+   this row made that reachable rather than merely visible. */
+.chat-composer-actions {
+  flex-wrap: wrap;
+  row-gap: 0.4rem;
+}
+
+#chat-composer-status,
+.chat-context-usage {
+  min-width: 0;
+}
+
+/* Request states. A user with ten requests could not tell which still needed
+   them: every card rendered identically and the queued ones claimed to be
+   superseded. State is carried as data so the card, the badge, and the
+   outstanding count cannot disagree — and it is never colour alone, so the
+   signal survives colour-blindness, high contrast, and greyscale. */
+.chat-request[data-request-state="needs-answer"] {
+  border-color: var(--accent, #3b7dd8);
+  border-left-width: 3px;
+  background: var(--surface-raised);
+  color: var(--text-strong);
+}
+
+.chat-request[data-request-state="queued"] {
+  border-style: dashed;
+}
+
+/* A resolved request recedes to a one-line trace: no accent, tighter padding,
+   and a summary that reads as a settled fact rather than a card awaiting a
+   decision. Its body (resources, or the question's prompts) stays in the
+   collapsed <details>, one disclosure away for anyone auditing what happened. */
+.chat-request[data-request-state="resolved"] {
+  border-color: var(--border-soft);
+  padding: 0.3rem 0.6rem;
+  color: var(--text-subtle);
+}
+
+.chat-request[data-request-state="resolved"] > summary {
+  color: var(--text-subtle);
+  font-weight: 400;
+}
+
+.chat-request-trace {
+  margin-left: 0.4rem;
+  color: var(--text-subtle);
+  font-weight: 500;
+}
+
+.chat-request-asked {
+  margin: 0.3rem 0 0;
+  color: var(--text-subtle);
+}
+
+.chat-request-origin {
+  margin: 0.35rem 0 0;
+  font-size: 0.85em;
+  color: var(--text-subtle);
+}
+
+.chat-request-badge {
+  margin-left: 0.5rem;
+  padding: 0.05rem 0.4rem;
+  border: 1px solid var(--accent, #3b7dd8);
+  border-radius: 0.35rem;
+  font-size: 0.75em;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--accent, #3b7dd8);
+  white-space: nowrap;
+}
+
+.chat-request-badge.is-queued {
+  border-color: var(--border-medium);
+  font-weight: 500;
+  color: var(--text-subtle);
+}
+
+/* The consequence of "Allow always", stated where the choice is made. Measured
+   against a live OpenCode 1.18.18: it reaches later conversations and the
+   request's saved pattern, and dies with the OpenCode instance — it is not the
+   project-persistent rule its type shape suggests. Quiet enough not to shout
+   over the request, present enough to be read before clicking. */
+.chat-request-scope {
+  margin: 0.45rem 0 0;
+  font-size: 0.85em;
+  line-height: 1.4;
+  color: var(--text-subtle);
+}
+
+.chat-conversation-controls select,
+.chat-model-select,
+.chat-composer textarea,
+.chat-request input[type="text"] {
+  border: 1px solid var(--border-medium);
+  border-radius: 0.45rem;
+  color: var(--text-strong);
+  background: var(--surface);
+  font: inherit;
+}
+
 .chat-conversation-controls select {
   min-width: min(18rem, 38vw);
   padding: 0.4rem 0.55rem;
@@ -5266,7 +5370,7 @@ body.is-resizing-chat .chat-resizer {
 .chat-latest {
   position: absolute;
   right: 1.25rem;
-  bottom: calc(var(--chat-composer-height, 5rem) + 0.75rem);
+  bottom: 0.75rem;
   z-index: 2;
   box-shadow: var(--shadow, 0 3px 12px rgb(0 0 0 / 20%));
 }
@@ -5280,7 +5384,7 @@ body.is-resizing-chat .chat-resizer {
 .chat-requests-jump {
   position: absolute;
   right: 1.25rem;
-  bottom: calc(var(--chat-composer-height, 5rem) + 0.75rem);
+  bottom: 0.75rem;
   z-index: 2;
   min-height: 2rem;
   padding: 0.35rem 0.7rem;
@@ -5301,7 +5405,7 @@ body.is-resizing-chat .chat-resizer {
 /* Both share the right edge; when "Latest" is up the pill steps one row
    higher instead of covering it. */
 .chat-latest:not([hidden]) + .chat-requests-jump {
-  bottom: calc(var(--chat-composer-height, 5rem) + 3.5rem);
+  bottom: 3.5rem;
 }
 
 .chat-composer {
@@ -5310,6 +5414,98 @@ body.is-resizing-chat .chat-resizer {
   padding: 0.75rem max(1rem, calc((100% - 52rem) / 2)) calc(0.75rem + env(safe-area-inset-bottom));
   border-top: 1px solid var(--border-soft);
   background: var(--surface-raised);
+}
+
+/* Context usage. The collapsed form has to answer "how full is this" on its
+   own — that is the whole point, since a conversation gave no sign until it
+   overflowed — so the meter and the figure both live in the summary, and
+   opening it only adds the breakdown. */
+.chat-context-usage {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.chat-context-usage[hidden] {
+  display: none;
+}
+
+.chat-context-usage > summary {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  list-style: none;
+  cursor: pointer;
+  color: var(--text-subtle);
+  font-size: 0.75em;
+  white-space: nowrap;
+}
+
+.chat-context-usage > summary::-webkit-details-marker {
+  display: none;
+}
+
+.chat-context-meter {
+  display: block;
+  overflow: hidden;
+  width: 2.5rem;
+  height: 0.35rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.2rem;
+  background: var(--surface);
+}
+
+.chat-context-meter-fill {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: var(--text-subtle);
+}
+
+/* Never colour alone — the figure beside the meter always states the fill, so
+   the warning tiers are an emphasis on something already legible. */
+.chat-context-usage[data-fill="high"] .chat-context-meter-fill {
+  background: var(--warning, #b8860b);
+}
+
+.chat-context-usage[data-fill="full"] .chat-context-meter-fill {
+  background: var(--danger, #c0392b);
+}
+
+.chat-context-usage[data-fill="full"] > summary,
+.chat-context-usage[data-fill="high"] > summary {
+  color: var(--text-strong);
+  font-weight: 600;
+}
+
+/* The breakdown floats over the timeline rather than growing the composer
+   row: opening a readout must not push the composer under the reader's
+   thumb. */
+.chat-context-breakdown {
+  position: absolute;
+  left: max(1rem, calc((100% - 52rem) / 2));
+  bottom: calc(100% - 0.25rem);
+  z-index: 5;
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 0.15rem 0.9rem;
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.7rem;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow, 0 8px 24px rgb(0 0 0 / 18%));
+  font-size: 0.75em;
+}
+
+.chat-context-breakdown dt {
+  color: var(--text-subtle);
+}
+
+.chat-context-breakdown dd {
+  margin: 0;
+  color: var(--text-strong);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 .chat-command-menu {
@@ -6401,6 +6597,37 @@ html[data-ui-mode="touch"] .chat-task-list {
   left: -1.05rem;
   content: "○";
   color: var(--text-subtle);
+}
+
+/* A subagent row is now two things on one line: what it is doing, and what it
+   ran and cost. The description takes the slack and truncates; the attribution
+   keeps its size (capped, so a long model id cannot eat the row) because a
+   half-shown token figure states nothing. */
+#chat-subagents-items li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.chat-subagent-open,
+.chat-subagent-label {
+  flex: 1 1 auto;
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-subagent-attribution {
+  flex: 0 0 auto;
+  overflow: hidden;
+  max-width: 50%;
+  margin-left: auto;
+  color: var(--text-subtle);
+  font-size: 0.85em;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 #chat-subagents-label {

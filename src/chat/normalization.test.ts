@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { normalizeProviderEvent, normalizeProviderMessage } from "./normalization";
+import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage } from "./normalization";
 import { ConversationReplay } from "./replay";
 import { ProviderTextReconciler } from "./text-reconciler";
 import { ConversationProjection } from "./adapter";
@@ -194,6 +194,94 @@ describe("provider text reconciliation", () => {
     expect(projection.items()).toEqual([
       expect.objectContaining({ type: "tool", status: "running", output: "line one\nline two" }),
     ]);
+  });
+});
+
+// Token usage is the one message-level fact the timeline has no item of its
+// own for: `renderItem` draws any assistant_message as a bubble, so a
+// usage-only item would be a stray empty message. It decorates the last text
+// part of its message instead — on history load directly, and live via the
+// part id the event memory remembers.
+describe("token usage", () => {
+  const tokens = { input: 12_000, output: 400, reasoning: 90, cache: { read: 8_000, write: 512 } };
+  const usage = { input: 12_000, output: 400, reasoning: 90, cacheRead: 8_000, cacheWrite: 512 };
+
+  test("a stored assistant message puts its usage on its last text part", () => {
+    const items = normalizeProviderMessage({
+      info: { id: "msg_a", sessionID: "s1", role: "assistant", time: { created: 6 }, tokens },
+      parts: [
+        { id: "prt_one", type: "text", text: "First." },
+        { id: "prt_tool", type: "tool", tool: "read", callID: "c", state: { status: "completed", input: {}, output: "ok" } },
+        { id: "prt_two", type: "text", text: "Second." },
+      ],
+    });
+    // The last text part, not the last item: the tool call sits after it.
+    expect(items).toEqual([
+      expect.objectContaining({ id: "part:prt_one", type: "assistant_message" }),
+      expect.objectContaining({ id: "tool:prt_tool" }),
+      expect.objectContaining({ id: "part:prt_two", type: "assistant_message", usage }),
+    ]);
+    expect(items[0]).not.toHaveProperty("usage");
+  });
+
+  test("a message with no reported tokens carries no usage at all", () => {
+    const items = normalizeProviderMessage({
+      info: { id: "msg_a", sessionID: "s1", role: "assistant", time: { created: 6 } },
+      parts: [{ id: "prt_one", type: "text", text: "First." }],
+    });
+    expect(items[0]).not.toHaveProperty("usage");
+    // Nor does a tokens object the agent left empty — no component reported is
+    // not the same statement as every component being zero.
+    const empty = normalizeProviderMessage({
+      info: { id: "msg_b", sessionID: "s1", role: "assistant", time: { created: 6 }, tokens: {} },
+      parts: [{ id: "prt_two", type: "text", text: "Second." }],
+    });
+    expect(empty[0]).not.toHaveProperty("usage");
+  });
+
+  test("live usage lands on the streamed part without a stray bubble or lost text", () => {
+    const memory = createProviderEventMemory();
+    const projection = new ConversationProjection(new ConversationReplay("g", "s", 10_000));
+    const events = [
+      { id: "1", type: "message.part.updated", data: { part: { id: "prt", messageID: "msg", sessionID: "s", type: "text", text: "Half an ans" } } },
+      { id: "2", type: "message.part.updated", data: { part: { id: "prt", messageID: "msg", sessionID: "s", type: "text", text: "Half an answer, then all of it." } } },
+      { id: "3", type: "message.updated", data: { info: { id: "msg", sessionID: "s", role: "assistant", time: { created: 3 }, tokens } } },
+    ];
+    for (const event of events) for (const update of normalizeProviderEvent(event, memory).updates) projection.apply(update);
+
+    expect(projection.items()).toEqual([
+      expect.objectContaining({ id: "part:prt", type: "assistant_message", markdown: "Half an answer, then all of it.", usage }),
+    ]);
+  });
+
+  test("usage that beats the first part waits for it rather than minting an item", () => {
+    const memory = createProviderEventMemory();
+    const projection = new ConversationProjection(new ConversationReplay("g", "s", 10_000));
+    const updated = { id: "1", type: "message.updated", data: { info: { id: "msg", sessionID: "s", role: "assistant", time: { created: 3 }, tokens } } };
+    for (const update of normalizeProviderEvent(updated, memory).updates) projection.apply(update);
+    // Nothing yet: a message.updated is not evidence that a bubble should
+    // appear, and the part it belongs to has not arrived.
+    expect(projection.items()).toEqual([]);
+
+    const part = { id: "2", type: "message.part.updated", data: { part: { id: "prt", messageID: "msg", sessionID: "s", type: "text", text: "The answer." } } };
+    for (const update of normalizeProviderEvent(part, memory).updates) projection.apply(update);
+    expect(projection.items()).toEqual([
+      expect.objectContaining({ id: "part:prt", type: "assistant_message", markdown: "The answer.", usage }),
+    ]);
+  });
+
+  test("a user message's tokens are not read, and no memory means no usage", () => {
+    const memory = createProviderEventMemory();
+    const user = { id: "1", type: "message.updated", data: { info: { id: "msg_u", sessionID: "s", role: "user", time: { created: 1 }, tokens } } };
+    expect(normalizeProviderEvent(user, memory).updates).toEqual([
+      { kind: "upsert", item: expect.objectContaining({ type: "user_message" }) },
+    ]);
+    expect(memory.pendingUsage.size).toBe(0);
+
+    // Called without memory (the shape most of this suite uses), the usage
+    // path is simply inert rather than throwing or guessing an item id.
+    const assistant = { id: "2", type: "message.updated", data: { info: { id: "msg_a", sessionID: "s", role: "assistant", time: { created: 2 }, tokens } } };
+    expect(normalizeProviderEvent(assistant).updates).toEqual([]);
   });
 });
 

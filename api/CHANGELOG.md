@@ -10,10 +10,11 @@ Compatibility: breaking (workspace)
 
 - `ChatModel` gained optional `variants` (the reasoning variants the model advertises, e.g. `high`/`xhigh`) and `contextLimit` (the model's context-window size). `ChatPromptRequest` gained an optional `variant` naming how the selected model should reason. The `variants` capability joined those a `ChatAgent` may declare.
 - `PermissionItem` gained an optional `diff`: the unified diff a file-edit permission would apply, when the agent attaches one (OpenCode reports it on the permission's `metadata.diff`). It is absent for a permission with nothing to show — a command, a fetch.
+- New `TokenUsage` schema: what a message spent, component by component. Every component is optional, and an absent one means the agent did not report it — which is not the same statement as zero. The `assistant_message` conversation item gained an optional `usage`, carried on a message's last part; the `tool` item gained an optional `usage` and `model`, which on a `task` tool describe the subagent's own session — the model it ran and the tokens it consumed, aggregated from that child session and mirrored onto the row that launched it. The `context` capability joined those a `ChatAgent` may declare; it governs whether either figure is reported at all.
 
 ### Migration
 
-A workspace client that validates conversation items against a closed schema must accept the new optional `diff` on permission items, or it will reject an otherwise valid timeline. Clients that ignore unknown properties need no change. No existing field changed meaning, type, or nullability.
+A workspace client that validates conversation items against a closed schema must accept the new optional `diff` on permission items, the new optional `usage` on assistant-message items, and the new optional `usage` and `model` on tool items, or it will reject an otherwise valid timeline. Clients that ignore unknown properties need no change. No existing field changed meaning, type, or nullability. Window occupancy is `input + cacheRead + cacheWrite`; `output` is what came back rather than what occupies the window, so a client that adds it to the fill will overstate it.
 
 ## Hub 1 / Workspace 4 - Unreleased
 

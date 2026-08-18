@@ -71,7 +71,7 @@ export class SdkV2Provider implements OpenCodeProvider {
     return {
       id: "opencode",
       name: "OpenCode",
-      capabilities: ["modes", "models", "commands", "questions", "permissions", "subagents", "variants"],
+      capabilities: ["modes", "models", "commands", "questions", "permissions", "subagents", "variants", "context"],
     };
   }
 
