@@ -4,7 +4,9 @@ See `proposal.md` — Why. The three features share one root cause: OpenCode
 reports the data and uatu discards it at two seams.
 
 - `sdk-v2-provider.ts` `listModels` keeps `{selection, provider, name}` and
-  drops each model's `variants: [{id, headers, body}]` and `limit.context`.
+  drops each model's `variants` and `limit.context`. `Model.variants` is a
+  keyed object map (`{ [variantId]: {...} }`), so the ids are its keys —
+  `Object.keys(model.variants ?? {})`.
 - `normalization.ts` `normalizeAssistant` keeps the message text and drops
   `modelID`, `providerID`, and `tokens {input, output, reasoning,
   cache{read,write}}`.
@@ -44,12 +46,27 @@ does not need. The subagent token figure is gated on `context` — it is the
 same usage data — while the subagent's model name shows whenever the child
 reports one, since that costs nothing extra.
 
-**Variant is a per-prompt field, remembered per conversation.** It matches the
-model select's own model: stored per conversation in the presentation state,
-sent with each prompt, refused if the selected model does not offer it. The
-alternative — a session-level variant switched on the side like the mode — is
-possible but wrong: a variant is a property of the ask, not of the session, and
-OpenCode's prompt API already models it that way.
+**Variant is remembered per conversation and reapplied each turn.** It matches
+the model select's storage: kept per conversation, refused if the selected model
+does not offer it. How it reaches OpenCode differs by path, and — corrected from
+the first draft — it is NOT a per-prompt body field on the v2 native path. The
+v2 prompt body has no `variant`; the variant rides on the model reference
+(`ModelRef.variant`) applied through `switchModel`, so on the v2 path it is
+session state. Because the UI sends the selected model with every prompt,
+`switchModel` runs every turn and the variant is reapplied every turn —
+behaviourally "sent with each prompt" even though it is session-scoped. On the
+classic/compat prompt path the body does take `variant`. uatu keeps
+`ModelSelection` as `{providerId, modelId}` and threads `variant` as its own
+argument, so the two paths diverge only inside the provider.
+
+**Message-level tokens attach to the last part; streaming emits a usage-only
+upsert.** The SDK reports `tokens` and `modelID` on the message, but uatu emits
+one `assistant_message` item per text part, and the streaming `message.updated`
+path emits no part at all. So usage is attached to the last part item during
+normalization, and the `message.updated` case emits a usage-only upsert against
+a stable per-message item id when the assistant message carries tokens. This is
+the load-bearing seam both the context indicator and subagent attribution read
+from, so it is decided here rather than left to each feature.
 
 **Context usage reads the latest assistant message, not a running sum.** The
 window fill is what the last turn's `tokens` reports against `limit.context`;
@@ -100,8 +117,12 @@ rejected it — it makes string parsing a protocol.
 
 ## Migration Plan
 
-No data migration. `workspaceApiRevision` 4 → 5 follows the established path:
-bump `api/contract.json` and `api/openapi.yaml`, add the `api/CHANGELOG.md`
-section, extend the closed schemas with the new optional fields, and let the
-contract tests gate it. A client on revision 4 sees optional fields it does not
-read; a client validating closed objects moves to 5.
+No data migration, and — corrected from the first draft — no revision bump: the
+branch already moved `workspaceApiRevision` to 5 (a sibling change added
+`PermissionItem.diff`), so this change adds its optional fields under the
+existing revision 5 and extends the existing `## Hub 1 / Workspace 5` changelog
+section rather than opening a new one. Closed schemas are enforced in three
+places, all of which must accept the new fields: `api/openapi.yaml`, the
+`expectKeys` allow-lists in `src/chat/validation.ts`, and the prompt route's
+body key list in `src/server/routes.ts`. A client validating closed objects
+already had to move to 5; these are further optional fields under it.

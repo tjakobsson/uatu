@@ -39,7 +39,9 @@ export type ChatCapability =
   | "commands"
   | "questions"
   | "permissions"
-  | "subagents";
+  | "subagents"
+  // The selected model offers named reasoning variants (thinking harder/faster).
+  | "variants";
 
 // What Chat is talking to. One agent per workspace today, but the surface
 // takes its name and its controls from this record rather than from fixed
@@ -76,6 +78,11 @@ export type ChatModel = {
   selection: ModelSelection;
   provider: string;
   name: string;
+  // The reasoning variants this model advertises (OpenCode reports them as a
+  // keyed map; these are its keys). Absent or empty when the model offers none.
+  variants?: string[];
+  // The model's context-window size in tokens, when the agent reports it.
+  contextLimit?: number;
 };
 
 export type ChatCommand = {

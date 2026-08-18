@@ -28,7 +28,7 @@ export interface WorkspaceChatService {
     snapshot: ConversationSnapshot;
     events: ReplaySubscription;
   }>;
-  prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string): Promise<{
+  prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string): Promise<{
     messageId: string;
     delivery: "steer" | "queue";
     conversation?: ConversationSummary;
@@ -144,7 +144,7 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
   async createConversation() { return (await this.requireAdapter()).createConversation(); }
   async history(id: string, options?: { cursor?: string; limit?: number }) { return (await this.requireAdapter()).history(id, options); }
   async subscribe(id: string, options?: { cursor?: string; signal?: AbortSignal }) { return (await this.requireAdapter()).subscribe(id, options); }
-  async prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string) { return (await this.requireAdapter()).prompt(id, requestId, text, model, mode); }
+  async prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string) { return (await this.requireAdapter()).prompt(id, requestId, text, model, mode, variant); }
   async cancel(id: string, requestId: string) { return (await this.requireAdapter()).abort(id, requestId); }
   async respondPermission(id: string, interactionId: string, requestId: string, outcome: PermissionOutcome) {
     return (await this.requireAdapter()).respondPermission(id, interactionId, requestId, outcome);

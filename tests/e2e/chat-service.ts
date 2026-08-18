@@ -32,6 +32,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
   // at-most-once contract) instead of minting a fresh one.
   promptAttempts: string[] = [];
   promptModes: string[] = [];
+  promptVariants: string[] = [];
   // When set, the next prompt stalls half a second and then rejects —
   // enough of a window for a test to deterministically switch conversations
   // while the request is in flight.
@@ -43,7 +44,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
   // The capabilities this fake declares. A test can narrow them to drive the
   // surface an agent that offers less produces — the one path a workspace with
   // a single real agent can never reach on its own.
-  private capabilities: ChatCapability[] = ["modes", "models", "commands", "questions", "permissions", "subagents"];
+  private capabilities: ChatCapability[] = ["modes", "models", "commands", "questions", "permissions", "subagents", "variants"];
 
   async status(): Promise<ChatAvailability> {
     this.statusCalls += 1;
@@ -88,7 +89,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
 
   async models() {
     return [
-      { selection: { providerId: "anthropic", modelId: "claude-sonnet" }, provider: "Anthropic", name: "Claude Sonnet" },
+      { selection: { providerId: "anthropic", modelId: "claude-sonnet" }, provider: "Anthropic", name: "Claude Sonnet", variants: ["high", "xhigh"], contextLimit: 200000 },
       { selection: { providerId: "openai", modelId: "gpt-5" }, provider: "OpenAI", name: "GPT-5" },
     ];
   }
@@ -143,12 +144,13 @@ export class FakeE2EChatService implements WorkspaceChatService {
     return { snapshot: await handoff.snapshot, events: handoff.subscription };
   }
 
-  async prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string): Promise<{
+  async prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string): Promise<{
     messageId: string;
     delivery: "steer" | "queue";
     conversation?: ConversationSummary;
   }> {
     if (mode) this.promptModes.push(mode);
+    if (variant) this.promptVariants.push(variant);
     const key = `prompt:${id}:${requestId}`;
     const existing = this.receipts.get(key) as { messageId: string; delivery: "steer" | "queue"; conversation?: ConversationSummary } | undefined;
     if (existing) return existing;
@@ -223,6 +225,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.statusCalls = 0;
     this.promptAttempts = [];
     this.promptModes = [];
+    this.promptVariants = [];
     this.failNextPrompt = false;
     this.generation = `e2e-chat-${this.nextId++}`;
     this.conversations.clear();

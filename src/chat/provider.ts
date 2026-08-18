@@ -43,14 +43,14 @@ export interface OpenCodeProvider {
    * stuck in a read-only mode is stuck for good.
    */
   listModes?(): Promise<ChatMode[]>;
-  switchModel(sessionId: string, selection: ModelSelection): Promise<void>;
+  switchModel(sessionId: string, selection: ModelSelection, variant?: string): Promise<void>;
   renameSession?(sessionId: string, title: string): Promise<ProviderSession>;
   listSessions(): Promise<ProviderSession[]>;
   createSession(id: string): Promise<ProviderSession>;
   getSession(id: string): Promise<ProviderSession | null>;
   listMessages(sessionId: string, options: { cursor?: string; limit: number }): Promise<ProviderPage<ProviderMessage>>;
   events(signal: AbortSignal): AsyncIterable<ProviderEvent>;
-  prompt(sessionId: string, input: { id: string; text: string; delivery: "steer" | "queue"; model?: ModelSelection; mode?: string }): Promise<{ messageId: string }>;
+  prompt(sessionId: string, input: { id: string; text: string; delivery: "steer" | "queue"; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;
   command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; mode?: string }): Promise<{ messageId: string }>;
   interrupt(sessionId: string): Promise<void>;
   replyPermission(sessionId: string, requestId: string, reply: ProviderPermissionReply): Promise<void>;

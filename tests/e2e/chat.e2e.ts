@@ -112,6 +112,27 @@ test.describe("desktop OpenCode chat", () => {
     await expect(page.locator("#chat-context")).toContainText("Fixture Agent");
   });
 
+  // A model that advertises reasoning variants gets a control for them, sent
+  // with the prompt; a model without variants shows none.
+  test("offers a model's reasoning variants and sends the chosen one", async ({ page, request }) => {
+    await page.getByRole("button", { name: "New" }).click();
+    const variantSelect = page.locator("#chat-variant-select");
+    const modelSelect = page.locator("#chat-model-select");
+    // Claude Sonnet (the default) advertises high/xhigh; GPT-5 advertises none.
+    await expect(variantSelect).toBeVisible();
+    await expect(variantSelect.locator("option")).toHaveText(["Reasoning: default", "Reasoning: high", "Reasoning: xhigh"]);
+    await modelSelect.selectOption({ label: "OpenAI: GPT-5" });
+    await expect(variantSelect).toBeHidden();
+    await modelSelect.selectOption({ label: "Anthropic: Claude Sonnet" });
+    await variantSelect.selectOption({ label: "Reasoning: xhigh" });
+
+    const input = page.locator("#chat-input");
+    await input.fill("think hard about this");
+    const sent = page.waitForResponse(response => response.url().endsWith("/prompts"));
+    await input.press("Enter");
+    expect((await sent).request().postDataJSON()).toMatchObject({ variant: "xhigh" });
+  });
+
   // The one path a workspace with a single real agent can never reach: an
   // agent that offers less. The control must be gone, not disabled — a
   // disabled control claims the feature exists and is merely unavailable now.

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { deriveConversationTitle, InteractionConflictError, InvalidModeSelectionError, InvalidModelSelectionError, OpenCodeChatAdapter, parseSlashCommand } from "./adapter";
+import { deriveConversationTitle, InteractionConflictError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, OpenCodeChatAdapter, parseSlashCommand } from "./adapter";
 import { normalizeProviderEvent } from "./normalization";
 import type { ChatAgent } from "./types";
 import type {
@@ -56,7 +56,7 @@ class FakeProvider implements OpenCodeProvider {
   sessions: ProviderSession[] = [];
   pages = new Map<string, ProviderPage<ProviderMessage>>();
   eventQueue = new EventQueue();
-  prompts: Array<{ sessionId: string; id: string; text: string; delivery: "steer" | "queue"; mode?: string }> = [];
+  prompts: Array<{ sessionId: string; id: string; text: string; delivery: "steer" | "queue"; mode?: string; variant?: string }> = [];
   commandCalls: Array<{ sessionId: string; id: string; name: string; arguments: string; model?: ModelSelection }> = [];
   permissionReplies: Array<{ sessionId: string; requestId: string; reply: ProviderPermissionReply }> = [];
   questionReplies: Array<{ sessionId: string; requestId: string; answers?: string[][]; rejected?: true }> = [];
@@ -85,7 +85,7 @@ class FakeProvider implements OpenCodeProvider {
     signal.addEventListener("abort", () => this.eventQueue.close(), { once: true });
     return this.eventQueue;
   }
-  async prompt(sessionId: string, input: { id: string; text: string; delivery: "steer" | "queue" }) {
+  async prompt(sessionId: string, input: { id: string; text: string; delivery: "steer" | "queue"; mode?: string; variant?: string }) {
     this.prompts.push({ sessionId, ...input });
     return { messageId: input.id };
   }
@@ -477,6 +477,19 @@ describe("prompt, abort, permission, and question mutations", () => {
     await adapter.prompt("session", "r1", "switch me", undefined, "build");
     expect(provider.prompts[0]).toEqual(expect.objectContaining({ mode: "build" }));
     await expect(adapter.prompt("session", "r2", "nope", undefined, "reviewer")).rejects.toBeInstanceOf(InvalidModeSelectionError);
+  });
+
+  test("passes a listed reasoning variant through and refuses an unknown one", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    provider.models = [{ selection: { providerId: "anthropic", modelId: "claude" }, provider: "Anthropic", name: "Claude", variants: ["high", "xhigh"] }];
+    const model = { providerId: "anthropic", modelId: "claude" };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+
+    await adapter.prompt("session", "r1", "think hard", model, undefined, "high");
+    expect(provider.prompts[0]).toEqual(expect.objectContaining({ variant: "high" }));
+    // Unknown for this model — refused before dispatch.
+    await expect(adapter.prompt("session", "r2", "nope", model, undefined, "ultra")).rejects.toBeInstanceOf(InvalidVariantSelectionError);
   });
 
   test("joins duplicate prompts, steers while running, and preserves content on abort", async () => {

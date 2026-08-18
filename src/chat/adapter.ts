@@ -47,6 +47,13 @@ export class InvalidModeSelectionError extends Error {
   }
 }
 
+export class InvalidVariantSelectionError extends Error {
+  constructor() {
+    super("selected variant is not available");
+    this.name = "InvalidVariantSelectionError";
+  }
+}
+
 // Just the slice of MetricsRegistry the adapter needs, so chat does not depend
 // on the debug module's shape.
 export type ChatEventMetrics = { inc(name: string, delta?: number): void };
@@ -346,7 +353,7 @@ export class OpenCodeChatAdapter {
     });
   }
 
-  async prompt(conversationId: string, requestId: string, text: string, model?: ModelSelection, mode?: string): Promise<{
+  async prompt(conversationId: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string): Promise<{
     messageId: string;
     delivery: "steer" | "queue";
     conversation?: ConversationSummary;
@@ -370,6 +377,14 @@ export class OpenCodeChatAdapter {
         const modes = await this.modes();
         if (!modes.some(candidate => candidate.name === mode)) throw new InvalidModeSelectionError();
         this.lastMode.set(conversationId, mode);
+      }
+      // A variant is refused unless the selected model advertises it. Checked
+      // against the model, since variants are per-model — an unknown one passed
+      // through would silently do nothing on the wire.
+      if (variant) {
+        const models = await this.provider.listModels();
+        const selected = model && models.find(candidate => sameSelection(candidate.selection, model));
+        if (!selected?.variants?.includes(variant)) throw new InvalidVariantSelectionError();
       }
       // Emptiness is checked before dispatch (afterwards the store already
       // holds this prompt), but the rename itself waits for admission — a
@@ -395,7 +410,7 @@ export class OpenCodeChatAdapter {
           : undefined;
         const accepted = slash
           ? await this.provider.command(conversationId, { id: messageId, name: slash.name, arguments: slash.arguments, model, mode })
-          : await this.provider.prompt(conversationId, { id: messageId, text, delivery, model, mode });
+          : await this.provider.prompt(conversationId, { id: messageId, text, delivery, model, mode, variant });
         if (renameToFirstPrompt) {
           try {
             session = await this.provider.renameSession!(conversationId, deriveConversationTitle(text));

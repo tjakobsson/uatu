@@ -62,13 +62,20 @@ None.
 
 ### Modified Capabilities
 
-- `opencode-chat`: adds one requirement and extends the capability vocabulary.
-  A new requirement, *Chat surfaces an agent's model options and usage*, states
-  that where the agent declares them, Chat offers a per-model reasoning-variant
-  choice, reports the conversation's context-window usage, and attributes each
-  subagent with its model and token cost — each gated on its declared
-  capability and absent, not empty, when undeclared. The **variants** and
-  **context** capability names join those the agent may declare.
+- `opencode-chat`: adds one requirement, *Chat lets the user choose how hard the
+  model reasons*, and the **variants** capability name. Where the agent declares
+  it, Chat offers a per-model reasoning-variant choice, sent with the prompt and
+  remembered per conversation; a model with no variants offers no choice, and an
+  undeclared capability leaves no control behind.
+
+**Scope narrowed during implementation.** This change now delivers the reasoning
+variant only. The context-window usage indicator and the subagent
+model/token attribution — the two features that share a token-usage seam — moved
+to a follow-up change (`chat-context-usage`), because both depend on carrying
+message-level token usage through the projection, a larger seam than the variant
+selector, and because a capability must not be declared before its control
+exists: this change declares only **variants**, and the follow-up declares
+**context** with the indicator that reads it.
 
 ## Impact
 
@@ -93,8 +100,12 @@ None.
 
 **Published API contract**
 - `ChatModel`, the chat tool/assistant items, and `ChatPromptRequest` are all
-  `additionalProperties: false`, so the added fields are breaking.
-  `workspaceApiRevision` 4 → 5, with an `api/CHANGELOG.md` migration section.
+  `additionalProperties: false`, so the added fields are breaking — but the
+  branch already moved `workspaceApiRevision` to 5, so these fields land under
+  the existing revision 5 (no further bump), extending its `api/CHANGELOG.md`
+  section. Closed-schema acceptance must be widened in three places: the
+  OpenAPI schema, the `validation.ts` `expectKeys` lists, and the prompt route's
+  body key list.
 
 **Delivery**
 - Chat is unreleased. These are genuine additions, so a `feat(chat)` note is

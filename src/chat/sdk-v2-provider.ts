@@ -64,14 +64,14 @@ export class SdkV2Provider implements OpenCodeProvider {
     return result;
   }
 
-  // Everything below is implemented against a live OpenCode server, so all six
-  // are declared. A capability this codebase has not built yet is not listed
-  // here: the change that builds it adds its key.
+  // Everything below is implemented against a live OpenCode server, so every
+  // capability is declared. A capability this codebase has not built yet is not
+  // listed here: the change that builds it adds its key.
   describe(): ChatAgent {
     return {
       id: "opencode",
       name: "OpenCode",
-      capabilities: ["modes", "models", "commands", "questions", "permissions", "subagents"],
+      capabilities: ["modes", "models", "commands", "questions", "permissions", "subagents", "variants"],
     };
   }
 
@@ -101,18 +101,27 @@ export class SdkV2Provider implements OpenCodeProvider {
     const connected = new Set(response.connected);
     return response.all
       .filter(provider => connected.has(provider.id))
-      .flatMap(provider => Object.values(provider.models).map(model => ({
-        selection: { providerId: provider.id, modelId: model.id },
-        provider: provider.name,
-        name: model.name,
-      })))
+      .flatMap(provider => Object.values(provider.models).map(model => {
+        // OpenCode reports variants as a keyed map; the ids are its keys.
+        const variants = Object.keys(model.variants ?? {});
+        return {
+          selection: { providerId: provider.id, modelId: model.id },
+          provider: provider.name,
+          name: model.name,
+          ...(variants.length ? { variants } : {}),
+          ...(model.limit?.context ? { contextLimit: model.limit.context } : {}),
+        };
+      }))
       .sort((left, right) => left.provider.localeCompare(right.provider) || left.name.localeCompare(right.name));
   }
 
-  async switchModel(sessionId: string, selection: ModelSelection): Promise<void> {
+  async switchModel(sessionId: string, selection: ModelSelection, variant?: string): Promise<void> {
     ensureSuccess(await this.client.v2.session.switchModel({
       sessionID: sessionId,
-      model: { providerID: selection.providerId, id: selection.modelId },
+      // On the v2 path a reasoning variant is not a prompt field — it rides on
+      // the model reference here. The UI re-sends the model every prompt, so
+      // this runs every turn and the variant is reapplied every turn.
+      model: { providerID: selection.providerId, id: selection.modelId, ...(variant ? { variant } : {}) },
     }));
   }
 
@@ -268,7 +277,7 @@ export class SdkV2Provider implements OpenCodeProvider {
     yield* mergeProviderEvents([native.stream, classic.stream], signal);
   }
 
-  async prompt(sessionId: string, input: { id: string; text: string; delivery: "steer" | "queue"; model?: ModelSelection; mode?: string }): Promise<{ messageId: string }> {
+  async prompt(sessionId: string, input: { id: string; text: string; delivery: "steer" | "queue"; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
     const messageId = stableProviderId("msg", input.id);
     if (this.compatibilitySessions.has(sessionId)) {
       ensureSuccess(await this.client.session.promptAsync({
@@ -278,10 +287,12 @@ export class SdkV2Provider implements OpenCodeProvider {
         parts: [{ type: "text", text: input.text }],
         ...(input.model ? { model: { providerID: input.model.providerId, modelID: input.model.modelId } } : {}),
         ...(input.mode ? { agent: input.mode } : {}),
+        // The classic path DOES take a body variant, unlike the v2 path below.
+        ...(input.variant ? { variant: input.variant } : {}),
       }));
       return { messageId };
     }
-    if (input.model) await this.switchModel(sessionId, input.model);
+    if (input.model) await this.switchModel(sessionId, input.model, input.variant);
     // Session-level, not a prompt field: the generated v2 prompt serializer
     // passes through only id/prompt/delivery/resume, so an `agent` property
     // there is silently dropped — the selection would look accepted while the

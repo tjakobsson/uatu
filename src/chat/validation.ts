@@ -99,13 +99,15 @@ function parseChatStartupDiagnostics(value: unknown): ChatStartupDiagnostics {
 
 export function parseChatModel(value: unknown): ChatModel {
   const record = expectRecord(value, "chat model");
-  expectKeys(record, ["selection", "provider", "name"], "chat model");
+  expectKeys(record, ["selection", "provider", "name", "variants", "contextLimit"], "chat model");
   const selection = expectRecord(record.selection, "model selection");
   expectKeys(selection, ["providerId", "modelId"], "model selection");
   expectIdentity(selection.providerId, "provider id");
   expectIdentity(selection.modelId, "model id");
   expectNonEmptyString(record.provider, "model provider");
   expectNonEmptyString(record.name, "model name");
+  if (record.variants !== undefined) expectStringArray(record.variants, "model variants", true);
+  if (record.contextLimit !== undefined && (typeof record.contextLimit !== "number" || record.contextLimit < 1)) throw new Error("model contextLimit must be a positive number");
   return value as ChatModel;
 }
 

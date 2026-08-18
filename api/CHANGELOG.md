@@ -8,6 +8,7 @@ Compatibility: breaking (workspace)
 
 ### Changes
 
+- `ChatModel` gained optional `variants` (the reasoning variants the model advertises, e.g. `high`/`xhigh`) and `contextLimit` (the model's context-window size). `ChatPromptRequest` gained an optional `variant` naming how the selected model should reason. The `variants` capability joined those a `ChatAgent` may declare.
 - `PermissionItem` gained an optional `diff`: the unified diff a file-edit permission would apply, when the agent attaches one (OpenCode reports it on the permission's `metadata.diff`). It is absent for a permission with nothing to show — a command, a fetch.
 
 ### Migration

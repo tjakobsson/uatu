@@ -552,7 +552,7 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
       },
     },
     [p("/api/chat/conversations/:conversationId/prompts")]: {
-      POST: async (request: RouteRequest) => chatMutation(request, ["requestId", "text", "model", "mode"], async (id, body) => {
+      POST: async (request: RouteRequest) => chatMutation(request, ["requestId", "text", "model", "mode", "variant"], async (id, body) => {
         const requestId = bodyIdentity(body, "requestId");
         if (requestId instanceof Response) return requestId;
         if (typeof body.text !== "string" || !body.text.trim()) return chatError(400, "text must not be empty");
@@ -561,7 +561,9 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         if (model instanceof Response) return model;
         const mode = parseModeSelection(body.mode);
         if (mode instanceof Response) return mode;
-        return run(() => deps.chatService.prompt(id, requestId, body.text as string, model, mode), 202);
+        const variant = parseModeSelection(body.variant);
+        if (variant instanceof Response) return variant;
+        return run(() => deps.chatService.prompt(id, requestId, body.text as string, model, mode, variant), 202);
       }),
     },
     [p("/api/chat/conversations/:conversationId/cancel")]: {

@@ -12,7 +12,7 @@ describe("OpenCode v2 identity policy", () => {
           default: {},
           all: [
             { id: "unused", name: "Unused", models: { hidden: { id: "hidden", name: "Hidden" } } },
-            { id: "openai", name: "OpenAI", models: { sol: { id: "gpt-5.6-sol", name: "GPT-5.6 Sol" } } },
+            { id: "openai", name: "OpenAI", models: { sol: { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", variants: { high: {}, xhigh: {} }, limit: { context: 200000 } } } },
             { id: "opencode", name: "OpenCode", models: { free: { id: "free", name: "Free" } } },
           ],
         } }),
@@ -21,9 +21,11 @@ describe("OpenCode v2 identity policy", () => {
     const provider = new SdkV2Provider(client, "/workspace");
 
     expect(await provider.listModels()).toEqual([
-      { selection: { providerId: "openai", modelId: "gpt-5.6-sol" }, provider: "OpenAI", name: "GPT-5.6 Sol" },
+      { selection: { providerId: "openai", modelId: "gpt-5.6-sol" }, provider: "OpenAI", name: "GPT-5.6 Sol", variants: ["high", "xhigh"], contextLimit: 200000 },
       { selection: { providerId: "opencode", modelId: "free" }, provider: "OpenCode", name: "Free" },
     ]);
+    // The variants capability is declared now that listModels reports variants.
+    expect(provider.describe().capabilities).toContain("variants");
   });
 
   test("maps and deduplicates compatibility commands and supplies missing built-ins", async () => {
