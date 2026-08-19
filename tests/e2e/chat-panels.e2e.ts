@@ -114,6 +114,18 @@ test.describe("chat panels and navigation", () => {
     await expect(drilldown).toBeHidden();
     await expect(page.locator("#chat-items")).toContainText("Review renderer");
     await expect(page.locator("#chat-conversation-select")).toHaveValue(parent);
+
+    // Browser Back dismisses the layer here too. One entry per layer in both
+    // chromes is what keeps this free of mode-dependent state — and it does
+    // not navigate the document behind it, because the entry it pops is the
+    // drill-down's own.
+    const documentUrl = page.url();
+    await page.getByRole("button", { name: "explore · Review renderer" }).click();
+    await expect(drilldown).toBeVisible();
+    await page.goBack();
+    await expect(drilldown).toBeHidden();
+    expect(page.url()).toBe(documentUrl);
+    await expect(page.locator("#chat-conversation-select")).toHaveValue(parent);
   });
 
   test("a request the parent is waiting on stays answerable behind an open subagent", async ({ page, request }) => {

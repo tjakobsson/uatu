@@ -215,11 +215,25 @@ export function patchFiles(patch: string): string[] {
  * line and would otherwise render as an addition.
  */
 export function patchDiffLines(patch: string): DiffLine[] {
+  // `--- ` and `+++ ` are file markers only *before* a hunk starts; inside one
+  // they are ordinary changed lines. Deleting `-- security check` produces
+  // exactly `--- security check`, and filtering it by prefix alone dropped a
+  // real change from the permission card — someone could approve an edit
+  // without having been shown every line of it. Position decides, so the one
+  // thing this has to track is whether a hunk is open.
+  let inHunk = false;
   return patch.split("\n").flatMap((line): DiffLine[] => {
-    // Unified-diff headers, not content: a git diff carries `diff --git`,
-    // `index`, and the `--- a/…` / `+++ b/…` file markers, which would
-    // otherwise render as deleted/added lines.
-    if (line.startsWith("***") || line.startsWith("@@") || line.startsWith("diff ") || line.startsWith("index ") || line.startsWith("--- ") || line.startsWith("+++ ")) return [];
+    if (line.startsWith("@@")) {
+      inHunk = true;
+      return [];
+    }
+    // A new file section: the `***` envelope verbs, and git's own preamble.
+    // Whatever follows is header again until that section's first hunk.
+    if (line.startsWith("***") || line.startsWith("diff ") || line.startsWith("index ")) {
+      inHunk = false;
+      return [];
+    }
+    if (!inHunk && (line.startsWith("--- ") || line.startsWith("+++ "))) return [];
     if (line.startsWith("+")) return [{ sign: "+", text: line.slice(1) }];
     if (line.startsWith("-")) return [{ sign: "-", text: line.slice(1) }];
     return [];

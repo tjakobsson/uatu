@@ -109,11 +109,6 @@ export function initChat(): void {
     label: string;
     projection: ChatProjection | null;
     stream: ChatEventStream | null;
-    // Touch pushes a history entry so the platform back gesture pops the
-    // child; the desktop split does not, because its return control is
-    // on screen beside the parent and a history entry there would put a
-    // transient view layer into the document back stack.
-    pushedHistory: boolean;
   };
   let child: Drilldown | null = null;
   let childGeneration = 0;
@@ -1166,10 +1161,10 @@ export function initChat(): void {
   const closeChildConversation = (popped = false) => {
     const open = child;
     if (!open) return;
-    if (!popped && open.pushedHistory && (history.state as { chatDrilldown?: boolean } | null)?.chatDrilldown === true) {
-      // `pushedHistory` deliberately stays true across the pop: it is what
-      // tells the interceptor the entry being popped is ours to consume.
-      // Re-entry is bounded by `popped`, not by clearing the flag.
+    if (!popped && (history.state as { chatDrilldown?: boolean } | null)?.chatDrilldown === true) {
+      // Ask the platform to pop, and finish in the popstate that arrives:
+      // leaving a back-stack entry for a layer that is no longer open would
+      // make the next Back a no-op. Re-entry is bounded by `popped`.
       history.back();
       return;
     }
@@ -1204,29 +1199,28 @@ export function initChat(): void {
     const generation = ++childGeneration;
     const previous = child;
     previous?.stream?.close();
-    const next: Drilldown = { conversationId: id, label, projection: null, stream: null, pushedHistory: previous?.pushedHistory ?? false };
+    const next: Drilldown = { conversationId: id, label, projection: null, stream: null };
+    const nested = previous !== null;
     child = next;
-    // Touch navigates as a stack, so the child is a pushed screen and the
-    // platform back gesture is what pops it. The desktop split keeps the
-    // parent beside the child and returns with the control in the layer's
-    // header, so it puts nothing in the document back stack.
-    if (document.documentElement.dataset.uiMode === "touch" && !next.pushedHistory) {
+    // One entry per layer, in both chromes. Conditioning this on the ui mode
+    // meant storing "was this touch when it opened" under a name that claimed
+    // to answer "does an entry exist" — two facts that drift the moment the
+    // mode changes live, which is where a run of back-navigation bugs came
+    // from. Back dismissing the topmost layer is the ordinary idiom on both,
+    // and it leaves nothing mode-dependent to keep in sync.
+    //
+    // A subagent opened from inside another reuses the entry already on the
+    // stack: the drill-down is one level deep, so one Back returns to the
+    // parent rather than walking a stack of replaced children.
+    if (!nested) {
       try {
         history.pushState({ ...(history.state as Record<string, unknown> | null), chatDrilldown: true }, "", location.href);
-        next.pushedHistory = true;
       } catch { /* history is best effort; the header control still returns */ }
     }
     releaseChildBack ??= registerBackInterceptor(() => {
-      const open = child;
-      if (!open) return false;
+      if (!child) return false;
       closeChildConversation(true);
-      // Consumed only when the entry being popped is the one this layer
-      // pushed. The desktop split pushes nothing — its return control is on
-      // screen — so a Back there is a real document navigation and must still
-      // reach the shell's handler, or the URL would move without the page.
-      // The layer closes either way: the transcript it drilled into belongs
-      // to the conversation being navigated away from.
-      return open.pushedHistory;
+      return true;
     });
     if (drilldownTitle) drilldownTitle.textContent = label;
     drilldown.hidden = false;
