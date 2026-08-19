@@ -1042,19 +1042,20 @@ describe("pending permission recovery", () => {
     }];
     let childMessages = [
       { id: "msg_old", type: "assistant", modelID: "claude-haiku", time: { created: 2 }, tokens: { input: 100 } },
-      { id: "msg_new", type: "assistant", modelID: "gpt-5", time: { created: 3 }, tokens: { input: 200 } },
+      { id: "msg_new", type: "assistant", modelID: "gpt-5", time: { created: 3 }, tokens: { reasoning: 50 } },
     ];
     provider.listMessages = async (sessionId) => ({ items: (sessionId === "child" ? childMessages : parentMessages) as never[] });
     const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
     const row = () => adapter.projectionForTests("parent").items().find(item => item.type === "tool");
 
     await adapter.history("parent");
-    expect(row()).toEqual(expect.objectContaining({ model: "gpt-5", usage: { input: 300 } }));
+    expect(row()).toEqual(expect.objectContaining({ model: "gpt-5", usage: { input: 100, reasoning: 50 } }));
     const pump = adapter.startEventPump();
     childMessages = [childMessages[0]!];
     provider.eventQueue.push({ id: "remove-new", type: "message.removed", properties: { sessionID: "child", messageID: "msg_new" } } as never);
     while ((row() as { model?: string } | undefined)?.model !== "claude-haiku") await Bun.sleep(1);
     expect(row()).toEqual(expect.objectContaining({ model: "claude-haiku", usage: { input: 100 } }));
+    expect((row() as { usage?: Record<string, number> }).usage).not.toHaveProperty("reasoning");
     expect((await adapter.history("parent")).items.find(item => item.type === "tool"))
       .toEqual(expect.objectContaining({ model: "claude-haiku", usage: { input: 100 } }));
     await adapter.stopEventPump();
@@ -1245,6 +1246,48 @@ describe("pending permission recovery", () => {
     // deleted message's usage and model from its result.
     expect(childReads).toBe(1);
     expect((await adapter.history("parent")).items.find(item => item.type === "tool")).not.toHaveProperty("usage");
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("eviction invalidates a stored attribution read already in flight", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    const parentMessages = [{
+      id: "prt_task", type: "assistant", time: { created: 1 },
+      content: [{ id: "prt_task", type: "tool", tool: "task", callID: "c1", state: {
+        status: "completed", input: { description: "Review renderer" }, metadata: { sessionId: "child" },
+      } }],
+    }];
+    let childStore = [{ id: "msg_old", type: "assistant", time: { created: 2 }, tokens: { input: 500 } }];
+    let childReads = 0;
+    let release: () => void = () => {};
+    provider.listMessages = async (sessionId) => {
+      if (sessionId !== "child") return { items: parentMessages as never[] };
+      childReads += 1;
+      const snapshot = childStore;
+      if (childReads === 1) await new Promise<void>(resolve => { release = resolve; });
+      return { items: snapshot as never[] };
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1, maxProjections: 2 });
+    const pump = adapter.startEventPump();
+
+    const opening = adapter.history("parent");
+    while (childReads === 0) await Bun.sleep(1);
+    provider.eventQueue.push({
+      id: "live", type: "message.updated",
+      properties: { info: { id: "msg_live", sessionID: "child", role: "assistant", time: { created: 3 }, tokens: { input: 900 } } },
+    } as never);
+    await Bun.sleep(20);
+    adapter.projectionForTests("other-1");
+    adapter.projectionForTests("other-2");
+    childStore = [...childStore, { id: "msg_live", type: "assistant", time: { created: 3 }, tokens: { input: 900 } }];
+    release();
+
+    expect((await opening).items.find(item => item.type === "tool")).not.toHaveProperty("usage");
+    const reopened = await adapter.history("parent");
+    expect(reopened.items.find(item => item.type === "tool")).toEqual(expect.objectContaining({ usage: { input: 1_400 } }));
+    expect(childReads).toBe(2);
     await adapter.stopEventPump();
     await pump;
   });

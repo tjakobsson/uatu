@@ -129,6 +129,7 @@ export class OpenCodeChatAdapter {
   // stale read just as newer live usage does.
   private readonly removedChildAttribution = new Map<string, Set<string>>();
   private readonly attributionReconstructions = new Map<string, Promise<void>>();
+  private readonly attributionEpochs = new Map<string, number>();
   // Attribution keys whose tally has been squared against the child's stored
   // history. A live tally alone is not proof of completeness: a parent evicted
   // mid-run loses its maps, and the child's next event recreates one holding
@@ -641,14 +642,18 @@ export class OpenCodeChatAdapter {
     const key = attributionKey(parentId, childId);
     const existing = this.attributionReconstructions.get(key);
     if (existing) return existing;
-    const pending = this.reconstructAttributionOnce(key, childId).finally(() => {
-      if (this.attributionReconstructions.get(key) === pending) this.attributionReconstructions.delete(key);
+    const epoch = this.attributionEpochs.get(key) ?? 0;
+    const pending = this.reconstructAttributionOnce(key, childId, epoch).finally(() => {
+      if (this.attributionReconstructions.get(key) === pending) {
+        this.attributionReconstructions.delete(key);
+        this.attributionEpochs.delete(key);
+      }
     });
     this.attributionReconstructions.set(key, pending);
     return pending;
   }
 
-  private async reconstructAttributionOnce(key: string, childId: string): Promise<void> {
+  private async reconstructAttributionOnce(key: string, childId: string, epoch: number): Promise<void> {
     const byMessage = new Map<string, TokenUsage>();
     const byModel = new Map<string, MessageModel>();
     try {
@@ -674,6 +679,10 @@ export class OpenCodeChatAdapter {
     } catch {
       return;
     }
+    // Eviction clears every live value this read would merge. A completion
+    // from before that boundary must not repopulate the cleared maps and mark
+    // a potentially incomplete answer authoritative.
+    if ((this.attributionEpochs.get(key) ?? 0) !== epoch) return;
     // Live events may have landed while the read was in flight, and they are
     // newer than the stored snapshot — per message the live figure wins, and
     // a model attributed live outranks the stored one. Overwriting instead
@@ -791,7 +800,7 @@ export class OpenCodeChatAdapter {
     // token counts actually move, and an upsert that restates the row
     // verbatim still costs a replay frame for every subscriber.
     if ((model === undefined ? row.model === undefined : row.model === model) && (usage === undefined ? row.usage === undefined : sameUsage(row.usage, usage))) return;
-    if (removedMessageId !== undefined && (model === undefined || usage === undefined)) {
+    if (removedMessageId !== undefined) {
       const { usage: _usage, model: _model, ...withoutAttribution } = row;
       // Upserts deliberately preserve attribution omitted by ordinary tool
       // updates. Remove first so an intentional clear is not merged away.
@@ -1074,6 +1083,10 @@ export class OpenCodeChatAdapter {
       this.lastModel.delete(candidateId);
       this.lastMode.delete(candidateId);
       this.lastVariant.delete(candidateId);
+      const prefix = `${candidateId}${ATTRIBUTION_SEPARATOR}`;
+      for (const key of this.attributionReconstructions.keys()) {
+        if (key.startsWith(prefix)) this.attributionEpochs.set(key, (this.attributionEpochs.get(key) ?? 0) + 1);
+      }
       forgetAttributions(this.childUsage, candidateId);
       forgetAttributions(this.childModels, candidateId);
       forgetAttributions(this.removedChildAttribution, candidateId);
