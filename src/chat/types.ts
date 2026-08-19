@@ -145,11 +145,11 @@ export type AssistantMessageItem = TimelineItemBase & {
   type: "assistant_message";
   markdown: string;
   completedAt?: number;
-  // The tokens the message this part belongs to consumed, when the agent
-  // reports them. Carried on the last part of a message, so the item that
-  // holds it is one that renders on its own — a usage-only bubble would be a
-  // stray empty message on the timeline.
+  // Message-level accounting rides a dedicated empty-markdown carrier.
   usage?: TokenUsage;
+  // The model that reported this carrier's usage, so a context percentage is
+  // measured against that model's window even after another model is selected.
+  model?: ModelSelection;
 };
 
 export type ReasoningItem = TimelineItemBase & {

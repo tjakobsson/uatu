@@ -156,6 +156,19 @@ test.describe("chat panels and navigation", () => {
     await page.goForward();
     await expect.poll(() => page.evaluate(() => (history.state as { chatDrilldown?: string } | null)?.chatDrilldown)).toBeUndefined();
     await expect(drilldown).toBeHidden();
+
+    // A direct close can retire the drill-down below a later document entry.
+    // Back skips toward the older live entry; Forward must then skip the same
+    // marker in the opposite direction and reach that later entry.
+    await page.getByRole("button", { name: "explore · Review renderer" }).click();
+    await expect(drilldown).toBeVisible();
+    await page.evaluate(() => history.pushState({ laterDocument: true }, "", `${location.pathname}${location.search}#later`));
+    await page.locator("#chat-drilldown-back").click();
+    await expect(drilldown).toBeHidden();
+    await page.goBack();
+    await expect.poll(() => page.evaluate(() => (history.state as { chatDrilldown?: string } | null)?.chatDrilldown)).toBeUndefined();
+    await page.goForward();
+    await expect.poll(() => page.evaluate(() => (history.state as { laterDocument?: boolean } | null)?.laterDocument)).toBe(true);
   });
 
   test("an incomplete question in a drill-down announces inside that layer", async ({ page, request }) => {
@@ -276,22 +289,27 @@ test.describe("chat panels and navigation", () => {
 
   test("a new message's initial zero report does not reset known context usage", async ({ page, request }) => {
     const conversationId = await seedAndOpen(page, request, "Stable context", [
-      { id: "usage:m1", type: "assistant_message", createdAt: 2, markdown: "", usage: { input: 30_000, cacheRead: 20_000 } },
+      { id: "usage:m1", type: "assistant_message", createdAt: 2, markdown: "", usage: { input: 30_000, cacheRead: 20_000 }, model: { providerId: "anthropic", modelId: "claude-sonnet" } },
     ]);
     const label = page.locator("#chat-context-usage-label");
+    await expect(label).toHaveText("50k/200k · 25%");
+
+    // Selecting a future model does not reinterpret model A's existing usage
+    // against model B's smaller window.
+    await page.locator("#chat-model-select").selectOption({ label: "OpenAI: GPT-5" });
     await expect(label).toHaveText("50k/200k · 25%");
 
     // OpenCode announces the next assistant message with zeroed counters, then
     // restates that carrier once real input accounting is available.
     await control(request, { action: "item", conversationId, item: {
-      id: "usage:m2", type: "assistant_message", createdAt: 3, markdown: "", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      id: "usage:m2", type: "assistant_message", createdAt: 3, markdown: "", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, model: { providerId: "openai", modelId: "gpt-5" },
     } });
     await expect(label).toHaveText("50k/200k · 25%");
 
     await control(request, { action: "item", conversationId, item: {
-      id: "usage:m2", type: "assistant_message", createdAt: 3, markdown: "", usage: { input: 60_000, output: 500, cacheRead: 10_000, cacheWrite: 0 },
+      id: "usage:m2", type: "assistant_message", createdAt: 3, markdown: "", usage: { input: 60_000, output: 500, cacheRead: 10_000, cacheWrite: 0 }, model: { providerId: "openai", modelId: "gpt-5" },
     } });
-    await expect(label).toHaveText("70k/200k · 35%");
+    await expect(label).toHaveText("70k/100k · 70%");
   });
 
   test("an agent that does not declare context reporting leaves no readout behind", async ({ page, request }) => {
@@ -310,6 +328,19 @@ test.describe("chat panels and navigation", () => {
     await expect(track.locator(".chat-subagent-attribution")).toHaveText("claude-sonnet-4-5");
     // Restored before leaving: this worker's service is shared with whatever
     // runs next against it, and a narrowed agent is this test's setup only.
+    await control(request, { action: "declareOnly", capabilities: ["modes", "models", "commands", "questions", "permissions", "subagents", "variants", "context"] });
+  });
+
+  test("an agent without subagents exposes no transcript controls from persisted tasks", async ({ page, request }) => {
+    await control(request, { action: "declareOnly", capabilities: ["models"] });
+    await seedAndOpen(page, request, "No subagents", [{
+      id: "tool:legacy-agent", type: "tool", createdAt: 2, name: "task", status: "completed", childConversationId: "legacy-child",
+      input: JSON.stringify({ description: "Old task", subagent_type: "explore", prompt: "go" }),
+    }]);
+    await expect(page.locator("#chat-subagents")).toBeHidden();
+    const row = page.locator('[data-chat-item-id="tool:legacy-agent"]');
+    await row.locator(":scope > summary").click();
+    await expect(row.locator("[data-open-conversation]")).toHaveCount(0);
     await control(request, { action: "declareOnly", capabilities: ["modes", "models", "commands", "questions", "permissions", "subagents", "variants", "context"] });
   });
 

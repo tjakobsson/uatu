@@ -209,7 +209,7 @@ describe("token usage", () => {
 
   test("a stored assistant message carries its usage once, beside its parts", () => {
     const items = normalizeProviderMessage({
-      info: { id: "msg_a", sessionID: "s1", role: "assistant", time: { created: 6 }, tokens },
+      info: { id: "msg_a", sessionID: "s1", role: "assistant", providerID: "anthropic", modelID: "claude-sonnet", time: { created: 6 }, tokens },
       parts: [
         { id: "prt_one", type: "text", text: "First." },
         { id: "prt_tool", type: "tool", tool: "read", callID: "c", state: { status: "completed", input: {}, output: "ok" } },
@@ -221,7 +221,7 @@ describe("token usage", () => {
       expect.objectContaining({ id: "part:prt_one", type: "assistant_message" }),
       expect.objectContaining({ id: "tool:prt_tool" }),
       expect.objectContaining({ id: "part:prt_two", type: "assistant_message" }),
-      expect.objectContaining({ id: "usage:msg_a", type: "assistant_message", markdown: "", usage }),
+      expect.objectContaining({ id: "usage:msg_a", type: "assistant_message", markdown: "", usage, model: { providerId: "anthropic", modelId: "claude-sonnet" } }),
     ]);
     expect(items.filter(item => "usage" in item)).toHaveLength(1);
   });

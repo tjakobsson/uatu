@@ -48,6 +48,7 @@ export function mergeAssistantMessage(current: AssistantMessageItem, incoming: A
     ...incoming,
     createdAt: usageOnly ? current.createdAt : incoming.createdAt,
     markdown: incoming.markdown || current.markdown,
+    model: incoming.model ?? current.model,
     ...(current.usage || incoming.usage ? { usage: { ...current.usage, ...incoming.usage } } : {}),
   };
 }

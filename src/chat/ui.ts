@@ -131,15 +131,24 @@ export function initChat(): void {
   // Entries for layers that closed while navigation sat above them. A history
   // entry cannot be deleted from the middle of the stack, so a direct close
   // (header, Escape) of a drill-down whose entry is buried leaves that entry
-  // behind — retired here, and skipped when a Back later lands on it, so the
-  // reader never meets a dead step. Registered before the layer's own
+  // behind — retired here, and skipped in the direction the reader was moving
+  // when navigation later lands on it, so the reader never meets a dead step.
+  // Registered before the layer's own
   // interceptor ever is: interceptors run newest-first, so an open layer
   // still answers first.
-  const retiredDrilldownTokens = new Set<string>();
+  type RetiredDrilldown = { kind: "forward-only" } | { kind: "buried"; next: "back" | "forward" };
+  const retiredDrilldownTokens = new Map<string, RetiredDrilldown>();
   registerBackInterceptor(event => {
     const flag = (event.state as { chatDrilldown?: unknown } | null)?.chatDrilldown;
-    if (typeof flag !== "string" || !retiredDrilldownTokens.has(flag)) return false;
-    history.back();
+    if (typeof flag !== "string") return false;
+    const retired = retiredDrilldownTokens.get(flag);
+    if (!retired) return false;
+    if (retired.kind === "forward-only") history.back();
+    else {
+      const direction = retired.next;
+      retired.next = direction === "back" ? "forward" : "back";
+      history[direction]();
+    }
     return true;
   });
   let rendering = false;
@@ -438,6 +447,12 @@ export function initChat(): void {
   let paintedSubagents = "";
   const syncSubagents = () => {
     if (!subagents || !subagentsLabel || !subagentsItems) return;
+    if (!declares("subagents")) {
+      paintedSubagents = "";
+      subagents.hidden = true;
+      subagentsItems.replaceChildren();
+      return;
+    }
     const all = projection ? subagentEntries(projection.items) : [];
     const dismissed = projection ? dismissedSubagents(projection.conversationId) : new Set<string>();
     const entries = all.filter(entry => !dismissed.has(entry.id));
@@ -517,7 +532,9 @@ export function initChat(): void {
     // The newest assistant usage, scanned from the tail — it is almost always
     // right at the end of a long timeline.
     let usage: TokenUsage | undefined;
+    let usageModel: ModelSelection | undefined;
     let zeroUsage: TokenUsage | undefined;
+    let zeroUsageModel: ModelSelection | undefined;
     const timelineItems = projection?.items ?? [];
     for (let index = timelineItems.length - 1; index >= 0; index -= 1) {
       const item = timelineItems[index]!;
@@ -525,20 +542,21 @@ export function initChat(): void {
       // OpenCode starts a new assistant message with an all-zero report before
       // its real input/cache accounting arrives. Do not flash the meter to 0
       // between turns when an earlier meaningful occupancy is still known.
-      zeroUsage ??= item.usage;
-      if (contextTokens(item.usage) > 0) { usage = item.usage; break; }
+      if (!zeroUsage) { zeroUsage = item.usage; zeroUsageModel = item.model; }
+      if (contextTokens(item.usage) > 0) { usage = item.usage; usageModel = item.model; break; }
     }
-    usage ??= zeroUsage;
-    if (usage === paintedUsage && modelSelect.value === paintedUsageModel) return;
+    if (!usage) { usage = zeroUsage; usageModel = zeroUsageModel; }
+    const reportingModel = usageModel ? modelValue(usageModel) : modelSelect.value;
+    if (usage === paintedUsage && reportingModel === paintedUsageModel) return;
     paintedUsage = usage;
-    paintedUsageModel = modelSelect.value;
+    paintedUsageModel = reportingModel;
     if (!usage) {
       contextUsage.hidden = true;
       contextUsage.open = false;
       return;
     }
     const used = contextTokens(usage);
-    const limit = models.find(model => modelValue(model.selection) === modelSelect.value)?.contextLimit;
+    const limit = models.find(model => modelValue(model.selection) === reportingModel)?.contextLimit;
     const fraction = limit && limit > 0 ? Math.min(1, used / limit) : undefined;
     contextUsageFill.style.width = `${Math.round((fraction ?? 0) * 100)}%`;
     // The figure states the fill in words as well as in width, so the tier
@@ -740,7 +758,7 @@ export function initChat(): void {
 
   const renderNow = (newContent: boolean) => {
     rendering = true;
-    const dirty = renderer.render(items, projection, expanded, queued);
+    const dirty = renderer.render(items, projection, expanded, queued, declares("subagents"));
     rendering = false;
     syncTaskList();
     syncSubagents();
@@ -1073,7 +1091,7 @@ export function initChat(): void {
       const page = await api.snapshot(current.conversationId, current.olderCursor);
       if (projection?.conversationId !== current.conversationId) return;
       projection = prependSnapshot(projection, page);
-      const dirty = renderer.render(items, projection, expanded, queued);
+      const dirty = renderer.render(items, projection, expanded, queued, declares("subagents"));
       timeline.scrollTop = anchor.afterMutation(geometry());
       for (const node of dirty) decorateFileLinks(node);
     } catch (error) { announce(messageOf(error), true); }
@@ -1309,7 +1327,7 @@ export function initChat(): void {
   const renderChild = (newContent: boolean) => {
     if (!drilldownItems || !drilldownTimeline) return;
     if (!childAnchor.isPinned()) childAnchor.beforeMutation(childGeometry());
-    const dirty = childRenderer.render(drilldownItems, child?.projection ?? null, expanded);
+    const dirty = childRenderer.render(drilldownItems, child?.projection ?? null, expanded, undefined, declares("subagents"));
     if (drilldownOlder) drilldownOlder.hidden = !child?.projection?.olderCursor;
     drilldownTimeline.scrollTop = childAnchor.afterMutation(childAnchorGeometry(), newContent);
     for (const node of dirty) {
@@ -1344,14 +1362,18 @@ export function initChat(): void {
     // direct close, or in the Forward stack after its Back pop. Retire it so
     // landing on that same-URL marker later returns to a live document entry
     // rather than leaving an inert navigation step.
-    if (drilldownHistoryToken !== null) retiredDrilldownTokens.add(drilldownHistoryToken);
+    if (drilldownHistoryToken !== null) {
+      retiredDrilldownTokens.set(drilldownHistoryToken, popped
+        ? { kind: "forward-only" }
+        : { kind: "buried", next: "back" });
+    }
     child = null;
     drilldownHistoryToken = null;
     childGeneration += 1;
     open.stream?.close();
     releaseChildBack?.();
     releaseChildBack = null;
-    if (drilldownItems) childRenderer.render(drilldownItems, null, expanded);
+    if (drilldownItems) childRenderer.render(drilldownItems, null, expanded, undefined, declares("subagents"));
     if (drilldownOlder) drilldownOlder.hidden = true;
     if (drilldown) drilldown.hidden = true;
     if (drilldownTitle) drilldownTitle.textContent = "";
@@ -1428,7 +1450,7 @@ export function initChat(): void {
     if (drilldownTitle) drilldownTitle.textContent = label;
     drilldown.hidden = false;
     surface.setAttribute("data-chat-drilldown", "open");
-    childRenderer.render(drilldownItems, null, expanded);
+    childRenderer.render(drilldownItems, null, expanded, undefined, declares("subagents"));
     // Hidden until this child's own first page says whether more exists —
     // otherwise a previous subagent's cursor would offer paging for a
     // transcript that has none.

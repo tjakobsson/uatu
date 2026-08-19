@@ -100,6 +100,13 @@ function messageModel(info: RecordValue): string | undefined {
   return optionalString(info.modelID ?? info.modelId) ?? optionalString(record(info.model).id);
 }
 
+function messageModelSelection(info: RecordValue): { providerId: string; modelId: string } | undefined {
+  const model = record(info.model);
+  const providerId = optionalString(info.providerID ?? info.providerId) ?? optionalString(model.providerID ?? model.providerId);
+  const modelId = messageModel(info);
+  return providerId && modelId ? { providerId, modelId } : undefined;
+}
+
 export type NormalizedProviderEvent = {
   conversationId?: string;
   updates: NormalizedProviderUpdate[];
@@ -526,7 +533,7 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
       let reported: { messageId: string; usage: TokenUsage } | undefined;
       if (usage && messageId) {
         reported = { messageId, usage };
-        updates.push(usageUpsert(`usage:${messageId}`, timestamp(record(info.time).created, createdAt), usage));
+        updates.push(usageUpsert(`usage:${messageId}`, timestamp(record(info.time).created, createdAt), usage, messageModelSelection(info)));
       }
       const model = role === "assistant" ? messageModel(info) : undefined;
       const assistantModel = model && messageId
@@ -589,8 +596,8 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
  * merge both the server and client projections apply, keeps the earlier
  * timestamp rather than resorting the timeline as the figure is restated.
  */
-function usageUpsert(itemId: string, createdAt: number, usage: TokenUsage): NormalizedProviderUpdate {
-  return { kind: "upsert", item: { id: itemId, type: "assistant_message", createdAt, markdown: "", usage } };
+function usageUpsert(itemId: string, createdAt: number, usage: TokenUsage, model?: { providerId: string; modelId: string }): NormalizedProviderUpdate {
+  return { kind: "upsert", item: { id: itemId, type: "assistant_message", createdAt, markdown: "", usage, ...(model ? { model } : {}) } };
 }
 
 function normalizeStoredMessage(info: RecordValue, parts: unknown[], mintUsageCarrier: boolean): ConversationItem[] {
@@ -601,7 +608,7 @@ function normalizeStoredMessage(info: RecordValue, parts: unknown[], mintUsageCa
     return [{ id: `message:${id}`, type: "user_message", createdAt, text: body }];
   }
   if (info.role === "assistant") {
-    return normalizeAssistant({ content: parts, error: info.error, snapshot: info.snapshot, tokens: info.tokens }, id, createdAt, mintUsageCarrier);
+    return normalizeAssistant({ content: parts, error: info.error, snapshot: info.snapshot, tokens: info.tokens, modelID: info.modelID ?? info.modelId, providerID: info.providerID ?? info.providerId, model: info.model }, id, createdAt, mintUsageCarrier);
   }
   return [];
 }
@@ -620,7 +627,8 @@ function normalizeAssistant(message: RecordValue, messageId: string, createdAt: 
   // spend claimed by two items.
   const usage = tokensToUsage(message.tokens);
   if (usage && mintUsageCarrier) {
-    items.push({ id: `usage:${messageId}`, type: "assistant_message", createdAt, markdown: "", usage });
+    const model = messageModelSelection(message);
+    items.push({ id: `usage:${messageId}`, type: "assistant_message", createdAt, markdown: "", usage, ...(model ? { model } : {}) });
   }
   const error = errorMessage(message.error);
   if (error) items.push({ id: `notice:${messageId}:error`, type: "notice", createdAt, level: "error", message: error });

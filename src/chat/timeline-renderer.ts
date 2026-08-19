@@ -21,7 +21,7 @@ export class TimelineRenderer {
   private conversationId: string | null = null;
 
   /** Reconciles the DOM under `target` and returns the created or changed nodes. */
-  render(target: HTMLElement, projection: ChatProjection | null, expanded: Set<string>, queued: ReadonlySet<string> = new Set()): HTMLElement[] {
+  render(target: HTMLElement, projection: ChatProjection | null, expanded: Set<string>, queued: ReadonlySet<string> = new Set(), allowSubagents = true): HTMLElement[] {
     if (!projection) {
       this.reset();
       clearChildren(target);
@@ -76,7 +76,7 @@ export class TimelineRenderer {
       // cached node is only reused when it would render identically.
       const foreign = (item.type === "permission" || item.type === "question")
         && item.conversationId !== undefined && item.conversationId !== projection.conversationId;
-      const variant = [todo?.label ?? "", todo?.task ?? "", String(isQueued), duration === undefined ? "" : String(duration), String(foreign)].join("\u0001");
+      const variant = [todo?.label ?? "", todo?.task ?? "", String(isQueued), duration === undefined ? "" : String(duration), String(foreign), String(allowSubagents)].join("\u0001");
       const entry = this.entries.get(item.id);
       if (entry && entry.item === item && entry.active === active && entry.variant === variant) {
         nodes.set(item.id, entry.node);
@@ -115,7 +115,7 @@ export class TimelineRenderer {
       // auto-open rule for the rest of the run, so a tool that keeps talking
       // cannot reopen a row the reader shut.
       const readerClosed = entry?.node.hasAttribute(READER_CLOSED) ?? false;
-      const node = buildNode(renderItem(item, open, active, todo, isQueued, duration, foreign, readerClosed));
+      const node = buildNode(renderItem(item, open, active, todo, isQueued, duration, foreign, readerClosed, allowSubagents));
       entry?.node.remove();
       this.entries.set(item.id, { node, item, active, variant });
       nodes.set(item.id, node);
@@ -418,7 +418,7 @@ function renderDraft(draft: AcceptedDraft): string {
   return `<article class="chat-item chat-user-message is-pending" data-chat-item-id="draft-${escapeHtmlAttribute(draft.requestId)}"><p>${escapeHtml(draft.text)}</p><small>${label}</small></article>`;
 }
 
-export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, queued = false, durationMs?: number, foreign = false, readerClosed = false): string {
+export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, queued = false, durationMs?: number, foreign = false, readerClosed = false, allowSubagents = true): string {
   const id = escapeHtmlAttribute(item.id);
   const stamp = timestampAttribute(item.createdAt);
   // A message sent mid-turn is accepted but not yet acted on. Without a mark
@@ -435,7 +435,7 @@ export function renderItem(item: ConversationItem, open: boolean, activeRequest:
   }
   if (item.type === "permission") return renderPermission(item, open, activeRequest, foreign);
   if (item.type === "question") return renderQuestion(item, open, activeRequest, foreign);
-  if (item.type === "tool") return renderTool(item, open, readerClosed, todo);
+  if (item.type === "tool") return renderTool(item, open, readerClosed, todo, allowSubagents);
   // A command's text is the subject, not the label. As a label it lands in the
   // summary's non-shrinking slot, so a long pipeline overruns the row instead
   // of truncating; "Shell" names the step and the command ellipsizes beside it.
@@ -499,9 +499,9 @@ function renderActivityOutput(output: string | undefined, status: ActivityStatus
   return `<pre>${escapeHtml(preview)}</pre><details class="chat-output-more"><summary>Show ${more} more ${more === 1 ? "line" : "lines"}</summary><pre>${escapeHtml(rest)}</pre></details>`;
 }
 
-function renderTool(item: ToolItem, open: boolean, readerClosed: boolean, todo?: TodoSummary): string {
+function renderTool(item: ToolItem, open: boolean, readerClosed: boolean, todo: TodoSummary | undefined, allowSubagents: boolean): string {
   const detail = describeToolDetail(item);
-  const body = toolBody(detail, item);
+  const body = toolBody(detail, item, allowSubagents);
   // A todo update stays collapsed, but its summary reports what moved and to
   // which task — every todowrite call carries the whole list, so showing the
   // list each time reprints it verbatim on every tool call.
@@ -516,7 +516,7 @@ function chatDiffMarkup(diff: DiffLine[]): string {
   return `<pre class="chat-diff">${diff.map(line => `<span class="chat-diff-line is-${line.sign === "-" ? "del" : "add"}">${escapeHtml(`${line.sign} ${line.text}`)}</span>`).join("\n")}</pre>`;
 }
 
-function toolBody(detail: ToolDetail, item: ToolItem): string {
+function toolBody(detail: ToolDetail, item: ToolItem, allowSubagents: boolean): string {
   const error = item.error ? `<pre class="chat-tool-error">${escapeHtml(item.error)}</pre>` : "";
   // Every branch has to surface `item.output` somehow, because the auto-open
   // rule keys on output alone: a row that opens itself to show its live tail
@@ -544,7 +544,7 @@ function toolBody(detail: ToolDetail, item: ToolItem): string {
     case "agent":
       // The result is the subagent's report — prose, rendered like assistant
       // markdown rather than dumped as the raw task envelope.
-      return `<p class="chat-tool-meta">${detail.subagent ? `<code>${escapeHtml(detail.subagent)}</code> ` : ""}${escapeHtml(detail.description)}${detail.conversationId ? ` <button type="button" data-open-conversation="${escapeHtmlAttribute(detail.conversationId)}">Open transcript</button>` : ""}</p><pre>${escapeHtml(detail.prompt)}</pre>${detail.result ? renderSubagentResult(detail.result) : ""}${error}`;
+      return `<p class="chat-tool-meta">${detail.subagent ? `<code>${escapeHtml(detail.subagent)}</code> ` : ""}${escapeHtml(detail.description)}${allowSubagents && detail.conversationId ? ` <button type="button" data-open-conversation="${escapeHtmlAttribute(detail.conversationId)}">Open transcript</button>` : ""}</p><pre>${escapeHtml(detail.prompt)}</pre>${detail.result ? renderSubagentResult(detail.result) : ""}${error}`;
     case "skill":
       return `${outputBlock(item)}${error}`;
     default:

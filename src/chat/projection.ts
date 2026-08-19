@@ -99,9 +99,8 @@ export function applyChatEvent(current: ChatProjection, event: ChatEvent, cursor
  *
  * - A `message.updated` for a user message normalizes with empty parts, and an
  *   optimistically-sent message holds a requestId the server echo lacks.
- * - A token-usage upsert decorates an assistant part rather than replacing it:
- *   it carries no markdown, and taking its empty text would blank the answer
- *   mid-stream.
+ * - A token-usage upsert restates a dedicated empty-markdown carrier and must
+ *   preserve previously reported accounting fields it omits.
  */
 function mergeUpsert(existing: ConversationItem | undefined, incoming: ConversationItem): ConversationItem {
   if (!existing || existing.type !== incoming.type) return incoming;

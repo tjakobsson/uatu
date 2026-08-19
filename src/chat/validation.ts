@@ -101,15 +101,19 @@ function parseChatStartupDiagnostics(value: unknown): ChatStartupDiagnostics {
 export function parseChatModel(value: unknown): ChatModel {
   const record = expectRecord(value, "chat model");
   expectKeys(record, ["selection", "provider", "name", "variants", "contextLimit"], "chat model");
-  const selection = expectRecord(record.selection, "model selection");
-  expectKeys(selection, ["providerId", "modelId"], "model selection");
-  expectIdentity(selection.providerId, "provider id");
-  expectIdentity(selection.modelId, "model id");
+  expectModelSelection(record.selection);
   expectNonEmptyString(record.provider, "model provider");
   expectNonEmptyString(record.name, "model name");
   if (record.variants !== undefined) expectStringArray(record.variants, "model variants", true);
   if (record.contextLimit !== undefined && (typeof record.contextLimit !== "number" || record.contextLimit < 1)) throw new Error("model contextLimit must be a positive number");
   return value as ChatModel;
+}
+
+function expectModelSelection(value: unknown): void {
+  const selection = expectRecord(value, "model selection");
+  expectKeys(selection, ["providerId", "modelId"], "model selection");
+  expectIdentity(selection.providerId, "provider id");
+  expectIdentity(selection.modelId, "model id");
 }
 
 // Capabilities are declared positively, so an unknown name is not an error —
@@ -245,10 +249,11 @@ export function parseConversationItem(value: unknown): ConversationItem {
       expectOptionalIdentity(record.requestId, "user message request id");
       break;
     case "assistant_message":
-      expectKeys(record, ["id", "type", "createdAt", "markdown", "completedAt", "usage"], type);
+      expectKeys(record, ["id", "type", "createdAt", "markdown", "completedAt", "usage", "model"], type);
       expectString(record.markdown, "assistant markdown");
       expectOptionalTimestamp(record.completedAt, "completedAt");
       expectTokenUsage(record.usage, "assistant usage");
+      if (record.model !== undefined) expectModelSelection(record.model);
       break;
     case "reasoning":
       expectKeys(record, ["id", "type", "createdAt", "text", "status", "durationMs"], type);

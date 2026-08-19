@@ -423,6 +423,14 @@ describe("subagent entries", () => {
     expect(more.querySelector(".chat-report-expand")?.textContent).toBe("Show full report");
     expect(more.hasAttribute("open")).toBe(false);
   });
+
+  test("a task keeps its report but hides transcript navigation when subagents are unsupported", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([task("legacy", { childConversationId: "child", output: "Report" })]), new Set(["tool:legacy"]), undefined, false);
+    expect(host.textContent).toContain("Report");
+    expect(host.querySelector("[data-open-conversation]")).toBeNull();
+  });
 });
 
 describe("permission choices state the authority they grant", () => {
