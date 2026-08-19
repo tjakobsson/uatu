@@ -124,6 +124,9 @@ export class OpenCodeChatAdapter {
   // no projection of its own. A ceiling backstops both maps besides.
   private readonly childUsage = new Map<string, Map<string, TokenUsage>>();
   private readonly childModel = new Map<string, string>();
+  // Deletions that race a stored-history reconstruction must win over that
+  // stale read just as newer live usage does.
+  private readonly removedChildUsage = new Map<string, Set<string>>();
   // Attribution keys whose tally has been squared against the child's stored
   // history. A live tally alone is not proof of completeness: a parent evicted
   // mid-run loses its maps, and the child's next event recreates one holding
@@ -630,6 +633,7 @@ export class OpenCodeChatAdapter {
    * re-read on every open.
    */
   private async reconstructAttribution(parentId: string, childId: string): Promise<void> {
+    const key = attributionKey(parentId, childId);
     const byMessage = new Map<string, TokenUsage>();
     let model: string | undefined;
     try {
@@ -657,7 +661,6 @@ export class OpenCodeChatAdapter {
     } catch {
       return;
     }
-    const key = attributionKey(parentId, childId);
     // Live events may have landed while the read was in flight, and they are
     // newer than the stored snapshot — per message the live figure wins, and
     // a model attributed live outranks the stored one. Overwriting instead
@@ -665,10 +668,13 @@ export class OpenCodeChatAdapter {
     // the replay cursor.
     const live = this.childUsage.get(key);
     if (live) for (const [messageId, usage] of live) byMessage.set(messageId, usage);
+    const removed = this.removedChildUsage.get(key);
+    if (removed) for (const messageId of removed) byMessage.delete(messageId);
     this.bankAttribution(this.childUsage, key, byMessage);
     if (model !== undefined && !this.childModel.has(key)) this.bankAttribution(this.childModel, key, model);
     // Squared against the store from here on; only an eviction re-arms the read.
     this.completeAttributions.add(key);
+    this.removedChildUsage.delete(key);
     if (this.completeAttributions.size > MAX_CHILD_ATTRIBUTIONS) {
       this.completeAttributions.delete(this.completeAttributions.values().next().value!);
     }
@@ -712,9 +718,10 @@ export class OpenCodeChatAdapter {
     conversationId: string,
     reported: { messageId: string; usage: TokenUsage } | undefined,
     assistantModel: string | undefined,
+    removedMessageId: string | undefined,
     coalescer: ProviderUpdateCoalescer,
   ): Promise<void> {
-    if (reported === undefined && assistantModel === undefined) return;
+    if (reported === undefined && assistantModel === undefined && removedMessageId === undefined) return;
     let parentId: string | null;
     try {
       parentId = await this.parentOf(conversationId);
@@ -732,6 +739,17 @@ export class OpenCodeChatAdapter {
       const byMessage = this.childUsage.get(key) ?? new Map<string, TokenUsage>();
       byMessage.set(reported.messageId, reported.usage);
       this.bankAttribution(this.childUsage, key, byMessage);
+      this.removedChildUsage.get(key)?.delete(reported.messageId);
+    }
+    if (removedMessageId !== undefined) {
+      const byMessage = this.childUsage.get(key) ?? new Map<string, TokenUsage>();
+      byMessage.delete(removedMessageId);
+      this.bankAttribution(this.childUsage, key, byMessage);
+      if (!this.completeAttributions.has(key)) {
+        const removed = this.removedChildUsage.get(key) ?? new Set<string>();
+        removed.add(removedMessageId);
+        this.bankAttribution(this.removedChildUsage, key, removed);
+      }
     }
     // Nothing to decorate if the parent is not projected — the row lives in
     // its timeline, and an unprojected parent has no row on screen to carry
@@ -747,7 +765,17 @@ export class OpenCodeChatAdapter {
     // Nothing new to say: most restatements change nothing until the turn's
     // token counts actually move, and an upsert that restates the row
     // verbatim still costs a replay frame for every subscriber.
-    if ((model === undefined || row.model === model) && (usage === undefined || sameUsage(row.usage, usage))) return;
+    if ((model === undefined || row.model === model) && (usage === undefined ? row.usage === undefined : sameUsage(row.usage, usage))) return;
+    if (usage === undefined && row.usage !== undefined) {
+      const { usage: _usage, ...withoutUsage } = row;
+      // Upserts deliberately preserve attribution omitted by ordinary tool
+      // updates. Remove first so this intentional clear is not merged away.
+      coalescer.push(parentId, [
+        { kind: "remove", itemId: row.id },
+        { kind: "upsert", item: { ...withoutUsage, ...(model === undefined ? {} : { model }) } },
+      ]);
+      return;
+    }
     coalescer.push(parentId, [{ kind: "upsert", item: {
       ...row,
       ...(model === undefined ? {} : { model }),
@@ -811,7 +839,7 @@ export class OpenCodeChatAdapter {
         // or token report — exactly what a message with only tool or
         // reasoning parts emits. Attribution must see those; only an event
         // carrying nothing at all is skipped.
-        if (normalized.updates.length === 0 && normalized.assistantUsage === undefined && normalized.assistantModel === undefined) continue;
+        if (normalized.updates.length === 0 && normalized.assistantUsage === undefined && normalized.assistantModel === undefined && normalized.removedMessageId === undefined) continue;
         // Confinement is checked per event as it arrives, never at flush time:
         // a session that moves out of the workspace must stop publishing from
         // that moment, and events received while it was confined stay valid.
@@ -841,7 +869,7 @@ export class OpenCodeChatAdapter {
         // The same reasoning as the mirror, for cost rather than requests: a
         // subagent's model and token spend live in its own session, which the
         // parent's client never sees.
-        await this.attributeSubagent(normalized.conversationId, normalized.assistantUsage, normalized.assistantModel, coalescer);
+        await this.attributeSubagent(normalized.conversationId, normalized.assistantUsage, normalized.assistantModel, normalized.removedMessageId, coalescer);
       }
     } finally {
       coalescer.dispose();
@@ -1019,6 +1047,7 @@ export class OpenCodeChatAdapter {
       this.lastVariant.delete(candidateId);
       forgetAttributions(this.childUsage, candidateId);
       forgetAttributions(this.childModel, candidateId);
+      forgetAttributions(this.removedChildUsage, candidateId);
       forgetAttributions(this.completeAttributions, candidateId);
     }
     return projection;

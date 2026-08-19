@@ -986,6 +986,38 @@ describe("pending permission recovery", () => {
     await pump;
   });
 
+  test("removing a subagent message withdraws its usage now and after reopening", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.pages.set("first", { items: [{
+      id: "prt_task", type: "assistant", time: { created: 1 },
+      content: [{ id: "prt_task", type: "tool", tool: "task", callID: "c1", state: {
+        status: "running", input: { description: "Review renderer" }, metadata: { sessionId: "child" },
+      } }],
+    }] });
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    await adapter.history("parent");
+    const row = () => adapter.projectionForTests("parent").items().find(item => item.type === "tool");
+    const pump = adapter.startEventPump();
+    const report = (messageId: string, input: number) => provider.eventQueue.push({
+      id: `e-${messageId}`, type: "message.updated",
+      properties: { sessionID: "child", info: { id: messageId, sessionID: "child", role: "assistant", modelID: "claude-haiku", time: { created: 2 }, tokens: { input } } },
+    } as never);
+
+    report("msg_a", 700);
+    report("msg_b", 300);
+    while (sumInput(row()) !== 1_000) await Bun.sleep(1);
+    provider.eventQueue.push({ id: "remove-a", type: "message.removed", properties: { sessionID: "child", messageID: "msg_a" } } as never);
+    while (sumInput(row()) !== 300) await Bun.sleep(1);
+    expect((await adapter.history("parent")).items.find(item => item.type === "tool")).toEqual(expect.objectContaining({ usage: { input: 300 } }));
+
+    provider.eventQueue.push({ id: "remove-b", type: "message.removed", properties: { sessionID: "child", messageID: "msg_b" } } as never);
+    while ((row() as { usage?: unknown } | undefined)?.usage !== undefined) await Bun.sleep(1);
+    expect((await adapter.history("parent")).items.find(item => item.type === "tool")).not.toHaveProperty("usage");
+    await adapter.stopEventPump();
+    await pump;
+  });
+
   test("a subagent that reports nothing leaves its row readable and unattributed", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];

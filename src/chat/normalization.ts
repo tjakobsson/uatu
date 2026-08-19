@@ -117,6 +117,9 @@ export type NormalizedProviderEvent = {
   // part id, one message's cumulative tokens would be banked once per part and
   // counted that many times over. Aggregation keys on this id instead.
   assistantUsage?: { messageId: string; usage: TokenUsage };
+  // A deleted assistant message must also leave any aggregate keyed by its
+  // provider id; timeline removes alone cannot reach the adapter's tally.
+  removedMessageId?: string;
 };
 
 // Event types recognized as deliberately carrying nothing for the timeline.
@@ -248,6 +251,7 @@ type KnownEvent = {
   updates: NormalizedProviderUpdate[];
   assistantModel?: string;
   assistantUsage?: { messageId: string; usage: TokenUsage };
+  removedMessageId?: string;
 };
 
 function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): KnownEvent | undefined {
@@ -531,6 +535,19 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
         updates,
         ...(assistantModel === undefined ? {} : { assistantModel }),
         ...(reported === undefined ? {} : { assistantUsage: reported }),
+      };
+    }
+    case "message.removed": {
+      const messageId = optionalString(data.messageID) ?? optionalString(data.messageId);
+      if (!messageId) return { conversationId, updates: [] };
+      memory?.roles.delete(messageId);
+      return {
+        conversationId,
+        updates: [
+          { kind: "remove", itemId: `message:${messageId}` },
+          { kind: "remove", itemId: `usage:${messageId}` },
+        ],
+        removedMessageId: messageId,
       };
     }
     case "message.part.updated": {

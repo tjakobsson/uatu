@@ -310,6 +310,20 @@ describe("token usage", () => {
     expect(normalized.assistantUsage).toEqual({ messageId: "msg", usage });
   });
 
+  test("removing a message withdraws its usage carrier and attribution key", () => {
+    const memory = createProviderEventMemory();
+    const projection = new ConversationProjection(new ConversationReplay("g", "s", 10_000));
+    const updated = { id: "1", type: "message.updated", properties: { info: { id: "msg", sessionID: "s", role: "assistant", time: { created: 3 }, tokens } } };
+    for (const update of normalizeProviderEvent(updated, memory).updates) projection.apply(update);
+    expect(projection.has("usage:msg")).toBe(true);
+
+    const removed = normalizeProviderEvent({ id: "2", type: "message.removed", properties: { sessionID: "s", messageID: "msg" } }, memory);
+    expect(removed.removedMessageId).toBe("msg");
+    expect(removed.updates).toContainEqual({ kind: "remove", itemId: "usage:msg" });
+    for (const update of removed.updates) projection.apply(update);
+    expect(projection.has("usage:msg")).toBe(false);
+  });
+
   test("a flat v2 stored record names its model as a reference, not a modelID field", () => {
     // The v2 store writes `model: { id, providerID }` where the classic store
     // wrote `modelID`. Reconstruction reads stored records, and a completed
