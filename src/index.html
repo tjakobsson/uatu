@@ -747,6 +747,10 @@
               </header>
               <div id="chat-drilldown-state" class="chat-state chat-drilldown-state" role="status" aria-live="polite" hidden></div>
               <div id="chat-drilldown-timeline" class="chat-timeline chat-drilldown-timeline" role="log" aria-live="polite" aria-relevant="additions text" tabindex="0">
+                <!-- A subagent can outrun one page like any conversation; without
+                     this its earlier messages are simply absent, with nothing
+                     saying so. -->
+                <button id="chat-drilldown-older" class="chat-secondary-button chat-load-older" type="button" hidden>Load older messages</button>
                 <div id="chat-drilldown-items"></div>
               </div>
             </section>

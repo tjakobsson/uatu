@@ -288,8 +288,14 @@ export class SdkV2Provider implements OpenCodeProvider {
         parts: [{ type: "text", text: input.text }],
         ...(input.model ? { model: { providerID: input.model.providerId, modelID: input.model.modelId } } : {}),
         ...(input.mode ? { agent: input.mode } : {}),
-        // The classic path DOES take a body variant, unlike the v2 path below.
-        ...(input.variant ? { variant: input.variant } : {}),
+        // No variant: the classic transport has no field for one. Checked
+        // against the pinned SDK — `prompt`, `command` and `summarize` bodies
+        // define messageID/model/agent and nothing else, and the only
+        // `variant` in those types is a toast severity. Spreading one in
+        // typechecks (TypeScript skips excess-property checks on spreads) and
+        // reads like support, which is the trap: a compatibility session runs
+        // at the model's default effort, and pretending otherwise puts a
+        // picker in front of a reader that changes nothing.
       }));
       return { messageId };
     }
@@ -327,10 +333,13 @@ export class SdkV2Provider implements OpenCodeProvider {
     // applied. Unconditional on purpose: any gate that trusts this process's
     // memory of the session's variant (an `input.variant` check, a local
     // applied-variant map) goes stale the moment the provider is recreated
-    // over a session that still carries one. A compatibility session exists
-    // only in the classic store, where the v2 switchModel lookup fails —
-    // there the variant is a body field on the dispatch itself, as the
-    // classic prompt path already sends it.
+    // over a session that still carries one.
+    //
+    // A compatibility session exists only in the classic store, where this
+    // v2 lookup fails — and the classic transport has no variant anywhere to
+    // fall back to (neither `command` nor `summarize` defines the field), so
+    // such a session runs at the model's default effort whichever branch
+    // below dispatches it.
     const compatibility = this.compatibilitySessions.has(sessionId);
     if (!compatibility && input.model) await this.switchModel(sessionId, input.model, input.variant);
     const dispatch = input.name === "compact" || input.name === "summarize"
@@ -348,7 +357,9 @@ export class SdkV2Provider implements OpenCodeProvider {
           arguments: input.arguments,
           ...(input.model ? { model: `${input.model.providerId}/${input.model.modelId}` } : {}),
           ...(input.mode ? { agent: input.mode } : {}),
-          ...(compatibility && input.variant ? { variant: input.variant } : {}),
+          // Same as the classic prompt path: no body field exists to carry a
+          // variant, and neither does `summarize` above — so a compatibility
+          // session's commands run at the model's default effort.
         })); })();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {

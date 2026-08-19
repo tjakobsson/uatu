@@ -89,6 +89,7 @@ export function initChat(): void {
   const drilldownTitle = document.querySelector<HTMLElement>("#chat-drilldown-title");
   const drilldownState = document.querySelector<HTMLElement>("#chat-drilldown-state");
   const drilldownBack = document.querySelector<HTMLButtonElement>("#chat-drilldown-back");
+  const drilldownOlder = document.querySelector<HTMLButtonElement>("#chat-drilldown-older");
   if (!surface || !timeline || !items || !state || !select || !newButton || !olderButton || !latestButton || !form || !input || !commandMenu || !send || !sendLabel || !modelSelect || !cancel || !composerStatus) return;
 
   const api = new ChatApiClient();
@@ -1300,6 +1301,7 @@ export function initChat(): void {
     if (!drilldownItems || !drilldownTimeline) return;
     if (!childAnchor.isPinned()) childAnchor.beforeMutation(childGeometry());
     const dirty = childRenderer.render(drilldownItems, child?.projection ?? null, expanded);
+    if (drilldownOlder) drilldownOlder.hidden = !child?.projection?.olderCursor;
     drilldownTimeline.scrollTop = childAnchor.afterMutation(childAnchorGeometry(), newContent);
     for (const node of dirty) {
       decorateFileLinks(node);
@@ -1340,6 +1342,7 @@ export function initChat(): void {
     releaseChildBack?.();
     releaseChildBack = null;
     if (drilldownItems) childRenderer.render(drilldownItems, null, expanded);
+    if (drilldownOlder) drilldownOlder.hidden = true;
     if (drilldown) drilldown.hidden = true;
     if (drilldownTitle) drilldownTitle.textContent = "";
     announceChild("");
@@ -1416,6 +1419,10 @@ export function initChat(): void {
     drilldown.hidden = false;
     surface.setAttribute("data-chat-drilldown", "open");
     childRenderer.render(drilldownItems, null, expanded);
+    // Hidden until this child's own first page says whether more exists —
+    // otherwise a previous subagent's cursor would offer paging for a
+    // transcript that has none.
+    if (drilldownOlder) drilldownOlder.hidden = true;
     childAnchor.restore(null);
     announceChild("Loading transcript…");
     drilldownBack?.focus();
@@ -1447,6 +1454,24 @@ export function initChat(): void {
       }
     })();
   };
+
+  // The same paging the parent timeline offers: a subagent's transcript is
+  // fetched one page at a time like any conversation, and without a way to
+  // ask for the rest a long one simply began mid-story.
+  drilldownOlder?.addEventListener("click", async () => {
+    const open = child;
+    if (!open?.projection?.olderCursor) return;
+    const generation = childGeneration;
+    drilldownOlder.disabled = true;
+    childAnchor.beforeMutation(childGeometry());
+    try {
+      const page = await api.snapshot(open.conversationId, open.projection.olderCursor);
+      if (generation !== childGeneration || child !== open || !open.projection) return;
+      open.projection = prependSnapshot(open.projection, page);
+      renderChild(false);
+    } catch (error) { announceChild(messageOf(error), true); }
+    finally { drilldownOlder.disabled = false; }
+  });
 
   drilldownBack?.addEventListener("click", () => closeChildConversation());
   drilldown?.addEventListener("keydown", event => {

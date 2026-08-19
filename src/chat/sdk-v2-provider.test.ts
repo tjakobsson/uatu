@@ -123,8 +123,11 @@ describe("OpenCode v2 identity policy", () => {
     expect(calls[1]![0]).toBe("command");
 
     // Compatibility: the session exists only in the classic store, where the
-    // v2 switchModel lookup would fail — the variant goes in the command body
-    // instead. The client has no v2 surface at all, so reaching for it throws.
+    // v2 switchModel lookup would fail — and the classic transport defines no
+    // variant field on `command` or `summarize`, so the turn runs at the
+    // model's default effort rather than carrying an invented property that
+    // the server would ignore. The client has no v2 surface at all here, so
+    // reaching for one would throw: not reaching for it is the assertion.
     let commandInput: Record<string, unknown> | undefined;
     const classicClient = {
       session: {
@@ -135,7 +138,8 @@ describe("OpenCode v2 identity policy", () => {
     const provider = new SdkV2Provider(classicClient, "/workspace");
     await provider.createSession("client-uuid");
     await provider.command("ses_classic", { id: "r2", name: "review", arguments: "", model, variant: "xhigh" });
-    expect(commandInput).toEqual(expect.objectContaining({ variant: "xhigh", model: "openai/gpt-5.6-sol" }));
+    expect(commandInput).toEqual(expect.objectContaining({ model: "openai/gpt-5.6-sol" }));
+    expect(commandInput).not.toHaveProperty("variant");
   });
 
   test("session lookup treats 404 as a store miss but propagates other errors", async () => {

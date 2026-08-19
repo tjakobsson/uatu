@@ -79,6 +79,30 @@ test.describe("chat panels and navigation", () => {
     await expect(panel.locator("#chat-task-list-items li.is-done")).toHaveText("Review structure");
   });
 
+  test("a subagent longer than a page can be read back to its start", async ({ page, request }) => {
+    // The transcript is fetched a page at a time like any conversation. With
+    // no way to ask for the rest, a long subagent simply began mid-story and
+    // said nothing about the messages above.
+    const child = await control(request, {
+      action: "seed", title: "Long child", child: true,
+      items: [{ id: "part:child-new", type: "assistant_message", createdAt: 9, markdown: "the newest finding" }],
+      older: [{ id: "part:child-old", type: "assistant_message", createdAt: 1, markdown: "the earliest finding" }],
+    }) as { conversation: { id: string } };
+    await seedAndOpen(page, request, "Fan-out", [
+      { id: "tool:agent1", type: "tool", createdAt: 2, name: "task", status: "completed", input: JSON.stringify({ description: "Read it all", subagent_type: "explore", prompt: "go" }), childConversationId: child.conversation.id },
+    ]);
+    await page.locator("#chat-subagents summary").click();
+    await page.getByRole("button", { name: "explore · Read it all" }).click();
+
+    const older = page.locator("#chat-drilldown-older");
+    await expect(page.locator("#chat-drilldown-items")).toContainText("the newest finding");
+    await expect(older).toBeVisible();
+    await older.click();
+    await expect(page.locator("#chat-drilldown-items")).toContainText("the earliest finding");
+    // One page back is the whole transcript here, so the offer retires.
+    await expect(older).toBeHidden();
+  });
+
   test("subagents pin as a track, dismiss finished, and open their transcript", async ({ page, request }) => {
     const child = await control(request, { action: "seed", title: "Child transcript", child: true, items: [
       { id: "part:child", type: "assistant_message", createdAt: 1, markdown: "child findings" },
