@@ -103,6 +103,37 @@ test.describe("chat panels and navigation", () => {
     await expect(older).toBeHidden();
   });
 
+  test("a stale pagination failure cannot overwrite a replacement drill-down", async ({ page, request }) => {
+    const childB = await control(request, { action: "seed", title: "Child B", child: true, items: [
+      { id: "part:b", type: "assistant_message", createdAt: 1, markdown: "child B findings" },
+    ] }) as { conversation: { id: string } };
+    const childA = await control(request, {
+      action: "seed", title: "Child A", child: true,
+      items: [{
+        id: "tool:nested", type: "tool", createdAt: 2, name: "task", status: "completed", childConversationId: childB.conversation.id,
+        input: JSON.stringify({ description: "Open B", subagent_type: "explore", prompt: "go" }),
+      }],
+      older: [{ id: "part:a-old", type: "assistant_message", createdAt: 1, markdown: "old A finding" }],
+    }) as { conversation: { id: string } };
+    await seedAndOpen(page, request, "Parent", [{
+      id: "tool:open-a", type: "tool", createdAt: 2, name: "task", status: "completed", childConversationId: childA.conversation.id,
+      input: JSON.stringify({ description: "Open A", subagent_type: "explore", prompt: "go" }),
+    }]);
+    await page.locator("#chat-subagents summary").click();
+    await page.getByRole("button", { name: "explore · Open A" }).click();
+    await expect(page.locator("#chat-drilldown-title")).toHaveText("explore · Open A");
+
+    await control(request, { action: "failOlderHistory" });
+    await page.locator("#chat-drilldown-older").click();
+    const nested = page.locator('[data-chat-item-id="tool:nested"]');
+    await nested.locator(":scope > summary").click();
+    await nested.getByRole("button", { name: "Open transcript" }).click();
+    await expect(page.locator("#chat-drilldown-title")).toHaveText("explore · Open B");
+    await expect(page.locator("#chat-drilldown-items")).toContainText("child B findings");
+    await page.waitForTimeout(350);
+    await expect(page.locator("#chat-drilldown-state")).not.toContainText("older transcript unavailable");
+  });
+
   test("subagents pin as a track, dismiss finished, and open their transcript", async ({ page, request }) => {
     const child = await control(request, { action: "seed", title: "Child transcript", child: true, items: [
       { id: "part:child", type: "assistant_message", createdAt: 1, markdown: "child findings" },
@@ -307,6 +338,19 @@ test.describe("chat panels and navigation", () => {
     // Hidden, not zeroed: an empty meter would be a claim about the
     // conversation rather than an absence of data about it.
     await expect(page.locator("#chat-context-usage")).toBeHidden();
+  });
+
+  test("switching conversations clears the previous context meter before loading", async ({ page, request }) => {
+    const target = await control(request, { action: "seed", title: "Unavailable target", items: [] }) as { conversation: { id: string } };
+    await seedAndOpen(page, request, "Measured source", [
+      { id: "usage:m1", type: "assistant_message", createdAt: 2, markdown: "", usage: { input: 50_000 }, model: { providerId: "anthropic", modelId: "claude-sonnet" } },
+    ]);
+    await expect(page.locator("#chat-context-usage")).toBeVisible();
+    await control(request, { action: "failHistory" });
+
+    await page.locator("#chat-conversation-select").selectOption(target.conversation.id);
+    await expect(page.locator("#chat-context-usage")).toBeHidden();
+    await expect(page.locator("#chat-state")).toContainText("chat operation failed");
   });
 
   test("a new message's initial zero report does not reset known context usage", async ({ page, request }) => {

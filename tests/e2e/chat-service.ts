@@ -41,6 +41,8 @@ export class FakeE2EChatService implements WorkspaceChatService {
   // enough of a window for a test to deterministically switch conversations
   // while the request is in flight.
   private failNextPrompt = false;
+  private failNextHistory = false;
+  private failNextOlderHistory = false;
   // When set, status() reports a failed startup carrying diagnostics, so the
   // suite can drive the unavailable surface. A retry clears it, which is the
   // recovery path a user takes after fixing their environment.
@@ -92,6 +94,11 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.failNextPrompt = true;
   }
 
+  failHistory(older = false): void {
+    if (older) this.failNextOlderHistory = true;
+    else this.failNextHistory = true;
+  }
+
   async models() {
     return [
       { selection: { providerId: "anthropic", modelId: "claude-sonnet" }, provider: "Anthropic", name: "Claude Sonnet", variants: ["high", "xhigh"], contextLimit: 200000 },
@@ -136,6 +143,15 @@ export class FakeE2EChatService implements WorkspaceChatService {
   }
 
   async history(id: string, options: { cursor?: string } = {}): Promise<ConversationSnapshot> {
+    if (options.cursor === "older" && this.failNextOlderHistory) {
+      this.failNextOlderHistory = false;
+      await new Promise(resolve => setTimeout(resolve, 300));
+      throw new Error("older transcript unavailable");
+    }
+    if (!options.cursor && this.failNextHistory) {
+      this.failNextHistory = false;
+      throw new Error("conversation unavailable");
+    }
     if (options.cursor === "older") {
       const snapshot = this.snapshot(id);
       return { ...snapshot, items: this.olderItems.get(id) ?? [] };
@@ -234,6 +250,8 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.promptModes = [];
     this.promptVariants = [];
     this.failNextPrompt = false;
+    this.failNextHistory = false;
+    this.failNextOlderHistory = false;
     this.generation = `e2e-chat-${this.nextId++}`;
     this.conversations.clear();
     this.items.clear();

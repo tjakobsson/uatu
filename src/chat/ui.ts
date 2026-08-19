@@ -988,6 +988,7 @@ export function initChat(): void {
     form.hidden = false;
     save();
     projection = null;
+    syncContextIndicator();
     input.value = presentation.drafts[id] ?? "";
     autosize(input);
     announce("Loading conversation...");
@@ -1379,6 +1380,7 @@ export function initChat(): void {
     releaseChildBack = null;
     if (drilldownItems) childRenderer.render(drilldownItems, null, expanded, undefined, declares("subagents"));
     if (drilldownOlder) drilldownOlder.hidden = true;
+    if (drilldownOlder) drilldownOlder.disabled = false;
     if (drilldown) drilldown.hidden = true;
     if (drilldownTitle) drilldownTitle.textContent = "";
     announceChild("");
@@ -1506,8 +1508,11 @@ export function initChat(): void {
       if (generation !== childGeneration || child !== open || !open.projection) return;
       open.projection = prependSnapshot(open.projection, page);
       renderChild(false);
-    } catch (error) { announceChild(messageOf(error), true); }
-    finally { drilldownOlder.disabled = false; }
+    } catch (error) {
+      if (generation === childGeneration && child === open) announceChild(messageOf(error), true);
+    } finally {
+      if (generation === childGeneration && child === open) drilldownOlder.disabled = false;
+    }
   });
 
   drilldownBack?.addEventListener("click", () => closeChildConversation());
