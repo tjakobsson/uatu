@@ -4,7 +4,10 @@ import type { ChatAgent, ChatMode, ChatCommand, ChatModel, ModelSelection, Struc
 // list is filtered by the adapter, which is what lets a parent discover its
 // children's pending questions.
 export type PendingQuestion = { requestId: string; conversationId: string; questions: StructuredQuestion[] };
-export type PendingPermission = { requestId: string; conversationId: string; action: string; resources: string[] };
+// `diff` is the change a file-edit permission would apply (OpenCode's
+// `metadata.diff`), carried through recovery so a card rebuilt after a missed
+// event shows the same change the live announcement would have.
+export type PendingPermission = { requestId: string; conversationId: string; action: string; resources: string[]; diff?: string };
 
 export type ProviderSession = {
   id: string;

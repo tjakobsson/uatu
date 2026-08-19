@@ -13,7 +13,7 @@ import type {
   ProviderPermissionReply,
   ProviderSession,
 } from "./provider";
-import { normalizeQuestion } from "./normalization";
+import { normalizeQuestion, permissionDiff } from "./normalization";
 import type { ChatAgent, ChatMode, ChatCommand, ChatModel, ModelSelection } from "./types";
 
 type Result<T> = { data?: T; error?: unknown };
@@ -36,13 +36,6 @@ export function createSdkV2Provider(options: {
 
 export class SdkV2Provider implements OpenCodeProvider {
   private readonly compatibilitySessions = new Set<string>();
-  // The reasoning variant each v2 session last had applied through
-  // switchModel. A command's dispatch body already names its model, so for
-  // commands switchModel exists only to move the session's variant — and
-  // "move" includes moving it back to the default, the one case the incoming
-  // `variant` field alone cannot see. Tracked here so a command with no
-  // variant on a session that never had one pays no extra round trip.
-  private readonly appliedVariants = new Map<string, string>();
 
   constructor(
     private readonly client: OpencodeClient,
@@ -131,9 +124,6 @@ export class SdkV2Provider implements OpenCodeProvider {
       // this runs every turn and the variant is reapplied every turn.
       model: { providerID: selection.providerId, id: selection.modelId, ...(variant ? { variant } : {}) },
     }));
-    // Only after success: a failed switch left the session where it was.
-    if (variant) this.appliedVariants.set(sessionId, variant);
-    else this.appliedVariants.delete(sessionId);
   }
 
   async renameSession(sessionId: string, title: string): Promise<ProviderSession> {
@@ -331,18 +321,18 @@ export class SdkV2Provider implements OpenCodeProvider {
     const messageId = stableProviderId("msg", input.id);
     // A command is a turn like any other, so it runs at the reasoning effort
     // the user picked. On the v2 path the variant is not a body field — it
-    // rides on the model reference — so it is applied through switchModel:
-    // when one is chosen, and ALSO when the picker says default while an
-    // earlier turn left one applied, which is what resets it. Gating purely
-    // on `input.variant` left "Reasoning: default" silently running command
-    // turns at whatever variant was last applied. A compatibility session
-    // exists only in the classic store, where the v2 switchModel lookup
-    // fails — there the variant is a body field on the dispatch itself, as
-    // the classic prompt path already sends it.
+    // rides on the model reference — so the model is re-sent exactly as
+    // `prompt` does: with the variant when one is chosen, and WITHOUT one
+    // when the picker says default, which resets whatever an earlier turn
+    // applied. Unconditional on purpose: any gate that trusts this process's
+    // memory of the session's variant (an `input.variant` check, a local
+    // applied-variant map) goes stale the moment the provider is recreated
+    // over a session that still carries one. A compatibility session exists
+    // only in the classic store, where the v2 switchModel lookup fails —
+    // there the variant is a body field on the dispatch itself, as the
+    // classic prompt path already sends it.
     const compatibility = this.compatibilitySessions.has(sessionId);
-    if (!compatibility && input.model && (input.variant !== undefined || this.appliedVariants.has(sessionId))) {
-      await this.switchModel(sessionId, input.model, input.variant);
-    }
+    if (!compatibility && input.model) await this.switchModel(sessionId, input.model, input.variant);
     const dispatch = input.name === "compact" || input.name === "summarize"
       ? (async () => ensureSuccess(await this.client.session.summarize({
           sessionID: sessionId,
@@ -402,7 +392,16 @@ export class SdkV2Provider implements OpenCodeProvider {
         : typeof request.permission === "string" ? request.permission : "permission";
       const raw = Array.isArray(request.resources) ? request.resources
         : Array.isArray(request.patterns) ? request.patterns : [];
-      return [{ requestId, conversationId: owner, action, resources: raw.filter((item): item is string => typeof item === "string") }];
+      return [{
+        requestId,
+        conversationId: owner,
+        action,
+        resources: raw.filter((item): item is string => typeof item === "string"),
+        // The same metadata.diff the live event carries — recovery is the
+        // path for a user who missed that event, and they are the one reader
+        // who must not approve an edit without being shown it.
+        ...permissionDiff(request),
+      }];
     });
   }
 

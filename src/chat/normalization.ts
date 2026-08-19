@@ -756,8 +756,10 @@ function permissionOutcome(value: unknown): "approved-once" | "approved-session"
 // The change a file-edit permission would apply, when the agent attaches one.
 // OpenCode puts a unified diff on the permission's `metadata.diff` — the same
 // string its own edit-tool renderer reads. A permission with none (a command,
-// a fetch) yields nothing to spread.
-function permissionDiff(data: RecordValue): { diff?: string } {
+// a fetch) yields nothing to spread. Exported because the pending-permission
+// recovery list carries the same metadata: a card rebuilt after a missed
+// event must show the same change the live announcement would have.
+export function permissionDiff(data: RecordValue): { diff?: string } {
   const diff = optionalString(record(data.metadata).diff);
   return diff && diff.trim() ? { diff } : {};
 }

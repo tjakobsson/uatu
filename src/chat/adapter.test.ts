@@ -748,7 +748,9 @@ describe("pending permission recovery", () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("local")];
     // The pump never saw this: OpenCode raised it while the stream was down.
-    provider.listPermissions = async () => [{ requestId: "perm_1", conversationId: "local", action: "skill", resources: ["review-code"] }];
+    // The diff rides along — recovery exists for the reader who missed the
+    // live announcement, who must not approve an edit without seeing it.
+    provider.listPermissions = async () => [{ requestId: "perm_1", conversationId: "local", action: "skill", resources: ["review-code"], diff: "@@ -1 +1 @@\n-a\n+b" }];
     const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
 
     const snapshot = await adapter.history("local");
@@ -758,6 +760,7 @@ describe("pending permission recovery", () => {
       action: "skill",
       resources: ["review-code"],
       status: "pending",
+      diff: "@@ -1 +1 @@\n-a\n+b",
     })]);
 
     await adapter.respondPermission("local", "perm_1", "req-1", "approved-once");

@@ -855,6 +855,9 @@ export class OpenCodeChatAdapter {
         action: request.action,
         resources: request.resources,
         status: "pending" as const,
+        // The recovered card must show the change the live one would have —
+        // this path exists for the reader who missed that event.
+        ...(request.diff === undefined ? {} : { diff: request.diff }),
       });
     }
     return items;
