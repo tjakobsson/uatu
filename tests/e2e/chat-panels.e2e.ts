@@ -195,6 +195,28 @@ test.describe("chat panels and navigation", () => {
     await expect(page.locator("#chat-state")).not.toContainText("Still to answer");
   });
 
+  test("repeated drill-down close activation queues only one history traversal", async ({ page, request }) => {
+    const child = await control(request, { action: "seed", title: "Close child", child: true, items: [
+      { id: "part:child", type: "assistant_message", createdAt: 1, markdown: "child findings" },
+    ] }) as { conversation: { id: string } };
+    await seedAndOpen(page, request, "Close parent", [{
+      id: "tool:agent-close", type: "tool", createdAt: 2, name: "task", status: "completed", childConversationId: child.conversation.id,
+      input: JSON.stringify({ description: "Close safely", subagent_type: "explore", prompt: "go" }),
+    }]);
+    await page.evaluate(() => history.pushState({ sentinel: true }, "", `${location.pathname}${location.search}#sentinel`));
+    await page.locator("#chat-subagents summary").click();
+    await page.getByRole("button", { name: "explore · Close safely" }).click();
+    const drilldown = page.locator("#chat-drilldown");
+    await expect(drilldown).toBeVisible();
+
+    await page.locator("#chat-drilldown-back").evaluate(button => {
+      (button as HTMLButtonElement).click();
+      (button as HTMLButtonElement).click();
+    });
+    await expect(drilldown).toBeHidden();
+    expect(await page.evaluate(() => (history.state as { sentinel?: boolean } | null)?.sentinel)).toBe(true);
+  });
+
   test("a request the parent is waiting on stays answerable behind an open subagent", async ({ page, request }) => {
     const child = await control(request, { action: "seed", title: "Child transcript", child: true, items: [
       { id: "part:child", type: "assistant_message", createdAt: 1, markdown: "child findings" },

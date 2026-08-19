@@ -128,6 +128,7 @@ export function initChat(): void {
   // counter restarts on every load, so the first open after a reload would
   // re-mint exactly the value a stale entry already carries.
   let drilldownHistoryToken: string | null = null;
+  let drilldownClosePending = false;
   // Entries for layers that closed while navigation sat above them. A history
   // entry cannot be deleted from the middle of the stack, so a direct close
   // (header, Escape) of a drill-down whose entry is buried leaves that entry
@@ -1350,14 +1351,17 @@ export function initChat(): void {
   const closeChildConversation = (popped = false) => {
     const open = child;
     if (!open) return;
+    if (!popped && drilldownClosePending) return;
     if (!popped && drilldownHistoryToken !== null && (history.state as { chatDrilldown?: unknown } | null)?.chatDrilldown === drilldownHistoryToken) {
       // Ask the platform to pop, and finish in the popstate that arrives:
       // leaving a back-stack entry for a layer that is no longer open would
       // make the next Back a no-op. Re-entry is bounded by `popped`. Matched
       // by token — a stale marker from before a reload is not our entry.
+      drilldownClosePending = true;
       history.back();
       return;
     }
+    drilldownClosePending = false;
     // The entry remains somewhere in history in both cases: buried below a
     // direct close, or in the Forward stack after its Back pop. Retire it so
     // landing on that same-URL marker later returns to a live document entry
@@ -1405,6 +1409,7 @@ export function initChat(): void {
   const openChildConversation = (id: string, label: string) => {
     if (!drilldown || !drilldownItems || !drilldownTimeline) return;
     const generation = ++childGeneration;
+    drilldownClosePending = false;
     const previous = child;
     previous?.stream?.close();
     const next: Drilldown = { conversationId: id, label, projection: null, stream: null };
