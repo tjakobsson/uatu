@@ -182,16 +182,24 @@ test.describe("chat panels and navigation", () => {
   // overflowed. The figure has to read without opening anything — opening it
   // only adds the breakdown.
   test("the context indicator reads the fill on open and expands to the breakdown", async ({ page, request }) => {
+    // The shape normalization produces: a message's spend rides its own
+    // `usage:<id>` carrier with empty markdown, never a text part — a message
+    // can emit several parts, and a per-part figure is one spend claimed
+    // twice. The carrier must feed the readout while rendering no bubble.
     await seedAndOpen(page, request, "Context", [
       { id: "message:u1", type: "user_message", createdAt: 1, text: "summarize the repo" },
-      { id: "part:a1", type: "assistant_message", createdAt: 2, markdown: "An earlier answer.", usage: { input: 4_000, output: 100 } },
-      { id: "part:a2", type: "assistant_message", createdAt: 3, markdown: "The latest answer.", usage: { input: 30_000, output: 1_200, reasoning: 400, cacheRead: 20_000, cacheWrite: 2_000 } },
+      { id: "part:a1", type: "assistant_message", createdAt: 2, markdown: "An earlier answer." },
+      { id: "usage:m1", type: "assistant_message", createdAt: 2, markdown: "", usage: { input: 4_000, output: 100 } },
+      { id: "part:a2", type: "assistant_message", createdAt: 3, markdown: "The latest answer." },
+      { id: "usage:m2", type: "assistant_message", createdAt: 3, markdown: "", usage: { input: 30_000, output: 1_200, reasoning: 400, cacheRead: 20_000, cacheWrite: 2_000 } },
     ]);
 
     // Populated from history, before any new turn — and from the newest
-    // assistant message, not the first one.
+    // message's carrier, not the first one.
     const indicator = page.locator("#chat-context-usage");
     await expect(indicator).toBeVisible();
+    // Two answers on screen, not four: a carrier is data, not a bubble.
+    await expect(page.locator("#chat-items .chat-assistant-message")).toHaveCount(2);
     // 30k + 20k cache read + 2k cache write = 52k of the fixture model's 200k.
     // Output is excluded: it is what came back, not what occupies the window.
     await expect(page.locator("#chat-context-usage-label")).toHaveText("52k/200k · 26%");

@@ -1392,7 +1392,12 @@ export function initChat(): void {
         drilldownHistoryToken = token;
       } catch { /* history is best effort; the header control still returns */ }
     }
-    releaseChildBack ??= registerBackInterceptor(event => {
+    // Only a layer that actually has an entry on the stack may consume Back.
+    // When the push above throws (a document not fully active, a browser
+    // refusing the operation) no entry exists, so the next Back is the
+    // shell's document navigation — intercepting it would close the layer AND
+    // leave the shell never loading the URL history already moved to.
+    if (drilldownHistoryToken !== null) releaseChildBack ??= registerBackInterceptor(event => {
       if (!child) return false;
       // Only the pop that leaves the drill-down's own entry is this layer's
       // to consume. Landing ON that entry means something pushed above it was

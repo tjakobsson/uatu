@@ -23,26 +23,20 @@ export type NormalizedEventOutcome =
   | "unparseable";
 
 /**
- * What normalizing one event needs to remember from earlier ones. Bounded on
- * every map: a long session must not grow any of these without limit.
+ * What normalizing one event needs to remember from earlier ones. Bounded: a
+ * long session must not grow it without limit.
  *
  * - `roles` — a part's sender, which only `message.updated` states.
- * - `lastAssistantPart` — the item a message's token usage decorates. Usage
- *   arrives on `message.updated`, which carries no part, so without this the
- *   only place to put it would be a new usage-only item — and `renderItem`
- *   draws any `assistant_message` as a bubble, so that is a stray empty
- *   message on the timeline.
- * - `pendingUsage` — usage that arrived before the message had any text part,
- *   flushed onto the first one that appears.
+ *
+ * Token usage needs nothing here: it rides an item keyed by the message that
+ * reported it, so no event has to recall which part came last.
  */
 export type ProviderEventMemory = {
   roles: Map<string, string>;
-  lastAssistantPart: Map<string, string>;
-  pendingUsage: Map<string, TokenUsage>;
 };
 
 export function createProviderEventMemory(): ProviderEventMemory {
-  return { roles: new Map(), lastAssistantPart: new Map(), pendingUsage: new Map() };
+  return { roles: new Map() };
 }
 
 const MEMORY_LIMIT = 2_048;
@@ -515,29 +509,21 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
       if (messageId && role && memory) remember(memory.roles, messageId, role);
       const updates: NormalizedProviderUpdate[] = normalizeProviderMessage({ info, parts: [] }, false)
         .map(item => ({ kind: "upsert" as const, item }));
-      // The message's token usage decorates the last text part it produced —
-      // an item that already renders — rather than becoming an item of its
-      // own. Before any part exists it waits in `pendingUsage`; a `message.updated`
-      // is not evidence that a bubble should appear. The attribution report
-      // does not wait with it: a message that produced only tool or reasoning
-      // parts still spent tokens, and the parent's subagent tally counts
-      // messages, not text parts.
+      // A message's tokens are the message's, so they ride one item keyed by
+      // the message — never a text part it produced. `message.updated`
+      // restates a growing cumulative figure, and a message can emit several
+      // text parts: decorating "the newest part" left the earlier part still
+      // claiming the same total, so one message's spend appeared on two items
+      // and anything aggregating them counted it twice. One carrier per
+      // message cannot double-count, needs no memory of which part came last,
+      // and covers the message that produces no text part at all (a purely
+      // agentic turn still fills the context window). Empty markdown is what
+      // keeps it off the screen — the renderer draws no bubble for it.
       const usage = role === "assistant" ? tokensToUsage(info.tokens) : undefined;
       let reported: { messageId: string; usage: TokenUsage } | undefined;
-      if (usage && messageId && memory) {
+      if (usage && messageId) {
         reported = { messageId, usage };
-        const partId = memory.lastAssistantPart.get(messageId);
-        if (partId) {
-          updates.push(usageUpsert(partId, timestamp(record(info.time).created, createdAt), usage));
-        } else {
-          remember(memory.pendingUsage, messageId, usage);
-          // "No part yet" may also mean no part ever — an agentic message of
-          // only tool and reasoning calls still fills the context window, and
-          // the readout must see it. The report rides a carrier of its own
-          // (empty markdown renders nothing); if a text part does appear, the
-          // flush below moves the figure onto it and retires the carrier.
-          updates.push(usageUpsert(`usage:${messageId}`, timestamp(record(info.time).created, createdAt), usage));
-        }
+        updates.push(usageUpsert(`usage:${messageId}`, timestamp(record(info.time).created, createdAt), usage));
       }
       const assistantModel = role === "assistant" ? messageModel(info) : undefined;
       return {
@@ -558,28 +544,13 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
           text: text(part.text),
         } }] };
       }
+      // A part carries no token report of its own: usage arrives on
+      // `message.updated` and lands on the message's own carrier, so a part
+      // needs no bookkeeping about where a figure should go.
       const partCreatedAt = timestamp(record(data.message).time, createdAt);
-      const updates = normalizePart(part, partCreatedAt);
-      const partId = optionalString(part.id);
-      let flushed: { messageId: string; usage: TokenUsage } | undefined;
-      if (part.type === "text" && messageId && partId && memory) {
-        remember(memory.lastAssistantPart, messageId, `part:${partId}`);
-        // Usage that beat the first part to the stream lands here, on the part
-        // it was always meant to decorate.
-        const pending = memory.pendingUsage.get(messageId);
-        if (pending) {
-          memory.pendingUsage.delete(messageId);
-          updates.push(usageUpsert(`part:${partId}`, partCreatedAt, pending));
-          // The part is the report's home now; the interim carrier retires so
-          // the timeline holds one statement of this message's usage.
-          updates.push({ kind: "remove", itemId: `usage:${messageId}` });
-          flushed = { messageId, usage: pending };
-        }
-      }
       return {
         conversationId: conversationId ?? optionalString(part.sessionID),
-        updates,
-        ...(flushed === undefined ? {} : { assistantUsage: flushed }),
+        updates: normalizePart(part, partCreatedAt),
       };
     }
     case "message.part.removed": {
@@ -593,13 +564,11 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
 }
 
 /**
- * A usage-only upsert: a decoration of an existing assistant part, or the
- * standalone `usage:<messageId>` carrier for a message with no text part.
- * Empty markdown is the signal that this carries no text: the renderer hides
- * such items entirely, and `mergeAssistantMessage` (usage.ts) — the one merge
- * both the server projection and the client projection apply — keeps the
- * streamed answer rather than blanking it, and keeps the part's own
- * timestamp rather than resorting the timeline.
+ * The `usage:<messageId>` carrier: what a message spent, as an item of its
+ * own. Empty markdown is the signal that it carries no text — the renderer
+ * draws no bubble for it, and `mergeAssistantMessage` (usage.ts), the one
+ * merge both the server and client projections apply, keeps the earlier
+ * timestamp rather than resorting the timeline as the figure is restated.
  */
 function usageUpsert(itemId: string, createdAt: number, usage: TokenUsage): NormalizedProviderUpdate {
   return { kind: "upsert", item: { id: itemId, type: "assistant_message", createdAt, markdown: "", usage } };
@@ -624,23 +593,15 @@ function normalizeAssistant(message: RecordValue, messageId: string, createdAt: 
     if (update.kind === "text" && update.item) return [update.item];
     return [];
   });
-  // The stored message states what the turn spent; it goes on the last text
-  // part, which is the item on screen when the turn is read back. This is the
-  // authoritative path — it is what populates the indicator on opening a
-  // conversation, before any new turn is taken. A message with no text part
-  // at all (tool and reasoning calls only) still filled the window, so its
-  // report rides a carrier that renders nothing rather than being dropped.
+  // What the turn spent, on the message's own carrier — the same item id the
+  // live path uses, so a conversation reads back exactly as it streamed. This
+  // is the authoritative path: it populates the readout on opening a
+  // conversation, before any new turn is taken. Never attached to a text
+  // part: a message can emit several, and a per-part figure is one message's
+  // spend claimed by two items.
   const usage = tokensToUsage(message.tokens);
-  if (usage) {
-    let attached = false;
-    for (let index = items.length - 1; index >= 0; index -= 1) {
-      const item = items[index]!;
-      if (item.type !== "assistant_message") continue;
-      items[index] = { ...item, usage };
-      attached = true;
-      break;
-    }
-    if (!attached && mintUsageCarrier) items.push({ id: `usage:${messageId}`, type: "assistant_message", createdAt, markdown: "", usage });
+  if (usage && mintUsageCarrier) {
+    items.push({ id: `usage:${messageId}`, type: "assistant_message", createdAt, markdown: "", usage });
   }
   const error = errorMessage(message.error);
   if (error) items.push({ id: `notice:${messageId}:error`, type: "notice", createdAt, level: "error", message: error });

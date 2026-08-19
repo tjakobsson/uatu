@@ -519,11 +519,17 @@ function chatDiffMarkup(diff: DiffLine[]): string {
 
 function toolBody(detail: ToolDetail, item: ToolItem): string {
   const error = item.error ? `<pre class="chat-tool-error">${escapeHtml(item.error)}</pre>` : "";
+  // Every branch has to surface `item.output` somehow, because the auto-open
+  // rule keys on output alone: a row that opens itself to show its live tail
+  // and then renders a body without it is a row that opened for nothing. The
+  // branches below that omit `outputBlock` surface it in their own words
+  // instead — `question` as the answer it parsed, `agent` as the subagent's
+  // report — which is why they are not bare.
   switch (detail.kind) {
     case "edit":
-      return `${fileButton(detail.path)}${chatDiffMarkup(detail.diff)}${error}`;
+      return `${fileButton(detail.path)}${chatDiffMarkup(detail.diff)}${outputBlock(item)}${error}`;
     case "write":
-      return `${fileButton(detail.path)}<pre>${escapeHtml(detail.content)}</pre>${error}`;
+      return `${fileButton(detail.path)}<pre>${escapeHtml(detail.content)}</pre>${outputBlock(item)}${error}`;
     case "read":
       return `${fileButton(detail.startLine ? `${detail.path}:${detail.startLine}` : detail.path)}${outputBlock(item)}${error}`;
     case "search":
@@ -531,9 +537,9 @@ function toolBody(detail: ToolDetail, item: ToolItem): string {
     case "fetch":
       return `<p class="chat-tool-meta"><code>${escapeHtml(detail.url)}</code></p>${outputBlock(item)}${error}`;
     case "todo":
-      return `<ul class="chat-todo">${detail.entries.map(entry => `<li class="is-${entry.state}">${escapeHtml(entry.text)}</li>`).join("")}</ul>${error}`;
+      return `<ul class="chat-todo">${detail.entries.map(entry => `<li class="is-${entry.state}">${escapeHtml(entry.text)}</li>`).join("")}</ul>${outputBlock(item)}${error}`;
     case "patch":
-      return `${detail.files.map(file => fileButton(file)).join("")}${chatDiffMarkup(detail.diff)}${error}`;
+      return `${detail.files.map(file => fileButton(file)).join("")}${chatDiffMarkup(detail.diff)}${outputBlock(item)}${error}`;
     case "question":
       return `${detail.asked.map(entry => `<p class="chat-tool-meta"><strong>${escapeHtml(entry.header)}</strong></p><p>${escapeHtml(entry.prompt)}</p>`).join("")}${detail.answer ? `<p class="chat-request-outcome">${escapeHtml(detail.answer)}</p>` : ""}${error}`;
     case "agent":
