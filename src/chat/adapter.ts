@@ -230,6 +230,26 @@ export class OpenCodeChatAdapter {
         }
       }
     }
+    // A subagent's attribution reached the parent as a live upsert; the store
+    // has no memory of it, so a reopened conversation would show costs that
+    // simply vanished. Reapplied from the tally this adapter still holds —
+    // no provider call, which is the whole reason the aggregate is computed
+    // here rather than fetched per child. A workspace restart (or an eviction
+    // of this parent) does lose it: the figure is live attribution, not
+    // stored history, and showing nothing beats showing a stale total.
+    for (let index = 0; index < items.length; index += 1) {
+      const item = items[index]!;
+      if (item.type !== "tool" || !item.childConversationId) continue;
+      const key = attributionKey(id, item.childConversationId);
+      const model = this.childModel.get(key);
+      const usage = sumUsage(this.childUsage.get(key));
+      if (model === undefined && usage === undefined) continue;
+      items[index] = {
+        ...item,
+        ...(model === undefined ? {} : { model }),
+        ...(usage === undefined ? {} : { usage }),
+      };
+    }
     // OpenCode 1.18 never emits `question.v2.asked`, so a pending question is
     // invisible to the event stream and only the provider knows about it.
     // Asking here is what makes an open question answerable at all. A failed

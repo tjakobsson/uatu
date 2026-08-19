@@ -939,6 +939,15 @@ describe("pending permission recovery", () => {
     while (sumInput(row()) === 2_000) await Bun.sleep(1);
     expect(sumInput(row())).toBe(2_100);
 
+    // Reopening the parent reapplies the tally rather than losing it: the
+    // store has no memory of an attribution that only ever arrived live, so a
+    // refresh would otherwise show costs that simply vanished.
+    const reopened = await adapter.history("parent");
+    expect(reopened.items.find(item => item.type === "tool")).toEqual(expect.objectContaining({
+      model: "claude-sonnet-4-5",
+      usage: { input: 2_100, output: 27, cacheRead: 200, cacheWrite: 0 },
+    }));
+
     // The tool part's own later update knows nothing about attribution; it
     // must not wipe what the child reported.
     applyEvent(adapter, "parent", {
@@ -1022,13 +1031,13 @@ describe("pending permission recovery", () => {
     report("b", 700);
     await Bun.sleep(20);
 
-    // Reopened, the row is rebuilt from the store with nothing attributed, and
-    // the next thing the subagent reports rebuilds the tally from what
-    // survived — 700 + 300, not 500 + 700 + 300.
+    // Reopened, the row carries the tally that survived and only that: the
+    // store never held the attribution, so reopening reapplies what this
+    // adapter still has — 700, with the evicted 500 gone for good.
     await adapter.history("parent");
-    expect(row()).not.toHaveProperty("usage");
+    expect(sumInput(row())).toBe(700);
     report("c", 300);
-    while (sumInput(row()) === undefined) await Bun.sleep(1);
+    while (sumInput(row()) === 700) await Bun.sleep(1);
     expect(sumInput(row())).toBe(1_000);
 
     await adapter.stopEventPump();

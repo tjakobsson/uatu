@@ -9,7 +9,7 @@ import { ChatViewportController } from "./viewport";
 import { newRequestId } from "./ids";
 import { insertCommand, matchingCommands } from "./slash-commands";
 import { navigateWorkspaceFileReference, resolveWorkspaceFileReference } from "./file-references";
-import { TimelineRenderer, decorateFileLinks, latestTodoEntries, statusLabel, subagentEntries } from "./timeline-renderer";
+import { READER_CLOSED, TimelineRenderer, decorateFileLinks, latestTodoEntries, statusLabel, subagentEntries } from "./timeline-renderer";
 import {
   addAcceptedDraft,
   applyChatEvent,
@@ -806,6 +806,11 @@ export function initChat(): void {
     }
     presentation.selectedId = id;
     applyModel(id);
+    // The variant list belongs to the model, and the model just changed to
+    // this conversation's. Without the rebuild, `applyVariant` below would
+    // validate against the previous conversation's options — hiding a control
+    // the new model does offer, or sending it a variant it does not.
+    renderVariants();
     applyMode(id);
     applyVariant(id);
     const conversation = conversations.find(item => item.id === id);
@@ -956,10 +961,14 @@ export function initChat(): void {
       const details = event.target as HTMLDetailsElement;
       if (!details.matches("details[data-chat-item-id]")) return;
       controller.beforeMutation(measure(), details.dataset.chatItemId);
-      // The reader has spoken, so the row is theirs from here: clearing the
-      // stream's auto-open marker is what stops the next render from undoing
-      // an expansion they made on a row that had opened itself earlier.
+      // The reader has spoken, so the row is theirs from here. Clearing the
+      // stream's auto-open marker stops the next render from undoing an
+      // expansion they made on a row that had opened itself; recording a close
+      // stops a still-streaming tool from shouldering the row back open on its
+      // next chunk. Both are needed — the auto-open rule is recomputed from
+      // status and output every render and has no memory of its own.
       details.removeAttribute("data-auto-open");
+      details.toggleAttribute(READER_CLOSED, !details.open);
       if (details.open) expanded.add(details.dataset.chatItemId!); else expanded.delete(details.dataset.chatItemId!);
       save();
       requestAnimationFrame(() => { scroller.scrollTop = controller.afterMutation(measure()); });

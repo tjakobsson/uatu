@@ -329,6 +329,28 @@ describe("streamed output auto-opens and then lets go", () => {
     expect(row().hasAttribute("open")).toBe(true);
   });
 
+  test("a row the reader closes stays closed while the tool keeps talking", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const row = () => host.querySelector('[data-chat-item-id="tool:grep"]') as HTMLElement;
+
+    renderer.render(host, projectionWith([tool("running", "line one")]), new Set());
+    expect(row().hasAttribute("open")).toBe(true);
+
+    // What ui.ts's toggle handler does when the reader collapses the row.
+    row().removeAttribute("data-auto-open");
+    row().toggleAttribute("data-reader-closed", true);
+    row().removeAttribute("open");
+
+    // The auto-open rule is recomputed from status and output on every render,
+    // so without a memory of the close the next chunk would reopen the row —
+    // the reader could not collapse a chatty tool at all while it ran.
+    renderer.render(host, projectionWith([tool("running", "line one\nline two")]), new Set());
+    expect(row().hasAttribute("open")).toBe(false);
+    renderer.render(host, projectionWith([tool("completed", "line one\nline two")], { status: "idle" }), new Set());
+    expect(row().hasAttribute("open")).toBe(false);
+  });
+
   test("a persisted expansion still opens a finished row with no output", () => {
     const renderer = new TimelineRenderer();
     const host = target();
