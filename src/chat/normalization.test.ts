@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage } from "./normalization";
+import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage } from "./normalization";
 import { ConversationReplay } from "./replay";
 import { ProviderTextReconciler } from "./text-reconciler";
 import { ConversationProjection } from "./adapter";
@@ -288,6 +288,17 @@ describe("token usage", () => {
     expect(normalized.assistantUsage).toEqual({ messageId: "msg", usage });
     // The decoration is still pending, waiting for a part that may never come.
     expect(memory.pendingUsage.get("msg")).toEqual(usage);
+  });
+
+  test("a flat v2 stored record names its model as a reference, not a modelID field", () => {
+    // The v2 store writes `model: { id, providerID }` where the classic store
+    // wrote `modelID`. Reconstruction reads stored records, and a completed
+    // attribution is banked — read only the classic field and a persisted v2
+    // child restores its cost with no model label, permanently.
+    expect(storedMessageUsage({ id: "msg_v2", type: "assistant", model: { id: "gpt-5.6-sol", providerID: "openai" }, tokens: { input: 5 } }))
+      .toEqual({ messageId: "msg_v2", usage: { input: 5 }, model: "gpt-5.6-sol" });
+    expect(storedMessageUsage({ info: { id: "msg_classic", role: "assistant", modelID: "claude-sonnet-4-5", tokens: { input: 7 } }, parts: [] }))
+      .toEqual({ messageId: "msg_classic", usage: { input: 7 }, model: "claude-sonnet-4-5" });
   });
 
   test("a stored message with only tool parts keeps its usage on a hidden carrier", () => {

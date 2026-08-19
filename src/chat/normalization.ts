@@ -89,9 +89,21 @@ export function storedMessageUsage(value: unknown): { messageId: string; usage?:
   const messageId = optionalString(info.id);
   if (!messageId || (info.role !== "assistant" && info.type !== "assistant")) return undefined;
   const usage = tokensToUsage(info.tokens);
-  const model = optionalString(info.modelID ?? info.modelId);
+  const model = messageModel(info);
   if (usage === undefined && model === undefined) return undefined;
   return { messageId, ...(usage === undefined ? {} : { usage }), ...(model === undefined ? {} : { model }) };
+}
+
+/**
+ * The model an assistant message ran. The classic store and the bridged
+ * events name it `modelID`/`modelId`; a flat v2 record carries a
+ * `model: { id, providerID }` reference instead. Both readers — the live
+ * event path and the stored-history reconstruction — must accept both, or a
+ * persisted v2 child restores its cost with no model label and the completed
+ * attribution is then banked without one for good.
+ */
+function messageModel(info: RecordValue): string | undefined {
+  return optionalString(info.modelID ?? info.modelId) ?? optionalString(record(info.model).id);
 }
 
 export type NormalizedProviderEvent = {
@@ -527,7 +539,7 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
           updates.push(usageUpsert(`usage:${messageId}`, timestamp(record(info.time).created, createdAt), usage));
         }
       }
-      const assistantModel = role === "assistant" ? optionalString(info.modelID ?? info.modelId) : undefined;
+      const assistantModel = role === "assistant" ? messageModel(info) : undefined;
       return {
         conversationId: conversationId ?? optionalString(info.sessionID),
         updates,

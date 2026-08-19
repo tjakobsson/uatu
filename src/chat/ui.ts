@@ -116,6 +116,13 @@ export function initChat(): void {
   const childRenderer = new TimelineRenderer();
   const childAnchor = new TimelineAnchorController();
   let releaseChildBack: (() => void) | null = null;
+  // The identity of the history entry THIS session pushed for the open
+  // drill-down, or null when none is on the stack. A unique value rather
+  // than a boolean because the boolean survives where the layer does not: a
+  // reload keeps the flagged entry while the in-memory drill-down dies, and
+  // an interceptor that trusts any flag then refuses to close a layer over a
+  // stale marker. Only the token minted by this open is "our entry".
+  let drilldownHistoryToken: number | null = null;
   let rendering = false;
   let renderFrame: number | null = null;
   let submitting = false;
@@ -218,6 +225,18 @@ export function initChat(): void {
   // fire — and a fallback to the parent's scroller would anchor the child
   // against the wrong geometry if they somehow did.
   const childGeometry = (): AnchorGeometry => geometryOf(drilldownTimeline!, drilldownItems!);
+  // The pinned fast path. Pinned means "keep the end in view", which needs
+  // the scroll extents and nothing per item — and the per-item pass is a
+  // forced layout of the whole transcript (a rect per item). During a
+  // streaming turn, pinned is the resting state and this runs per rendered
+  // frame AND per scroll tick (each programmatic scrollTop echoes a scroll
+  // event), so paying the full pass there saturates a phone's main thread —
+  // taps land while the handler is still measuring, and the tap is what a
+  // reader experiences as dead.
+  const extentsOf = (scroller: HTMLElement): AnchorGeometry =>
+    ({ scrollTop: scroller.scrollTop, clientHeight: scroller.clientHeight, scrollHeight: scroller.scrollHeight, items: [] });
+  const anchorGeometry = (): AnchorGeometry => anchor.isPinned() ? extentsOf(timeline) : geometry();
+  const childAnchorGeometry = (): AnchorGeometry => childAnchor.isPinned() ? extentsOf(drilldownTimeline!) : childGeometry();
 
   const flushSave = () => {
     if (saveTimer !== null) {
@@ -262,10 +281,20 @@ export function initChat(): void {
    * hand, expanding to the whole list. The timeline badges narrate what
    * changed; this answers "where are we now" without scrolling back for it.
    * Contents are patched rather than rebuilt so expanding it survives renders.
+   *
+   * Rebuilt only when the tasks actually changed. This runs on every rendered
+   * frame of a streaming turn, and rebuilding the rows each frame does more
+   * than waste work: on iOS, a tap whose target node is replaced before the
+   * finger lifts never becomes a click, so a track that rebuilds per frame is
+   * a track that cannot be tapped while the agent is working.
    */
+  let paintedTasks = "";
   const syncTaskList = () => {
     if (!taskList || !taskListLabel || !taskListItems) return;
     const tasks = projection ? latestTodoEntries(projection.items) : [];
+    const signature = tasks.map(task => `${task.state}\u0001${task.text}`).join("\u0002");
+    if (signature === paintedTasks) return;
+    paintedTasks = signature;
     if (tasks.length === 0) {
       taskList.hidden = true;
       taskListItems.replaceChildren();
@@ -331,11 +360,17 @@ export function initChat(): void {
    * styling alone does not answer that in a long transcript, because you still
    * have to scroll and count. This says how many and takes you to one.
    */
+  let paintedRequests = "";
   const syncOutstandingRequests = () => {
     if (!requestsJump) return;
     const outstanding = projection
       ? projection.items.filter(item => (item.type === "permission" || item.type === "question") && item.status === "pending")
       : [];
+    // Skipped when nothing changed: rewriting the pill's text every frame
+    // replaces the text node a finger may be resting on.
+    const signature = `${outstanding.length}\u0001${outstanding[outstanding.length - 1]?.id ?? ""}`;
+    if (signature === paintedRequests) return;
+    paintedRequests = signature;
     if (outstanding.length === 0) {
       requestsJump.hidden = true;
       requestsJump.textContent = "";
@@ -376,11 +411,20 @@ export function initChat(): void {
     jumpToRequestCard(id);
   });
 
+  // Same rebuild-only-on-change rule as the task list, for the same tap
+  // reason — these rows are buttons, and a button replaced mid-tap is a
+  // button that never fires.
+  let paintedSubagents = "";
   const syncSubagents = () => {
     if (!subagents || !subagentsLabel || !subagentsItems) return;
     const all = projection ? subagentEntries(projection.items) : [];
     const dismissed = projection ? dismissedSubagents(projection.conversationId) : new Set<string>();
     const entries = all.filter(entry => !dismissed.has(entry.id));
+    const signature = entries
+      .map(entry => [entry.id, entry.status, entry.subagent ?? "", entry.description, entry.conversationId ?? "", entry.model ?? "", entry.usage ? String(totalTokens(entry.usage)) : ""].join("\u0001"))
+      .join("\u0002");
+    if (signature === paintedSubagents) return;
+    paintedSubagents = signature;
     if (dismissButton) {
       dismissButton.hidden = !entries.some(entry => entry.status !== "running" && entry.status !== "pending");
     }
@@ -502,11 +546,20 @@ export function initChat(): void {
    * exchange. Hidden below two prompts, where the rail carries no information,
    * and capped to the most recent dozen so it cannot outgrow the viewport.
    */
+  let paintedRail = "";
   const syncPromptRail = () => {
     if (!promptRail) return;
     const prompts = projection
       ? projection.items.filter((item): item is Extract<ConversationItem, { type: "user_message" }> => item.type === "user_message")
       : [];
+    // Rebuilt only when the dots would differ; the active marking still runs
+    // every call, since it follows the scroll position rather than the set.
+    const signature = prompts.length < 2 ? "" : prompts.slice(-12).map(prompt => prompt.id).join("\u0002");
+    if (signature === paintedRail) {
+      if (signature !== "") syncPromptRailActive();
+      return;
+    }
+    paintedRail = signature;
     if (prompts.length < 2) {
       promptRail.hidden = true;
       promptRail.replaceChildren();
@@ -666,7 +719,7 @@ export function initChat(): void {
     syncOutstandingRequests();
     syncContextIndicator();
     syncPromptRail();
-    timeline.scrollTop = anchor.afterMutation(geometry(), newContent);
+    timeline.scrollTop = anchor.afterMutation(anchorGeometry(), newContent);
     latestButton.hidden = !anchor.hasUnseen();
     syncControls();
     for (const node of dirty) {
@@ -679,7 +732,9 @@ export function initChat(): void {
 
   const scheduleRender = (newContent = false, captureCurrent = true) => {
     if (renderFrame !== null) return;
-    if (captureCurrent) anchor.beforeMutation(geometry());
+    // beforeMutation is a no-op while pinned — skipping the call skips the
+    // full-geometry pass it would otherwise be handed for nothing.
+    if (captureCurrent && !anchor.isPinned()) anchor.beforeMutation(geometry());
     renderFrame = requestAnimationFrame(() => {
       renderFrame = null;
       renderNow(newContent);
@@ -968,7 +1023,11 @@ export function initChat(): void {
 
   timeline.addEventListener("scroll", () => {
     if (rendering) return;
-    anchor.observe(geometry());
+    // Cheap while pinned; the full pass runs only once actually unpinned.
+    // The first tick that crosses the threshold captures no anchor (items
+    // were not collected), which self-heals on the next tick — a transient
+    // preferable to a forced layout on every scroll event of a long chat.
+    anchor.observe(anchorGeometry());
     if (projection) {
       const current = anchor.currentAnchor();
       if (current) presentation.anchors[projection.conversationId] = current;
@@ -1065,6 +1124,14 @@ export function initChat(): void {
     }
   };
 
+  // A failure reports where the reader is looking: a card answered inside the
+  // drill-down speaks through the drill-down's own status line — in touch
+  // mode that layer covers the parent's entirely, so a message sent to the
+  // parent's line is a message no one sees while the controls silently
+  // re-enable.
+  const announceFailureFor = (source: ChatProjection) =>
+    child && source.conversationId === child.conversationId ? announceChild : announce;
+
   const resolvePermission = async (source: ChatProjection, itemId: string, outcome: PermissionOutcome) => {
     const item = source.items.find(candidate => candidate.id === itemId);
     if (!item || item.type !== "permission" || item.status !== "pending") return;
@@ -1073,7 +1140,7 @@ export function initChat(): void {
     // screen: a subagent's request shown in its parent must be answered for the
     // subagent, so the child's requirePending guard and receipt key govern it.
     try { await api.permission(item.conversationId ?? source.conversationId, item.requestId, newRequestId(), outcome); }
-    catch (error) { announce(messageOf(error), true); disableCard(itemId, false); }
+    catch (error) { announceFailureFor(source)(messageOf(error), true); disableCard(itemId, false); }
   };
 
   const resolveQuestion = async (source: ChatProjection, itemId: string, outcome: QuestionOutcome) => {
@@ -1081,7 +1148,7 @@ export function initChat(): void {
     if (!item || item.type !== "question" || item.status !== "pending") return;
     disableCard(itemId, true);
     try { await api.question(item.conversationId ?? source.conversationId, item.requestId, newRequestId(), outcome); }
-    catch (error) { announce(messageOf(error), true); disableCard(itemId, false); }
+    catch (error) { announceFailureFor(source)(messageOf(error), true); disableCard(itemId, false); }
   };
 
   /**
@@ -1182,9 +1249,9 @@ export function initChat(): void {
 
   const renderChild = (newContent: boolean) => {
     if (!drilldownItems || !drilldownTimeline) return;
-    childAnchor.beforeMutation(childGeometry());
+    if (!childAnchor.isPinned()) childAnchor.beforeMutation(childGeometry());
     const dirty = childRenderer.render(drilldownItems, child?.projection ?? null, expanded);
-    drilldownTimeline.scrollTop = childAnchor.afterMutation(childGeometry(), newContent);
+    drilldownTimeline.scrollTop = childAnchor.afterMutation(childAnchorGeometry(), newContent);
     for (const node of dirty) {
       decorateFileLinks(node);
       node.querySelectorAll<HTMLFormElement>("form[data-question-form]").forEach(syncQuestionForm);
@@ -1205,14 +1272,16 @@ export function initChat(): void {
   const closeChildConversation = (popped = false) => {
     const open = child;
     if (!open) return;
-    if (!popped && (history.state as { chatDrilldown?: boolean } | null)?.chatDrilldown === true) {
+    if (!popped && drilldownHistoryToken !== null && (history.state as { chatDrilldown?: unknown } | null)?.chatDrilldown === drilldownHistoryToken) {
       // Ask the platform to pop, and finish in the popstate that arrives:
       // leaving a back-stack entry for a layer that is no longer open would
-      // make the next Back a no-op. Re-entry is bounded by `popped`.
+      // make the next Back a no-op. Re-entry is bounded by `popped`. Matched
+      // by token — a stale marker from before a reload is not our entry.
       history.back();
       return;
     }
     child = null;
+    drilldownHistoryToken = null;
     childGeneration += 1;
     open.stream?.close();
     releaseChildBack?.();
@@ -1265,7 +1334,8 @@ export function initChat(): void {
     // parent rather than walking a stack of replaced children.
     if (!nested) {
       try {
-        history.pushState({ ...(history.state as Record<string, unknown> | null), chatDrilldown: true }, "", location.href);
+        history.pushState({ ...(history.state as Record<string, unknown> | null), chatDrilldown: generation }, "", location.href);
+        drilldownHistoryToken = generation;
       } catch { /* history is best effort; the header control still returns */ }
     }
     releaseChildBack ??= registerBackInterceptor(event => {
@@ -1274,9 +1344,12 @@ export function initChat(): void {
       // to consume. Landing ON that entry means something pushed above it was
       // popped — a TOC anchor, a document opened from inside the transcript —
       // and that back press belongs to the shell's handling, with the layer
-      // staying up. Consuming it would desync the URL from the preview and
-      // leave this entry stranded for the next Back.
-      if ((event.state as { chatDrilldown?: boolean } | null)?.chatDrilldown === true) return false;
+      // staying up. Matched by the token this open minted, never by the mere
+      // presence of a marker: a marker on some other entry is a leftover
+      // (from before a reload, or an entry buried below ours) and a pop
+      // landing there closes the layer like any other.
+      const flag = (event.state as { chatDrilldown?: unknown } | null)?.chatDrilldown;
+      if (drilldownHistoryToken !== null && flag === drilldownHistoryToken) return false;
       closeChildConversation(true);
       return true;
     });
@@ -1328,7 +1401,7 @@ export function initChat(): void {
   if (drilldownItems && drilldownTimeline) {
     wireExpansionToggle(drilldownItems, drilldownTimeline, childAnchor, childGeometry);
     wireItemInteractions(drilldownItems, () => child?.projection ?? null);
-    drilldownTimeline.addEventListener("scroll", () => { childAnchor.observe(childGeometry()); }, { passive: true });
+    drilldownTimeline.addEventListener("scroll", () => { childAnchor.observe(childAnchorGeometry()); }, { passive: true });
   }
 
   const closeCommandMenu = () => {
