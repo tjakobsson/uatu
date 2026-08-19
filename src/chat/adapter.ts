@@ -31,6 +31,7 @@ const DEFAULT_PAGE_SIZE = 50;
 // Sized so reconstructAttribution reads a whole subagent transcript in one
 // call in practice; its cursor loop is the backstop, not the plan.
 const RECONSTRUCTION_READ_LIMIT = 10_000;
+type MessageModel = { model: string; createdAt: number };
 
 export class InteractionConflictError extends Error {
   constructor(message = "interaction request is stale or already resolved") {
@@ -112,10 +113,10 @@ export class OpenCodeChatAdapter {
   private readonly lastModel = new Map<string, ModelSelection>();
   private readonly lastMode = new Map<string, string>();
   private readonly lastVariant = new Map<string, string>();
-  // A subagent's own cost, kept per message within the child session. Per
-  // message because `message.updated` restates a message's growing tokens
-  // rather than adding to them — summing every event would multiply the same
-  // turn.
+  // A subagent's own cost and model, kept per message within the child session.
+  // Per message because `message.updated` restates growing tokens rather than
+  // adding to them, and removing the newest message must reveal the preceding
+  // message's model rather than leave the deleted one attributed.
   //
   // Keyed by parent AND child (`attributionKey`), not by child alone: the
   // tally exists to decorate a row in the parent's timeline, so it should live
@@ -123,10 +124,10 @@ export class OpenCodeChatAdapter {
   // never fire — the LRU evicts conversations, and a child session usually has
   // no projection of its own. A ceiling backstops both maps besides.
   private readonly childUsage = new Map<string, Map<string, TokenUsage>>();
-  private readonly childModel = new Map<string, string>();
+  private readonly childModels = new Map<string, Map<string, MessageModel>>();
   // Deletions that race a stored-history reconstruction must win over that
   // stale read just as newer live usage does.
-  private readonly removedChildUsage = new Map<string, Set<string>>();
+  private readonly removedChildAttribution = new Map<string, Set<string>>();
   private readonly attributionReconstructions = new Map<string, Promise<void>>();
   // Attribution keys whose tally has been squared against the child's stored
   // history. A live tally alone is not proof of completeness: a parent evicted
@@ -267,7 +268,7 @@ export class OpenCodeChatAdapter {
       const item = items[index]!;
       if (item.type !== "tool" || !item.childConversationId) continue;
       const key = attributionKey(id, item.childConversationId);
-      const model = this.childModel.get(key);
+      const model = latestModel(this.childModels.get(key));
       const usage = sumUsage(this.childUsage.get(key));
       if (model === undefined && usage === undefined) continue;
       items[index] = {
@@ -649,7 +650,7 @@ export class OpenCodeChatAdapter {
 
   private async reconstructAttributionOnce(key: string, childId: string): Promise<void> {
     const byMessage = new Map<string, TokenUsage>();
-    let model: string | undefined;
+    const byModel = new Map<string, MessageModel>();
     try {
       // Every message, in one read: banking a partial tally would permanently
       // underreport the child, because a banked key is never re-read. The
@@ -662,14 +663,12 @@ export class OpenCodeChatAdapter {
       let cursor: string | undefined;
       do {
         const page = await this.provider.listMessages(childId, { cursor, limit: RECONSTRUCTION_READ_LIMIT });
-        let pageModel: string | undefined;
         for (const message of page.items) {
           const reported = storedMessageUsage(message);
           if (!reported) continue;
           if (reported.usage) byMessage.set(reported.messageId, reported.usage);
-          if (reported.model) pageModel = reported.model;
+          if (reported.model) byModel.set(reported.messageId, { model: reported.model, createdAt: reported.createdAt });
         }
-        model ??= pageModel;
         cursor = page.nextCursor;
       } while (cursor !== undefined);
     } catch {
@@ -682,13 +681,18 @@ export class OpenCodeChatAdapter {
     // the replay cursor.
     const live = this.childUsage.get(key);
     if (live) for (const [messageId, usage] of live) byMessage.set(messageId, usage);
-    const removed = this.removedChildUsage.get(key);
-    if (removed) for (const messageId of removed) byMessage.delete(messageId);
+    const liveModels = this.childModels.get(key);
+    if (liveModels) for (const [messageId, model] of liveModels) byModel.set(messageId, model);
+    const removed = this.removedChildAttribution.get(key);
+    if (removed) for (const messageId of removed) {
+      byMessage.delete(messageId);
+      byModel.delete(messageId);
+    }
     this.bankAttribution(this.childUsage, key, byMessage);
-    if (model !== undefined && !this.childModel.has(key)) this.bankAttribution(this.childModel, key, model);
+    this.bankAttribution(this.childModels, key, byModel);
     // Squared against the store from here on; only an eviction re-arms the read.
     this.completeAttributions.add(key);
-    this.removedChildUsage.delete(key);
+    this.removedChildAttribution.delete(key);
     if (this.completeAttributions.size > MAX_CHILD_ATTRIBUTIONS) {
       this.completeAttributions.delete(this.completeAttributions.values().next().value!);
     }
@@ -731,7 +735,7 @@ export class OpenCodeChatAdapter {
   private async attributeSubagent(
     conversationId: string,
     reported: { messageId: string; usage: TokenUsage } | undefined,
-    assistantModel: string | undefined,
+    assistantModel: { messageId: string; model: string; createdAt: number } | undefined,
     removedMessageId: string | undefined,
     coalescer: ProviderUpdateCoalescer,
   ): Promise<void> {
@@ -744,7 +748,12 @@ export class OpenCodeChatAdapter {
     }
     if (!parentId) return;
     const key = attributionKey(parentId, conversationId);
-    if (assistantModel !== undefined) this.bankAttribution(this.childModel, key, assistantModel);
+    if (assistantModel !== undefined) {
+      const byMessage = this.childModels.get(key) ?? new Map<string, MessageModel>();
+      byMessage.set(assistantModel.messageId, { model: assistantModel.model, createdAt: assistantModel.createdAt });
+      this.bankAttribution(this.childModels, key, byMessage);
+      this.removedChildAttribution.get(key)?.delete(assistantModel.messageId);
+    }
     if (reported !== undefined) {
       // Keyed by the provider's message id, not by the part the usage
       // decorated: a message can produce several text parts, and its tokens
@@ -753,16 +762,18 @@ export class OpenCodeChatAdapter {
       const byMessage = this.childUsage.get(key) ?? new Map<string, TokenUsage>();
       byMessage.set(reported.messageId, reported.usage);
       this.bankAttribution(this.childUsage, key, byMessage);
-      this.removedChildUsage.get(key)?.delete(reported.messageId);
+      this.removedChildAttribution.get(key)?.delete(reported.messageId);
     }
     if (removedMessageId !== undefined) {
       const byMessage = this.childUsage.get(key) ?? new Map<string, TokenUsage>();
       byMessage.delete(removedMessageId);
       this.bankAttribution(this.childUsage, key, byMessage);
+      const byModel = this.childModels.get(key);
+      byModel?.delete(removedMessageId);
       if (!this.completeAttributions.has(key)) {
-        const removed = this.removedChildUsage.get(key) ?? new Set<string>();
+        const removed = this.removedChildAttribution.get(key) ?? new Set<string>();
         removed.add(removedMessageId);
-        this.bankAttribution(this.removedChildUsage, key, removed);
+        this.bankAttribution(this.removedChildAttribution, key, removed);
       }
     }
     // Nothing to decorate if the parent is not projected — the row lives in
@@ -774,19 +785,23 @@ export class OpenCodeChatAdapter {
     const parent = this.projections.get(parentId);
     const row = parent?.find(item => item.type === "tool" && item.childConversationId === conversationId);
     if (!row || row.type !== "tool") return;
-    const model = this.childModel.get(key);
+    const model = latestModel(this.childModels.get(key));
     const usage = sumUsage(this.childUsage.get(key));
     // Nothing new to say: most restatements change nothing until the turn's
     // token counts actually move, and an upsert that restates the row
     // verbatim still costs a replay frame for every subscriber.
-    if ((model === undefined || row.model === model) && (usage === undefined ? row.usage === undefined : sameUsage(row.usage, usage))) return;
-    if (usage === undefined && row.usage !== undefined) {
-      const { usage: _usage, ...withoutUsage } = row;
+    if ((model === undefined ? row.model === undefined : row.model === model) && (usage === undefined ? row.usage === undefined : sameUsage(row.usage, usage))) return;
+    if (removedMessageId !== undefined && (model === undefined || usage === undefined)) {
+      const { usage: _usage, model: _model, ...withoutAttribution } = row;
       // Upserts deliberately preserve attribution omitted by ordinary tool
-      // updates. Remove first so this intentional clear is not merged away.
+      // updates. Remove first so an intentional clear is not merged away.
       coalescer.push(parentId, [
         { kind: "remove", itemId: row.id },
-        { kind: "upsert", item: { ...withoutUsage, ...(model === undefined ? {} : { model }) } },
+        { kind: "upsert", item: {
+          ...withoutAttribution,
+          ...(model === undefined ? {} : { model }),
+          ...(usage === undefined ? {} : { usage }),
+        } },
       ]);
       return;
     }
@@ -818,7 +833,7 @@ export class OpenCodeChatAdapter {
         for (const update of updates) {
           if (update.kind !== "upsert" || update.item.type !== "tool" || !update.item.childConversationId) continue;
           const key = attributionKey(conversationId, update.item.childConversationId);
-          const model = this.childModel.get(key);
+          const model = latestModel(this.childModels.get(key));
           const usage = sumUsage(this.childUsage.get(key));
           if (model === undefined && usage === undefined) continue;
           const row = projection.find(item => item.id === update.item.id);
@@ -1060,8 +1075,8 @@ export class OpenCodeChatAdapter {
       this.lastMode.delete(candidateId);
       this.lastVariant.delete(candidateId);
       forgetAttributions(this.childUsage, candidateId);
-      forgetAttributions(this.childModel, candidateId);
-      forgetAttributions(this.removedChildUsage, candidateId);
+      forgetAttributions(this.childModels, candidateId);
+      forgetAttributions(this.removedChildAttribution, candidateId);
       forgetAttributions(this.completeAttributions, candidateId);
     }
     return projection;
@@ -1269,6 +1284,17 @@ function sumUsage(byMessage: Map<string, TokenUsage> | undefined): TokenUsage | 
     }
   }
   return Object.keys(total).length > 0 ? total : undefined;
+}
+
+function latestModel(byMessage: Map<string, MessageModel> | undefined): string | undefined {
+  let latest: { messageId: string; value: MessageModel } | undefined;
+  if (!byMessage) return undefined;
+  for (const [messageId, value] of byMessage) {
+    if (!latest || value.createdAt > latest.value.createdAt || (value.createdAt === latest.value.createdAt && messageId > latest.messageId)) {
+      latest = { messageId, value };
+    }
+  }
+  return latest?.value.model;
 }
 
 function mergeInteraction(current: ConversationItem | undefined, incoming: ConversationItem): ConversationItem {

@@ -1031,6 +1031,36 @@ describe("pending permission recovery", () => {
     await pump;
   });
 
+  test("removing the newest subagent message restores the remaining message's model", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    const parentMessages = [{
+      id: "prt_task", type: "assistant", time: { created: 1 },
+      content: [{ id: "prt_task", type: "tool", tool: "task", callID: "c1", state: {
+        status: "completed", input: { description: "Review renderer" }, metadata: { sessionId: "child" },
+      } }],
+    }];
+    let childMessages = [
+      { id: "msg_old", type: "assistant", modelID: "claude-haiku", time: { created: 2 }, tokens: { input: 100 } },
+      { id: "msg_new", type: "assistant", modelID: "gpt-5", time: { created: 3 }, tokens: { input: 200 } },
+    ];
+    provider.listMessages = async (sessionId) => ({ items: (sessionId === "child" ? childMessages : parentMessages) as never[] });
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const row = () => adapter.projectionForTests("parent").items().find(item => item.type === "tool");
+
+    await adapter.history("parent");
+    expect(row()).toEqual(expect.objectContaining({ model: "gpt-5", usage: { input: 300 } }));
+    const pump = adapter.startEventPump();
+    childMessages = [childMessages[0]!];
+    provider.eventQueue.push({ id: "remove-new", type: "message.removed", properties: { sessionID: "child", messageID: "msg_new" } } as never);
+    while ((row() as { model?: string } | undefined)?.model !== "claude-haiku") await Bun.sleep(1);
+    expect(row()).toEqual(expect.objectContaining({ model: "claude-haiku", usage: { input: 100 } }));
+    expect((await adapter.history("parent")).items.find(item => item.type === "tool"))
+      .toEqual(expect.objectContaining({ model: "claude-haiku", usage: { input: 100 } }));
+    await adapter.stopEventPump();
+    await pump;
+  });
+
   test("a subagent that reports nothing leaves its row readable and unattributed", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
@@ -1192,8 +1222,11 @@ describe("pending permission recovery", () => {
     provider.listMessages = async (sessionId, options) => {
       if (sessionId !== "child") return listMessages(sessionId, options);
       childReads += 1;
-      await new Promise<void>(resolve => { release = resolve; });
-      return { items: [{ id: "msg_removed", type: "assistant", time: { created: 2 }, tokens: { input: 500 } }] as never[] };
+      const items = childReads === 1
+        ? [{ id: "msg_removed", type: "assistant", time: { created: 2 }, tokens: { input: 500 } }]
+        : [];
+      if (childReads === 1) await new Promise<void>(resolve => { release = resolve; });
+      return { items: items as never[] };
     };
     const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
     const pump = adapter.startEventPump();
@@ -1208,6 +1241,8 @@ describe("pending permission recovery", () => {
     for (const snapshot of await Promise.all([first, second])) {
       expect(snapshot.items.find(item => item.type === "tool")).not.toHaveProperty("usage");
     }
+    // Both snapshots share one read, and the racing tombstone removes the
+    // deleted message's usage and model from its result.
     expect(childReads).toBe(1);
     expect((await adapter.history("parent")).items.find(item => item.type === "tool")).not.toHaveProperty("usage");
     await adapter.stopEventPump();

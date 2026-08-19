@@ -78,14 +78,14 @@ export function tokensToUsage(value: unknown): TokenUsage | undefined {
  * for it is gone. Returns nothing for a user message, or for one that reported
  * neither.
  */
-export function storedMessageUsage(value: unknown): { messageId: string; usage?: TokenUsage; model?: string } | undefined {
+export function storedMessageUsage(value: unknown): { messageId: string; createdAt: number; usage?: TokenUsage; model?: string } | undefined {
   const { info } = unwrapStoredMessage(value);
   const messageId = optionalString(info.id);
   if (!messageId || (info.role !== "assistant" && info.type !== "assistant")) return undefined;
   const usage = tokensToUsage(info.tokens);
   const model = messageModel(info);
   if (usage === undefined && model === undefined) return undefined;
-  return { messageId, ...(usage === undefined ? {} : { usage }), ...(model === undefined ? {} : { model }) };
+  return { messageId, createdAt: timestamp(record(info.time).created, 0), ...(usage === undefined ? {} : { usage }), ...(model === undefined ? {} : { model }) };
 }
 
 /**
@@ -111,11 +111,10 @@ export type NormalizedProviderEvent = {
   // the envelope rather than on an item: it belongs to the message, and the
   // one thing that needs it — attributing a subagent on its parent's row —
   // reads it from the child's event stream, not from the child's timeline.
-  assistantModel?: string;
-  // The tokens a message reported, with the message's own id. The item the
-  // usage decorates is a *part*, and a message can produce several — keyed by
-  // part id, one message's cumulative tokens would be banked once per part and
-  // counted that many times over. Aggregation keys on this id instead.
+  assistantModel?: { messageId: string; model: string; createdAt: number };
+  // The tokens a message reported, with the message's own id. A message can
+  // produce several parts, so aggregation keys on this id rather than counting
+  // the dedicated usage carrier as though it were another content part.
   assistantUsage?: { messageId: string; usage: TokenUsage };
   // A deleted assistant message must also leave any aggregate keyed by its
   // provider id; timeline removes alone cannot reach the adapter's tally.
@@ -249,7 +248,7 @@ function conversationIdOf(value: unknown): string | undefined {
 type KnownEvent = {
   conversationId?: string;
   updates: NormalizedProviderUpdate[];
-  assistantModel?: string;
+  assistantModel?: { messageId: string; model: string; createdAt: number };
   assistantUsage?: { messageId: string; usage: TokenUsage };
   removedMessageId?: string;
 };
@@ -529,7 +528,10 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
         reported = { messageId, usage };
         updates.push(usageUpsert(`usage:${messageId}`, timestamp(record(info.time).created, createdAt), usage));
       }
-      const assistantModel = role === "assistant" ? messageModel(info) : undefined;
+      const model = role === "assistant" ? messageModel(info) : undefined;
+      const assistantModel = model && messageId
+        ? { messageId, model, createdAt: timestamp(record(info.time).created, createdAt) }
+        : undefined;
       return {
         conversationId: conversationId ?? optionalString(info.sessionID),
         updates,
