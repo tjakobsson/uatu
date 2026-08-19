@@ -481,16 +481,15 @@ export const READER_CLOSED = "data-reader-closed";
 function renderActivityOutput(output: string | undefined, status: ActivityStatus): string {
   if (!output) return "";
   if (status === "running") {
-    // The tail is sliced without materializing every line: this re-runs on
-    // every streamed chunk, and splitting the whole accumulated output made
-    // each chunk pay for the full transcript in allocations.
-    let newlines = 0;
-    for (let at = output.indexOf("\n"); at !== -1; at = output.indexOf("\n", at + 1)) newlines += 1;
-    if (newlines + 1 <= OUTPUT_LINE_LIMIT) return `<pre class="chat-tool-stream">${escapeHtml(output)}</pre>`;
+    // Search backward only as far as the visible tail. This runs for every
+    // cumulative chunk, so counting every newline would make a long stream
+    // quadratic even though only twelve lines are rendered.
     let cut = output.length;
-    for (let index = 0; index < OUTPUT_LINE_LIMIT; index += 1) cut = output.lastIndexOf("\n", cut - 1);
-    const elided = newlines + 1 - OUTPUT_LINE_LIMIT;
-    return `<p class="chat-output-elided">…${elided} earlier ${elided === 1 ? "line" : "lines"}</p><pre class="chat-tool-stream">${escapeHtml(output.slice(cut + 1))}</pre>`;
+    for (let index = 0; index < OUTPUT_LINE_LIMIT; index += 1) {
+      cut = output.lastIndexOf("\n", cut - 1);
+      if (cut === -1) return `<pre class="chat-tool-stream">${escapeHtml(output)}</pre>`;
+    }
+    return `<p class="chat-output-elided">Earlier output omitted</p><pre class="chat-tool-stream">${escapeHtml(output.slice(cut + 1))}</pre>`;
   }
   const lines = output.split("\n");
   if (lines.length <= OUTPUT_LINE_LIMIT) return `<pre>${escapeHtml(output)}</pre>`;

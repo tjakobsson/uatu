@@ -647,10 +647,10 @@ describe("tool output is streamed live and bounded when finished", () => {
     renderer.render(host, projectionWith([item]), new Set());
     const row = host.querySelector('[data-chat-item-id="tool:t1"]') as HTMLDetailsElement;
     expect(row.hasAttribute("open")).toBe(true);
-    // The tail is shown; the earliest lines are elided with a count.
+    // The tail is shown; earlier lines are elided without rescanning to count them.
     expect(host.querySelector(".chat-tool-stream")!.textContent).toContain("line 30");
     expect(host.querySelector(".chat-tool-stream")!.textContent).not.toContain("line 1\n");
-    expect(host.querySelector(".chat-output-elided")!.textContent).toContain("18 earlier lines");
+    expect(host.querySelector(".chat-output-elided")!.textContent).toBe("Earlier output omitted");
   });
 
   test("a finished tool bounds long output behind a show-more, keeping the rest", () => {
