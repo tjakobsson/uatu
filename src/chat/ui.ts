@@ -127,6 +127,20 @@ export function initChat(): void {
   // counter restarts on every load, so the first open after a reload would
   // re-mint exactly the value a stale entry already carries.
   let drilldownHistoryToken: string | null = null;
+  // Entries for layers that closed while navigation sat above them. A history
+  // entry cannot be deleted from the middle of the stack, so a direct close
+  // (header, Escape) of a drill-down whose entry is buried leaves that entry
+  // behind — retired here, and skipped when a Back later lands on it, so the
+  // reader never meets a dead step. Registered before the layer's own
+  // interceptor ever is: interceptors run newest-first, so an open layer
+  // still answers first.
+  const retiredDrilldownTokens = new Set<string>();
+  registerBackInterceptor(event => {
+    const flag = (event.state as { chatDrilldown?: unknown } | null)?.chatDrilldown;
+    if (typeof flag !== "string" || !retiredDrilldownTokens.has(flag)) return false;
+    history.back();
+    return true;
+  });
   let rendering = false;
   let renderFrame: number | null = null;
   let submitting = false;
@@ -1315,6 +1329,10 @@ export function initChat(): void {
       history.back();
       return;
     }
+    // Reaching here directly (not via a pop) with a token still minted means
+    // the layer's entry is buried under navigation pushed above it — it
+    // cannot be removed, so it is retired and later skipped.
+    if (!popped && drilldownHistoryToken !== null) retiredDrilldownTokens.add(drilldownHistoryToken);
     child = null;
     drilldownHistoryToken = null;
     childGeneration += 1;

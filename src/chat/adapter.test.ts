@@ -1228,6 +1228,34 @@ describe("pending permission recovery", () => {
     }));
   });
 
+  test("a subagent that starts and reports inside one coalescer window still lands on its row", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 25 });
+    await adapter.history("parent");
+    const pump = adapter.startEventPump();
+    // The task row and the child's whole report enter one buffer window: when
+    // the usage arrives, the parent's row is not in the projection yet, so
+    // the live decoration path finds nothing. The flush must settle the
+    // banked figures onto the row it just materialized — a fast child that
+    // never speaks again gives no later event to retry on.
+    provider.eventQueue.push({
+      id: "e-task", type: "message.part.updated",
+      data: { part: { id: "prt_task", messageID: "m1", sessionID: "parent", type: "tool", tool: "task", callID: "c1", state: {
+        status: "running", input: { description: "Quick check" }, metadata: { sessionId: "child" },
+      } } },
+    } as never);
+    provider.eventQueue.push({
+      id: "e-msg", type: "message.updated",
+      data: { info: { id: "msg_fast", sessionID: "child", role: "assistant", modelID: "claude-haiku", time: { created: 2 }, tokens: { input: 120 } } },
+    } as never);
+    const row = () => adapter.projectionForTests("parent").items().find(item => item.type === "tool");
+    while (!(row() as { usage?: unknown } | undefined)?.usage) await Bun.sleep(5);
+    expect(row()).toEqual(expect.objectContaining({ model: "claude-haiku", usage: { input: 120 } }));
+    await adapter.stopEventPump();
+    await pump;
+  });
+
   test("a tally rebuilt by live events after an eviction is not mistaken for complete", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];

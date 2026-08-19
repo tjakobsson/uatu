@@ -767,6 +767,27 @@ export class OpenCodeChatAdapter {
         // whatever the coalescer buffered in its final window.
         const projection = this.projection(conversationId);
         for (const update of updates) projection.apply(update);
+        // A fast subagent can start and report inside one coalescer window:
+        // its usage arrives while the parent's task row is still buffered, so
+        // attributeSubagent found no row to decorate and only banked the
+        // figures. The row exists now — settle any banked attribution onto
+        // task rows this flush just materialized, or a child that never
+        // speaks again leaves its row bare until the parent is reopened.
+        for (const update of updates) {
+          if (update.kind !== "upsert" || update.item.type !== "tool" || !update.item.childConversationId) continue;
+          const key = attributionKey(conversationId, update.item.childConversationId);
+          const model = this.childModel.get(key);
+          const usage = sumUsage(this.childUsage.get(key));
+          if (model === undefined && usage === undefined) continue;
+          const row = projection.find(item => item.id === update.item.id);
+          if (!row || row.type !== "tool") continue;
+          if ((model === undefined || row.model === model) && (usage === undefined || sameUsage(row.usage, usage))) continue;
+          projection.apply({ kind: "upsert", item: {
+            ...row,
+            ...(model === undefined ? {} : { model }),
+            ...(usage === undefined ? {} : { usage }),
+          } });
+        }
       },
     });
     try {

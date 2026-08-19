@@ -37,6 +37,25 @@ test("outstanding requests are counted, reachable, and clear at zero", async ({ 
   await expect(jump).toBeHidden();
 });
 
+test("a variant without a model is refused at the boundary", async ({ page, request }) => {
+  await request.post("/__e2e/reset");
+  const token = await request.get("/__e2e/terminal-token").then(r => r.json()) as { token: string };
+  const seeded = await request.post("/__e2e/chat", { data: { action: "seed", title: "Variant pairing", items: [] } })
+    .then(r => r.json()) as { conversation: { id: string } };
+  // The browser context carries the workspace session; page.request shares it.
+  await page.goto(`/?t=${encodeURIComponent(token.token)}`);
+  // A variant names an effort OF a model; accepting a bare one would tie its
+  // validity to server-side memory of the conversation's current model, which
+  // an adapter restart empties while the session keeps its model.
+  const response = await page.request.post(`/api/chat/conversations/${seeded.conversation.id}/prompts`, {
+    // The browser sends these itself; the request context must state them.
+    headers: { origin: new URL(page.url()).origin },
+    data: { requestId: "r-variant-alone", text: "think hard", variant: "high" },
+  });
+  expect(response.status()).toBe(400);
+  expect(await response.json()).toMatchObject({ error: "variant requires a model selection" });
+});
+
 test("a pending edit permission shows its diff, and a resolved one recedes", async ({ page, request }) => {
   await request.post("/__e2e/reset");
   const token = await request.get("/__e2e/terminal-token").then(r => r.json()) as { token: string };

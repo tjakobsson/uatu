@@ -563,6 +563,13 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         if (mode instanceof Response) return mode;
         const variant = parseNameSelection(body.variant, "variant");
         if (variant instanceof Response) return variant;
+        // A variant names an effort OF a model, so the pair travels together.
+        // Validating a bare variant against server-side memory of "the
+        // current model" reads well until that memory is gone — an adapter
+        // restart empties it while the session keeps its model — and then
+        // the same request flips from accepted to rejected. Requiring the
+        // pair makes the contract independent of server lifetime.
+        if (variant !== undefined && model === undefined) return chatError(400, "variant requires a model selection");
         return run(() => deps.chatService.prompt(id, requestId, body.text as string, model, mode, variant), 202);
       }),
     },
