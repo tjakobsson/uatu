@@ -1,3 +1,4 @@
+import { boundedSet } from "../shared/bounded-map";
 import type { ConversationItem, ConversationStatus, StructuredQuestion, TokenUsage } from "./types";
 
 type RecordValue = Record<string, unknown>;
@@ -47,8 +48,7 @@ export function createProviderEventMemory(): ProviderEventMemory {
 const MEMORY_LIMIT = 2_048;
 
 function remember<T>(map: Map<string, T>, key: string, value: T): void {
-  map.set(key, value);
-  if (map.size > MEMORY_LIMIT) map.delete(map.keys().next().value!);
+  boundedSet(map, key, value, MEMORY_LIMIT);
 }
 
 /**
@@ -85,10 +85,7 @@ export function tokensToUsage(value: unknown): TokenUsage | undefined {
  * neither.
  */
 export function storedMessageUsage(value: unknown): { messageId: string; usage?: TokenUsage; model?: string } | undefined {
-  const envelope = record(value);
-  // The classic store wraps each message as { info, parts }; the v2 store is
-  // flat. Same rule `normalizeProviderMessage` uses to tell them apart.
-  const info = optionalString(record(envelope.info).id) === undefined ? envelope : record(envelope.info);
+  const { info } = unwrapStoredMessage(value);
   const messageId = optionalString(info.id);
   if (!messageId || (info.role !== "assistant" && info.type !== "assistant")) return undefined;
   const usage = tokensToUsage(info.tokens);
@@ -159,13 +156,24 @@ const INTENTIONALLY_IGNORED = new Set([
   "tui.session.select",
 ]);
 
-export function normalizeProviderMessage(value: unknown): ConversationItem[] {
+/**
+ * The classic store wraps each message as { info, parts } and names the
+ * sender `role`; the v2 store is flat with a `type`. The one detector every
+ * stored-message reader shares — `normalizeProviderMessage` for the timeline,
+ * `storedMessageUsage` for the accounting — so a store-shape change is a
+ * one-place fix.
+ */
+function unwrapStoredMessage(value: unknown): { info: RecordValue; parts: unknown[]; classic: boolean } {
   const envelope = record(value);
   const info = record(envelope.info);
-  // The classic store wraps each message as { info, parts } and names the
-  // sender `role`; the v2 store is flat with a `type`.
-  if (optionalString(info.role)) return normalizeStoredMessage(info, array(envelope.parts));
-  const message = envelope;
+  if (optionalString(info.role)) return { info, parts: array(envelope.parts), classic: true };
+  return { info: envelope, parts: [], classic: false };
+}
+
+export function normalizeProviderMessage(value: unknown): ConversationItem[] {
+  const { info, parts, classic } = unwrapStoredMessage(value);
+  if (classic) return normalizeStoredMessage(info, parts);
+  const message = info;
   const id = string(message.id, "message id");
   const createdAt = timestamp(record(message.time).created, 0);
   switch (message.type) {
@@ -557,9 +565,10 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
 
 /**
  * A usage-only decoration of an existing assistant part. Empty markdown is the
- * signal that this carries no text: `mergeInteraction` and the client
- * projection both keep the streamed answer rather than blanking it, and keep
- * the part's own timestamp rather than resorting the timeline.
+ * signal that this carries no text: `mergeAssistantMessage` (usage.ts) — the
+ * one merge both the server projection and the client projection apply — keeps
+ * the streamed answer rather than blanking it, and keeps the part's own
+ * timestamp rather than resorting the timeline.
  */
 function usageUpsert(itemId: string, createdAt: number, usage: TokenUsage): NormalizedProviderUpdate {
   return { kind: "upsert", item: { id: itemId, type: "assistant_message", createdAt, markdown: "", usage } };

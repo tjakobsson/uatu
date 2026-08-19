@@ -121,6 +121,25 @@ describe("OpenCode-native tool payloads", () => {
     ]);
   });
 
+  test("an envelope section without @@ markers keeps header-looking changes", () => {
+    // The apply_patch envelope allows hunks with no `@@` context marker at
+    // all, and it has no `--- `/`+++ ` file markers of its own — so inside an
+    // envelope section those prefixes are always content. Treating them as
+    // headers there re-created the very bug the position tracking fixed:
+    // deleting `-- security check` vanished from the card.
+    const envelope = [
+      "*** Begin Patch",
+      "*** Update File: /ws/db/query.sql",
+      "--- security check",
+      "+++ audited check",
+      "*** End Patch",
+    ].join("\n");
+    expect(patchDiffLines(envelope)).toEqual([
+      { sign: "-", text: "-- security check" },
+      { sign: "+", text: "++ audited check" },
+    ]);
+  });
+
   test("each file section's own headers are dropped, in a multi-file diff", () => {
     const twoFiles = [
       "diff --git a/one.ts b/one.ts",

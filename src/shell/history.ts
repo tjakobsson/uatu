@@ -126,8 +126,11 @@ function isSameDocumentHashOnlyNavigation(): boolean {
 // Registered rather than racing the popstate listener order: the layer's own
 // module boots long after `attachPopstateHandler()`, so "who listened first"
 // is not a contract anything can rely on. An interceptor returns true when it
-// consumed the back press.
-type BackInterceptor = () => boolean;
+// consumed the back press; it receives the popstate event so it can decline a
+// pop that landed on some other entry — entries keep being pushed above an
+// open layer (a TOC anchor, a document click), and those back presses belong
+// to the handling below, not to the layer.
+type BackInterceptor = (event: PopStateEvent) => boolean;
 const backInterceptors: BackInterceptor[] = [];
 
 export function registerBackInterceptor(interceptor: BackInterceptor): () => void {
@@ -139,10 +142,10 @@ export function registerBackInterceptor(interceptor: BackInterceptor): () => voi
 }
 
 export function attachPopstateHandler() {
-  window.addEventListener("popstate", () => {
+  window.addEventListener("popstate", event => {
     // Topmost layer first — the most recently registered is the one on screen.
     for (const interceptor of [...backInterceptors].reverse()) {
-      if (interceptor()) return;
+      if (interceptor(event)) return;
     }
     // Same-document hash-only navigation: the user clicked an in-page anchor
     // (e.g. a TOC entry) which pushed a `#fragment` history entry, then hit

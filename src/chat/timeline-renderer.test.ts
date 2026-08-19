@@ -470,6 +470,30 @@ describe("permission choices state the authority they grant", () => {
     expect(host.querySelector("details.chat-request")!.hasAttribute("open")).toBe(false);
     expect(host.querySelector("details.chat-request ul code")!.textContent).toContain("review-code");
   });
+
+  test("a resolved card the reader opened stays open when the item is republished", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const row = () => host.querySelector("details.chat-request") as HTMLElement;
+    renderer.render(host, projectionWith([{ ...permission, status: "resolved", outcome: "approved-once" }]), new Set());
+    expect(row().hasAttribute("open")).toBe(false);
+
+    // The reader opens the receded card to audit what was granted.
+    row().setAttribute("open", "");
+    // A resync republishes the same resolved item with fresh object identity;
+    // that is not a new resolution, and it must not snap the audit shut.
+    renderer.render(host, projectionWith([{ ...permission, status: "resolved", outcome: "approved-once" }]), new Set());
+    expect(row().hasAttribute("open")).toBe(true);
+
+    // The pending→resolved transition is what recedes: a card that resolves
+    // while open starts closed.
+    const fresh = target();
+    renderer.render(fresh, projectionWith([permission]), new Set());
+    const pendingRow = fresh.querySelector("details.chat-request") as HTMLElement;
+    expect(pendingRow.hasAttribute("open")).toBe(true);
+    renderer.render(fresh, projectionWith([{ ...permission, status: "resolved", outcome: "rejected" }]), new Set());
+    expect((fresh.querySelector("details.chat-request") as HTMLElement).hasAttribute("open")).toBe(false);
+  });
 });
 
 describe("a request's state is visible without reading it", () => {

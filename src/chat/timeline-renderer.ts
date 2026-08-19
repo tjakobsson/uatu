@@ -82,17 +82,24 @@ export class TimelineRenderer {
       // A request does not take its open state from `expanded`: a pending one
       // is force-open (below), and force-opening it fires a toggle that records
       // it as "expanded" — so honouring that set would keep it open once it
-      // resolves and defeat the receding. Instead a pending request opens and a
-      // resolved one starts closed; a resolved card the user opens by hand stays
-      // open because a stable item is patched in place, never rebuilt. Every
-      // other item preserves its DOM open state across re-renders as before.
+      // resolves and defeat the receding. Instead a pending request opens, and
+      // the pending→resolved transition starts the card closed. A card that was
+      // already resolved keeps its DOM open state across rebuilds — a resolved
+      // item republished with fresh identity (a resync re-running the
+      // selection) is not a new resolution, and snapping shut a card the
+      // reader opened to audit would punish them for a stream hiccup.
       const isRequest = item.type === "permission" || item.type === "question";
+      const stayedResolved = (item.type === "permission" || item.type === "question")
+        && item.status === "resolved"
+        && entry !== undefined
+        && (entry.item.type === "permission" || entry.item.type === "question")
+        && entry.item.status === "resolved";
       // A row the stream opened for its live tail is not a row the reader
       // opened: taking its DOM state back as "expanded" would keep a finished
       // tool permanently expanded, since the auto-open rule would then never
       // get to say no. Its own rule decides again on every render instead.
       const open = isRequest
-        ? false
+        ? stayedResolved && entry!.node.hasAttribute("open")
         : entry
           ? entry.node.hasAttribute("open") && !entry.node.hasAttribute("data-auto-open")
           : expanded.has(item.id);
@@ -458,19 +465,26 @@ function autoOpen(status: ActivityStatus, output: string | undefined): boolean {
  */
 export const READER_CLOSED = "data-reader-closed";
 
-// One rendering for a tool or command's output. While it runs, the tail is
-// shown live so progress is visible; once finished, a long output is bounded to
-// a preview with a native show-more that reveals the rest — never dumped whole,
-// never dropped. The full text is always present in the DOM.
+// One rendering for a tool or command's output. While it runs, only the tail
+// is shown (and rendered) so progress is visible without the transcript
+// carrying the whole log; once finished, a long output is bounded to a preview
+// with a native show-more that reveals the rest — from then on the full text
+// is present in the DOM.
 function renderActivityOutput(output: string | undefined, status: ActivityStatus): string {
   if (!output) return "";
-  const lines = output.split("\n");
   if (status === "running") {
-    const tail = lines.slice(-OUTPUT_LINE_LIMIT);
-    const elided = lines.length - tail.length;
-    const note = elided > 0 ? `<p class="chat-output-elided">…${elided} earlier ${elided === 1 ? "line" : "lines"}</p>` : "";
-    return `${note}<pre class="chat-tool-stream">${escapeHtml(tail.join("\n"))}</pre>`;
+    // The tail is sliced without materializing every line: this re-runs on
+    // every streamed chunk, and splitting the whole accumulated output made
+    // each chunk pay for the full transcript in allocations.
+    let newlines = 0;
+    for (let at = output.indexOf("\n"); at !== -1; at = output.indexOf("\n", at + 1)) newlines += 1;
+    if (newlines + 1 <= OUTPUT_LINE_LIMIT) return `<pre class="chat-tool-stream">${escapeHtml(output)}</pre>`;
+    let cut = output.length;
+    for (let index = 0; index < OUTPUT_LINE_LIMIT; index += 1) cut = output.lastIndexOf("\n", cut - 1);
+    const elided = newlines + 1 - OUTPUT_LINE_LIMIT;
+    return `<p class="chat-output-elided">…${elided} earlier ${elided === 1 ? "line" : "lines"}</p><pre class="chat-tool-stream">${escapeHtml(output.slice(cut + 1))}</pre>`;
   }
+  const lines = output.split("\n");
   if (lines.length <= OUTPUT_LINE_LIMIT) return `<pre>${escapeHtml(output)}</pre>`;
   const preview = lines.slice(0, OUTPUT_LINE_LIMIT).join("\n");
   const rest = lines.slice(OUTPUT_LINE_LIMIT).join("\n");

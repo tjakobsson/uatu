@@ -1,3 +1,4 @@
+import { TOKEN_USAGE_COMPONENTS } from "./usage";
 import type {
   ActivityStatus,
   ChatAgent,
@@ -225,8 +226,8 @@ export function parseQuestionRequest(value: unknown): QuestionRequest {
 function expectTokenUsage(value: unknown, label: string): void {
   if (value === undefined) return;
   const usage = expectRecord(value, label);
-  expectKeys(usage, ["input", "output", "reasoning", "cacheRead", "cacheWrite"], label);
-  for (const key of ["input", "output", "reasoning", "cacheRead", "cacheWrite"] as const) {
+  expectKeys(usage, [...TOKEN_USAGE_COMPONENTS], label);
+  for (const key of TOKEN_USAGE_COMPONENTS) {
     expectOptionalCount(usage[key], `${label} ${key}`);
   }
 }

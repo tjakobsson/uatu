@@ -215,25 +215,28 @@ export function patchFiles(patch: string): string[] {
  * line and would otherwise render as an addition.
  */
 export function patchDiffLines(patch: string): DiffLine[] {
-  // `--- ` and `+++ ` are file markers only *before* a hunk starts; inside one
-  // they are ordinary changed lines. Deleting `-- security check` produces
-  // exactly `--- security check`, and filtering it by prefix alone dropped a
-  // real change from the permission card — someone could approve an edit
-  // without having been shown every line of it. Position decides, so the one
-  // thing this has to track is whether a hunk is open.
-  let inHunk = false;
+  // `--- ` and `+++ ` are file markers only in a unified diff's header — from
+  // git's `diff `/`index ` preamble to that file's first `@@` hunk. Everywhere
+  // else they are ordinary changed lines: deleting `-- security check`
+  // produces exactly `--- security check`, and dropping it by prefix alone
+  // meant someone could approve an edit without having been shown every line
+  // of it. The apply_patch envelope has no such markers at all — after a
+  // `*** <verb> File:` header every +/- line is a change, whether or not an
+  // `@@` context marker ever appears — so an envelope verb opens content, not
+  // another header. Position decides; the one thing tracked is which of the
+  // two zones a line sits in.
+  let inContent = false;
   return patch.split("\n").flatMap((line): DiffLine[] => {
-    if (line.startsWith("@@")) {
-      inHunk = true;
+    if (line.startsWith("@@") || line.startsWith("***")) {
+      inContent = true;
       return [];
     }
-    // A new file section: the `***` envelope verbs, and git's own preamble.
-    // Whatever follows is header again until that section's first hunk.
-    if (line.startsWith("***") || line.startsWith("diff ") || line.startsWith("index ")) {
-      inHunk = false;
+    // Git's preamble: header again until this file section's first hunk.
+    if (line.startsWith("diff ") || line.startsWith("index ")) {
+      inContent = false;
       return [];
     }
-    if (!inHunk && (line.startsWith("--- ") || line.startsWith("+++ "))) return [];
+    if (!inContent && (line.startsWith("--- ") || line.startsWith("+++ "))) return [];
     if (line.startsWith("+")) return [{ sign: "+", text: line.slice(1) }];
     if (line.startsWith("-")) return [{ sign: "-", text: line.slice(1) }];
     return [];

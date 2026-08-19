@@ -488,12 +488,21 @@ describe("prompt, abort, permission, and question mutations", () => {
     provider.sessions = [fixtureSession("session")];
     provider.models = [{ selection: { providerId: "anthropic", modelId: "claude" }, provider: "Anthropic", name: "Claude", variants: ["high", "xhigh"] }];
     const model = { providerId: "anthropic", modelId: "claude" };
+    let modelLists = 0;
+    const listModels = provider.listModels.bind(provider);
+    provider.listModels = async () => { modelLists += 1; return listModels(); };
     const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
 
     await adapter.prompt("session", "r1", "think hard", model, undefined, "high");
     expect(provider.prompts[0]).toEqual(expect.objectContaining({ variant: "high" }));
+    // The model changed and the variant is new, but one list answers both
+    // checks — and a variant is re-sent with every prompt, so an unchanged
+    // one must not pay a provider round trip per message.
+    expect(modelLists).toBe(1);
+    await adapter.prompt("session", "r2", "keep thinking", model, undefined, "high");
+    expect(modelLists).toBe(1);
     // Unknown for this model — refused before dispatch.
-    await expect(adapter.prompt("session", "r2", "nope", model, undefined, "ultra")).rejects.toBeInstanceOf(InvalidVariantSelectionError);
+    await expect(adapter.prompt("session", "r3", "nope", model, undefined, "ultra")).rejects.toBeInstanceOf(InvalidVariantSelectionError);
   });
 
   test("joins duplicate prompts, steers while running, and preserves content on abort", async () => {
@@ -1204,7 +1213,7 @@ describe("pending permission recovery", () => {
     }));
   });
 
-  test("evicting a conversation drops the subagent attribution it accumulated", async () => {
+  test("a tally rebuilt by live events after an eviction is not mistaken for complete", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
     provider.pages.set("first", { items: [{
@@ -1213,6 +1222,14 @@ describe("pending permission recovery", () => {
         status: "running", input: { description: "Review renderer" }, metadata: { sessionId: "child" },
       } }],
     }] });
+    // The child's store holds what was reported before the eviction; the
+    // stored figure for msg_a is deliberately staler than what arrived live.
+    let childStore: never[] = [];
+    const listMessages = provider.listMessages.bind(provider);
+    provider.listMessages = async (sessionId, options) => {
+      if (sessionId !== "child") return listMessages(sessionId, options);
+      return { items: childStore };
+    };
     const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1, maxProjections: 2 });
     await adapter.history("parent");
     const pump = adapter.startEventPump();
@@ -1230,24 +1247,25 @@ describe("pending permission recovery", () => {
 
     report("a", 500);
     while (sumInput(row()) !== 500) await Bun.sleep(1);
+    childStore = [{ id: "msg_a", type: "assistant", time: { created: 2 }, tokens: { input: 500 } }] as never[];
 
     // Two other conversations push the parent out of the LRU, and the tally
-    // kept for its subagent goes with it — it existed to decorate a row in
-    // that timeline, and the timeline is gone.
+    // kept for its subagent goes with it. The child keeps running: its next
+    // report recreates a map holding only the post-eviction message.
     adapter.projectionForTests("other-1");
     adapter.projectionForTests("other-2");
 
     report("b", 700);
     await Bun.sleep(20);
 
-    // Reopened, the row carries the tally that survived and only that: the
-    // store never held the attribution, so reopening reapplies what this
-    // adapter still has — 700, with the evicted 500 gone for good.
+    // Reopened, the partial rebuild must not pass for the whole answer: the
+    // pre-eviction 500 is recovered from the child's store and merged with
+    // the 700 that arrived live after the eviction.
     await adapter.history("parent");
-    expect(sumInput(row())).toBe(700);
+    expect(sumInput(row())).toBe(1_200);
     report("c", 300);
-    while (sumInput(row()) === 700) await Bun.sleep(1);
-    expect(sumInput(row())).toBe(1_000);
+    while (sumInput(row()) !== 1_500) await Bun.sleep(1);
+    expect(sumInput(row())).toBe(1_500);
 
     await adapter.stopEventPump();
     await pump;

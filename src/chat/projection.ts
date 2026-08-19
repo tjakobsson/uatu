@@ -1,3 +1,4 @@
+import { mergeAssistantMessage } from "./usage";
 import type { ChatEvent, ConversationItem, ConversationSnapshot, ConversationStatus } from "./types";
 
 export type AcceptedDraft = { requestId: string; messageId: string; text: string };
@@ -110,14 +111,7 @@ function mergeUpsert(existing: ConversationItem | undefined, incoming: Conversat
       : incoming;
   }
   if (existing.type === "assistant_message" && incoming.type === "assistant_message") {
-    const usageOnly = incoming.markdown === "";
-    return {
-      ...existing,
-      ...incoming,
-      createdAt: usageOnly ? existing.createdAt : incoming.createdAt,
-      markdown: incoming.markdown || existing.markdown,
-      ...(existing.usage || incoming.usage ? { usage: { ...existing.usage, ...incoming.usage } } : {}),
-    };
+    return mergeAssistantMessage(existing, incoming);
   }
   return incoming;
 }

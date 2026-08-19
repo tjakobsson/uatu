@@ -1,7 +1,9 @@
 import { randomBytes, randomUUID } from "node:crypto";
 
+import { boundedSet } from "../shared/bounded-map";
 import { ProviderUpdateCoalescer } from "./coalescer";
 import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage, type NormalizedProviderUpdate } from "./normalization";
+import { mergeAssistantMessage, sameUsage, TOKEN_USAGE_COMPONENTS } from "./usage";
 import type { OpenCodeProvider, ProviderPermissionReply, ProviderSession } from "./provider";
 import { IdempotencyReceipts } from "./receipts";
 import { ConversationReplay, type ReplaySubscription } from "./replay";
@@ -109,6 +111,7 @@ export class OpenCodeChatAdapter {
   private readonly countedEventTypes = new Set<string>();
   private readonly lastModel = new Map<string, ModelSelection>();
   private readonly lastMode = new Map<string, string>();
+  private readonly lastVariant = new Map<string, string>();
   // A subagent's own cost, kept per message within the child session. Per
   // message because `message.updated` restates a message's growing tokens
   // rather than adding to them — summing every event would multiply the same
@@ -121,6 +124,13 @@ export class OpenCodeChatAdapter {
   // no projection of its own. A ceiling backstops both maps besides.
   private readonly childUsage = new Map<string, Map<string, TokenUsage>>();
   private readonly childModel = new Map<string, string>();
+  // Attribution keys whose tally has been squared against the child's stored
+  // history. A live tally alone is not proof of completeness: a parent evicted
+  // mid-run loses its maps, and the child's next event recreates one holding
+  // only the post-eviction message — present, but missing everything before.
+  // Only a successful stored read (merged with whatever landed live) earns the
+  // mark, and only the mark lets history() skip the read.
+  private readonly completeAttributions = new Set<string>();
   private readonly providerEventMemory = createProviderEventMemory();
   private pumpController: AbortController | null = null;
   private pumpPromise: Promise<void> | null = null;
@@ -236,13 +246,16 @@ export class OpenCodeChatAdapter {
     // A subagent's attribution reached the parent as a live upsert, and the
     // parent's own store has no memory of it — so a reopened conversation
     // would show costs that simply vanished. The child's stored messages do
-    // still carry them, so a tally this adapter no longer holds is rebuilt
-    // from there, once, and banked. Paid per parent-open for a subagent never
-    // seen live rather than on every open (the aggregate is still computed
-    // here, not fetched per render) — and in parallel, so a fan-out costs one
-    // round trip rather than one each.
+    // still carry them, so a tally not yet squared against that store is
+    // rebuilt from there, once, and banked. The gate is the completeness mark,
+    // not mere map presence: a tally recreated by live events after an
+    // eviction exists but holds only the post-eviction messages, and skipping
+    // the read for it would under-report the child forever. Paid once per
+    // child rather than per open (the aggregate is still computed here, not
+    // fetched per render) — and in parallel, so a fan-out costs one round trip
+    // rather than one each.
     const unattributed = [...new Set(items.flatMap(item =>
-      item.type === "tool" && item.childConversationId && !this.childUsage.has(attributionKey(id, item.childConversationId))
+      item.type === "tool" && item.childConversationId && !this.completeAttributions.has(attributionKey(id, item.childConversationId))
         ? [item.childConversationId]
         : []))];
     await Promise.all(unattributed.map(childId => this.reconstructAttribution(id, childId)));
@@ -407,10 +420,17 @@ export class OpenCodeChatAdapter {
       const delivery = projection.status === "running" ? "steer" : "queue";
       const messageId = this.id();
       const previousModel = model ? this.lastModel.get(conversationId) : undefined;
-      if (model && (!previousModel || !sameSelection(previousModel, model))) {
-        const models = await this.provider.listModels();
-        if (!models.some(candidate => sameSelection(candidate.selection, model))) throw new InvalidModelSelectionError();
+      const modelChanged = model !== undefined && (!previousModel || !sameSelection(previousModel, model));
+      // One list serves the model check and the variant check below; only a
+      // change pays the round trip.
+      let available: ChatModel[] | undefined;
+      if (model && modelChanged) {
+        available = await this.provider.listModels();
+        if (!available.some(candidate => sameSelection(candidate.selection, model))) throw new InvalidModelSelectionError();
         this.lastModel.set(conversationId, model);
+        // A variant is valid only for the model it was checked against, so a
+        // model change re-arms the variant check.
+        this.lastVariant.delete(conversationId);
       }
       // Same freshness rule as the model: only a change pays the list round
       // trip, and an unknown name is refused rather than passed through for
@@ -422,11 +442,15 @@ export class OpenCodeChatAdapter {
       }
       // A variant is refused unless the selected model advertises it. Checked
       // against the model, since variants are per-model — an unknown one passed
-      // through would silently do nothing on the wire.
-      if (variant) {
-        const models = await this.provider.listModels();
-        const selected = model && models.find(candidate => sameSelection(candidate.selection, model));
+      // through would silently do nothing on the wire. Same freshness rule as
+      // the model and mode: a variant is re-sent with every prompt of a
+      // conversation, so validating it every time would pay a provider round
+      // trip per message rather than per change.
+      if (variant && this.lastVariant.get(conversationId) !== variant) {
+        available ??= await this.provider.listModels();
+        const selected = model && available.find(candidate => sameSelection(candidate.selection, model));
         if (!selected?.variants?.includes(variant)) throw new InvalidVariantSelectionError();
+        this.lastVariant.set(conversationId, variant);
       }
       // Emptiness is checked before dispatch (afterwards the store already
       // holds this prompt), but the rename itself waits for admission — a
@@ -636,8 +660,24 @@ export class OpenCodeChatAdapter {
     // the replay cursor.
     const live = this.childUsage.get(key);
     if (live) for (const [messageId, usage] of live) byMessage.set(messageId, usage);
-    capped(this.childUsage, key, byMessage);
-    if (model !== undefined && !this.childModel.has(key)) capped(this.childModel, key, model);
+    this.bankAttribution(this.childUsage, key, byMessage);
+    if (model !== undefined && !this.childModel.has(key)) this.bankAttribution(this.childModel, key, model);
+    // Squared against the store from here on; only an eviction re-arms the read.
+    this.completeAttributions.add(key);
+    if (this.completeAttributions.size > MAX_CHILD_ATTRIBUTIONS) {
+      this.completeAttributions.delete(this.completeAttributions.values().next().value!);
+    }
+  }
+
+  /**
+   * Bounded insert for the attribution maps. An eviction takes the mark of
+   * completeness with it: the next open of that parent must re-read the
+   * child's store rather than trust whatever partial tally live events
+   * rebuild afterwards.
+   */
+  private bankAttribution<T>(map: Map<string, T>, key: string, value: T): void {
+    const evicted = boundedSet(map, key, value, MAX_CHILD_ATTRIBUTIONS);
+    if (evicted !== undefined) this.completeAttributions.delete(evicted);
   }
 
   /**
@@ -678,7 +718,7 @@ export class OpenCodeChatAdapter {
     }
     if (!parentId) return;
     const key = attributionKey(parentId, conversationId);
-    if (assistantModel !== undefined) capped(this.childModel, key, assistantModel);
+    if (assistantModel !== undefined) this.bankAttribution(this.childModel, key, assistantModel);
     if (reported !== undefined) {
       // Keyed by the provider's message id, not by the part the usage
       // decorated: a message can produce several text parts, and its tokens
@@ -686,16 +726,23 @@ export class OpenCodeChatAdapter {
       // message's spend once for every part it emitted.
       const byMessage = this.childUsage.get(key) ?? new Map<string, TokenUsage>();
       byMessage.set(reported.messageId, reported.usage);
-      capped(this.childUsage, key, byMessage);
+      this.bankAttribution(this.childUsage, key, byMessage);
     }
     // Nothing to decorate if the parent is not projected — the row lives in
     // its timeline, and an unprojected parent has no row on screen to carry
-    // the figure.
+    // the figure. The lookup walks the projection unordered: this runs per
+    // child event, and OpenCode restates a message's tokens many times a
+    // turn, so sorting the whole parent timeline each time (what `items()`
+    // does) would make a chatty subagent cost the parent's length per chunk.
     const parent = this.projections.get(parentId);
-    const row = parent?.items().find(item => item.type === "tool" && item.childConversationId === conversationId);
+    const row = parent?.find(item => item.type === "tool" && item.childConversationId === conversationId);
     if (!row || row.type !== "tool") return;
     const model = this.childModel.get(key);
     const usage = sumUsage(this.childUsage.get(key));
+    // Nothing new to say: most restatements change nothing until the turn's
+    // token counts actually move, and an upsert that restates the row
+    // verbatim still costs a replay frame for every subscriber.
+    if ((model === undefined || row.model === model) && (usage === undefined || sameUsage(row.usage, usage))) return;
     coalescer.push(parentId, [{ kind: "upsert", item: {
       ...row,
       ...(model === undefined ? {} : { model }),
@@ -940,8 +987,10 @@ export class OpenCodeChatAdapter {
       this.projections.delete(candidateId);
       this.lastModel.delete(candidateId);
       this.lastMode.delete(candidateId);
+      this.lastVariant.delete(candidateId);
       forgetAttributions(this.childUsage, candidateId);
       forgetAttributions(this.childModel, candidateId);
+      forgetAttributions(this.completeAttributions, candidateId);
     }
     return projection;
   }
@@ -997,6 +1046,12 @@ export class ConversationProjection {
 
   items(): ConversationItem[] {
     return [...this.timeline.values()].sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+  }
+
+  /** First match in insertion order, for lookups that need no timeline order. */
+  find(predicate: (item: ConversationItem) => boolean): ConversationItem | undefined {
+    for (const item of this.timeline.values()) if (predicate(item)) return item;
+    return undefined;
   }
 
   seed(items: ConversationItem[]): void {
@@ -1122,15 +1177,9 @@ function attributionKey(parentId: string, childId: string): string {
   return `${parentId}${ATTRIBUTION_SEPARATOR}${childId}`;
 }
 
-function forgetAttributions(map: Map<string, unknown>, parentId: string): void {
+function forgetAttributions(keyed: Map<string, unknown> | Set<string>, parentId: string): void {
   const prefix = `${parentId}${ATTRIBUTION_SEPARATOR}`;
-  for (const key of map.keys()) if (key.startsWith(prefix)) map.delete(key);
-}
-
-/** Insert-ordered with a ceiling: the oldest child attributed drops out first. */
-function capped<T>(map: Map<string, T>, key: string, value: T): void {
-  map.set(key, value);
-  if (map.size > MAX_CHILD_ATTRIBUTIONS) map.delete(map.keys().next().value!);
+  for (const key of keyed.keys()) if (key.startsWith(prefix)) keyed.delete(key);
 }
 
 /**
@@ -1142,7 +1191,7 @@ function sumUsage(byMessage: Map<string, TokenUsage> | undefined): TokenUsage | 
   if (!byMessage || byMessage.size === 0) return undefined;
   const total: TokenUsage = {};
   for (const usage of byMessage.values()) {
-    for (const key of ["input", "output", "reasoning", "cacheRead", "cacheWrite"] as const) {
+    for (const key of TOKEN_USAGE_COMPONENTS) {
       const value = usage[key];
       if (value !== undefined) total[key] = (total[key] ?? 0) + value;
     }
@@ -1160,18 +1209,7 @@ function mergeInteraction(current: ConversationItem | undefined, incoming: Conve
     if (!incoming.text) return { ...incoming, text: current.text };
   }
   if (current.type === "assistant_message" && incoming.type === "assistant_message") {
-    // A usage-only upsert decorates a part that is already on screen: it
-    // carries no text and no time of its own. Taking its empty markdown would
-    // erase the answer mid-stream; taking its timestamp would resort the
-    // timeline, which is ordered by `createdAt`.
-    const usageOnly = incoming.markdown === "";
-    return {
-      ...current,
-      ...incoming,
-      createdAt: usageOnly ? current.createdAt : incoming.createdAt,
-      markdown: incoming.markdown || current.markdown,
-      ...(current.usage || incoming.usage ? { usage: { ...current.usage, ...incoming.usage } } : {}),
-    };
+    return mergeAssistantMessage(current, incoming);
   }
   // Resolved interactions are terminal. The merged provider streams preserve
   // order only within themselves, so a delayed classic alias of an ask can

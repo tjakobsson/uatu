@@ -4758,6 +4758,19 @@ body.is-resizing-chat .chat-resizer {
   font-size: 0.85em;
 }
 
+/* `pre` is pinned the same way — an absolute 12px in both vendored sheets —
+   so without this, fenced blocks stayed at Preview's size while Chat prose
+   and inline code scaled down. The inner `code` must come back to 100%: the
+   Chat-scoped `code` rule above outranks the vendored `pre code` reset
+   (0,2,1 vs 0,1,2) and would otherwise compound 0.85em twice inside fences. */
+.chat-surface .markdown-body pre {
+  font-size: 0.85em;
+}
+
+.chat-surface .markdown-body pre code {
+  font-size: 100%;
+}
+
 .chat-surface:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
@@ -4818,8 +4831,7 @@ body.is-resizing-chat .chat-resizer {
   row-gap: 0.4rem;
 }
 
-#chat-composer-status,
-.chat-context-usage {
+#chat-composer-status {
   min-width: 0;
 }
 
@@ -5435,7 +5447,6 @@ body.is-resizing-chat .chat-resizer {
    opening it only adds the breakdown. */
 .chat-context-usage {
   flex: 0 0 auto;
-  min-width: 0;
 }
 
 .chat-context-usage[hidden] {

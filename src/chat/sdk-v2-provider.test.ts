@@ -101,10 +101,19 @@ describe("OpenCode v2 identity policy", () => {
       },
     } as unknown as OpencodeClient;
     const model = { providerId: "openai", modelId: "gpt-5.6-sol" };
-    await new SdkV2Provider(nativeClient, "/workspace").command("ses_native", { id: "r1", name: "review", arguments: "", model, variant: "xhigh" });
+    const native = new SdkV2Provider(nativeClient, "/workspace");
+    await native.command("ses_native", { id: "r1", name: "review", arguments: "", model, variant: "xhigh" });
     expect(calls[0]).toEqual(["switchModel", { sessionID: "ses_native", model: { providerID: "openai", id: "gpt-5.6-sol", variant: "xhigh" } }]);
     expect(calls[1]![0]).toBe("command");
     expect(calls[1]![1]).not.toHaveProperty("variant");
+
+    // "Reasoning: default" is a choice too: the model reference is re-sent
+    // WITHOUT a variant, exactly as the prompt path does — skipping the call
+    // would leave the xhigh applied above silently active for command turns.
+    calls.length = 0;
+    await native.command("ses_native", { id: "r2", name: "review", arguments: "", model });
+    expect(calls[0]).toEqual(["switchModel", { sessionID: "ses_native", model: { providerID: "openai", id: "gpt-5.6-sol" } }]);
+    expect(calls[1]![0]).toBe("command");
 
     // Compatibility: the session exists only in the classic store, where the
     // v2 switchModel lookup would fail — the variant goes in the command body

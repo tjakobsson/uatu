@@ -2,6 +2,7 @@ import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2/client";
 import { createHash } from "node:crypto";
 
+import { boundedSet } from "../shared/bounded-map";
 import type {
   OpenCodeProvider,
   PendingPermission,
@@ -35,6 +36,13 @@ export function createSdkV2Provider(options: {
 
 export class SdkV2Provider implements OpenCodeProvider {
   private readonly compatibilitySessions = new Set<string>();
+  // The reasoning variant each v2 session last had applied through
+  // switchModel. A command's dispatch body already names its model, so for
+  // commands switchModel exists only to move the session's variant — and
+  // "move" includes moving it back to the default, the one case the incoming
+  // `variant` field alone cannot see. Tracked here so a command with no
+  // variant on a session that never had one pays no extra round trip.
+  private readonly appliedVariants = new Map<string, string>();
 
   constructor(
     private readonly client: OpencodeClient,
@@ -123,6 +131,9 @@ export class SdkV2Provider implements OpenCodeProvider {
       // this runs every turn and the variant is reapplied every turn.
       model: { providerID: selection.providerId, id: selection.modelId, ...(variant ? { variant } : {}) },
     }));
+    // Only after success: a failed switch left the session where it was.
+    if (variant) this.appliedVariants.set(sessionId, variant);
+    else this.appliedVariants.delete(sessionId);
   }
 
   async renameSession(sessionId: string, title: string): Promise<ProviderSession> {
@@ -320,14 +331,18 @@ export class SdkV2Provider implements OpenCodeProvider {
     const messageId = stableProviderId("msg", input.id);
     // A command is a turn like any other, so it runs at the reasoning effort
     // the user picked. On the v2 path the variant is not a body field — it
-    // rides on the model reference — so it has to be applied the same way
-    // `prompt` does, or the picker would accept a choice that command-driven
-    // turns silently ignored. A compatibility session exists only in the
-    // classic store, where the v2 switchModel lookup fails — there the
-    // variant is a body field on the dispatch itself, as the classic prompt
-    // path already sends it.
+    // rides on the model reference — so it is applied through switchModel:
+    // when one is chosen, and ALSO when the picker says default while an
+    // earlier turn left one applied, which is what resets it. Gating purely
+    // on `input.variant` left "Reasoning: default" silently running command
+    // turns at whatever variant was last applied. A compatibility session
+    // exists only in the classic store, where the v2 switchModel lookup
+    // fails — there the variant is a body field on the dispatch itself, as
+    // the classic prompt path already sends it.
     const compatibility = this.compatibilitySessions.has(sessionId);
-    if (!compatibility && input.model && input.variant) await this.switchModel(sessionId, input.model, input.variant);
+    if (!compatibility && input.model && (input.variant !== undefined || this.appliedVariants.has(sessionId))) {
+      await this.switchModel(sessionId, input.model, input.variant);
+    }
     const dispatch = input.name === "compact" || input.name === "summarize"
       ? (async () => ensureSuccess(await this.client.session.summarize({
           sessionID: sessionId,
@@ -522,8 +537,7 @@ async function* mergeProviderEvents(streams: AsyncIterable<unknown>[], signal: A
           let identity = providerEventIdentity(event);
           if (typeof event.id !== "string") {
             const occurrence = (occurrences.get(identity) ?? 0) + 1;
-            occurrences.set(identity, occurrence);
-            if (occurrences.size > 2_048) occurrences.delete(occurrences.keys().next().value!);
+            boundedSet(occurrences, identity, occurrence, 2_048);
             identity = `${identity}#${occurrence}`;
           }
           if (seen.has(identity)) continue;

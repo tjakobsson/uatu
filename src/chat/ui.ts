@@ -9,7 +9,8 @@ import { ChatViewportController } from "./viewport";
 import { newRequestId } from "./ids";
 import { insertCommand, matchingCommands } from "./slash-commands";
 import { navigateWorkspaceFileReference, resolveWorkspaceFileReference } from "./file-references";
-import { READER_CLOSED, TimelineRenderer, decorateFileLinks, latestTodoEntries, statusLabel, subagentEntries } from "./timeline-renderer";
+import { READER_CLOSED, TimelineRenderer, decorateFileLinks, latestTodoEntries, statusLabel, subagentEntries, type SubagentEntry } from "./timeline-renderer";
+import { totalTokens } from "./usage";
 import {
   addAcceptedDraft,
   applyChatEvent,
@@ -185,11 +186,16 @@ export function initChat(): void {
   };
   nameAgent();
 
-  const announce = (message: string, error = false) => {
-    state.textContent = message;
-    state.classList.toggle("is-error", error);
-    state.hidden = !message;
+  // One status-line contract for every surface that has one; the parent's
+  // state element and the drill-down's differ only in which element speaks.
+  const announcerFor = (target: HTMLElement | null) => (message: string, error = false) => {
+    if (!target) return;
+    target.textContent = message;
+    target.classList.toggle("is-error", error);
+    target.hidden = !message;
   };
+  const announce = announcerFor(state);
+  const announceChild = announcerFor(drilldownState);
 
   const geometryOf = (scroller: HTMLElement, container: HTMLElement): AnchorGeometry => {
     const bounds = scroller.getBoundingClientRect();
@@ -207,8 +213,11 @@ export function initChat(): void {
   };
 
   const geometry = (): AnchorGeometry => geometryOf(timeline, items);
-  const childGeometry = (): AnchorGeometry =>
-    drilldownTimeline && drilldownItems ? geometryOf(drilldownTimeline, drilldownItems) : geometryOf(timeline, items);
+  // Every caller sits behind a guard on the drill-down elements existing
+  // (renderChild and the wiring at the bottom), so the assertions cannot
+  // fire — and a fallback to the parent's scroller would anchor the child
+  // against the wrong geometry if they somehow did.
+  const childGeometry = (): AnchorGeometry => geometryOf(drilldownTimeline!, drilldownItems!);
 
   const flushSave = () => {
     if (saveTimer !== null) {
@@ -285,9 +294,18 @@ export function initChat(): void {
   // presentation, so a reload does not resurrect an already-dismissed strip.
   const dismissedSubagents = (conversationId: string): Set<string> =>
     new Set(presentation.dismissedSubagents[conversationId] ?? []);
+  // One policy for what a drill-down is titled, read from the structured
+  // entries rather than scraped from whichever markup happens to carry the
+  // text — the track row and the timeline row must produce the same title.
+  const subagentLabel = (entry: SubagentEntry): string =>
+    entry.subagent ? `${entry.subagent} · ${entry.description}` : entry.description;
+  const subagentLabelFor = (conversationId: string, source: ChatProjection | null): string => {
+    const entry = source ? subagentEntries(source.items).find(candidate => candidate.conversationId === conversationId) : undefined;
+    return entry ? subagentLabel(entry) : "Subagent";
+  };
   subagentsItems?.addEventListener("click", event => {
     const open = (event.target as Element).closest<HTMLElement>("[data-open-conversation]");
-    if (open?.dataset.openConversation) openChildConversation(open.dataset.openConversation, open.textContent ?? "Subagent");
+    if (open?.dataset.openConversation) openChildConversation(open.dataset.openConversation, subagentLabelFor(open.dataset.openConversation, projection));
   });
   dismissButton?.addEventListener("click", event => {
     event.preventDefault();
@@ -332,17 +350,30 @@ export function initChat(): void {
     requestsJump.dataset.requestTarget = outstanding[outstanding.length - 1]!.id;
   };
 
-  requestsJump?.addEventListener("click", () => {
-    const id = requestsJump.dataset.requestTarget;
-    if (!id) return;
-    // The count is the parent's, so the jump is too: an open drill-down closes
-    // first rather than scrolling a timeline the child is covering.
-    closeChildConversation();
+  // A jump parked while the drill-down closes. Closing can be asynchronous —
+  // it defers to a history pop when the drill-down's entry is current — and
+  // the close re-asserts the parent's anchor, which would snap a jump
+  // performed before it straight back to where the timeline was pinned. The
+  // close performs the parked jump instead, after its own scroll restore.
+  let pendingRequestJump: string | null = null;
+  const jumpToRequestCard = (id: string) => {
     const card = items.querySelector(`[data-chat-item-id="${CSS.escape(id)}"]`);
     if (!(card instanceof HTMLElement)) return;
     if (card instanceof HTMLDetailsElement) card.open = true;
     card.scrollIntoView({ block: "center" });
     card.focus?.();
+  };
+  requestsJump?.addEventListener("click", () => {
+    const id = requestsJump.dataset.requestTarget;
+    if (!id) return;
+    // The count is the parent's, so the jump is too: an open drill-down closes
+    // first rather than scrolling a timeline the child is covering.
+    if (child) {
+      pendingRequestJump = id;
+      closeChildConversation();
+      return;
+    }
+    jumpToRequestCard(id);
   });
 
   const syncSubagents = () => {
@@ -366,7 +397,7 @@ export function initChat(): void {
     subagentsItems.replaceChildren(...entries.map(entry => {
       const row = document.createElement("li");
       row.className = `is-${entry.status}`;
-      const text = entry.subagent ? `${entry.subagent} · ${entry.description}` : entry.description;
+      const text = subagentLabel(entry);
       if (entry.conversationId) {
         const open = document.createElement("button");
         open.type = "button";
@@ -387,7 +418,7 @@ export function initChat(): void {
       // subagent stays a readable row rather than one asserting a zero.
       const attribution = [
         entry.model,
-        declares("context") && entry.usage ? `${formatTokens(subagentTokens(entry.usage))} tokens` : undefined,
+        declares("context") && entry.usage ? `${formatTokens(totalTokens(entry.usage))} tokens` : undefined,
       ].filter(Boolean).join(" · ");
       if (attribution) {
         const note = document.createElement("span");
@@ -410,12 +441,25 @@ export function initChat(): void {
    * Nothing reported means nothing is shown: an empty meter would be a claim
    * about a conversation, not an absence of data about it.
    */
+  // What the meter last painted, by identity — items are immutable, so the
+  // same usage object means the same figures. This sync runs on every rendered
+  // frame of a streaming turn, and text deltas must not pay for meter and
+  // breakdown rebuilds that would come out identical.
+  let paintedUsage: TokenUsage | undefined;
+  let paintedUsageModel: string | undefined;
   const syncContextIndicator = () => {
     if (!contextUsage?.isConnected || !contextUsageFill || !contextUsageLabel || !contextUsageBreakdown) return;
-    const usage = projection?.items.reduce<TokenUsage | undefined>(
-      (latest, item) => (item.type === "assistant_message" && item.usage ? item.usage : latest),
-      undefined,
-    );
+    // The newest assistant usage, scanned from the tail — it is almost always
+    // right at the end of a long timeline.
+    let usage: TokenUsage | undefined;
+    const timelineItems = projection?.items ?? [];
+    for (let index = timelineItems.length - 1; index >= 0; index -= 1) {
+      const item = timelineItems[index]!;
+      if (item.type === "assistant_message" && item.usage) { usage = item.usage; break; }
+    }
+    if (usage === paintedUsage && modelSelect.value === paintedUsageModel) return;
+    paintedUsage = usage;
+    paintedUsageModel = modelSelect.value;
     if (!usage) {
       contextUsage.hidden = true;
       contextUsage.open = false;
@@ -714,13 +758,18 @@ export function initChat(): void {
 
   /**
    * Reasoning variants belong to the selected model, so the list is rebuilt
-   * whenever the model changes. A model that offers none hides the control
-   * (like an absent mode list), and the whole control is removed when the agent
-   * does not declare the capability. "Default" leads, meaning the model's own
-   * effort, and a chosen variant is remembered per conversation like the model.
+   * whenever the model changes — and the target conversation rides in as the
+   * argument on a conversation switch, because at that moment `projection`
+   * still names the previous one. A model that offers none hides the control
+   * (like an absent mode list), and the whole control is removed when the
+   * agent does not declare the capability — checked as `isConnected`, since
+   * the removed node is still reachable from this closure and repopulating it
+   * would let a stored variant ride along with no visible control saying so.
+   * "Default" leads, meaning the model's own effort, and a chosen variant is
+   * remembered per conversation like the model.
    */
-  const renderVariants = () => {
-    if (!variantSelect) return;
+  const renderVariants = (conversationId = projection?.conversationId ?? presentation.selectedId) => {
+    if (!variantSelect?.isConnected) return;
     const selected = models.find(model => modelValue(model.selection) === modelSelect.value);
     const variants = selected?.variants ?? [];
     variantSelect.replaceChildren();
@@ -728,11 +777,6 @@ export function initChat(): void {
     if (variants.length === 0) return;
     variantSelect.append(new Option("Reasoning: default", ""));
     for (const variant of variants) variantSelect.append(new Option(`Reasoning: ${variant}`, variant));
-    applyVariant(projection?.conversationId ?? presentation.selectedId);
-  };
-
-  const applyVariant = (conversationId: string | undefined) => {
-    if (!variantSelect || variantSelect.hidden) return;
     const offered = (name: string | undefined) => (name && Array.from(variantSelect.options).some(option => option.value === name) ? name : undefined);
     variantSelect.value = offered(conversationId ? presentation.variants[conversationId] : undefined) ?? offered(presentation.variant) ?? "";
   };
@@ -802,12 +846,10 @@ export function initChat(): void {
     presentation.selectedId = id;
     applyModel(id);
     // The variant list belongs to the model, and the model just changed to
-    // this conversation's. Without the rebuild, `applyVariant` below would
-    // validate against the previous conversation's options — hiding a control
-    // the new model does offer, or sending it a variant it does not.
-    renderVariants();
+    // this conversation's — the rebuild validates the stored variant against
+    // the new model's options rather than the previous conversation's.
+    renderVariants(id);
     applyMode(id);
-    applyVariant(id);
     const conversation = conversations.find(item => item.id === id);
     if (chatTitle) chatTitle.textContent = conversation ? displayConversationTitle(conversation) : chatHeading();
     form.hidden = false;
@@ -955,6 +997,15 @@ export function initChat(): void {
     container.addEventListener("toggle", event => {
       const details = event.target as HTMLDetailsElement;
       if (!details.matches("details[data-chat-item-id]")) return;
+      // Inserting a `<details open>` node fires a toggle of its own (the
+      // renderer's force-opened request cards rely on exactly that), so an
+      // open row still carrying the stream's marker is the render echoing,
+      // not the reader speaking. Acting on the echo would strip the marker on
+      // every rebuild — reclassifying each auto-opened row as reader-opened,
+      // pinning it open past completion, and banking its id in `expanded`.
+      // The reader can only ever close an already-open row (open=false, which
+      // passes) or open an unmarked one, so no real interaction is lost.
+      if (details.open && details.hasAttribute("data-auto-open")) return;
       controller.beforeMutation(measure(), details.dataset.chatItemId);
       // The reader has spoken, so the row is theirs from here. Clearing the
       // stream's auto-open marker stops the next render from undoing an
@@ -1047,7 +1098,7 @@ export function initChat(): void {
       const source = sourceProjection();
       if (!target || !source) return;
       if (target.dataset.openConversation) {
-        openChildConversation(target.dataset.openConversation, target.closest("details")?.querySelector(".chat-activity-subject")?.textContent ?? "Subagent");
+        openChildConversation(target.dataset.openConversation, subagentLabelFor(target.dataset.openConversation, source));
         return;
       }
       if (target.dataset.fileRef) {
@@ -1129,13 +1180,6 @@ export function initChat(): void {
     });
   };
 
-  const announceChild = (message: string, error = false) => {
-    if (!drilldownState) return;
-    drilldownState.textContent = message;
-    drilldownState.classList.toggle("is-error", error);
-    drilldownState.hidden = !message;
-  };
-
   const renderChild = (newContent: boolean) => {
     if (!drilldownItems || !drilldownTimeline) return;
     childAnchor.beforeMutation(childGeometry());
@@ -1182,6 +1226,13 @@ export function initChat(): void {
     // only re-asserting the anchor the timeline was already holding.
     timeline.scrollTop = anchor.afterMutation(geometry());
     timeline.focus({ preventScroll: true });
+    // A jump that was waiting on this close lands after the anchor restore,
+    // never before it — see the requests-jump handler.
+    if (pendingRequestJump !== null) {
+      const target = pendingRequestJump;
+      pendingRequestJump = null;
+      jumpToRequestCard(target);
+    }
   };
 
   /**
@@ -1217,8 +1268,15 @@ export function initChat(): void {
         history.pushState({ ...(history.state as Record<string, unknown> | null), chatDrilldown: true }, "", location.href);
       } catch { /* history is best effort; the header control still returns */ }
     }
-    releaseChildBack ??= registerBackInterceptor(() => {
+    releaseChildBack ??= registerBackInterceptor(event => {
       if (!child) return false;
+      // Only the pop that leaves the drill-down's own entry is this layer's
+      // to consume. Landing ON that entry means something pushed above it was
+      // popped — a TOC anchor, a document opened from inside the transcript —
+      // and that back press belongs to the shell's handling, with the layer
+      // staying up. Consuming it would desync the URL from the preview and
+      // leave this entry stranded for the next Back.
+      if ((event.state as { chatDrilldown?: boolean } | null)?.chatDrilldown === true) return false;
       closeChildConversation(true);
       return true;
     });
@@ -1360,7 +1418,10 @@ export function initChat(): void {
     const retry = retryRequests.get(conversationId);
     const requestId = retry?.text === text ? retry.requestId : newRequestId();
     const selectedModel = models.find(model => modelValue(model.selection) === modelSelect.value)?.selection;
-    const selectedVariant = variantSelect && !variantSelect.hidden ? (variantSelect.value || undefined) : undefined;
+    // `isConnected`, not just non-null: the control is removed when the agent
+    // does not declare the capability, and a detached select must not smuggle
+    // a stored variant onto the wire with nothing on screen saying so.
+    const selectedVariant = variantSelect?.isConnected && !variantSelect.hidden ? (variantSelect.value || undefined) : undefined;
     const selectedMode = modeSelect?.value || undefined;
     const wasRunning = projection.status === "running" || projection.status === "sending";
     submitting = true;
@@ -1655,16 +1716,6 @@ function parseStoredModels(value: unknown): Record<string, ModelSelection> {
  * one hover or one expansion away (the title attribute and the breakdown), so
  * the compact form never has to be the only statement.
  */
-/**
- * What a subagent burned: every component the agent reported, output included.
- * Unlike the context indicator — which asks how full the window is right now
- * and so counts only what occupies it — this is a spend figure, and reasoning
- * and output tokens were spent.
- */
-function subagentTokens(usage: TokenUsage): number {
-  return (usage.input ?? 0) + (usage.output ?? 0) + (usage.reasoning ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
-}
-
 function formatTokens(value: number): string {
   if (value < 1_000) return String(value);
   if (value < 1_000_000) return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)}k`;
