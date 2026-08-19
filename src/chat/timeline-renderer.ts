@@ -58,8 +58,16 @@ export class TimelineRenderer {
     const todoLabels = todoActivityLabels(projection.items);
     const durations = turnDurations(projection.items);
 
+    // An assistant message with no text is data, not a bubble: the usage
+    // carrier for a tool-only message (`usage:<id>` from normalization) and a
+    // part the stream has not filled yet both hold facts the readouts consume
+    // while having nothing to show. Filtered before rendering AND before
+    // grouping, so a carrier sitting between two tool calls cannot split a
+    // finished run's group.
+    const visible = projection.items.filter(item => !(item.type === "assistant_message" && item.markdown === ""));
+
     const nodes = new Map<string, HTMLElement>();
-    for (const item of projection.items) {
+    for (const item of visible) {
       const active = activeRequests.has(item.id);
       const todo = todoLabels.get(item.id);
       const isQueued = queued.has(item.id);
@@ -118,7 +126,7 @@ export class TimelineRenderer {
     // one group line; everything else stays flat. Member nodes keep their
     // per-item identity — grouping only changes where they are parented.
     const liveGroupIds = new Set<string>();
-    for (const segment of activitySegments(projection.items, projection.status)) {
+    for (const segment of activitySegments(visible, projection.status)) {
       if (!segment.group) {
         for (const item of segment.items) {
           const node = nodes.get(item.id);

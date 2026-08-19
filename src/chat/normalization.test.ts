@@ -92,7 +92,7 @@ describe("OpenCode v2 normalization", () => {
       { id: "n1", type: "system", text: "Context updated", time: { created: 12 } },
     ];
 
-    const items = messages.flatMap(normalizeProviderMessage);
+    const items = messages.flatMap(message => normalizeProviderMessage(message));
     expect(items.map(item => item.type)).toEqual([
       "user_message", "assistant_message", "reasoning", "tool", "command", "notice", "file_change", "command", "notice",
     ]);
@@ -197,11 +197,12 @@ describe("provider text reconciliation", () => {
   });
 });
 
-// Token usage is the one message-level fact the timeline has no item of its
-// own for: `renderItem` draws any assistant_message as a bubble, so a
-// usage-only item would be a stray empty message. It decorates the last text
-// part of its message instead — on history load directly, and live via the
-// part id the event memory remembers.
+// Token usage is a message-level fact. It decorates the last text part of its
+// message — on history load directly, and live via the part id the event
+// memory remembers — and a message with no text part carries it on a
+// `usage:<id>` item with empty markdown, which the renderer hides: the
+// context readout must see a tool-only message's spend, but nothing may put
+// a stray empty bubble on the timeline.
 describe("token usage", () => {
   const tokens = { input: 12_000, output: 400, reasoning: 90, cache: { read: 8_000, write: 512 } };
   const usage = { input: 12_000, output: 400, reasoning: 90, cacheRead: 8_000, cacheWrite: 512 };
@@ -254,17 +255,21 @@ describe("token usage", () => {
     ]);
   });
 
-  test("usage that beats the first part waits for it rather than minting an item", () => {
+  test("usage that beats the first part rides a hidden carrier, then moves onto it", () => {
     const memory = createProviderEventMemory();
     const projection = new ConversationProjection(new ConversationReplay("g", "s", 10_000));
     const updated = { id: "1", type: "message.updated", data: { info: { id: "msg", sessionID: "s", role: "assistant", time: { created: 3 }, tokens } } };
     for (const update of normalizeProviderEvent(updated, memory).updates) projection.apply(update);
-    // Nothing yet: a message.updated is not evidence that a bubble should
-    // appear, and the part it belongs to has not arrived.
-    expect(projection.items()).toEqual([]);
+    // The carrier holds the figure so the context readout sees it even if no
+    // part ever comes; empty markdown is what keeps it off the screen.
+    expect(projection.items()).toEqual([
+      expect.objectContaining({ id: "usage:msg", type: "assistant_message", markdown: "", usage }),
+    ]);
 
     const part = { id: "2", type: "message.part.updated", data: { part: { id: "prt", messageID: "msg", sessionID: "s", type: "text", text: "The answer." } } };
     for (const update of normalizeProviderEvent(part, memory).updates) projection.apply(update);
+    // The part is the report's home now, and the carrier retires — one
+    // statement of the message's usage, not two.
     expect(projection.items()).toEqual([
       expect.objectContaining({ id: "part:prt", type: "assistant_message", markdown: "The answer.", usage }),
     ]);
@@ -273,14 +278,29 @@ describe("token usage", () => {
   test("a message with no text part still reports its usage for attribution", () => {
     const memory = createProviderEventMemory();
     // A purely agentic message: tool and reasoning parts only, so no text
-    // part ever registers. Its spend must still reach the subagent tally —
-    // the timeline decoration is what waits, not the report.
+    // part ever registers. Its spend reaches the subagent tally through the
+    // envelope, and the conversation's own readout through the carrier item.
     const updated = { id: "1", type: "message.updated", data: { info: { id: "msg", sessionID: "s", role: "assistant", time: { created: 3 }, tokens } } };
     const normalized = normalizeProviderEvent(updated, memory);
-    expect(normalized.updates).toEqual([]);
+    expect(normalized.updates).toEqual([
+      { kind: "upsert", item: expect.objectContaining({ id: "usage:msg", markdown: "", usage }) },
+    ]);
     expect(normalized.assistantUsage).toEqual({ messageId: "msg", usage });
     // The decoration is still pending, waiting for a part that may never come.
     expect(memory.pendingUsage.get("msg")).toEqual(usage);
+  });
+
+  test("a stored message with only tool parts keeps its usage on a hidden carrier", () => {
+    const items = normalizeProviderMessage({
+      info: { id: "msg_t", sessionID: "s1", role: "assistant", time: { created: 6 }, tokens },
+      parts: [{ id: "prt_tool", type: "tool", tool: "read", callID: "c", state: { status: "completed", input: {}, output: "ok" } }],
+    });
+    // Reopening a conversation whose newest message was tool-only must not
+    // lose the window's current fill.
+    expect(items).toEqual([
+      expect.objectContaining({ id: "tool:prt_tool" }),
+      expect.objectContaining({ id: "usage:msg_t", type: "assistant_message", markdown: "", usage }),
+    ]);
   });
 
   test("a user message's tokens are not read, and no memory means no usage", () => {

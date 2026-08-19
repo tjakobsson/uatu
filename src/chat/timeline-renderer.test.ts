@@ -168,6 +168,19 @@ describe("activity grouping", () => {
     expect(group.querySelectorAll(".chat-group-items [data-chat-item-id]")).toHaveLength(3);
   });
 
+  test("a usage carrier renders nothing and does not split a finished run", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    // A tool-only message's usage rides an empty assistant_message item; it
+    // must feed the context readout without becoming a bubble — and without
+    // cutting the run of activities around it into two groups.
+    const carrier: ConversationItem = { id: "usage:m1", type: "assistant_message", createdAt: 1, markdown: "", usage: { input: 500 } };
+    renderer.render(host, projectionWith([user, tool("a"), carrier, tool("b"), tool("c"), answer], { status: "idle" }), new Set());
+    expect(host.querySelector('[data-chat-item-id="usage:m1"]')).toBeNull();
+    expect(Array.from(host.children).map(child => child.getAttribute("data-chat-item-id")))
+      .toEqual(["message:u1", "group:tool:a", "part:a1"]);
+  });
+
   test("the trailing run of a running turn stays flat", () => {
     const renderer = new TimelineRenderer();
     const host = target();

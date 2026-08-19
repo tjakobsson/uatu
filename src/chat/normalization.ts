@@ -170,9 +170,17 @@ function unwrapStoredMessage(value: unknown): { info: RecordValue; parts: unknow
   return { info: envelope, parts: [], classic: false };
 }
 
-export function normalizeProviderMessage(value: unknown): ConversationItem[] {
+/**
+ * `mintUsageCarrier` guards the `usage:<id>` fallback for a message whose
+ * usage found no text part to decorate. On a real stored read the parts are
+ * the whole truth, so no part means no part ever and the carrier is right.
+ * The live `message.updated` path reuses this function with parts it KNOWS
+ * are empty — there the event memory decides where the usage lands, and a
+ * carrier minted here would duplicate (and outlive) that placement.
+ */
+export function normalizeProviderMessage(value: unknown, mintUsageCarrier = true): ConversationItem[] {
   const { info, parts, classic } = unwrapStoredMessage(value);
-  if (classic) return normalizeStoredMessage(info, parts);
+  if (classic) return normalizeStoredMessage(info, parts, mintUsageCarrier);
   const message = info;
   const id = string(message.id, "message id");
   const createdAt = timestamp(record(message.time).created, 0);
@@ -180,7 +188,7 @@ export function normalizeProviderMessage(value: unknown): ConversationItem[] {
     case "user":
       return [{ id: `message:${id}`, type: "user_message", createdAt, text: text(message.text) }];
     case "assistant":
-      return normalizeAssistant(message, id, createdAt);
+      return normalizeAssistant(message, id, createdAt, mintUsageCarrier);
     case "shell":
       return [{
         id: `command:${string(message.callID, "call id")}`,
@@ -493,7 +501,7 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
       const messageId = optionalString(info.id);
       const role = optionalString(info.role) ?? optionalString(info.type);
       if (messageId && role && memory) remember(memory.roles, messageId, role);
-      const updates: NormalizedProviderUpdate[] = normalizeProviderMessage({ info, parts: [] })
+      const updates: NormalizedProviderUpdate[] = normalizeProviderMessage({ info, parts: [] }, false)
         .map(item => ({ kind: "upsert" as const, item }));
       // The message's token usage decorates the last text part it produced —
       // an item that already renders — rather than becoming an item of its
@@ -511,6 +519,12 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
           updates.push(usageUpsert(partId, timestamp(record(info.time).created, createdAt), usage));
         } else {
           remember(memory.pendingUsage, messageId, usage);
+          // "No part yet" may also mean no part ever — an agentic message of
+          // only tool and reasoning calls still fills the context window, and
+          // the readout must see it. The report rides a carrier of its own
+          // (empty markdown renders nothing); if a text part does appear, the
+          // flush below moves the figure onto it and retires the carrier.
+          updates.push(usageUpsert(`usage:${messageId}`, timestamp(record(info.time).created, createdAt), usage));
         }
       }
       const assistantModel = role === "assistant" ? optionalString(info.modelID ?? info.modelId) : undefined;
@@ -544,6 +558,9 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
         if (pending) {
           memory.pendingUsage.delete(messageId);
           updates.push(usageUpsert(`part:${partId}`, partCreatedAt, pending));
+          // The part is the report's home now; the interim carrier retires so
+          // the timeline holds one statement of this message's usage.
+          updates.push({ kind: "remove", itemId: `usage:${messageId}` });
           flushed = { messageId, usage: pending };
         }
       }
@@ -564,17 +581,19 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
 }
 
 /**
- * A usage-only decoration of an existing assistant part. Empty markdown is the
- * signal that this carries no text: `mergeAssistantMessage` (usage.ts) — the
- * one merge both the server projection and the client projection apply — keeps
- * the streamed answer rather than blanking it, and keeps the part's own
+ * A usage-only upsert: a decoration of an existing assistant part, or the
+ * standalone `usage:<messageId>` carrier for a message with no text part.
+ * Empty markdown is the signal that this carries no text: the renderer hides
+ * such items entirely, and `mergeAssistantMessage` (usage.ts) — the one merge
+ * both the server projection and the client projection apply — keeps the
+ * streamed answer rather than blanking it, and keeps the part's own
  * timestamp rather than resorting the timeline.
  */
 function usageUpsert(itemId: string, createdAt: number, usage: TokenUsage): NormalizedProviderUpdate {
   return { kind: "upsert", item: { id: itemId, type: "assistant_message", createdAt, markdown: "", usage } };
 }
 
-function normalizeStoredMessage(info: RecordValue, parts: unknown[]): ConversationItem[] {
+function normalizeStoredMessage(info: RecordValue, parts: unknown[], mintUsageCarrier: boolean): ConversationItem[] {
   const id = string(info.id, "message id");
   const createdAt = timestamp(record(info.time).created, 0);
   if (info.role === "user") {
@@ -582,12 +601,12 @@ function normalizeStoredMessage(info: RecordValue, parts: unknown[]): Conversati
     return [{ id: `message:${id}`, type: "user_message", createdAt, text: body }];
   }
   if (info.role === "assistant") {
-    return normalizeAssistant({ content: parts, error: info.error, snapshot: info.snapshot, tokens: info.tokens }, id, createdAt);
+    return normalizeAssistant({ content: parts, error: info.error, snapshot: info.snapshot, tokens: info.tokens }, id, createdAt, mintUsageCarrier);
   }
   return [];
 }
 
-function normalizeAssistant(message: RecordValue, messageId: string, createdAt: number): ConversationItem[] {
+function normalizeAssistant(message: RecordValue, messageId: string, createdAt: number, mintUsageCarrier: boolean): ConversationItem[] {
   const items = array(message.content).flatMap(value => normalizePart(record(value), createdAt)).flatMap(update => {
     if (update.kind === "upsert") return [update.item];
     if (update.kind === "text" && update.item) return [update.item];
@@ -596,15 +615,20 @@ function normalizeAssistant(message: RecordValue, messageId: string, createdAt: 
   // The stored message states what the turn spent; it goes on the last text
   // part, which is the item on screen when the turn is read back. This is the
   // authoritative path — it is what populates the indicator on opening a
-  // conversation, before any new turn is taken.
+  // conversation, before any new turn is taken. A message with no text part
+  // at all (tool and reasoning calls only) still filled the window, so its
+  // report rides a carrier that renders nothing rather than being dropped.
   const usage = tokensToUsage(message.tokens);
   if (usage) {
+    let attached = false;
     for (let index = items.length - 1; index >= 0; index -= 1) {
       const item = items[index]!;
       if (item.type !== "assistant_message") continue;
       items[index] = { ...item, usage };
+      attached = true;
       break;
     }
+    if (!attached && mintUsageCarrier) items.push({ id: `usage:${messageId}`, type: "assistant_message", createdAt, markdown: "", usage });
   }
   const error = errorMessage(message.error);
   if (error) items.push({ id: `notice:${messageId}:error`, type: "notice", createdAt, level: "error", message: error });

@@ -165,7 +165,7 @@ export class OpenCodeChatAdapter {
         try {
           const page = await this.provider.listMessages(session.id, { limit: 100 });
           const firstUserMessage = page.items
-            .flatMap(normalizeProviderMessage)
+            .flatMap(message => normalizeProviderMessage(message))
             .filter(item => item.type === "user_message" && item.text.trim())
             .sort((left, right) => left.createdAt - right.createdAt)[0];
           if (firstUserMessage?.type === "user_message") {
@@ -222,7 +222,7 @@ export class OpenCodeChatAdapter {
     const replayCursor = this.projection(id).replay.latestCursor();
     const cursor = options.cursor ? decodeHistoryCursor(options.cursor) : undefined;
     const page = await this.provider.listMessages(id, { cursor: cursor?.provider, limit: options.limit ?? DEFAULT_PAGE_SIZE });
-    const items = page.items.flatMap(normalizeProviderMessage);
+    const items = page.items.flatMap(message => normalizeProviderMessage(message));
     // Stable sort with no id tiebreaker: parts of one message share the
     // message's timestamp, so ties must fall back to the provider's own part
     // order (the order `flatMap` already produced). Comparing ids instead
