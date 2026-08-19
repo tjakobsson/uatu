@@ -1299,7 +1299,7 @@ export function initChat(): void {
       const missing = answers.flatMap((answer, index) => answer.length === 0 ? [index] : []);
       if (missing.length > 0) {
         showQuestionPanel(questionForm, missing[0]!);
-        announce(`Still to answer: ${missing.map(index => item.questions[index]!.header).filter(Boolean).join(", ")}`, true);
+        announceFailureFor(source)(`Still to answer: ${missing.map(index => item.questions[index]!.header).filter(Boolean).join(", ")}`, true);
         return;
       }
       void resolveQuestion(source, item.id, { kind: "answered", answers });
@@ -1340,10 +1340,11 @@ export function initChat(): void {
       history.back();
       return;
     }
-    // Reaching here directly (not via a pop) with a token still minted means
-    // the layer's entry is buried under navigation pushed above it — it
-    // cannot be removed, so it is retired and later skipped.
-    if (!popped && drilldownHistoryToken !== null) retiredDrilldownTokens.add(drilldownHistoryToken);
+    // The entry remains somewhere in history in both cases: buried below a
+    // direct close, or in the Forward stack after its Back pop. Retire it so
+    // landing on that same-URL marker later returns to a live document entry
+    // rather than leaving an inert navigation step.
+    if (drilldownHistoryToken !== null) retiredDrilldownTokens.add(drilldownHistoryToken);
     child = null;
     drilldownHistoryToken = null;
     childGeneration += 1;

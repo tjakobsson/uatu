@@ -150,6 +150,36 @@ test.describe("chat panels and navigation", () => {
     await expect(drilldown).toBeHidden();
     expect(page.url()).toBe(documentUrl);
     await expect(page.locator("#chat-conversation-select")).toHaveValue(parent);
+    // The popped drill-down entry remains in the Forward stack, but is retired:
+    // forwarding to it returns to the live parent entry instead of parking on
+    // an inert same-URL marker.
+    await page.goForward();
+    await expect.poll(() => page.evaluate(() => (history.state as { chatDrilldown?: string } | null)?.chatDrilldown)).toBeUndefined();
+    await expect(drilldown).toBeHidden();
+  });
+
+  test("an incomplete question in a drill-down announces inside that layer", async ({ page, request }) => {
+    const child = await control(request, { action: "seed", title: "Question child", child: true, items: [{
+      id: "question:q1", type: "question", createdAt: 1, requestId: "q1", status: "pending",
+      questions: [
+        { header: "Scope", prompt: "Which scope?", options: [{ label: "UI", description: "Interface" }], multiple: false, allowFreeForm: false },
+        { header: "Notes", prompt: "Any notes?", options: [], multiple: false, allowFreeForm: true },
+      ],
+    }] }) as { conversation: { id: string } };
+    await seedAndOpen(page, request, "Question parent", [{
+      id: "tool:agent-question", type: "tool", createdAt: 2, name: "task", status: "running", childConversationId: child.conversation.id,
+      input: JSON.stringify({ description: "Ask reader", subagent_type: "explore", prompt: "go" }),
+    }]);
+    await page.locator("#chat-subagents summary").click();
+    await page.getByRole("button", { name: "explore · Ask reader" }).click();
+    const drilldown = page.locator("#chat-drilldown");
+    await expect(drilldown).toBeVisible();
+
+    const form = drilldown.locator("form[data-question-form]");
+    await form.locator('[data-question-tab="1"]').click();
+    await form.evaluate(element => (element as HTMLFormElement).requestSubmit());
+    await expect(page.locator("#chat-drilldown-state")).toContainText("Still to answer: Scope, Notes");
+    await expect(page.locator("#chat-state")).not.toContainText("Still to answer");
   });
 
   test("a request the parent is waiting on stays answerable behind an open subagent", async ({ page, request }) => {
