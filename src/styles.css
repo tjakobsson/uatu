@@ -5381,8 +5381,71 @@ body.is-resizing-chat .chat-resizer {
   background: var(--accent);
 }
 
+/* Icon-only in both chromes: the up arrow IS the action, in the accent blue
+   for send and steer alike — the aria-label and title state which one this
+   press is, and the label span stays in the DOM for assistive tech. */
+#chat-send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#chat-send .chat-send-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .chat-send-icon {
+  display: block;
+}
+
+/* The agent has the prompt and nothing has come back yet. The pulse is the
+   liveness signal (Paseo-style square); the label restates the status and
+   elapsed time, whose composer twin is visually hidden in touch mode. */
+.chat-waiting {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.25rem 0.9rem;
+  color: var(--text-subtle);
+  font-size: 0.85em;
+}
+
+.chat-waiting[hidden] {
   display: none;
+}
+
+.chat-waiting-pulse {
+  flex: 0 0 auto;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 0.15rem;
+  background: var(--accent);
+  animation: chat-waiting-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes chat-waiting-pulse {
+  0%,
+  100% {
+    transform: scale(0.65);
+    opacity: 0.45;
+  }
+
+  50% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-waiting-pulse {
+    animation: none;
+  }
 }
 
 .chat-primary-button:disabled,
@@ -6059,19 +6122,6 @@ html[data-ui-mode="touch"] #chat-send {
   touch-action: manipulation;
 }
 
-html[data-ui-mode="touch"] #chat-send .chat-send-label {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
-
-html[data-ui-mode="touch"] #chat-send .chat-send-icon {
-  display: block;
-}
 
 html[data-ui-mode="touch"] .chat-model-select {
   flex: 1 1 8rem;

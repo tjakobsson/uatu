@@ -716,6 +716,13 @@
             <div id="chat-timeline" class="chat-timeline" role="log" aria-live="polite" aria-relevant="additions text" tabindex="0">
               <button id="chat-load-older" class="chat-secondary-button chat-load-older" type="button" hidden>Load older messages</button>
               <div id="chat-items"></div>
+              <!-- Liveness while the agent has the prompt but nothing has come
+                   back yet — a local model loading its weights holds this
+                   state for a long while with nothing else saying so. -->
+              <div id="chat-waiting" class="chat-waiting" role="status" hidden>
+                <span class="chat-waiting-pulse" aria-hidden="true"></span>
+                <span id="chat-waiting-label"></span>
+              </div>
             </div>
             <!-- A subagent's transcript is a drill-down into a turn, not a
                  conversation you can start — so it is reached from the

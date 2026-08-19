@@ -71,6 +71,8 @@ export function initChat(): void {
   const variantSelect = document.querySelector<HTMLSelectElement>("#chat-variant-select");
   const cancel = document.querySelector<HTMLButtonElement>("#chat-cancel");
   const composerStatus = document.querySelector<HTMLElement>("#chat-composer-status");
+  const waiting = document.querySelector<HTMLElement>("#chat-waiting");
+  const waitingLabel = document.querySelector<HTMLElement>("#chat-waiting-label");
   const contextUsage = document.querySelector<HTMLDetailsElement>("#chat-context-usage");
   const contextUsageFill = document.querySelector<HTMLElement>("#chat-context-usage-meter .chat-context-meter-fill");
   const contextUsageLabel = document.querySelector<HTMLElement>("#chat-context-usage-label");
@@ -753,6 +755,36 @@ export function initChat(): void {
     return `${base} · ${elapsed}`;
   };
 
+  /**
+   * Waiting on the agent's first sign of life for this turn: the prompt is
+   * accepted and nothing newer than the reader's own message has arrived. A
+   * local model that must load its weights sits in this state for a long
+   * while, and the composer's "Working" line — visually hidden in touch
+   * mode — was the only thing saying anything was happening at all.
+   */
+  const awaitingFirstResponse = (): boolean => {
+    if (!projection) return false;
+    if (projection.status !== "sending" && projection.status !== "running") return false;
+    if (projection.acceptedDrafts.length > 0) return true;
+    for (let index = projection.items.length - 1; index >= 0; index -= 1) {
+      const item = projection.items[index]!;
+      if (item.type === "user_message") return true;
+      // A previous turn's footer and a hidden usage carrier say nothing about
+      // THIS turn; keep looking past them.
+      if (item.type === "turn_status") continue;
+      if (item.type === "assistant_message" && item.markdown === "") continue;
+      return false;
+    }
+    return false;
+  };
+
+  const syncWaiting = () => {
+    if (!waiting || !waitingLabel) return;
+    const show = awaitingFirstResponse();
+    waiting.hidden = !show;
+    if (show) waitingLabel.textContent = workingText();
+  };
+
   const syncControls = () => {
     const status = projection?.status ?? null;
     if (status !== lastStatus) {
@@ -770,7 +802,7 @@ export function initChat(): void {
       delete presentation.workingSince[projection.conversationId];
       save();
     }
-    if (running && workingTimer === null) workingTimer = setInterval(() => { composerStatus.textContent = workingText(); }, 1_000);
+    if (running && workingTimer === null) workingTimer = setInterval(() => { composerStatus.textContent = workingText(); syncWaiting(); }, 1_000);
     if (!running && workingTimer !== null) {
       clearInterval(workingTimer);
       workingTimer = null;
@@ -786,6 +818,7 @@ export function initChat(): void {
     cancel.hidden = !running;
     olderButton.hidden = !projection?.olderCursor;
     composerStatus.textContent = composerNote ?? workingText();
+    syncWaiting();
   };
 
   const noteComposer = (message: string | null) => {
