@@ -42,7 +42,12 @@ test.describe("desktop OpenCode chat", () => {
     await expect(page.locator("#chat-conversation-select option:checked")).toHaveText("Initial prompt");
     await expect(modelSelect).toBeEnabled();
     await expect(page.locator("#chat-items")).toContainText("Initial prompt");
-    await expect(page.locator("#chat-send")).toHaveText("Steer");
+    // The send button is icon-only; the action it would take rides on the
+    // accessible name (and the sr-only label the toHaveText would also see).
+    await expect(page.locator("#chat-send")).toHaveAttribute("aria-label", "Steer message");
+    // With a turn in flight and nothing back yet, the timeline says so.
+    await expect(page.locator("#chat-waiting")).toBeVisible();
+    await expect(page.locator("#chat-waiting")).toContainText("Working");
 
     await input.fill("Use the smaller approach");
     const steerResponse = page.waitForResponse(response => response.url().endsWith("/prompts"));
@@ -110,6 +115,27 @@ test.describe("desktop OpenCode chat", () => {
     // The visible header, not only the assistive one: a workspace always has a
     // root label, so the agent has to sit beside it rather than behind it.
     await expect(page.locator("#chat-context")).toContainText("Fixture Agent");
+  });
+
+  // A model that advertises reasoning variants gets a control for them, sent
+  // with the prompt; a model without variants shows none.
+  test("offers a model's reasoning variants and sends the chosen one", async ({ page, request }) => {
+    await page.getByRole("button", { name: "New" }).click();
+    const variantSelect = page.locator("#chat-variant-select");
+    const modelSelect = page.locator("#chat-model-select");
+    // Claude Sonnet (the default) advertises high/xhigh; GPT-5 advertises none.
+    await expect(variantSelect).toBeVisible();
+    await expect(variantSelect.locator("option")).toHaveText(["Reasoning: default", "Reasoning: high", "Reasoning: xhigh"]);
+    await modelSelect.selectOption({ label: "OpenAI: GPT-5" });
+    await expect(variantSelect).toBeHidden();
+    await modelSelect.selectOption({ label: "Anthropic: Claude Sonnet" });
+    await variantSelect.selectOption({ label: "Reasoning: xhigh" });
+
+    const input = page.locator("#chat-input");
+    await input.fill("think hard about this");
+    const sent = page.waitForResponse(response => response.url().endsWith("/prompts"));
+    await input.press("Enter");
+    expect((await sent).request().postDataJSON()).toMatchObject({ variant: "xhigh" });
   });
 
   // The one path a workspace with a single real agent can never reach: an
@@ -201,7 +227,7 @@ test.describe("desktop OpenCode chat", () => {
     await expect(card).toContainText("until OpenCode restarts");
 
     await page.getByRole("button", { name: "Allow once" }).click();
-    await expect(page.locator('[data-chat-item-id="permission:perm-1"]')).toContainText("Resolved: approved-once");
+    await expect(page.locator('[data-chat-item-id="permission:perm-1"]')).toContainText("Allowed once");
     await expect(page.getByRole("button", { name: "Allow once" })).toHaveCount(0);
 
     const question: ConversationItem = {

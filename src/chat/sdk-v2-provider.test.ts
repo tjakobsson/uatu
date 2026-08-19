@@ -12,7 +12,7 @@ describe("OpenCode v2 identity policy", () => {
           default: {},
           all: [
             { id: "unused", name: "Unused", models: { hidden: { id: "hidden", name: "Hidden" } } },
-            { id: "openai", name: "OpenAI", models: { sol: { id: "gpt-5.6-sol", name: "GPT-5.6 Sol" } } },
+            { id: "openai", name: "OpenAI", models: { sol: { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", variants: { high: {}, xhigh: {} }, limit: { context: 200000 } } } },
             { id: "opencode", name: "OpenCode", models: { free: { id: "free", name: "Free" } } },
           ],
         } }),
@@ -21,9 +21,11 @@ describe("OpenCode v2 identity policy", () => {
     const provider = new SdkV2Provider(client, "/workspace");
 
     expect(await provider.listModels()).toEqual([
-      { selection: { providerId: "openai", modelId: "gpt-5.6-sol" }, provider: "OpenAI", name: "GPT-5.6 Sol" },
+      { selection: { providerId: "openai", modelId: "gpt-5.6-sol" }, provider: "OpenAI", name: "GPT-5.6 Sol", variants: ["high", "xhigh"], contextLimit: 200000 },
       { selection: { providerId: "opencode", modelId: "free" }, provider: "OpenCode", name: "Free" },
     ]);
+    // The variants capability is declared now that listModels reports variants.
+    expect(provider.describe().capabilities).toContain("variants");
   });
 
   test("maps and deduplicates compatibility commands and supplies missing built-ins", async () => {
@@ -60,6 +62,9 @@ describe("OpenCode v2 identity policy", () => {
         command: async (input: Record<string, unknown>) => { commandInput = input; return { data: { info: {}, parts: [] } }; },
         summarize: async (input: Record<string, unknown>) => { summarizeInput = input; return { data: true }; },
       },
+      // A v2-native command re-sends the model reference before dispatching,
+      // exactly as prompt does; this test's assertions are about the dispatch.
+      v2: { session: { switchModel: async () => ({ data: undefined }) } },
     } as unknown as OpencodeClient;
     const provider = new SdkV2Provider(client, "/workspace");
     const model = { providerId: "anthropic", modelId: "claude-sonnet" };
@@ -82,6 +87,62 @@ describe("OpenCode v2 identity policy", () => {
       providerID: "anthropic",
       modelID: "claude-sonnet",
     });
+  });
+
+  test("a command's variant rides the transport the session lives in", async () => {
+    // v2-native: the variant is not a body field — it is applied through
+    // switchModel before dispatch, exactly as the prompt path does.
+    const calls: Array<[string, Record<string, unknown>]> = [];
+    const nativeClient = {
+      session: {
+        command: async (input: Record<string, unknown>) => { calls.push(["command", input]); return { data: { info: {}, parts: [] } }; },
+      },
+      v2: {
+        session: {
+          switchModel: async (input: Record<string, unknown>) => { calls.push(["switchModel", input]); return { data: undefined }; },
+        },
+      },
+    } as unknown as OpencodeClient;
+    const model = { providerId: "openai", modelId: "gpt-5.6-sol" };
+    const native = new SdkV2Provider(nativeClient, "/workspace");
+    await native.command("ses_native", { id: "r1", name: "review", arguments: "", model, variant: "xhigh" });
+    expect(calls[0]).toEqual(["switchModel", { sessionID: "ses_native", model: { providerID: "openai", id: "gpt-5.6-sol", variant: "xhigh" } }]);
+    expect(calls[1]![0]).toBe("command");
+    expect(calls[1]![1]).not.toHaveProperty("variant");
+
+    // "Reasoning: default" is a choice too: the model reference is re-sent
+    // WITHOUT a variant, exactly as the prompt path does — skipping the call
+    // would leave the xhigh applied above silently active for command turns.
+    // Unconditional even for a fresh provider: OpenCode keeps a session's
+    // variant across restarts, so local memory of "none applied" proves
+    // nothing. A recreated provider must reset the same way.
+    calls.length = 0;
+    const recreated = new SdkV2Provider(nativeClient, "/workspace");
+    await recreated.command("ses_native", { id: "r2", name: "review", arguments: "", model });
+    expect(calls[0]).toEqual(["switchModel", { sessionID: "ses_native", model: { providerID: "openai", id: "gpt-5.6-sol" } }]);
+    expect(calls[1]![0]).toBe("command");
+
+    // Compatibility: prompt and ordinary command carry variant directly;
+    // summarize alone has no such field in the pinned transport.
+    let commandInput: Record<string, unknown> | undefined;
+    let promptInput: Record<string, unknown> | undefined;
+    let summarizeInput: Record<string, unknown> | undefined;
+    const classicClient = {
+      session: {
+        create: async () => ({ data: { ...session("ses_classic"), directory: "/workspace" } }),
+        command: async (input: Record<string, unknown>) => { commandInput = input; return { data: { info: {}, parts: [] } }; },
+        promptAsync: async (input: Record<string, unknown>) => { promptInput = input; return { data: undefined }; },
+        summarize: async (input: Record<string, unknown>) => { summarizeInput = input; return { data: true }; },
+      },
+    } as unknown as OpencodeClient;
+    const provider = new SdkV2Provider(classicClient, "/workspace");
+    await provider.createSession("client-uuid");
+    await provider.command("ses_classic", { id: "r2", name: "review", arguments: "", model, variant: "xhigh" });
+    await provider.prompt("ses_classic", { id: "r3", text: "go", delivery: "queue", model, variant: "xhigh" });
+    expect(commandInput).toEqual(expect.objectContaining({ model: "openai/gpt-5.6-sol", variant: "xhigh" }));
+    expect(promptInput).toEqual(expect.objectContaining({ model: { providerID: "openai", modelID: "gpt-5.6-sol" }, variant: "xhigh" }));
+    await expect(provider.command("ses_classic", { id: "r4", name: "compact", arguments: "", model, variant: "xhigh" })).rejects.toThrow("compatibility compaction");
+    expect(summarizeInput).toBeUndefined();
   });
 
   test("session lookup treats 404 as a store miss but propagates other errors", async () => {
@@ -310,6 +371,24 @@ describe("OpenCode v2 identity policy", () => {
     await provider.getSession("ses_child");
     await provider.replyPermission("ses_child", "perm_1", "once");
     expect(replies).toEqual(["classic:perm_1"]);
+  });
+
+  test("the pending-permission list carries the edit's diff through recovery", async () => {
+    const client = {
+      permission: {
+        list: async () => ({ data: [
+          { id: "perm_edit", sessionID: "ses_a", action: "edit", resources: ["src/app.ts"], metadata: { diff: "@@ -1 +1 @@\n-old\n+new" } },
+          { id: "perm_cmd", sessionID: "ses_a", permission: "shell", patterns: ["bun test"] },
+        ] }),
+      },
+    } as unknown as OpencodeClient;
+    const pending = await new SdkV2Provider(client, "/workspace").listPermissions();
+    // The edit's diff rides along — a card rebuilt from this list is shown to
+    // a reader who missed the live event, and they must see the same change.
+    expect(pending).toEqual([
+      { requestId: "perm_edit", conversationId: "ses_a", action: "edit", resources: ["src/app.ts"], diff: "@@ -1 +1 @@\n-old\n+new" },
+      { requestId: "perm_cmd", conversationId: "ses_a", action: "shell", resources: ["bun test"] },
+    ]);
   });
 
   test("inherits the compatibility store across the inventory even when children list first", async () => {

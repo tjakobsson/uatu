@@ -88,14 +88,14 @@ export class ChatApiClient {
     return this.get(appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}?${query}`), parseConversationSnapshot);
   }
 
-  prompt(conversationId: string, requestId: string, text: string, model?: ModelSelection, mode?: string): Promise<{
+  prompt(conversationId: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string): Promise<{
     messageId: string;
     delivery: "steer" | "queue";
     conversation?: ConversationSummary;
   }> {
     return this.mutate(
       appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/prompts`),
-      { requestId, text, ...(model ? { model } : {}), ...(mode ? { mode } : {}) },
+      { requestId, text, ...(model ? { model } : {}), ...(mode ? { mode } : {}), ...(variant ? { variant } : {}) },
       value => {
         const result = value as { messageId: string; delivery: "steer" | "queue"; conversation?: unknown };
         return {

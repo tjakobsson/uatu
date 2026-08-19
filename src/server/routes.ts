@@ -11,7 +11,7 @@
 
 import type { Serve } from "bun";
 
-import { InteractionConflictError, InvalidModeSelectionError, InvalidModelSelectionError } from "../chat/adapter";
+import { InteractionConflictError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError } from "../chat/adapter";
 import { encodeReplayCursor } from "../chat/replay";
 import { ChatUnavailableError, type WorkspaceChatService } from "../chat/service";
 import type { ModelSelection, PermissionOutcome, QuestionOutcome } from "../chat/types";
@@ -552,16 +552,25 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
       },
     },
     [p("/api/chat/conversations/:conversationId/prompts")]: {
-      POST: async (request: RouteRequest) => chatMutation(request, ["requestId", "text", "model", "mode"], async (id, body) => {
+      POST: async (request: RouteRequest) => chatMutation(request, ["requestId", "text", "model", "mode", "variant"], async (id, body) => {
         const requestId = bodyIdentity(body, "requestId");
         if (requestId instanceof Response) return requestId;
         if (typeof body.text !== "string" || !body.text.trim()) return chatError(400, "text must not be empty");
         if (Buffer.byteLength(body.text) > CHAT_PROMPT_BYTES) return chatError(413, "text is too large");
         const model = parseModelSelection(body.model);
         if (model instanceof Response) return model;
-        const mode = parseModeSelection(body.mode);
+        const mode = parseNameSelection(body.mode, "mode");
         if (mode instanceof Response) return mode;
-        return run(() => deps.chatService.prompt(id, requestId, body.text as string, model, mode), 202);
+        const variant = parseNameSelection(body.variant, "variant");
+        if (variant instanceof Response) return variant;
+        // A variant names an effort OF a model, so the pair travels together.
+        // Validating a bare variant against server-side memory of "the
+        // current model" reads well until that memory is gone — an adapter
+        // restart empties it while the session keeps its model — and then
+        // the same request flips from accepted to rejected. Requiring the
+        // pair makes the contract independent of server lifetime.
+        if (variant !== undefined && model === undefined) return chatError(400, "variant requires a model selection");
+        return run(() => deps.chatService.prompt(id, requestId, body.text as string, model, mode, variant), 202);
       }),
     },
     [p("/api/chat/conversations/:conversationId/cancel")]: {
@@ -681,11 +690,14 @@ function parseModelSelection(value: unknown): ModelSelection | undefined | Respo
     : chatError(400, "invalid model selection");
 }
 
-function parseModeSelection(value: unknown): string | undefined | Response {
+// One rule for both named selections, but each rejection names its own field —
+// a client sent "invalid mode selection" for a malformed variant would debug
+// the wrong key.
+function parseNameSelection(value: unknown, noun: "mode" | "variant"): string | undefined | Response {
   if (value === undefined) return undefined;
   return typeof value === "string" && validIdentity(value)
     ? value
-    : chatError(400, "invalid mode selection");
+    : chatError(400, `invalid ${noun} selection`);
 }
 
 function normalizedChatError(error: unknown): Response {
@@ -693,6 +705,7 @@ function normalizedChatError(error: unknown): Response {
   if (error instanceof InteractionConflictError) return chatError(409, error.message);
   if (error instanceof InvalidModelSelectionError) return chatError(400, error.message);
   if (error instanceof InvalidModeSelectionError) return chatError(400, error.message);
+  if (error instanceof InvalidVariantSelectionError) return chatError(400, error.message);
   if (error instanceof ChatUnavailableError) return chatError(503, "chat is unavailable");
   if (error instanceof Error && /invalid history cursor/.test(error.message)) return chatError(400, "invalid cursor");
   return chatError(500, "chat operation failed");

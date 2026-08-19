@@ -8,7 +8,7 @@ beforeAll(() => {
   (globalThis as Record<string, unknown>).document = dom.document;
 });
 
-const { TimelineRenderer } = await import("./timeline-renderer");
+const { TimelineRenderer, subagentEntries } = await import("./timeline-renderer");
 
 function projectionWith(items: ConversationItem[], overrides: Partial<ChatProjection> = {}): ChatProjection {
   return {
@@ -116,7 +116,9 @@ describe("TimelineRenderer", () => {
     renderer.render(host, projectionWith([{ ...question, status: "resolved", outcome: { kind: "answered", answers: [["a"]] } }]), new Set());
 
     expect(host.querySelector("form[data-question-form]")).toBeNull();
-    expect(host.querySelector(".chat-request-outcome")!.textContent).toBe("Answered");
+    // The outcome recedes into the summary; the form is gone.
+    expect(host.querySelector(".chat-request-trace")!.textContent).toBe("Answered");
+    expect(host.querySelector("details.chat-request")!.hasAttribute("open")).toBe(false);
   });
 
   test("drafts render, update their label, and disappear when reconciled", () => {
@@ -164,6 +166,19 @@ describe("activity grouping", () => {
     expect(group.querySelector(".chat-group-count")!.textContent).toBe("3 steps");
     expect(group.querySelector(".chat-activity-subject")!.textContent).toBe("Read ×3");
     expect(group.querySelectorAll(".chat-group-items [data-chat-item-id]")).toHaveLength(3);
+  });
+
+  test("a usage carrier renders nothing and does not split a finished run", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    // A tool-only message's usage rides an empty assistant_message item; it
+    // must feed the context readout without becoming a bubble — and without
+    // cutting the run of activities around it into two groups.
+    const carrier: ConversationItem = { id: "usage:m1", type: "assistant_message", createdAt: 1, markdown: "", usage: { input: 500 } };
+    renderer.render(host, projectionWith([user, tool("a"), carrier, tool("b"), tool("c"), answer], { status: "idle" }), new Set());
+    expect(host.querySelector('[data-chat-item-id="usage:m1"]')).toBeNull();
+    expect(Array.from(host.children).map(child => child.getAttribute("data-chat-item-id")))
+      .toEqual(["message:u1", "group:tool:a", "part:a1"]);
   });
 
   test("the trailing run of a running turn stays flat", () => {
@@ -290,6 +305,134 @@ describe("presentation details", () => {
   });
 });
 
+describe("streamed output auto-opens and then lets go", () => {
+  const tool = (status: string, output: string): ConversationItem => ({
+    id: "tool:grep", type: "tool", createdAt: 1, name: "grep", status: status as never, input: "pattern", output,
+  });
+
+  test("a running tool with output opens itself and collapses again once it finishes", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const row = () => host.querySelector('[data-chat-item-id="tool:grep"]') as HTMLElement;
+
+    renderer.render(host, projectionWith([tool("running", "line one")]), new Set());
+    expect(row().hasAttribute("open")).toBe(true);
+
+    // The next render reads the node's own open state back. Without marking
+    // the auto-open as the stream's rather than the reader's, "open" would be
+    // sticky and the finished row would never return to its compact form.
+    renderer.render(host, projectionWith([tool("running", "line one\nline two")]), new Set());
+    expect(row().hasAttribute("open")).toBe(true);
+
+    renderer.render(host, projectionWith([tool("completed", "line one\nline two")], { status: "idle" }), new Set());
+    expect(row().hasAttribute("open")).toBe(false);
+  });
+
+  test("a row the reader opened while it ran stays open when it finishes", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const row = () => host.querySelector('[data-chat-item-id="tool:grep"]') as HTMLElement;
+
+    renderer.render(host, projectionWith([tool("running", "line one")]), new Set());
+    // What the toggle handler in ui.ts does on any reader interaction: the row
+    // stops being the stream's and becomes theirs.
+    row().removeAttribute("data-auto-open");
+
+    renderer.render(host, projectionWith([tool("completed", "line one")], { status: "idle" }), new Set());
+    expect(row().hasAttribute("open")).toBe(true);
+  });
+
+  test("a row the reader closes stays closed while the tool keeps talking", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const row = () => host.querySelector('[data-chat-item-id="tool:grep"]') as HTMLElement;
+
+    renderer.render(host, projectionWith([tool("running", "line one")]), new Set());
+    expect(row().hasAttribute("open")).toBe(true);
+
+    // What ui.ts's toggle handler does when the reader collapses the row.
+    row().removeAttribute("data-auto-open");
+    row().toggleAttribute("data-reader-closed", true);
+    row().removeAttribute("open");
+
+    // The auto-open rule is recomputed from status and output on every render,
+    // so without a memory of the close the next chunk would reopen the row —
+    // the reader could not collapse a chatty tool at all while it ran.
+    renderer.render(host, projectionWith([tool("running", "line one\nline two")]), new Set());
+    expect(row().hasAttribute("open")).toBe(false);
+    renderer.render(host, projectionWith([tool("completed", "line one\nline two")], { status: "idle" }), new Set());
+    expect(row().hasAttribute("open")).toBe(false);
+  });
+
+  test("a persisted expansion still opens a finished row with no output", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([tool("completed", "")], { status: "idle" }), new Set(["tool:grep"]));
+    expect((host.querySelector('[data-chat-item-id="tool:grep"]') as HTMLElement).hasAttribute("open")).toBe(true);
+  });
+});
+
+describe("subagent entries", () => {
+  const task = (id: string, extra: Partial<Extract<ConversationItem, { type: "tool" }>> = {}): ConversationItem => ({
+    id: `tool:${id}`, type: "tool", createdAt: 1, name: "task", status: "completed",
+    input: JSON.stringify({ description: "Review renderer", subagent_type: "explore", prompt: "go" }),
+    ...extra,
+  });
+
+  test("an entry carries the model and usage the adapter mirrored onto its row", () => {
+    const [entry] = subagentEntries([task("a", {
+      childConversationId: "child",
+      model: "claude-sonnet-4-5",
+      usage: { input: 1_200, output: 340, cacheRead: 800 },
+    })]);
+    expect(entry).toEqual({
+      id: "tool:a",
+      description: "Review renderer",
+      subagent: "explore",
+      status: "completed",
+      conversationId: "child",
+      model: "claude-sonnet-4-5",
+      usage: { input: 1_200, output: 340, cacheRead: 800 },
+    });
+  });
+
+  test("an unattributed subagent is still an entry, asserting neither figure", () => {
+    const [entry] = subagentEntries([task("b")]);
+    expect(entry).toEqual({ id: "tool:b", description: "Review renderer", subagent: "explore", status: "completed" });
+    expect(entry).not.toHaveProperty("model");
+    expect(entry).not.toHaveProperty("usage");
+  });
+
+  test("a model known before any usage is reported still names the model", () => {
+    const [entry] = subagentEntries([task("c", { status: "running", model: "gpt-5" })]);
+    expect(entry).toEqual(expect.objectContaining({ status: "running", model: "gpt-5" }));
+    expect(entry).not.toHaveProperty("usage");
+  });
+
+  test("a long completed report renders spanning Markdown once behind a visual bound", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const report = ["**Finding one**", "```ts", ...Array.from({ length: 27 }, (_, index) => `const line${index + 1} = true;`), "```"].join("\n");
+    renderer.render(host, projectionWith([task("long", { output: report })]), new Set(["tool:long"]));
+
+    expect(host.querySelector(".chat-subagent-result strong")?.textContent).toBe("Finding one");
+    const code = host.querySelectorAll(".chat-subagent-result pre code");
+    expect(code).toHaveLength(1);
+    expect(code[0]!.textContent).toContain("const line27 = true;");
+    const more = host.querySelector(".chat-subagent-result .chat-output-more") as HTMLDetailsElement;
+    expect(more.querySelector(".chat-report-expand")?.textContent).toBe("Show full report");
+    expect(more.hasAttribute("open")).toBe(false);
+  });
+
+  test("a task keeps its report but hides transcript navigation when subagents are unsupported", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([task("legacy", { childConversationId: "child", output: "Report" })]), new Set(["tool:legacy"]), undefined, false);
+    expect(host.textContent).toContain("Report");
+    expect(host.querySelector("[data-open-conversation]")).toBeNull();
+  });
+});
+
 describe("permission choices state the authority they grant", () => {
   const permission: ConversationItem = {
     id: "permission:p1",
@@ -328,12 +471,64 @@ describe("permission choices state the authority they grant", () => {
     expect(text).not.toMatch(/only (this|the current) (session|conversation)\b/i);
   });
 
+  test("a pending edit permission shows its diff where the choices are; a plain one shows none", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([{ ...permission, diff: "@@ -1 +1 @@\n-old line\n+new line" }]), new Set());
+    const change = host.querySelector(".chat-request-change .chat-diff");
+    expect(change).not.toBeNull();
+    expect(change!.textContent).toContain("- old line");
+    expect(change!.textContent).toContain("+ new line");
+    // The diff sits with the approve/reject actions, in the same card.
+    expect(host.querySelector(".chat-request .chat-request-actions")).not.toBeNull();
+
+    const bare = target();
+    renderer.render(bare, projectionWith([permission]), new Set());
+    expect(bare.querySelector(".chat-request-change")).toBeNull();
+  });
+
+  test("a resolved edit permission does not re-show its diff", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([{ ...permission, status: "resolved", outcome: "approved-once", diff: "@@ -1 +1 @@\n-a\n+b" }]), new Set());
+    expect(host.querySelector(".chat-request-change")).toBeNull();
+    expect(host.querySelector(".chat-request-trace")!.textContent).toBe("Allowed once");
+  });
+
   test("a resolved request states its outcome without offering choices again", () => {
     const renderer = new TimelineRenderer();
     const host = target();
     renderer.render(host, projectionWith([{ ...permission, status: "resolved", outcome: "approved-session" }]), new Set());
     expect(host.querySelectorAll("[data-permission-outcome]")).toHaveLength(0);
-    expect(host.textContent).toContain("approved-session");
+    // Receded: the outcome is stated in words in the summary trace, the card is
+    // closed, and the resources it named are still in the collapsed body.
+    expect(host.querySelector(".chat-request-trace")!.textContent).toBe("Allowed always");
+    expect(host.querySelector("details.chat-request")!.hasAttribute("open")).toBe(false);
+    expect(host.querySelector("details.chat-request ul code")!.textContent).toContain("review-code");
+  });
+
+  test("a resolved card the reader opened stays open when the item is republished", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const row = () => host.querySelector("details.chat-request") as HTMLElement;
+    renderer.render(host, projectionWith([{ ...permission, status: "resolved", outcome: "approved-once" }]), new Set());
+    expect(row().hasAttribute("open")).toBe(false);
+
+    // The reader opens the receded card to audit what was granted.
+    row().setAttribute("open", "");
+    // A resync republishes the same resolved item with fresh object identity;
+    // that is not a new resolution, and it must not snap the audit shut.
+    renderer.render(host, projectionWith([{ ...permission, status: "resolved", outcome: "approved-once" }]), new Set());
+    expect(row().hasAttribute("open")).toBe(true);
+
+    // The pending→resolved transition is what recedes: a card that resolves
+    // while open starts closed.
+    const fresh = target();
+    renderer.render(fresh, projectionWith([permission]), new Set());
+    const pendingRow = fresh.querySelector("details.chat-request") as HTMLElement;
+    expect(pendingRow.hasAttribute("open")).toBe(true);
+    renderer.render(fresh, projectionWith([{ ...permission, status: "resolved", outcome: "rejected" }]), new Set());
+    expect((fresh.querySelector("details.chat-request") as HTMLElement).hasAttribute("open")).toBe(false);
   });
 });
 
@@ -449,5 +644,44 @@ describe("requests owned by different conversations do not block each other", ()
     ]), new Set());
     const states = [...host.querySelectorAll("[data-request-state]")].map(n => (n as HTMLElement).dataset.requestState);
     expect(states).toEqual(["queued", "needs-answer"]);
+  });
+});
+
+describe("tool output is streamed live and bounded when finished", () => {
+  const lines = (n: number) => Array.from({ length: n }, (_, i) => `line ${i + 1}`).join("\n");
+
+  test("a running tool shows its tail live and opens itself", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const item: ConversationItem = { id: "tool:t1", type: "tool", createdAt: 1, name: "bash", status: "running", output: lines(30) };
+    renderer.render(host, projectionWith([item]), new Set());
+    const row = host.querySelector('[data-chat-item-id="tool:t1"]') as HTMLDetailsElement;
+    expect(row.hasAttribute("open")).toBe(true);
+    // The tail is shown; earlier lines are elided without rescanning to count them.
+    expect(host.querySelector(".chat-tool-stream")!.textContent).toContain("line 30");
+    expect(host.querySelector(".chat-tool-stream")!.textContent).not.toContain("line 1\n");
+    expect(host.querySelector(".chat-output-elided")!.textContent).toBe("Earlier output omitted");
+  });
+
+  test("a finished tool bounds long output behind a show-more, keeping the rest", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const item: ConversationItem = { id: "tool:t2", type: "tool", createdAt: 1, name: "bash", status: "completed", output: lines(30) };
+    renderer.render(host, projectionWith([item]), new Set());
+    // Preview shown, the rest behind a native show-more that still holds it.
+    expect(host.querySelector(".chat-tool-stream")).toBeNull();
+    const more = host.querySelector(".chat-output-more") as HTMLDetailsElement;
+    expect(more.querySelector("summary")!.textContent).toContain("Show 18 more lines");
+    expect(more.hasAttribute("open")).toBe(false);
+    expect(more.textContent).toContain("line 30");
+  });
+
+  test("a finished tool with short output shows it whole", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const item: ConversationItem = { id: "tool:t3", type: "tool", createdAt: 1, name: "bash", status: "completed", output: lines(4) };
+    renderer.render(host, projectionWith([item]), new Set());
+    expect(host.querySelector(".chat-output-more")).toBeNull();
+    expect(host.querySelector('[data-chat-item-id="tool:t3"] pre')!.textContent).toContain("line 4");
   });
 });

@@ -1,3 +1,4 @@
+import { TOKEN_USAGE_COMPONENTS } from "./usage";
 import type {
   ActivityStatus,
   ChatAgent,
@@ -99,14 +100,20 @@ function parseChatStartupDiagnostics(value: unknown): ChatStartupDiagnostics {
 
 export function parseChatModel(value: unknown): ChatModel {
   const record = expectRecord(value, "chat model");
-  expectKeys(record, ["selection", "provider", "name"], "chat model");
-  const selection = expectRecord(record.selection, "model selection");
+  expectKeys(record, ["selection", "provider", "name", "variants", "contextLimit"], "chat model");
+  expectModelSelection(record.selection);
+  expectNonEmptyString(record.provider, "model provider");
+  expectNonEmptyString(record.name, "model name");
+  if (record.variants !== undefined) expectStringArray(record.variants, "model variants", true);
+  if (record.contextLimit !== undefined && (typeof record.contextLimit !== "number" || record.contextLimit < 1)) throw new Error("model contextLimit must be a positive number");
+  return value as ChatModel;
+}
+
+function expectModelSelection(value: unknown): void {
+  const selection = expectRecord(value, "model selection");
   expectKeys(selection, ["providerId", "modelId"], "model selection");
   expectIdentity(selection.providerId, "provider id");
   expectIdentity(selection.modelId, "model id");
-  expectNonEmptyString(record.provider, "model provider");
-  expectNonEmptyString(record.name, "model name");
-  return value as ChatModel;
 }
 
 // Capabilities are declared positively, so an unknown name is not an error —
@@ -177,7 +184,7 @@ export function parsePermissionRequest(value: unknown): PermissionRequest {
   const record = expectRecord(value, "permission request");
   expectKeys(
     record,
-    ["id", "type", "createdAt", "requestId", "conversationId", "action", "resources", "status", "outcome"],
+    ["id", "type", "createdAt", "requestId", "conversationId", "action", "resources", "status", "outcome", "diff"],
     "permission request",
   );
   expectOptionalIdentity(record.conversationId, "permission owning conversation");
@@ -192,6 +199,7 @@ export function parsePermissionRequest(value: unknown): PermissionRequest {
   if (record.status === "resolved") {
     expectOneOf(record.outcome, ["approved-once", "approved-session", "rejected"], "permission outcome");
   }
+  if (record.diff !== undefined) expectString(record.diff, "permission diff");
   return value as PermissionRequest;
 }
 
@@ -213,6 +221,21 @@ export function parseQuestionRequest(value: unknown): QuestionRequest {
   return value as QuestionRequest;
 }
 
+/**
+ * Token usage, closed like every other item field. Each component is optional
+ * because an agent reports what it measures — but an absent component must
+ * stay absent, not arrive as some other type, since the readouts do
+ * arithmetic on these.
+ */
+function expectTokenUsage(value: unknown, label: string): void {
+  if (value === undefined) return;
+  const usage = expectRecord(value, label);
+  expectKeys(usage, [...TOKEN_USAGE_COMPONENTS], label);
+  for (const key of TOKEN_USAGE_COMPONENTS) {
+    expectOptionalCount(usage[key], `${label} ${key}`);
+  }
+}
+
 export function parseConversationItem(value: unknown): ConversationItem {
   const record = expectRecord(value, "conversation item");
   const type = expectString(record.type, "conversation item type");
@@ -226,9 +249,11 @@ export function parseConversationItem(value: unknown): ConversationItem {
       expectOptionalIdentity(record.requestId, "user message request id");
       break;
     case "assistant_message":
-      expectKeys(record, ["id", "type", "createdAt", "markdown", "completedAt"], type);
+      expectKeys(record, ["id", "type", "createdAt", "markdown", "completedAt", "usage", "model"], type);
       expectString(record.markdown, "assistant markdown");
       expectOptionalTimestamp(record.completedAt, "completedAt");
+      expectTokenUsage(record.usage, "assistant usage");
+      if (record.model !== undefined) expectModelSelection(record.model);
       break;
     case "reasoning":
       expectKeys(record, ["id", "type", "createdAt", "text", "status", "durationMs"], type);
@@ -238,13 +263,15 @@ export function parseConversationItem(value: unknown): ConversationItem {
       expectOptionalTimestamp(record.durationMs, "durationMs");
       break;
     case "tool":
-      expectKeys(record, ["id", "type", "createdAt", "name", "status", "input", "output", "error", "childConversationId"], type);
+      expectKeys(record, ["id", "type", "createdAt", "name", "status", "input", "output", "error", "childConversationId", "model", "usage"], type);
       expectNonEmptyString(record.name, "tool name");
       parseActivityStatus(record.status);
       expectOptionalString(record.input, "tool input");
       expectOptionalString(record.output, "tool output");
       expectOptionalString(record.error, "tool error");
       expectOptionalString(record.childConversationId, "tool child conversation id");
+      expectOptionalString(record.model, "tool model");
+      expectTokenUsage(record.usage, "tool usage");
       break;
     case "command":
       expectKeys(record, ["id", "type", "createdAt", "command", "status", "output", "exitCode"], type);

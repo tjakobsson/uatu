@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { normalizeProviderEvent, normalizeProviderMessage } from "./normalization";
+import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage } from "./normalization";
 import { ConversationReplay } from "./replay";
 import { ProviderTextReconciler } from "./text-reconciler";
 import { ConversationProjection } from "./adapter";
@@ -92,7 +92,7 @@ describe("OpenCode v2 normalization", () => {
       { id: "n1", type: "system", text: "Context updated", time: { created: 12 } },
     ];
 
-    const items = messages.flatMap(normalizeProviderMessage);
+    const items = messages.flatMap(message => normalizeProviderMessage(message));
     expect(items.map(item => item.type)).toEqual([
       "user_message", "assistant_message", "reasoning", "tool", "command", "notice", "file_change", "command", "notice",
     ]);
@@ -182,6 +182,188 @@ describe("provider text reconciliation", () => {
     ]);
     expect(projection.replay.latestCursor()).not.toBe("");
   });
+
+  // The live tail the renderer shows comes from `output` being kept as the tool
+  // runs: a progress event carries the content so far, and it lands on the same
+  // running tool entry, updated in place rather than added as a new row.
+  test("a running tool's progress content lands on its output, in place", () => {
+    const projection = new ConversationProjection(new ConversationReplay("g", "s", 10_000));
+    const running = { id: "p1", type: "session.next.tool.progress", data: { sessionID: "s", callID: "call", timestamp: 1, name: "grep", content: [{ type: "text", text: "line one" }] } };
+    const more = { id: "p2", type: "session.next.tool.progress", data: { sessionID: "s", callID: "call", timestamp: 1, name: "grep", content: [{ type: "text", text: "line one\nline two" }] } };
+    for (const event of [running, more]) for (const update of normalizeProviderEvent(event).updates) projection.apply(update);
+    expect(projection.items()).toEqual([
+      expect.objectContaining({ type: "tool", status: "running", output: "line one\nline two" }),
+    ]);
+  });
+});
+
+// Token usage is a message-level fact, so it rides ONE item keyed by the
+// message — `usage:<id>`, with empty markdown, which the renderer draws no
+// bubble for. Never a text part: `message.updated` restates a growing
+// cumulative figure and a message can emit several parts, so a per-part
+// figure is one message's spend claimed by two items. Live and stored
+// produce the same item id, so a conversation reads back as it streamed.
+describe("token usage", () => {
+  const tokens = { input: 12_000, output: 400, reasoning: 90, cache: { read: 8_000, write: 512 } };
+  const usage = { input: 12_000, output: 400, reasoning: 90, cacheRead: 8_000, cacheWrite: 512 };
+
+  test("a stored assistant message carries its usage once, beside its parts", () => {
+    const items = normalizeProviderMessage({
+      info: { id: "msg_a", sessionID: "s1", role: "assistant", providerID: "anthropic", modelID: "claude-sonnet", time: { created: 6 }, tokens },
+      parts: [
+        { id: "prt_one", type: "text", text: "First." },
+        { id: "prt_tool", type: "tool", tool: "read", callID: "c", state: { status: "completed", input: {}, output: "ok" } },
+        { id: "prt_two", type: "text", text: "Second." },
+      ],
+    });
+    // Two text parts, one figure: neither bubble claims the message's total.
+    expect(items).toEqual([
+      expect.objectContaining({ id: "part:prt_one", type: "assistant_message" }),
+      expect.objectContaining({ id: "tool:prt_tool" }),
+      expect.objectContaining({ id: "part:prt_two", type: "assistant_message" }),
+      expect.objectContaining({ id: "usage:msg_a", type: "assistant_message", markdown: "", usage, model: { providerId: "anthropic", modelId: "claude-sonnet" } }),
+    ]);
+    expect(items.filter(item => "usage" in item)).toHaveLength(1);
+  });
+
+  test("a message with no reported tokens carries no usage at all", () => {
+    const items = normalizeProviderMessage({
+      info: { id: "msg_a", sessionID: "s1", role: "assistant", time: { created: 6 } },
+      parts: [{ id: "prt_one", type: "text", text: "First." }],
+    });
+    expect(items[0]).not.toHaveProperty("usage");
+    // Nor does a tokens object the agent left empty — no component reported is
+    // not the same statement as every component being zero.
+    const empty = normalizeProviderMessage({
+      info: { id: "msg_b", sessionID: "s1", role: "assistant", time: { created: 6 }, tokens: {} },
+      parts: [{ id: "prt_two", type: "text", text: "Second." }],
+    });
+    expect(empty[0]).not.toHaveProperty("usage");
+  });
+
+  test("live usage arrives beside the streamed part without touching its text", () => {
+    const memory = createProviderEventMemory();
+    const projection = new ConversationProjection(new ConversationReplay("g", "s", 10_000));
+    const events = [
+      { id: "1", type: "message.part.updated", data: { message: { time: 3 }, part: { id: "prt", messageID: "msg", sessionID: "s", type: "text", text: "Half an ans" } } },
+      { id: "2", type: "message.part.updated", data: { message: { time: 3 }, part: { id: "prt", messageID: "msg", sessionID: "s", type: "text", text: "Half an answer, then all of it." } } },
+      { id: "3", type: "message.updated", data: { info: { id: "msg", sessionID: "s", role: "assistant", time: { created: 3 }, tokens } } },
+    ];
+    for (const event of events) for (const update of normalizeProviderEvent(event, memory).updates) projection.apply(update);
+
+    expect(projection.items()).toEqual([
+      expect.objectContaining({ id: "part:prt", type: "assistant_message", markdown: "Half an answer, then all of it." }),
+      expect.objectContaining({ id: "usage:msg", type: "assistant_message", markdown: "", usage }),
+    ]);
+  });
+
+  test("a message with two text parts states its spend once, not once per part", () => {
+    const memory = createProviderEventMemory();
+    const projection = new ConversationProjection(new ConversationReplay("g", "s", 10_000));
+    // The shape that double-counted: part A, a cumulative report, part B, the
+    // report restated. Attached per part, A kept the first total while B took
+    // the second, so aggregating assistant usage counted one message twice.
+    const events = [
+      { id: "1", type: "message.part.updated", data: { part: { id: "prt_a", messageID: "msg", sessionID: "s", type: "text", text: "First." } } },
+      { id: "2", type: "message.updated", data: { info: { id: "msg", sessionID: "s", role: "assistant", time: { created: 3 }, tokens: { input: 100 } } } },
+      { id: "3", type: "message.part.updated", data: { part: { id: "prt_b", messageID: "msg", sessionID: "s", type: "text", text: "Second." } } },
+      { id: "4", type: "message.updated", data: { info: { id: "msg", sessionID: "s", role: "assistant", time: { created: 3 }, tokens: { input: 180 } } } },
+    ];
+    for (const event of events) for (const update of normalizeProviderEvent(event, memory).updates) projection.apply(update);
+
+    const carrying = projection.items().filter(item => item.type === "assistant_message" && item.usage);
+    expect(carrying).toEqual([
+      expect.objectContaining({ id: "usage:msg", markdown: "", usage: { input: 180 } }),
+    ]);
+  });
+
+  test("usage that beats the first part needs no part to land on", () => {
+    const memory = createProviderEventMemory();
+    const projection = new ConversationProjection(new ConversationReplay("g", "s", 10_000));
+    const updated = { id: "1", type: "message.updated", data: { info: { id: "msg", sessionID: "s", role: "assistant", time: { created: 3 }, tokens } } };
+    for (const update of normalizeProviderEvent(updated, memory).updates) projection.apply(update);
+    // The carrier holds the figure whether or not a part ever comes; empty
+    // markdown is what keeps it off the screen.
+    expect(projection.items()).toEqual([
+      expect.objectContaining({ id: "usage:msg", type: "assistant_message", markdown: "", usage }),
+    ]);
+
+    const part = { id: "2", type: "message.part.updated", data: { part: { id: "prt", messageID: "msg", sessionID: "s", type: "text", text: "The answer." } } };
+    for (const update of normalizeProviderEvent(part, memory).updates) projection.apply(update);
+    // The part arrives as itself; the figure stays where it was reported.
+    expect(projection.items()).toEqual([
+      expect.objectContaining({ id: "usage:msg", markdown: "", usage }),
+      expect.objectContaining({ id: "part:prt", type: "assistant_message", markdown: "The answer." }),
+    ]);
+  });
+
+  test("a message with no text part still reports its usage for attribution", () => {
+    const memory = createProviderEventMemory();
+    // A purely agentic message: tool and reasoning parts only, so no text
+    // part ever registers. Its spend reaches the subagent tally through the
+    // envelope, and the conversation's own readout through the carrier item.
+    const updated = { id: "1", type: "message.updated", data: { info: { id: "msg", sessionID: "s", role: "assistant", time: { created: 3 }, tokens } } };
+    const normalized = normalizeProviderEvent(updated, memory);
+    expect(normalized.updates).toEqual([
+      { kind: "upsert", item: expect.objectContaining({ id: "usage:msg", markdown: "", usage }) },
+    ]);
+    expect(normalized.assistantUsage).toEqual({ messageId: "msg", usage });
+  });
+
+  test("removing a message withdraws its usage carrier and attribution key", () => {
+    const memory = createProviderEventMemory();
+    const projection = new ConversationProjection(new ConversationReplay("g", "s", 10_000));
+    const updated = { id: "1", type: "message.updated", properties: { info: { id: "msg", sessionID: "s", role: "assistant", time: { created: 3 }, tokens } } };
+    for (const update of normalizeProviderEvent(updated, memory).updates) projection.apply(update);
+    expect(projection.has("usage:msg")).toBe(true);
+
+    const removed = normalizeProviderEvent({ id: "2", type: "message.removed", properties: { sessionID: "s", messageID: "msg" } }, memory);
+    expect(removed.removedMessageId).toBe("msg");
+    expect(removed.updates).toContainEqual({ kind: "remove", itemId: "usage:msg" });
+    for (const update of removed.updates) projection.apply(update);
+    expect(projection.has("usage:msg")).toBe(false);
+  });
+
+  test("a flat v2 stored record names its model as a reference, not a modelID field", () => {
+    // The v2 store writes `model: { id, providerID }` where the classic store
+    // wrote `modelID`. Reconstruction reads stored records, and a completed
+    // attribution is banked — read only the classic field and a persisted v2
+    // child restores its cost with no model label, permanently.
+    expect(storedMessageUsage({ id: "msg_v2", type: "assistant", model: { id: "gpt-5.6-sol", providerID: "openai" }, tokens: { input: 5 } }))
+      .toEqual({ messageId: "msg_v2", createdAt: 0, usage: { input: 5 }, model: "gpt-5.6-sol" });
+    expect(storedMessageUsage({ info: { id: "msg_classic", role: "assistant", modelID: "claude-sonnet-4-5", tokens: { input: 7 } }, parts: [] }))
+      .toEqual({ messageId: "msg_classic", createdAt: 0, usage: { input: 7 }, model: "claude-sonnet-4-5" });
+  });
+
+  test("a stored message with only tool parts keeps its usage on a hidden carrier", () => {
+    const items = normalizeProviderMessage({
+      info: { id: "msg_t", sessionID: "s1", role: "assistant", time: { created: 6 }, tokens },
+      parts: [{ id: "prt_tool", type: "tool", tool: "read", callID: "c", state: { status: "completed", input: {}, output: "ok" } }],
+    });
+    // Reopening a conversation whose newest message was tool-only must not
+    // lose the window's current fill.
+    expect(items).toEqual([
+      expect.objectContaining({ id: "tool:prt_tool" }),
+      expect.objectContaining({ id: "usage:msg_t", type: "assistant_message", markdown: "", usage }),
+    ]);
+  });
+
+  test("a user message's tokens are not read, and no memory means no usage", () => {
+    const memory = createProviderEventMemory();
+    const user = { id: "1", type: "message.updated", data: { info: { id: "msg_u", sessionID: "s", role: "user", time: { created: 1 }, tokens } } };
+    expect(normalizeProviderEvent(user, memory).updates).toEqual([
+      { kind: "upsert", item: expect.objectContaining({ type: "user_message" }) },
+    ]);
+    expect(normalizeProviderEvent(user, memory).updates.some(update =>
+      update.kind === "upsert" && update.item.id.startsWith("usage:"))).toBe(false);
+
+    // Called without memory (the shape most of this suite uses), an
+    // assistant's usage still reports — it needs no memory to place.
+    const assistant = { id: "2", type: "message.updated", data: { info: { id: "msg_a", sessionID: "s", role: "assistant", time: { created: 2 }, tokens } } };
+    expect(normalizeProviderEvent(assistant).updates).toEqual([
+      { kind: "upsert", item: expect.objectContaining({ id: "usage:msg_a", markdown: "", usage }) },
+    ]);
+  });
 });
 
 describe("both OpenCode event naming generations", () => {
@@ -216,6 +398,18 @@ describe("both OpenCode event naming generations", () => {
       resources: ["review-code"],
       status: "pending",
     })]);
+  });
+
+  // OpenCode attaches an edit's pending change on the permission's
+  // `metadata.diff` — a `@@`-hunk unified diff, the shape observed in the
+  // 1.18 binary. A permission without one carries no diff.
+  test("an edit permission keeps its pending diff, a plain one carries none", () => {
+    const edit = { id: "e3", type: "permission.v2.asked", data: { id: "perm_2", sessionID: "s", action: "edit", resources: ["src/app.ts"], metadata: { diff: "@@ -1 +1 @@\n-old\n+new" } } };
+    const [item] = apply([edit]).items();
+    expect(item).toEqual(expect.objectContaining({ id: "permission:perm_2", diff: "@@ -1 +1 @@\n-old\n+new" }));
+
+    const [plain] = apply([v2Asked]).items();
+    expect(plain).not.toHaveProperty("diff");
   });
 
   test("the same request under both generations settles as one entry, either order", () => {

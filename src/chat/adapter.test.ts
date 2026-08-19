@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { deriveConversationTitle, InteractionConflictError, InvalidModeSelectionError, InvalidModelSelectionError, OpenCodeChatAdapter, parseSlashCommand } from "./adapter";
+import { deriveConversationTitle, InteractionConflictError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, OpenCodeChatAdapter, parseSlashCommand } from "./adapter";
 import { normalizeProviderEvent } from "./normalization";
 import type { ChatAgent } from "./types";
 import type {
@@ -11,7 +11,8 @@ import type {
   ProviderPermissionReply,
   ProviderSession,
 } from "./provider";
-import type { ChatEvent, ChatModel, ModelSelection } from "./types";
+import { UnsupportedVariantSelectionError } from "./provider";
+import type { ChatEvent, ChatModel, ConversationItem, ModelSelection } from "./types";
 import { ConversationNotFoundError } from "./workspace";
 import { MetricsRegistry } from "../debug/metrics";
 
@@ -56,7 +57,7 @@ class FakeProvider implements OpenCodeProvider {
   sessions: ProviderSession[] = [];
   pages = new Map<string, ProviderPage<ProviderMessage>>();
   eventQueue = new EventQueue();
-  prompts: Array<{ sessionId: string; id: string; text: string; delivery: "steer" | "queue"; mode?: string }> = [];
+  prompts: Array<{ sessionId: string; id: string; text: string; delivery: "steer" | "queue"; mode?: string; variant?: string }> = [];
   commandCalls: Array<{ sessionId: string; id: string; name: string; arguments: string; model?: ModelSelection }> = [];
   permissionReplies: Array<{ sessionId: string; requestId: string; reply: ProviderPermissionReply }> = [];
   questionReplies: Array<{ sessionId: string; requestId: string; answers?: string[][]; rejected?: true }> = [];
@@ -85,7 +86,7 @@ class FakeProvider implements OpenCodeProvider {
     signal.addEventListener("abort", () => this.eventQueue.close(), { once: true });
     return this.eventQueue;
   }
-  async prompt(sessionId: string, input: { id: string; text: string; delivery: "steer" | "queue" }) {
+  async prompt(sessionId: string, input: { id: string; text: string; delivery: "steer" | "queue"; mode?: string; variant?: string }) {
     this.prompts.push({ sessionId, ...input });
     return { messageId: input.id };
   }
@@ -107,6 +108,10 @@ class FakeProvider implements OpenCodeProvider {
 
 function fixtureSession(id: string, directory = process.cwd(), updatedAt = 1): ProviderSession {
   return { id, title: `Conversation ${id}`, directory, createdAt: updatedAt, updatedAt };
+}
+
+function sumInput(item: ConversationItem | undefined): number | undefined {
+  return item?.type === "tool" ? item.usage?.input : undefined;
 }
 
 function applyEvent(adapter: OpenCodeChatAdapter, conversationId: string, event: ProviderEvent): void {
@@ -479,6 +484,52 @@ describe("prompt, abort, permission, and question mutations", () => {
     await expect(adapter.prompt("session", "r2", "nope", undefined, "reviewer")).rejects.toBeInstanceOf(InvalidModeSelectionError);
   });
 
+  test("passes a listed reasoning variant through and refuses an unknown one", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    provider.models = [{ selection: { providerId: "anthropic", modelId: "claude" }, provider: "Anthropic", name: "Claude", variants: ["high", "xhigh"] }];
+    const model = { providerId: "anthropic", modelId: "claude" };
+    let modelLists = 0;
+    const listModels = provider.listModels.bind(provider);
+    provider.listModels = async () => { modelLists += 1; return listModels(); };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+
+    await adapter.prompt("session", "r1", "think hard", model, undefined, "high");
+    expect(provider.prompts[0]).toEqual(expect.objectContaining({ variant: "high" }));
+    // The model changed and the variant is new, but one list answers both
+    // checks — and a variant is re-sent with every prompt, so an unchanged
+    // one must not pay a provider round trip per message.
+    expect(modelLists).toBe(1);
+    await adapter.prompt("session", "r2", "keep thinking", model, undefined, "high");
+    expect(modelLists).toBe(1);
+    // Unknown for this model — refused before dispatch.
+    await expect(adapter.prompt("session", "r3", "nope", model, undefined, "ultra")).rejects.toBeInstanceOf(InvalidVariantSelectionError);
+
+    // A variant without a restated model means "this conversation's model,
+    // harder": the last applied model stands in for the check AND rides the
+    // dispatch — on the v2 path the variant travels on the model reference,
+    // so a variant with no model to ride would be silently dropped.
+    await adapter.prompt("session", "r4", "go deeper", undefined, undefined, "xhigh");
+    expect(provider.prompts[2]).toEqual(expect.objectContaining({ variant: "xhigh", model }));
+
+    // A conversation whose model this adapter never learned has nothing to
+    // check the variant against, and nothing for it to ride — refused.
+    const fresh = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g2" });
+    await expect(fresh.prompt("session", "r5", "nope", undefined, undefined, "high")).rejects.toBeInstanceOf(InvalidVariantSelectionError);
+  });
+
+  test("maps a provider's unsupported variant to the client selection error", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    provider.models = [{ selection: { providerId: "anthropic", modelId: "claude" }, provider: "Anthropic", name: "Claude", variants: ["high"] }];
+    provider.command = async () => { throw new UnsupportedVariantSelectionError("reasoning variants are not supported for compatibility compaction"); };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+
+    const error = adapter.prompt("session", "r1", "/compact", { providerId: "anthropic", modelId: "claude" }, undefined, "high");
+    await expect(error).rejects.toBeInstanceOf(InvalidVariantSelectionError);
+    await expect(error).rejects.toThrow("compatibility compaction");
+  });
+
   test("joins duplicate prompts, steers while running, and preserves content on abort", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
@@ -722,7 +773,9 @@ describe("pending permission recovery", () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("local")];
     // The pump never saw this: OpenCode raised it while the stream was down.
-    provider.listPermissions = async () => [{ requestId: "perm_1", conversationId: "local", action: "skill", resources: ["review-code"] }];
+    // The diff rides along — recovery exists for the reader who missed the
+    // live announcement, who must not approve an edit without seeing it.
+    provider.listPermissions = async () => [{ requestId: "perm_1", conversationId: "local", action: "skill", resources: ["review-code"], diff: "@@ -1 +1 @@\n-a\n+b" }];
     const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
 
     const snapshot = await adapter.history("local");
@@ -732,6 +785,7 @@ describe("pending permission recovery", () => {
       action: "skill",
       resources: ["review-code"],
       status: "pending",
+      diff: "@@ -1 +1 @@\n-a\n+b",
     })]);
 
     await adapter.respondPermission("local", "perm_1", "req-1", "approved-once");
@@ -863,6 +917,559 @@ describe("pending permission recovery", () => {
       data: { sessionID: "child", callID: "c1", tool: "question" },
     } as never);
     while (adapter.projectionForTests("parent").has("question:que_gone")) await Bun.sleep(1);
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  // A subagent's model and cost live in its own session, which the parent's
+  // client never sees. The adapter is the only place both are in scope, so it
+  // sums the child's messages and materializes the total onto the row that
+  // launched it.
+  test("a subagent's usage aggregates across its messages and lands on the parent's row", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.pages.set("first", { items: [{
+      id: "prt_task", type: "assistant", time: { created: 1 },
+      content: [{ id: "prt_task", type: "tool", tool: "task", callID: "c1", state: {
+        status: "running", input: { description: "Review renderer", subagent_type: "explore" }, metadata: { sessionId: "child" },
+      } }],
+    }] });
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    await adapter.history("parent");
+    const row = () => adapter.projectionForTests("parent").items().find(item => item.type === "tool");
+    expect(row()).toEqual(expect.objectContaining({ id: "tool:prt_task", childConversationId: "child" }));
+    expect(row()).not.toHaveProperty("usage");
+
+    const pump = adapter.startEventPump();
+    // The child's own stream: a text part first (usage decorates the part it
+    // belongs to), then the message's tokens.
+    const part = (id: string) => ({
+      id: `e-part-${id}`, type: "message.part.updated",
+      data: { part: { id: `prt_${id}`, messageID: id, sessionID: "child", type: "text", text: "findings" } },
+    });
+    const message = (id: string, input: number, output: number) => ({
+      id: `e-${id}-${input}`, type: "message.updated",
+      data: { info: { id, sessionID: "child", role: "assistant", modelID: "claude-sonnet-4-5", time: { created: 2 }, tokens: { input, output, cache: { read: 100, write: 0 } } } },
+    });
+    // Two messages, and one of them restated: `message.updated` reports a
+    // message's growing tokens rather than a delta, so the restatement must
+    // replace that message's figure and not add to it.
+    provider.eventQueue.push(part("msg_a") as never);
+    provider.eventQueue.push(message("msg_a", 1_000, 10) as never);
+    provider.eventQueue.push(message("msg_a", 1_200, 20) as never);
+    provider.eventQueue.push(part("msg_b") as never);
+    provider.eventQueue.push(message("msg_b", 800, 5) as never);
+    while (sumInput(row()) !== 2_000) await Bun.sleep(1);
+    expect(row()).toEqual(expect.objectContaining({
+      model: "claude-sonnet-4-5",
+      usage: { input: 2_000, output: 25, cacheRead: 200, cacheWrite: 0 },
+    }));
+
+    // A message that emits a second text part reports the SAME cumulative
+    // tokens again, against the new part. Keyed by part, that message's spend
+    // would be banked twice; keyed by message, the restatement replaces it.
+    provider.eventQueue.push({
+      id: "e-part-msg_b-2", type: "message.part.updated",
+      data: { part: { id: "prt_msg_b_2", messageID: "msg_b", sessionID: "child", type: "text", text: "and more" } },
+    } as never);
+    provider.eventQueue.push(message("msg_b", 900, 7) as never);
+    while (sumInput(row()) === 2_000) await Bun.sleep(1);
+    expect(sumInput(row())).toBe(2_100);
+
+    // Reopening the parent reapplies the tally rather than losing it: the
+    // store has no memory of an attribution that only ever arrived live, so a
+    // refresh would otherwise show costs that simply vanished.
+    const reopened = await adapter.history("parent");
+    expect(reopened.items.find(item => item.type === "tool")).toEqual(expect.objectContaining({
+      model: "claude-sonnet-4-5",
+      usage: { input: 2_100, output: 27, cacheRead: 200, cacheWrite: 0 },
+    }));
+
+    // The tool part's own later update knows nothing about attribution; it
+    // must not wipe what the child reported.
+    applyEvent(adapter, "parent", {
+      id: "e-done", type: "message.part.updated",
+      data: { part: { id: "prt_task", messageID: "m1", sessionID: "parent", type: "tool", tool: "task", callID: "c1", state: {
+        status: "completed", input: { description: "Review renderer", subagent_type: "explore" }, metadata: { sessionId: "child" }, output: "done",
+      } } },
+    } as never);
+    expect(row()).toEqual(expect.objectContaining({ status: "completed", model: "claude-sonnet-4-5", usage: { input: 2_100, output: 27, cacheRead: 200, cacheWrite: 0 } }));
+
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("removing a subagent message withdraws its usage now and after reopening", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.pages.set("first", { items: [{
+      id: "prt_task", type: "assistant", time: { created: 1 },
+      content: [{ id: "prt_task", type: "tool", tool: "task", callID: "c1", state: {
+        status: "running", input: { description: "Review renderer" }, metadata: { sessionId: "child" },
+      } }],
+    }] });
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    await adapter.history("parent");
+    const row = () => adapter.projectionForTests("parent").items().find(item => item.type === "tool");
+    const pump = adapter.startEventPump();
+    const report = (messageId: string, input: number) => provider.eventQueue.push({
+      id: `e-${messageId}`, type: "message.updated",
+      properties: { sessionID: "child", info: { id: messageId, sessionID: "child", role: "assistant", modelID: "claude-haiku", time: { created: 2 }, tokens: { input } } },
+    } as never);
+
+    report("msg_a", 700);
+    report("msg_b", 300);
+    while (sumInput(row()) !== 1_000) await Bun.sleep(1);
+    provider.eventQueue.push({ id: "remove-a", type: "message.removed", properties: { sessionID: "child", messageID: "msg_a" } } as never);
+    while (sumInput(row()) !== 300) await Bun.sleep(1);
+    expect((await adapter.history("parent")).items.find(item => item.type === "tool")).toEqual(expect.objectContaining({ usage: { input: 300 } }));
+
+    provider.eventQueue.push({ id: "remove-b", type: "message.removed", properties: { sessionID: "child", messageID: "msg_b" } } as never);
+    while ((row() as { usage?: unknown } | undefined)?.usage !== undefined) await Bun.sleep(1);
+    expect((await adapter.history("parent")).items.find(item => item.type === "tool")).not.toHaveProperty("usage");
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("removing the newest subagent message restores the remaining message's model", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    const parentMessages = [{
+      id: "prt_task", type: "assistant", time: { created: 1 },
+      content: [{ id: "prt_task", type: "tool", tool: "task", callID: "c1", state: {
+        status: "completed", input: { description: "Review renderer" }, metadata: { sessionId: "child" },
+      } }],
+    }];
+    let childMessages = [
+      { id: "msg_old", type: "assistant", modelID: "claude-haiku", time: { created: 2 }, tokens: { input: 100 } },
+      { id: "msg_new", type: "assistant", modelID: "gpt-5", time: { created: 3 }, tokens: { reasoning: 50 } },
+    ];
+    provider.listMessages = async (sessionId) => ({ items: (sessionId === "child" ? childMessages : parentMessages) as never[] });
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const row = () => adapter.projectionForTests("parent").items().find(item => item.type === "tool");
+
+    await adapter.history("parent");
+    expect(row()).toEqual(expect.objectContaining({ model: "gpt-5", usage: { input: 100, reasoning: 50 } }));
+    const pump = adapter.startEventPump();
+    childMessages = [childMessages[0]!];
+    provider.eventQueue.push({ id: "remove-new", type: "message.removed", properties: { sessionID: "child", messageID: "msg_new" } } as never);
+    while ((row() as { model?: string } | undefined)?.model !== "claude-haiku") await Bun.sleep(1);
+    expect(row()).toEqual(expect.objectContaining({ model: "claude-haiku", usage: { input: 100 } }));
+    expect((row() as { usage?: Record<string, number> }).usage).not.toHaveProperty("reasoning");
+    expect((await adapter.history("parent")).items.find(item => item.type === "tool"))
+      .toEqual(expect.objectContaining({ model: "claude-haiku", usage: { input: 100 } }));
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("a subagent that reports nothing leaves its row readable and unattributed", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.pages.set("first", { items: [{
+      id: "prt_task", type: "assistant", time: { created: 1 },
+      content: [{ id: "prt_task", type: "tool", tool: "task", callID: "c1", state: {
+        status: "running", input: { description: "Audit styles" }, metadata: { sessionId: "child" },
+      } }],
+    }] });
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    await adapter.history("parent");
+    const pump = adapter.startEventPump();
+    // An assistant message with no tokens at all: nothing to attribute, and a
+    // zero would be a figure the agent never gave.
+    provider.eventQueue.push({
+      id: "e1", type: "message.updated",
+      data: { info: { id: "msg", sessionID: "child", role: "assistant", time: { created: 2 } } },
+    } as never);
+    provider.eventQueue.push({
+      id: "e2", type: "message.part.updated",
+      data: { part: { id: "prt_c", messageID: "msg", sessionID: "child", type: "text", text: "working" } },
+    } as never);
+    await Bun.sleep(20);
+    const row = adapter.projectionForTests("parent").items().find(item => item.type === "tool");
+    // Still named, still carrying a status; simply nothing claimed about cost.
+    expect(row).toEqual(expect.objectContaining({ id: "tool:prt_task", name: "task", input: JSON.stringify({ description: "Audit styles" }) }));
+    expect(typeof (row as { status?: unknown }).status).toBe("string");
+    expect(row).not.toHaveProperty("usage");
+    expect(row).not.toHaveProperty("model");
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("a subagent seen only in the store is attributed from its own messages", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.pages.set("first", { items: [{
+      id: "prt_task", type: "assistant", time: { created: 1 },
+      content: [{ id: "prt_task", type: "tool", tool: "task", callID: "c1", state: {
+        status: "completed", input: { description: "Review renderer" }, metadata: { sessionId: "child" },
+      } }],
+    }] });
+    // The child's own history, as a fresh adapter would find it: the turn
+    // finished before this process existed, so nothing was ever seen live.
+    const childMessages = [
+      { id: "msg_a", type: "assistant", modelID: "claude-sonnet-4-5", time: { created: 2 }, tokens: { input: 900, output: 30, cache: { read: 40, write: 0 } } },
+      { id: "msg_b", type: "assistant", modelID: "claude-sonnet-4-5", time: { created: 3 }, tokens: { input: 600, output: 10, cache: { read: 0, write: 0 } } },
+    ];
+    let childReads = 0;
+    const listMessages = provider.listMessages.bind(provider);
+    provider.listMessages = async (sessionId, options) => {
+      if (sessionId !== "child") return listMessages(sessionId, options);
+      childReads += 1;
+      return { items: childMessages as never[] };
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+
+    const snapshot = await adapter.history("parent");
+    expect(snapshot.items.find(item => item.type === "tool")).toEqual(expect.objectContaining({
+      model: "claude-sonnet-4-5",
+      usage: { input: 1_500, output: 40, cacheRead: 40, cacheWrite: 0 },
+    }));
+    expect(childReads).toBe(1);
+
+    // Banked, so reopening does not pay for it again.
+    await adapter.history("parent");
+    expect(childReads).toBe(1);
+  });
+
+  test("a child message with only tool parts still counts toward the parent's total", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.pages.set("first", { items: [{
+      id: "prt_task", type: "assistant", time: { created: 1 },
+      content: [{ id: "prt_task", type: "tool", tool: "task", callID: "c1", state: {
+        status: "running", input: { description: "Review renderer" }, metadata: { sessionId: "child" },
+      } }],
+    }] });
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    await adapter.history("parent");
+    const row = () => adapter.projectionForTests("parent").items().find(item => item.type === "tool");
+    const pump = adapter.startEventPump();
+    // The child's whole turn is agentic: tool calls, no text part ever, so
+    // nothing ever lands in the child's own timeline. The message's tokens
+    // must still reach the parent's tally.
+    provider.eventQueue.push({
+      id: "e1", type: "message.updated",
+      data: { info: { id: "msg_agentic", sessionID: "child", role: "assistant", modelID: "claude-sonnet-4-5", time: { created: 2 }, tokens: { input: 700, output: 15, cache: { read: 30, write: 0 } } } },
+    } as never);
+    while (!(row() as { usage?: unknown }).usage) await Bun.sleep(1);
+    expect(row()).toEqual(expect.objectContaining({
+      model: "claude-sonnet-4-5",
+      usage: { input: 700, output: 15, cacheRead: 30, cacheWrite: 0 },
+    }));
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("usage arriving during a reconstruction wins over the stored snapshot", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.pages.set("first", { items: [{
+      id: "prt_task", type: "assistant", time: { created: 1 },
+      content: [{ id: "prt_task", type: "tool", tool: "task", callID: "c1", state: {
+        status: "completed", input: { description: "Review renderer" }, metadata: { sessionId: "child" },
+      } }],
+    }] });
+    // The stored read is held open so live events can land mid-flight. The
+    // snapshot it eventually returns is older than what the child reports
+    // live while it is pending.
+    let release: () => void = () => {};
+    const listMessages = provider.listMessages.bind(provider);
+    provider.listMessages = async (sessionId, options) => {
+      if (sessionId !== "child") return listMessages(sessionId, options);
+      await new Promise<void>(resolve => { release = resolve; });
+      return { items: [
+        { id: "msg_a", type: "assistant", modelID: "claude-haiku", time: { created: 2 }, tokens: { input: 500, output: 5, cache: { read: 0, write: 0 } } },
+      ] as never[] };
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+
+    const opening = adapter.history("parent");
+    await Bun.sleep(5); // the reconstruction is now blocked inside the read
+    provider.eventQueue.push({
+      id: "e-live", type: "message.updated",
+      data: { info: { id: "msg_a", sessionID: "child", role: "assistant", modelID: "gpt-5", time: { created: 3 }, tokens: { input: 900, output: 20, cache: { read: 0, write: 0 } } } },
+    } as never);
+    await Bun.sleep(20); // let the live attribution land before the read returns
+    release();
+
+    // Both the returned snapshot and later opens carry the live figure — the
+    // stale stored read must not overwrite what arrived while it was in
+    // flight, or the stale number would be banked permanently.
+    expect((await opening).items.find(item => item.type === "tool")).toEqual(expect.objectContaining({
+      model: "gpt-5",
+      usage: { input: 900, output: 20, cacheRead: 0, cacheWrite: 0 },
+    }));
+    expect((await adapter.history("parent")).items.find(item => item.type === "tool")).toEqual(expect.objectContaining({
+      model: "gpt-5",
+      usage: { input: 900, output: 20, cacheRead: 0, cacheWrite: 0 },
+    }));
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("concurrent snapshots share reconstruction and preserve a racing removal", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.pages.set("first", { items: [{
+      id: "prt_task", type: "assistant", time: { created: 1 },
+      content: [{ id: "prt_task", type: "tool", tool: "task", callID: "c1", state: {
+        status: "completed", input: { description: "Review renderer" }, metadata: { sessionId: "child" },
+      } }],
+    }] });
+    let childReads = 0;
+    let release: () => void = () => {};
+    const listMessages = provider.listMessages.bind(provider);
+    provider.listMessages = async (sessionId, options) => {
+      if (sessionId !== "child") return listMessages(sessionId, options);
+      childReads += 1;
+      const items = childReads === 1
+        ? [{ id: "msg_removed", type: "assistant", time: { created: 2 }, tokens: { input: 500 } }]
+        : [];
+      if (childReads === 1) await new Promise<void>(resolve => { release = resolve; });
+      return { items: items as never[] };
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+
+    const first = adapter.history("parent");
+    const second = adapter.history("parent");
+    while (childReads === 0) await Bun.sleep(1);
+    provider.eventQueue.push({ id: "remove", type: "message.removed", properties: { sessionID: "child", messageID: "msg_removed" } } as never);
+    await Bun.sleep(20);
+    release();
+
+    for (const snapshot of await Promise.all([first, second])) {
+      expect(snapshot.items.find(item => item.type === "tool")).not.toHaveProperty("usage");
+    }
+    // Both snapshots share one read, and the racing tombstone removes the
+    // deleted message's usage and model from its result.
+    expect(childReads).toBe(1);
+    expect((await adapter.history("parent")).items.find(item => item.type === "tool")).not.toHaveProperty("usage");
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("eviction invalidates a stored attribution read already in flight", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    const parentMessages = [{
+      id: "prt_task", type: "assistant", time: { created: 1 },
+      content: [{ id: "prt_task", type: "tool", tool: "task", callID: "c1", state: {
+        status: "completed", input: { description: "Review renderer" }, metadata: { sessionId: "child" },
+      } }],
+    }];
+    let childStore = [{ id: "msg_old", type: "assistant", time: { created: 2 }, tokens: { input: 500 } }];
+    let childReads = 0;
+    let release: () => void = () => {};
+    provider.listMessages = async (sessionId) => {
+      if (sessionId !== "child") return { items: parentMessages as never[] };
+      childReads += 1;
+      const snapshot = childStore;
+      if (childReads === 1) await new Promise<void>(resolve => { release = resolve; });
+      return { items: snapshot as never[] };
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1, maxProjections: 2 });
+    const pump = adapter.startEventPump();
+
+    const opening = adapter.history("parent");
+    while (childReads === 0) await Bun.sleep(1);
+    provider.eventQueue.push({
+      id: "live", type: "message.updated",
+      properties: { info: { id: "msg_live", sessionID: "child", role: "assistant", time: { created: 3 }, tokens: { input: 900 } } },
+    } as never);
+    await Bun.sleep(20);
+    adapter.projectionForTests("other-1");
+    adapter.projectionForTests("other-2");
+    childStore = [...childStore, { id: "msg_live", type: "assistant", time: { created: 3 }, tokens: { input: 900 } }];
+    release();
+
+    expect((await opening).items.find(item => item.type === "tool")).not.toHaveProperty("usage");
+    const reopened = await adapter.history("parent");
+    expect(reopened.items.find(item => item.type === "tool")).toEqual(expect.objectContaining({ usage: { input: 1_400 } }));
+    expect(childReads).toBe(2);
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("a subagent longer than a page is tallied across all its pages", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.pages.set("first", { items: [{
+      id: "prt_task", type: "assistant", time: { created: 1 },
+      content: [{ id: "prt_task", type: "tool", tool: "task", callID: "c1", state: {
+        status: "completed", input: { description: "Review renderer" }, metadata: { sessionId: "child" },
+      } }],
+    }] });
+    // The provider pages newest-first: the first read returns the tail of the
+    // transcript with a cursor pointing at what came before it.
+    const childPages = new Map<string, { items: never[]; nextCursor?: string }>([
+      ["latest", { items: [
+        { id: "msg_new", type: "assistant", modelID: "claude-sonnet-4-5", time: { created: 3 }, tokens: { input: 600, output: 10, cache: { read: 0, write: 0 } } },
+      ] as never[], nextCursor: "older" }],
+      ["older", { items: [
+        { id: "msg_old", type: "assistant", modelID: "claude-haiku", time: { created: 2 }, tokens: { input: 900, output: 30, cache: { read: 40, write: 0 } } },
+      ] as never[] }],
+    ]);
+    let childReads = 0;
+    const listMessages = provider.listMessages.bind(provider);
+    provider.listMessages = async (sessionId, options) => {
+      if (sessionId !== "child") return listMessages(sessionId, options);
+      childReads += 1;
+      return childPages.get(options.cursor ?? "latest") ?? { items: [] };
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+
+    const snapshot = await adapter.history("parent");
+    // The tally covers the whole transcript, and the model is the child's
+    // newest, not whichever page happened to be read last.
+    expect(snapshot.items.find(item => item.type === "tool")).toEqual(expect.objectContaining({
+      model: "claude-sonnet-4-5",
+      usage: { input: 1_500, output: 40, cacheRead: 40, cacheWrite: 0 },
+    }));
+    expect(childReads).toBe(2);
+
+    // Banked as one answer: reopening re-reads nothing.
+    await adapter.history("parent");
+    expect(childReads).toBe(2);
+  });
+
+  test("a subagent that reported nothing is read once and not asked again", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.pages.set("first", { items: [{
+      id: "prt_task", type: "assistant", time: { created: 1 },
+      content: [{ id: "prt_task", type: "tool", tool: "task", callID: "c1", state: {
+        status: "completed", input: { description: "Audit styles" }, metadata: { sessionId: "child" },
+      } }],
+    }] });
+    let childReads = 0;
+    const listMessages = provider.listMessages.bind(provider);
+    provider.listMessages = async (sessionId, options) => {
+      if (sessionId !== "child") return listMessages(sessionId, options);
+      childReads += 1;
+      return { items: [] };
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+
+    const snapshot = await adapter.history("parent");
+    // Still a readable row asserting no figure — and an empty answer is an
+    // answer, so it is not re-asked.
+    expect(snapshot.items.find(item => item.type === "tool")).not.toHaveProperty("usage");
+    await adapter.history("parent");
+    expect(childReads).toBe(1);
+  });
+
+  test("a failed child read is unknown, not empty, and is retried", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.pages.set("first", { items: [{
+      id: "prt_task", type: "assistant", time: { created: 1 },
+      content: [{ id: "prt_task", type: "tool", tool: "task", callID: "c1", state: {
+        status: "completed", input: { description: "Review renderer" }, metadata: { sessionId: "child" },
+      } }],
+    }] });
+    let fail = true;
+    const listMessages = provider.listMessages.bind(provider);
+    provider.listMessages = async (sessionId, options) => {
+      if (sessionId !== "child") return listMessages(sessionId, options);
+      if (fail) throw new Error("provider unreachable");
+      return { items: [{ id: "msg_a", type: "assistant", modelID: "gpt-5", time: { created: 2 }, tokens: { input: 500 } }] as never[] };
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+
+    // The error degrades the row rather than the snapshot, and banks nothing —
+    // caching it as "no usage" would hide the cost permanently.
+    expect((await adapter.history("parent")).items.find(item => item.type === "tool")).not.toHaveProperty("usage");
+    fail = false;
+    expect((await adapter.history("parent")).items.find(item => item.type === "tool")).toEqual(expect.objectContaining({
+      model: "gpt-5",
+      usage: { input: 500 },
+    }));
+  });
+
+  test("a subagent that starts and reports inside one coalescer window still lands on its row", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 25 });
+    await adapter.history("parent");
+    const pump = adapter.startEventPump();
+    // The task row and the child's whole report enter one buffer window: when
+    // the usage arrives, the parent's row is not in the projection yet, so
+    // the live decoration path finds nothing. The flush must settle the
+    // banked figures onto the row it just materialized — a fast child that
+    // never speaks again gives no later event to retry on.
+    provider.eventQueue.push({
+      id: "e-task", type: "message.part.updated",
+      data: { part: { id: "prt_task", messageID: "m1", sessionID: "parent", type: "tool", tool: "task", callID: "c1", state: {
+        status: "running", input: { description: "Quick check" }, metadata: { sessionId: "child" },
+      } } },
+    } as never);
+    provider.eventQueue.push({
+      id: "e-msg", type: "message.updated",
+      data: { info: { id: "msg_fast", sessionID: "child", role: "assistant", modelID: "claude-haiku", time: { created: 2 }, tokens: { input: 120 } } },
+    } as never);
+    const row = () => adapter.projectionForTests("parent").items().find(item => item.type === "tool");
+    while (!(row() as { usage?: unknown } | undefined)?.usage) await Bun.sleep(5);
+    expect(row()).toEqual(expect.objectContaining({ model: "claude-haiku", usage: { input: 120 } }));
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("a tally rebuilt by live events after an eviction is not mistaken for complete", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.pages.set("first", { items: [{
+      id: "prt_task", type: "assistant", time: { created: 1 },
+      content: [{ id: "prt_task", type: "tool", tool: "task", callID: "c1", state: {
+        status: "running", input: { description: "Review renderer" }, metadata: { sessionId: "child" },
+      } }],
+    }] });
+    // The child's store holds what was reported before the eviction; the
+    // stored figure for msg_a is deliberately staler than what arrived live.
+    let childStore: never[] = [];
+    const listMessages = provider.listMessages.bind(provider);
+    provider.listMessages = async (sessionId, options) => {
+      if (sessionId !== "child") return listMessages(sessionId, options);
+      return { items: childStore };
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1, maxProjections: 2 });
+    await adapter.history("parent");
+    const pump = adapter.startEventPump();
+    const report = (suffix: string, input: number) => {
+      provider.eventQueue.push({
+        id: `e-part-${suffix}`, type: "message.part.updated",
+        data: { part: { id: `prt_${suffix}`, messageID: `msg_${suffix}`, sessionID: "child", type: "text", text: "findings" } },
+      } as never);
+      provider.eventQueue.push({
+        id: `e-msg-${suffix}`, type: "message.updated",
+        data: { info: { id: `msg_${suffix}`, sessionID: "child", role: "assistant", time: { created: 2 }, tokens: { input } } },
+      } as never);
+    };
+    const row = () => adapter.projectionForTests("parent").items().find(item => item.type === "tool");
+
+    report("a", 500);
+    while (sumInput(row()) !== 500) await Bun.sleep(1);
+    childStore = [{ id: "msg_a", type: "assistant", time: { created: 2 }, tokens: { input: 500 } }] as never[];
+
+    // Two other conversations push the parent out of the LRU, and the tally
+    // kept for its subagent goes with it. The child keeps running: its next
+    // report recreates a map holding only the post-eviction message.
+    adapter.projectionForTests("other-1");
+    adapter.projectionForTests("other-2");
+
+    report("b", 700);
+    await Bun.sleep(20);
+
+    // Reopened, the partial rebuild must not pass for the whole answer: the
+    // pre-eviction 500 is recovered from the child's store and merged with
+    // the 700 that arrived live after the eviction.
+    await adapter.history("parent");
+    expect(sumInput(row())).toBe(1_200);
+    report("c", 300);
+    while (sumInput(row()) !== 1_500) await Bun.sleep(1);
+    expect(sumInput(row())).toBe(1_500);
+
     await adapter.stopEventPump();
     await pump;
   });

@@ -99,6 +99,68 @@ describe("OpenCode-native tool payloads", () => {
     expect(toolSubject(detail)).toBe("2 files");
   });
 
+  test("a changed line that looks like a file header is still a changed line", () => {
+    // The one case a prefix filter cannot get right: deleting `-- security
+    // check` produces `--- security check`, and adding `++counter ` produces
+    // `+++counter `. Dropped from the card, a reader approves an edit without
+    // having been shown every line of it.
+    const gitDiff = [
+      "diff --git a/src/guard.ts b/src/guard.ts",
+      "index 1111111..2222222 100644",
+      "--- a/src/guard.ts",
+      "+++ b/src/guard.ts",
+      "@@ -1,4 +1,4 @@",
+      " const guard = () => {",
+      "--- security check",
+      "+++counter ",
+      " };",
+    ].join("\n");
+    expect(patchDiffLines(gitDiff)).toEqual([
+      { sign: "-", text: "-- security check" },
+      { sign: "+", text: "++counter " },
+    ]);
+  });
+
+  test("an envelope section without @@ markers keeps header-looking changes", () => {
+    // The apply_patch envelope allows hunks with no `@@` context marker at
+    // all, and it has no `--- `/`+++ ` file markers of its own — so inside an
+    // envelope section those prefixes are always content. Treating them as
+    // headers there re-created the very bug the position tracking fixed:
+    // deleting `-- security check` vanished from the card.
+    const envelope = [
+      "*** Begin Patch",
+      "*** Update File: /ws/db/query.sql",
+      "--- security check",
+      "+++ audited check",
+      "*** End Patch",
+    ].join("\n");
+    expect(patchDiffLines(envelope)).toEqual([
+      { sign: "-", text: "-- security check" },
+      { sign: "+", text: "++ audited check" },
+    ]);
+  });
+
+  test("each file section's own headers are dropped, in a multi-file diff", () => {
+    const twoFiles = [
+      "diff --git a/one.ts b/one.ts",
+      "--- a/one.ts",
+      "+++ b/one.ts",
+      "@@ -1 +1 @@",
+      "-first",
+      "diff --git a/two.ts b/two.ts",
+      "--- a/two.ts",
+      "+++ b/two.ts",
+      "@@ -1 +1 @@",
+      "+second",
+    ].join("\n");
+    // The second file's markers must be dropped too: a hunk left open by the
+    // first file would have taken them for content.
+    expect(patchDiffLines(twoFiles)).toEqual([
+      { sign: "-", text: "first" },
+      { sign: "+", text: "second" },
+    ]);
+  });
+
   test("a replayed question part keeps its questions and answer", () => {
     const detail = describeToolDetail({
       name: "question",

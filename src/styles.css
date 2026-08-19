@@ -92,6 +92,15 @@
   --surface: light-dark(#ffffff, #0d1117);
   --surface-raised: light-dark(#ffffff, #161b22);
   --surface-subtle: light-dark(#f6f8fa, #161b22);
+  /* The pinned chat progress tracks (todo list, subagents) sit against this
+     rather than --surface-raised. It has to differ from --surface-raised in
+     BOTH schemes so the tracks read as their own tier: in dark, the three
+     existing tiers collapse onto #161b22, so re-pointing at an existing token
+     would look identical there. A shade darker than the page in light, a
+     touch lighter than the raised cards in dark; either way it separates from
+     what it sits against. Colour is not the only cue —
+     the tracks stay pinned, bordered, and behind a caret. */
+  --surface-track: light-dark(#eef1f4, #1c222b);
   /* Semantic state colors (GitHub light/dark pairs). */
   --success: light-dark(#2da44e, #3fb950);
   --success-strong: light-dark(#1a7f37, #3fb950);
@@ -4654,7 +4663,7 @@ html[data-ui-mode="touch"] .chat-resizer {
   color: var(--text-subtle);
   cursor: pointer;
   writing-mode: vertical-rl;
-  font-size: 0.72rem;
+  font-size: 0.72em;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
@@ -4717,6 +4726,49 @@ body.is-resizing-chat .chat-resizer {
   flex-direction: column;
   overflow: hidden;
   background: var(--surface);
+  /* Chat's own reading scale, denser than the document preview's. It lives
+     here, on the surface, because that is the one place the desktop split,
+     touch mode, and the native WebView zoom all compose against without any
+     of them needing to know about it. Descendants size in `em` so they
+     inherit it; the vendored `.markdown-body` is pinned at an absolute 16px
+     and is overridden separately below. Touch mode sets its own base on
+     `.chat-timeline`, which wins here in that mode. */
+  font-size: 0.9rem;
+}
+
+/* Assistant messages render into `.markdown-body`, which github-markdown-css
+   pins at an absolute `font-size: 16px` — no scale on the surface can reach
+   it. Scoped to the chat surface (0,2,0 beats the vendored 0,1,0, and we sit
+   after the @import, so no !important), it takes the surface's scale instead;
+   github-markdown-css sizes its own internals in em/%, so headings, code, and
+   the rest follow proportionally. `.markdown-body` outside Chat is untouched. */
+.chat-surface .markdown-body {
+  font-size: inherit;
+}
+
+/* The same problem one level down, and not solved by the rule above:
+   github-markdown-css pins `code`/`tt`/`samp` at an absolute `12px`, so they
+   ignore the container's scale entirely. In Chat that left code *proportionally
+   larger* against the denser prose than it is in Preview — the opposite of what
+   the scale was for. Restated relative to whatever the surface is set to, at
+   GitHub's own code ratio, so it tracks the scale instead of fighting it. */
+.chat-surface .markdown-body code,
+.chat-surface .markdown-body tt,
+.chat-surface .markdown-body samp {
+  font-size: 0.85em;
+}
+
+/* `pre` is pinned the same way — an absolute 12px in both vendored sheets —
+   so without this, fenced blocks stayed at Preview's size while Chat prose
+   and inline code scaled down. The inner `code` must come back to 100%: the
+   Chat-scoped `code` rule above outranks the vendored `pre code` reset
+   (0,2,1 vs 0,1,2) and would otherwise compound 0.85em twice inside fences. */
+.chat-surface .markdown-body pre {
+  font-size: 0.85em;
+}
+
+.chat-surface .markdown-body pre code {
+  font-size: 100%;
 }
 
 .chat-surface:focus-visible {
@@ -4769,6 +4821,20 @@ body.is-resizing-chat .chat-resizer {
   gap: 0.5rem;
 }
 
+/* The row wraps rather than overflowing. Its items have content floors the
+   selects will not shrink past, and `#chat-composer-status`'s auto margin
+   turns the resulting negative free space into a leftward spill — the row
+   escaped the panel entirely, over the preview beside it. One more readout in
+   this row made that reachable rather than merely visible. */
+.chat-composer-actions {
+  flex-wrap: wrap;
+  row-gap: 0.4rem;
+}
+
+#chat-composer-status {
+  min-width: 0;
+}
+
 /* Request states. A user with ten requests could not tell which still needed
    them: every card rendered identically and the queued ones claimed to be
    superseded. State is carried as data so the card, the badge, and the
@@ -4785,8 +4851,30 @@ body.is-resizing-chat .chat-resizer {
   border-style: dashed;
 }
 
+/* A resolved request recedes to a one-line trace: no accent, tighter padding,
+   and a summary that reads as a settled fact rather than a card awaiting a
+   decision. Its body (resources, or the question's prompts) stays in the
+   collapsed <details>, one disclosure away for anyone auditing what happened. */
 .chat-request[data-request-state="resolved"] {
-  opacity: 0.72;
+  border-color: var(--border-soft);
+  padding: 0.3rem 0.6rem;
+  color: var(--text-subtle);
+}
+
+.chat-request[data-request-state="resolved"] > summary {
+  color: var(--text-subtle);
+  font-weight: 400;
+}
+
+.chat-request-trace {
+  margin-left: 0.4rem;
+  color: var(--text-subtle);
+  font-weight: 500;
+}
+
+.chat-request-asked {
+  margin: 0.3rem 0 0;
+  color: var(--text-subtle);
 }
 
 .chat-request-origin {
@@ -4921,10 +5009,111 @@ body.is-resizing-chat .chat-resizer {
 }
 
 #chat-items,
+#chat-drilldown-items,
 .chat-item,
 .chat-assistant-message {
   min-width: 0;
   max-width: 100%;
+}
+
+/* The transcript box: the parent's timeline and, over it, the subagent
+   drill-down. Everything else in the surface — the picker, the pinned tracks,
+   the outstanding-request pill, the composer — sits outside this box and
+   stays the parent's, which is what keeps the parent answerable while a
+   child is open. */
+.chat-transcript-area {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* One navigation model, two chromes. On the desktop split the child is an
+   inline drill-down laid over the parent's transcript — inset at the top and
+   shadowed, so the parent is visibly still there behind it rather than
+   replaced. Touch overrides this into a pushed screen further down. */
+.chat-drilldown {
+  position: absolute;
+  inset: 1.75rem 0 0;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-top: 1px solid var(--border-medium);
+  border-radius: 0.75rem 0.75rem 0 0;
+  background: var(--surface);
+  box-shadow: 0 -6px 20px rgb(0 0 0 / 18%);
+}
+
+.chat-drilldown[hidden] {
+  display: none;
+}
+
+.chat-drilldown-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border-soft);
+  border-radius: 0.75rem 0.75rem 0 0;
+  background: var(--surface-raised);
+}
+
+/* Returning is the layer's primary action, so it leads the header and reads
+   as a control rather than a hint. */
+.chat-drilldown-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  min-height: 2rem;
+  padding: 0.25rem 0.5rem 0.25rem 0.35rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.4rem;
+  color: var(--text-strong);
+  background: var(--surface);
+  font: inherit;
+  cursor: pointer;
+}
+
+.chat-drilldown-back:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.chat-drilldown-title {
+  overflow: hidden;
+  margin: 0;
+  color: var(--text-muted, inherit);
+  font-size: 0.8125em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-drilldown-state {
+  flex: 0 0 auto;
+}
+
+.chat-drilldown-state[hidden] {
+  display: none;
+}
+
+.chat-drilldown-timeline {
+  border-radius: 0;
+}
+
+/* The rail and the Latest button read the parent's timeline, which the child
+   is covering — they would be pointing at content that is not on screen. The
+   request pill is the opposite case: it is how the parent stays answerable,
+   so it stays up and above the layer. */
+.chat-surface[data-chat-drilldown] #chat-prompt-rail,
+.chat-surface[data-chat-drilldown] #chat-latest {
+  display: none;
+}
+
+.chat-surface[data-chat-drilldown] #chat-requests-jump {
+  z-index: 5;
 }
 
 .chat-assistant-message {
@@ -5016,7 +5205,7 @@ body.is-resizing-chat .chat-resizer {
   padding: 0.2rem 0;
   cursor: pointer;
   color: var(--text-subtle);
-  font-size: 0.875rem;
+  font-size: 0.875em;
   list-style: none;
 }
 
@@ -5061,9 +5250,41 @@ body.is-resizing-chat .chat-resizer {
   border-radius: 0.35rem;
 }
 
+/* A running tool's live tail: the same block as its finished output, marked so
+   it reads as in-progress rather than settled. It updates in place as progress
+   arrives, and its own max-height keeps a chatty tool from taking the row. */
+.chat-tool-stream {
+  border-left: 2px solid var(--accent, #3b7dd8);
+}
+
+/* What the tail dropped off the top while running, and the show-more that
+   reveals a finished tool's remaining output — both quiet, both secondary to
+   the output they bound. */
+.chat-output-elided {
+  margin: 0 0 0.3rem;
+  color: var(--text-subtle);
+  font-size: 0.85em;
+}
+
+.chat-output-more > summary {
+  padding: 0.25rem 0;
+  color: var(--accent, #3b7dd8);
+  cursor: pointer;
+  list-style: none;
+  font-size: 0.9em;
+}
+
+.chat-output-more > summary::-webkit-details-marker {
+  display: none;
+}
+
+.chat-output-more[open] > summary {
+  color: var(--text-subtle);
+}
+
 .chat-activity-status,
 .chat-change-counts {
-  font-size: 0.78rem;
+  font-size: 0.89em;
   color: var(--text-subtle);
 }
 
@@ -5075,15 +5296,31 @@ body.is-resizing-chat .chat-resizer {
   white-space: nowrap;
   color: var(--text-subtle);
   font-family: var(--mono-font-family);
-  font-size: 0.82rem;
+  font-size: 0.94em;
 }
 
 .chat-tool-meta {
   margin: 0.55rem 0 0;
 }
 
-.chat-tool-meta code {
-  word-break: break-all;
+/* Everything in a card that is a path, a pattern, or a shell pipeline. None
+   of them carries a break opportunity a browser will take on its own, so one
+   long token sets the card's width and the rest runs off the side of a
+   phone — a reader approving a command whose end they cannot see. `anywhere`
+   breaks mid-token only when it must, and unlike `break-all` it also lowers
+   the min-content width, which is what actually lets the card shrink to a
+   narrow viewport instead of forcing the overflow. */
+.chat-tool-meta code,
+.chat-request li code,
+.chat-surface [data-file-ref] {
+  overflow-wrap: anywhere;
+}
+
+/* The browser's 40px list indent is a tenth of a phone's width, spent on
+   nothing. The resources are the content here. */
+.chat-request ul {
+  margin: 0.45rem 0 0;
+  padding-left: 1.25rem;
 }
 
 .chat-diff {
@@ -5160,8 +5397,71 @@ body.is-resizing-chat .chat-resizer {
   background: var(--accent);
 }
 
+/* Icon-only in both chromes: the up arrow IS the action, in the accent blue
+   for send and steer alike — the aria-label and title state which one this
+   press is, and the label span stays in the DOM for assistive tech. */
+#chat-send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#chat-send .chat-send-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .chat-send-icon {
+  display: block;
+}
+
+/* The agent has the prompt and nothing has come back yet. The pulse is the
+   liveness signal (Paseo-style square); the label restates the status and
+   elapsed time, whose composer twin is visually hidden in touch mode. */
+.chat-waiting {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.25rem 0.9rem;
+  color: var(--text-subtle);
+  font-size: 0.85em;
+}
+
+.chat-waiting[hidden] {
   display: none;
+}
+
+.chat-waiting-pulse {
+  flex: 0 0 auto;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 0.15rem;
+  background: var(--accent);
+  animation: chat-waiting-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes chat-waiting-pulse {
+  0%,
+  100% {
+    transform: scale(0.65);
+    opacity: 0.45;
+  }
+
+  50% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-waiting-pulse {
+    animation: none;
+  }
 }
 
 .chat-primary-button:disabled,
@@ -5174,7 +5474,7 @@ body.is-resizing-chat .chat-resizer {
 .chat-latest {
   position: absolute;
   right: 1.25rem;
-  bottom: calc(var(--chat-composer-height, 5rem) + 0.75rem);
+  bottom: 0.75rem;
   z-index: 2;
   box-shadow: var(--shadow, 0 3px 12px rgb(0 0 0 / 20%));
 }
@@ -5188,7 +5488,7 @@ body.is-resizing-chat .chat-resizer {
 .chat-requests-jump {
   position: absolute;
   right: 1.25rem;
-  bottom: calc(var(--chat-composer-height, 5rem) + 0.75rem);
+  bottom: 0.75rem;
   z-index: 2;
   min-height: 2rem;
   padding: 0.35rem 0.7rem;
@@ -5209,7 +5509,7 @@ body.is-resizing-chat .chat-resizer {
 /* Both share the right edge; when "Latest" is up the pill steps one row
    higher instead of covering it. */
 .chat-latest:not([hidden]) + .chat-requests-jump {
-  bottom: calc(var(--chat-composer-height, 5rem) + 3.5rem);
+  bottom: 3.5rem;
 }
 
 .chat-composer {
@@ -5218,6 +5518,97 @@ body.is-resizing-chat .chat-resizer {
   padding: 0.75rem max(1rem, calc((100% - 52rem) / 2)) calc(0.75rem + env(safe-area-inset-bottom));
   border-top: 1px solid var(--border-soft);
   background: var(--surface-raised);
+}
+
+/* Context usage. The collapsed form has to answer "how full is this" on its
+   own — that is the whole point, since a conversation gave no sign until it
+   overflowed — so the meter and the figure both live in the summary, and
+   opening it only adds the breakdown. */
+.chat-context-usage {
+  flex: 0 0 auto;
+}
+
+.chat-context-usage[hidden] {
+  display: none;
+}
+
+.chat-context-usage > summary {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  list-style: none;
+  cursor: pointer;
+  color: var(--text-subtle);
+  font-size: 0.75em;
+  white-space: nowrap;
+}
+
+.chat-context-usage > summary::-webkit-details-marker {
+  display: none;
+}
+
+.chat-context-meter {
+  display: block;
+  overflow: hidden;
+  width: 2.5rem;
+  height: 0.35rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.2rem;
+  background: var(--surface);
+}
+
+.chat-context-meter-fill {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: var(--text-subtle);
+}
+
+/* Never colour alone — the figure beside the meter always states the fill, so
+   the warning tiers are an emphasis on something already legible. */
+.chat-context-usage[data-fill="high"] .chat-context-meter-fill {
+  background: var(--warning, #b8860b);
+}
+
+.chat-context-usage[data-fill="full"] .chat-context-meter-fill {
+  background: var(--danger, #c0392b);
+}
+
+.chat-context-usage[data-fill="full"] > summary,
+.chat-context-usage[data-fill="high"] > summary {
+  color: var(--text-strong);
+  font-weight: 600;
+}
+
+/* The breakdown floats over the timeline rather than growing the composer
+   row: opening a readout must not push the composer under the reader's
+   thumb. */
+.chat-context-breakdown {
+  position: absolute;
+  left: max(1rem, calc((100% - 52rem) / 2));
+  bottom: calc(100% - 0.25rem);
+  z-index: 5;
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 0.15rem 0.9rem;
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.7rem;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow, 0 8px 24px rgb(0 0 0 / 18%));
+  font-size: 0.75em;
+}
+
+.chat-context-breakdown dt {
+  color: var(--text-subtle);
+}
+
+.chat-context-breakdown dd {
+  margin: 0;
+  color: var(--text-strong);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 .chat-command-menu {
@@ -5274,7 +5665,7 @@ body.is-resizing-chat .chat-resizer {
 
 .chat-command-description {
   grid-column: 1 / -1;
-  font-size: 0.78rem;
+  font-size: 0.78em;
 }
 
 .chat-composer textarea {
@@ -5301,7 +5692,7 @@ body.is-resizing-chat .chat-resizer {
   color: var(--text-strong);
   background: var(--surface);
   font: inherit;
-  font-size: 0.8rem;
+  font-size: 0.8em;
   text-overflow: ellipsis;
 }
 
@@ -5312,7 +5703,7 @@ body.is-resizing-chat .chat-resizer {
 #chat-composer-status {
   margin-right: auto;
   color: var(--text-subtle);
-  font-size: 0.8rem;
+  font-size: 0.8em;
 }
 
 .chat-file-line-target {
@@ -5592,6 +5983,62 @@ html[data-ui-mode="touch"][data-active-tab="chat"] .chat-surface {
   padding-right: env(safe-area-inset-right);
 }
 
+/* Touch navigates as a stack, so the same drill-down state renders as a
+   pushed screen rather than an inline layer: it takes the chat surface's own
+   fixed box (one z-index above it, so the tab bar below is untouched and Chat
+   is still the tab you are in) and the platform back gesture pops it — the
+   history entry pushed on open is what makes that gesture land here. */
+html[data-ui-mode="touch"] .chat-drilldown {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: var(--chat-visual-top, 0px);
+  bottom: auto;
+  height: var(--chat-visual-height, calc(100dvh - var(--tab-bar-total)));
+  z-index: 36;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  padding-top: env(safe-area-inset-top);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+  animation: chat-drilldown-push 180ms ease-out;
+}
+
+@keyframes chat-drilldown-push {
+  from {
+    transform: translateX(15%);
+    opacity: 0.35;
+  }
+
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+html[data-ui-mode="touch"] .chat-drilldown-header {
+  min-height: 3rem;
+  padding: 0.5rem 0.65rem;
+  border-radius: 0;
+}
+
+html[data-ui-mode="touch"] .chat-drilldown-back {
+  min-height: 2.5rem;
+  padding-inline: 0.6rem 0.75rem;
+}
+
+/* The pushed screen takes a z-index above the chat surface, which the desktop
+   rule's `z-index: 5` cannot clear — so the request pill has to be raised
+   again here. Without it the pill is painted over: still "visible" to a box
+   test, and completely unreachable to a finger. A request arriving on the
+   parent while a subagent's transcript is open would otherwise give no sign
+   at all, since the back gesture is the only way to it and nothing would say
+   to take it. */
+html[data-ui-mode="touch"] .chat-surface[data-chat-drilldown] #chat-requests-jump {
+  z-index: 37;
+}
+
 html[data-ui-mode="touch"] .chat-header {
   min-height: 3.5rem;
   padding: 0.55rem 0.75rem;
@@ -5691,19 +6138,6 @@ html[data-ui-mode="touch"] #chat-send {
   touch-action: manipulation;
 }
 
-html[data-ui-mode="touch"] #chat-send .chat-send-label {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
-
-html[data-ui-mode="touch"] #chat-send .chat-send-icon {
-  display: block;
-}
 
 html[data-ui-mode="touch"] .chat-model-select {
   flex: 1 1 8rem;
@@ -6030,7 +6464,7 @@ body.terminal-transcript-open .touch-tab-bar {
   display: block;
   margin-top: 0.3rem;
   color: var(--text-subtle);
-  font-size: 0.75rem;
+  font-size: 0.75em;
 }
 
 /* Question options are the primary action, so each is a full-width tap target
@@ -6075,7 +6509,7 @@ body.terminal-transcript-open .touch-tab-bar {
 
 .chat-question-hint {
   color: var(--text-subtle);
-  font-size: 0.78rem;
+  font-size: 0.78em;
   font-weight: 400;
 }
 
@@ -6107,7 +6541,7 @@ body.terminal-transcript-open .touch-tab-bar {
   color: var(--text-subtle);
   background: var(--surface);
   font: inherit;
-  font-size: 0.8rem;
+  font-size: 0.8em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -6142,8 +6576,11 @@ body.terminal-transcript-open .touch-tab-bar {
   margin: 0 max(1rem, calc((100% - 52rem) / 2)) 0.5rem;
   border: 1px solid var(--border-soft);
   border-radius: 0.7rem;
-  background: var(--surface-raised);
-  font-size: 0.85rem;
+  /* Its own tier, not --surface-raised: the pinned tracks are where "where are
+     we now" lives, and against the raised timeline cards they need somewhere
+     for the eye to land. Covers both the todo list and the subagent track. */
+  background: var(--surface-track);
+  font-size: 0.85em;
 }
 
 .chat-task-list[hidden] {
@@ -6263,6 +6700,37 @@ html[data-ui-mode="touch"] .chat-task-list {
   color: var(--text-subtle);
 }
 
+/* A subagent row is now two things on one line: what it is doing, and what it
+   ran and cost. The description takes the slack and truncates; the attribution
+   keeps its size (capped, so a long model id cannot eat the row) because a
+   half-shown token figure states nothing. */
+#chat-subagents-items li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.chat-subagent-open,
+.chat-subagent-label {
+  flex: 1 1 auto;
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-subagent-attribution {
+  flex: 0 0 auto;
+  overflow: hidden;
+  max-width: 50%;
+  margin-left: auto;
+  color: var(--text-subtle);
+  font-size: 0.85em;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 #chat-subagents-label {
   min-width: 0;
   overflow: hidden;
@@ -6301,7 +6769,12 @@ html[data-chat-keyboard] #chat-subagents-items {
   color: var(--accent);
   background: transparent;
   font: inherit;
-  font-size: 0.78rem;
+  /* Not a further reduction: this sits inside `.chat-task-list`'s own 0.85em,
+     and 0.78em on top of that compounded to roughly 9.5px — well past the
+     density pass's intent and too small to read for a control that destroys
+     state. It matches the track label it sits beside; being the only accent
+     text in the row is what marks it as the action. */
+  font-size: 1em;
 }
 
 .chat-track-dismiss[hidden] {
@@ -6357,6 +6830,33 @@ html[data-ui-mode="touch"] .chat-header {
   border-top: 1px solid var(--border-soft);
 }
 
+.chat-subagent-result-content {
+  position: relative;
+}
+
+.chat-subagent-result.is-bounded:not(:has(.chat-output-more[open])) .chat-subagent-result-content {
+  max-height: 18em;
+  overflow: hidden;
+}
+
+.chat-subagent-result.is-bounded:not(:has(.chat-output-more[open])) .chat-subagent-result-content::after {
+  position: absolute;
+  inset: auto 0 0;
+  height: 2.5em;
+  background: linear-gradient(transparent, var(--surface));
+  content: "";
+  pointer-events: none;
+}
+
+.chat-report-collapse,
+.chat-output-more[open] .chat-report-expand {
+  display: none;
+}
+
+.chat-output-more[open] .chat-report-collapse {
+  display: inline;
+}
+
 /* Grouped steps: a finished run of activity rows collapses to one line at the
    same visual weight as a single row — the group is chrome about chrome. It
    sits between prose blocks, so it needs its own vertical air to not read as
@@ -6372,7 +6872,7 @@ html[data-ui-mode="touch"] .chat-header {
   gap: 0.55rem;
   padding: 0.2rem 0;
   cursor: pointer;
-  font-size: 0.875rem;
+  font-size: 0.875em;
   list-style: none;
 }
 
@@ -6383,7 +6883,7 @@ html[data-ui-mode="touch"] .chat-header {
 .chat-activity-group > summary::before {
   content: "▸";
   flex: 0 0 auto;
-  font-size: 0.7rem;
+  font-size: 0.8em;
 }
 
 .chat-activity-group[open] > summary::before {
@@ -6471,7 +6971,7 @@ html[data-ui-mode="touch"] .chat-activity-group > summary {
   background: transparent;
   color: var(--accent);
   font: inherit;
-  font-size: 0.82rem;
+  font-size: 0.82em;
   text-decoration: underline;
 }
 
@@ -6514,7 +7014,7 @@ html[data-ui-mode="touch"] .chat-surface[data-chat-rail] .chat-timeline {
   background: var(--surface-raised);
   box-shadow: var(--shadow, 0 4px 14px rgb(0 0 0 / 18%));
   color: var(--text-strong);
-  font-size: 0.8rem;
+  font-size: 0.8em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

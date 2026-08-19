@@ -53,6 +53,82 @@ test("four tabs preserve chat state and keyboard navigation", async ({ page, req
   await expect(page.locator("#touch-tab-files")).toBeFocused();
 });
 
+test("a subagent transcript pushes as a screen and the back gesture pops it", async ({ page, request }) => {
+  // `boot` resets the service, so the child is seeded after it and the row
+  // that points at it is published once both conversations exist.
+  const parent = await boot(page, request);
+  const child = await control(request, { action: "seed", title: "Child transcript", child: true, items: [
+    { id: "part:child", type: "assistant_message", createdAt: 1, markdown: "child findings" },
+  ] });
+  await control(request, { action: "item", conversationId: parent, item: {
+    id: "tool:agent1", type: "tool", createdAt: 2, name: "task", status: "completed",
+    input: JSON.stringify({ description: "Review renderer", subagent_type: "explore", prompt: "go" }),
+    childConversationId: child.conversation.id,
+  } });
+
+  await expect(page.locator("#chat-subagents")).toBeVisible();
+  await page.locator("#chat-subagents summary").click();
+  await page.getByRole("button", { name: "explore · Review renderer" }).click();
+
+  const drilldown = page.locator("#chat-drilldown");
+  await expect(drilldown).toBeVisible();
+  await expect(page.locator("#chat-drilldown-items")).toContainText("child findings");
+  // A layer within the Chat tab, not a way out of it: the tab bar is still
+  // there and Chat is still the selected tab.
+  await expect(page.locator("#touch-tab-bar")).toBeVisible();
+  await expect(page.locator("#touch-tab-chat")).toHaveAttribute("aria-selected", "true");
+  // The picker is behind the pushed screen and still on the parent — a
+  // subagent is never one of its entries.
+  await expect(page.locator("#chat-conversation-select")).toHaveValue(parent);
+  await expect(page.locator("#chat-conversation-select option")).toHaveCount(1);
+
+  // The platform back gesture pops the screen rather than leaving the app or
+  // navigating the document behind it.
+  await page.goBack();
+  await expect(drilldown).toBeHidden();
+  await expect(page.locator("#chat-surface")).toBeVisible();
+  await expect(page.locator("#chat-conversation-select")).toHaveValue(parent);
+});
+
+test("a request the parent is waiting on stays reachable over the pushed screen", async ({ page, request }) => {
+  const parent = await boot(page, request);
+  const child = await control(request, { action: "seed", title: "Child transcript", child: true, items: [
+    { id: "part:child", type: "assistant_message", createdAt: 1, markdown: "child findings" },
+  ] });
+  await control(request, { action: "item", conversationId: parent, item: {
+    id: "tool:agent1", type: "tool", createdAt: 2, name: "task", status: "completed",
+    input: JSON.stringify({ description: "Review renderer", subagent_type: "explore", prompt: "go" }),
+    childConversationId: child.conversation.id,
+  } });
+  await control(request, { action: "item", conversationId: parent, item: {
+    id: "permission:p1", type: "permission", createdAt: 3, requestId: "p1", status: "pending",
+    action: "bash", resources: ["rm -rf build"],
+  } });
+
+  await expect(page.locator("#chat-subagents")).toBeVisible();
+  await page.locator("#chat-subagents summary").click({ position: { x: 8, y: 8 } });
+  await page.getByRole("button", { name: "explore · Review renderer" }).click();
+  await expect(page.locator("#chat-drilldown")).toBeVisible();
+
+  // Asserted by what is painted, not by `toBeVisible`: the pushed screen
+  // covers the whole surface, so a box-and-CSS check calls the pill visible
+  // while it sits underneath and no finger can reach it. That is exactly how
+  // this was missed the first time.
+  const jump = page.locator("#chat-requests-jump");
+  const box = (await jump.boundingBox())!;
+  const painted = await page.evaluate(([x, y]) => document.elementFromPoint(x as number, y as number)?.id ?? "",
+    [box.x + box.width / 2, box.y + box.height / 2]);
+  expect(painted).toBe("chat-requests-jump");
+
+  // And taking it returns to the parent with the card answerable.
+  await jump.click();
+  await expect(page.locator("#chat-drilldown")).toBeHidden();
+  const card = page.locator('[data-chat-item-id="permission:p1"]');
+  await expect(card).toBeVisible();
+  await card.getByRole("button", { name: "Allow once" }).click();
+  await expect(jump).toBeHidden();
+});
+
 test("software-keyboard geometry keeps the composer in the visual viewport", async ({ page, request }) => {
   await page.addInitScript(() => {
     const viewport = new EventTarget() as EventTarget & { height: number; offsetTop: number };
@@ -117,9 +193,32 @@ test("history prepend and activity expansion preserve semantic position", async 
   await timeline.evaluate(element => { element.scrollTop = element.scrollHeight - element.clientHeight - 80; element.dispatchEvent(new Event("scroll")); });
   await expect(details).toBeInViewport();
   const activityTop = await details.evaluate(element => element.getBoundingClientRect().top);
-  await details.locator("summary").click();
+  await details.locator("> summary").click();
   await expect(details).toHaveAttribute("open", "");
   expect(await details.evaluate(element => element.getBoundingClientRect().top)).toBeCloseTo(activityTop, 0);
+});
+
+test("a permission's long paths wrap instead of running off the screen", async ({ page, request }) => {
+  // Absolute paths and shell pipelines have no break opportunity a browser
+  // takes on its own. Unwrapped, the longest one sets the card's width and
+  // the rest leaves the viewport — a reader approving a command whose end
+  // they cannot see, which is exactly what the card exists to prevent.
+  const permission: ConversationItem = {
+    id: "permission:p-long", type: "permission", createdAt: 10, requestId: "p-long",
+    action: "bash",
+    resources: [
+      "cat /Users/tobias/src/github.com/tjakobsson/uatu/openspec/changes/chat-context-usage/design.md",
+      "sed -n '1,80p' /Users/tobias/src/github.com/tjakobsson/uatu/README.md",
+    ],
+    status: "pending",
+  };
+  await boot(page, request, { items: [permission] });
+  await expect(page.locator('[data-chat-item-id="permission:p-long"]')).toBeVisible();
+  const timeline = await page.locator("#chat-timeline").evaluate(element => ({
+    scrollWidth: element.scrollWidth,
+    clientWidth: element.clientWidth,
+  }));
+  expect(timeline.scrollWidth).toBeLessThanOrEqual(timeline.clientWidth);
 });
 
 test("rotation and live mode switching retain Chat without remounting", async ({ page, request }) => {

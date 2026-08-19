@@ -2,9 +2,9 @@ import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
 import { appState } from "../shell/state";
 import { renderChatMarkdown } from "./markdown";
 import { resolveWorkspaceFileReference } from "./file-references";
-import { describeToolDetail, deriveTodoActivities, todoActivitySummary, toolSubject, type TodoEntry, type TodoSummary, type ToolDetail } from "./tool-detail";
+import { describeToolDetail, deriveTodoActivities, patchDiffLines, todoActivitySummary, toolSubject, type DiffLine, type TodoEntry, type TodoSummary, type ToolDetail } from "./tool-detail";
 import type { AcceptedDraft, ChatProjection } from "./projection";
-import type { ConversationItem, ConversationStatus, QuestionRequest, ToolItem } from "./types";
+import type { ActivityStatus, ConversationItem, ConversationStatus, PermissionOutcome, QuestionRequest, TokenUsage, ToolItem } from "./types";
 
 type RenderedEntry = { node: HTMLElement; item: ConversationItem; active: boolean; variant: string };
 
@@ -21,7 +21,7 @@ export class TimelineRenderer {
   private conversationId: string | null = null;
 
   /** Reconciles the DOM under `target` and returns the created or changed nodes. */
-  render(target: HTMLElement, projection: ChatProjection | null, expanded: Set<string>, queued: ReadonlySet<string> = new Set()): HTMLElement[] {
+  render(target: HTMLElement, projection: ChatProjection | null, expanded: Set<string>, queued: ReadonlySet<string> = new Set(), allowSubagents = true): HTMLElement[] {
     if (!projection) {
       this.reset();
       clearChildren(target);
@@ -58,8 +58,16 @@ export class TimelineRenderer {
     const todoLabels = todoActivityLabels(projection.items);
     const durations = turnDurations(projection.items);
 
+    // An assistant message with no text is data, not a bubble: the usage
+    // carrier for a tool-only message (`usage:<id>` from normalization) and a
+    // part the stream has not filled yet both hold facts the readouts consume
+    // while having nothing to show. Filtered before rendering AND before
+    // grouping, so a carrier sitting between two tool calls cannot split a
+    // finished run's group.
+    const visible = projection.items.filter(item => !(item.type === "assistant_message" && item.markdown === ""));
+
     const nodes = new Map<string, HTMLElement>();
-    for (const item of projection.items) {
+    for (const item of visible) {
       const active = activeRequests.has(item.id);
       const todo = todoLabels.get(item.id);
       const isQueued = queued.has(item.id);
@@ -68,7 +76,7 @@ export class TimelineRenderer {
       // cached node is only reused when it would render identically.
       const foreign = (item.type === "permission" || item.type === "question")
         && item.conversationId !== undefined && item.conversationId !== projection.conversationId;
-      const variant = [todo?.label ?? "", todo?.task ?? "", String(isQueued), duration === undefined ? "" : String(duration), String(foreign)].join("\u0001");
+      const variant = [todo?.label ?? "", todo?.task ?? "", String(isQueued), duration === undefined ? "" : String(duration), String(foreign), String(allowSubagents)].join("\u0001");
       const entry = this.entries.get(item.id);
       if (entry && entry.item === item && entry.active === active && entry.variant === variant) {
         nodes.set(item.id, entry.node);
@@ -79,8 +87,35 @@ export class TimelineRenderer {
         dirty.push(entry.node);
         continue;
       }
-      const open = entry ? entry.node.hasAttribute("open") : expanded.has(item.id);
-      const node = buildNode(renderItem(item, open, active, todo, isQueued, duration, foreign));
+      // A request does not take its open state from `expanded`: a pending one
+      // is force-open (below), and force-opening it fires a toggle that records
+      // it as "expanded" — so honouring that set would keep it open once it
+      // resolves and defeat the receding. Instead a pending request opens, and
+      // the pending→resolved transition starts the card closed. A card that was
+      // already resolved keeps its DOM open state across rebuilds — a resolved
+      // item republished with fresh identity (a resync re-running the
+      // selection) is not a new resolution, and snapping shut a card the
+      // reader opened to audit would punish them for a stream hiccup.
+      const isRequest = item.type === "permission" || item.type === "question";
+      const stayedResolved = (item.type === "permission" || item.type === "question")
+        && item.status === "resolved"
+        && entry !== undefined
+        && (entry.item.type === "permission" || entry.item.type === "question")
+        && entry.item.status === "resolved";
+      // A row the stream opened for its live tail is not a row the reader
+      // opened: taking its DOM state back as "expanded" would keep a finished
+      // tool permanently expanded, since the auto-open rule would then never
+      // get to say no. Its own rule decides again on every render instead.
+      const open = isRequest
+        ? stayedResolved && entry!.node.hasAttribute("open")
+        : entry
+          ? entry.node.hasAttribute("open") && !entry.node.hasAttribute("data-auto-open")
+          : expanded.has(item.id);
+      // Carried forward across the rebuild: an explicit close outranks the
+      // auto-open rule for the rest of the run, so a tool that keeps talking
+      // cannot reopen a row the reader shut.
+      const readerClosed = entry?.node.hasAttribute(READER_CLOSED) ?? false;
+      const node = buildNode(renderItem(item, open, active, todo, isQueued, duration, foreign, readerClosed, allowSubagents));
       entry?.node.remove();
       this.entries.set(item.id, { node, item, active, variant });
       nodes.set(item.id, node);
@@ -91,7 +126,7 @@ export class TimelineRenderer {
     // one group line; everything else stays flat. Member nodes keep their
     // per-item identity — grouping only changes where they are parented.
     const liveGroupIds = new Set<string>();
-    for (const segment of activitySegments(projection.items, projection.status)) {
+    for (const segment of activitySegments(visible, projection.status)) {
       if (!segment.group) {
         for (const item of segment.items) {
           const node = nodes.get(item.id);
@@ -214,7 +249,19 @@ export function latestTodoEntries(items: readonly ConversationItem[]): TodoEntry
   return [];
 }
 
-export type SubagentEntry = { id: string; description: string; subagent?: string; status: ConversationStatus | string; conversationId?: string };
+// `model` and `usage` come from the child session the subagent ran as,
+// mirrored onto this tool item by the adapter — the client holds one
+// conversation's projection and can never read a child's. Both are optional:
+// a subagent that has not reported them still has a row to render.
+export type SubagentEntry = {
+  id: string;
+  description: string;
+  subagent?: string;
+  status: ConversationStatus | string;
+  conversationId?: string;
+  model?: string;
+  usage?: TokenUsage;
+};
 
 /**
  * Subagents launched in this conversation, in the order they started. Unlike
@@ -233,6 +280,8 @@ export function subagentEntries(items: readonly ConversationItem[]): SubagentEnt
       ...(detail.subagent === undefined ? {} : { subagent: detail.subagent }),
       status: item.status,
       ...(detail.conversationId === undefined ? {} : { conversationId: detail.conversationId }),
+      ...(item.model === undefined ? {} : { model: item.model }),
+      ...(item.usage === undefined ? {} : { usage: item.usage }),
     });
   }
   return entries;
@@ -369,7 +418,7 @@ function renderDraft(draft: AcceptedDraft): string {
   return `<article class="chat-item chat-user-message is-pending" data-chat-item-id="draft-${escapeHtmlAttribute(draft.requestId)}"><p>${escapeHtml(draft.text)}</p><small>${label}</small></article>`;
 }
 
-export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, queued = false, durationMs?: number, foreign = false): string {
+export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, queued = false, durationMs?: number, foreign = false, readerClosed = false, allowSubagents = true): string {
   const id = escapeHtmlAttribute(item.id);
   const stamp = timestampAttribute(item.createdAt);
   // A message sent mid-turn is accepted but not yet acted on. Without a mark
@@ -386,34 +435,100 @@ export function renderItem(item: ConversationItem, open: boolean, activeRequest:
   }
   if (item.type === "permission") return renderPermission(item, open, activeRequest, foreign);
   if (item.type === "question") return renderQuestion(item, open, activeRequest, foreign);
-  if (item.type === "tool") return renderTool(item, open, todo);
+  if (item.type === "tool") return renderTool(item, open, readerClosed, todo, allowSubagents);
   // A command's text is the subject, not the label. As a label it lands in the
   // summary's non-shrinking slot, so a long pipeline overruns the row instead
   // of truncating; "Shell" names the step and the command ellipsizes beside it.
   if (item.type === "command") {
-    return activityShell(id, item.status, "Shell", item.command, `<pre>${escapeHtml(item.output ?? "")}</pre>`, open, stamp);
+    return activityShell(id, item.status, "Shell", item.command, renderActivityOutput(item.output, item.status), open, autoOpen(item.status, item.output) && !readerClosed, readerClosed, stamp);
   }
-  return activityShell(id, item.status, reasoningLabel(item), undefined, `<pre>${escapeHtml(item.text)}</pre>`, open, stamp);
+  // Reasoning has no streamed output to auto-open for; it opens only when the
+  // reader says so.
+  return activityShell(id, item.status, reasoningLabel(item), undefined, `<pre>${escapeHtml(item.text)}</pre>`, open, false, readerClosed, stamp);
 }
 
-function renderTool(item: ToolItem, open: boolean, todo?: TodoSummary): string {
+// How much of a tool's output to show before it becomes a show-more (finished)
+// or an elided tail (running). Chosen to keep a chatty tool from taking over
+// the transcript while still showing enough to read what it did.
+const OUTPUT_LINE_LIMIT = 12;
+
+// A running tool's row opens itself once it has output, so its live tail is
+// visible without the reader hunting for it — the way OpenCode's own client
+// shows a command working. A finished tool follows the normal collapse rules,
+// which is what `autoOpen` exists to make possible: the row has to be able to
+// say the stream opened it, or reading its DOM state back on the next render
+// would keep it open forever once the tool finished (the same trap the
+// force-open rule for requests documents above).
+function autoOpen(status: ActivityStatus, output: string | undefined): boolean {
+  return status === "running" && !!output;
+}
+
+/**
+ * A row the reader deliberately closed. Held in the DOM for the same reason
+ * the auto-open marker is — the next render reads its open state back from
+ * there — and needed for the same reason in mirror image: the auto-open rule
+ * is recomputed from status and output on every render, so a chatty tool would
+ * shoulder the row back open on its very next chunk. Closing it has to mean
+ * something for the rest of the run, not until the next line of output.
+ */
+export const READER_CLOSED = "data-reader-closed";
+
+// One rendering for a tool or command's output. While it runs, only the tail
+// is shown (and rendered) so progress is visible without the transcript
+// carrying the whole log; once finished, a long output is bounded to a preview
+// with a native show-more that reveals the rest — from then on the full text
+// is present in the DOM.
+function renderActivityOutput(output: string | undefined, status: ActivityStatus): string {
+  if (!output) return "";
+  if (status === "running") {
+    // Search backward only as far as the visible tail. This runs for every
+    // cumulative chunk, so counting every newline would make a long stream
+    // quadratic even though only twelve lines are rendered.
+    let cut = output.length;
+    for (let index = 0; index < OUTPUT_LINE_LIMIT; index += 1) {
+      cut = output.lastIndexOf("\n", cut - 1);
+      if (cut === -1) return `<pre class="chat-tool-stream">${escapeHtml(output)}</pre>`;
+    }
+    return `<p class="chat-output-elided">Earlier output omitted</p><pre class="chat-tool-stream">${escapeHtml(output.slice(cut + 1))}</pre>`;
+  }
+  const lines = output.split("\n");
+  if (lines.length <= OUTPUT_LINE_LIMIT) return `<pre>${escapeHtml(output)}</pre>`;
+  const preview = lines.slice(0, OUTPUT_LINE_LIMIT).join("\n");
+  const rest = lines.slice(OUTPUT_LINE_LIMIT).join("\n");
+  const more = lines.length - OUTPUT_LINE_LIMIT;
+  return `<pre>${escapeHtml(preview)}</pre><details class="chat-output-more"><summary>Show ${more} more ${more === 1 ? "line" : "lines"}</summary><pre>${escapeHtml(rest)}</pre></details>`;
+}
+
+function renderTool(item: ToolItem, open: boolean, readerClosed: boolean, todo: TodoSummary | undefined, allowSubagents: boolean): string {
   const detail = describeToolDetail(item);
-  const body = toolBody(detail, item);
+  const body = toolBody(detail, item, allowSubagents);
   // A todo update stays collapsed, but its summary reports what moved and to
   // which task — every todowrite call carries the whole list, so showing the
   // list each time reprints it verbatim on every tool call.
   const label = detail.kind === "todo" && todo ? todo.label : detail.label;
   const subject = detail.kind === "todo" ? todo?.task : toolSubject(detail);
-  return activityShell(escapeHtmlAttribute(item.id), item.status, label, subject, body, open, timestampAttribute(item.createdAt));
+  return activityShell(escapeHtmlAttribute(item.id), item.status, label, subject, body, open, autoOpen(item.status, item.output) && !readerClosed, readerClosed, timestampAttribute(item.createdAt));
 }
 
-function toolBody(detail: ToolDetail, item: ToolItem): string {
+// One rendering for every diff the chat shows — a tool's edit, a patch, and a
+// permission's pending change all read the same way.
+function chatDiffMarkup(diff: DiffLine[]): string {
+  return `<pre class="chat-diff">${diff.map(line => `<span class="chat-diff-line is-${line.sign === "-" ? "del" : "add"}">${escapeHtml(`${line.sign} ${line.text}`)}</span>`).join("\n")}</pre>`;
+}
+
+function toolBody(detail: ToolDetail, item: ToolItem, allowSubagents: boolean): string {
   const error = item.error ? `<pre class="chat-tool-error">${escapeHtml(item.error)}</pre>` : "";
+  // Every branch has to surface `item.output` somehow, because the auto-open
+  // rule keys on output alone: a row that opens itself to show its live tail
+  // and then renders a body without it is a row that opened for nothing. The
+  // branches below that omit `outputBlock` surface it in their own words
+  // instead — `question` as the answer it parsed, `agent` as the subagent's
+  // report — which is why they are not bare.
   switch (detail.kind) {
     case "edit":
-      return `${fileButton(detail.path)}<pre class="chat-diff">${detail.diff.map(line => `<span class="chat-diff-line is-${line.sign === "-" ? "del" : "add"}">${escapeHtml(`${line.sign} ${line.text}`)}</span>`).join("\n")}</pre>${error}`;
+      return `${fileButton(detail.path)}${chatDiffMarkup(detail.diff)}${outputBlock(item)}${error}`;
     case "write":
-      return `${fileButton(detail.path)}<pre>${escapeHtml(detail.content)}</pre>${error}`;
+      return `${fileButton(detail.path)}<pre>${escapeHtml(detail.content)}</pre>${outputBlock(item)}${error}`;
     case "read":
       return `${fileButton(detail.startLine ? `${detail.path}:${detail.startLine}` : detail.path)}${outputBlock(item)}${error}`;
     case "search":
@@ -421,24 +536,36 @@ function toolBody(detail: ToolDetail, item: ToolItem): string {
     case "fetch":
       return `<p class="chat-tool-meta"><code>${escapeHtml(detail.url)}</code></p>${outputBlock(item)}${error}`;
     case "todo":
-      return `<ul class="chat-todo">${detail.entries.map(entry => `<li class="is-${entry.state}">${escapeHtml(entry.text)}</li>`).join("")}</ul>${error}`;
+      return `<ul class="chat-todo">${detail.entries.map(entry => `<li class="is-${entry.state}">${escapeHtml(entry.text)}</li>`).join("")}</ul>${outputBlock(item)}${error}`;
     case "patch":
-      return `${detail.files.map(file => fileButton(file)).join("")}<pre class="chat-diff">${detail.diff.map(line => `<span class="chat-diff-line is-${line.sign === "-" ? "del" : "add"}">${escapeHtml(`${line.sign} ${line.text}`)}</span>`).join("\n")}</pre>${error}`;
+      return `${detail.files.map(file => fileButton(file)).join("")}${chatDiffMarkup(detail.diff)}${outputBlock(item)}${error}`;
     case "question":
       return `${detail.asked.map(entry => `<p class="chat-tool-meta"><strong>${escapeHtml(entry.header)}</strong></p><p>${escapeHtml(entry.prompt)}</p>`).join("")}${detail.answer ? `<p class="chat-request-outcome">${escapeHtml(detail.answer)}</p>` : ""}${error}`;
     case "agent":
       // The result is the subagent's report — prose, rendered like assistant
       // markdown rather than dumped as the raw task envelope.
-      return `<p class="chat-tool-meta">${detail.subagent ? `<code>${escapeHtml(detail.subagent)}</code> ` : ""}${escapeHtml(detail.description)}${detail.conversationId ? ` <button type="button" data-open-conversation="${escapeHtmlAttribute(detail.conversationId)}">Open transcript</button>` : ""}</p><pre>${escapeHtml(detail.prompt)}</pre>${detail.result ? `<div class="chat-subagent-result markdown-body">${renderChatMarkdown(detail.result)}</div>` : ""}${error}`;
+      return `<p class="chat-tool-meta">${detail.subagent ? `<code>${escapeHtml(detail.subagent)}</code> ` : ""}${escapeHtml(detail.description)}${allowSubagents && detail.conversationId ? ` <button type="button" data-open-conversation="${escapeHtmlAttribute(detail.conversationId)}">Open transcript</button>` : ""}</p><pre>${escapeHtml(detail.prompt)}</pre>${detail.result ? renderSubagentResult(detail.result) : ""}${error}`;
     case "skill":
       return `${outputBlock(item)}${error}`;
     default:
-      return `<pre>${escapeHtml([item.input, item.output, item.error].filter(Boolean).join("\n\n"))}</pre>`;
+      // An unknown tool: show its input, then bound its output like any other.
+      return `${item.input ? `<pre>${escapeHtml(item.input)}</pre>` : ""}${outputBlock(item)}${error}`;
   }
 }
 
 function outputBlock(item: ToolItem): string {
-  return item.output ? `<pre>${escapeHtml(item.output)}</pre>` : "";
+  return renderActivityOutput(item.output, item.status);
+}
+
+// Task output is prose rather than a raw log, but it obeys the same finished
+// output bound. Both preview and remainder stay Markdown-rendered.
+function renderSubagentResult(result: string): string {
+  const lines = result.split("\n");
+  if (lines.length <= OUTPUT_LINE_LIMIT) return `<div class="chat-subagent-result markdown-body">${renderChatMarkdown(result)}</div>`;
+  // Render once so a fence, list, or table crossing the visual cutoff keeps
+  // its structure. The closed details element is a native state toggle; CSS
+  // uses it to clip or reveal this same content rather than rendering halves.
+  return `<div class="chat-subagent-result is-bounded"><div class="chat-subagent-result-content markdown-body">${renderChatMarkdown(result)}</div><details class="chat-output-more"><summary><span class="chat-report-expand">Show full report</span><span class="chat-report-collapse">Collapse report</span></summary></details></div>`;
 }
 
 function fileButton(reference: string): string {
@@ -459,9 +586,15 @@ export function workspaceRelative(reference: string): string {
   return reference;
 }
 
-function activityShell(id: string, status: string, label: string, subject: string | undefined, body: string, open: boolean, stamp: string): string {
+// `auto` marks a row the stream opened rather than the reader. It is carried in
+// the DOM because that is where the next render reads the open state back from,
+// and the two have to stay distinguishable there.
+function activityShell(id: string, status: string, label: string, subject: string | undefined, body: string, open: boolean, auto: boolean, readerClosed: boolean, stamp: string): string {
   const subjectHtml = subject ? `<span class="chat-activity-subject">${escapeHtml(workspaceRelative(subject))}</span>` : "";
-  return `<details class="chat-item chat-activity is-${status}" data-chat-item-id="${id}"${stamp}${open ? " open" : ""}><summary><span>${escapeHtml(label)}</span>${subjectHtml}<span class="chat-activity-status">${escapeHtml(status)}</span></summary>${body}</details>`;
+  // Both markers ride on the rebuilt node, because a rebuild is how this row
+  // survives streaming and neither state is recoverable from the item itself.
+  const markers = `${!open && auto ? " data-auto-open" : ""}${readerClosed ? ` ${READER_CLOSED}` : ""}`;
+  return `<details class="chat-item chat-activity is-${status}" data-chat-item-id="${id}"${stamp}${open || auto ? " open" : ""}${markers}><summary><span>${escapeHtml(label)}</span>${subjectHtml}<span class="chat-activity-status">${escapeHtml(status)}</span></summary>${body}</details>`;
 }
 
 // A request's state, as data rather than something CSS has to re-derive: the
@@ -512,11 +645,28 @@ function renderPermission(item: Extract<ConversationItem, { type: "permission" }
   // permission spec), which is agent-specific behavior, not just an agent
   // name. A second agent that persists grants differently needs its own
   // statement here, not a find-and-replace.
-  const outcome = pending && active
+  // A resolved request recedes: the outcome moves into the summary so it stays
+  // legible at a glance, the choices and their scope note fall away, and the
+  // resources it named stay in the collapsed body for a user auditing what was
+  // granted. Only a pending request keeps its full footprint.
+  const body = pending && active
     ? `<div class="chat-request-actions"><button type="button" data-permission-outcome="approved-once">Allow once</button><button type="button" data-permission-outcome="approved-session">Allow always</button><button type="button" data-permission-outcome="rejected">Reject</button></div><p class="chat-request-scope">“Allow always” also covers later conversations, and similar requests — until OpenCode restarts.</p>`
-    : pending ? `<p class="chat-request-outcome">Waiting its turn — answer the newest request first.</p>` : `<p class="chat-request-outcome">Resolved: ${escapeHtml(item.outcome ?? "resolved")}</p>`;
+    : pending ? `<p class="chat-request-outcome">Waiting its turn — answer the newest request first.</p>` : "";
   const state = requestState(item.status, active);
-  return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${requestAttributes(state)}${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}><summary>Permission: ${escapeHtml(item.action)}${requestBadge(state)}</summary>${requestOrigin(foreign)}<ul>${item.resources.map(resource => `<li><code>${escapeHtml(resource)}</code></li>`).join("")}</ul>${outcome}</details>`;
+  const summaryTrace = state === "resolved" ? ` <span class="chat-request-trace">${escapeHtml(permissionOutcomeLabel(item.outcome))}</span>` : requestBadge(state);
+  // What "Allow" would apply, shown where the choice is made. Only while the
+  // request is still open — a receded, resolved card does not re-show the diff.
+  const changePreview = pending && item.diff ? `<div class="chat-request-change">${chatDiffMarkup(patchDiffLines(item.diff))}</div>` : "";
+  return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${requestAttributes(state)}${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}><summary>Permission: ${escapeHtml(item.action)}${summaryTrace}</summary>${requestOrigin(foreign)}<ul>${item.resources.map(resource => `<li><code>${escapeHtml(resource)}</code></li>`).join("")}</ul>${changePreview}${body}</details>`;
+}
+
+// The receded form's label — what was decided, in words, since the summary no
+// longer sits beside the choices that produced it.
+function permissionOutcomeLabel(outcome: PermissionOutcome | undefined): string {
+  if (outcome === "approved-once") return "Allowed once";
+  if (outcome === "approved-session") return "Allowed always";
+  if (outcome === "rejected") return "Rejected";
+  return "Resolved";
 }
 
 function renderQuestion(item: QuestionRequest, open: boolean, active: boolean, foreign = false): string {
@@ -532,9 +682,14 @@ function renderQuestion(item: QuestionRequest, open: boolean, active: boolean, f
   // legend says which it is — otherwise there is nothing telling you more than
   // one answer is allowed.
   const questions = item.questions.map((question, index) => `<fieldset class="chat-question-panel" data-question-panel="${index}"${index === 0 ? "" : " hidden"}><legend${stepped ? ` class="sr-only"` : ""}>${escapeHtml(question.header)}</legend><p>${escapeHtml(question.prompt)}${question.multiple ? ` <span class="chat-question-hint">choose one or more</span>` : ""}</p>${question.options.map(option => `<label class="chat-question-option"><input type="${question.multiple ? "checkbox" : "radio"}" name="q-${index}" value="${escapeHtmlAttribute(option.label)}"><span class="chat-question-option-text"><span class="chat-question-option-label">${escapeHtml(option.label)}</span>${option.description ? `<small>${escapeHtml(option.description)}</small>` : ""}</span></label>`).join("")}${question.allowFreeForm ? `<label class="chat-question-freeform">Other <input name="q-${index}" type="text"></label>` : ""}</fieldset>`).join("");
-  const body = pending && active ? `<form data-question-form>${tabs}${questions}<div class="chat-request-actions"><button type="submit" data-question-primary disabled>${stepped ? "Next" : "Answer"}</button><button type="button" data-question-reject>Reject</button></div></form>` : pending ? `<p class="chat-request-outcome">Waiting its turn — answer the newest request first.</p>` : `<p class="chat-request-outcome">${item.outcome?.kind === "rejected" ? "Rejected" : "Answered"}</p>`;
+  // Same receding as a permission: a resolved question carries its outcome in
+  // the summary and drops the answered form. Its prompts stay in the collapsed
+  // body so what was asked remains reachable.
+  const resolvedBody = item.questions.map(question => `<p class="chat-request-asked">${escapeHtml(question.prompt)}</p>`).join("");
+  const body = pending && active ? `<form data-question-form>${tabs}${questions}<div class="chat-request-actions"><button type="submit" data-question-primary disabled>${stepped ? "Next" : "Answer"}</button><button type="button" data-question-reject>Reject</button></div></form>` : pending ? `<p class="chat-request-outcome">Waiting its turn — answer the newest request first.</p>` : resolvedBody;
   const state = requestState(item.status, active);
-  return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${requestAttributes(state)}${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}><summary>Question${requestBadge(state)}</summary>${requestOrigin(foreign)}${body}</details>`;
+  const summaryTrace = state === "resolved" ? ` <span class="chat-request-trace">${item.outcome?.kind === "rejected" ? "Rejected" : "Answered"}</span>` : requestBadge(state);
+  return `<details class="chat-item chat-request" data-chat-item-id="${escapeHtmlAttribute(item.id)}"${requestAttributes(state)}${timestampAttribute(item.createdAt)}${open || pending ? " open" : ""}><summary>Question${summaryTrace}</summary>${requestOrigin(foreign)}${body}</details>`;
 }
 
 export function decorateFileLinks(container: HTMLElement): void {

@@ -39,7 +39,12 @@ export type ChatCapability =
   | "commands"
   | "questions"
   | "permissions"
-  | "subagents";
+  | "subagents"
+  // The selected model offers named reasoning variants (thinking harder/faster).
+  | "variants"
+  // The agent reports token usage per message, so Chat can say how full the
+  // context window is and what each subagent cost.
+  | "context";
 
 // What Chat is talking to. One agent per workspace today, but the surface
 // takes its name and its controls from this record rather than from fixed
@@ -76,6 +81,11 @@ export type ChatModel = {
   selection: ModelSelection;
   provider: string;
   name: string;
+  // The reasoning variants this model advertises (OpenCode reports them as a
+  // keyed map; these are its keys). Absent or empty when the model offers none.
+  variants?: string[];
+  // The model's context-window size in tokens, when the agent reports it.
+  contextLimit?: number;
 };
 
 export type ChatCommand = {
@@ -112,10 +122,34 @@ export type UserMessageItem = TimelineItemBase & {
   requestId?: string;
 };
 
+/**
+ * What a message spent, as the agent reports it. Absent fields mean the agent
+ * did not report that component — never zero, because "no cache read" and "not
+ * told" are different statements and a readout that conflates them asserts a
+ * figure it does not have.
+ *
+ * The window fill is `input + cacheRead + cacheWrite`: the prompt the most
+ * recent request carried, which already includes the conversation so far. It
+ * deliberately excludes `output`, which is what came back rather than what is
+ * occupying the window.
+ */
+export type TokenUsage = {
+  input?: number;
+  output?: number;
+  reasoning?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+};
+
 export type AssistantMessageItem = TimelineItemBase & {
   type: "assistant_message";
   markdown: string;
   completedAt?: number;
+  // Message-level accounting rides a dedicated empty-markdown carrier.
+  usage?: TokenUsage;
+  // The model that reported this carrier's usage, so a context percentage is
+  // measured against that model's window even after another model is selected.
+  model?: ModelSelection;
 };
 
 export type ReasoningItem = TimelineItemBase & {
@@ -137,6 +171,12 @@ export type ToolItem = TimelineItemBase & {
   // The child session a `task` tool ran as, when the provider reports one —
   // what makes a subagent transcript openable as its own conversation.
   childConversationId?: string;
+  // A subagent's own model and token cost, aggregated from its child session
+  // and mirrored here — the client holds one conversation's projection and can
+  // never read a child's, so the attribution has to be materialized onto the
+  // row that launched it. Absent until the child has reported something.
+  model?: string;
+  usage?: TokenUsage;
 };
 
 export type CommandItem = TimelineItemBase & {
@@ -169,6 +209,10 @@ export type PermissionRequest = TimelineItemBase & {
   resources: string[];
   status: "pending" | "resolved";
   outcome?: PermissionOutcome;
+  // A unified diff of the change a file-edit permission would apply, when the
+  // agent attaches one (OpenCode puts it on the permission's `metadata.diff`).
+  // Absent for a permission with nothing to show — a command, a fetch.
+  diff?: string;
 };
 
 export type QuestionOption = {

@@ -162,10 +162,11 @@ async function handleE2EChat(request: Request): Promise<Response> {
     delta?: string;
     status?: ConversationStatus;
     capabilities?: ChatCapability[];
+    child?: boolean;
   };
   switch (body.action) {
     case "seed":
-      return Response.json(chatService.seed(body.title ?? "Fixture conversation", body.items ?? [], body.older ?? []));
+      return Response.json(chatService.seed(body.title ?? "Fixture conversation", body.items ?? [], body.older ?? [], body.child ?? false));
     case "item":
       if (body.conversationId && body.item) return Response.json(chatService.publishItem(body.conversationId, body.item));
       break;
@@ -184,9 +185,15 @@ async function handleE2EChat(request: Request): Promise<Response> {
       chatService.disconnect();
       return Response.json({ ok: true });
     case "stats":
-      return Response.json({ statusCalls: chatService.statusCalls, promptAttempts: chatService.promptAttempts, promptModes: chatService.promptModes });
+      return Response.json({ statusCalls: chatService.statusCalls, promptAttempts: chatService.promptAttempts, promptModes: chatService.promptModes, promptVariants: chatService.promptVariants });
     case "failPrompt":
       chatService.failPrompt();
+      return Response.json({ ok: true });
+    case "failHistory":
+      chatService.failHistory(false);
+      return Response.json({ ok: true });
+    case "failOlderHistory":
+      chatService.failHistory(true);
       return Response.json({ ok: true });
     case "failStartup":
       chatService.failStartup();

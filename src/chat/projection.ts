@@ -1,3 +1,4 @@
+import { mergeAssistantMessage } from "./usage";
 import type { ChatEvent, ConversationItem, ConversationSnapshot, ConversationStatus } from "./types";
 
 export type AcceptedDraft = { requestId: string; messageId: string; text: string };
@@ -70,9 +71,7 @@ export function applyChatEvent(current: ChatProjection, event: ChatEvent, cursor
   if (event.type === "item.upsert") {
     const index = items.findIndex(item => item.id === event.item.id);
     const existing = index < 0 ? undefined : items[index];
-    const incoming = existing?.type === "user_message" && event.item.type === "user_message" && existing.requestId && !event.item.requestId
-      ? { ...event.item, text: existing.text, requestId: existing.requestId }
-      : event.item;
+    const incoming = mergeUpsert(existing, event.item);
     items = index < 0 ? [...items, incoming] : items.map((item, at) => at === index ? incoming : item);
   } else if (event.type === "item.remove") {
     items = items.filter(item => item.id !== event.itemId);
@@ -92,6 +91,28 @@ export function applyChatEvent(current: ChatProjection, event: ChatEvent, cursor
     },
     outcome: "applied",
   };
+}
+
+/**
+ * What an upsert keeps from the item it replaces. Two cases, both about an
+ * upsert that carries less than what is already on screen:
+ *
+ * - A `message.updated` for a user message normalizes with empty parts, and an
+ *   optimistically-sent message holds a requestId the server echo lacks.
+ * - A token-usage upsert restates a dedicated empty-markdown carrier and must
+ *   preserve previously reported accounting fields it omits.
+ */
+function mergeUpsert(existing: ConversationItem | undefined, incoming: ConversationItem): ConversationItem {
+  if (!existing || existing.type !== incoming.type) return incoming;
+  if (existing.type === "user_message" && incoming.type === "user_message") {
+    return existing.requestId && !incoming.requestId
+      ? { ...incoming, text: existing.text, requestId: existing.requestId }
+      : incoming;
+  }
+  if (existing.type === "assistant_message" && incoming.type === "assistant_message") {
+    return mergeAssistantMessage(existing, incoming);
+  }
+  return incoming;
 }
 
 function appendDelta(item: ConversationItem, delta: string): ConversationItem {

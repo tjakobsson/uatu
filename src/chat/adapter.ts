@@ -1,8 +1,10 @@
 import { randomBytes, randomUUID } from "node:crypto";
 
+import { boundedSet } from "../shared/bounded-map";
 import { ProviderUpdateCoalescer } from "./coalescer";
-import { normalizeProviderEvent, normalizeProviderMessage, type NormalizedProviderUpdate } from "./normalization";
-import type { OpenCodeProvider, ProviderPermissionReply, ProviderSession } from "./provider";
+import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage, type NormalizedProviderUpdate } from "./normalization";
+import { mergeAssistantMessage, sameUsage, TOKEN_USAGE_COMPONENTS } from "./usage";
+import { UnsupportedVariantSelectionError, type OpenCodeProvider, type ProviderPermissionReply, type ProviderSession } from "./provider";
 import { IdempotencyReceipts } from "./receipts";
 import { ConversationReplay, type ReplaySubscription } from "./replay";
 import { ProviderTextReconciler } from "./text-reconciler";
@@ -21,10 +23,15 @@ import type {
   ModelSelection,
   QuestionOutcome,
   QuestionRequest,
+  TokenUsage,
 } from "./types";
 import { ConversationNotFoundError, isSessionInWorkspace } from "./workspace";
 
 const DEFAULT_PAGE_SIZE = 50;
+// Sized so reconstructAttribution reads a whole subagent transcript in one
+// call in practice; its cursor loop is the backstop, not the plan.
+const RECONSTRUCTION_READ_LIMIT = 10_000;
+type MessageModel = { model: string; createdAt: number };
 
 export class InteractionConflictError extends Error {
   constructor(message = "interaction request is stale or already resolved") {
@@ -44,6 +51,13 @@ export class InvalidModeSelectionError extends Error {
   constructor() {
     super("selected mode is not available");
     this.name = "InvalidModeSelectionError";
+  }
+}
+
+export class InvalidVariantSelectionError extends Error {
+  constructor(message = "selected variant is not available") {
+    super(message);
+    this.name = "InvalidVariantSelectionError";
   }
 }
 
@@ -98,7 +112,32 @@ export class OpenCodeChatAdapter {
   private readonly countedEventTypes = new Set<string>();
   private readonly lastModel = new Map<string, ModelSelection>();
   private readonly lastMode = new Map<string, string>();
-  private readonly providerMessageRoles = new Map<string, string>();
+  private readonly lastVariant = new Map<string, string>();
+  // A subagent's own cost and model, kept per message within the child session.
+  // Per message because `message.updated` restates growing tokens rather than
+  // adding to them, and removing the newest message must reveal the preceding
+  // message's model rather than leave the deleted one attributed.
+  //
+  // Keyed by parent AND child (`attributionKey`), not by child alone: the
+  // tally exists to decorate a row in the parent's timeline, so it should live
+  // exactly as long as that timeline does. Keyed by the child, eviction would
+  // never fire — the LRU evicts conversations, and a child session usually has
+  // no projection of its own. A ceiling backstops both maps besides.
+  private readonly childUsage = new Map<string, Map<string, TokenUsage>>();
+  private readonly childModels = new Map<string, Map<string, MessageModel>>();
+  // Deletions that race a stored-history reconstruction must win over that
+  // stale read just as newer live usage does.
+  private readonly removedChildAttribution = new Map<string, Set<string>>();
+  private readonly attributionReconstructions = new Map<string, Promise<void>>();
+  private readonly attributionEpochs = new Map<string, number>();
+  // Attribution keys whose tally has been squared against the child's stored
+  // history. A live tally alone is not proof of completeness: a parent evicted
+  // mid-run loses its maps, and the child's next event recreates one holding
+  // only the post-eviction message — present, but missing everything before.
+  // Only a successful stored read (merged with whatever landed live) earns the
+  // mark, and only the mark lets history() skip the read.
+  private readonly completeAttributions = new Set<string>();
+  private readonly providerEventMemory = createProviderEventMemory();
   private pumpController: AbortController | null = null;
   private pumpPromise: Promise<void> | null = null;
 
@@ -132,7 +171,7 @@ export class OpenCodeChatAdapter {
         try {
           const page = await this.provider.listMessages(session.id, { limit: 100 });
           const firstUserMessage = page.items
-            .flatMap(normalizeProviderMessage)
+            .flatMap(message => normalizeProviderMessage(message))
             .filter(item => item.type === "user_message" && item.text.trim())
             .sort((left, right) => left.createdAt - right.createdAt)[0];
           if (firstUserMessage?.type === "user_message") {
@@ -189,7 +228,7 @@ export class OpenCodeChatAdapter {
     const replayCursor = this.projection(id).replay.latestCursor();
     const cursor = options.cursor ? decodeHistoryCursor(options.cursor) : undefined;
     const page = await this.provider.listMessages(id, { cursor: cursor?.provider, limit: options.limit ?? DEFAULT_PAGE_SIZE });
-    const items = page.items.flatMap(normalizeProviderMessage);
+    const items = page.items.flatMap(message => normalizeProviderMessage(message));
     // Stable sort with no id tiebreaker: parts of one message share the
     // message's timestamp, so ties must fall back to the provider's own part
     // order (the order `flatMap` already produced). Comparing ids instead
@@ -209,6 +248,35 @@ export class OpenCodeChatAdapter {
           items[index] = { ...item, status: "cancelled" };
         }
       }
+    }
+    // A subagent's attribution reached the parent as a live upsert, and the
+    // parent's own store has no memory of it — so a reopened conversation
+    // would show costs that simply vanished. The child's stored messages do
+    // still carry them, so a tally not yet squared against that store is
+    // rebuilt from there, once, and banked. The gate is the completeness mark,
+    // not mere map presence: a tally recreated by live events after an
+    // eviction exists but holds only the post-eviction messages, and skipping
+    // the read for it would under-report the child forever. Paid once per
+    // child rather than per open (the aggregate is still computed here, not
+    // fetched per render) — and in parallel, so a fan-out costs one round trip
+    // rather than one each.
+    const unattributed = [...new Set(items.flatMap(item =>
+      item.type === "tool" && item.childConversationId && !this.completeAttributions.has(attributionKey(id, item.childConversationId))
+        ? [item.childConversationId]
+        : []))];
+    await Promise.all(unattributed.map(childId => this.reconstructAttribution(id, childId)));
+    for (let index = 0; index < items.length; index += 1) {
+      const item = items[index]!;
+      if (item.type !== "tool" || !item.childConversationId) continue;
+      const key = attributionKey(id, item.childConversationId);
+      const model = latestModel(this.childModels.get(key));
+      const usage = sumUsage(this.childUsage.get(key));
+      if (model === undefined && usage === undefined) continue;
+      items[index] = {
+        ...item,
+        ...(model === undefined ? {} : { model }),
+        ...(usage === undefined ? {} : { usage }),
+      };
     }
     // OpenCode 1.18 never emits `question.v2.asked`, so a pending question is
     // invisible to the event stream and only the provider knows about it.
@@ -346,7 +414,7 @@ export class OpenCodeChatAdapter {
     });
   }
 
-  async prompt(conversationId: string, requestId: string, text: string, model?: ModelSelection, mode?: string): Promise<{
+  async prompt(conversationId: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string): Promise<{
     messageId: string;
     delivery: "steer" | "queue";
     conversation?: ConversationSummary;
@@ -358,10 +426,17 @@ export class OpenCodeChatAdapter {
       const delivery = projection.status === "running" ? "steer" : "queue";
       const messageId = this.id();
       const previousModel = model ? this.lastModel.get(conversationId) : undefined;
-      if (model && (!previousModel || !sameSelection(previousModel, model))) {
-        const models = await this.provider.listModels();
-        if (!models.some(candidate => sameSelection(candidate.selection, model))) throw new InvalidModelSelectionError();
+      const modelChanged = model !== undefined && (!previousModel || !sameSelection(previousModel, model));
+      // One list serves the model check and the variant check below; only a
+      // change pays the round trip.
+      let available: ChatModel[] | undefined;
+      if (model && modelChanged) {
+        available = await this.provider.listModels();
+        if (!available.some(candidate => sameSelection(candidate.selection, model))) throw new InvalidModelSelectionError();
         this.lastModel.set(conversationId, model);
+        // A variant is valid only for the model it was checked against, so a
+        // model change re-arms the variant check.
+        this.lastVariant.delete(conversationId);
       }
       // Same freshness rule as the model: only a change pays the list round
       // trip, and an unknown name is refused rather than passed through for
@@ -370,6 +445,23 @@ export class OpenCodeChatAdapter {
         const modes = await this.modes();
         if (!modes.some(candidate => candidate.name === mode)) throw new InvalidModeSelectionError();
         this.lastMode.set(conversationId, mode);
+      }
+      // A variant is refused unless the model it would ride advertises it —
+      // variants are per-model, and an unknown one passed through would
+      // silently do nothing on the wire. A prompt that carries a variant
+      // without restating the model means "this conversation's model, harder":
+      // the last model this adapter applied stands in, for the check here and
+      // for the dispatch below, because on the v2 path the variant rides the
+      // model reference and a variant with nothing to ride is dropped. Same
+      // freshness rule as the model and mode: a variant is re-sent with every
+      // prompt of a conversation, so validating it every time would pay a
+      // provider round trip per message rather than per change.
+      const variantModel = variant ? model ?? this.lastModel.get(conversationId) : model;
+      if (variant && this.lastVariant.get(conversationId) !== variant) {
+        available ??= await this.provider.listModels();
+        const selected = variantModel && available.find(candidate => sameSelection(candidate.selection, variantModel));
+        if (!selected?.variants?.includes(variant)) throw new InvalidVariantSelectionError();
+        this.lastVariant.set(conversationId, variant);
       }
       // Emptiness is checked before dispatch (afterwards the store already
       // holds this prompt), but the rename itself waits for admission — a
@@ -394,8 +486,8 @@ export class OpenCodeChatAdapter {
           ? parseSlashCommand(text, await this.provider.listCommands())
           : undefined;
         const accepted = slash
-          ? await this.provider.command(conversationId, { id: messageId, name: slash.name, arguments: slash.arguments, model, mode })
-          : await this.provider.prompt(conversationId, { id: messageId, text, delivery, model, mode });
+          ? await this.provider.command(conversationId, { id: messageId, name: slash.name, arguments: slash.arguments, model: variantModel, mode, variant })
+          : await this.provider.prompt(conversationId, { id: messageId, text, delivery, model: variantModel, mode, variant });
         if (renameToFirstPrompt) {
           try {
             session = await this.provider.renameSession!(conversationId, deriveConversationTitle(text));
@@ -410,8 +502,11 @@ export class OpenCodeChatAdapter {
         if (projection.status === "sending") projection.statusUpdate("running");
         return { messageId: accepted.messageId, delivery, ...(conversation ? { conversation } : {}) };
       } catch (error) {
-        if (!steering && projection.status === "sending") projection.statusUpdate("failed", errorMessage(error));
-        throw error;
+        const mapped = error instanceof UnsupportedVariantSelectionError
+          ? new InvalidVariantSelectionError(error.message)
+          : error;
+        if (!steering && projection.status === "sending") projection.statusUpdate("failed", errorMessage(mapped));
+        throw mapped;
       }
     });
   }
@@ -532,6 +627,200 @@ export class OpenCodeChatAdapter {
       : update));
   }
 
+  /**
+   * Rebuilds a subagent's cost from its own stored messages, for a parent
+   * reopened after the live tally was lost — a workspace restart, or an
+   * eviction of this parent.
+   *
+   * A failed read banks nothing: an errored list is unknown, not empty, and
+   * caching it as empty would hide a subagent's cost permanently after one
+   * transient provider error. A successful read banks even an empty result,
+   * which is what stops a child that genuinely reported nothing from being
+   * re-read on every open.
+   */
+  private reconstructAttribution(parentId: string, childId: string): Promise<void> {
+    const key = attributionKey(parentId, childId);
+    const existing = this.attributionReconstructions.get(key);
+    if (existing) return existing;
+    const epoch = this.attributionEpochs.get(key) ?? 0;
+    const pending = this.reconstructAttributionOnce(key, childId, epoch).finally(() => {
+      if (this.attributionReconstructions.get(key) === pending) {
+        this.attributionReconstructions.delete(key);
+        this.attributionEpochs.delete(key);
+      }
+    });
+    this.attributionReconstructions.set(key, pending);
+    return pending;
+  }
+
+  private async reconstructAttributionOnce(key: string, childId: string, epoch: number): Promise<void> {
+    const byMessage = new Map<string, TokenUsage>();
+    const byModel = new Map<string, MessageModel>();
+    try {
+      // Every message, in one read: banking a partial tally would permanently
+      // underreport the child, because a banked key is never re-read. The
+      // read asks for effectively everything at once — the provider's paging
+      // is a local slice over a fully refetched merge, so walking it in
+      // fifty-message pages would fetch the whole child once per page. The
+      // cursor loop stays as a backstop for a child even longer than one
+      // read; pages walk newest to oldest, so the first page's last-reported
+      // model is the child's newest and is kept.
+      let cursor: string | undefined;
+      do {
+        const page = await this.provider.listMessages(childId, { cursor, limit: RECONSTRUCTION_READ_LIMIT });
+        for (const message of page.items) {
+          const reported = storedMessageUsage(message);
+          if (!reported) continue;
+          if (reported.usage) byMessage.set(reported.messageId, reported.usage);
+          if (reported.model) byModel.set(reported.messageId, { model: reported.model, createdAt: reported.createdAt });
+        }
+        cursor = page.nextCursor;
+      } while (cursor !== undefined);
+    } catch {
+      return;
+    }
+    // Eviction clears every live value this read would merge. A completion
+    // from before that boundary must not repopulate the cleared maps and mark
+    // a potentially incomplete answer authoritative.
+    if ((this.attributionEpochs.get(key) ?? 0) !== epoch) return;
+    // Live events may have landed while the read was in flight, and they are
+    // newer than the stored snapshot — per message the live figure wins, and
+    // a model attributed live outranks the stored one. Overwriting instead
+    // would bank the stale snapshot permanently once the events fall behind
+    // the replay cursor.
+    const live = this.childUsage.get(key);
+    if (live) for (const [messageId, usage] of live) byMessage.set(messageId, usage);
+    const liveModels = this.childModels.get(key);
+    if (liveModels) for (const [messageId, model] of liveModels) byModel.set(messageId, model);
+    const removed = this.removedChildAttribution.get(key);
+    if (removed) for (const messageId of removed) {
+      byMessage.delete(messageId);
+      byModel.delete(messageId);
+    }
+    this.bankAttribution(this.childUsage, key, byMessage);
+    this.bankAttribution(this.childModels, key, byModel);
+    // Squared against the store from here on; only an eviction re-arms the read.
+    this.completeAttributions.add(key);
+    this.removedChildAttribution.delete(key);
+    if (this.completeAttributions.size > MAX_CHILD_ATTRIBUTIONS) {
+      this.completeAttributions.delete(this.completeAttributions.values().next().value!);
+    }
+  }
+
+  /**
+   * Bounded insert for the attribution maps. An eviction takes the mark of
+   * completeness with it: the next open of that parent must re-read the
+   * child's store rather than trust whatever partial tally live events
+   * rebuild afterwards.
+   */
+  private bankAttribution<T>(map: Map<string, T>, key: string, value: T): void {
+    const evicted = boundedSet(map, key, value, MAX_CHILD_ATTRIBUTIONS);
+    if (evicted !== undefined) this.completeAttributions.delete(evicted);
+  }
+
+  /**
+   * A session's parent, cached. A failed lookup propagates rather than caching
+   * as "no parent": a cached null would permanently hide a subagent from the
+   * conversation that launched it after one transient provider error.
+   */
+  private async parentOf(id: string): Promise<string | null> {
+    const known = this.sessionParents.get(id);
+    if (known !== undefined) return known;
+    const parentId = (await this.provider.getSession(id))?.parentId ?? null;
+    this.sessionParents.set(id, parentId);
+    return parentId;
+  }
+
+  /**
+   * Attributes a subagent on the row that launched it: the model its own
+   * session ran and the tokens it consumed, summed across its messages and
+   * upserted onto the parent's `task` tool item.
+   *
+   * Materialized onto the parent's item rather than read on demand because the
+   * client holds one conversation's projection and can never see a child's —
+   * and computed from the events already flowing through this pump rather than
+   * fetched per child, which would be a provider call per subagent per render.
+   */
+  private async attributeSubagent(
+    conversationId: string,
+    reported: { messageId: string; usage: TokenUsage } | undefined,
+    assistantModel: { messageId: string; model: string; createdAt: number } | undefined,
+    removedMessageId: string | undefined,
+    coalescer: ProviderUpdateCoalescer,
+  ): Promise<void> {
+    if (reported === undefined && assistantModel === undefined && removedMessageId === undefined) return;
+    let parentId: string | null;
+    try {
+      parentId = await this.parentOf(conversationId);
+    } catch {
+      return; // Unknown parentage is not a reason to fail the child's own events.
+    }
+    if (!parentId) return;
+    const key = attributionKey(parentId, conversationId);
+    if (assistantModel !== undefined) {
+      const byMessage = this.childModels.get(key) ?? new Map<string, MessageModel>();
+      byMessage.set(assistantModel.messageId, { model: assistantModel.model, createdAt: assistantModel.createdAt });
+      this.bankAttribution(this.childModels, key, byMessage);
+      this.removedChildAttribution.get(key)?.delete(assistantModel.messageId);
+    }
+    if (reported !== undefined) {
+      // Keyed by the provider's message id, not by the part the usage
+      // decorated: a message can produce several text parts, and its tokens
+      // are cumulative for the message. Banking them per part would count one
+      // message's spend once for every part it emitted.
+      const byMessage = this.childUsage.get(key) ?? new Map<string, TokenUsage>();
+      byMessage.set(reported.messageId, reported.usage);
+      this.bankAttribution(this.childUsage, key, byMessage);
+      this.removedChildAttribution.get(key)?.delete(reported.messageId);
+    }
+    if (removedMessageId !== undefined) {
+      const byMessage = this.childUsage.get(key) ?? new Map<string, TokenUsage>();
+      byMessage.delete(removedMessageId);
+      this.bankAttribution(this.childUsage, key, byMessage);
+      const byModel = this.childModels.get(key);
+      byModel?.delete(removedMessageId);
+      if (!this.completeAttributions.has(key)) {
+        const removed = this.removedChildAttribution.get(key) ?? new Set<string>();
+        removed.add(removedMessageId);
+        this.bankAttribution(this.removedChildAttribution, key, removed);
+      }
+    }
+    // Nothing to decorate if the parent is not projected — the row lives in
+    // its timeline, and an unprojected parent has no row on screen to carry
+    // the figure. The lookup walks the projection unordered: this runs per
+    // child event, and OpenCode restates a message's tokens many times a
+    // turn, so sorting the whole parent timeline each time (what `items()`
+    // does) would make a chatty subagent cost the parent's length per chunk.
+    const parent = this.projections.get(parentId);
+    const row = parent?.find(item => item.type === "tool" && item.childConversationId === conversationId);
+    if (!row || row.type !== "tool") return;
+    const model = latestModel(this.childModels.get(key));
+    const usage = sumUsage(this.childUsage.get(key));
+    // Nothing new to say: most restatements change nothing until the turn's
+    // token counts actually move, and an upsert that restates the row
+    // verbatim still costs a replay frame for every subscriber.
+    if ((model === undefined ? row.model === undefined : row.model === model) && (usage === undefined ? row.usage === undefined : sameUsage(row.usage, usage))) return;
+    if (removedMessageId !== undefined) {
+      const { usage: _usage, model: _model, ...withoutAttribution } = row;
+      // Upserts deliberately preserve attribution omitted by ordinary tool
+      // updates. Remove first so an intentional clear is not merged away.
+      coalescer.push(parentId, [
+        { kind: "remove", itemId: row.id },
+        { kind: "upsert", item: {
+          ...withoutAttribution,
+          ...(model === undefined ? {} : { model }),
+          ...(usage === undefined ? {} : { usage }),
+        } },
+      ]);
+      return;
+    }
+    coalescer.push(parentId, [{ kind: "upsert", item: {
+      ...row,
+      ...(model === undefined ? {} : { model }),
+      ...(usage === undefined ? {} : { usage }),
+    } }]);
+  }
+
   projectionForTests(id: string): ConversationProjection {
     return this.projection(id);
   }
@@ -544,6 +833,27 @@ export class OpenCodeChatAdapter {
         // whatever the coalescer buffered in its final window.
         const projection = this.projection(conversationId);
         for (const update of updates) projection.apply(update);
+        // A fast subagent can start and report inside one coalescer window:
+        // its usage arrives while the parent's task row is still buffered, so
+        // attributeSubagent found no row to decorate and only banked the
+        // figures. The row exists now — settle any banked attribution onto
+        // task rows this flush just materialized, or a child that never
+        // speaks again leaves its row bare until the parent is reopened.
+        for (const update of updates) {
+          if (update.kind !== "upsert" || update.item.type !== "tool" || !update.item.childConversationId) continue;
+          const key = attributionKey(conversationId, update.item.childConversationId);
+          const model = latestModel(this.childModels.get(key));
+          const usage = sumUsage(this.childUsage.get(key));
+          if (model === undefined && usage === undefined) continue;
+          const row = projection.find(item => item.id === update.item.id);
+          if (!row || row.type !== "tool") continue;
+          if ((model === undefined || row.model === model) && (usage === undefined || sameUsage(row.usage, usage))) continue;
+          projection.apply({ kind: "upsert", item: {
+            ...row,
+            ...(model === undefined ? {} : { model }),
+            ...(usage === undefined ? {} : { usage }),
+          } });
+        }
       },
     });
     try {
@@ -554,7 +864,7 @@ export class OpenCodeChatAdapter {
         // rather than ending the pump and losing the whole restart gap.
         let normalized;
         try {
-          normalized = normalizeProviderEvent(event, this.providerMessageRoles);
+          normalized = normalizeProviderEvent(event, this.providerEventMemory);
         } catch {
           this.countDiscard("unparseable", "");
           continue;
@@ -562,7 +872,12 @@ export class OpenCodeChatAdapter {
         if (normalized.outcome === "unrecognized" || normalized.outcome === "unparseable") {
           this.countDiscard(normalized.outcome, normalized.eventType);
         }
-        if (!normalized.conversationId || normalized.updates.length === 0) continue;
+        if (!normalized.conversationId) continue;
+        // An event with no timeline updates can still carry a child's model
+        // or token report — exactly what a message with only tool or
+        // reasoning parts emits. Attribution must see those; only an event
+        // carrying nothing at all is skipped.
+        if (normalized.updates.length === 0 && normalized.assistantUsage === undefined && normalized.assistantModel === undefined && normalized.removedMessageId === undefined) continue;
         // Confinement is checked per event as it arrives, never at flush time:
         // a session that moves out of the workspace must stop publishing from
         // that moment, and events received while it was confined stay valid.
@@ -589,6 +904,10 @@ export class OpenCodeChatAdapter {
         // conversation, carrying the child's id so the answer still goes to
         // the child.
         await this.mirrorToParent(normalized.conversationId, normalized.updates, coalescer);
+        // The same reasoning as the mirror, for cost rather than requests: a
+        // subagent's model and token spend live in its own session, which the
+        // parent's client never sees.
+        await this.attributeSubagent(normalized.conversationId, normalized.assistantUsage, normalized.assistantModel, normalized.removedMessageId, coalescer);
       }
     } finally {
       coalescer.dispose();
@@ -628,6 +947,9 @@ export class OpenCodeChatAdapter {
         action: request.action,
         resources: request.resources,
         status: "pending" as const,
+        // The recovered card must show the change the live one would have —
+        // this path exists for the reader who missed that event.
+        ...(request.diff === undefined ? {} : { diff: request.diff }),
       });
     }
     return items;
@@ -646,16 +968,7 @@ export class OpenCodeChatAdapter {
   /** Cached because a reconciliation may ask about the same session twice. */
   private async isChildOf(candidate: string, parentId: string): Promise<boolean> {
     if (candidate === parentId) return false;
-    let known = this.sessionParents.get(candidate);
-    if (known === undefined) {
-      // A failed lookup propagates instead of caching as "no parent": the
-      // callers already treat an errored sweep as unknown-not-empty, and a
-      // cached null would permanently hide a subagent's requests from its
-      // parent after one transient provider error.
-      known = (await this.provider.getSession(candidate))?.parentId ?? null;
-      this.sessionParents.set(candidate, known);
-    }
-    return known === parentId;
+    return (await this.parentOf(candidate)) === parentId;
   }
 
   /** Throws on provider failure — an errored list is unknown, not empty. */
@@ -769,6 +1082,15 @@ export class OpenCodeChatAdapter {
       this.projections.delete(candidateId);
       this.lastModel.delete(candidateId);
       this.lastMode.delete(candidateId);
+      this.lastVariant.delete(candidateId);
+      const prefix = `${candidateId}${ATTRIBUTION_SEPARATOR}`;
+      for (const key of this.attributionReconstructions.keys()) {
+        if (key.startsWith(prefix)) this.attributionEpochs.set(key, (this.attributionEpochs.get(key) ?? 0) + 1);
+      }
+      forgetAttributions(this.childUsage, candidateId);
+      forgetAttributions(this.childModels, candidateId);
+      forgetAttributions(this.removedChildAttribution, candidateId);
+      forgetAttributions(this.completeAttributions, candidateId);
     }
     return projection;
   }
@@ -824,6 +1146,12 @@ export class ConversationProjection {
 
   items(): ConversationItem[] {
     return [...this.timeline.values()].sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+  }
+
+  /** First match in insertion order, for lookups that need no timeline order. */
+  find(predicate: (item: ConversationItem) => boolean): ConversationItem | undefined {
+    for (const item of this.timeline.values()) if (predicate(item)) return item;
+    return undefined;
   }
 
   seed(items: ConversationItem[]): void {
@@ -941,6 +1269,47 @@ export class ConversationProjection {
   }
 }
 
+const MAX_CHILD_ATTRIBUTIONS = 512;
+// NUL: a session id cannot contain one, so the two halves stay unambiguous.
+const ATTRIBUTION_SEPARATOR = "\u0000";
+
+function attributionKey(parentId: string, childId: string): string {
+  return `${parentId}${ATTRIBUTION_SEPARATOR}${childId}`;
+}
+
+function forgetAttributions(keyed: Map<string, unknown> | Set<string>, parentId: string): void {
+  const prefix = `${parentId}${ATTRIBUTION_SEPARATOR}`;
+  for (const key of keyed.keys()) if (key.startsWith(prefix)) keyed.delete(key);
+}
+
+/**
+ * A subagent's total, component by component. A component nothing reported
+ * stays absent rather than summing to zero — the row must not assert a figure
+ * the agent never gave.
+ */
+function sumUsage(byMessage: Map<string, TokenUsage> | undefined): TokenUsage | undefined {
+  if (!byMessage || byMessage.size === 0) return undefined;
+  const total: TokenUsage = {};
+  for (const usage of byMessage.values()) {
+    for (const key of TOKEN_USAGE_COMPONENTS) {
+      const value = usage[key];
+      if (value !== undefined) total[key] = (total[key] ?? 0) + value;
+    }
+  }
+  return Object.keys(total).length > 0 ? total : undefined;
+}
+
+function latestModel(byMessage: Map<string, MessageModel> | undefined): string | undefined {
+  let latest: { messageId: string; value: MessageModel } | undefined;
+  if (!byMessage) return undefined;
+  for (const [messageId, value] of byMessage) {
+    if (!latest || value.createdAt > latest.value.createdAt || (value.createdAt === latest.value.createdAt && messageId > latest.messageId)) {
+      latest = { messageId, value };
+    }
+  }
+  return latest?.value.model;
+}
+
 function mergeInteraction(current: ConversationItem | undefined, incoming: ConversationItem): ConversationItem {
   if (!current || current.type !== incoming.type) return incoming;
   if (current.type === "user_message" && incoming.type === "user_message") {
@@ -949,6 +1318,9 @@ function mergeInteraction(current: ConversationItem | undefined, incoming: Conve
     // normalize with empty parts — an empty incoming text is "no new content",
     // not a blanking instruction.
     if (!incoming.text) return { ...incoming, text: current.text };
+  }
+  if (current.type === "assistant_message" && incoming.type === "assistant_message") {
+    return mergeAssistantMessage(current, incoming);
   }
   // Resolved interactions are terminal. The merged provider streams preserve
   // order only within themselves, so a delayed classic alias of an ask can
@@ -984,6 +1356,12 @@ function mergeInteraction(current: ConversationItem | undefined, incoming: Conve
       input: incoming.input ?? current.input,
       output: incoming.output ?? current.output,
       error: incoming.error ?? current.error,
+      // A subagent's attribution is mirrored from its child session, so it
+      // arrives on its own upsert and must survive the tool part's own
+      // updates — which know nothing about it.
+      childConversationId: incoming.childConversationId ?? current.childConversationId,
+      model: incoming.model ?? current.model,
+      ...(current.usage || incoming.usage ? { usage: { ...current.usage, ...incoming.usage } } : {}),
     };
   }
   if (current.type === "command" && incoming.type === "command") {

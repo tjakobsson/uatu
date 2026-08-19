@@ -22,6 +22,10 @@ export class FakeE2EChatService implements WorkspaceChatService {
   private readonly replay = new Map<string, ConversationReplay>();
   private readonly receipts = new Map<string, unknown>();
   private readonly olderItems = new Map<string, ConversationItem[]>();
+  // Conversations a subagent runs as. The real adapter keeps them out of the
+  // picker (a child session has a parentId), and Chat's drill-down navigation
+  // depends on that, so the fake has to keep the same shape.
+  private readonly children = new Set<string>();
   private readonly subscriptions = new Set<{ cancel(): void }>();
   // Counted so the suite can assert Chat's lazy backend startup: in production
   // status() launches the OpenCode server, so a page load that never opens
@@ -32,10 +36,13 @@ export class FakeE2EChatService implements WorkspaceChatService {
   // at-most-once contract) instead of minting a fresh one.
   promptAttempts: string[] = [];
   promptModes: string[] = [];
+  promptVariants: string[] = [];
   // When set, the next prompt stalls half a second and then rejects —
   // enough of a window for a test to deterministically switch conversations
   // while the request is in flight.
   private failNextPrompt = false;
+  private failNextHistory = false;
+  private failNextOlderHistory = false;
   // When set, status() reports a failed startup carrying diagnostics, so the
   // suite can drive the unavailable surface. A retry clears it, which is the
   // recovery path a user takes after fixing their environment.
@@ -43,7 +50,8 @@ export class FakeE2EChatService implements WorkspaceChatService {
   // The capabilities this fake declares. A test can narrow them to drive the
   // surface an agent that offers less produces — the one path a workspace with
   // a single real agent can never reach on its own.
-  private capabilities: ChatCapability[] = ["modes", "models", "commands", "questions", "permissions", "subagents"];
+  private static readonly DEFAULT_CAPABILITIES: ChatCapability[] = ["modes", "models", "commands", "questions", "permissions", "subagents", "variants", "context"];
+  private capabilities: ChatCapability[] = [...FakeE2EChatService.DEFAULT_CAPABILITIES];
 
   async status(): Promise<ChatAvailability> {
     this.statusCalls += 1;
@@ -86,10 +94,15 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.failNextPrompt = true;
   }
 
+  failHistory(older = false): void {
+    if (older) this.failNextOlderHistory = true;
+    else this.failNextHistory = true;
+  }
+
   async models() {
     return [
-      { selection: { providerId: "anthropic", modelId: "claude-sonnet" }, provider: "Anthropic", name: "Claude Sonnet" },
-      { selection: { providerId: "openai", modelId: "gpt-5" }, provider: "OpenAI", name: "GPT-5" },
+      { selection: { providerId: "anthropic", modelId: "claude-sonnet" }, provider: "Anthropic", name: "Claude Sonnet", variants: ["high", "xhigh"], contextLimit: 200000 },
+      { selection: { providerId: "openai", modelId: "gpt-5" }, provider: "OpenAI", name: "GPT-5", contextLimit: 100000 },
     ];
   }
 
@@ -109,7 +122,9 @@ export class FakeE2EChatService implements WorkspaceChatService {
   }
 
   async listConversations(): Promise<ConversationSummary[]> {
-    return [...this.conversations.values()].sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
+    return [...this.conversations.values()]
+      .filter(conversation => !this.children.has(conversation.id))
+      .sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
   }
 
   async createConversation(): Promise<ConversationSnapshot> {
@@ -128,6 +143,15 @@ export class FakeE2EChatService implements WorkspaceChatService {
   }
 
   async history(id: string, options: { cursor?: string } = {}): Promise<ConversationSnapshot> {
+    if (options.cursor === "older" && this.failNextOlderHistory) {
+      this.failNextOlderHistory = false;
+      await new Promise(resolve => setTimeout(resolve, 300));
+      throw new Error("older transcript unavailable");
+    }
+    if (!options.cursor && this.failNextHistory) {
+      this.failNextHistory = false;
+      throw new Error("conversation unavailable");
+    }
     if (options.cursor === "older") {
       const snapshot = this.snapshot(id);
       return { ...snapshot, items: this.olderItems.get(id) ?? [] };
@@ -143,12 +167,13 @@ export class FakeE2EChatService implements WorkspaceChatService {
     return { snapshot: await handoff.snapshot, events: handoff.subscription };
   }
 
-  async prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string): Promise<{
+  async prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string): Promise<{
     messageId: string;
     delivery: "steer" | "queue";
     conversation?: ConversationSummary;
   }> {
     if (mode) this.promptModes.push(mode);
+    if (variant) this.promptVariants.push(variant);
     const key = `prompt:${id}:${requestId}`;
     const existing = this.receipts.get(key) as { messageId: string; delivery: "steer" | "queue"; conversation?: ConversationSummary } | undefined;
     if (existing) return existing;
@@ -223,16 +248,23 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.statusCalls = 0;
     this.promptAttempts = [];
     this.promptModes = [];
+    this.promptVariants = [];
     this.failNextPrompt = false;
+    this.failNextHistory = false;
+    this.failNextOlderHistory = false;
     this.generation = `e2e-chat-${this.nextId++}`;
     this.conversations.clear();
     this.items.clear();
     this.replay.clear();
     this.receipts.clear();
     this.olderItems.clear();
+    this.children.clear();
+    // A narrowed agent is one test's setup, not the fixture's resting state:
+    // left in place it reaches whichever test boots against this worker next.
+    this.capabilities = [...FakeE2EChatService.DEFAULT_CAPABILITIES];
   }
 
-  seed(title: string, items: ConversationItem[], older: ConversationItem[] = []): ConversationSnapshot {
+  seed(title: string, items: ConversationItem[], older: ConversationItem[] = [], child = false): ConversationSnapshot {
     const id = `conversation-${this.nextId++}`;
     const conversation: ConversationSummary = {
       id,
@@ -242,6 +274,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
       status: "idle",
     };
     this.conversations.set(id, conversation);
+    if (child) this.children.add(id);
     this.items.set(id, new Map(items.map(item => [item.id, item])));
     this.replay.set(id, new ConversationReplay(this.generation, id, 64 * 1024));
     if (older.length) this.olderItems.set(id, older);

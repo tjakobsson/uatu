@@ -2,6 +2,8 @@ import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2/client";
 import { createHash } from "node:crypto";
 
+import { boundedSet } from "../shared/bounded-map";
+import { UnsupportedVariantSelectionError } from "./provider";
 import type {
   OpenCodeProvider,
   PendingPermission,
@@ -12,7 +14,7 @@ import type {
   ProviderPermissionReply,
   ProviderSession,
 } from "./provider";
-import { normalizeQuestion } from "./normalization";
+import { normalizeQuestion, permissionDiff } from "./normalization";
 import type { ChatAgent, ChatMode, ChatCommand, ChatModel, ModelSelection } from "./types";
 
 type Result<T> = { data?: T; error?: unknown };
@@ -64,14 +66,14 @@ export class SdkV2Provider implements OpenCodeProvider {
     return result;
   }
 
-  // Everything below is implemented against a live OpenCode server, so all six
-  // are declared. A capability this codebase has not built yet is not listed
-  // here: the change that builds it adds its key.
+  // Everything below is implemented against a live OpenCode server, so every
+  // capability is declared. A capability this codebase has not built yet is not
+  // listed here: the change that builds it adds its key.
   describe(): ChatAgent {
     return {
       id: "opencode",
       name: "OpenCode",
-      capabilities: ["modes", "models", "commands", "questions", "permissions", "subagents"],
+      capabilities: ["modes", "models", "commands", "questions", "permissions", "subagents", "variants", "context"],
     };
   }
 
@@ -101,18 +103,27 @@ export class SdkV2Provider implements OpenCodeProvider {
     const connected = new Set(response.connected);
     return response.all
       .filter(provider => connected.has(provider.id))
-      .flatMap(provider => Object.values(provider.models).map(model => ({
-        selection: { providerId: provider.id, modelId: model.id },
-        provider: provider.name,
-        name: model.name,
-      })))
+      .flatMap(provider => Object.values(provider.models).map(model => {
+        // OpenCode reports variants as a keyed map; the ids are its keys.
+        const variants = Object.keys(model.variants ?? {});
+        return {
+          selection: { providerId: provider.id, modelId: model.id },
+          provider: provider.name,
+          name: model.name,
+          ...(variants.length ? { variants } : {}),
+          ...(model.limit?.context ? { contextLimit: model.limit.context } : {}),
+        };
+      }))
       .sort((left, right) => left.provider.localeCompare(right.provider) || left.name.localeCompare(right.name));
   }
 
-  async switchModel(sessionId: string, selection: ModelSelection): Promise<void> {
+  async switchModel(sessionId: string, selection: ModelSelection, variant?: string): Promise<void> {
     ensureSuccess(await this.client.v2.session.switchModel({
       sessionID: sessionId,
-      model: { providerID: selection.providerId, id: selection.modelId },
+      // On the v2 path a reasoning variant is not a prompt field — it rides on
+      // the model reference here. The UI re-sends the model every prompt, so
+      // this runs every turn and the variant is reapplied every turn.
+      model: { providerID: selection.providerId, id: selection.modelId, ...(variant ? { variant } : {}) },
     }));
   }
 
@@ -268,7 +279,7 @@ export class SdkV2Provider implements OpenCodeProvider {
     yield* mergeProviderEvents([native.stream, classic.stream], signal);
   }
 
-  async prompt(sessionId: string, input: { id: string; text: string; delivery: "steer" | "queue"; model?: ModelSelection; mode?: string }): Promise<{ messageId: string }> {
+  async prompt(sessionId: string, input: { id: string; text: string; delivery: "steer" | "queue"; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
     const messageId = stableProviderId("msg", input.id);
     if (this.compatibilitySessions.has(sessionId)) {
       ensureSuccess(await this.client.session.promptAsync({
@@ -278,10 +289,11 @@ export class SdkV2Provider implements OpenCodeProvider {
         parts: [{ type: "text", text: input.text }],
         ...(input.model ? { model: { providerID: input.model.providerId, modelID: input.model.modelId } } : {}),
         ...(input.mode ? { agent: input.mode } : {}),
+        ...(input.variant ? { variant: input.variant } : {}),
       }));
       return { messageId };
     }
-    if (input.model) await this.switchModel(sessionId, input.model);
+    if (input.model) await this.switchModel(sessionId, input.model, input.variant);
     // Session-level, not a prompt field: the generated v2 prompt serializer
     // passes through only id/prompt/delivery/resume, so an `agent` property
     // there is silently dropped — the selection would look accepted while the
@@ -305,9 +317,28 @@ export class SdkV2Provider implements OpenCodeProvider {
    * while a healthy turn outlives the window, detaches, and reports failures
    * through the event stream like any running turn.
    */
-  async command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; mode?: string }): Promise<{ messageId: string }> {
+  async command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
     const messageId = stableProviderId("msg", input.id);
-    const dispatch = input.name === "compact" || input.name === "summarize"
+    // A command is a turn like any other, so it runs at the reasoning effort
+    // the user picked. On the v2 path the variant is not a body field — it
+    // rides on the model reference — so the model is re-sent exactly as
+    // `prompt` does: with the variant when one is chosen, and WITHOUT one
+    // when the picker says default, which resets whatever an earlier turn
+    // applied. Unconditional on purpose: any gate that trusts this process's
+    // memory of the session's variant (an `input.variant` check, a local
+    // applied-variant map) goes stale the moment the provider is recreated
+    // over a session that still carries one.
+    //
+    // A compatibility session exists only in the classic store, where this
+    // v2 lookup fails. Its prompt and ordinary command routes carry variant
+    // directly, but summarize does not; refuse only that unsupported pairing.
+    const compatibility = this.compatibilitySessions.has(sessionId);
+    const summarizes = input.name === "compact" || input.name === "summarize";
+    if (compatibility && summarizes && input.variant) {
+      throw new UnsupportedVariantSelectionError("reasoning variants are not supported for compatibility compaction");
+    }
+    if (!compatibility && input.model) await this.switchModel(sessionId, input.model, input.variant);
+    const dispatch = summarizes
       ? (async () => ensureSuccess(await this.client.session.summarize({
           sessionID: sessionId,
           directory: this.directory,
@@ -322,6 +353,7 @@ export class SdkV2Provider implements OpenCodeProvider {
           arguments: input.arguments,
           ...(input.model ? { model: `${input.model.providerId}/${input.model.modelId}` } : {}),
           ...(input.mode ? { agent: input.mode } : {}),
+          ...(compatibility && input.variant ? { variant: input.variant } : {}),
         })); })();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -365,7 +397,16 @@ export class SdkV2Provider implements OpenCodeProvider {
         : typeof request.permission === "string" ? request.permission : "permission";
       const raw = Array.isArray(request.resources) ? request.resources
         : Array.isArray(request.patterns) ? request.patterns : [];
-      return [{ requestId, conversationId: owner, action, resources: raw.filter((item): item is string => typeof item === "string") }];
+      return [{
+        requestId,
+        conversationId: owner,
+        action,
+        resources: raw.filter((item): item is string => typeof item === "string"),
+        // The same metadata.diff the live event carries — recovery is the
+        // path for a user who missed that event, and they are the one reader
+        // who must not approve an edit without being shown it.
+        ...permissionDiff(request),
+      }];
     });
   }
 
@@ -500,8 +541,7 @@ async function* mergeProviderEvents(streams: AsyncIterable<unknown>[], signal: A
           let identity = providerEventIdentity(event);
           if (typeof event.id !== "string") {
             const occurrence = (occurrences.get(identity) ?? 0) + 1;
-            occurrences.set(identity, occurrence);
-            if (occurrences.size > 2_048) occurrences.delete(occurrences.keys().next().value!);
+            boundedSet(occurrences, identity, occurrence, 2_048);
             identity = `${identity}#${occurrence}`;
           }
           if (seen.has(identity)) continue;

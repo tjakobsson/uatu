@@ -708,13 +708,60 @@
           </header>
           <div id="chat-state" class="chat-state" role="status" aria-live="polite">Loading chat…</div>
           <div id="chat-find-slot" class="find-slot"></div>
-          <div id="chat-timeline" class="chat-timeline" role="log" aria-live="polite" aria-relevant="additions text" tabindex="0">
-            <button id="chat-load-older" class="chat-secondary-button chat-load-older" type="button" hidden>Load older messages</button>
-            <div id="chat-items"></div>
+          <!-- The timeline and the subagent drill-down share one box: the
+               child opens *over* the parent's transcript, while the header,
+               the pinned tracks, the outstanding-request pill, and the
+               composer below stay the parent's and stay live. -->
+          <div class="chat-transcript-area">
+            <div id="chat-timeline" class="chat-timeline" role="log" aria-live="polite" aria-relevant="additions text" tabindex="0">
+              <button id="chat-load-older" class="chat-secondary-button chat-load-older" type="button" hidden>Load older messages</button>
+              <div id="chat-items"></div>
+              <!-- Liveness while the agent has the prompt but nothing has come
+                   back yet — a local model loading its weights holds this
+                   state for a long while with nothing else saying so. -->
+              <div id="chat-waiting" class="chat-waiting" role="status" hidden>
+                <span class="chat-waiting-pulse" aria-hidden="true"></span>
+                <span id="chat-waiting-label"></span>
+              </div>
+            </div>
+            <!-- A subagent's transcript is a drill-down into a turn, not a
+                 conversation you can start — so it is reached from the
+                 subagent row that launched it and never from the picker,
+                 which keeps showing the parent. -->
+            <section id="chat-drilldown" class="chat-drilldown" aria-label="Subagent transcript" hidden>
+              <header class="chat-drilldown-header">
+                <button id="chat-drilldown-back" class="chat-drilldown-back" type="button" aria-label="Back to the conversation">
+                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                    <path
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.6"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      d="M9.5 4.5 6 8l3.5 3.5"
+                    />
+                  </svg>
+                  <span class="chat-drilldown-back-label">Back</span>
+                </button>
+                <p id="chat-drilldown-title" class="chat-drilldown-title"></p>
+              </header>
+              <div id="chat-drilldown-state" class="chat-state chat-drilldown-state" role="status" aria-live="polite" hidden></div>
+              <div id="chat-drilldown-timeline" class="chat-timeline chat-drilldown-timeline" role="log" aria-live="polite" aria-relevant="additions text" tabindex="0">
+                <!-- A subagent can outrun one page like any conversation; without
+                     this its earlier messages are simply absent, with nothing
+                     saying so. -->
+                <button id="chat-drilldown-older" class="chat-secondary-button chat-load-older" type="button" hidden>Load older messages</button>
+                <div id="chat-drilldown-items"></div>
+              </div>
+            </section>
+            <!-- Both pin to the transcript's lower edge rather than to a
+                 measured composer height: the pinned tracks sit between the
+                 timeline and the composer, so an offset counted from the
+                 composer alone put these on top of them. -->
+            <button id="chat-latest" class="chat-latest" type="button" aria-label="Jump to latest messages" hidden>Latest</button>
+            <button id="chat-requests-jump" class="chat-requests-jump" type="button" hidden></button>
           </div>
           <nav id="chat-prompt-rail" class="chat-prompt-rail" aria-label="Jump to a prompt" hidden></nav>
-          <button id="chat-latest" class="chat-latest" type="button" aria-label="Jump to latest messages" hidden>Latest</button>
-          <button id="chat-requests-jump" class="chat-requests-jump" type="button" hidden></button>
           <details id="chat-subagents" class="chat-task-list chat-subagents" hidden>
             <summary><span id="chat-subagents-label"></span><button id="chat-subagents-dismiss" class="chat-track-dismiss" type="button" hidden>Dismiss finished</button></summary>
             <ul id="chat-subagents-items"></ul>
@@ -728,6 +775,17 @@
             <div id="chat-command-menu" class="chat-command-menu" role="listbox" aria-label="Slash commands" hidden></div>
             <textarea id="chat-input" rows="1" placeholder="Send a message…" aria-describedby="chat-composer-status" aria-controls="chat-command-menu" aria-expanded="false" aria-autocomplete="list"></textarea>
             <div class="chat-composer-actions">
+              <!-- How full the context window is, beside the turn status: a
+                   conversation gave no sign of this until it overflowed. The
+                   collapsed summary carries the fill on its own; opening it
+                   shows the breakdown the agent reported. -->
+              <details id="chat-context-usage" class="chat-context-usage" hidden>
+                <summary>
+                  <span id="chat-context-usage-meter" class="chat-context-meter" aria-hidden="true"><span class="chat-context-meter-fill"></span></span>
+                  <span id="chat-context-usage-label" class="chat-context-label"></span>
+                </summary>
+                <dl id="chat-context-usage-breakdown" class="chat-context-breakdown"></dl>
+              </details>
               <span id="chat-composer-status" role="status" aria-live="polite">Ready</span>
               <label class="sr-only" for="chat-mode-select">Mode</label>
               <select id="chat-mode-select" class="chat-model-select" aria-label="Chat mode" hidden></select>
@@ -735,6 +793,8 @@
               <select id="chat-model-select" class="chat-model-select" aria-label="Chat model" disabled>
                 <option>Loading models...</option>
               </select>
+              <label class="sr-only" for="chat-variant-select">Reasoning</label>
+              <select id="chat-variant-select" class="chat-model-select" aria-label="Reasoning effort" hidden></select>
               <button id="chat-cancel" class="chat-secondary-button" type="button" hidden>Cancel</button>
               <button id="chat-send" class="chat-primary-button" type="submit" aria-label="Send message" title="Send message" disabled>
                 <span class="chat-send-label">Send</span>

@@ -1,4 +1,5 @@
-import type { ConversationItem, ConversationStatus, StructuredQuestion } from "./types";
+import { boundedSet } from "../shared/bounded-map";
+import type { ConversationItem, ConversationStatus, StructuredQuestion, TokenUsage } from "./types";
 
 type RecordValue = Record<string, unknown>;
 
@@ -21,6 +22,91 @@ export type NormalizedEventOutcome =
   // A case matched but the payload did not carry what that case requires.
   | "unparseable";
 
+/**
+ * What normalizing one event needs to remember from earlier ones. Bounded: a
+ * long session must not grow it without limit.
+ *
+ * - `roles` — a part's sender, which only `message.updated` states.
+ *
+ * Token usage needs nothing here: it rides an item keyed by the message that
+ * reported it, so no event has to recall which part came last.
+ */
+export type ProviderEventMemory = {
+  roles: Map<string, string>;
+};
+
+export function createProviderEventMemory(): ProviderEventMemory {
+  return { roles: new Map() };
+}
+
+const MEMORY_LIMIT = 2_048;
+
+function remember<T>(map: Map<string, T>, key: string, value: T): void {
+  boundedSet(map, key, value, MEMORY_LIMIT);
+}
+
+/**
+ * The tokens the agent reported, as our own shape. Missing components stay
+ * missing rather than becoming zero: "the agent did not report cache reads"
+ * and "there were none" are different statements, and only one of them lets a
+ * readout claim a figure.
+ *
+ * `tokens.total` is deliberately not read — it counts output, so it is not
+ * what occupies the context window.
+ */
+export function tokensToUsage(value: unknown): TokenUsage | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const tokens = value as RecordValue;
+  const cache = record(tokens.cache);
+  const usage: TokenUsage = {};
+  const put = (key: keyof TokenUsage, raw: unknown) => {
+    if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) usage[key] = raw;
+  };
+  put("input", tokens.input);
+  put("output", tokens.output);
+  put("reasoning", tokens.reasoning);
+  put("cacheRead", cache.read);
+  put("cacheWrite", cache.write);
+  return Object.keys(usage).length > 0 ? usage : undefined;
+}
+
+/**
+ * A stored assistant message's own accounting: the tokens it reported and the
+ * model it ran. Distinct from `normalizeProviderMessage`, which is about the
+ * timeline a message produces — this is about the message itself, and exists so
+ * a subagent's cost can be rebuilt from its stored history when the live tally
+ * for it is gone. Returns nothing for a user message, or for one that reported
+ * neither.
+ */
+export function storedMessageUsage(value: unknown): { messageId: string; createdAt: number; usage?: TokenUsage; model?: string } | undefined {
+  const { info } = unwrapStoredMessage(value);
+  const messageId = optionalString(info.id);
+  if (!messageId || (info.role !== "assistant" && info.type !== "assistant")) return undefined;
+  const usage = tokensToUsage(info.tokens);
+  const model = messageModel(info);
+  if (usage === undefined && model === undefined) return undefined;
+  return { messageId, createdAt: timestamp(record(info.time).created, 0), ...(usage === undefined ? {} : { usage }), ...(model === undefined ? {} : { model }) };
+}
+
+/**
+ * The model an assistant message ran. The classic store and the bridged
+ * events name it `modelID`/`modelId`; a flat v2 record carries a
+ * `model: { id, providerID }` reference instead. Both readers — the live
+ * event path and the stored-history reconstruction — must accept both, or a
+ * persisted v2 child restores its cost with no model label and the completed
+ * attribution is then banked without one for good.
+ */
+function messageModel(info: RecordValue): string | undefined {
+  return optionalString(info.modelID ?? info.modelId) ?? optionalString(record(info.model).id);
+}
+
+function messageModelSelection(info: RecordValue): { providerId: string; modelId: string } | undefined {
+  const model = record(info.model);
+  const providerId = optionalString(info.providerID ?? info.providerId) ?? optionalString(model.providerID ?? model.providerId);
+  const modelId = messageModel(info);
+  return providerId && modelId ? { providerId, modelId } : undefined;
+}
+
 export type NormalizedProviderEvent = {
   conversationId?: string;
   updates: NormalizedProviderUpdate[];
@@ -28,6 +114,18 @@ export type NormalizedProviderEvent = {
   // The event's own type, so a caller can count drops per type. Never a
   // payload — a payload can carry file contents.
   eventType: string;
+  // The model the assistant message ran, when the event states it. Reported on
+  // the envelope rather than on an item: it belongs to the message, and the
+  // one thing that needs it — attributing a subagent on its parent's row —
+  // reads it from the child's event stream, not from the child's timeline.
+  assistantModel?: { messageId: string; model: string; createdAt: number };
+  // The tokens a message reported, with the message's own id. A message can
+  // produce several parts, so aggregation keys on this id rather than counting
+  // the dedicated usage carrier as though it were another content part.
+  assistantUsage?: { messageId: string; usage: TokenUsage };
+  // A deleted assistant message must also leave any aggregate keyed by its
+  // provider id; timeline removes alone cannot reach the adapter's tally.
+  removedMessageId?: string;
 };
 
 // Event types recognized as deliberately carrying nothing for the timeline.
@@ -73,20 +171,39 @@ const INTENTIONALLY_IGNORED = new Set([
   "tui.session.select",
 ]);
 
-export function normalizeProviderMessage(value: unknown): ConversationItem[] {
+/**
+ * The classic store wraps each message as { info, parts } and names the
+ * sender `role`; the v2 store is flat with a `type`. The one detector every
+ * stored-message reader shares — `normalizeProviderMessage` for the timeline,
+ * `storedMessageUsage` for the accounting — so a store-shape change is a
+ * one-place fix.
+ */
+function unwrapStoredMessage(value: unknown): { info: RecordValue; parts: unknown[]; classic: boolean } {
   const envelope = record(value);
   const info = record(envelope.info);
-  // The classic store wraps each message as { info, parts } and names the
-  // sender `role`; the v2 store is flat with a `type`.
-  if (optionalString(info.role)) return normalizeStoredMessage(info, array(envelope.parts));
-  const message = envelope;
+  if (optionalString(info.role)) return { info, parts: array(envelope.parts), classic: true };
+  return { info: envelope, parts: [], classic: false };
+}
+
+/**
+ * `mintUsageCarrier` guards the `usage:<id>` fallback for a message whose
+ * usage found no text part to decorate. On a real stored read the parts are
+ * the whole truth, so no part means no part ever and the carrier is right.
+ * The live `message.updated` path reuses this function with parts it KNOWS
+ * are empty — there the event memory decides where the usage lands, and a
+ * carrier minted here would duplicate (and outlive) that placement.
+ */
+export function normalizeProviderMessage(value: unknown, mintUsageCarrier = true): ConversationItem[] {
+  const { info, parts, classic } = unwrapStoredMessage(value);
+  if (classic) return normalizeStoredMessage(info, parts, mintUsageCarrier);
+  const message = info;
   const id = string(message.id, "message id");
   const createdAt = timestamp(record(message.time).created, 0);
   switch (message.type) {
     case "user":
       return [{ id: `message:${id}`, type: "user_message", createdAt, text: text(message.text) }];
     case "assistant":
-      return normalizeAssistant(message, id, createdAt);
+      return normalizeAssistant(message, id, createdAt, mintUsageCarrier);
     case "shell":
       return [{
         id: `command:${string(message.callID, "call id")}`,
@@ -108,10 +225,10 @@ export function normalizeProviderMessage(value: unknown): ConversationItem[] {
 
 // Public boundary. Every failure mode resolves to an outcome rather than an
 // exception, so one malformed payload costs one event instead of the pump.
-export function normalizeProviderEvent(value: unknown, messageRoles?: Map<string, string>): NormalizedProviderEvent {
+export function normalizeProviderEvent(value: unknown, memory?: ProviderEventMemory): NormalizedProviderEvent {
   const eventType = optionalString(record(value).type) ?? "";
   try {
-    const matched = normalizeKnownEvent(value, messageRoles);
+    const matched = normalizeKnownEvent(value, memory);
     if (matched) return { ...matched, outcome: matched.updates.length > 0 ? "handled" : "ignored", eventType };
     return {
       conversationId: conversationIdOf(value),
@@ -135,7 +252,15 @@ function conversationIdOf(value: unknown): string | undefined {
   }
 }
 
-function normalizeKnownEvent(value: unknown, messageRoles?: Map<string, string>): { conversationId?: string; updates: NormalizedProviderUpdate[] } | undefined {
+type KnownEvent = {
+  conversationId?: string;
+  updates: NormalizedProviderUpdate[];
+  assistantModel?: { messageId: string; model: string; createdAt: number };
+  assistantUsage?: { messageId: string; usage: TokenUsage };
+  removedMessageId?: string;
+};
+
+function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): KnownEvent | undefined {
   const event = record(value);
   const data = record(event.data ?? event.properties);
   const conversationId = optionalString(data.sessionID) ?? optionalString(data.sessionId);
@@ -265,6 +390,7 @@ function normalizeKnownEvent(value: unknown, messageRoles?: Map<string, string>)
         action: text(data.permission),
         resources: stringArray(data.patterns),
         status: "pending",
+        ...permissionDiff(data),
       } }] };
     case "permission.replied":
       return { conversationId, updates: [{ kind: "upsert", item: {
@@ -288,6 +414,7 @@ function normalizeKnownEvent(value: unknown, messageRoles?: Map<string, string>)
         action: text(data.action),
         resources: stringArray(data.resources),
         status: "pending",
+        ...permissionDiff(data),
       } }] };
     case "permission.v2.replied": {
       const requestId = string(data.requestID, "permission id");
@@ -388,20 +515,54 @@ function normalizeKnownEvent(value: unknown, messageRoles?: Map<string, string>)
     case "message.updated": {
       const info = record(data.info ?? data.message);
       const messageId = optionalString(info.id);
-      const role = optionalString(info.role);
-      if (messageId && role && messageRoles) {
-        messageRoles.set(messageId, role);
-        if (messageRoles.size > 2_048) messageRoles.delete(messageRoles.keys().next().value!);
+      const role = optionalString(info.role) ?? optionalString(info.type);
+      if (messageId && role && memory) remember(memory.roles, messageId, role);
+      const updates: NormalizedProviderUpdate[] = normalizeProviderMessage({ info, parts: [] }, false)
+        .map(item => ({ kind: "upsert" as const, item }));
+      // A message's tokens are the message's, so they ride one item keyed by
+      // the message — never a text part it produced. `message.updated`
+      // restates a growing cumulative figure, and a message can emit several
+      // text parts: decorating "the newest part" left the earlier part still
+      // claiming the same total, so one message's spend appeared on two items
+      // and anything aggregating them counted it twice. One carrier per
+      // message cannot double-count, needs no memory of which part came last,
+      // and covers the message that produces no text part at all (a purely
+      // agentic turn still fills the context window). Empty markdown is what
+      // keeps it off the screen — the renderer draws no bubble for it.
+      const usage = role === "assistant" ? tokensToUsage(info.tokens) : undefined;
+      let reported: { messageId: string; usage: TokenUsage } | undefined;
+      if (usage && messageId) {
+        reported = { messageId, usage };
+        updates.push(usageUpsert(`usage:${messageId}`, timestamp(record(info.time).created, createdAt), usage, messageModelSelection(info)));
       }
+      const model = role === "assistant" ? messageModel(info) : undefined;
+      const assistantModel = model && messageId
+        ? { messageId, model, createdAt: timestamp(record(info.time).created, createdAt) }
+        : undefined;
       return {
         conversationId: conversationId ?? optionalString(info.sessionID),
-        updates: normalizeProviderMessage({ info, parts: [] }).map(item => ({ kind: "upsert", item })),
+        updates,
+        ...(assistantModel === undefined ? {} : { assistantModel }),
+        ...(reported === undefined ? {} : { assistantUsage: reported }),
+      };
+    }
+    case "message.removed": {
+      const messageId = optionalString(data.messageID) ?? optionalString(data.messageId);
+      if (!messageId) return { conversationId, updates: [] };
+      memory?.roles.delete(messageId);
+      return {
+        conversationId,
+        updates: [
+          { kind: "remove", itemId: `message:${messageId}` },
+          { kind: "remove", itemId: `usage:${messageId}` },
+        ],
+        removedMessageId: messageId,
       };
     }
     case "message.part.updated": {
       const part = record(data.part);
       const messageId = optionalString(part.messageID);
-      if (part.type === "text" && messageId && messageRoles?.get(messageId) === "user") {
+      if (part.type === "text" && messageId && memory?.roles.get(messageId) === "user") {
         return { conversationId: conversationId ?? optionalString(part.sessionID), updates: [{ kind: "upsert", item: {
           id: `message:${messageId}`,
           type: "user_message",
@@ -409,7 +570,14 @@ function normalizeKnownEvent(value: unknown, messageRoles?: Map<string, string>)
           text: text(part.text),
         } }] };
       }
-      return { conversationId: conversationId ?? optionalString(part.sessionID), updates: normalizePart(part, timestamp(record(data.message).time, createdAt)) };
+      // A part carries no token report of its own: usage arrives on
+      // `message.updated` and lands on the message's own carrier, so a part
+      // needs no bookkeeping about where a figure should go.
+      const partCreatedAt = timestamp(record(data.message).time, createdAt);
+      return {
+        conversationId: conversationId ?? optionalString(part.sessionID),
+        updates: normalizePart(part, partCreatedAt),
+      };
     }
     case "message.part.removed": {
       const partId = optionalString(data.partID);
@@ -421,7 +589,18 @@ function normalizeKnownEvent(value: unknown, messageRoles?: Map<string, string>)
   }
 }
 
-function normalizeStoredMessage(info: RecordValue, parts: unknown[]): ConversationItem[] {
+/**
+ * The `usage:<messageId>` carrier: what a message spent, as an item of its
+ * own. Empty markdown is the signal that it carries no text — the renderer
+ * draws no bubble for it, and `mergeAssistantMessage` (usage.ts), the one
+ * merge both the server and client projections apply, keeps the earlier
+ * timestamp rather than resorting the timeline as the figure is restated.
+ */
+function usageUpsert(itemId: string, createdAt: number, usage: TokenUsage, model?: { providerId: string; modelId: string }): NormalizedProviderUpdate {
+  return { kind: "upsert", item: { id: itemId, type: "assistant_message", createdAt, markdown: "", usage, ...(model ? { model } : {}) } };
+}
+
+function normalizeStoredMessage(info: RecordValue, parts: unknown[], mintUsageCarrier: boolean): ConversationItem[] {
   const id = string(info.id, "message id");
   const createdAt = timestamp(record(info.time).created, 0);
   if (info.role === "user") {
@@ -429,17 +608,28 @@ function normalizeStoredMessage(info: RecordValue, parts: unknown[]): Conversati
     return [{ id: `message:${id}`, type: "user_message", createdAt, text: body }];
   }
   if (info.role === "assistant") {
-    return normalizeAssistant({ content: parts, error: info.error, snapshot: info.snapshot }, id, createdAt);
+    return normalizeAssistant({ content: parts, error: info.error, snapshot: info.snapshot, tokens: info.tokens, modelID: info.modelID ?? info.modelId, providerID: info.providerID ?? info.providerId, model: info.model }, id, createdAt, mintUsageCarrier);
   }
   return [];
 }
 
-function normalizeAssistant(message: RecordValue, messageId: string, createdAt: number): ConversationItem[] {
+function normalizeAssistant(message: RecordValue, messageId: string, createdAt: number, mintUsageCarrier: boolean): ConversationItem[] {
   const items = array(message.content).flatMap(value => normalizePart(record(value), createdAt)).flatMap(update => {
     if (update.kind === "upsert") return [update.item];
     if (update.kind === "text" && update.item) return [update.item];
     return [];
   });
+  // What the turn spent, on the message's own carrier — the same item id the
+  // live path uses, so a conversation reads back exactly as it streamed. This
+  // is the authoritative path: it populates the readout on opening a
+  // conversation, before any new turn is taken. Never attached to a text
+  // part: a message can emit several, and a per-part figure is one message's
+  // spend claimed by two items.
+  const usage = tokensToUsage(message.tokens);
+  if (usage && mintUsageCarrier) {
+    const model = messageModelSelection(message);
+    items.push({ id: `usage:${messageId}`, type: "assistant_message", createdAt, markdown: "", usage, ...(model ? { model } : {}) });
+  }
   const error = errorMessage(message.error);
   if (error) items.push({ id: `notice:${messageId}:error`, type: "notice", createdAt, level: "error", message: error });
   for (const path of stringArray(record(message.snapshot).files)) {
@@ -585,6 +775,17 @@ export function normalizeQuestion(value: unknown): StructuredQuestion {
 
 function permissionOutcome(value: unknown): "approved-once" | "approved-session" | "rejected" {
   return value === "once" ? "approved-once" : value === "always" ? "approved-session" : "rejected";
+}
+
+// The change a file-edit permission would apply, when the agent attaches one.
+// OpenCode puts a unified diff on the permission's `metadata.diff` — the same
+// string its own edit-tool renderer reads. A permission with none (a command,
+// a fetch) yields nothing to spread. Exported because the pending-permission
+// recovery list carries the same metadata: a card rebuilt after a missed
+// event must show the same change the live announcement would have.
+export function permissionDiff(data: RecordValue): { diff?: string } {
+  const diff = optionalString(record(data.metadata).diff);
+  return diff && diff.trim() ? { diff } : {};
 }
 
 function activityStatus(value: unknown): "pending" | "running" | "completed" | "failed" {
