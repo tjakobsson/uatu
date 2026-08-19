@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 
 import { ProviderUpdateCoalescer } from "./coalescer";
-import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, type NormalizedProviderUpdate } from "./normalization";
+import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage, type NormalizedProviderUpdate } from "./normalization";
 import type { OpenCodeProvider, ProviderPermissionReply, ProviderSession } from "./provider";
 import { IdempotencyReceipts } from "./receipts";
 import { ConversationReplay, type ReplaySubscription } from "./replay";
@@ -230,13 +230,19 @@ export class OpenCodeChatAdapter {
         }
       }
     }
-    // A subagent's attribution reached the parent as a live upsert; the store
-    // has no memory of it, so a reopened conversation would show costs that
-    // simply vanished. Reapplied from the tally this adapter still holds —
-    // no provider call, which is the whole reason the aggregate is computed
-    // here rather than fetched per child. A workspace restart (or an eviction
-    // of this parent) does lose it: the figure is live attribution, not
-    // stored history, and showing nothing beats showing a stale total.
+    // A subagent's attribution reached the parent as a live upsert, and the
+    // parent's own store has no memory of it — so a reopened conversation
+    // would show costs that simply vanished. The child's stored messages do
+    // still carry them, so a tally this adapter no longer holds is rebuilt
+    // from there, once, and banked. Paid per parent-open for a subagent never
+    // seen live rather than on every open (the aggregate is still computed
+    // here, not fetched per render) — and in parallel, so a fan-out costs one
+    // round trip rather than one each.
+    const unattributed = [...new Set(items.flatMap(item =>
+      item.type === "tool" && item.childConversationId && !this.childUsage.has(attributionKey(id, item.childConversationId))
+        ? [item.childConversationId]
+        : []))];
+    await Promise.all(unattributed.map(childId => this.reconstructAttribution(id, childId)));
     for (let index = 0; index < items.length; index += 1) {
       const item = items[index]!;
       if (item.type !== "tool" || !item.childConversationId) continue;
@@ -578,6 +584,36 @@ export class OpenCodeChatAdapter {
         item: { ...update.item, conversationId },
       }
       : update));
+  }
+
+  /**
+   * Rebuilds a subagent's cost from its own stored messages, for a parent
+   * reopened after the live tally was lost — a workspace restart, or an
+   * eviction of this parent.
+   *
+   * A failed read banks nothing: an errored list is unknown, not empty, and
+   * caching it as empty would hide a subagent's cost permanently after one
+   * transient provider error. A successful read banks even an empty result,
+   * which is what stops a child that genuinely reported nothing from being
+   * re-read on every open.
+   */
+  private async reconstructAttribution(parentId: string, childId: string): Promise<void> {
+    const byMessage = new Map<string, TokenUsage>();
+    let model: string | undefined;
+    try {
+      const page = await this.provider.listMessages(childId, { limit: DEFAULT_PAGE_SIZE });
+      for (const message of page.items) {
+        const reported = storedMessageUsage(message);
+        if (!reported) continue;
+        if (reported.usage) byMessage.set(reported.messageId, reported.usage);
+        if (reported.model) model = reported.model;
+      }
+    } catch {
+      return;
+    }
+    const key = attributionKey(parentId, childId);
+    capped(this.childUsage, key, byMessage);
+    if (model !== undefined) capped(this.childModel, key, model);
   }
 
   /**

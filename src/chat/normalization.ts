@@ -76,6 +76,27 @@ export function tokensToUsage(value: unknown): TokenUsage | undefined {
   return Object.keys(usage).length > 0 ? usage : undefined;
 }
 
+/**
+ * A stored assistant message's own accounting: the tokens it reported and the
+ * model it ran. Distinct from `normalizeProviderMessage`, which is about the
+ * timeline a message produces — this is about the message itself, and exists so
+ * a subagent's cost can be rebuilt from its stored history when the live tally
+ * for it is gone. Returns nothing for a user message, or for one that reported
+ * neither.
+ */
+export function storedMessageUsage(value: unknown): { messageId: string; usage?: TokenUsage; model?: string } | undefined {
+  const envelope = record(value);
+  // The classic store wraps each message as { info, parts }; the v2 store is
+  // flat. Same rule `normalizeProviderMessage` uses to tell them apart.
+  const info = optionalString(record(envelope.info).id) === undefined ? envelope : record(envelope.info);
+  const messageId = optionalString(info.id);
+  if (!messageId || (info.role !== "assistant" && info.type !== "assistant")) return undefined;
+  const usage = tokensToUsage(info.tokens);
+  const model = optionalString(info.modelID ?? info.modelId);
+  if (usage === undefined && model === undefined) return undefined;
+  return { messageId, ...(usage === undefined ? {} : { usage }), ...(model === undefined ? {} : { model }) };
+}
+
 export type NormalizedProviderEvent = {
   conversationId?: string;
   updates: NormalizedProviderUpdate[];

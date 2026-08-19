@@ -73,6 +73,16 @@ model; on update, the parent's `task` tool item (matched by
 `childConversationId === childSessionId`) is upserted with `model`/`usage`. The
 per-child maps evict with the projection LRU alongside `lastModel`/`lastMode`.
 
+Revised during implementation: "not fetched per-child" held for the live path
+but left a real hole — the parent's own store never records the attribution, so
+a workspace restart or an eviction of the parent lost a figure the child's
+stored messages still carry. A cost that silently disappears is worse than the
+round trips it saved. Reconstruction is therefore lazy and cached: a `task` row
+whose child has no banked tally reads that child's messages once, in parallel
+with its siblings, and banks the result — so the cost is paid per parent-open
+for a subagent never seen live, and never again. A failed read banks nothing,
+since an errored list is unknown rather than empty.
+
 ## Risks / Trade-offs
 
 - **Live `message.updated` ↔ part ordering (primary).** Whether tokens reliably

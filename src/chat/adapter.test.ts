@@ -995,6 +995,96 @@ describe("pending permission recovery", () => {
     await pump;
   });
 
+  test("a subagent seen only in the store is attributed from its own messages", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.pages.set("first", { items: [{
+      id: "prt_task", type: "assistant", time: { created: 1 },
+      content: [{ id: "prt_task", type: "tool", tool: "task", callID: "c1", state: {
+        status: "completed", input: { description: "Review renderer" }, metadata: { sessionId: "child" },
+      } }],
+    }] });
+    // The child's own history, as a fresh adapter would find it: the turn
+    // finished before this process existed, so nothing was ever seen live.
+    const childMessages = [
+      { id: "msg_a", type: "assistant", modelID: "claude-sonnet-4-5", time: { created: 2 }, tokens: { input: 900, output: 30, cache: { read: 40, write: 0 } } },
+      { id: "msg_b", type: "assistant", modelID: "claude-sonnet-4-5", time: { created: 3 }, tokens: { input: 600, output: 10, cache: { read: 0, write: 0 } } },
+    ];
+    let childReads = 0;
+    const listMessages = provider.listMessages.bind(provider);
+    provider.listMessages = async (sessionId, options) => {
+      if (sessionId !== "child") return listMessages(sessionId, options);
+      childReads += 1;
+      return { items: childMessages as never[] };
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+
+    const snapshot = await adapter.history("parent");
+    expect(snapshot.items.find(item => item.type === "tool")).toEqual(expect.objectContaining({
+      model: "claude-sonnet-4-5",
+      usage: { input: 1_500, output: 40, cacheRead: 40, cacheWrite: 0 },
+    }));
+    expect(childReads).toBe(1);
+
+    // Banked, so reopening does not pay for it again.
+    await adapter.history("parent");
+    expect(childReads).toBe(1);
+  });
+
+  test("a subagent that reported nothing is read once and not asked again", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.pages.set("first", { items: [{
+      id: "prt_task", type: "assistant", time: { created: 1 },
+      content: [{ id: "prt_task", type: "tool", tool: "task", callID: "c1", state: {
+        status: "completed", input: { description: "Audit styles" }, metadata: { sessionId: "child" },
+      } }],
+    }] });
+    let childReads = 0;
+    const listMessages = provider.listMessages.bind(provider);
+    provider.listMessages = async (sessionId, options) => {
+      if (sessionId !== "child") return listMessages(sessionId, options);
+      childReads += 1;
+      return { items: [] };
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+
+    const snapshot = await adapter.history("parent");
+    // Still a readable row asserting no figure — and an empty answer is an
+    // answer, so it is not re-asked.
+    expect(snapshot.items.find(item => item.type === "tool")).not.toHaveProperty("usage");
+    await adapter.history("parent");
+    expect(childReads).toBe(1);
+  });
+
+  test("a failed child read is unknown, not empty, and is retried", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.pages.set("first", { items: [{
+      id: "prt_task", type: "assistant", time: { created: 1 },
+      content: [{ id: "prt_task", type: "tool", tool: "task", callID: "c1", state: {
+        status: "completed", input: { description: "Review renderer" }, metadata: { sessionId: "child" },
+      } }],
+    }] });
+    let fail = true;
+    const listMessages = provider.listMessages.bind(provider);
+    provider.listMessages = async (sessionId, options) => {
+      if (sessionId !== "child") return listMessages(sessionId, options);
+      if (fail) throw new Error("provider unreachable");
+      return { items: [{ id: "msg_a", type: "assistant", modelID: "gpt-5", time: { created: 2 }, tokens: { input: 500 } }] as never[] };
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+
+    // The error degrades the row rather than the snapshot, and banks nothing —
+    // caching it as "no usage" would hide the cost permanently.
+    expect((await adapter.history("parent")).items.find(item => item.type === "tool")).not.toHaveProperty("usage");
+    fail = false;
+    expect((await adapter.history("parent")).items.find(item => item.type === "tool")).toEqual(expect.objectContaining({
+      model: "gpt-5",
+      usage: { input: 500 },
+    }));
+  });
+
   test("evicting a conversation drops the subagent attribution it accumulated", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
