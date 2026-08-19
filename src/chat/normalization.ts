@@ -490,14 +490,17 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
       // The message's token usage decorates the last text part it produced —
       // an item that already renders — rather than becoming an item of its
       // own. Before any part exists it waits in `pendingUsage`; a `message.updated`
-      // is not evidence that a bubble should appear.
+      // is not evidence that a bubble should appear. The attribution report
+      // does not wait with it: a message that produced only tool or reasoning
+      // parts still spent tokens, and the parent's subagent tally counts
+      // messages, not text parts.
       const usage = role === "assistant" ? tokensToUsage(info.tokens) : undefined;
       let reported: { messageId: string; usage: TokenUsage } | undefined;
       if (usage && messageId && memory) {
+        reported = { messageId, usage };
         const partId = memory.lastAssistantPart.get(messageId);
         if (partId) {
           updates.push(usageUpsert(partId, timestamp(record(info.time).created, createdAt), usage));
-          reported = { messageId, usage };
         } else {
           remember(memory.pendingUsage, messageId, usage);
         }

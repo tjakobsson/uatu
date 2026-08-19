@@ -26,6 +26,9 @@ import type {
 import { ConversationNotFoundError, isSessionInWorkspace } from "./workspace";
 
 const DEFAULT_PAGE_SIZE = 50;
+// Sized so reconstructAttribution reads a whole subagent transcript in one
+// call in practice; its cursor loop is the backstop, not the plan.
+const RECONSTRUCTION_READ_LIMIT = 10_000;
 
 export class InteractionConflictError extends Error {
   constructor(message = "interaction request is stale or already resolved") {
@@ -601,13 +604,17 @@ export class OpenCodeChatAdapter {
     const byMessage = new Map<string, TokenUsage>();
     let model: string | undefined;
     try {
-      // Every page, not just the newest: banking a one-page tally would
-      // permanently underreport any child longer than a page, and a banked
-      // key is never re-read. Pages walk newest to oldest, so the first
-      // page's last-reported model is the child's newest and is kept.
+      // Every message, in one read: banking a partial tally would permanently
+      // underreport the child, because a banked key is never re-read. The
+      // read asks for effectively everything at once — the provider's paging
+      // is a local slice over a fully refetched merge, so walking it in
+      // fifty-message pages would fetch the whole child once per page. The
+      // cursor loop stays as a backstop for a child even longer than one
+      // read; pages walk newest to oldest, so the first page's last-reported
+      // model is the child's newest and is kept.
       let cursor: string | undefined;
       do {
-        const page = await this.provider.listMessages(childId, { cursor, limit: DEFAULT_PAGE_SIZE });
+        const page = await this.provider.listMessages(childId, { cursor, limit: RECONSTRUCTION_READ_LIMIT });
         let pageModel: string | undefined;
         for (const message of page.items) {
           const reported = storedMessageUsage(message);
@@ -622,8 +629,15 @@ export class OpenCodeChatAdapter {
       return;
     }
     const key = attributionKey(parentId, childId);
+    // Live events may have landed while the read was in flight, and they are
+    // newer than the stored snapshot — per message the live figure wins, and
+    // a model attributed live outranks the stored one. Overwriting instead
+    // would bank the stale snapshot permanently once the events fall behind
+    // the replay cursor.
+    const live = this.childUsage.get(key);
+    if (live) for (const [messageId, usage] of live) byMessage.set(messageId, usage);
     capped(this.childUsage, key, byMessage);
-    if (model !== undefined) capped(this.childModel, key, model);
+    if (model !== undefined && !this.childModel.has(key)) capped(this.childModel, key, model);
   }
 
   /**
@@ -719,7 +733,12 @@ export class OpenCodeChatAdapter {
         if (normalized.outcome === "unrecognized" || normalized.outcome === "unparseable") {
           this.countDiscard(normalized.outcome, normalized.eventType);
         }
-        if (!normalized.conversationId || normalized.updates.length === 0) continue;
+        if (!normalized.conversationId) continue;
+        // An event with no timeline updates can still carry a child's model
+        // or token report — exactly what a message with only tool or
+        // reasoning parts emits. Attribution must see those; only an event
+        // carrying nothing at all is skipped.
+        if (normalized.updates.length === 0 && normalized.assistantUsage === undefined && normalized.assistantModel === undefined) continue;
         // Confinement is checked per event as it arrives, never at flush time:
         // a session that moves out of the workspace must stop publishing from
         // that moment, and events received while it was confined stay valid.

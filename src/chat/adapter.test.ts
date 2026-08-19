@@ -1031,6 +1031,83 @@ describe("pending permission recovery", () => {
     expect(childReads).toBe(1);
   });
 
+  test("a child message with only tool parts still counts toward the parent's total", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.pages.set("first", { items: [{
+      id: "prt_task", type: "assistant", time: { created: 1 },
+      content: [{ id: "prt_task", type: "tool", tool: "task", callID: "c1", state: {
+        status: "running", input: { description: "Review renderer" }, metadata: { sessionId: "child" },
+      } }],
+    }] });
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    await adapter.history("parent");
+    const row = () => adapter.projectionForTests("parent").items().find(item => item.type === "tool");
+    const pump = adapter.startEventPump();
+    // The child's whole turn is agentic: tool calls, no text part ever, so
+    // nothing ever lands in the child's own timeline. The message's tokens
+    // must still reach the parent's tally.
+    provider.eventQueue.push({
+      id: "e1", type: "message.updated",
+      data: { info: { id: "msg_agentic", sessionID: "child", role: "assistant", modelID: "claude-sonnet-4-5", time: { created: 2 }, tokens: { input: 700, output: 15, cache: { read: 30, write: 0 } } } },
+    } as never);
+    while (!(row() as { usage?: unknown }).usage) await Bun.sleep(1);
+    expect(row()).toEqual(expect.objectContaining({
+      model: "claude-sonnet-4-5",
+      usage: { input: 700, output: 15, cacheRead: 30, cacheWrite: 0 },
+    }));
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("usage arriving during a reconstruction wins over the stored snapshot", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.pages.set("first", { items: [{
+      id: "prt_task", type: "assistant", time: { created: 1 },
+      content: [{ id: "prt_task", type: "tool", tool: "task", callID: "c1", state: {
+        status: "completed", input: { description: "Review renderer" }, metadata: { sessionId: "child" },
+      } }],
+    }] });
+    // The stored read is held open so live events can land mid-flight. The
+    // snapshot it eventually returns is older than what the child reports
+    // live while it is pending.
+    let release: () => void = () => {};
+    const listMessages = provider.listMessages.bind(provider);
+    provider.listMessages = async (sessionId, options) => {
+      if (sessionId !== "child") return listMessages(sessionId, options);
+      await new Promise<void>(resolve => { release = resolve; });
+      return { items: [
+        { id: "msg_a", type: "assistant", modelID: "claude-haiku", time: { created: 2 }, tokens: { input: 500, output: 5, cache: { read: 0, write: 0 } } },
+      ] as never[] };
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+
+    const opening = adapter.history("parent");
+    await Bun.sleep(5); // the reconstruction is now blocked inside the read
+    provider.eventQueue.push({
+      id: "e-live", type: "message.updated",
+      data: { info: { id: "msg_a", sessionID: "child", role: "assistant", modelID: "gpt-5", time: { created: 3 }, tokens: { input: 900, output: 20, cache: { read: 0, write: 0 } } } },
+    } as never);
+    await Bun.sleep(20); // let the live attribution land before the read returns
+    release();
+
+    // Both the returned snapshot and later opens carry the live figure — the
+    // stale stored read must not overwrite what arrived while it was in
+    // flight, or the stale number would be banked permanently.
+    expect((await opening).items.find(item => item.type === "tool")).toEqual(expect.objectContaining({
+      model: "gpt-5",
+      usage: { input: 900, output: 20, cacheRead: 0, cacheWrite: 0 },
+    }));
+    expect((await adapter.history("parent")).items.find(item => item.type === "tool")).toEqual(expect.objectContaining({
+      model: "gpt-5",
+      usage: { input: 900, output: 20, cacheRead: 0, cacheWrite: 0 },
+    }));
+    await adapter.stopEventPump();
+    await pump;
+  });
+
   test("a subagent longer than a page is tallied across all its pages", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];

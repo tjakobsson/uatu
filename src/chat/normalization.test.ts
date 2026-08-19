@@ -270,6 +270,19 @@ describe("token usage", () => {
     ]);
   });
 
+  test("a message with no text part still reports its usage for attribution", () => {
+    const memory = createProviderEventMemory();
+    // A purely agentic message: tool and reasoning parts only, so no text
+    // part ever registers. Its spend must still reach the subagent tally —
+    // the timeline decoration is what waits, not the report.
+    const updated = { id: "1", type: "message.updated", data: { info: { id: "msg", sessionID: "s", role: "assistant", time: { created: 3 }, tokens } } };
+    const normalized = normalizeProviderEvent(updated, memory);
+    expect(normalized.updates).toEqual([]);
+    expect(normalized.assistantUsage).toEqual({ messageId: "msg", usage });
+    // The decoration is still pending, waiting for a part that may never come.
+    expect(memory.pendingUsage.get("msg")).toEqual(usage);
+  });
+
   test("a user message's tokens are not read, and no memory means no usage", () => {
     const memory = createProviderEventMemory();
     const user = { id: "1", type: "message.updated", data: { info: { id: "msg_u", sessionID: "s", role: "user", time: { created: 1 }, tokens } } };
