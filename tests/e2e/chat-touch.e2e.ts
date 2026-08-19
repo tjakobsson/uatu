@@ -198,6 +198,29 @@ test("history prepend and activity expansion preserve semantic position", async 
   expect(await details.evaluate(element => element.getBoundingClientRect().top)).toBeCloseTo(activityTop, 0);
 });
 
+test("a permission's long paths wrap instead of running off the screen", async ({ page, request }) => {
+  // Absolute paths and shell pipelines have no break opportunity a browser
+  // takes on its own. Unwrapped, the longest one sets the card's width and
+  // the rest leaves the viewport — a reader approving a command whose end
+  // they cannot see, which is exactly what the card exists to prevent.
+  const permission: ConversationItem = {
+    id: "permission:p-long", type: "permission", createdAt: 10, requestId: "p-long",
+    action: "bash",
+    resources: [
+      "cat /Users/tobias/src/github.com/tjakobsson/uatu/openspec/changes/chat-context-usage/design.md",
+      "sed -n '1,80p' /Users/tobias/src/github.com/tjakobsson/uatu/README.md",
+    ],
+    status: "pending",
+  };
+  await boot(page, request, { items: [permission] });
+  await expect(page.locator('[data-chat-item-id="permission:p-long"]')).toBeVisible();
+  const timeline = await page.locator("#chat-timeline").evaluate(element => ({
+    scrollWidth: element.scrollWidth,
+    clientWidth: element.clientWidth,
+  }));
+  expect(timeline.scrollWidth).toBeLessThanOrEqual(timeline.clientWidth);
+});
+
 test("rotation and live mode switching retain Chat without remounting", async ({ page, request }) => {
   await boot(page, request);
   await page.locator("#chat-input").fill("rotation draft");

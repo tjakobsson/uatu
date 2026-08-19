@@ -5303,8 +5303,24 @@ body.is-resizing-chat .chat-resizer {
   margin: 0.55rem 0 0;
 }
 
-.chat-tool-meta code {
-  word-break: break-all;
+/* Everything in a card that is a path, a pattern, or a shell pipeline. None
+   of them carries a break opportunity a browser will take on its own, so one
+   long token sets the card's width and the rest runs off the side of a
+   phone — a reader approving a command whose end they cannot see. `anywhere`
+   breaks mid-token only when it must, and unlike `break-all` it also lowers
+   the min-content width, which is what actually lets the card shrink to a
+   narrow viewport instead of forcing the overflow. */
+.chat-tool-meta code,
+.chat-request li code,
+.chat-surface [data-file-ref] {
+  overflow-wrap: anywhere;
+}
+
+/* The browser's 40px list indent is a tenth of a phone's width, spent on
+   nothing. The resources are the content here. */
+.chat-request ul {
+  margin: 0.45rem 0 0;
+  padding-left: 1.25rem;
 }
 
 .chat-diff {
