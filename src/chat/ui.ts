@@ -1379,8 +1379,10 @@ export function initChat(): void {
     releaseChildBack?.();
     releaseChildBack = null;
     if (drilldownItems) childRenderer.render(drilldownItems, null, expanded, undefined, declares("subagents"));
-    if (drilldownOlder) drilldownOlder.hidden = true;
-    if (drilldownOlder) drilldownOlder.disabled = false;
+    if (drilldownOlder) {
+      drilldownOlder.hidden = true;
+      drilldownOlder.disabled = false;
+    }
     if (drilldown) drilldown.hidden = true;
     if (drilldownTitle) drilldownTitle.textContent = "";
     announceChild("");
@@ -1461,7 +1463,10 @@ export function initChat(): void {
     // Hidden until this child's own first page says whether more exists —
     // otherwise a previous subagent's cursor would offer paging for a
     // transcript that has none.
-    if (drilldownOlder) drilldownOlder.hidden = true;
+    if (drilldownOlder) {
+      drilldownOlder.hidden = true;
+      drilldownOlder.disabled = false;
+    }
     childAnchor.restore(null);
     announceChild("Loading transcript…");
     drilldownBack?.focus();

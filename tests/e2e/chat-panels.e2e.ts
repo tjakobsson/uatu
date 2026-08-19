@@ -104,9 +104,11 @@ test.describe("chat panels and navigation", () => {
   });
 
   test("a stale pagination failure cannot overwrite a replacement drill-down", async ({ page, request }) => {
-    const childB = await control(request, { action: "seed", title: "Child B", child: true, items: [
-      { id: "part:b", type: "assistant_message", createdAt: 1, markdown: "child B findings" },
-    ] }) as { conversation: { id: string } };
+    const childB = await control(request, {
+      action: "seed", title: "Child B", child: true,
+      items: [{ id: "part:b", type: "assistant_message", createdAt: 2, markdown: "child B findings" }],
+      older: [{ id: "part:b-old", type: "assistant_message", createdAt: 1, markdown: "older child B finding" }],
+    }) as { conversation: { id: string } };
     const childA = await control(request, {
       action: "seed", title: "Child A", child: true,
       items: [{
@@ -132,6 +134,9 @@ test.describe("chat panels and navigation", () => {
     await expect(page.locator("#chat-drilldown-items")).toContainText("child B findings");
     await page.waitForTimeout(350);
     await expect(page.locator("#chat-drilldown-state")).not.toContainText("older transcript unavailable");
+    await expect(page.locator("#chat-drilldown-older")).toBeEnabled();
+    await page.locator("#chat-drilldown-older").click();
+    await expect(page.locator("#chat-drilldown-items")).toContainText("older child B finding");
   });
 
   test("subagents pin as a track, dismiss finished, and open their transcript", async ({ page, request }) => {
