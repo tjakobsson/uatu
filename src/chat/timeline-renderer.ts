@@ -562,10 +562,10 @@ function outputBlock(item: ToolItem): string {
 function renderSubagentResult(result: string): string {
   const lines = result.split("\n");
   if (lines.length <= OUTPUT_LINE_LIMIT) return `<div class="chat-subagent-result markdown-body">${renderChatMarkdown(result)}</div>`;
-  const preview = lines.slice(0, OUTPUT_LINE_LIMIT).join("\n");
-  const rest = lines.slice(OUTPUT_LINE_LIMIT).join("\n");
-  const more = lines.length - OUTPUT_LINE_LIMIT;
-  return `<div class="chat-subagent-result markdown-body">${renderChatMarkdown(preview)}<details class="chat-output-more"><summary>Show ${more} more ${more === 1 ? "line" : "lines"}</summary>${renderChatMarkdown(rest)}</details></div>`;
+  // Render once so a fence, list, or table crossing the visual cutoff keeps
+  // its structure. The closed details element is a native state toggle; CSS
+  // uses it to clip or reveal this same content rather than rendering halves.
+  return `<div class="chat-subagent-result is-bounded"><div class="chat-subagent-result-content markdown-body">${renderChatMarkdown(result)}</div><details class="chat-output-more"><summary><span class="chat-report-expand">Show full report</span><span class="chat-report-collapse">Collapse report</span></summary></details></div>`;
 }
 
 function fileButton(reference: string): string {

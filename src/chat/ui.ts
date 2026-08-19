@@ -10,7 +10,7 @@ import { newRequestId } from "./ids";
 import { insertCommand, matchingCommands } from "./slash-commands";
 import { navigateWorkspaceFileReference, resolveWorkspaceFileReference } from "./file-references";
 import { READER_CLOSED, TimelineRenderer, decorateFileLinks, latestTodoEntries, statusLabel, subagentEntries, type SubagentEntry } from "./timeline-renderer";
-import { totalTokens } from "./usage";
+import { contextTokens, totalTokens } from "./usage";
 import {
   addAcceptedDraft,
   applyChatEvent,
@@ -515,11 +515,18 @@ export function initChat(): void {
     // The newest assistant usage, scanned from the tail — it is almost always
     // right at the end of a long timeline.
     let usage: TokenUsage | undefined;
+    let zeroUsage: TokenUsage | undefined;
     const timelineItems = projection?.items ?? [];
     for (let index = timelineItems.length - 1; index >= 0; index -= 1) {
       const item = timelineItems[index]!;
-      if (item.type === "assistant_message" && item.usage) { usage = item.usage; break; }
+      if (item.type !== "assistant_message" || !item.usage) continue;
+      // OpenCode starts a new assistant message with an all-zero report before
+      // its real input/cache accounting arrives. Do not flash the meter to 0
+      // between turns when an earlier meaningful occupancy is still known.
+      zeroUsage ??= item.usage;
+      if (contextTokens(item.usage) > 0) { usage = item.usage; break; }
     }
+    usage ??= zeroUsage;
     if (usage === paintedUsage && modelSelect.value === paintedUsageModel) return;
     paintedUsage = usage;
     paintedUsageModel = modelSelect.value;
@@ -528,7 +535,7 @@ export function initChat(): void {
       contextUsage.open = false;
       return;
     }
-    const used = (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
+    const used = contextTokens(usage);
     const limit = models.find(model => modelValue(model.selection) === modelSelect.value)?.contextLimit;
     const fraction = limit && limit > 0 ? Math.min(1, used / limit) : undefined;
     contextUsageFill.style.width = `${Math.round((fraction ?? 0) * 100)}%`;

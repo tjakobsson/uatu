@@ -23,6 +23,11 @@ export function totalTokens(usage: TokenUsage): number {
   return TOKEN_USAGE_COMPONENTS.reduce((sum, key) => sum + (usage[key] ?? 0), 0);
 }
 
+/** Tokens occupying the model's context window right now. */
+export function contextTokens(usage: TokenUsage): number {
+  return (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
+}
+
 /** Component-by-component equality; absent components must match too. */
 export function sameUsage(left: TokenUsage | undefined, right: TokenUsage | undefined): boolean {
   if (left === undefined || right === undefined) return left === right;
@@ -32,10 +37,9 @@ export function sameUsage(left: TokenUsage | undefined, right: TokenUsage | unde
 /**
  * What an assistant-message upsert keeps from the item it replaces. A
  * usage-only upsert (empty markdown is the producer's signal — see
- * `usageUpsert` in normalization.ts) decorates a part that is already on
- * screen: it carries no text and no time of its own. Taking its empty
- * markdown would erase the answer mid-stream; taking its timestamp would
- * resort the timeline, which is ordered by `createdAt`.
+ * `usageUpsert` in normalization.ts) updates the dedicated message-level
+ * carrier. Keeping its original timestamp prevents cumulative restatements
+ * from resorting the timeline, which is ordered by `createdAt`.
  */
 export function mergeAssistantMessage(current: AssistantMessageItem, incoming: AssistantMessageItem): AssistantMessageItem {
   const usageOnly = incoming.markdown === "";

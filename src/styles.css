@@ -6830,6 +6830,33 @@ html[data-ui-mode="touch"] .chat-header {
   border-top: 1px solid var(--border-soft);
 }
 
+.chat-subagent-result-content {
+  position: relative;
+}
+
+.chat-subagent-result.is-bounded:not(:has(.chat-output-more[open])) .chat-subagent-result-content {
+  max-height: 18em;
+  overflow: hidden;
+}
+
+.chat-subagent-result.is-bounded:not(:has(.chat-output-more[open])) .chat-subagent-result-content::after {
+  position: absolute;
+  inset: auto 0 0;
+  height: 2.5em;
+  background: linear-gradient(transparent, var(--surface));
+  content: "";
+  pointer-events: none;
+}
+
+.chat-report-collapse,
+.chat-output-more[open] .chat-report-expand {
+  display: none;
+}
+
+.chat-output-more[open] .chat-report-collapse {
+  display: inline;
+}
+
 /* Grouped steps: a finished run of activity rows collapses to one line at the
    same visual weight as a single row — the group is chrome about chrome. It
    sits between prose blocks, so it needs its own vertical air to not read as

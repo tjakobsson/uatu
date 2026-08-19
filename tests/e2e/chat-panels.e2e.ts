@@ -244,6 +244,26 @@ test.describe("chat panels and navigation", () => {
     await expect(page.locator("#chat-context-usage")).toBeHidden();
   });
 
+  test("a new message's initial zero report does not reset known context usage", async ({ page, request }) => {
+    const conversationId = await seedAndOpen(page, request, "Stable context", [
+      { id: "usage:m1", type: "assistant_message", createdAt: 2, markdown: "", usage: { input: 30_000, cacheRead: 20_000 } },
+    ]);
+    const label = page.locator("#chat-context-usage-label");
+    await expect(label).toHaveText("50k/200k · 25%");
+
+    // OpenCode announces the next assistant message with zeroed counters, then
+    // restates that carrier once real input accounting is available.
+    await control(request, { action: "item", conversationId, item: {
+      id: "usage:m2", type: "assistant_message", createdAt: 3, markdown: "", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    } });
+    await expect(label).toHaveText("50k/200k · 25%");
+
+    await control(request, { action: "item", conversationId, item: {
+      id: "usage:m2", type: "assistant_message", createdAt: 3, markdown: "", usage: { input: 60_000, output: 500, cacheRead: 10_000, cacheWrite: 0 },
+    } });
+    await expect(label).toHaveText("70k/200k · 35%");
+  });
+
   test("an agent that does not declare context reporting leaves no readout behind", async ({ page, request }) => {
     await control(request, { action: "declareOnly", capabilities: ["models", "subagents"] });
     await seedAndOpen(page, request, "Undeclared", [
@@ -279,6 +299,26 @@ test.describe("chat panels and navigation", () => {
     // The unattributed one stays a readable row and asserts no figure.
     await expect(rows.nth(1)).toContainText("general · Audit styles");
     await expect(rows.nth(1).locator(".chat-subagent-attribution")).toHaveCount(0);
+  });
+
+  test("a long subagent report expands without splitting its Markdown", async ({ page, request }) => {
+    const report = ["Report", "```ts", ...Array.from({ length: 30 }, (_, index) => `const line${index + 1} = true;`), "```"].join("\n");
+    await seedAndOpen(page, request, "Long report", [{
+      id: "tool:agent-long", type: "tool", createdAt: 2, name: "task", status: "completed", output: report,
+      input: JSON.stringify({ description: "Review renderer", subagent_type: "explore", prompt: "go" }),
+    }]);
+
+    const row = page.locator('[data-chat-item-id="tool:agent-long"]');
+    await row.locator(":scope > summary").click();
+    const content = row.locator(".chat-subagent-result-content");
+    const collapsedHeight = await content.evaluate(element => element.getBoundingClientRect().height);
+    await expect(row.locator(".chat-subagent-result pre code")).toHaveCount(1);
+    await expect(row.locator(".chat-subagent-result pre code")).toContainText("const line30 = true;");
+
+    await row.locator(".chat-output-more summary").click();
+    const expandedHeight = await content.evaluate(element => element.getBoundingClientRect().height);
+    expect(expandedHeight).toBeGreaterThan(collapsedHeight);
+    await expect(row.locator(".chat-report-collapse")).toBeVisible();
   });
 
   test("the prompt rail jumps to a prompt and flashes the landing", async ({ page, request }) => {

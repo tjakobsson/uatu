@@ -409,17 +409,19 @@ describe("subagent entries", () => {
     expect(entry).not.toHaveProperty("usage");
   });
 
-  test("a long completed report keeps Markdown but bounds its remainder", () => {
+  test("a long completed report renders spanning Markdown once behind a visual bound", () => {
     const renderer = new TimelineRenderer();
     const host = target();
-    const report = ["**Finding one**", ...Array.from({ length: 29 }, (_, index) => `line ${index + 2}`)].join("\n");
+    const report = ["**Finding one**", "```ts", ...Array.from({ length: 27 }, (_, index) => `const line${index + 1} = true;`), "```"].join("\n");
     renderer.render(host, projectionWith([task("long", { output: report })]), new Set(["tool:long"]));
 
     expect(host.querySelector(".chat-subagent-result strong")?.textContent).toBe("Finding one");
+    const code = host.querySelectorAll(".chat-subagent-result pre code");
+    expect(code).toHaveLength(1);
+    expect(code[0]!.textContent).toContain("const line27 = true;");
     const more = host.querySelector(".chat-subagent-result .chat-output-more") as HTMLDetailsElement;
-    expect(more.querySelector("summary")?.textContent).toBe("Show 18 more lines");
+    expect(more.querySelector(".chat-report-expand")?.textContent).toBe("Show full report");
     expect(more.hasAttribute("open")).toBe(false);
-    expect(more.textContent).toContain("line 30");
   });
 });
 
