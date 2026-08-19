@@ -116,10 +116,6 @@ export class SdkV2Provider implements OpenCodeProvider {
       .sort((left, right) => left.provider.localeCompare(right.provider) || left.name.localeCompare(right.name));
   }
 
-  supportsVariants(sessionId: string): boolean {
-    return !this.compatibilitySessions.has(sessionId);
-  }
-
   async switchModel(sessionId: string, selection: ModelSelection, variant?: string): Promise<void> {
     ensureSuccess(await this.client.v2.session.switchModel({
       sessionID: sessionId,
@@ -285,7 +281,6 @@ export class SdkV2Provider implements OpenCodeProvider {
   async prompt(sessionId: string, input: { id: string; text: string; delivery: "steer" | "queue"; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
     const messageId = stableProviderId("msg", input.id);
     if (this.compatibilitySessions.has(sessionId)) {
-      if (input.variant) throw new Error("Reasoning variants are not supported for compatibility sessions");
       ensureSuccess(await this.client.session.promptAsync({
         sessionID: sessionId,
         directory: this.directory,
@@ -293,10 +288,7 @@ export class SdkV2Provider implements OpenCodeProvider {
         parts: [{ type: "text", text: input.text }],
         ...(input.model ? { model: { providerID: input.model.providerId, modelID: input.model.modelId } } : {}),
         ...(input.mode ? { agent: input.mode } : {}),
-        // No variant: the classic transport has no field for one. Checked
-        // against the pinned SDK — `prompt`, `command` and `summarize` bodies
-        // define messageID/model/agent and nothing else. A selected variant is
-        // rejected above rather than silently running at the default effort.
+        ...(input.variant ? { variant: input.variant } : {}),
       }));
       return { messageId };
     }
@@ -337,14 +329,13 @@ export class SdkV2Provider implements OpenCodeProvider {
     // over a session that still carries one.
     //
     // A compatibility session exists only in the classic store, where this
-    // v2 lookup fails — and the classic transport has no variant anywhere to
-    // fall back to (neither `command` nor `summarize` defines the field), so
-    // such a session accepts only the default effort; an explicit variant is
-    // rejected rather than silently discarded.
+    // v2 lookup fails. Its prompt and ordinary command routes carry variant
+    // directly, but summarize does not; refuse only that unsupported pairing.
     const compatibility = this.compatibilitySessions.has(sessionId);
-    if (compatibility && input.variant) throw new Error("Reasoning variants are not supported for compatibility sessions");
+    const summarizes = input.name === "compact" || input.name === "summarize";
+    if (compatibility && summarizes && input.variant) throw new Error("Reasoning variants are not supported for compatibility compaction");
     if (!compatibility && input.model) await this.switchModel(sessionId, input.model, input.variant);
-    const dispatch = input.name === "compact" || input.name === "summarize"
+    const dispatch = summarizes
       ? (async () => ensureSuccess(await this.client.session.summarize({
           sessionID: sessionId,
           directory: this.directory,
@@ -359,8 +350,7 @@ export class SdkV2Provider implements OpenCodeProvider {
           arguments: input.arguments,
           ...(input.model ? { model: `${input.model.providerId}/${input.model.modelId}` } : {}),
           ...(input.mode ? { agent: input.mode } : {}),
-          // Same as the classic prompt path: no body field exists to carry a
-          // variant, and an explicit selection was rejected before dispatch.
+          ...(compatibility && input.variant ? { variant: input.variant } : {}),
         })); })();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {

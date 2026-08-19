@@ -385,9 +385,11 @@ export function initChat(): void {
     const outstanding = projection
       ? projection.items.filter(item => (item.type === "permission" || item.type === "question") && item.status === "pending")
       : [];
+    const target = outstanding.reduce<(typeof outstanding)[number] | undefined>((newest, item) =>
+      !newest || item.createdAt > newest.createdAt || (item.createdAt === newest.createdAt && item.id > newest.id) ? item : newest, undefined);
     // Skipped when nothing changed: rewriting the pill's text every frame
     // replaces the text node a finger may be resting on.
-    const signature = `${outstanding.length}\u0001${outstanding[outstanding.length - 1]?.id ?? ""}`;
+    const signature = `${outstanding.length}\u0001${target?.id ?? ""}`;
     if (signature === paintedRequests) return;
     paintedRequests = signature;
     if (outstanding.length === 0) {
@@ -401,7 +403,7 @@ export function initChat(): void {
     requestsJump.textContent = `${outstanding.length} ${noun} your answer`;
     // The answerable one is the newest; that is where the jump lands, because
     // it is the only one a user can act on right now.
-    requestsJump.dataset.requestTarget = outstanding[outstanding.length - 1]!.id;
+    requestsJump.dataset.requestTarget = target!.id;
   };
 
   // A jump parked while the drill-down closes. Closing can be asynchronous —

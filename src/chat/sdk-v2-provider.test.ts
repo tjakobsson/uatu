@@ -122,25 +122,27 @@ describe("OpenCode v2 identity policy", () => {
     expect(calls[0]).toEqual(["switchModel", { sessionID: "ses_native", model: { providerID: "openai", id: "gpt-5.6-sol" } }]);
     expect(calls[1]![0]).toBe("command");
 
-    // Compatibility: the classic transport defines no variant field on
-    // prompt, command, or summarize. Refuse the choice instead of reporting a
-    // successful turn that silently ran at the default effort.
+    // Compatibility: prompt and ordinary command carry variant directly;
+    // summarize alone has no such field in the pinned transport.
     let commandInput: Record<string, unknown> | undefined;
     let promptInput: Record<string, unknown> | undefined;
+    let summarizeInput: Record<string, unknown> | undefined;
     const classicClient = {
       session: {
         create: async () => ({ data: { ...session("ses_classic"), directory: "/workspace" } }),
         command: async (input: Record<string, unknown>) => { commandInput = input; return { data: { info: {}, parts: [] } }; },
         promptAsync: async (input: Record<string, unknown>) => { promptInput = input; return { data: undefined }; },
+        summarize: async (input: Record<string, unknown>) => { summarizeInput = input; return { data: true }; },
       },
     } as unknown as OpencodeClient;
     const provider = new SdkV2Provider(classicClient, "/workspace");
     await provider.createSession("client-uuid");
-    expect(provider.supportsVariants("ses_classic")).toBe(false);
-    await expect(provider.command("ses_classic", { id: "r2", name: "review", arguments: "", model, variant: "xhigh" })).rejects.toThrow("not supported");
-    await expect(provider.prompt("ses_classic", { id: "r3", text: "go", delivery: "queue", model, variant: "xhigh" })).rejects.toThrow("not supported");
-    expect(commandInput).toBeUndefined();
-    expect(promptInput).toBeUndefined();
+    await provider.command("ses_classic", { id: "r2", name: "review", arguments: "", model, variant: "xhigh" });
+    await provider.prompt("ses_classic", { id: "r3", text: "go", delivery: "queue", model, variant: "xhigh" });
+    expect(commandInput).toEqual(expect.objectContaining({ model: "openai/gpt-5.6-sol", variant: "xhigh" }));
+    expect(promptInput).toEqual(expect.objectContaining({ model: { providerID: "openai", modelID: "gpt-5.6-sol" }, variant: "xhigh" }));
+    await expect(provider.command("ses_classic", { id: "r4", name: "compact", arguments: "", model, variant: "xhigh" })).rejects.toThrow("compatibility compaction");
+    expect(summarizeInput).toBeUndefined();
   });
 
   test("session lookup treats 404 as a store miss but propagates other errors", async () => {

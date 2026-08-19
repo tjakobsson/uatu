@@ -35,6 +35,18 @@ test("outstanding requests are counted, reachable, and clear at zero", async ({ 
     } } });
   }
   await expect(jump).toBeHidden();
+
+  // Recovered requests can share a timestamp and arrive in provider order.
+  // Admission breaks that tie by greatest id, not by whichever arrived last.
+  for (const requestId of ["z", "a"]) {
+    await request.post("/__e2e/chat", { data: { action: "item", conversationId: id, item: {
+      id: `permission:${requestId}`, type: "permission", createdAt: 20, requestId,
+      action: "bash", resources: [`cmd-${requestId}`], status: "pending",
+    } } });
+  }
+  await expect(jump).toHaveAttribute("data-request-target", "permission:z");
+  await expect(page.locator('[data-chat-item-id="permission:z"]')).toHaveAttribute("data-request-state", "needs-answer");
+  await expect(page.locator('[data-chat-item-id="permission:a"]')).toHaveAttribute("data-request-state", "queued");
 });
 
 test("a variant without a model is refused at the boundary", async ({ page, request }) => {
