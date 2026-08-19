@@ -408,6 +408,19 @@ describe("subagent entries", () => {
     expect(entry).toEqual(expect.objectContaining({ status: "running", model: "gpt-5" }));
     expect(entry).not.toHaveProperty("usage");
   });
+
+  test("a long completed report keeps Markdown but bounds its remainder", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const report = ["**Finding one**", ...Array.from({ length: 29 }, (_, index) => `line ${index + 2}`)].join("\n");
+    renderer.render(host, projectionWith([task("long", { output: report })]), new Set(["tool:long"]));
+
+    expect(host.querySelector(".chat-subagent-result strong")?.textContent).toBe("Finding one");
+    const more = host.querySelector(".chat-subagent-result .chat-output-more") as HTMLDetailsElement;
+    expect(more.querySelector("summary")?.textContent).toBe("Show 18 more lines");
+    expect(more.hasAttribute("open")).toBe(false);
+    expect(more.textContent).toContain("line 30");
+  });
 });
 
 describe("permission choices state the authority they grant", () => {

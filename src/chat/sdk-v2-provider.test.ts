@@ -122,24 +122,25 @@ describe("OpenCode v2 identity policy", () => {
     expect(calls[0]).toEqual(["switchModel", { sessionID: "ses_native", model: { providerID: "openai", id: "gpt-5.6-sol" } }]);
     expect(calls[1]![0]).toBe("command");
 
-    // Compatibility: the session exists only in the classic store, where the
-    // v2 switchModel lookup would fail — and the classic transport defines no
-    // variant field on `command` or `summarize`, so the turn runs at the
-    // model's default effort rather than carrying an invented property that
-    // the server would ignore. The client has no v2 surface at all here, so
-    // reaching for one would throw: not reaching for it is the assertion.
+    // Compatibility: the classic transport defines no variant field on
+    // prompt, command, or summarize. Refuse the choice instead of reporting a
+    // successful turn that silently ran at the default effort.
     let commandInput: Record<string, unknown> | undefined;
+    let promptInput: Record<string, unknown> | undefined;
     const classicClient = {
       session: {
         create: async () => ({ data: { ...session("ses_classic"), directory: "/workspace" } }),
         command: async (input: Record<string, unknown>) => { commandInput = input; return { data: { info: {}, parts: [] } }; },
+        promptAsync: async (input: Record<string, unknown>) => { promptInput = input; return { data: undefined }; },
       },
     } as unknown as OpencodeClient;
     const provider = new SdkV2Provider(classicClient, "/workspace");
     await provider.createSession("client-uuid");
-    await provider.command("ses_classic", { id: "r2", name: "review", arguments: "", model, variant: "xhigh" });
-    expect(commandInput).toEqual(expect.objectContaining({ model: "openai/gpt-5.6-sol" }));
-    expect(commandInput).not.toHaveProperty("variant");
+    expect(provider.supportsVariants("ses_classic")).toBe(false);
+    await expect(provider.command("ses_classic", { id: "r2", name: "review", arguments: "", model, variant: "xhigh" })).rejects.toThrow("not supported");
+    await expect(provider.prompt("ses_classic", { id: "r3", text: "go", delivery: "queue", model, variant: "xhigh" })).rejects.toThrow("not supported");
+    expect(commandInput).toBeUndefined();
+    expect(promptInput).toBeUndefined();
   });
 
   test("session lookup treats 404 as a store miss but propagates other errors", async () => {

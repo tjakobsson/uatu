@@ -454,6 +454,7 @@ export class OpenCodeChatAdapter {
       // prompt of a conversation, so validating it every time would pay a
       // provider round trip per message rather than per change.
       const variantModel = variant ? model ?? this.lastModel.get(conversationId) : model;
+      if (variant && this.provider.supportsVariants?.(conversationId) === false) throw new InvalidVariantSelectionError();
       if (variant && this.lastVariant.get(conversationId) !== variant) {
         available ??= await this.provider.listModels();
         const selected = variantModel && available.find(candidate => sameSelection(candidate.selection, variantModel));

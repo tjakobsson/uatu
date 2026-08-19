@@ -66,6 +66,7 @@ class FakeProvider implements OpenCodeProvider {
   listPermissions?: OpenCodeProvider["listPermissions"];
   listQuestions?: OpenCodeProvider["listQuestions"];
   listModes?: OpenCodeProvider["listModes"];
+  supportsVariants?: OpenCodeProvider["supportsVariants"];
 
   async listCommands() { return this.commands; }
   async listModels() { return this.models; }
@@ -515,6 +516,18 @@ describe("prompt, abort, permission, and question mutations", () => {
     // check the variant against, and nothing for it to ride — refused.
     const fresh = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g2" });
     await expect(fresh.prompt("session", "r5", "nope", undefined, undefined, "high")).rejects.toBeInstanceOf(InvalidVariantSelectionError);
+  });
+
+  test("refuses a listed variant when this session's transport cannot apply it", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    provider.models = [{ selection: { providerId: "anthropic", modelId: "claude" }, provider: "Anthropic", name: "Claude", variants: ["high"] }];
+    provider.supportsVariants = () => false;
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+
+    await expect(adapter.prompt("session", "r1", "think hard", { providerId: "anthropic", modelId: "claude" }, undefined, "high"))
+      .rejects.toBeInstanceOf(InvalidVariantSelectionError);
+    expect(provider.prompts).toHaveLength(0);
   });
 
   test("joins duplicate prompts, steers while running, and preserves content on abort", async () => {

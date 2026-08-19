@@ -545,7 +545,7 @@ function toolBody(detail: ToolDetail, item: ToolItem): string {
     case "agent":
       // The result is the subagent's report — prose, rendered like assistant
       // markdown rather than dumped as the raw task envelope.
-      return `<p class="chat-tool-meta">${detail.subagent ? `<code>${escapeHtml(detail.subagent)}</code> ` : ""}${escapeHtml(detail.description)}${detail.conversationId ? ` <button type="button" data-open-conversation="${escapeHtmlAttribute(detail.conversationId)}">Open transcript</button>` : ""}</p><pre>${escapeHtml(detail.prompt)}</pre>${detail.result ? `<div class="chat-subagent-result markdown-body">${renderChatMarkdown(detail.result)}</div>` : ""}${error}`;
+      return `<p class="chat-tool-meta">${detail.subagent ? `<code>${escapeHtml(detail.subagent)}</code> ` : ""}${escapeHtml(detail.description)}${detail.conversationId ? ` <button type="button" data-open-conversation="${escapeHtmlAttribute(detail.conversationId)}">Open transcript</button>` : ""}</p><pre>${escapeHtml(detail.prompt)}</pre>${detail.result ? renderSubagentResult(detail.result) : ""}${error}`;
     case "skill":
       return `${outputBlock(item)}${error}`;
     default:
@@ -556,6 +556,17 @@ function toolBody(detail: ToolDetail, item: ToolItem): string {
 
 function outputBlock(item: ToolItem): string {
   return renderActivityOutput(item.output, item.status);
+}
+
+// Task output is prose rather than a raw log, but it obeys the same finished
+// output bound. Both preview and remainder stay Markdown-rendered.
+function renderSubagentResult(result: string): string {
+  const lines = result.split("\n");
+  if (lines.length <= OUTPUT_LINE_LIMIT) return `<div class="chat-subagent-result markdown-body">${renderChatMarkdown(result)}</div>`;
+  const preview = lines.slice(0, OUTPUT_LINE_LIMIT).join("\n");
+  const rest = lines.slice(OUTPUT_LINE_LIMIT).join("\n");
+  const more = lines.length - OUTPUT_LINE_LIMIT;
+  return `<div class="chat-subagent-result markdown-body">${renderChatMarkdown(preview)}<details class="chat-output-more"><summary>Show ${more} more ${more === 1 ? "line" : "lines"}</summary>${renderChatMarkdown(rest)}</details></div>`;
 }
 
 function fileButton(reference: string): string {

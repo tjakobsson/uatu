@@ -40,6 +40,8 @@ export interface OpenCodeProvider {
   describe(): ChatAgent;
   listCommands(): Promise<ChatCommand[]>;
   listModels(): Promise<ChatModel[]>;
+  /** Whether this session's transport can apply a model reasoning variant. */
+  supportsVariants?(sessionId: string): boolean;
   /**
    * Modes a prompt can run under (Build, Plan, ...). Optional: a provider
    * without it simply never offers a choice. Without the choice a session
