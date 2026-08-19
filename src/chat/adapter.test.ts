@@ -1031,6 +1031,48 @@ describe("pending permission recovery", () => {
     expect(childReads).toBe(1);
   });
 
+  test("a subagent longer than a page is tallied across all its pages", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.pages.set("first", { items: [{
+      id: "prt_task", type: "assistant", time: { created: 1 },
+      content: [{ id: "prt_task", type: "tool", tool: "task", callID: "c1", state: {
+        status: "completed", input: { description: "Review renderer" }, metadata: { sessionId: "child" },
+      } }],
+    }] });
+    // The provider pages newest-first: the first read returns the tail of the
+    // transcript with a cursor pointing at what came before it.
+    const childPages = new Map<string, { items: never[]; nextCursor?: string }>([
+      ["latest", { items: [
+        { id: "msg_new", type: "assistant", modelID: "claude-sonnet-4-5", time: { created: 3 }, tokens: { input: 600, output: 10, cache: { read: 0, write: 0 } } },
+      ] as never[], nextCursor: "older" }],
+      ["older", { items: [
+        { id: "msg_old", type: "assistant", modelID: "claude-haiku", time: { created: 2 }, tokens: { input: 900, output: 30, cache: { read: 40, write: 0 } } },
+      ] as never[] }],
+    ]);
+    let childReads = 0;
+    const listMessages = provider.listMessages.bind(provider);
+    provider.listMessages = async (sessionId, options) => {
+      if (sessionId !== "child") return listMessages(sessionId, options);
+      childReads += 1;
+      return childPages.get(options.cursor ?? "latest") ?? { items: [] };
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+
+    const snapshot = await adapter.history("parent");
+    // The tally covers the whole transcript, and the model is the child's
+    // newest, not whichever page happened to be read last.
+    expect(snapshot.items.find(item => item.type === "tool")).toEqual(expect.objectContaining({
+      model: "claude-sonnet-4-5",
+      usage: { input: 1_500, output: 40, cacheRead: 40, cacheWrite: 0 },
+    }));
+    expect(childReads).toBe(2);
+
+    // Banked as one answer: reopening re-reads nothing.
+    await adapter.history("parent");
+    expect(childReads).toBe(2);
+  });
+
   test("a subagent that reported nothing is read once and not asked again", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];

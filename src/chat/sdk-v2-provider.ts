@@ -322,8 +322,12 @@ export class SdkV2Provider implements OpenCodeProvider {
     // the user picked. On the v2 path the variant is not a body field — it
     // rides on the model reference — so it has to be applied the same way
     // `prompt` does, or the picker would accept a choice that command-driven
-    // turns silently ignored.
-    if (input.model && input.variant) await this.switchModel(sessionId, input.model, input.variant);
+    // turns silently ignored. A compatibility session exists only in the
+    // classic store, where the v2 switchModel lookup fails — there the
+    // variant is a body field on the dispatch itself, as the classic prompt
+    // path already sends it.
+    const compatibility = this.compatibilitySessions.has(sessionId);
+    if (!compatibility && input.model && input.variant) await this.switchModel(sessionId, input.model, input.variant);
     const dispatch = input.name === "compact" || input.name === "summarize"
       ? (async () => ensureSuccess(await this.client.session.summarize({
           sessionID: sessionId,
@@ -339,6 +343,7 @@ export class SdkV2Provider implements OpenCodeProvider {
           arguments: input.arguments,
           ...(input.model ? { model: `${input.model.providerId}/${input.model.modelId}` } : {}),
           ...(input.mode ? { agent: input.mode } : {}),
+          ...(compatibility && input.variant ? { variant: input.variant } : {}),
         })); })();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {

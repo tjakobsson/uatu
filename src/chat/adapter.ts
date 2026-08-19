@@ -601,13 +601,23 @@ export class OpenCodeChatAdapter {
     const byMessage = new Map<string, TokenUsage>();
     let model: string | undefined;
     try {
-      const page = await this.provider.listMessages(childId, { limit: DEFAULT_PAGE_SIZE });
-      for (const message of page.items) {
-        const reported = storedMessageUsage(message);
-        if (!reported) continue;
-        if (reported.usage) byMessage.set(reported.messageId, reported.usage);
-        if (reported.model) model = reported.model;
-      }
+      // Every page, not just the newest: banking a one-page tally would
+      // permanently underreport any child longer than a page, and a banked
+      // key is never re-read. Pages walk newest to oldest, so the first
+      // page's last-reported model is the child's newest and is kept.
+      let cursor: string | undefined;
+      do {
+        const page = await this.provider.listMessages(childId, { cursor, limit: DEFAULT_PAGE_SIZE });
+        let pageModel: string | undefined;
+        for (const message of page.items) {
+          const reported = storedMessageUsage(message);
+          if (!reported) continue;
+          if (reported.usage) byMessage.set(reported.messageId, reported.usage);
+          if (reported.model) pageModel = reported.model;
+        }
+        model ??= pageModel;
+        cursor = page.nextCursor;
+      } while (cursor !== undefined);
     } catch {
       return;
     }

@@ -86,6 +86,42 @@ describe("OpenCode v2 identity policy", () => {
     });
   });
 
+  test("a command's variant rides the transport the session lives in", async () => {
+    // v2-native: the variant is not a body field — it is applied through
+    // switchModel before dispatch, exactly as the prompt path does.
+    const calls: Array<[string, Record<string, unknown>]> = [];
+    const nativeClient = {
+      session: {
+        command: async (input: Record<string, unknown>) => { calls.push(["command", input]); return { data: { info: {}, parts: [] } }; },
+      },
+      v2: {
+        session: {
+          switchModel: async (input: Record<string, unknown>) => { calls.push(["switchModel", input]); return { data: undefined }; },
+        },
+      },
+    } as unknown as OpencodeClient;
+    const model = { providerId: "openai", modelId: "gpt-5.6-sol" };
+    await new SdkV2Provider(nativeClient, "/workspace").command("ses_native", { id: "r1", name: "review", arguments: "", model, variant: "xhigh" });
+    expect(calls[0]).toEqual(["switchModel", { sessionID: "ses_native", model: { providerID: "openai", id: "gpt-5.6-sol", variant: "xhigh" } }]);
+    expect(calls[1]![0]).toBe("command");
+    expect(calls[1]![1]).not.toHaveProperty("variant");
+
+    // Compatibility: the session exists only in the classic store, where the
+    // v2 switchModel lookup would fail — the variant goes in the command body
+    // instead. The client has no v2 surface at all, so reaching for it throws.
+    let commandInput: Record<string, unknown> | undefined;
+    const classicClient = {
+      session: {
+        create: async () => ({ data: { ...session("ses_classic"), directory: "/workspace" } }),
+        command: async (input: Record<string, unknown>) => { commandInput = input; return { data: { info: {}, parts: [] } }; },
+      },
+    } as unknown as OpencodeClient;
+    const provider = new SdkV2Provider(classicClient, "/workspace");
+    await provider.createSession("client-uuid");
+    await provider.command("ses_classic", { id: "r2", name: "review", arguments: "", model, variant: "xhigh" });
+    expect(commandInput).toEqual(expect.objectContaining({ variant: "xhigh", model: "openai/gpt-5.6-sol" }));
+  });
+
   test("session lookup treats 404 as a store miss but propagates other errors", async () => {
     const client = (classicStatus: number, v2Status: number) => ({
       session: { get: async () => ({ error: { message: "classic" }, response: { status: classicStatus } }) },
