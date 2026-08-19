@@ -503,6 +503,18 @@ describe("prompt, abort, permission, and question mutations", () => {
     expect(modelLists).toBe(1);
     // Unknown for this model — refused before dispatch.
     await expect(adapter.prompt("session", "r3", "nope", model, undefined, "ultra")).rejects.toBeInstanceOf(InvalidVariantSelectionError);
+
+    // A variant without a restated model means "this conversation's model,
+    // harder": the last applied model stands in for the check AND rides the
+    // dispatch — on the v2 path the variant travels on the model reference,
+    // so a variant with no model to ride would be silently dropped.
+    await adapter.prompt("session", "r4", "go deeper", undefined, undefined, "xhigh");
+    expect(provider.prompts[2]).toEqual(expect.objectContaining({ variant: "xhigh", model }));
+
+    // A conversation whose model this adapter never learned has nothing to
+    // check the variant against, and nothing for it to ride — refused.
+    const fresh = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g2" });
+    await expect(fresh.prompt("session", "r5", "nope", undefined, undefined, "high")).rejects.toBeInstanceOf(InvalidVariantSelectionError);
   });
 
   test("joins duplicate prompts, steers while running, and preserves content on abort", async () => {

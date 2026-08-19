@@ -121,8 +121,10 @@ export function initChat(): void {
   // than a boolean because the boolean survives where the layer does not: a
   // reload keeps the flagged entry while the in-memory drill-down dies, and
   // an interceptor that trusts any flag then refuses to close a layer over a
-  // stale marker. Only the token minted by this open is "our entry".
-  let drilldownHistoryToken: number | null = null;
+  // stale marker. Minted with newRequestId, NOT a page-local counter: a
+  // counter restarts on every load, so the first open after a reload would
+  // re-mint exactly the value a stale entry already carries.
+  let drilldownHistoryToken: string | null = null;
   let rendering = false;
   let renderFrame: number | null = null;
   let submitting = false;
@@ -1334,8 +1336,9 @@ export function initChat(): void {
     // parent rather than walking a stack of replaced children.
     if (!nested) {
       try {
-        history.pushState({ ...(history.state as Record<string, unknown> | null), chatDrilldown: generation }, "", location.href);
-        drilldownHistoryToken = generation;
+        const token = newRequestId();
+        history.pushState({ ...(history.state as Record<string, unknown> | null), chatDrilldown: token }, "", location.href);
+        drilldownHistoryToken = token;
       } catch { /* history is best effort; the header control still returns */ }
     }
     releaseChildBack ??= registerBackInterceptor(event => {

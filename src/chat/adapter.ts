@@ -440,15 +440,20 @@ export class OpenCodeChatAdapter {
         if (!modes.some(candidate => candidate.name === mode)) throw new InvalidModeSelectionError();
         this.lastMode.set(conversationId, mode);
       }
-      // A variant is refused unless the selected model advertises it. Checked
-      // against the model, since variants are per-model — an unknown one passed
-      // through would silently do nothing on the wire. Same freshness rule as
-      // the model and mode: a variant is re-sent with every prompt of a
-      // conversation, so validating it every time would pay a provider round
-      // trip per message rather than per change.
+      // A variant is refused unless the model it would ride advertises it —
+      // variants are per-model, and an unknown one passed through would
+      // silently do nothing on the wire. A prompt that carries a variant
+      // without restating the model means "this conversation's model, harder":
+      // the last model this adapter applied stands in, for the check here and
+      // for the dispatch below, because on the v2 path the variant rides the
+      // model reference and a variant with nothing to ride is dropped. Same
+      // freshness rule as the model and mode: a variant is re-sent with every
+      // prompt of a conversation, so validating it every time would pay a
+      // provider round trip per message rather than per change.
+      const variantModel = variant ? model ?? this.lastModel.get(conversationId) : model;
       if (variant && this.lastVariant.get(conversationId) !== variant) {
         available ??= await this.provider.listModels();
-        const selected = model && available.find(candidate => sameSelection(candidate.selection, model));
+        const selected = variantModel && available.find(candidate => sameSelection(candidate.selection, variantModel));
         if (!selected?.variants?.includes(variant)) throw new InvalidVariantSelectionError();
         this.lastVariant.set(conversationId, variant);
       }
@@ -475,8 +480,8 @@ export class OpenCodeChatAdapter {
           ? parseSlashCommand(text, await this.provider.listCommands())
           : undefined;
         const accepted = slash
-          ? await this.provider.command(conversationId, { id: messageId, name: slash.name, arguments: slash.arguments, model, mode, variant })
-          : await this.provider.prompt(conversationId, { id: messageId, text, delivery, model, mode, variant });
+          ? await this.provider.command(conversationId, { id: messageId, name: slash.name, arguments: slash.arguments, model: variantModel, mode, variant })
+          : await this.provider.prompt(conversationId, { id: messageId, text, delivery, model: variantModel, mode, variant });
         if (renameToFirstPrompt) {
           try {
             session = await this.provider.renameSession!(conversationId, deriveConversationTitle(text));
