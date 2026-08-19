@@ -11,6 +11,7 @@ import type {
   ProviderPermissionReply,
   ProviderSession,
 } from "./provider";
+import { UnsupportedVariantSelectionError } from "./provider";
 import type { ChatEvent, ChatModel, ConversationItem, ModelSelection } from "./types";
 import { ConversationNotFoundError } from "./workspace";
 import { MetricsRegistry } from "../debug/metrics";
@@ -515,6 +516,18 @@ describe("prompt, abort, permission, and question mutations", () => {
     // check the variant against, and nothing for it to ride — refused.
     const fresh = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g2" });
     await expect(fresh.prompt("session", "r5", "nope", undefined, undefined, "high")).rejects.toBeInstanceOf(InvalidVariantSelectionError);
+  });
+
+  test("maps a provider's unsupported variant to the client selection error", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    provider.models = [{ selection: { providerId: "anthropic", modelId: "claude" }, provider: "Anthropic", name: "Claude", variants: ["high"] }];
+    provider.command = async () => { throw new UnsupportedVariantSelectionError("reasoning variants are not supported for compatibility compaction"); };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+
+    const error = adapter.prompt("session", "r1", "/compact", { providerId: "anthropic", modelId: "claude" }, undefined, "high");
+    await expect(error).rejects.toBeInstanceOf(InvalidVariantSelectionError);
+    await expect(error).rejects.toThrow("compatibility compaction");
   });
 
   test("joins duplicate prompts, steers while running, and preserves content on abort", async () => {
@@ -1160,6 +1173,43 @@ describe("pending permission recovery", () => {
       model: "gpt-5",
       usage: { input: 900, output: 20, cacheRead: 0, cacheWrite: 0 },
     }));
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("concurrent snapshots share reconstruction and preserve a racing removal", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("parent"), { ...fixtureSession("child"), parentId: "parent" }];
+    provider.pages.set("first", { items: [{
+      id: "prt_task", type: "assistant", time: { created: 1 },
+      content: [{ id: "prt_task", type: "tool", tool: "task", callID: "c1", state: {
+        status: "completed", input: { description: "Review renderer" }, metadata: { sessionId: "child" },
+      } }],
+    }] });
+    let childReads = 0;
+    let release: () => void = () => {};
+    const listMessages = provider.listMessages.bind(provider);
+    provider.listMessages = async (sessionId, options) => {
+      if (sessionId !== "child") return listMessages(sessionId, options);
+      childReads += 1;
+      await new Promise<void>(resolve => { release = resolve; });
+      return { items: [{ id: "msg_removed", type: "assistant", time: { created: 2 }, tokens: { input: 500 } }] as never[] };
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const pump = adapter.startEventPump();
+
+    const first = adapter.history("parent");
+    const second = adapter.history("parent");
+    while (childReads === 0) await Bun.sleep(1);
+    provider.eventQueue.push({ id: "remove", type: "message.removed", properties: { sessionID: "child", messageID: "msg_removed" } } as never);
+    await Bun.sleep(20);
+    release();
+
+    for (const snapshot of await Promise.all([first, second])) {
+      expect(snapshot.items.find(item => item.type === "tool")).not.toHaveProperty("usage");
+    }
+    expect(childReads).toBe(1);
+    expect((await adapter.history("parent")).items.find(item => item.type === "tool")).not.toHaveProperty("usage");
     await adapter.stopEventPump();
     await pump;
   });

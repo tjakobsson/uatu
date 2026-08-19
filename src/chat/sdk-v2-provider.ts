@@ -3,6 +3,7 @@ import type { OpencodeClient } from "@opencode-ai/sdk/v2/client";
 import { createHash } from "node:crypto";
 
 import { boundedSet } from "../shared/bounded-map";
+import { UnsupportedVariantSelectionError } from "./provider";
 import type {
   OpenCodeProvider,
   PendingPermission,
@@ -333,7 +334,9 @@ export class SdkV2Provider implements OpenCodeProvider {
     // directly, but summarize does not; refuse only that unsupported pairing.
     const compatibility = this.compatibilitySessions.has(sessionId);
     const summarizes = input.name === "compact" || input.name === "summarize";
-    if (compatibility && summarizes && input.variant) throw new Error("Reasoning variants are not supported for compatibility compaction");
+    if (compatibility && summarizes && input.variant) {
+      throw new UnsupportedVariantSelectionError("reasoning variants are not supported for compatibility compaction");
+    }
     if (!compatibility && input.model) await this.switchModel(sessionId, input.model, input.variant);
     const dispatch = summarizes
       ? (async () => ensureSuccess(await this.client.session.summarize({

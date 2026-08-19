@@ -4,7 +4,7 @@ import { boundedSet } from "../shared/bounded-map";
 import { ProviderUpdateCoalescer } from "./coalescer";
 import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage, type NormalizedProviderUpdate } from "./normalization";
 import { mergeAssistantMessage, sameUsage, TOKEN_USAGE_COMPONENTS } from "./usage";
-import type { OpenCodeProvider, ProviderPermissionReply, ProviderSession } from "./provider";
+import { UnsupportedVariantSelectionError, type OpenCodeProvider, type ProviderPermissionReply, type ProviderSession } from "./provider";
 import { IdempotencyReceipts } from "./receipts";
 import { ConversationReplay, type ReplaySubscription } from "./replay";
 import { ProviderTextReconciler } from "./text-reconciler";
@@ -54,8 +54,8 @@ export class InvalidModeSelectionError extends Error {
 }
 
 export class InvalidVariantSelectionError extends Error {
-  constructor() {
-    super("selected variant is not available");
+  constructor(message = "selected variant is not available") {
+    super(message);
     this.name = "InvalidVariantSelectionError";
   }
 }
@@ -127,6 +127,7 @@ export class OpenCodeChatAdapter {
   // Deletions that race a stored-history reconstruction must win over that
   // stale read just as newer live usage does.
   private readonly removedChildUsage = new Map<string, Set<string>>();
+  private readonly attributionReconstructions = new Map<string, Promise<void>>();
   // Attribution keys whose tally has been squared against the child's stored
   // history. A live tally alone is not proof of completeness: a parent evicted
   // mid-run loses its maps, and the child's next event recreates one holding
@@ -499,8 +500,11 @@ export class OpenCodeChatAdapter {
         if (projection.status === "sending") projection.statusUpdate("running");
         return { messageId: accepted.messageId, delivery, ...(conversation ? { conversation } : {}) };
       } catch (error) {
-        if (!steering && projection.status === "sending") projection.statusUpdate("failed", errorMessage(error));
-        throw error;
+        const mapped = error instanceof UnsupportedVariantSelectionError
+          ? new InvalidVariantSelectionError(error.message)
+          : error;
+        if (!steering && projection.status === "sending") projection.statusUpdate("failed", errorMessage(mapped));
+        throw mapped;
       }
     });
   }
@@ -632,8 +636,18 @@ export class OpenCodeChatAdapter {
    * which is what stops a child that genuinely reported nothing from being
    * re-read on every open.
    */
-  private async reconstructAttribution(parentId: string, childId: string): Promise<void> {
+  private reconstructAttribution(parentId: string, childId: string): Promise<void> {
     const key = attributionKey(parentId, childId);
+    const existing = this.attributionReconstructions.get(key);
+    if (existing) return existing;
+    const pending = this.reconstructAttributionOnce(key, childId).finally(() => {
+      if (this.attributionReconstructions.get(key) === pending) this.attributionReconstructions.delete(key);
+    });
+    this.attributionReconstructions.set(key, pending);
+    return pending;
+  }
+
+  private async reconstructAttributionOnce(key: string, childId: string): Promise<void> {
     const byMessage = new Map<string, TokenUsage>();
     let model: string | undefined;
     try {

@@ -28,6 +28,13 @@ export type ProviderPage<T> = {
 export type ProviderMessage = Record<string, unknown>;
 export type ProviderEvent = Record<string, unknown>;
 
+export class UnsupportedVariantSelectionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnsupportedVariantSelectionError";
+  }
+}
+
 export type ProviderPermissionReply = "once" | "always" | "reject";
 
 export interface OpenCodeProvider {
