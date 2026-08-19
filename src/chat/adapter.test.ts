@@ -928,6 +928,17 @@ describe("pending permission recovery", () => {
       usage: { input: 2_000, output: 25, cacheRead: 200, cacheWrite: 0 },
     }));
 
+    // A message that emits a second text part reports the SAME cumulative
+    // tokens again, against the new part. Keyed by part, that message's spend
+    // would be banked twice; keyed by message, the restatement replaces it.
+    provider.eventQueue.push({
+      id: "e-part-msg_b-2", type: "message.part.updated",
+      data: { part: { id: "prt_msg_b_2", messageID: "msg_b", sessionID: "child", type: "text", text: "and more" } },
+    } as never);
+    provider.eventQueue.push(message("msg_b", 900, 7) as never);
+    while (sumInput(row()) === 2_000) await Bun.sleep(1);
+    expect(sumInput(row())).toBe(2_100);
+
     // The tool part's own later update knows nothing about attribution; it
     // must not wipe what the child reported.
     applyEvent(adapter, "parent", {
@@ -936,7 +947,7 @@ describe("pending permission recovery", () => {
         status: "completed", input: { description: "Review renderer", subagent_type: "explore" }, metadata: { sessionId: "child" }, output: "done",
       } } },
     } as never);
-    expect(row()).toEqual(expect.objectContaining({ status: "completed", model: "claude-sonnet-4-5", usage: { input: 2_000, output: 25, cacheRead: 200, cacheWrite: 0 } }));
+    expect(row()).toEqual(expect.objectContaining({ status: "completed", model: "claude-sonnet-4-5", usage: { input: 2_100, output: 27, cacheRead: 200, cacheWrite: 0 } }));
 
     await adapter.stopEventPump();
     await pump;

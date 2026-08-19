@@ -316,8 +316,14 @@ export class SdkV2Provider implements OpenCodeProvider {
    * while a healthy turn outlives the window, detaches, and reports failures
    * through the event stream like any running turn.
    */
-  async command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; mode?: string }): Promise<{ messageId: string }> {
+  async command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
     const messageId = stableProviderId("msg", input.id);
+    // A command is a turn like any other, so it runs at the reasoning effort
+    // the user picked. On the v2 path the variant is not a body field — it
+    // rides on the model reference — so it has to be applied the same way
+    // `prompt` does, or the picker would accept a choice that command-driven
+    // turns silently ignored.
+    if (input.model && input.variant) await this.switchModel(sessionId, input.model, input.variant);
     const dispatch = input.name === "compact" || input.name === "summarize"
       ? (async () => ensureSuccess(await this.client.session.summarize({
           sessionID: sessionId,

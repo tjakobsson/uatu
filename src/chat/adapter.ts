@@ -422,7 +422,7 @@ export class OpenCodeChatAdapter {
           ? parseSlashCommand(text, await this.provider.listCommands())
           : undefined;
         const accepted = slash
-          ? await this.provider.command(conversationId, { id: messageId, name: slash.name, arguments: slash.arguments, model, mode })
+          ? await this.provider.command(conversationId, { id: messageId, name: slash.name, arguments: slash.arguments, model, mode, variant })
           : await this.provider.prompt(conversationId, { id: messageId, text, delivery, model, mode, variant });
         if (renameToFirstPrompt) {
           try {
@@ -585,14 +585,11 @@ export class OpenCodeChatAdapter {
    */
   private async attributeSubagent(
     conversationId: string,
-    updates: NormalizedProviderUpdate[],
+    reported: { messageId: string; usage: TokenUsage } | undefined,
     assistantModel: string | undefined,
     coalescer: ProviderUpdateCoalescer,
   ): Promise<void> {
-    const reported = updates.flatMap(update => update.kind === "upsert" && update.item.type === "assistant_message" && update.item.usage
-      ? [[update.item.id, update.item.usage] as const]
-      : []);
-    if (reported.length === 0 && assistantModel === undefined) return;
+    if (reported === undefined && assistantModel === undefined) return;
     let parentId: string | null;
     try {
       parentId = await this.parentOf(conversationId);
@@ -602,9 +599,13 @@ export class OpenCodeChatAdapter {
     if (!parentId) return;
     const key = attributionKey(parentId, conversationId);
     if (assistantModel !== undefined) capped(this.childModel, key, assistantModel);
-    if (reported.length > 0) {
+    if (reported !== undefined) {
+      // Keyed by the provider's message id, not by the part the usage
+      // decorated: a message can produce several text parts, and its tokens
+      // are cumulative for the message. Banking them per part would count one
+      // message's spend once for every part it emitted.
       const byMessage = this.childUsage.get(key) ?? new Map<string, TokenUsage>();
-      for (const [itemId, usage] of reported) byMessage.set(itemId, usage);
+      byMessage.set(reported.messageId, reported.usage);
       capped(this.childUsage, key, byMessage);
     }
     // Nothing to decorate if the parent is not projected — the row lives in
@@ -682,7 +683,7 @@ export class OpenCodeChatAdapter {
         // The same reasoning as the mirror, for cost rather than requests: a
         // subagent's model and token spend live in its own session, which the
         // parent's client never sees.
-        await this.attributeSubagent(normalized.conversationId, normalized.updates, normalized.assistantModel, coalescer);
+        await this.attributeSubagent(normalized.conversationId, normalized.assistantUsage, normalized.assistantModel, coalescer);
       }
     } finally {
       coalescer.dispose();

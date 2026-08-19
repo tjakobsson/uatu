@@ -11,7 +11,7 @@
 
 import type { Serve } from "bun";
 
-import { InteractionConflictError, InvalidModeSelectionError, InvalidModelSelectionError } from "../chat/adapter";
+import { InteractionConflictError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError } from "../chat/adapter";
 import { encodeReplayCursor } from "../chat/replay";
 import { ChatUnavailableError, type WorkspaceChatService } from "../chat/service";
 import type { ModelSelection, PermissionOutcome, QuestionOutcome } from "../chat/types";
@@ -695,6 +695,7 @@ function normalizedChatError(error: unknown): Response {
   if (error instanceof InteractionConflictError) return chatError(409, error.message);
   if (error instanceof InvalidModelSelectionError) return chatError(400, error.message);
   if (error instanceof InvalidModeSelectionError) return chatError(400, error.message);
+  if (error instanceof InvalidVariantSelectionError) return chatError(400, error.message);
   if (error instanceof ChatUnavailableError) return chatError(503, "chat is unavailable");
   if (error instanceof Error && /invalid history cursor/.test(error.message)) return chatError(400, "invalid cursor");
   return chatError(500, "chat operation failed");

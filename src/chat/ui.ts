@@ -956,6 +956,10 @@ export function initChat(): void {
       const details = event.target as HTMLDetailsElement;
       if (!details.matches("details[data-chat-item-id]")) return;
       controller.beforeMutation(measure(), details.dataset.chatItemId);
+      // The reader has spoken, so the row is theirs from here: clearing the
+      // stream's auto-open marker is what stops the next render from undoing
+      // an expansion they made on a row that had opened itself earlier.
+      details.removeAttribute("data-auto-open");
       if (details.open) expanded.add(details.dataset.chatItemId!); else expanded.delete(details.dataset.chatItemId!);
       save();
       requestAnimationFrame(() => { scroller.scrollTop = controller.afterMutation(measure()); });
@@ -1154,7 +1158,9 @@ export function initChat(): void {
     const open = child;
     if (!open) return;
     if (!popped && open.pushedHistory && (history.state as { chatDrilldown?: boolean } | null)?.chatDrilldown === true) {
-      child = { ...open, pushedHistory: false };
+      // `pushedHistory` deliberately stays true across the pop: it is what
+      // tells the interceptor the entry being popped is ours to consume.
+      // Re-entry is bounded by `popped`, not by clearing the flag.
       history.back();
       return;
     }
@@ -1202,9 +1208,16 @@ export function initChat(): void {
       } catch { /* history is best effort; the header control still returns */ }
     }
     releaseChildBack ??= registerBackInterceptor(() => {
-      if (!child) return false;
+      const open = child;
+      if (!open) return false;
       closeChildConversation(true);
-      return true;
+      // Consumed only when the entry being popped is the one this layer
+      // pushed. The desktop split pushes nothing — its return control is on
+      // screen — so a Back there is a real document navigation and must still
+      // reach the shell's handler, or the URL would move without the page.
+      // The layer closes either way: the transcript it drilled into belongs
+      // to the conversation being navigated away from.
+      return open.pushedHistory;
     });
     if (drilldownTitle) drilldownTitle.textContent = label;
     drilldown.hidden = false;

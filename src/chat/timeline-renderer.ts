@@ -87,7 +87,15 @@ export class TimelineRenderer {
       // open because a stable item is patched in place, never rebuilt. Every
       // other item preserves its DOM open state across re-renders as before.
       const isRequest = item.type === "permission" || item.type === "question";
-      const open = isRequest ? false : entry ? entry.node.hasAttribute("open") : expanded.has(item.id);
+      // A row the stream opened for its live tail is not a row the reader
+      // opened: taking its DOM state back as "expanded" would keep a finished
+      // tool permanently expanded, since the auto-open rule would then never
+      // get to say no. Its own rule decides again on every render instead.
+      const open = isRequest
+        ? false
+        : entry
+          ? entry.node.hasAttribute("open") && !entry.node.hasAttribute("data-auto-open")
+          : expanded.has(item.id);
       const node = buildNode(renderItem(item, open, active, todo, isQueued, duration, foreign));
       entry?.node.remove();
       this.entries.set(item.id, { node, item, active, variant });
@@ -413,9 +421,11 @@ export function renderItem(item: ConversationItem, open: boolean, activeRequest:
   // summary's non-shrinking slot, so a long pipeline overruns the row instead
   // of truncating; "Shell" names the step and the command ellipsizes beside it.
   if (item.type === "command") {
-    return activityShell(id, item.status, "Shell", item.command, renderActivityOutput(item.output, item.status), streamOpen(open, item.status, item.output), stamp);
+    return activityShell(id, item.status, "Shell", item.command, renderActivityOutput(item.output, item.status), open, autoOpen(item.status, item.output), stamp);
   }
-  return activityShell(id, item.status, reasoningLabel(item), undefined, `<pre>${escapeHtml(item.text)}</pre>`, open, stamp);
+  // Reasoning has no streamed output to auto-open for; it opens only when the
+  // reader says so.
+  return activityShell(id, item.status, reasoningLabel(item), undefined, `<pre>${escapeHtml(item.text)}</pre>`, open, false, stamp);
 }
 
 // How much of a tool's output to show before it becomes a show-more (finished)
@@ -425,9 +435,13 @@ const OUTPUT_LINE_LIMIT = 12;
 
 // A running tool's row opens itself once it has output, so its live tail is
 // visible without the reader hunting for it — the way OpenCode's own client
-// shows a command working. A finished tool follows the normal collapse rules.
-function streamOpen(open: boolean, status: ActivityStatus, output: string | undefined): boolean {
-  return open || (status === "running" && !!output);
+// shows a command working. A finished tool follows the normal collapse rules,
+// which is what `autoOpen` exists to make possible: the row has to be able to
+// say the stream opened it, or reading its DOM state back on the next render
+// would keep it open forever once the tool finished (the same trap the
+// force-open rule for requests documents above).
+function autoOpen(status: ActivityStatus, output: string | undefined): boolean {
+  return status === "running" && !!output;
 }
 
 // One rendering for a tool or command's output. While it runs, the tail is
@@ -458,7 +472,7 @@ function renderTool(item: ToolItem, open: boolean, todo?: TodoSummary): string {
   // list each time reprints it verbatim on every tool call.
   const label = detail.kind === "todo" && todo ? todo.label : detail.label;
   const subject = detail.kind === "todo" ? todo?.task : toolSubject(detail);
-  return activityShell(escapeHtmlAttribute(item.id), item.status, label, subject, body, streamOpen(open, item.status, item.output), timestampAttribute(item.createdAt));
+  return activityShell(escapeHtmlAttribute(item.id), item.status, label, subject, body, open, autoOpen(item.status, item.output), timestampAttribute(item.createdAt));
 }
 
 // One rendering for every diff the chat shows — a tool's edit, a patch, and a
@@ -520,9 +534,13 @@ export function workspaceRelative(reference: string): string {
   return reference;
 }
 
-function activityShell(id: string, status: string, label: string, subject: string | undefined, body: string, open: boolean, stamp: string): string {
+// `auto` marks a row the stream opened rather than the reader. It is carried in
+// the DOM because that is where the next render reads the open state back from,
+// and the two have to stay distinguishable there.
+function activityShell(id: string, status: string, label: string, subject: string | undefined, body: string, open: boolean, auto: boolean, stamp: string): string {
   const subjectHtml = subject ? `<span class="chat-activity-subject">${escapeHtml(workspaceRelative(subject))}</span>` : "";
-  return `<details class="chat-item chat-activity is-${status}" data-chat-item-id="${id}"${stamp}${open ? " open" : ""}><summary><span>${escapeHtml(label)}</span>${subjectHtml}<span class="chat-activity-status">${escapeHtml(status)}</span></summary>${body}</details>`;
+  const marker = !open && auto ? " data-auto-open" : "";
+  return `<details class="chat-item chat-activity is-${status}" data-chat-item-id="${id}"${stamp}${open || auto ? " open" : ""}${marker}><summary><span>${escapeHtml(label)}</span>${subjectHtml}<span class="chat-activity-status">${escapeHtml(status)}</span></summary>${body}</details>`;
 }
 
 // A request's state, as data rather than something CSS has to re-derive: the

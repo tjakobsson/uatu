@@ -96,8 +96,9 @@
      rather than --surface-raised. It has to differ from --surface-raised in
      BOTH schemes so the tracks read as their own tier: in dark, the three
      existing tiers collapse onto #161b22, so re-pointing at an existing token
-     would look identical there. A touch lighter than the page in light, a
-     touch lighter than the raised cards in dark; colour is not the only cue —
+     would look identical there. A shade darker than the page in light, a
+     touch lighter than the raised cards in dark; either way it separates from
+     what it sits against. Colour is not the only cue —
      the tracks stay pinned, bordered, and behind a caret. */
   --surface-track: light-dark(#eef1f4, #1c222b);
   /* Semantic state colors (GitHub light/dark pairs). */
@@ -4745,6 +4746,18 @@ body.is-resizing-chat .chat-resizer {
   font-size: inherit;
 }
 
+/* The same problem one level down, and not solved by the rule above:
+   github-markdown-css pins `code`/`tt`/`samp` at an absolute `12px`, so they
+   ignore the container's scale entirely. In Chat that left code *proportionally
+   larger* against the denser prose than it is in Preview — the opposite of what
+   the scale was for. Restated relative to whatever the surface is set to, at
+   GitHub's own code ratio, so it tracks the scale instead of fighting it. */
+.chat-surface .markdown-body code,
+.chat-surface .markdown-body tt,
+.chat-surface .markdown-body samp {
+  font-size: 0.85em;
+}
+
 .chat-surface:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
@@ -5925,6 +5938,17 @@ html[data-ui-mode="touch"] .chat-drilldown-back {
   padding-inline: 0.6rem 0.75rem;
 }
 
+/* The pushed screen takes a z-index above the chat surface, which the desktop
+   rule's `z-index: 5` cannot clear — so the request pill has to be raised
+   again here. Without it the pill is painted over: still "visible" to a box
+   test, and completely unreachable to a finger. A request arriving on the
+   parent while a subagent's transcript is open would otherwise give no sign
+   at all, since the back gesture is the only way to it and nothing would say
+   to take it. */
+html[data-ui-mode="touch"] .chat-surface[data-chat-drilldown] #chat-requests-jump {
+  z-index: 37;
+}
+
 html[data-ui-mode="touch"] .chat-header {
   min-height: 3.5rem;
   padding: 0.55rem 0.75rem;
@@ -6668,7 +6692,12 @@ html[data-chat-keyboard] #chat-subagents-items {
   color: var(--accent);
   background: transparent;
   font: inherit;
-  font-size: 0.78em;
+  /* Not a further reduction: this sits inside `.chat-task-list`'s own 0.85em,
+     and 0.78em on top of that compounded to roughly 9.5px — well past the
+     density pass's intent and too small to read for a control that destroys
+     state. It matches the track label it sits beside; being the only accent
+     text in the row is what marks it as the action. */
+  font-size: 1em;
 }
 
 .chat-track-dismiss[hidden] {

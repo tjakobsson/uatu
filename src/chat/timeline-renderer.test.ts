@@ -292,6 +292,51 @@ describe("presentation details", () => {
   });
 });
 
+describe("streamed output auto-opens and then lets go", () => {
+  const tool = (status: string, output: string): ConversationItem => ({
+    id: "tool:grep", type: "tool", createdAt: 1, name: "grep", status: status as never, input: "pattern", output,
+  });
+
+  test("a running tool with output opens itself and collapses again once it finishes", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const row = () => host.querySelector('[data-chat-item-id="tool:grep"]') as HTMLElement;
+
+    renderer.render(host, projectionWith([tool("running", "line one")]), new Set());
+    expect(row().hasAttribute("open")).toBe(true);
+
+    // The next render reads the node's own open state back. Without marking
+    // the auto-open as the stream's rather than the reader's, "open" would be
+    // sticky and the finished row would never return to its compact form.
+    renderer.render(host, projectionWith([tool("running", "line one\nline two")]), new Set());
+    expect(row().hasAttribute("open")).toBe(true);
+
+    renderer.render(host, projectionWith([tool("completed", "line one\nline two")], { status: "idle" }), new Set());
+    expect(row().hasAttribute("open")).toBe(false);
+  });
+
+  test("a row the reader opened while it ran stays open when it finishes", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const row = () => host.querySelector('[data-chat-item-id="tool:grep"]') as HTMLElement;
+
+    renderer.render(host, projectionWith([tool("running", "line one")]), new Set());
+    // What the toggle handler in ui.ts does on any reader interaction: the row
+    // stops being the stream's and becomes theirs.
+    row().removeAttribute("data-auto-open");
+
+    renderer.render(host, projectionWith([tool("completed", "line one")], { status: "idle" }), new Set());
+    expect(row().hasAttribute("open")).toBe(true);
+  });
+
+  test("a persisted expansion still opens a finished row with no output", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([tool("completed", "")], { status: "idle" }), new Set(["tool:grep"]));
+    expect((host.querySelector('[data-chat-item-id="tool:grep"]') as HTMLElement).hasAttribute("open")).toBe(true);
+  });
+});
+
 describe("subagent entries", () => {
   const task = (id: string, extra: Partial<Extract<ConversationItem, { type: "tool" }>> = {}): ConversationItem => ({
     id: `tool:${id}`, type: "tool", createdAt: 1, name: "task", status: "completed",

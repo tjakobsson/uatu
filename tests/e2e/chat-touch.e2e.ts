@@ -90,6 +90,45 @@ test("a subagent transcript pushes as a screen and the back gesture pops it", as
   await expect(page.locator("#chat-conversation-select")).toHaveValue(parent);
 });
 
+test("a request the parent is waiting on stays reachable over the pushed screen", async ({ page, request }) => {
+  const parent = await boot(page, request);
+  const child = await control(request, { action: "seed", title: "Child transcript", child: true, items: [
+    { id: "part:child", type: "assistant_message", createdAt: 1, markdown: "child findings" },
+  ] });
+  await control(request, { action: "item", conversationId: parent, item: {
+    id: "tool:agent1", type: "tool", createdAt: 2, name: "task", status: "completed",
+    input: JSON.stringify({ description: "Review renderer", subagent_type: "explore", prompt: "go" }),
+    childConversationId: child.conversation.id,
+  } });
+  await control(request, { action: "item", conversationId: parent, item: {
+    id: "permission:p1", type: "permission", createdAt: 3, requestId: "p1", status: "pending",
+    action: "bash", resources: ["rm -rf build"],
+  } });
+
+  await expect(page.locator("#chat-subagents")).toBeVisible();
+  await page.locator("#chat-subagents summary").click({ position: { x: 8, y: 8 } });
+  await page.getByRole("button", { name: "explore · Review renderer" }).click();
+  await expect(page.locator("#chat-drilldown")).toBeVisible();
+
+  // Asserted by what is painted, not by `toBeVisible`: the pushed screen
+  // covers the whole surface, so a box-and-CSS check calls the pill visible
+  // while it sits underneath and no finger can reach it. That is exactly how
+  // this was missed the first time.
+  const jump = page.locator("#chat-requests-jump");
+  const box = (await jump.boundingBox())!;
+  const painted = await page.evaluate(([x, y]) => document.elementFromPoint(x as number, y as number)?.id ?? "",
+    [box.x + box.width / 2, box.y + box.height / 2]);
+  expect(painted).toBe("chat-requests-jump");
+
+  // And taking it returns to the parent with the card answerable.
+  await jump.click();
+  await expect(page.locator("#chat-drilldown")).toBeHidden();
+  const card = page.locator('[data-chat-item-id="permission:p1"]');
+  await expect(card).toBeVisible();
+  await card.getByRole("button", { name: "Allow once" }).click();
+  await expect(jump).toBeHidden();
+});
+
 test("software-keyboard geometry keeps the composer in the visual viewport", async ({ page, request }) => {
   await page.addInitScript(() => {
     const viewport = new EventTarget() as EventTarget & { height: number; offsetTop: number };

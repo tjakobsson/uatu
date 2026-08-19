@@ -88,6 +88,11 @@ export type NormalizedProviderEvent = {
   // one thing that needs it — attributing a subagent on its parent's row —
   // reads it from the child's event stream, not from the child's timeline.
   assistantModel?: string;
+  // The tokens a message reported, with the message's own id. The item the
+  // usage decorates is a *part*, and a message can produce several — keyed by
+  // part id, one message's cumulative tokens would be banked once per part and
+  // counted that many times over. Aggregation keys on this id instead.
+  assistantUsage?: { messageId: string; usage: TokenUsage };
 };
 
 // Event types recognized as deliberately carrying nothing for the timeline.
@@ -195,7 +200,14 @@ function conversationIdOf(value: unknown): string | undefined {
   }
 }
 
-function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): { conversationId?: string; updates: NormalizedProviderUpdate[]; assistantModel?: string } | undefined {
+type KnownEvent = {
+  conversationId?: string;
+  updates: NormalizedProviderUpdate[];
+  assistantModel?: string;
+  assistantUsage?: { messageId: string; usage: TokenUsage };
+};
+
+function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): KnownEvent | undefined {
   const event = record(value);
   const data = record(event.data ?? event.properties);
   const conversationId = optionalString(data.sessionID) ?? optionalString(data.sessionId);
@@ -459,16 +471,22 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): { co
       // own. Before any part exists it waits in `pendingUsage`; a `message.updated`
       // is not evidence that a bubble should appear.
       const usage = role === "assistant" ? tokensToUsage(info.tokens) : undefined;
+      let reported: { messageId: string; usage: TokenUsage } | undefined;
       if (usage && messageId && memory) {
         const partId = memory.lastAssistantPart.get(messageId);
-        if (partId) updates.push(usageUpsert(partId, timestamp(record(info.time).created, createdAt), usage));
-        else remember(memory.pendingUsage, messageId, usage);
+        if (partId) {
+          updates.push(usageUpsert(partId, timestamp(record(info.time).created, createdAt), usage));
+          reported = { messageId, usage };
+        } else {
+          remember(memory.pendingUsage, messageId, usage);
+        }
       }
       const assistantModel = role === "assistant" ? optionalString(info.modelID ?? info.modelId) : undefined;
       return {
         conversationId: conversationId ?? optionalString(info.sessionID),
         updates,
         ...(assistantModel === undefined ? {} : { assistantModel }),
+        ...(reported === undefined ? {} : { assistantUsage: reported }),
       };
     }
     case "message.part.updated": {
@@ -485,6 +503,7 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): { co
       const partCreatedAt = timestamp(record(data.message).time, createdAt);
       const updates = normalizePart(part, partCreatedAt);
       const partId = optionalString(part.id);
+      let flushed: { messageId: string; usage: TokenUsage } | undefined;
       if (part.type === "text" && messageId && partId && memory) {
         remember(memory.lastAssistantPart, messageId, `part:${partId}`);
         // Usage that beat the first part to the stream lands here, on the part
@@ -493,9 +512,14 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): { co
         if (pending) {
           memory.pendingUsage.delete(messageId);
           updates.push(usageUpsert(`part:${partId}`, partCreatedAt, pending));
+          flushed = { messageId, usage: pending };
         }
       }
-      return { conversationId: conversationId ?? optionalString(part.sessionID), updates };
+      return {
+        conversationId: conversationId ?? optionalString(part.sessionID),
+        updates,
+        ...(flushed === undefined ? {} : { assistantUsage: flushed }),
+      };
     }
     case "message.part.removed": {
       const partId = optionalString(data.partID);
