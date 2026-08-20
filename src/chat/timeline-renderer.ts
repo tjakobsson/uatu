@@ -459,7 +459,7 @@ function assistantMessageComplete(items: readonly ConversationItem[], index: num
   const item = items[index];
   if (!item || item.type !== "assistant_message") return false;
   if (item.completedAt !== undefined) return true;
-  if (items.slice(index + 1).some(candidate => candidate.type === "user_message" || candidate.type === "turn_status")) return true;
+  if (items.slice(index + 1).some(candidate => candidate.type === "turn_status")) return true;
   return status !== "sending" && status !== "running";
 }
 

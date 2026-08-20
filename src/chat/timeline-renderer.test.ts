@@ -103,6 +103,23 @@ describe("TimelineRenderer", () => {
     expect(article.querySelector(".chat-assistant-content")?.textContent).toContain("Hello again");
   });
 
+  test("does not mark a streaming assistant complete when a steer follows it", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const assistant: ConversationItem = { id: "part:steered", type: "assistant_message", createdAt: 1, markdown: "Working" };
+    const steer: ConversationItem = { id: "message:steer", type: "user_message", createdAt: 2, text: "Use the smaller approach" };
+
+    renderer.render(host, projectionWith([assistant, steer]), new Set());
+    const article = host.querySelector<HTMLElement>('[data-chat-item-id="part:steered"]')!;
+    expect(article.dataset.complete).toBe("false");
+    expect(article.querySelector("[data-chat-copy='answer']")).toBeNull();
+
+    renderer.render(host, projectionWith([{ ...assistant, markdown: "Working after steer" }, steer]), new Set());
+    expect(host.querySelector('[data-chat-item-id="part:steered"]')).toBe(article);
+    expect(article.querySelector(".chat-assistant-content")?.textContent).toContain("Working after steer");
+    expect(article.querySelector("[data-chat-copy='answer']")).toBeNull();
+  });
+
   test("renders custom answers as a synthetic peer choice with a separate hidden input", () => {
     const renderer = new TimelineRenderer();
     const host = target();
