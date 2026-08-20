@@ -238,7 +238,7 @@ A history snapshot SHALL identify a stream cursor; reconnecting from a retained 
 - **THEN** the timeline reflects the revert rather than continuing to present the reverted work as though it still applies
 
 ### Requirement: Chat presents turns as readable conversation with inspectable activity
-The web Chat surface SHALL render user prompts and streamed assistant Markdown as the primary conversation, with safe code rendering consistent with UatuCode's existing rendering posture. Reasoning, tool calls, command execution, file changes, and tool results SHALL be represented as subordinate, inspectable activity with running, completed, failed, and cancelled states rather than flattened into assistant prose. Untrusted Markdown, tool output, filenames, and errors MUST NOT create active markup or script execution.
+The web Chat surface SHALL render user prompts and streamed assistant Markdown as the primary conversation, with safe code rendering consistent with UatuCode's existing rendering posture. Reasoning, tool calls, command execution, file changes, and tool results SHALL be represented as subordinate, inspectable activity with running, completed, failed, and cancelled states rather than flattened into assistant prose. While a tool runs, its output SHALL be shown as it streams rather than only on completion, so a long-running tool shows progress. A finished tool's output SHALL be bounded — presented as a summary and a bounded preview with a way to see the rest — rather than shown whole or hidden whole. Untrusted Markdown, tool output, filenames, and errors MUST NOT create active markup or script execution.
 
 #### Scenario: Assistant answer remains visually primary
 - **WHEN** a turn contains assistant text interleaved with multiple tool calls
@@ -249,12 +249,23 @@ The web Chat surface SHALL render user prompts and streamed assistant Markdown a
 - **WHEN** a tool moves from running to completed or failed
 - **THEN** its existing activity entry updates state instead of adding a duplicate entry
 
+#### Scenario: A running tool shows its output as it streams
+- **WHEN** a tool is running and the agent streams its output
+- **THEN** the surface shows that output as it arrives
+- **AND** it updates the tool's existing entry in place
+
+#### Scenario: A finished tool's output is bounded with a way to see the rest
+- **WHEN** a completed tool produced more output than the bounded preview shows
+- **THEN** the entry shows a summary and a bounded preview
+- **AND** offers a way to see the full output
+- **AND** does not render the whole output by default
+
 #### Scenario: Hostile content remains inert
 - **WHEN** assistant Markdown or tool output contains script-capable markup or a JavaScript URL
 - **THEN** the rendered conversation does not execute it or expose an active unsafe link
 
 ### Requirement: Users can resolve agent interaction requests in context
-An unresolved OpenCode permission request SHALL appear in the conversation that raised it with the approval and rejection choices OpenCode supports for it: approving the single occurrence, approving persistently, and rejecting. A structured OpenCode question SHALL render its prompt, options, multi-selection behavior, and free-form response when supported. A resolved request SHALL become non-interactive and record its outcome. Submitting a response more than once MUST NOT produce multiple provider replies.
+An unresolved OpenCode permission request SHALL appear in the conversation that raised it with the approval and rejection choices OpenCode supports for it: approving the single occurrence, approving persistently, and rejecting. Where a permission would change a file, the request SHALL show what it would change — the pending diff — where the choice is made, so the user sees the change before allowing it. A permission with nothing to show a diff for is unaffected. A structured OpenCode question SHALL render its prompt, options, multi-selection behavior, and free-form response when supported. A resolved request SHALL become non-interactive and record its outcome. A resolved request SHALL also recede: its outcome stays legible where the request was raised, but it MUST NOT keep the footprint it held while it needed an answer, and what it named SHALL stay reachable from the receded form. Submitting a response more than once MUST NOT produce multiple provider replies.
 
 A request raised by a subagent SHALL additionally appear in the conversation that launched that subagent, and SHALL be answerable there. The subagent's own conversation remains the single owner of the request: an answer given from the launching conversation SHALL be directed to the owning conversation, so exactly one response reaches OpenCode however many places the request was shown. Resolving it SHALL resolve it everywhere it appears.
 
@@ -272,6 +283,21 @@ A pending request SHALL remain discoverable and answerable even when the server 
 - **WHEN** OpenCode requests permission for a command and the user chooses one-time approval
 - **THEN** the response is sent once to the matching pending request
 - **AND** the card records that the request was approved for that occurrence
+
+#### Scenario: An edit permission shows its diff before approval
+- **WHEN** a pending permission would change a file
+- **THEN** the card shows the change it would apply
+- **AND** the diff is shown where the approve and reject choices are
+
+#### Scenario: A non-edit permission shows no diff
+- **WHEN** a pending permission has no file change to show
+- **THEN** the card presents its choices without a diff
+
+#### Scenario: An answered request recedes
+- **WHEN** a permission or question has been answered
+- **THEN** what was asked and what was decided remain legible
+- **AND** the request occupies less of the transcript than it did while it needed an answer
+- **AND** the resources it named remain reachable from it
 
 #### Scenario: A subagent's request reaches the conversation that launched it
 - **WHEN** a subagent raises a permission request while its parent conversation is open
@@ -487,3 +513,116 @@ MUST NOT be exposed as navigable workspace links.
 #### Scenario: Outside path is not navigable
 - **WHEN** provider output references an absolute path outside every watched root or contains traversal outside the workspace
 - **THEN** Chat renders it as inert text rather than a UatuCode navigation action
+
+### Requirement: Chat reads at its own density and tiers its surfaces
+The Chat surface SHALL set a reading density of its own rather than inheriting the document preview's prose scale, so that a conversation read in a narrow side panel shows several turns at once. That density MUST apply to the whole surface — transcript, rendered assistant Markdown, requests, pinned tracks, and composer — so that no region is left at a scale that disagrees with the rest. The document preview's own reading scale SHALL be unaffected.
+
+Chat SHALL present its pinned progress tracks as a tier distinct from the transcript entries above them, so a reader can tell at a glance which part of the surface reports the present state. That distinction MUST NOT rely on colour alone, and MUST hold under both the light and the dark colour scheme.
+
+#### Scenario: The conversation is denser than the preview
+- **WHEN** the same viewport shows the rendered document and the Chat transcript
+- **THEN** Chat renders its conversation at a smaller reading scale than the document preview
+- **AND** the document preview's own scale is unchanged
+
+#### Scenario: Every chat region shares the scale
+- **WHEN** a conversation shows assistant Markdown, an activity row, a request card, a pinned track, and the composer
+- **THEN** all of them read at Chat's scale
+- **AND** no region reads at the document preview's scale
+
+#### Scenario: Live tracks are distinguishable from the transcript
+- **WHEN** a conversation is running with an active task list and running subagents
+- **THEN** the pinned tracks are distinguishable from the transcript entries above them
+- **AND** the distinction is carried by something other than colour alone
+
+#### Scenario: The tier survives both colour schemes
+- **WHEN** the surface is rendered under the light scheme and under the dark scheme
+- **THEN** the pinned tracks remain distinguishable from the transcript in both
+
+### Requirement: Chat lets the user choose how hard the model reasons
+Where the agent declares the reasoning-variant capability, Chat SHALL let the user choose how hard the selected model reasons, from the named ways of thinking that model advertises — such as thinking harder or faster. The choice SHALL be scoped to how a prompt runs, sent with the prompt rather than changing the model, and SHALL be remembered per conversation as the model choice is. A model that advertises no such ways offers no choice, and where the capability is undeclared the control is absent rather than shown empty.
+
+#### Scenario: A model's reasoning variants are offered and sent
+- **WHEN** the selected model advertises reasoning variants and the user chooses one
+- **THEN** the choice is presented as how the prompt runs, not as a different model
+- **AND** the next prompt is sent with that variant
+- **AND** the choice is remembered for the conversation
+
+#### Scenario: A model without variants offers no reasoning control
+- **WHEN** the selected model advertises no reasoning variants
+- **THEN** no reasoning control is shown for it
+
+#### Scenario: An unknown variant is refused
+- **WHEN** a prompt is sent with a variant the selected model does not advertise
+- **THEN** the server refuses it rather than forwarding it
+
+#### Scenario: The control is absent when the capability is undeclared
+- **WHEN** the agent does not declare the reasoning-variant capability
+- **THEN** no reasoning control appears
+- **AND** the capabilities the agent does declare are unaffected
+
+### Requirement: A subagent's transcript opens as a drill-down from its parent
+A subagent's transcript SHALL be reached from its parent conversation — the subagent row that represents it — and SHALL NOT be presented as an entry in the conversation picker, which lists the conversations a user can start and resume. Opening a subagent's transcript SHALL NOT change which conversation the picker shows as selected: the parent remains the selected conversation.
+
+Opening a subagent's transcript SHALL present it as a layer over the parent with a first-class way back to the parent. Where the surface navigates as a stack — a phone — this SHALL be a push with the platform's back gesture returning to the parent. Where the surface shows the parent alongside — the desktop split — the child SHALL open as an inline drill-down that keeps the parent in view, with a return affordance.
+
+While a subagent's transcript is open, the parent SHALL remain reachable and its pending requests answerable, so a request the parent or another subagent is waiting on is not trapped behind the open child.
+
+Returning from a subagent's transcript SHALL restore the parent as it was, without the child persisting as a pseudo-conversation and without the return depending on re-selecting the parent from a list.
+
+#### Scenario: A subagent transcript is not a picker entry
+- **WHEN** a conversation has run subagents
+- **THEN** the conversation picker lists only conversations the user can start and resume
+- **AND** no subagent transcript appears in it
+
+#### Scenario: Opening a subagent drills down without changing the selected conversation
+- **WHEN** the user opens a subagent's transcript from its row
+- **THEN** the transcript opens as a layer over the parent
+- **AND** the picker still shows the parent as the selected conversation
+
+#### Scenario: Returning to the parent is first-class
+- **WHEN** a subagent's transcript is open
+- **THEN** there is a way back to the parent that does not require re-selecting it from a list
+- **AND** returning restores the parent as it was
+
+#### Scenario: The parent stays answerable behind an open child
+- **WHEN** a subagent's transcript is open and the parent has a pending request
+- **THEN** the parent's request remains reachable and answerable
+
+#### Scenario: Touch navigates as a stack
+- **WHEN** the surface navigates as a stack and the user opens a subagent's transcript
+- **THEN** it is pushed as a screen
+- **AND** the platform back gesture returns to the parent
+
+### Requirement: Chat reports context usage and subagent cost
+Where the agent declares the context capability, Chat SHALL report how full the conversation's context window is, against the selected model's limit, and SHALL attribute each subagent with the model it ran and the tokens it consumed. Each SHALL be gated on that declared capability: undeclared, the readout or figure is absent rather than empty, and its absence SHALL NOT degrade the rest.
+
+The context report SHALL be legible without the user opening anything, and MAY expand to the breakdown the agent reports — input, cache, and output. It reports the live window fill, not lifetime spend, and SHALL be populated when an existing conversation is opened, not only after a new turn is taken.
+
+A subagent's attribution SHALL reflect the subagent's own session — a subagent may run a different model from its parent — and SHALL state the tokens that subagent consumed, aggregated from its child session onto the launching conversation. The model MAY be shown before any usage is known. When the agent has not reported usage for a subagent, the row SHALL stay readable and SHALL NOT assert a figure it does not have.
+
+#### Scenario: The context indicator reads without being opened
+- **WHEN** a conversation has exchanged turns and the agent declares context reporting
+- **THEN** the surface shows how full the context window is against the model's limit
+- **AND** the fill is legible without expanding anything
+
+#### Scenario: The indicator is populated on opening an existing conversation
+- **WHEN** the user opens a conversation that already has assistant turns
+- **THEN** the context fill is shown from that history, before any new turn
+
+#### Scenario: The context breakdown expands
+- **WHEN** the user opens the context indicator
+- **THEN** it shows the input, cache, and output the agent reported
+
+#### Scenario: A subagent row names its model and tokens
+- **WHEN** a subagent has run and the agent reports its model and token counts
+- **THEN** its row states which model it ran and how many tokens it consumed
+
+#### Scenario: A subagent without reported usage stays readable
+- **WHEN** a subagent has not yet reported usage, or the agent does not report it
+- **THEN** the row still names the subagent and its status
+- **AND** no token figure is asserted for it
+
+#### Scenario: An undeclared context capability leaves nothing behind
+- **WHEN** the agent does not declare the context capability
+- **THEN** the context indicator and the subagent token figure are absent
+- **AND** the capabilities the agent does declare are unaffected
