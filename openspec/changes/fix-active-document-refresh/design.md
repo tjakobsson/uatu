@@ -31,7 +31,7 @@ Continue passing the representative `changedId` to Follow selection and search-r
 
 ### D3: Guard rendered/source loads with a monotonic client generation
 
-Assign each ordinary document load a generation and capture the requested document and view. After asynchronous fetch and decoding, update caches and the DOM only if the load is still the newest generation and still matches the active selection and view. A newer in-place refresh of the same document must supersede an older one as reliably as a selection change does.
+Assign each ordinary document load or cached payload application a generation and capture the requested document, view, and layout. After asynchronous fetch and decoding, update caches and the DOM only if the load is still the newest generation and still matches the active selection, view, and layout. A newer in-place refresh of the same document must supersede an older one as reliably as a selection, view, or layout change does.
 
 A generation guard is preferred over relying only on request cancellation because cancellation can race with an already completed response and is not itself proof that a result is still relevant. Existing Diff request guards remain authoritative for Diff mode.
 

@@ -443,8 +443,21 @@ export function defaultDocumentId(roots: RootGroup[]): string | null {
     })[0]?.id ?? null;
 }
 
-export function shouldRefreshPreview(selectedId: string | null, changedId: string | null): boolean {
-  return Boolean(selectedId && changedId && selectedId === changedId);
+export function shouldRefreshPreview(
+  selectedId: string | null,
+  changedId: string | null,
+  previousRoots: RootGroup[],
+  nextRoots: RootGroup[],
+): boolean {
+  if (!selectedId) return false;
+  if (selectedId === changedId) return true;
+
+  const previous = findDocument(previousRoots, selectedId);
+  const next = findDocument(nextRoots, selectedId);
+  return Boolean(previous && next && (
+    previous.mtimeMs !== next.mtimeMs
+    || previous.kind !== next.kind
+  ));
 }
 
 export function nextSelectedDocumentId(
