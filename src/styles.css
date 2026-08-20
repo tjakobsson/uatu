@@ -4831,6 +4831,10 @@ body.is-resizing-chat .chat-resizer {
   row-gap: 0.4rem;
 }
 
+.chat-composer-controls {
+  display: contents;
+}
+
 #chat-composer-status {
   min-width: 0;
 }
@@ -6160,9 +6164,19 @@ html[data-ui-mode="touch"] .chat-composer textarea {
 }
 
 html[data-ui-mode="touch"] .chat-composer-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
   min-height: 2rem;
-  justify-content: space-between;
+}
+
+html[data-ui-mode="touch"] .chat-composer-controls {
+  display: flex;
+  align-items: center;
+  align-content: end;
   flex-wrap: wrap;
+  gap: 0.4rem 0.5rem;
+  min-width: 0;
 }
 
 html[data-ui-mode="touch"] #chat-send {
@@ -6180,7 +6194,8 @@ html[data-ui-mode="touch"] #chat-send {
 html[data-ui-mode="touch"] .chat-model-select {
   flex: 1 1 8rem;
   min-width: 0;
-  max-width: 100%;
+  max-width: none;
+  margin-right: 0;
 }
 
 html[data-ui-mode="touch"] #chat-composer-status {
@@ -6214,11 +6229,6 @@ html[data-ui-mode="touch"] #chat-composer-status {
   clip: rect(0 0 0 0);
   clip-path: inset(50%);
   white-space: nowrap;
-}
-
-html[data-ui-mode="touch"] .chat-model-select {
-  max-width: 62%;
-  margin-right: auto;
 }
 
 @media (max-width: 420px) {

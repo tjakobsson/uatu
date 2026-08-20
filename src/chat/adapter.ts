@@ -228,7 +228,12 @@ export class OpenCodeChatAdapter {
     const session = await this.provider.createSession(this.id());
     await this.requireSession(session.id);
     const projection = this.projection(session.id);
-    const configuration = await this.configuration(session.id);
+    // Provider records can expose agent defaults before the conversation has
+    // accepted a prompt. Those are not conversation-owned selections yet and
+    // may not even be present in the offered inventory, so a fresh conversation
+    // starts unknown rather than claiming an unavailable current variant.
+    const configuration: ConversationConfiguration = {};
+    this.configurations.set(session.id, configuration);
     return {
       conversation: this.summary(session),
       configuration,

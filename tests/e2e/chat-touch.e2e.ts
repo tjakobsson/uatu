@@ -53,6 +53,33 @@ test("four tabs preserve chat state and keyboard navigation", async ({ page, req
   await expect(page.locator("#touch-tab-files")).toBeFocused();
 });
 
+test("composer controls wrap without placing Send on its own row", async ({ page, request }) => {
+  const id = await boot(page, request);
+  await page.locator("#chat-model-select").selectOption({ label: "Anthropic: Claude Sonnet" });
+  await page.locator("#chat-mode-select").selectOption("build");
+  await page.locator("#chat-variant-select").selectOption("high");
+  await control(request, { action: "status", conversationId: id, status: "running" });
+  await expect(page.locator("#chat-cancel")).toBeVisible();
+  await page.locator("#chat-input").focus();
+  await expect(page.locator("html")).toHaveAttribute("data-chat-editing", "");
+
+  const geometry = await page.locator(".chat-composer-actions").evaluate(actions => {
+    const send = actions.querySelector<HTMLElement>("#chat-send")!.getBoundingClientRect();
+    const controls = actions.querySelector<HTMLElement>(".chat-composer-controls")!.getBoundingClientRect();
+    const bounds = actions.getBoundingClientRect();
+    return {
+      sendTop: send.top,
+      sendBottom: send.bottom,
+      controlsBottom: controls.bottom,
+      sendRight: send.right,
+      boundsRight: bounds.right,
+    };
+  });
+  expect(Math.abs(geometry.sendBottom - geometry.controlsBottom)).toBeLessThanOrEqual(1);
+  expect(geometry.sendTop).toBeLessThan(geometry.controlsBottom);
+  expect(geometry.sendRight).toBeLessThanOrEqual(geometry.boundsRight + 1);
+});
+
 test("a subagent transcript pushes as a screen and the back gesture pops it", async ({ page, request }) => {
   // `boot` resets the service, so the child is seeded after it and the row
   // that points at it is published once both conversations exist.
@@ -178,7 +205,9 @@ test("history prepend and activity expansion preserve semantic position", async 
   await timeline.evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new Event("scroll")); });
   const anchor = page.locator(`[data-chat-item-id="${latest[0]!.id}"]`);
   const before = await anchor.evaluate(element => element.getBoundingClientRect().top);
+  const olderResponse = page.waitForResponse(response => response.url().includes("cursor=older"));
   await page.locator("#chat-load-older").click();
+  expect((await olderResponse).ok()).toBe(true);
   await expect(page.locator("#chat-items")).toContainText("older message 0");
   expect(await anchor.evaluate(element => element.getBoundingClientRect().top)).toBeCloseTo(before, 0);
 

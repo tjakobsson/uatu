@@ -107,6 +107,24 @@ test.describe("conversation configuration and rename", () => {
     expect(stored).not.toHaveProperty("variants");
   });
 
+  test("a new conversation starts agent-controlled without inheriting reasoning", async ({ page, request }) => {
+    await request.post("/__e2e/reset");
+    await control(request, {
+      action: "seed",
+      title: "Configured conversation",
+      items: [],
+      configuration: { model: { providerId: "anthropic", modelId: "claude-sonnet" }, mode: "build", variant: "xhigh" },
+    });
+    await boot(page, await token(request));
+    await expect(page.locator("#chat-variant-select")).toHaveValue("xhigh");
+
+    await page.getByRole("button", { name: "New conversation", exact: true }).click();
+    await expect(page.locator("#chat-model-select")).toHaveValue("");
+    await expect(page.locator("#chat-model-select option:checked")).toHaveText("Model: agent default");
+    await expect(page.locator("#chat-variant-select")).toBeHidden();
+    await expect(page.locator("#chat-variant-select option").filter({ hasText: "current, unavailable" })).toHaveCount(0);
+  });
+
   test("keeps staged choices during a remote update and recovers configuration after restart", async ({ page, request }) => {
     await request.post("/__e2e/reset");
     const seeded = await control(request, {
