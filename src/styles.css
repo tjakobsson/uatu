@@ -5727,7 +5727,7 @@ body.is-resizing-chat .chat-resizer {
   inset: 2px;
   border-radius: 50%;
   color: var(--text-subtle);
-  background: conic-gradient(from -90deg, currentColor 0 var(--context-fill, 0%), transparent var(--context-fill, 0%) 100%);
+  background: conic-gradient(from var(--context-start, 270deg), currentColor 0 var(--context-fill, 0%), transparent var(--context-fill, 0%) 100%);
   opacity: 0.42;
 }
 

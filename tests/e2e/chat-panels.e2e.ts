@@ -344,9 +344,11 @@ test.describe("chat panels and navigation", () => {
     await expect(meter).toHaveCSS("border-radius", "50%");
     const fillPresentation = await meter.locator(".chat-context-meter-fill").evaluate(element => ({
       amount: (element as HTMLElement).style.getPropertyValue("--context-fill"),
+      start: (element as HTMLElement).style.getPropertyValue("--context-start"),
       background: getComputedStyle(element).backgroundImage,
     }));
     expect(fillPresentation.amount).toBe("26%");
+    expect(fillPresentation.start).toBe("223.2deg");
     expect(fillPresentation.background).toContain("conic-gradient");
 
     await indicator.locator("summary").click();

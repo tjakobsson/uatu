@@ -572,7 +572,12 @@ export function initChat(): void {
     const used = contextTokens(usage);
     const limit = models.find(model => modelValue(model.selection) === reportingModel)?.contextLimit;
     const fraction = limit && limit > 0 ? Math.min(1, used / limit) : undefined;
-    contextUsageFill.style.setProperty("--context-fill", `${Math.round((fraction ?? 0) * 100)}%`);
+    const fillPercent = Math.round((fraction ?? 0) * 100);
+    contextUsageFill.style.setProperty("--context-fill", `${fillPercent}%`);
+    // Keep the unfilled wedge centred on the right, so partial usage reads as
+    // a right-facing Pac-Man rather than a clock with an arbitrary start edge.
+    const startAngle = Math.round((90 + (100 - fillPercent) * 1.8) * 10) / 10;
+    contextUsageFill.style.setProperty("--context-start", `${startAngle}deg`);
     // The figure states the fill in words as well as in width, so the tier
     // colouring below is emphasis on something already legible rather than
     // the only signal.
