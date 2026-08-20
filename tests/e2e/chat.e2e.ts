@@ -27,7 +27,7 @@ test.describe("desktop OpenCode chat", () => {
     await expect(page.locator("#chat-conversation-select")).not.toHaveValue("");
     const firstId = await page.locator("#chat-conversation-select").inputValue();
     const modelSelect = page.locator("#chat-model-select");
-    await expect(modelSelect.locator("option")).toHaveText(["Model: agent default", "Anthropic: Claude Sonnet", "OpenAI: GPT-5"]);
+    await expect(modelSelect.locator("option")).toHaveText(["Model: current unknown", "Anthropic: Claude Sonnet", "OpenAI: GPT-5"]);
     await modelSelect.selectOption({ label: "OpenAI: GPT-5" });
 
     const input = page.locator("#chat-input");
@@ -85,7 +85,7 @@ test.describe("desktop OpenCode chat", () => {
   test("switches the mode for a prompt and defaults to the agent's own", async ({ page }) => {
     await page.getByRole("button", { name: "New conversation" }).click();
     const modeSelect = page.locator("#chat-mode-select");
-    await expect(modeSelect.locator("option")).toHaveText(["Mode: agent default", "Mode: Build", "Mode: Plan"]);
+    await expect(modeSelect.locator("option")).toHaveText(["Mode: current unknown", "Mode: Build", "Mode: Plan"]);
     await expect(modeSelect).toHaveValue("");
 
     const input = page.locator("#chat-input");
@@ -126,7 +126,7 @@ test.describe("desktop OpenCode chat", () => {
     await expect(modelSelect).toHaveValue("");
     await modelSelect.selectOption({ label: "Anthropic: Claude Sonnet" });
     await expect(variantSelect).toBeVisible();
-    await expect(variantSelect.locator("option")).toHaveText(["Reasoning: agent default", "Reasoning: high", "Reasoning: xhigh"]);
+    await expect(variantSelect.locator("option")).toHaveText(["Reasoning: current unknown", "Reasoning: high", "Reasoning: xhigh"]);
     await modelSelect.selectOption({ label: "OpenAI: GPT-5" });
     await expect(variantSelect).toBeHidden();
     await modelSelect.selectOption({ label: "Anthropic: Claude Sonnet" });

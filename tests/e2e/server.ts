@@ -185,6 +185,9 @@ async function handleE2EChat(request: Request): Promise<Response> {
     case "configuration":
       if (body.conversationId && body.configuration) return Response.json(chatService.publishConfiguration(body.conversationId, body.configuration));
       break;
+    case "nextConversationConfiguration":
+      chatService.configureNextConversation(body.configuration ?? {});
+      return Response.json({ ok: true });
     case "disconnect":
       chatService.disconnect();
       return Response.json({ ok: true });

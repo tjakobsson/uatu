@@ -279,7 +279,8 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
       const model = record(data.model);
       const providerId = string(model.providerID ?? model.providerId, "model provider id");
       const modelId = string(model.id ?? model.modelID ?? model.modelId, "model id");
-      const variant = optionalString(model.variant);
+      const reportedVariant = optionalString(model.variant);
+      const variant = reportedVariant === "default" ? undefined : reportedVariant;
       return {
         conversationId,
         updates: [],
@@ -624,7 +625,8 @@ function configurationFromRecord(value: RecordValue): ConversationConfiguration 
   const modelId = optionalString(value.modelID ?? value.modelId) ?? optionalString(modelRecord.id ?? modelRecord.modelID ?? modelRecord.modelId);
   const model = providerId && modelId ? { providerId, modelId } : undefined;
   const mode = optionalString(value.agent ?? value.mode);
-  const variant = model ? optionalString(value.variant ?? modelRecord.variant) : undefined;
+  const reportedVariant = model ? optionalString(value.variant ?? modelRecord.variant) : undefined;
+  const variant = reportedVariant === "default" ? undefined : reportedVariant;
   if (!model && !mode) return undefined;
   return { ...(model ? { model } : {}), ...(mode ? { mode } : {}), ...(variant ? { variant } : {}) };
 }

@@ -870,7 +870,7 @@ export function initChat(): void {
     }
     const effective = projection?.configuration?.model;
     const staged = projection && stagedConfigurations.get(projection.conversationId)?.model;
-    const defaultOption = new Option(effective ? staged ? "Use current model" : "Model: current selection" : "Model: agent default", "");
+    const defaultOption = new Option(effective ? staged ? "Use current model" : "Model: current selection" : "Model: current unknown", "");
     defaultOption.disabled = Boolean(effective && !staged);
     modelSelect.append(defaultOption);
     for (const model of models) {
@@ -915,7 +915,7 @@ export function initChat(): void {
     const stagedVariant = projection && stagedConfigurations.get(projection.conversationId)?.variant;
     const effectiveVariantApplies = Boolean(effectiveVariant && !stagedConfigurations.get(projection?.conversationId ?? "")?.model);
     const defaultOption = new Option(
-      effectiveVariantApplies ? stagedVariant ? "Use current reasoning" : "Reasoning: current selection" : "Reasoning: agent default",
+      effectiveVariantApplies ? stagedVariant ? "Use current reasoning" : "Reasoning: current selection" : "Reasoning: current unknown",
       "",
     );
     defaultOption.disabled = effectiveVariantApplies && !stagedVariant;
@@ -942,7 +942,7 @@ export function initChat(): void {
     if (modes.length === 0) return;
     const effective = projection?.configuration?.mode;
     const staged = projection && stagedConfigurations.get(projection.conversationId)?.mode;
-    const defaultOption = new Option(effective ? staged ? "Use current mode" : "Mode: current selection" : "Mode: agent default", "");
+    const defaultOption = new Option(effective ? staged ? "Use current mode" : "Mode: current selection" : "Mode: current unknown", "");
     defaultOption.disabled = Boolean(effective && !staged);
     modeSelect.append(defaultOption);
     for (const mode of modes) {

@@ -82,7 +82,7 @@ test.describe("conversation configuration and rename", () => {
     await page.reload();
     await openChatPanel(page);
     await expect(page.locator("#chat-model-select")).toHaveValue("");
-    await expect(page.locator("#chat-model-select option:checked")).toHaveText("Model: agent default");
+    await expect(page.locator("#chat-model-select option:checked")).toHaveText("Model: current unknown");
     await expect(page.locator("#chat-mode-select")).toHaveValue("");
 
     await page.locator("#chat-input").fill("do not invent defaults");
@@ -107,7 +107,7 @@ test.describe("conversation configuration and rename", () => {
     expect(stored).not.toHaveProperty("variants");
   });
 
-  test("a new conversation starts agent-controlled without inheriting reasoning", async ({ page, request }) => {
+  test("a new conversation shows OpenCode's resolved model without a default reasoning sentinel", async ({ page, request }) => {
     await request.post("/__e2e/reset");
     await control(request, {
       action: "seed",
@@ -118,10 +118,14 @@ test.describe("conversation configuration and rename", () => {
     await boot(page, await token(request));
     await expect(page.locator("#chat-variant-select")).toHaveValue("xhigh");
 
+    await control(request, {
+      action: "nextConversationConfiguration",
+      configuration: { model: { providerId: "anthropic", modelId: "claude-sonnet" }, mode: "build" },
+    });
     await page.getByRole("button", { name: "New conversation", exact: true }).click();
-    await expect(page.locator("#chat-model-select")).toHaveValue("");
-    await expect(page.locator("#chat-model-select option:checked")).toHaveText("Model: agent default");
-    await expect(page.locator("#chat-variant-select")).toBeHidden();
+    await expect(page.locator("#chat-model-select option:checked")).toHaveText("Anthropic: Claude Sonnet");
+    await expect(page.locator("#chat-mode-select")).toHaveValue("build");
+    await expect(page.locator("#chat-variant-select option:checked")).toHaveText("Reasoning: current unknown");
     await expect(page.locator("#chat-variant-select option").filter({ hasText: "current, unavailable" })).toHaveCount(0);
   });
 

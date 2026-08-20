@@ -587,7 +587,10 @@ function configurationRecord(value: unknown): ConversationConfiguration {
   const modelId = stringValue(record.modelID ?? record.modelId) ?? stringValue(modelRecord.id ?? modelRecord.modelID ?? modelRecord.modelId);
   const model = providerId && modelId ? { providerId, modelId } : undefined;
   const mode = stringValue(record.agent ?? record.mode);
-  const variant = model ? stringValue(record.variant ?? modelRecord.variant) : undefined;
+  const rawVariant = model ? stringValue(record.variant ?? modelRecord.variant) : undefined;
+  // OpenCode uses "default" to mean no explicit reasoning override. It is not
+  // a model variant and the TUI does not present it as one.
+  const variant = rawVariant === "default" ? undefined : rawVariant;
   return { ...(model ? { model } : {}), ...(mode ? { mode } : {}), ...(variant ? { variant } : {}) };
 }
 

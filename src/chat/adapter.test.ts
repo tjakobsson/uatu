@@ -245,18 +245,18 @@ describe("OpenCode conversation inventory and history", () => {
     let configurationReads = 0;
     provider.getConversationConfiguration = async () => {
       configurationReads += 1;
-      return { model: { providerId: "provider-default", modelId: "model" }, variant: "unlisted" };
+      return { model: { providerId: "provider-default", modelId: "model" } };
     };
     const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "created" });
     const created = await adapter.createConversation();
     expect(created).toEqual(expect.objectContaining({
       conversation: expect.objectContaining({ id: "created" }),
-      configuration: {},
+      configuration: { model: { providerId: "provider-default", modelId: "model" } },
       generation: "g",
       items: [],
     }));
-    expect(configurationReads).toBe(0);
-    expect((await adapter.history("created")).configuration).toEqual({});
+    expect(configurationReads).toBe(1);
+    expect((await adapter.history("created")).configuration).toEqual({ model: { providerId: "provider-default", modelId: "model" } });
     expect(await adapter.getConversation("created")).toEqual(expect.objectContaining({ id: "created" }));
   });
 

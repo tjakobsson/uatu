@@ -24,6 +24,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
   private readonly configurations = new Map<string, ConversationConfiguration>();
   private readonly receipts = new Map<string, unknown>();
   private readonly olderItems = new Map<string, ConversationItem[]>();
+  private nextCreatedConfiguration: ConversationConfiguration = {};
   // Conversations a subagent runs as. The real adapter keeps them out of the
   // picker (a child session has a parentId), and Chat's drill-down navigation
   // depends on that, so the fake has to keep the same shape.
@@ -67,6 +68,10 @@ export class FakeE2EChatService implements WorkspaceChatService {
 
   declareOnly(capabilities: ChatCapability[]): void {
     this.capabilities = capabilities;
+  }
+
+  configureNextConversation(configuration: ConversationConfiguration): void {
+    this.nextCreatedConfiguration = structuredClone(configuration);
   }
 
   async retry(): Promise<ChatAvailability> {
@@ -141,7 +146,8 @@ export class FakeE2EChatService implements WorkspaceChatService {
     };
     this.conversations.set(id, conversation);
     this.items.set(id, new Map());
-    this.configurations.set(id, {});
+    this.configurations.set(id, this.nextCreatedConfiguration);
+    this.nextCreatedConfiguration = {};
     this.replay.set(id, new ConversationReplay(this.generation, id, 64 * 1024));
     return this.snapshot(id);
   }
@@ -293,6 +299,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.configurations.clear();
     this.receipts.clear();
     this.olderItems.clear();
+    this.nextCreatedConfiguration = {};
     this.children.clear();
     // A narrowed agent is one test's setup, not the fixture's resting state:
     // left in place it reaches whichever test boots against this worker next.

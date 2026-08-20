@@ -14,6 +14,10 @@ describe("OpenCode v2 identity policy", () => {
       model: { providerID: "openai", id: "gpt-5", variant: "high" },
       agent: "build",
     }], [])).toEqual({ model: { providerId: "openai", modelId: "gpt-5" }, mode: "build", variant: "high" });
+    expect(normalizePersistedConversationConfiguration([{
+      model: { providerID: "lmstudio", id: "qwen3.8", variant: "default" },
+      agent: "build",
+    }], [])).toEqual({ model: { providerId: "lmstudio", modelId: "qwen3.8" }, mode: "build" });
 
     expect(normalizePersistedConversationConfiguration([], [{
       info: {
