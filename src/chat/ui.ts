@@ -868,7 +868,11 @@ export function initChat(): void {
       modelSelect.disabled = true;
       return;
     }
-    modelSelect.append(new Option("Model: agent default", ""));
+    const effective = projection?.configuration?.model;
+    const staged = projection && stagedConfigurations.get(projection.conversationId)?.model;
+    const defaultOption = new Option(effective ? staged ? "Use current model" : "Model: current selection" : "Model: agent default", "");
+    defaultOption.disabled = Boolean(effective && !staged);
+    modelSelect.append(defaultOption);
     for (const model of models) {
       modelSelect.append(new Option(`${model.provider}: ${model.name}`, modelValue(model.selection)));
     }
@@ -905,11 +909,18 @@ export function initChat(): void {
       return;
     }
     variantSelect.hidden = false;
-    variantSelect.append(new Option("Reasoning: agent default", ""));
-    for (const variant of variants) variantSelect.append(new Option(`Reasoning: ${variant}`, variant));
     const effectiveVariant = projection?.configuration?.model && selected && sameModel(projection.configuration.model, selected.selection)
       ? projection.configuration.variant
       : undefined;
+    const stagedVariant = projection && stagedConfigurations.get(projection.conversationId)?.variant;
+    const effectiveVariantApplies = Boolean(effectiveVariant && !stagedConfigurations.get(projection?.conversationId ?? "")?.model);
+    const defaultOption = new Option(
+      effectiveVariantApplies ? stagedVariant ? "Use current reasoning" : "Reasoning: current selection" : "Reasoning: agent default",
+      "",
+    );
+    defaultOption.disabled = effectiveVariantApplies && !stagedVariant;
+    variantSelect.append(defaultOption);
+    for (const variant of variants) variantSelect.append(new Option(`Reasoning: ${variant}`, variant));
     const variant = configuration.variant ?? effectiveVariant;
     if (variant && !variants.includes(variant)) {
       const unavailable = new Option(`Reasoning: ${variant} (current, unavailable)`, variant);
@@ -929,7 +940,11 @@ export function initChat(): void {
     modeSelect.replaceChildren();
     modeSelect.hidden = modes.length === 0;
     if (modes.length === 0) return;
-    modeSelect.append(new Option("Mode: agent default", ""));
+    const effective = projection?.configuration?.mode;
+    const staged = projection && stagedConfigurations.get(projection.conversationId)?.mode;
+    const defaultOption = new Option(effective ? staged ? "Use current mode" : "Mode: current selection" : "Mode: agent default", "");
+    defaultOption.disabled = Boolean(effective && !staged);
+    modeSelect.append(defaultOption);
     for (const mode of modes) {
       const option = new Option(modeLabel(mode.name), mode.name);
       if (mode.description) option.title = mode.description;
@@ -1074,8 +1089,7 @@ export function initChat(): void {
     else staged.model = selection;
     delete staged.variant;
     setStagedConfiguration(projection.conversationId, staged);
-    applyModel();
-    renderVariants();
+    renderModels();
     // The fill is measured against the selected model's window, so choosing a
     // different model restates it rather than leaving the old percentage up.
     syncContextIndicator();
@@ -1097,7 +1111,7 @@ export function initChat(): void {
     if (!name || name === projection.configuration?.mode) delete staged.mode;
     else staged.mode = name;
     setStagedConfiguration(projection.conversationId, staged);
-    applyMode();
+    renderModes();
   });
   newButton.addEventListener("click", async () => {
     newButton.disabled = true;

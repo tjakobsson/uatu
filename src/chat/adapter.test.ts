@@ -496,6 +496,42 @@ describe("prompt, abort, permission, and question mutations", () => {
     await pump;
   });
 
+  test("accepted prompts merge onto provider events processed during admission", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    provider.configurations.set("session", { model: { providerId: "anthropic", modelId: "claude" }, mode: "plan" });
+    provider.listModes = async () => [{ name: "plan", description: "" }, { name: "build", description: "" }];
+    let admitPrompt!: () => void;
+    const promptAdmitted = new Promise<void>(resolve => { admitPrompt = resolve; });
+    let releasePrompt!: () => void;
+    const promptGate = new Promise<void>(resolve => { releasePrompt = resolve; });
+    provider.prompt = async (_sessionId, input) => {
+      admitPrompt();
+      await promptGate;
+      return { messageId: input.id };
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "message" });
+    const subscription = await adapter.subscribe("session");
+    const iterator = subscription.events[Symbol.asyncIterator]();
+    const pump = adapter.startEventPump();
+
+    const pending = adapter.prompt("session", "request", "go", undefined, "build");
+    await promptAdmitted;
+    provider.eventQueue.push({
+      type: "session.next.model.switched",
+      properties: { sessionID: "session", model: { providerID: "openai", id: "gpt" } },
+    });
+    let event: ChatEvent | undefined;
+    while (event?.type !== "conversation.configuration") event = (await iterator.next()).value;
+    expect(event.configuration).toEqual({ model: { providerId: "openai", modelId: "gpt" }, mode: "plan" });
+    releasePrompt();
+
+    expect((await pending).configuration).toEqual({ model: { providerId: "openai", modelId: "gpt" }, mode: "build" });
+    subscription.events.cancel();
+    await adapter.stopEventPump();
+    await pump;
+  });
+
   test("manual rename is confined, idempotent, conflict-aware, and prevents first-prompt overwrite", async () => {
     const provider = new FakeProvider();
     provider.agent.capabilities.push("conversation-rename");
@@ -525,6 +561,38 @@ describe("prompt, abort, permission, and question mutations", () => {
     await expect(adapter.renameConversation("session", "large", "é".repeat(101))).rejects.toBeInstanceOf(InvalidConversationTitleError);
     adapter.projectionForTests("session").statusUpdate("running");
     await expect(adapter.renameConversation("session", "running", "Blocked")).rejects.toBeInstanceOf(ConversationMutationConflictError);
+  });
+
+  test("a manual rename during prompt validation wins over first-prompt naming", async () => {
+    const provider = new FakeProvider();
+    provider.agent.capabilities.push("conversation-rename");
+    provider.sessions = [{ ...fixtureSession("session"), title: "New session - now" }];
+    let renames = 0;
+    provider.renameSession = async (id, title) => {
+      renames += 1;
+      const renamed = { ...provider.sessions.find(session => session.id === id)!, title };
+      provider.sessions[0] = renamed;
+      return renamed;
+    };
+    let validationStarted!: () => void;
+    const validating = new Promise<void>(resolve => { validationStarted = resolve; });
+    let releaseValidation!: () => void;
+    const validationGate = new Promise<void>(resolve => { releaseValidation = resolve; });
+    provider.listMessages = async () => {
+      validationStarted();
+      await validationGate;
+      return { items: [] };
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "message" });
+
+    const pending = adapter.prompt("session", "prompt-1", "Automatic title candidate");
+    await validating;
+    await adapter.renameConversation("session", "rename-1", "Manual title");
+    releaseValidation();
+    await pending;
+
+    expect(provider.sessions[0]?.title).toBe("Manual title");
+    expect(renames).toBe(1);
   });
 
   test("rename rejects unsupported and foreign-workspace provider outcomes", async () => {

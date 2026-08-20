@@ -40,11 +40,17 @@ test.describe("conversation configuration and rename", () => {
       for (const client of [page, second.page]) {
         await expect(client.locator("#chat-model-select")).toHaveValue(JSON.stringify(["openai", "gpt-5"]));
         await expect(client.locator("#chat-mode-select")).toHaveValue("plan");
+        await expect(client.locator('#chat-model-select option[value=""]')).toBeDisabled();
+        await expect(client.locator('#chat-mode-select option[value=""]')).toBeDisabled();
       }
 
       await page.locator("#chat-model-select").selectOption({ label: "Anthropic: Claude Sonnet" });
       await page.locator("#chat-mode-select").selectOption("build");
       await page.locator("#chat-variant-select").selectOption("xhigh");
+      await expect(page.locator('#chat-model-select option[value=""]')).toHaveText("Use current model");
+      await expect(page.locator('#chat-model-select option[value=""]')).toBeEnabled();
+      await expect(page.locator('#chat-mode-select option[value=""]')).toHaveText("Use current mode");
+      await expect(page.locator('#chat-mode-select option[value=""]')).toBeEnabled();
       await page.locator("#chat-input").fill("share this configuration");
       const accepted = page.waitForResponse(response => response.url().endsWith("/prompts"));
       await page.locator("#chat-send").click();

@@ -516,15 +516,25 @@ export class OpenCodeChatAdapter {
           : await this.provider.prompt(conversationId, { id: messageId, text, delivery, model: variantModel, mode, variant });
         if (renameToFirstPrompt) {
           try {
-            session = await this.provider.renameSession!(conversationId, deriveConversationTitle(text));
-            if (!await isSessionInWorkspace(session.directory, this.workspacePath)) throw new ConversationNotFoundError();
-            conversation = this.summary(session, projection.status);
-            projection.replay.publish({ type: "conversation.updated", conversation });
+            // A manual rename can finish while prompt validation is still
+            // running, before the projection enters `sending`. Re-read here so
+            // the stale first-prompt decision cannot overwrite that title.
+            session = await this.requireSession(conversationId);
+            if (isDefaultConversationTitle(session.title)) {
+              session = await this.provider.renameSession!(conversationId, deriveConversationTitle(text));
+              if (!await isSessionInWorkspace(session.directory, this.workspacePath)) throw new ConversationNotFoundError();
+              conversation = this.summary(session, projection.status);
+              projection.replay.publish({ type: "conversation.updated", conversation });
+            }
           } catch { /* cosmetic — listConversations repairs default titles later */ }
         }
         projection.upsert({ id: `message:${accepted.messageId}`, type: "user_message", createdAt: Date.now(), text, requestId });
+        // Provider events can update the cache while prompt admission awaits.
+        // Merge onto the latest value synchronously so omitted fields preserve
+        // that newer state rather than restoring the pre-admission snapshot.
+        const latestConfiguration = this.configurations.get(conversationId) ?? currentConfiguration;
         const configuration: ConversationConfiguration = {
-          ...currentConfiguration,
+          ...latestConfiguration,
           ...(model ? { model } : {}),
           ...(mode ? { mode } : {}),
         };
@@ -533,7 +543,7 @@ export class OpenCodeChatAdapter {
           else delete configuration.variant;
         } else if (variant) configuration.variant = variant;
         this.configurations.set(conversationId, configuration);
-        if (!sameConfiguration(currentConfiguration, configuration)) {
+        if (!sameConfiguration(latestConfiguration, configuration)) {
           projection.replay.publish({ type: "conversation.configuration", configuration });
         }
         // A fast command can finish its whole turn while the dispatch
