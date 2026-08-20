@@ -141,6 +141,22 @@ describe("OpenCode conversation inventory and history", () => {
     expect((await adapter.listConversations())[0]?.title).toBe("Investigate authenticated model discovery");
   });
 
+  test("repairs a persisted default title from before the newest message page", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [{ ...fixtureSession("session"), title: "New session - 2026-08-15T12:00:00Z" }];
+    const first = { id: "first", type: "user", time: { created: 1 }, text: "Name the conversation from this prompt" };
+    const later = { id: "later", type: "user", time: { created: 101 }, text: "Do not use this later prompt" };
+    provider.pages.set("first", { items: [later], configurationItems: [first, later] });
+    provider.renameSession = async (id, title) => {
+      const renamed = { ...provider.sessions.find(session => session.id === id)!, title };
+      provider.sessions[0] = renamed;
+      return renamed;
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd() });
+
+    expect((await adapter.listConversations())[0]?.title).toBe("Name the conversation from this prompt");
+  });
+
 
   test("subagent child sessions stay out of the conversation list", async () => {
     const provider = new FakeProvider();

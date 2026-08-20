@@ -190,8 +190,14 @@ export class OpenCodeChatAdapter {
       if (session.parentId) continue;
       if (this.provider.renameSession && isDefaultConversationTitle(session.title)) {
         try {
-          const page = await this.provider.listMessages(session.id, { limit: 100 });
-          const firstUserMessage = page.items
+          let page = await this.provider.listMessages(session.id, { limit: 100 });
+          let messages = [...(page.configurationItems ?? page.items)];
+          while (!page.configurationItems && page.nextCursor) {
+            page = await this.provider.listMessages(session.id, { cursor: page.nextCursor, limit: 100 });
+            if (page.configurationItems) messages = [...page.configurationItems];
+            else messages.push(...page.items);
+          }
+          const firstUserMessage = messages
             .flatMap(message => normalizeProviderMessage(message))
             .filter(item => item.type === "user_message" && item.text.trim())
             .sort((left, right) => left.createdAt - right.createdAt)[0];

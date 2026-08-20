@@ -127,7 +127,7 @@ test.describe("desktop OpenCode chat", () => {
     // explicitly reveals its high/xhigh variants; GPT-5 advertises none.
     await chooseChatModel(page, "Claude Sonnet");
     await expect(variantSelect).toBeVisible();
-    await expect(variantSelect.locator("option")).toHaveText(["Let Fixture Agent choose reasoning", "high", "xhigh"]);
+    await expect(variantSelect.locator("option")).toHaveText(["Let Fixture Agent choose reasoning", "High", "Xhigh"]);
     await page.locator(".chat-configuration-model", { hasText: "GPT-5" }).click();
     await expect(variantSelect).toBeHidden();
     await page.locator(".chat-configuration-model", { hasText: "Claude Sonnet" }).click();
