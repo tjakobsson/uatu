@@ -20,8 +20,11 @@ import {
   removeAcceptedDraft,
   type ChatProjection,
 } from "./projection";
-import type { ChatAgent, ChatCapability, ChatMode, ChatAvailability, ChatCommand, ChatModel, ConversationItem, ConversationSummary, ModelSelection, PermissionOutcome, QuestionOutcome, TokenUsage } from "./types";
+import type { ChatAgent, ChatCapability, ChatMode, ChatAvailability, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationSummary, ModelSelection, PermissionOutcome, QuestionOutcome, TokenUsage } from "./types";
 import { formatDiagnostics } from "./diagnostics";
+import { collectQuestionAnswers, showQuestionPanel, syncQuestionControl, syncQuestionForm } from "./question-form";
+import { configurationOptionLabel, createChatConfigurationPicker, type ChatConfigurationPickerController } from "./configuration-picker";
+import { copyChatText } from "./copy-actions";
 
 const PRESENTATION_KEY = "uatu:chat-presentation";
 const SAVE_DEBOUNCE_MS = 400;
@@ -32,25 +35,12 @@ type Presentation = {
   expanded: string[];
   anchors: Record<string, TimelineAnchor>;
   workingSince: Record<string, number>;
-  // `model` is the default for a conversation never chosen for; `models`
-  // remembers the per-conversation choice. One global value made the picker
-  // claim whatever was last chosen anywhere, for every conversation.
-  model?: ModelSelection;
-  models: Record<string, ModelSelection>;
-  // Same shape for the mode (Build/Plan/...). Empty means the agent's own
-  // default: the picker never claims to know a session's current mode.
-  mode?: string;
-  modes: Record<string, string>;
-  // The reasoning variant, per conversation and as a global default — the same
-  // storage as the model. Empty means the model's own default effort.
-  variant?: string;
-  variants: Record<string, string>;
   // Dismissed finished-subagent entry ids, per conversation — dismissal is a
   // user statement that must survive reload.
   dismissedSubagents: Record<string, string[]>;
 };
 
-const EMPTY_PRESENTATION: Presentation = { drafts: {}, expanded: [], anchors: {}, workingSince: {}, models: {}, modes: {}, variants: {}, dismissedSubagents: {} };
+const EMPTY_PRESENTATION: Presentation = { drafts: {}, expanded: [], anchors: {}, workingSince: {}, dismissedSubagents: {} };
 
 export function initChat(): void {
   const surface = document.querySelector<HTMLElement>("#chat-surface");
@@ -59,6 +49,10 @@ export function initChat(): void {
   const state = document.querySelector<HTMLElement>("#chat-state");
   const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select");
   const newButton = document.querySelector<HTMLButtonElement>("#chat-new-conversation");
+  const renameButton = document.querySelector<HTMLButtonElement>("#chat-rename-conversation");
+  const renameForm = document.querySelector<HTMLFormElement>("#chat-rename-form");
+  const renameInput = document.querySelector<HTMLInputElement>("#chat-rename-title");
+  const renameCancel = document.querySelector<HTMLButtonElement>("#chat-rename-cancel");
   const olderButton = document.querySelector<HTMLButtonElement>("#chat-load-older");
   const latestButton = document.querySelector<HTMLButtonElement>("#chat-latest");
   const form = document.querySelector<HTMLFormElement>("#chat-composer");
@@ -66,11 +60,27 @@ export function initChat(): void {
   const commandMenu = document.querySelector<HTMLElement>("#chat-command-menu");
   const send = document.querySelector<HTMLButtonElement>("#chat-send");
   const sendLabel = document.querySelector<HTMLElement>("#chat-send .chat-send-label");
-  const modelSelect = document.querySelector<HTMLSelectElement>("#chat-model-select");
-  const modeSelect = document.querySelector<HTMLSelectElement>("#chat-mode-select");
-  const variantSelect = document.querySelector<HTMLSelectElement>("#chat-variant-select");
-  const cancel = document.querySelector<HTMLButtonElement>("#chat-cancel");
+  const configurationTrigger = document.querySelector<HTMLButtonElement>("#chat-configuration-trigger");
+  const configurationSummary = document.querySelector<HTMLElement>("#chat-configuration-summary");
+  const configurationDetails = document.querySelector<HTMLElement>("#chat-configuration-details");
+  const configurationModeSummary = document.querySelector<HTMLElement>("#chat-configuration-mode-summary");
+  const configurationVariantSummary = document.querySelector<HTMLElement>("#chat-configuration-variant-summary");
+  const configurationVariantValue = document.querySelector<HTMLElement>("#chat-configuration-variant-value");
+  const configurationDialog = document.querySelector<HTMLDialogElement>("#chat-configuration-dialog");
+  const configurationSearch = document.querySelector<HTMLInputElement>("#chat-configuration-search");
+  const configurationModelsSection = document.querySelector<HTMLElement>("#chat-configuration-models-section");
+  const configurationModels = document.querySelector<HTMLElement>("#chat-configuration-models");
+  const configurationResultStatus = document.querySelector<HTMLElement>("#chat-configuration-result-status");
+  const configurationEmpty = document.querySelector<HTMLElement>("#chat-configuration-empty");
+  const configurationDone = document.querySelector<HTMLButtonElement>("#chat-configuration-done");
+  const configurationModeSection = document.querySelector<HTMLElement>("#chat-configuration-mode-section");
+  const configurationMode = document.querySelector<HTMLSelectElement>("#chat-configuration-mode");
+  const configurationVariantSection = document.querySelector<HTMLElement>("#chat-configuration-variant-section");
+  const configurationVariant = document.querySelector<HTMLSelectElement>("#chat-configuration-variant");
   const composerStatus = document.querySelector<HTMLElement>("#chat-composer-status");
+  const composerStatusLive = document.querySelector<HTMLElement>("#chat-composer-status-live");
+  const composerError = document.querySelector<HTMLElement>("#chat-composer-error");
+  const copyStatus = document.querySelector<HTMLElement>("#chat-copy-status");
   const waiting = document.querySelector<HTMLElement>("#chat-waiting");
   const waitingLabel = document.querySelector<HTMLElement>("#chat-waiting-label");
   const contextUsage = document.querySelector<HTMLDetailsElement>("#chat-context-usage");
@@ -90,7 +100,7 @@ export function initChat(): void {
   const drilldownState = document.querySelector<HTMLElement>("#chat-drilldown-state");
   const drilldownBack = document.querySelector<HTMLButtonElement>("#chat-drilldown-back");
   const drilldownOlder = document.querySelector<HTMLButtonElement>("#chat-drilldown-older");
-  if (!surface || !timeline || !items || !state || !select || !newButton || !olderButton || !latestButton || !form || !input || !commandMenu || !send || !sendLabel || !modelSelect || !cancel || !composerStatus) return;
+  if (!surface || !timeline || !items || !state || !select || !newButton || !olderButton || !latestButton || !form || !input || !commandMenu || !send || !sendLabel || !configurationTrigger || !configurationSummary || !configurationDetails || !configurationModeSummary || !configurationVariantSummary || !configurationVariantValue || !configurationDialog || !configurationSearch || !configurationModelsSection || !configurationModels || !configurationResultStatus || !configurationEmpty || !configurationDone || !composerStatus || !composerStatusLive || !composerError || !copyStatus) return;
 
   const api = new ChatApiClient();
   const anchor = new TimelineAnchorController();
@@ -102,6 +112,8 @@ export function initChat(): void {
   let modes: ChatMode[] = [];
   let commands: ChatCommand[] = [];
   let projection: ChatProjection | null = null;
+  const stagedConfigurations = new Map<string, ConversationConfiguration>();
+  let configurationPicker: ChatConfigurationPickerController | null = null;
   let stream: ChatEventStream | null = null;
   let selectionGeneration = 0;
   // Viewing child X of parent Y. A subagent transcript is a drill-down into a
@@ -155,6 +167,7 @@ export function initChat(): void {
   let rendering = false;
   let renderFrame: number | null = null;
   let submitting = false;
+  let cancelling = false;
   // A failed send leaves acceptance unknown — the server may already hold a
   // receipt for the request. Resubmitting the same text reuses its id so the
   // receipt dedupes instead of starting a second agent turn. Keyed per
@@ -169,6 +182,7 @@ export function initChat(): void {
   // conversation status actually moves, so a render cannot erase it.
   let composerNote: string | null = null;
   let lastStatus: ChatProjection["status"] | null = null;
+  let lastRoutineAnnouncement = "";
   const expanded = new Set(presentation.expanded);
   // Messages accepted while a turn was already running. They are cleared when
   // the turn ends, which is the moment the agent has actually taken them.
@@ -213,12 +227,12 @@ export function initChat(): void {
    */
   const applyCapabilities = () => {
     if (!agent) return;
-    if (!declares("modes")) modeSelect?.remove();
-    if (!declares("models")) modelSelect.remove();
-    if (!declares("variants")) variantSelect?.remove();
+    configurationTrigger.hidden = !declares("models") && !declares("modes") && !declares("variants");
     // An agent that does not report token usage has no context readout to
     // show, and a permanently empty meter would claim otherwise.
     if (!declares("context")) contextUsage?.remove();
+    if (!declares("conversation-rename")) renameButton?.remove();
+    else if (renameButton) renameButton.hidden = false;
   };
   nameAgent();
 
@@ -283,8 +297,6 @@ export function initChat(): void {
       for (const key of Object.keys(presentation.drafts)) if (!known.has(key)) delete presentation.drafts[key];
       for (const key of Object.keys(presentation.anchors)) if (!known.has(key)) delete presentation.anchors[key];
       for (const key of Object.keys(presentation.workingSince)) if (!known.has(key)) delete presentation.workingSince[key];
-      for (const key of Object.keys(presentation.models)) if (!known.has(key)) delete presentation.models[key];
-      for (const key of Object.keys(presentation.variants)) if (!known.has(key)) delete presentation.variants[key];
       for (const key of Object.keys(presentation.dismissedSubagents)) if (!known.has(key)) delete presentation.dismissedSubagents[key];
     }
     while (expanded.size > MAX_EXPANDED_ENTRIES) {
@@ -547,7 +559,8 @@ export function initChat(): void {
       if (contextTokens(item.usage) > 0) { usage = item.usage; usageModel = item.model; break; }
     }
     if (!usage) { usage = zeroUsage; usageModel = zeroUsageModel; }
-    const reportingModel = usageModel ? modelValue(usageModel) : modelSelect.value;
+    const displayedModel = displayedConfiguration().model;
+    const reportingModel = usageModel ? modelValue(usageModel) : displayedModel ? modelValue(displayedModel) : "";
     if (usage === paintedUsage && reportingModel === paintedUsageModel) return;
     paintedUsage = usage;
     paintedUsageModel = reportingModel;
@@ -559,18 +572,22 @@ export function initChat(): void {
     const used = contextTokens(usage);
     const limit = models.find(model => modelValue(model.selection) === reportingModel)?.contextLimit;
     const fraction = limit && limit > 0 ? Math.min(1, used / limit) : undefined;
-    contextUsageFill.style.width = `${Math.round((fraction ?? 0) * 100)}%`;
+    const fillPercent = Math.round((fraction ?? 0) * 100);
+    contextUsageFill.style.setProperty("--context-fill", `${fillPercent}%`);
+    // Keep the unfilled wedge centred on the right, so partial usage reads as
+    // a right-facing Pac-Man rather than a clock with an arbitrary start edge.
+    const startAngle = Math.round((90 + (100 - fillPercent) * 1.8) * 10) / 10;
+    contextUsageFill.style.setProperty("--context-start", `${startAngle}deg`);
     // The figure states the fill in words as well as in width, so the tier
     // colouring below is emphasis on something already legible rather than
     // the only signal.
-    contextUsageLabel.textContent = fraction === undefined
-      ? `${formatTokens(used)} in context`
-      : `${formatTokens(used)}/${formatTokens(limit!)} · ${Math.round(fraction * 100)}%`;
+    contextUsageLabel.textContent = fraction === undefined ? "?" : `${Math.round(fraction * 100)}%`;
     contextUsage.dataset.fill = fraction === undefined ? "unknown" : fraction >= 0.9 ? "full" : fraction >= 0.75 ? "high" : "normal";
     contextUsage.title = fraction === undefined
       ? `${used.toLocaleString()} tokens in the context window`
       : `${used.toLocaleString()} of ${limit!.toLocaleString()} tokens in the context window`;
-    const rows: Array<[string, number]> = [];
+    const rows: Array<[string, number]> = [["In context", used]];
+    if (limit !== undefined) rows.push(["Limit", limit]);
     if (usage.input !== undefined) rows.push(["Input", usage.input]);
     if (usage.cacheRead !== undefined) rows.push(["Cache read", usage.cacheRead]);
     if (usage.cacheWrite !== undefined) rows.push(["Cache write", usage.cacheWrite]);
@@ -828,6 +845,37 @@ export function initChat(): void {
     if (show) waitingLabel.textContent = workingText();
   };
 
+  const setComposerError = (message: string | null) => {
+    composerError.textContent = message ?? "";
+    composerError.hidden = !message;
+  };
+
+  const syncRoutineStatus = () => {
+    const conversationStatus = projection?.status;
+    const stateName = cancelling
+      ? "cancelling"
+      : submitting || conversationStatus === "sending"
+        ? "sending"
+        : conversationStatus === "running"
+          ? "working"
+          : conversationStatus === "failed"
+            ? "failed"
+            : "ready";
+    const label = cancelling
+      ? "Cancelling"
+      : submitting && conversationStatus !== "running"
+        ? "Sending"
+        : conversationStatus ? statusLabel(conversationStatus) : "Select a conversation";
+    composerStatus.dataset.state = stateName;
+    composerStatus.setAttribute("aria-label", label);
+    composerStatus.title = stateName === "working" ? workingText() : label;
+    const announcement = composerNote ?? label;
+    if (announcement !== lastRoutineAnnouncement) {
+      lastRoutineAnnouncement = announcement;
+      composerStatusLive.textContent = announcement;
+    }
+  };
+
   const syncControls = () => {
     const status = projection?.status ?? null;
     if (status !== lastStatus) {
@@ -845,128 +893,74 @@ export function initChat(): void {
       delete presentation.workingSince[projection.conversationId];
       save();
     }
-    if (running && workingTimer === null) workingTimer = setInterval(() => { composerStatus.textContent = workingText(); syncWaiting(); }, 1_000);
+    if (running && workingTimer === null) workingTimer = setInterval(() => { syncRoutineStatus(); syncWaiting(); }, 1_000);
     if (!running && workingTimer !== null) {
       clearInterval(workingTimer);
       workingTimer = null;
     }
-    send.disabled = submitting || !projection || !input.value.trim();
-    const action = running ? "Steer" : "Send";
+    send.type = running ? "button" : "submit";
+    send.dataset.action = running ? "cancel" : "send";
+    send.disabled = running ? cancelling || !projection : submitting || !projection || !input.value.trim();
+    const action = running ? "Cancel" : "Send";
     sendLabel.textContent = action;
-    send.setAttribute("aria-label", `${action} message`);
-    send.title = `${action} message`;
-    modelSelect.disabled = submitting || models.length === 0;
-    if (modeSelect?.isConnected) modeSelect.disabled = submitting || modes.length === 0;
-    if (variantSelect?.isConnected) variantSelect.disabled = submitting;
-    cancel.hidden = !running;
+    send.setAttribute("aria-label", running ? "Cancel response" : "Send message");
+    send.title = running ? "Cancel response" : "Send message";
+    configurationTrigger.disabled = submitting || !projection;
     olderButton.hidden = !projection?.olderCursor;
-    composerStatus.textContent = composerNote ?? workingText();
+    syncRoutineStatus();
     syncWaiting();
   };
 
   const noteComposer = (message: string | null) => {
     composerNote = message;
-    composerStatus.textContent = message ?? workingText();
+    syncRoutineStatus();
   };
 
-  const renderModels = () => {
-    modelSelect.replaceChildren();
-    if (models.length === 0) {
-      modelSelect.append(new Option("No models available", ""));
-      modelSelect.disabled = true;
-      return;
+  const displayedConfiguration = (): ConversationConfiguration => {
+    if (!projection) return {};
+    const staged = stagedConfigurations.get(projection.conversationId);
+    const configuration = { ...projection.configuration, ...staged };
+    if (staged?.model && projection.configuration?.model && !sameModel(staged.model, projection.configuration.model) && staged.variant === undefined) {
+      delete configuration.variant;
     }
-    for (const model of models) {
-      modelSelect.append(new Option(`${model.provider}: ${model.name}`, modelValue(model.selection)));
-    }
-    const stored = presentation.model && models.some(model => sameModel(model.selection, presentation.model!))
-      ? presentation.model
-      : models[0]!.selection;
-    presentation.model = stored;
-    applyModel(projection?.conversationId ?? presentation.selectedId);
-    renderVariants();
-    save();
+    return configuration;
+  };
+
+  const setStagedConfiguration = (conversationId: string, configuration: ConversationConfiguration) => {
+    if (configuration.model || configuration.mode || configuration.variant) stagedConfigurations.set(conversationId, configuration);
+    else stagedConfigurations.delete(conversationId);
+  };
+
+  const renderConfiguration = () => {
+    const configuration = displayedConfiguration();
+    const displayedModel = configuration.model
+      ? models.find(model => sameModel(model.selection, configuration.model!))
+      : undefined;
+    configurationSummary.textContent = declares("models")
+      ? displayedModel?.name ?? (configuration.model ? `${configuration.model.providerId}/${configuration.model.modelId}` : `Let ${agent?.name ?? "OpenCode"} choose`)
+      : "Chat settings";
+    const showMode = declares("modes") && modes.length > 0;
+    const showReasoning = declares("variants") && Boolean(displayedModel?.variants?.length);
+    configurationModeSummary.hidden = !showMode;
+    configurationModeSummary.textContent = showMode ? configurationOptionLabel(configuration.mode ?? "auto") : "";
+    configurationVariantSummary.hidden = !showReasoning;
+    configurationVariantValue.textContent = showReasoning ? configurationOptionLabel(configuration.variant ?? "auto") : "";
+    configurationDetails.hidden = !showMode && !showReasoning;
+    const accessibleValues = [
+      declares("models") ? `Model: ${displayedModel?.name ?? (configuration.model ? `${configuration.model.providerId}/${configuration.model.modelId}, unavailable` : `chosen by ${agent?.name ?? "the agent"}`)}` : "",
+      showMode ? `Mode: ${configuration.mode ? configurationOptionLabel(configuration.mode) : `chosen by ${agent?.name ?? "the agent"}`}` : "",
+      showReasoning ? `Reasoning: ${configuration.variant ? configurationOptionLabel(configuration.variant) : `chosen by ${agent?.name ?? "the agent"}`}` : "",
+    ].filter(Boolean);
+    configurationTrigger.setAttribute("aria-label", accessibleValues.length > 0 ? `Chat configuration. ${accessibleValues.join(". ")}` : "Chat settings");
+    configurationPicker?.update({ agent, models, modes, configuration });
     syncControls();
-  };
-
-  /**
-   * Reasoning variants belong to the selected model, so the list is rebuilt
-   * whenever the model changes — and the target conversation rides in as the
-   * argument on a conversation switch, because at that moment `projection`
-   * still names the previous one. A model that offers none hides the control
-   * (like an absent mode list), and the whole control is removed when the
-   * agent does not declare the capability — checked as `isConnected`, since
-   * the removed node is still reachable from this closure and repopulating it
-   * would let a stored variant ride along with no visible control saying so.
-   * "Default" leads, meaning the model's own effort, and a chosen variant is
-   * remembered per conversation like the model.
-   */
-  const renderVariants = (conversationId = projection?.conversationId ?? presentation.selectedId) => {
-    if (!variantSelect?.isConnected) return;
-    const selected = models.find(model => modelValue(model.selection) === modelSelect.value);
-    const variants = selected?.variants ?? [];
-    variantSelect.replaceChildren();
-    variantSelect.hidden = variants.length === 0;
-    if (variants.length === 0) return;
-    variantSelect.append(new Option("Reasoning: default", ""));
-    for (const variant of variants) variantSelect.append(new Option(`Reasoning: ${variant}`, variant));
-    const offered = (name: string | undefined) => (name && Array.from(variantSelect.options).some(option => option.value === name) ? name : undefined);
-    variantSelect.value = offered(conversationId ? presentation.variants[conversationId] : undefined) ?? offered(presentation.variant) ?? "";
-  };
-
-  /**
-   * The mode picker leads with "default" rather than claiming a value: the
-   * session's current mode is the agent's state, not ours, and a session
-   * stuck in a read-only mode is exactly the case where lying would hurt.
-   * Choosing a named mode sends it with every prompt from then on.
-   */
-  const renderModes = () => {
-    if (!modeSelect) return;
-    modeSelect.replaceChildren();
-    modeSelect.hidden = modes.length === 0;
-    if (modes.length === 0) return;
-    modeSelect.append(new Option("Mode: default", ""));
-    for (const mode of modes) {
-      const option = new Option(modeLabel(mode.name), mode.name);
-      if (mode.description) option.title = mode.description;
-      modeSelect.append(option);
-    }
-    applyMode(projection?.conversationId ?? presentation.selectedId);
-    syncControls();
-  };
-
-  const applyMode = (conversationId: string | undefined) => {
-    if (!modeSelect || modes.length === 0) return;
-    const known = (name: string | undefined) => (name && modes.some(mode => mode.name === name) ? name : undefined);
-    const chosen = known(conversationId ? presentation.modes[conversationId] : undefined);
-    // Once a named mode has been chosen for this conversation there is no
-    // default to go back to: the mode is session state in the agent, and a
-    // prompt that omits it keeps the previous choice — offering "default"
-    // then would display one mode and run another.
-    const defaultOption = modeSelect.options[0];
-    if (defaultOption && defaultOption.value === "") defaultOption.disabled = chosen !== undefined;
-    modeSelect.value = chosen ?? known(presentation.mode) ?? "";
-  };
-
-  /**
-   * Points the picker at the conversation's own model, falling back to the
-   * global default and then the first available model. A stored selection the
-   * server no longer offers is ignored rather than shown as a live choice.
-   */
-  const applyModel = (conversationId: string | undefined) => {
-    if (models.length === 0) return;
-    const known = (selection: ModelSelection | undefined) =>
-      selection && models.some(model => sameModel(model.selection, selection)) ? selection : undefined;
-    const chosen = known(conversationId ? presentation.models[conversationId] : undefined)
-      ?? known(presentation.model)
-      ?? models[0]!.selection;
-    modelSelect.value = modelValue(chosen);
   };
 
   const selectConversation = async (id: string) => {
     // Choosing a conversation is leaving whatever turn was being drilled into:
     // the drill-down is a view over the parent, and the parent is changing.
     closeChildConversation();
+    if (renameForm) renameForm.hidden = true;
     const token = ++selectionGeneration;
     stream?.close();
     stream = null;
@@ -977,17 +971,13 @@ export function initChat(): void {
       if (currentAnchor) presentation.anchors[projection.conversationId] = currentAnchor;
     }
     presentation.selectedId = id;
-    applyModel(id);
-    // The variant list belongs to the model, and the model just changed to
-    // this conversation's — the rebuild validates the stored variant against
-    // the new model's options rather than the previous conversation's.
-    renderVariants(id);
-    applyMode(id);
     const conversation = conversations.find(item => item.id === id);
     if (chatTitle) chatTitle.textContent = conversation ? displayConversationTitle(conversation) : chatHeading();
     form.hidden = false;
     save();
     projection = null;
+    setComposerError(null);
+    renderConfiguration();
     syncContextIndicator();
     input.value = presentation.drafts[id] ?? "";
     autosize(input);
@@ -997,6 +987,8 @@ export function initChat(): void {
       const snapshot = await api.snapshot(id);
       if (token !== selectionGeneration) return;
       projection = projectionFromSnapshot(snapshot, acceptedDrafts);
+      conversations = conversations.map(item => item.id === snapshot.conversation.id ? snapshot.conversation : item);
+      renderConfiguration();
       announce(snapshot.items.length ? "" : "Start this conversation by sending a message.");
       anchor.restore(presentation.anchors[id] ?? null);
       scheduleRender(false, false);
@@ -1009,6 +1001,18 @@ export function initChat(): void {
             return;
           }
           projection = result.projection;
+          if (event.type === "conversation.configuration") renderConfiguration();
+          if (event.type === "conversation.status") {
+            if (event.status === "failed") setComposerError(event.message || "The active turn failed.");
+            else if (event.status === "sending" || event.status === "running") setComposerError(null);
+          }
+          if (event.type === "conversation.updated") {
+            conversations = conversations.map(conversation => conversation.id === event.conversation.id ? event.conversation : conversation);
+            const option = Array.from(select.options).find(candidate => candidate.value === event.conversation.id);
+            if (option) option.text = displayConversationTitle(event.conversation);
+            if (chatTitle) chatTitle.textContent = displayConversationTitle(event.conversation);
+            if (renameInput && renameForm && !renameForm.hidden && document.activeElement !== renameInput) renameInput.value = event.conversation.title;
+          }
           if (result.outcome === "applied") { announce(""); scheduleRender(true); }
         },
         resync: () => { if (token === selectionGeneration) void selectConversation(id); },
@@ -1036,40 +1040,60 @@ export function initChat(): void {
   };
 
   select.addEventListener("change", () => { if (select.value) void selectConversation(select.value); });
-  modelSelect.addEventListener("change", () => {
-    renderVariants();
-    const selection = models.find(model => modelValue(model.selection) === modelSelect.value)?.selection;
-    if (!selection) return;
-    presentation.model = selection;
-    if (projection) presentation.models[projection.conversationId] = selection;
-    save();
-    // The fill is measured against the selected model's window, so choosing a
-    // different model restates it rather than leaving the old percentage up.
+  const stageModel = (selection: ModelSelection | undefined) => {
+    if (!projection) return;
+    const staged = { ...stagedConfigurations.get(projection.conversationId) };
+    if (!selection || (projection.configuration?.model && sameModel(selection, projection.configuration.model))) delete staged.model;
+    else staged.model = selection;
+    delete staged.variant;
+    setStagedConfiguration(projection.conversationId, staged);
+    renderConfiguration();
     syncContextIndicator();
-  });
-  variantSelect?.addEventListener("change", () => {
-    const name = variantSelect.value || undefined;
-    if (name) presentation.variant = name; else delete presentation.variant;
-    if (projection) {
-      if (name) presentation.variants[projection.conversationId] = name;
-      else delete presentation.variants[projection.conversationId];
-    }
-    save();
-  });
-  modeSelect?.addEventListener("change", () => {
-    const name = modeSelect.value || undefined;
+  };
+  const stageVariant = (name: string | undefined) => {
+    if (!projection) return;
+    const staged = { ...stagedConfigurations.get(projection.conversationId) };
+    const displayedModel = staged.model ?? projection.configuration?.model;
+    const effectiveModel = projection.configuration?.model;
+    const effectiveModelApplies = displayedModel === undefined
+      ? effectiveModel === undefined
+      : effectiveModel !== undefined && sameModel(displayedModel, effectiveModel);
+    if (!name || (effectiveModelApplies && name === projection.configuration?.variant)) delete staged.variant;
+    else staged.variant = name;
+    setStagedConfiguration(projection.conversationId, staged);
+    renderConfiguration();
+  };
+  const stageMode = (name: string | undefined) => {
+    if (!projection) return;
     if (name && !modes.some(mode => mode.name === name)) return;
-    if (name) presentation.mode = name;
-    else delete presentation.mode;
-    if (projection) {
-      if (name) presentation.modes[projection.conversationId] = name;
-      else delete presentation.modes[projection.conversationId];
-    }
-    save();
-    // Re-derives the default option's availability: choosing a named mode
-    // locks "default" for this conversation from now on.
-    applyMode(projection?.conversationId ?? presentation.selectedId);
+    const staged = { ...stagedConfigurations.get(projection.conversationId) };
+    if (!name || name === projection.configuration?.mode) delete staged.mode;
+    else staged.mode = name;
+    setStagedConfiguration(projection.conversationId, staged);
+    renderConfiguration();
+  };
+  configurationPicker = createChatConfigurationPicker({
+    dialog: configurationDialog,
+    trigger: configurationTrigger,
+    surface,
+    search: configurationSearch,
+    modelsSection: configurationModelsSection,
+    models: configurationModels,
+    resultStatus: configurationResultStatus,
+    empty: configurationEmpty,
+    done: configurationDone,
+    modeSection: configurationModeSection ?? undefined,
+    modeSelect: configurationMode ?? undefined,
+    variantSection: configurationVariantSection ?? undefined,
+    variantSelect: configurationVariant ?? undefined,
+    touchInitialFocus: configurationDone,
+  }, {
+    onModel: stageModel,
+    onMode: stageMode,
+    onVariant: stageVariant,
   });
+  configurationTrigger.addEventListener("click", () => configurationPicker?.open());
+  renderConfiguration();
   newButton.addEventListener("click", async () => {
     newButton.disabled = true;
     announce("Creating conversation...");
@@ -1082,6 +1106,54 @@ export function initChat(): void {
       select.value = snapshot.conversation.id;
     } catch (error) { announce(messageOf(error), true); }
     finally { newButton.disabled = false; }
+  });
+
+  renameButton?.addEventListener("click", () => {
+    if (!projection || !renameForm || !renameInput || !declares("conversation-rename")) return;
+    renameInput.value = projection.conversation?.title ?? "";
+    renameForm.hidden = false;
+    renameInput.focus();
+    renameInput.select();
+  });
+  renameCancel?.addEventListener("click", () => {
+    if (renameForm) renameForm.hidden = true;
+    renameButton?.focus();
+  });
+  renameForm?.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (!projection || !renameInput) return;
+    const conversationId = projection.conversationId;
+    const title = renameInput.value.trim();
+    if (!title) {
+      announce("Conversation title must not be empty", true);
+      renameInput.focus();
+      return;
+    }
+    if (new TextEncoder().encode(title).byteLength > 200) {
+      announce("Conversation title must be at most 200 bytes", true);
+      renameInput.focus();
+      return;
+    }
+    const controls = renameForm.querySelectorAll<HTMLButtonElement | HTMLInputElement>("button, input");
+    controls.forEach(control => { control.disabled = true; });
+    try {
+      const { conversation } = await api.renameConversation(conversationId, newRequestId(), title);
+      conversations = conversations.map(item => item.id === conversation.id ? conversation : item);
+      const option = Array.from(select.options).find(candidate => candidate.value === conversation.id);
+      if (option) option.text = displayConversationTitle(conversation);
+      if (projection?.conversationId === conversation.id) {
+        projection = { ...projection, conversation };
+        if (chatTitle) chatTitle.textContent = displayConversationTitle(conversation);
+      }
+      renameForm.hidden = true;
+      announce("");
+      renameButton?.focus();
+    } catch (error) {
+      announce(messageOf(error), true);
+      renameInput.focus();
+    } finally {
+      controls.forEach(control => { control.disabled = false; });
+    }
   });
 
   olderButton.addEventListener("click", async () => {
@@ -1159,50 +1231,6 @@ export function initChat(): void {
     }, true);
   };
 
-  /** A question is answered once any option is ticked or free-form text typed. */
-  const panelAnswered = (panel: HTMLElement): boolean =>
-    panel.querySelector("input[type=radio]:checked, input[type=checkbox]:checked") !== null
-    || [...panel.querySelectorAll<HTMLInputElement>("input[type=text]")].some(input => input.value.trim() !== "");
-
-  /**
-   * Drives the tab strip and the primary button: "Next" until the last
-   * question, "Answer" on it, disabled until the step in view is satisfied.
-   * A multi-select step needs at least one box ticked, never all of them.
-   */
-  const syncQuestionForm = (form: HTMLFormElement) => {
-    const panels = [...form.querySelectorAll<HTMLElement>("[data-question-panel]")];
-    if (panels.length === 0) return;
-    const activeIndex = Math.max(0, panels.findIndex(panel => !panel.hidden));
-    const answered = panels.map(panelAnswered);
-    form.querySelectorAll<HTMLButtonElement>("[data-question-tab]").forEach((tab, index) => {
-      tab.setAttribute("aria-selected", String(index === activeIndex));
-      tab.classList.toggle("is-active", index === activeIndex);
-      tab.classList.toggle("is-answered", answered[index] === true);
-    });
-    const primary = form.querySelector<HTMLButtonElement>("[data-question-primary]");
-    if (!primary) return;
-    const last = activeIndex === panels.length - 1;
-    primary.textContent = last ? "Answer" : "Next";
-    primary.disabled = last ? answered.some(value => !value) : !answered[activeIndex];
-  };
-
-  const showQuestionPanel = (form: HTMLFormElement, index: number) => {
-    form.querySelectorAll<HTMLElement>("[data-question-panel]").forEach((panel, at) => { panel.hidden = at !== index; });
-    syncQuestionForm(form);
-  };
-
-  // Radios and the "Other" free-form field share a name, and a single-choice
-  // question must submit exactly one answer — picking one side clears the
-  // other, so the form state always matches what FormData will produce.
-  const enforceSingleChoice = (input: HTMLInputElement, form: HTMLFormElement) => {
-    const siblings = form.querySelectorAll<HTMLInputElement>(`input[name="${CSS.escape(input.name)}"]`);
-    if (input.type === "radio") {
-      siblings.forEach(sibling => { if (sibling.type === "text") sibling.value = ""; });
-    } else if (input.type === "text" && input.value.trim() !== "") {
-      siblings.forEach(sibling => { if (sibling.type === "radio") sibling.checked = false; });
-    }
-  };
-
   // A failure reports where the reader is looking: a card answered inside the
   // drill-down speaks through the drill-down's own status line — in touch
   // mode that layer covers the parent's entirely, so a message sent to the
@@ -1240,9 +1268,20 @@ export function initChat(): void {
    */
   const wireItemInteractions = (container: HTMLElement, sourceProjection: () => ChatProjection | null) => {
     container.addEventListener("click", event => {
-      const target = (event.target as Element).closest<HTMLElement>("[data-file-ref], [data-permission-outcome], [data-question-reject], [data-open-conversation]");
+      const target = (event.target as Element).closest<HTMLElement>("[data-file-ref], [data-permission-outcome], [data-question-reject], [data-open-conversation], [data-chat-copy]");
       const source = sourceProjection();
       if (!target || !source) return;
+      if (target instanceof HTMLButtonElement && target.dataset.chatCopy) {
+        const itemElement = target.closest<HTMLElement>("[data-chat-item-id]");
+        const item = source.items.find(candidate => candidate.id === itemElement?.dataset.chatItemId);
+        if (!item || item.type !== "assistant_message") return;
+        const text = target.dataset.chatCopy === "code"
+          ? target.closest("pre")?.querySelector(":scope > code")?.textContent
+          : item.markdown;
+        if (text === undefined || text === null) return;
+        void copyChatText(target, text, message => { copyStatus.textContent = message; });
+        return;
+      }
       if (target.dataset.openConversation) {
         openChildConversation(target.dataset.openConversation, subagentLabelFor(target.dataset.openConversation, source));
         return;
@@ -1272,25 +1311,13 @@ export function initChat(): void {
       const input = event.target as HTMLInputElement;
       const form = input.form;
       if (!form?.matches("form[data-question-form]")) return;
-      enforceSingleChoice(input, form);
-      syncQuestionForm(form);
-      // A lone single-choice question needs no confirmation step: picking the
-      // option is the answer. Anything with more questions, multiple allowed
-      // answers, or a free-form field keeps its explicit step.
-      if (input.type !== "radio") return;
-      const source = sourceProjection();
-      const item = source?.items.find(candidate => candidate.id === input.closest<HTMLElement>("[data-chat-item-id]")?.dataset.chatItemId);
-      if (!source || !item || item.type !== "question" || item.questions.length !== 1) return;
-      const question = item.questions[0]!;
-      if (question.multiple || question.allowFreeForm) return;
-      void resolveQuestion(source, item.id, { kind: "answered", answers: [[input.value]] });
+      syncQuestionControl(input, true);
     });
     container.addEventListener("input", event => {
       const input = event.target as HTMLInputElement;
       const form = input.form;
       if (!form?.matches("form[data-question-form]")) return;
-      enforceSingleChoice(input, form);
-      syncQuestionForm(form);
+      syncQuestionControl(input);
     });
     container.addEventListener("click", event => {
       const tab = (event.target as Element).closest<HTMLButtonElement>("[data-question-tab]");
@@ -1312,8 +1339,7 @@ export function initChat(): void {
         showQuestionPanel(questionForm, activeIndex + 1);
         return;
       }
-      const data = new FormData(questionForm);
-      const answers = item.questions.map((_, index) => data.getAll(`q-${index}`).map(String).filter(Boolean));
+      const answers = collectQuestionAnswers(questionForm);
       // The button is disabled until every step is satisfied, so this only
       // catches a form submitted some other way (Enter in the free-form field).
       const missing = answers.flatMap((answer, index) => answer.length === 0 ? [index] : []);
@@ -1597,8 +1623,9 @@ export function initChat(): void {
       return;
     }
     if (commandMatch && event.key === "Escape") { event.preventDefault(); closeCommandMenu(); return; }
+    const running = projection?.status === "running" || projection?.status === "sending";
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing
-      && (event.metaKey || event.ctrlKey || document.documentElement.dataset.uiMode !== "touch")) {
+      && (event.metaKey || event.ctrlKey || document.documentElement.dataset.uiMode !== "touch" || running)) {
       event.preventDefault();
       form.requestSubmit();
     }
@@ -1614,6 +1641,20 @@ export function initChat(): void {
   send.addEventListener("pointerdown", event => {
     if (event.pointerType === "touch") event.preventDefault();
   });
+  send.addEventListener("click", async () => {
+    if (!projection || (projection.status !== "running" && projection.status !== "sending") || cancelling) return;
+    cancelling = true;
+    setComposerError(null);
+    noteComposer("Cancelling...");
+    syncControls();
+    try { await api.cancel(projection.conversationId, newRequestId()); }
+    catch (error) {
+      const message = messageOf(error);
+      announce(message, true);
+      setComposerError(`Cancellation failed: ${message}`);
+    }
+    finally { cancelling = false; syncControls(); }
+  });
   form.addEventListener("submit", async event => {
     event.preventDefault();
     if (!projection || !input.value.trim() || submitting) return;
@@ -1621,14 +1662,18 @@ export function initChat(): void {
     const text = input.value;
     const retry = retryRequests.get(conversationId);
     const requestId = retry?.text === text ? retry.requestId : newRequestId();
-    const selectedModel = models.find(model => modelValue(model.selection) === modelSelect.value)?.selection;
-    // `isConnected`, not just non-null: the control is removed when the agent
-    // does not declare the capability, and a detached select must not smuggle
-    // a stored variant onto the wire with nothing on screen saying so.
-    const selectedVariant = variantSelect?.isConnected && !variantSelect.hidden ? (variantSelect.value || undefined) : undefined;
-    const selectedMode = modeSelect?.value || undefined;
+    const configuration = displayedConfiguration();
+    const selectedModelRecord = declares("models") && configuration.model
+      ? models.find(model => sameModel(model.selection, configuration.model!))
+      : undefined;
+    const selectedModel = selectedModelRecord?.selection;
+    const selectedVariant = declares("variants") && configuration.variant && selectedModelRecord?.variants?.includes(configuration.variant)
+      ? configuration.variant
+      : undefined;
+    const selectedMode = declares("modes") && modes.some(mode => mode.name === configuration.mode) ? configuration.mode : undefined;
     const wasRunning = projection.status === "running" || projection.status === "sending";
     submitting = true;
+    setComposerError(null);
     // Optimistic send: the message shows immediately and the input clears;
     // on failure the draft is removed and the text restored.
     projection = addAcceptedDraft(projection, { requestId, messageId: `pending:${requestId}`, text });
@@ -1642,6 +1687,7 @@ export function initChat(): void {
     try {
       const accepted = await api.prompt(conversationId, requestId, text, selectedModel, selectedMode, selectedVariant);
       retryRequests.delete(conversationId);
+      stagedConfigurations.delete(conversationId);
       if (accepted.conversation) {
         conversations = conversations.map(conversation => conversation.id === accepted.conversation!.id ? accepted.conversation! : conversation);
         const option = Array.from(select.options).find(candidate => candidate.value === accepted.conversation!.id);
@@ -1649,13 +1695,17 @@ export function initChat(): void {
         if (chatTitle) chatTitle.textContent = displayConversationTitle(accepted.conversation);
       }
       if (projection?.conversationId === conversationId) {
+        projection = { ...projection, configuration: accepted.configuration };
         if (wasRunning) queued.add(`message:${accepted.messageId}`);
         projection = confirmAcceptedDraft(projection, { requestId, messageId: accepted.messageId, text });
+        renderConfiguration();
         scheduleRender(true);
       }
       noteComposer(accepted.delivery === "steer" ? "Steer accepted" : "Message accepted");
+      setComposerError(null);
     } catch (error) {
-      announce(messageOf(error), true);
+      const message = messageOf(error);
+      announce(message, true);
       retryRequests.set(conversationId, { text, requestId });
       if (projection?.conversationId === conversationId) {
         projection = removeAcceptedDraft(projection, requestId);
@@ -1674,6 +1724,7 @@ export function initChat(): void {
         save();
       }
       submitting = false;
+      setComposerError(`${message}. Draft restored.`);
       noteComposer("Message not accepted; draft restored");
       syncControls();
       return;
@@ -1681,15 +1732,6 @@ export function initChat(): void {
     submitting = false;
     syncControls();
   });
-  cancel.addEventListener("click", async () => {
-    if (!projection) return;
-    cancel.disabled = true;
-    noteComposer("Cancelling...");
-    try { await api.cancel(projection.conversationId, newRequestId()); }
-    catch (error) { announce(messageOf(error), true); }
-    finally { cancel.disabled = false; }
-  });
-
   const observer = typeof ResizeObserver === "function" ? new ResizeObserver(() => {
     if (anchor.isPinned()) timeline.scrollTop = anchor.afterMutation(geometry());
     else if (anchor.currentAnchor()) timeline.scrollTop = anchor.afterMutation(geometry());
@@ -1703,6 +1745,7 @@ export function initChat(): void {
     observer?.disconnect();
     surfaceObserver.disconnect();
     viewport.stop();
+    configurationPicker?.destroy();
     if (workingTimer !== null) clearInterval(workingTimer);
   }, { once: true });
 
@@ -1810,8 +1853,7 @@ export function initChat(): void {
       form.hidden = false;
       select.disabled = false;
       newButton.disabled = false;
-      renderModels();
-      renderModes();
+      renderConfiguration();
       announce(conversations.length ? "" : "No conversations yet. Create one to start.");
       renderChooser();
       bootstrapped = true;
@@ -1846,14 +1888,6 @@ function autosize(input: HTMLTextAreaElement): void {
   input.style.height = `${Math.min(input.scrollHeight, 192)}px`;
 }
 
-// The shape this key had before agent/mode/subagent were separated.
-type LegacyPresentation = { agent?: unknown; agents?: unknown };
-
-function stringOrLegacy(value: unknown, legacy: unknown): string | undefined {
-  if (typeof value === "string") return value;
-  return typeof legacy === "string" ? legacy : undefined;
-}
-
 function readPresentation(): Presentation {
   try {
     const raw = presentationLocalStorage()?.getItem(PRESENTATION_KEY);
@@ -1865,25 +1899,9 @@ function readPresentation(): Presentation {
       expanded: Array.isArray(value.expanded) ? value.expanded.filter(item => typeof item === "string") : [],
       anchors: value.anchors && typeof value.anchors === "object" ? value.anchors : {},
       workingSince: parseStoredTimestamps(value.workingSince),
-      model: parseStoredModel(value.model),
-      models: parseStoredModels(value.models),
-      // `agent`/`agents` are this key's pre-rename names. Dropping them would
-      // reset a saved mode to "default" while the agent's session still runs
-      // the old one — the picker would display one mode and run another, which
-      // is the exact lie applyMode() exists to prevent. Read once; the next
-      // save writes only the new names.
-      mode: stringOrLegacy(value.mode, (value as LegacyPresentation).agent),
-      modes: parseStoredNames(value.modes ?? (value as LegacyPresentation).agents),
-      variant: typeof value.variant === "string" ? value.variant : undefined,
-      variants: parseStoredNames(value.variants),
       dismissedSubagents: parseStoredIdLists(value.dismissedSubagents),
     };
   } catch { return structuredClone(EMPTY_PRESENTATION); }
-}
-
-function parseStoredNames(value: unknown): Record<string, string> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
 }
 
 function parseStoredIdLists(value: unknown): Record<string, string[]> {
@@ -1899,22 +1917,6 @@ function parseStoredTimestamps(value: unknown): Record<string, number> {
     typeof entry[1] === "number" && Number.isFinite(entry[1]) && entry[1] >= 0));
 }
 
-function parseStoredModel(value: unknown): ModelSelection | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const model = value as Partial<ModelSelection>;
-  return typeof model.providerId === "string" && typeof model.modelId === "string"
-    ? { providerId: model.providerId, modelId: model.modelId }
-    : undefined;
-}
-
-function parseStoredModels(value: unknown): Record<string, ModelSelection> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  const entries = Object.entries(value)
-    .map(([id, selection]) => [id, parseStoredModel(selection)] as const)
-    .filter((entry): entry is [string, ModelSelection] => entry[1] !== undefined);
-  return Object.fromEntries(entries);
-}
-
 /**
  * Token counts at a glance: `840`, `12.4k`, `1.2M`. The exact figure is always
  * one hover or one expansion away (the title attribute and the breakdown), so
@@ -1928,10 +1930,6 @@ function formatTokens(value: number): string {
 
 function modelValue(model: ModelSelection): string {
   return JSON.stringify([model.providerId, model.modelId]);
-}
-
-function modeLabel(name: string): string {
-  return `Mode: ${name.charAt(0).toUpperCase()}${name.slice(1)}`;
 }
 
 function sameModel(left: ModelSelection, right: ModelSelection): boolean {

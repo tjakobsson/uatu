@@ -72,6 +72,26 @@ describe("OpenCode classic message store", () => {
 });
 
 describe("OpenCode v2 normalization", () => {
+  test("enables custom question answers unless OpenCode explicitly disables them", () => {
+    const allowFreeForm = (custom?: boolean) => {
+      const update = normalizeProviderEvent({
+        id: `question-${String(custom)}`,
+        type: "question.v2.asked",
+        data: {
+          id: `q-${String(custom)}`,
+          sessionID: "s1",
+          questions: [{ question: "Choose", header: "Choice", options: [{ label: "A", description: "" }], ...(custom === undefined ? {} : { custom }) }],
+        },
+      }).updates[0];
+      if (update?.kind !== "upsert" || update.item.type !== "question") throw new Error("expected normalized question");
+      return update.item.questions[0]?.allowFreeForm;
+    };
+
+    expect(allowFreeForm()).toBe(true);
+    expect(allowFreeForm(true)).toBe(true);
+    expect(allowFreeForm(false)).toBe(false);
+  });
+
   test("normalizes recorded projected message shapes without exposing provider objects", () => {
     const messages = [
       { id: "u1", type: "user", time: { created: 1 }, text: "Implement chat", metadata: { private: true } },

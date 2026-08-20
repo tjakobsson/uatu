@@ -1,7 +1,7 @@
 import type { APIRequestContext, Page } from "@playwright/test";
 
-import type { ConversationItem } from "../../src/chat/types";
-import { openChatPanel } from "./chat-helpers";
+import type { ConversationConfiguration, ConversationItem } from "../../src/chat/types";
+import { chooseChatModel, installClipboardMock, openChatConfiguration, openChatPanel, readClipboardMock } from "./chat-helpers";
 import { expect, test } from "./fixtures";
 
 async function bootChat(page: Page, request: APIRequestContext): Promise<void> {
@@ -19,8 +19,14 @@ async function control(request: APIRequestContext, body: Record<string, unknown>
   return response.json();
 }
 
-async function seedAndOpen(page: Page, request: APIRequestContext, title: string, items: ConversationItem[]): Promise<string> {
-  const seeded = await control(request, { action: "seed", title, items }) as { conversation: { id: string } };
+async function seedAndOpen(
+  page: Page,
+  request: APIRequestContext,
+  title: string,
+  items: ConversationItem[],
+  configuration?: ConversationConfiguration,
+): Promise<string> {
+  const seeded = await control(request, { action: "seed", title, items, ...(configuration ? { configuration } : {}) }) as { conversation: { id: string } };
   await page.reload();
   await openChatPanel(page);
   await expect(page.locator("#chat-conversation-select")).toHaveValue(seeded.conversation.id);
@@ -144,6 +150,7 @@ test.describe("chat panels and navigation", () => {
       { id: "part:child", type: "assistant_message", createdAt: 1, markdown: "child findings" },
     ] }) as { conversation: { id: string } };
     const parent = await seedAndOpen(page, request, "Fan-out", [
+      { id: "part:parent", type: "assistant_message", createdAt: 1, markdown: "parent findings" },
       { id: "tool:agent1", type: "tool", createdAt: 2, name: "task", status: "completed", input: JSON.stringify({ description: "Review renderer", subagent_type: "explore", prompt: "go" }), childConversationId: child.conversation.id },
       { id: "tool:agent2", type: "tool", createdAt: 3, name: "task", status: "running", input: JSON.stringify({ description: "Audit styles", subagent_type: "general", prompt: "go" }) },
     ]);
@@ -151,6 +158,9 @@ test.describe("chat panels and navigation", () => {
     const track = page.locator("#chat-subagents");
     await expect(track).toBeVisible();
     await expect(track.locator("summary")).toContainText("1 of 2 subagents working · Audit styles");
+    await installClipboardMock(page);
+    await page.locator('[data-chat-item-id="part:parent"] [data-chat-copy="answer"]').click();
+    expect(await readClipboardMock(page)).toBe("parent findings");
 
     await track.locator("summary").click();
     await expect(track.locator("li")).toHaveCount(2);
@@ -162,6 +172,8 @@ test.describe("chat panels and navigation", () => {
     await expect(drilldown).toBeVisible();
     await expect(page.locator("#chat-drilldown-items")).toContainText("child findings");
     await expect(page.locator("#chat-drilldown-title")).toHaveText("explore · Review renderer");
+    await page.locator('#chat-drilldown-items [data-chat-item-id="part:child"] [data-chat-copy="answer"]').click();
+    expect(await readClipboardMock(page)).toBe("child findings");
     await expect(page.locator("#chat-conversation-select")).toHaveValue(parent);
     // The picker lists conversations you can start and resume; a subagent's
     // transcript is neither, so it is absent from it entirely.
@@ -304,8 +316,8 @@ test.describe("chat panels and navigation", () => {
   });
 
   // A conversation gave no sign of how full its context window was until it
-  // overflowed. The figure has to read without opening anything — opening it
-  // only adds the breakdown.
+  // overflowed. The battery percentage reads without opening anything;
+  // opening it adds the exact token figures.
   test("the context indicator reads the fill on open and expands to the breakdown", async ({ page, request }) => {
     // The shape normalization produces: a message's spend rides its own
     // `usage:<id>` carrier with empty markdown, never a text part — a message
@@ -317,7 +329,7 @@ test.describe("chat panels and navigation", () => {
       { id: "usage:m1", type: "assistant_message", createdAt: 2, markdown: "", usage: { input: 4_000, output: 100 } },
       { id: "part:a2", type: "assistant_message", createdAt: 3, markdown: "The latest answer." },
       { id: "usage:m2", type: "assistant_message", createdAt: 3, markdown: "", usage: { input: 30_000, output: 1_200, reasoning: 400, cacheRead: 20_000, cacheWrite: 2_000 } },
-    ]);
+    ], { model: { providerId: "anthropic", modelId: "claude-sonnet" } });
 
     // Populated from history, before any new turn — and from the newest
     // message's carrier, not the first one.
@@ -327,13 +339,23 @@ test.describe("chat panels and navigation", () => {
     await expect(page.locator("#chat-items .chat-assistant-message")).toHaveCount(2);
     // 30k + 20k cache read + 2k cache write = 52k of the fixture model's 200k.
     // Output is excluded: it is what came back, not what occupies the window.
-    await expect(page.locator("#chat-context-usage-label")).toHaveText("52k/200k · 26%");
+    await expect(page.locator("#chat-context-usage-label")).toHaveText("26%");
+    const meter = page.locator("#chat-context-usage-meter");
+    await expect(meter).toHaveCSS("border-radius", "50%");
+    const fillPresentation = await meter.locator(".chat-context-meter-fill").evaluate(element => ({
+      amount: (element as HTMLElement).style.getPropertyValue("--context-fill"),
+      start: (element as HTMLElement).style.getPropertyValue("--context-start"),
+      background: getComputedStyle(element).backgroundImage,
+    }));
+    expect(fillPresentation.amount).toBe("26%");
+    expect(fillPresentation.start).toBe("223.2deg");
+    expect(fillPresentation.background).toContain("conic-gradient");
 
     await indicator.locator("summary").click();
     const breakdown = page.locator("#chat-context-usage-breakdown");
     await expect(breakdown).toBeVisible();
-    await expect(breakdown.locator("dt")).toHaveText(["Input", "Cache read", "Cache write", "Reasoning", "Output"]);
-    await expect(breakdown.locator("dd")).toHaveText(["30,000", "20,000", "2,000", "400", "1,200"]);
+    await expect(breakdown.locator("dt")).toHaveText(["In context", "Limit", "Input", "Cache read", "Cache write", "Reasoning", "Output"]);
+    await expect(breakdown.locator("dd")).toHaveText(["52,000", "200,000", "30,000", "20,000", "2,000", "400", "1,200"]);
   });
 
   test("a conversation with no reported usage claims nothing", async ({ page, request }) => {
@@ -363,24 +385,25 @@ test.describe("chat panels and navigation", () => {
       { id: "usage:m1", type: "assistant_message", createdAt: 2, markdown: "", usage: { input: 30_000, cacheRead: 20_000 }, model: { providerId: "anthropic", modelId: "claude-sonnet" } },
     ]);
     const label = page.locator("#chat-context-usage-label");
-    await expect(label).toHaveText("50k/200k · 25%");
+    await expect(label).toHaveText("25%");
 
     // Selecting a future model does not reinterpret model A's existing usage
     // against model B's smaller window.
-    await page.locator("#chat-model-select").selectOption({ label: "OpenAI: GPT-5" });
-    await expect(label).toHaveText("50k/200k · 25%");
+    await chooseChatModel(page, "GPT-5");
+    await page.locator("#chat-configuration-done").click();
+    await expect(label).toHaveText("25%");
 
     // OpenCode announces the next assistant message with zeroed counters, then
     // restates that carrier once real input accounting is available.
     await control(request, { action: "item", conversationId, item: {
       id: "usage:m2", type: "assistant_message", createdAt: 3, markdown: "", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, model: { providerId: "openai", modelId: "gpt-5" },
     } });
-    await expect(label).toHaveText("50k/200k · 25%");
+    await expect(label).toHaveText("25%");
 
     await control(request, { action: "item", conversationId, item: {
       id: "usage:m2", type: "assistant_message", createdAt: 3, markdown: "", usage: { input: 60_000, output: 500, cacheRead: 10_000, cacheWrite: 0 }, model: { providerId: "openai", modelId: "gpt-5" },
     } });
-    await expect(label).toHaveText("70k/100k · 70%");
+    await expect(label).toHaveText("70%");
   });
 
   test("an agent that does not declare context reporting leaves no readout behind", async ({ page, request }) => {
@@ -391,7 +414,9 @@ test.describe("chat panels and navigation", () => {
     ]);
     // Absent, not empty — and what the agent does declare is unaffected.
     await expect(page.locator("#chat-context-usage")).toHaveCount(0);
-    await expect(page.locator("#chat-model-select")).toBeVisible();
+    await openChatConfiguration(page);
+    await expect(page.locator("#chat-configuration-models-section")).toBeVisible();
+    await page.locator("#chat-configuration-done").click();
     const track = page.locator("#chat-subagents");
     await track.locator("summary").click();
     await expect(track.locator("li")).toContainText("explore · Review renderer");

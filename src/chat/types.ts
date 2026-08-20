@@ -44,7 +44,8 @@ export type ChatCapability =
   | "variants"
   // The agent reports token usage per message, so Chat can say how full the
   // context window is and what each subagent cost.
-  | "context";
+  | "context"
+  | "conversation-rename";
 
 // What Chat is talking to. One agent per workspace today, but the surface
 // takes its name and its controls from this record rather than from fixed
@@ -75,6 +76,13 @@ export type ActivityStatus = "pending" | "running" | "completed" | "failed" | "c
 export type ModelSelection = {
   providerId: string;
   modelId: string;
+};
+
+export type ConversationConfiguration = {
+  model?: ModelSelection;
+  mode?: string;
+  // A variant always qualifies the selected model; it is invalid on its own.
+  variant?: string;
 };
 
 export type ChatModel = {
@@ -270,6 +278,7 @@ export type InteractionRequest = PermissionRequest | QuestionRequest;
 
 export type ConversationSnapshot = {
   conversation: ConversationSummary;
+  configuration: ConversationConfiguration;
   generation: string;
   cursor: string;
   items: ConversationItem[];
@@ -287,5 +296,7 @@ export type ChatEvent = ChatEventBase & (
   | { type: "item.remove"; itemId: string }
   | { type: "item.text_delta"; itemId: string; delta: string }
   | { type: "conversation.status"; status: ConversationStatus; message?: string }
+  | { type: "conversation.configuration"; configuration: ConversationConfiguration }
+  | { type: "conversation.updated"; conversation: ConversationSummary }
   | { type: "resync"; reason: "generation-changed" | "retention-gap" | "invalid-cursor" }
 );

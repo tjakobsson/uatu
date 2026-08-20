@@ -1,5 +1,5 @@
 import { boundedSet } from "../shared/bounded-map";
-import type { ConversationItem, ConversationStatus, StructuredQuestion, TokenUsage } from "./types";
+import type { ConversationConfiguration, ConversationItem, ConversationStatus, StructuredQuestion, TokenUsage } from "./types";
 
 type RecordValue = Record<string, unknown>;
 
@@ -126,6 +126,9 @@ export type NormalizedProviderEvent = {
   // A deleted assistant message must also leave any aggregate keyed by its
   // provider id; timeline removes alone cannot reach the adapter's tally.
   removedMessageId?: string;
+  configuration?: ConversationConfiguration;
+  // A model switch without a variant explicitly clears the previous variant.
+  replaceModel?: boolean;
 };
 
 // Event types recognized as deliberately carrying nothing for the timeline.
@@ -258,6 +261,8 @@ type KnownEvent = {
   assistantModel?: { messageId: string; model: string; createdAt: number };
   assistantUsage?: { messageId: string; usage: TokenUsage };
   removedMessageId?: string;
+  configuration?: ConversationConfiguration;
+  replaceModel?: boolean;
 };
 
 function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): KnownEvent | undefined {
@@ -268,6 +273,31 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
   const createdAt = timestamp(data.timestamp ?? data.timeCreated, Date.now());
 
   switch (event.type) {
+    case "session.next.agent.switched":
+      return { conversationId, updates: [], configuration: { mode: string(data.agent, "session agent") } };
+    case "session.next.model.switched": {
+      const model = record(data.model);
+      const providerId = string(model.providerID ?? model.providerId, "model provider id");
+      const modelId = string(model.id ?? model.modelID ?? model.modelId, "model id");
+      const reportedVariant = optionalString(model.variant);
+      const variant = reportedVariant === "default" ? undefined : reportedVariant;
+      return {
+        conversationId,
+        updates: [],
+        configuration: { model: { providerId, modelId }, ...(variant ? { variant } : {}) },
+        replaceModel: true,
+      };
+    }
+    case "session.updated": {
+      const info = record(data.info ?? data.session);
+      const configuration = configurationFromRecord(info);
+      return {
+        conversationId: conversationId ?? optionalString(info.id),
+        updates: [],
+        ...(configuration ? { configuration } : {}),
+        ...(configuration?.model ? { replaceModel: true } : {}),
+      };
+    }
     case "session.next.prompted":
     case "session.next.prompt.admitted": {
       const prompt = record(data.prompt);
@@ -589,6 +619,18 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
   }
 }
 
+function configurationFromRecord(value: RecordValue): ConversationConfiguration | undefined {
+  const modelRecord = record(value.model);
+  const providerId = optionalString(value.providerID ?? value.providerId) ?? optionalString(modelRecord.providerID ?? modelRecord.providerId);
+  const modelId = optionalString(value.modelID ?? value.modelId) ?? optionalString(modelRecord.id ?? modelRecord.modelID ?? modelRecord.modelId);
+  const model = providerId && modelId ? { providerId, modelId } : undefined;
+  const mode = optionalString(value.agent ?? value.mode);
+  const reportedVariant = model ? optionalString(value.variant ?? modelRecord.variant) : undefined;
+  const variant = reportedVariant === "default" ? undefined : reportedVariant;
+  if (!model && !mode) return undefined;
+  return { ...(model ? { model } : {}), ...(mode ? { mode } : {}), ...(variant ? { variant } : {}) };
+}
+
 /**
  * The `usage:<messageId>` carrier: what a message spent, as an item of its
  * own. Empty markdown is the signal that it carries no text — the renderer
@@ -769,7 +811,7 @@ export function normalizeQuestion(value: unknown): StructuredQuestion {
       return { label: text(item.label), description: text(item.description) };
     }),
     multiple: question.multiple === true,
-    allowFreeForm: question.custom === true,
+    allowFreeForm: question.custom !== false,
   };
 }
 

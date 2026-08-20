@@ -1,9 +1,152 @@
 import { describe, expect, test } from "bun:test";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2/client";
 
-import { SdkV2Provider, stableProviderId } from "./sdk-v2-provider";
+import { normalizePersistedConversationConfiguration, resolveNewConversationConfiguration, SdkV2Provider, stableProviderId } from "./sdk-v2-provider";
 
 describe("OpenCode v2 identity policy", () => {
+  test("declares durable conversation rename support", () => {
+    const provider = new SdkV2Provider({} as OpencodeClient, "/workspace");
+    expect(provider.describe().capabilities).toContain("conversation-rename");
+  });
+
+  test("normalizes native and compatibility persisted configuration without inventing fields", () => {
+    expect(normalizePersistedConversationConfiguration([{
+      model: { providerID: "openai", id: "gpt-5", variant: "high" },
+      agent: "build",
+    }], [])).toEqual({ model: { providerId: "openai", modelId: "gpt-5" }, mode: "build", variant: "high" });
+    expect(normalizePersistedConversationConfiguration([{
+      model: { providerID: "lmstudio", id: "qwen3.8", variant: "default" },
+      agent: "build",
+    }], [])).toEqual({ model: { providerId: "lmstudio", modelId: "qwen3.8" }, mode: "build" });
+
+    expect(normalizePersistedConversationConfiguration([], [{
+      info: {
+        id: "msg_user",
+        role: "user",
+        time: { created: 2 },
+        agent: "plan",
+        model: { providerID: "anthropic", modelID: "claude" },
+        variant: "max",
+      },
+      parts: [],
+    }])).toEqual({ model: { providerId: "anthropic", modelId: "claude" }, mode: "plan", variant: "max" });
+
+    expect(normalizePersistedConversationConfiguration([], [{
+      info: { id: "msg_assistant", role: "assistant", time: { created: 1 }, mode: "build", modelID: "claude", providerID: "anthropic" },
+      parts: [],
+    }])).toEqual({ model: { providerId: "anthropic", modelId: "claude" }, mode: "build" });
+    expect(normalizePersistedConversationConfiguration([], [{ info: { id: "msg", role: "user", time: { created: 1 }, variant: "high" }, parts: [] }])).toEqual({});
+  });
+
+  test("a fresh provider reconstructs configuration from persisted records", async () => {
+    const persisted = [{
+      info: {
+        id: "msg_user",
+        role: "user",
+        time: { created: 1 },
+        agent: "build",
+        model: { providerID: "openai", modelID: "gpt-5", variant: "high" },
+      },
+      parts: [],
+    }];
+    const client = {
+      session: {
+        get: async () => ({ data: { ...session("ses_restart"), metadata: { "uatu.transport": "compatibility" } } }),
+        messages: async () => ({ data: persisted }),
+      },
+      v2: {
+        session: {
+          get: async () => ({ error: { message: "missing" }, response: { status: 404 } }),
+          messages: async () => ({ data: { data: [], cursor: { next: null } } }),
+        },
+      },
+    } as unknown as OpencodeClient;
+
+    const restarted = new SdkV2Provider(client, "/workspace");
+    expect(await restarted.getConversationConfiguration("ses_restart")).toEqual({
+      model: { providerId: "openai", modelId: "gpt-5" },
+      mode: "build",
+      variant: "high",
+    });
+  });
+
+  test("configuration recovery reuses messages already loaded for history", async () => {
+    let messageReads = 0;
+    const client = {
+      session: {
+        get: async () => ({ data: { ...session("ses_reuse"), metadata: { "uatu.transport": "compatibility" } } }),
+        messages: async () => { messageReads += 1; return { data: [] }; },
+      },
+      v2: {
+        session: {
+          get: async () => ({ error: { message: "missing" }, response: { status: 404 } }),
+          messages: async () => { messageReads += 1; return { data: { data: [], cursor: { next: null } } }; },
+        },
+      },
+    } as unknown as OpencodeClient;
+    const provider = new SdkV2Provider(client, "/workspace");
+    const messages = [{
+      info: {
+        id: "msg_user",
+        role: "user",
+        time: { created: 1 },
+        agent: "plan",
+        model: { providerID: "openai", modelID: "gpt" },
+      },
+      parts: [],
+    }];
+
+    expect(await provider.getConversationConfiguration("ses_reuse", messages)).toEqual({
+      model: { providerId: "openai", modelId: "gpt" },
+      mode: "plan",
+    });
+    expect(messageReads).toBe(0);
+  });
+
+  test("resolves new conversations with OpenCode's durable cold-TUI policy", () => {
+    const agents = [
+      { name: "plan", mode: "primary" },
+      { name: "build", mode: "primary", model: { providerID: "anthropic", modelID: "claude" } },
+      { name: "explore", mode: "subagent", model: { providerID: "openai", modelID: "gpt" } },
+    ];
+    const providers = {
+      providers: [
+        { id: "openai", models: { gpt: { id: "gpt", variants: { high: {} } } } },
+        { id: "anthropic", models: { claude: { id: "claude", variants: { max: {} } } } },
+      ],
+      default: { openai: "gpt", anthropic: "claude" },
+    };
+    const preferences = {
+      recent: [{ providerID: "openai", modelID: "gpt" }],
+      variant: { "anthropic/claude": "max", "openai/gpt": "default" },
+    };
+
+    // The built-in default is Build, and its configured model outranks config
+    // and recency. A currently advertised durable variant follows the model.
+    expect(resolveNewConversationConfiguration(
+      { model: "openai/gpt" },
+      agents,
+      providers,
+      preferences,
+    )).toEqual({ model: { providerId: "anthropic", modelId: "claude" }, mode: "build", variant: "max" });
+
+    // A configured default agent wins. Without an agent model, workspace
+    // config wins recency, while the TUI's "default" sentinel stays absent.
+    expect(resolveNewConversationConfiguration(
+      { default_agent: "plan", model: "openai/gpt" },
+      agents,
+      providers,
+      preferences,
+    )).toEqual({ model: { providerId: "openai", modelId: "gpt" }, mode: "plan" });
+
+    // With no configured model, the most recently selected valid model wins.
+    expect(resolveNewConversationConfiguration(
+      { default_agent: "plan" },
+      agents,
+      providers,
+      { recent: [{ providerID: "anthropic", modelID: "claude" }], variant: { "anthropic/claude": "stale" } },
+    )).toEqual({ model: { providerId: "anthropic", modelId: "claude" }, mode: "plan" });
+  });
   test("lists models from every authenticated provider", async () => {
     const client = {
       provider: {
@@ -266,8 +409,17 @@ describe("OpenCode v2 identity policy", () => {
     } as unknown as OpencodeClient;
     const provider = new SdkV2Provider(client, "/workspace");
 
-    expect((await provider.createSession("client-uuid")).id).toBe("ses_provider");
-    expect(createInput).toEqual({ directory: "/workspace", metadata: { "uatu.transport": "compatibility" } });
+    expect((await provider.createSession("client-uuid", {
+      model: { providerId: "openai", modelId: "gpt-5.6-sol" },
+      mode: "plan",
+      variant: "high",
+    })).id).toBe("ses_provider");
+    expect(createInput).toEqual({
+      directory: "/workspace",
+      metadata: { "uatu.transport": "compatibility" },
+      agent: "plan",
+      model: { providerID: "openai", id: "gpt-5.6-sol", variant: "high" },
+    });
 
     const model = { providerId: "openai", modelId: "gpt-5.6-sol" };
     const first = await provider.prompt("ses_provider", { id: "client-uuid", text: "hello", delivery: "queue", model });
@@ -389,6 +541,21 @@ describe("OpenCode v2 identity policy", () => {
       { requestId: "perm_edit", conversationId: "ses_a", action: "edit", resources: ["src/app.ts"], diff: "@@ -1 +1 @@\n-old\n+new" },
       { requestId: "perm_cmd", conversationId: "ses_a", action: "shell", resources: ["bun test"] },
     ]);
+  });
+
+  test("pending questions enable custom answers unless explicitly disabled", async () => {
+    const client = {
+      question: {
+        list: async () => ({ data: [
+          { id: "que_omitted", sessionID: "ses_a", questions: [{ question: "Omitted", header: "Choice", options: [] }] },
+          { id: "que_true", sessionID: "ses_a", questions: [{ question: "True", header: "Choice", options: [], custom: true }] },
+          { id: "que_false", sessionID: "ses_a", questions: [{ question: "False", header: "Choice", options: [], custom: false }] },
+        ] }),
+      },
+    } as unknown as OpencodeClient;
+
+    const pending = await new SdkV2Provider(client, "/workspace").listQuestions();
+    expect(pending.map(request => request.questions[0]?.allowFreeForm)).toEqual([true, true, false]);
   });
 
   test("inherits the compatibility store across the inventory even when children list first", async () => {
@@ -524,6 +691,7 @@ describe("history across both OpenCode message stores", () => {
     const provider = new SdkV2Provider(client([{ data: [] }], legacy), "/workspace");
     const newest = await provider.listMessages("ses_legacy", { limit: 2 });
     expect(newest.items.map(item => (item as { info: { id: string } }).info.id)).toEqual(["msg_2", "msg_3"]);
+    expect(newest.configurationItems?.map(item => (item as { info: { id: string } }).info.id)).toEqual(["msg_1", "msg_2", "msg_3"]);
     expect(newest.nextCursor).toBe("1");
 
     const older = await provider.listMessages("ses_legacy", { limit: 2, cursor: newest.nextCursor });

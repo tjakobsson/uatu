@@ -67,7 +67,7 @@ export class TimelineRenderer {
     const visible = projection.items.filter(item => !(item.type === "assistant_message" && item.markdown === ""));
 
     const nodes = new Map<string, HTMLElement>();
-    for (const item of visible) {
+    for (const [visibleIndex, item] of visible.entries()) {
       const active = activeRequests.has(item.id);
       const todo = todoLabels.get(item.id);
       const isQueued = queued.has(item.id);
@@ -76,13 +76,20 @@ export class TimelineRenderer {
       // cached node is only reused when it would render identically.
       const foreign = (item.type === "permission" || item.type === "question")
         && item.conversationId !== undefined && item.conversationId !== projection.conversationId;
-      const variant = [todo?.label ?? "", todo?.task ?? "", String(isQueued), duration === undefined ? "" : String(duration), String(foreign), String(allowSubagents)].join("\u0001");
       const entry = this.entries.get(item.id);
+      // Completion is monotonic for an item. A new turn makes the conversation
+      // active again, but must not revoke copy actions from an answer that was
+      // already observed in a terminal state. A steer never reaches that state,
+      // so its still-streaming assistant remains incomplete.
+      const completedAssistant = item.type === "assistant_message"
+        && (entry?.node.dataset.complete === "true" || assistantMessageComplete(visible, visibleIndex, projection.status));
+      const variant = [todo?.label ?? "", todo?.task ?? "", String(isQueued), duration === undefined ? "" : String(duration), String(foreign), String(allowSubagents), String(completedAssistant)].join("\u0001");
       if (entry && entry.item === item && entry.active === active && entry.variant === variant) {
         nodes.set(item.id, entry.node);
         continue;
       }
-      if (entry && entry.active === active && entry.variant === variant && patchInPlace(entry, item)) {
+      if (entry && entry.active === active && patchInPlace(entry, item, completedAssistant)) {
+        entry.variant = variant;
         nodes.set(item.id, entry.node);
         dirty.push(entry.node);
         continue;
@@ -115,7 +122,8 @@ export class TimelineRenderer {
       // auto-open rule for the rest of the run, so a tool that keeps talking
       // cannot reopen a row the reader shut.
       const readerClosed = entry?.node.hasAttribute(READER_CLOSED) ?? false;
-      const node = buildNode(renderItem(item, open, active, todo, isQueued, duration, foreign, readerClosed, allowSubagents));
+      const node = buildNode(renderItem(item, open, active, todo, isQueued, duration, foreign, readerClosed, allowSubagents, completedAssistant));
+      if (completedAssistant) decorateAssistantCopyActions(node);
       entry?.node.remove();
       this.entries.set(item.id, { node, item, active, variant });
       nodes.set(item.id, node);
@@ -372,11 +380,16 @@ function formatWorked(ms: number): string {
 }
 
 /** Streaming-friendly updates that avoid rebuilding the node. */
-function patchInPlace(entry: RenderedEntry, item: ConversationItem): boolean {
+function patchInPlace(entry: RenderedEntry, item: ConversationItem, completedAssistant = false): boolean {
   const current = entry.item;
   if (current.type !== item.type) return false;
   if (item.type === "assistant_message" && current.type === "assistant_message") {
-    if (current.markdown !== item.markdown) entry.node.innerHTML = renderChatMarkdown(item.markdown);
+    const content = entry.node.querySelector<HTMLElement>(".chat-assistant-content");
+    if (!content) return false;
+    if (current.markdown !== item.markdown) content.innerHTML = renderChatMarkdown(item.markdown);
+    entry.node.dataset.complete = String(completedAssistant);
+    if (completedAssistant) decorateAssistantCopyActions(entry.node);
+    else entry.node.querySelectorAll("[data-chat-copy]").forEach(control => control.remove());
     entry.item = item;
     return true;
   }
@@ -418,13 +431,13 @@ function renderDraft(draft: AcceptedDraft): string {
   return `<article class="chat-item chat-user-message is-pending" data-chat-item-id="draft-${escapeHtmlAttribute(draft.requestId)}"><p>${escapeHtml(draft.text)}</p><small>${label}</small></article>`;
 }
 
-export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, queued = false, durationMs?: number, foreign = false, readerClosed = false, allowSubagents = true): string {
+export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, queued = false, durationMs?: number, foreign = false, readerClosed = false, allowSubagents = true, completedAssistant = false): string {
   const id = escapeHtmlAttribute(item.id);
   const stamp = timestampAttribute(item.createdAt);
   // A message sent mid-turn is accepted but not yet acted on. Without a mark
   // it looks identical to one the agent has already read.
   if (item.type === "user_message") return `<article class="chat-item chat-user-message${queued ? " is-queued" : ""}" data-chat-item-id="${id}"${stamp}><div>${escapeHtml(item.text)}</div>${queued ? `<small class="chat-queued-tag">Queued — the agent is still working</small>` : ""}</article>`;
-  if (item.type === "assistant_message") return `<article class="chat-item chat-assistant-message markdown-body" data-chat-item-id="${id}"${stamp}>${renderChatMarkdown(item.markdown)}</article>`;
+  if (item.type === "assistant_message") return `<article class="chat-item chat-assistant-message" data-chat-item-id="${id}" data-complete="${completedAssistant}"${stamp}><div class="chat-assistant-content markdown-body">${renderChatMarkdown(item.markdown)}</div></article>`;
   if (item.type === "turn_status") {
     const worked = durationMs === undefined ? "" : formatWorked(durationMs);
     return `<footer class="chat-item chat-turn-status is-${item.status}" data-chat-item-id="${id}"${stamp} role="status">${escapeHtml(statusLabel(item.status))}${item.message ? `: ${escapeHtml(item.message)}` : ""}${worked ? ` <span class="chat-turn-worked">· worked ${worked}</span>` : ""}</footer>`;
@@ -445,6 +458,48 @@ export function renderItem(item: ConversationItem, open: boolean, activeRequest:
   // Reasoning has no streamed output to auto-open for; it opens only when the
   // reader says so.
   return activityShell(id, item.status, reasoningLabel(item), undefined, `<pre>${escapeHtml(item.text)}</pre>`, open, false, readerClosed, stamp);
+}
+
+function assistantMessageComplete(items: readonly ConversationItem[], index: number, status: ConversationStatus): boolean {
+  const item = items[index];
+  if (!item || item.type !== "assistant_message") return false;
+  if (item.completedAt !== undefined) return true;
+  if (items.slice(index + 1).some(candidate => candidate.type === "turn_status")) return true;
+  return status !== "sending" && status !== "running";
+}
+
+export function decorateAssistantCopyActions(container: HTMLElement): void {
+  const article = container.matches(".chat-assistant-message")
+    ? container
+    : container.querySelector<HTMLElement>(".chat-assistant-message");
+  if (!article || article.dataset.complete !== "true") return;
+  const content = article.querySelector<HTMLElement>(".chat-assistant-content");
+  if (!content) return;
+  if (!article.querySelector(":scope > .chat-answer-actions > [data-chat-copy='answer']")) {
+    let actions = article.querySelector<HTMLElement>(":scope > .chat-answer-actions");
+    if (!actions) {
+      actions = document.createElement("div");
+      actions.className = "chat-answer-actions";
+      article.append(actions);
+    }
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "chat-copy-action chat-answer-copy";
+    copy.dataset.chatCopy = "answer";
+    copy.setAttribute("aria-label", "Copy completed answer");
+    copy.title = "Copy completed answer";
+    actions.append(copy);
+  }
+  for (const pre of content.querySelectorAll<HTMLPreElement>("pre")) {
+    if (!pre.querySelector(":scope > code") || pre.querySelector(":scope > [data-chat-copy='code']")) continue;
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "chat-copy-action chat-code-copy";
+    copy.dataset.chatCopy = "code";
+    copy.setAttribute("aria-label", "Copy code block");
+    copy.title = "Copy code block";
+    pre.append(copy);
+  }
 }
 
 // How much of a tool's output to show before it becomes a show-more (finished)
@@ -681,7 +736,15 @@ function renderQuestion(item: QuestionRequest, open: boolean, active: boolean, f
   // A checkbox and a radio read almost identically inside a styled row, so the
   // legend says which it is — otherwise there is nothing telling you more than
   // one answer is allowed.
-  const questions = item.questions.map((question, index) => `<fieldset class="chat-question-panel" data-question-panel="${index}"${index === 0 ? "" : " hidden"}><legend${stepped ? ` class="sr-only"` : ""}>${escapeHtml(question.header)}</legend><p>${escapeHtml(question.prompt)}${question.multiple ? ` <span class="chat-question-hint">choose one or more</span>` : ""}</p>${question.options.map(option => `<label class="chat-question-option"><input type="${question.multiple ? "checkbox" : "radio"}" name="q-${index}" value="${escapeHtmlAttribute(option.label)}"><span class="chat-question-option-text"><span class="chat-question-option-label">${escapeHtml(option.label)}</span>${option.description ? `<small>${escapeHtml(option.description)}</small>` : ""}</span></label>`).join("")}${question.allowFreeForm ? `<label class="chat-question-freeform">Other <input name="q-${index}" type="text"></label>` : ""}</fieldset>`).join("");
+  const questions = item.questions.map((question, index) => {
+    const type = question.multiple ? "checkbox" : "radio";
+    const customInputId = `question-${item.id}-${index}-custom`;
+    const options = question.options.map(option => `<label class="chat-question-option"><input type="${type}" name="q-${index}" value="${escapeHtmlAttribute(option.label)}" data-question-provider-option><span class="chat-question-option-text"><span class="chat-question-option-label">${escapeHtml(option.label)}</span>${option.description ? `<small>${escapeHtml(option.description)}</small>` : ""}</span></label>`).join("");
+    const custom = question.allowFreeForm
+      ? `<label class="chat-question-option chat-question-custom-option"><input type="${type}" name="${question.multiple ? `q-${index}-custom-choice` : `q-${index}`}" data-question-custom-toggle aria-controls="${escapeHtmlAttribute(customInputId)}" aria-expanded="false"><span class="chat-question-option-text"><span class="chat-question-option-label">Type your own answer</span></span></label><label class="chat-question-custom-editor" data-question-custom-editor for="${escapeHtmlAttribute(customInputId)}" hidden><span class="sr-only">Type your own answer</span><input id="${escapeHtmlAttribute(customInputId)}" name="q-${index}-custom-text" type="text" data-question-custom-input autocomplete="off"></label>`
+      : "";
+    return `<fieldset class="chat-question-panel" data-question-panel="${index}"${index === 0 ? "" : " hidden"}><legend${stepped ? ` class="sr-only"` : ""}>${escapeHtml(question.header)}</legend><p>${escapeHtml(question.prompt)}${question.multiple ? ` <span class="chat-question-hint">choose one or more</span>` : ""}</p>${options}${custom}</fieldset>`;
+  }).join("");
   // Same receding as a permission: a resolved question carries its outcome in
   // the summary and drops the answered form. Its prompts stay in the collapsed
   // body so what was asked remains reachable.

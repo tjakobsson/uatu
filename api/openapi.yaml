@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: UatuCode public API
-  version: 1.5.0-experimental
+  version: 1.6.0-experimental
   license: { name: MIT, identifier: MIT }
-  summary: Hub revision 1 and workspace revision 5
+  summary: Hub revision 1 and workspace revision 6
   description: |
     Canonical HTTP contract for the UatuCode Hub and workspace APIs. Workspace
     operations use their externally visible Hub proxy paths. Streaming message
@@ -15,7 +15,7 @@ info:
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
     hubApiRevision: 1
-    workspaceApiRevision: 5
+    workspaceApiRevision: 6
 servers:
   - url: https://{hubHost}
     variables:
@@ -79,8 +79,8 @@ paths:
               example:
                 version: 0.5.1 (abcdef0)
                 hubApiRevision: 1
-                workspaceApiRevision: 5
-                workspaces: [{ id: uatu, path: /src/uatu, backend: local, running: true, workspaceApiRevision: 5, shells: [{ attached: false, label: zsh }] }]
+                workspaceApiRevision: 6
+                workspaces: [{ id: uatu, path: /src/uatu, backend: local, running: true, workspaceApiRevision: 6, shells: [{ attached: false, label: zsh }] }]
         '401': { $ref: '#/components/responses/Error' }
   /api/hub/browse:
     get:
@@ -272,7 +272,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/WorkspaceState' }
-              example: { workspaceApiRevision: 5, roots: [], repositories: [], compareTarget: base, initialFollow: true, defaultDocumentId: null, changedId: null, generatedAt: 0, build: { version: 0.5.1, branch: main, commitSha: abcdef, commitShort: abcdef, release: false, identifier: 0.5.1, bundledWebRevision: 1 }, scope: { kind: folder }, unscopedFingerprint: 3f2a, terminal: enabled }
+              example: { workspaceApiRevision: 6, roots: [], repositories: [], compareTarget: base, initialFollow: true, defaultDocumentId: null, changedId: null, generatedAt: 0, build: { version: 0.5.1, branch: main, commitSha: abcdef, commitShort: abcdef, release: false, identifier: 0.5.1, bundledWebRevision: 1 }, scope: { kind: folder }, unscopedFingerprint: 3f2a, terminal: enabled }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
@@ -455,6 +455,34 @@ paths:
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
+        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
+    patch:
+      operationId: workspaceRenameChatConversation
+      tags: [Chat]
+      summary: Rename a resumable conversation idempotently
+      description: Requires the agent to declare the `conversation-rename` capability. The server trims the title before validating and persisting it; the trimmed title must be non-empty and at most 200 UTF-8 bytes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConversationRenameRequest' }
+            example: { requestId: 550e8400-e29b-41d4-a716-446655440000, title: API contract follow-up }
+      responses:
+        '200':
+          description: Renamed conversation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConversationRenameResult' }
+              example: { conversation: { id: conversation-1, title: API contract follow-up, createdAt: 1724100000000, updatedAt: 1724100300000, status: idle } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '413': { $ref: '#/components/responses/Error' }
+        '415': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
         '502': { $ref: '#/components/responses/SessionUnreachable' }
         '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
@@ -866,7 +894,7 @@ components:
     ModelSelection: { type: object, required: [providerId, modelId], properties: { providerId: { type: string, minLength: 1, maxLength: 512 }, modelId: { type: string, minLength: 1, maxLength: 512 } }, additionalProperties: false }
     ChatModel: { type: object, required: [selection, provider, name], properties: { selection: { $ref: '#/components/schemas/ModelSelection' }, provider: { type: string, minLength: 1 }, name: { type: string, minLength: 1 }, variants: { type: array, items: { type: string, minLength: 1 }, description: "Reasoning variants the model advertises (e.g. high, xhigh). Absent when it offers none." }, contextLimit: { type: integer, minimum: 1, description: "The model's context-window size in tokens, when reported." } }, additionalProperties: false }
     ChatModelList: { type: object, required: [models], properties: { models: { type: array, items: { $ref: '#/components/schemas/ChatModel' } } }, additionalProperties: false }
-    ChatAgent: { type: object, required: [id, name, capabilities], description: "The agent Chat is talking to. Capabilities are declared positively: a capability is listed or the agent does not have it.", properties: { id: { type: string, minLength: 1, maxLength: 512 }, name: { type: string, minLength: 1, maxLength: 512 }, capabilities: { type: array, items: { type: string, minLength: 1, description: "Recognized today: modes, models, commands, questions, permissions, subagents, variants, context. Open on purpose — a later revision adds capabilities without a breaking change, and a client MUST ignore a name it does not recognize rather than reject the agent." } } }, additionalProperties: false }
+    ChatAgent: { type: object, required: [id, name, capabilities], description: "The agent Chat is talking to. Capabilities are declared positively: a capability is listed or the agent does not have it. `conversation-rename` means the conversation title can be persisted through the rename operation.", properties: { id: { type: string, minLength: 1, maxLength: 512 }, name: { type: string, minLength: 1, maxLength: 512 }, capabilities: { type: array, items: { type: string, minLength: 1, description: "Recognized today: modes, models, commands, questions, permissions, subagents, variants, context, conversation-rename. Open on purpose — a later revision adds capabilities without a breaking change, and a client MUST ignore a name it does not recognize rather than reject the agent." } } }, additionalProperties: false }
     ChatMode: { type: object, required: [name, description], properties: { name: { type: string, minLength: 1, maxLength: 512 }, description: { type: string } }, additionalProperties: false }
     ChatModeList: { type: object, required: [modes], properties: { modes: { type: array, items: { $ref: '#/components/schemas/ChatMode' } } }, additionalProperties: false }
     ChatCommand: { type: object, required: [name, description, argumentHint, kind], properties: { name: { type: string, minLength: 1, maxLength: 512, pattern: '^[^\s/]+$' }, description: { type: string }, argumentHint: { type: string }, kind: { enum: [command, skill] } }, additionalProperties: false }
@@ -896,12 +924,29 @@ components:
     QuestionOutcome:
       oneOf:
         - { type: object, required: [kind], properties: { kind: { const: rejected } }, additionalProperties: false }
-        - { type: object, required: [kind, answers], properties: { kind: { const: answered }, answers: { type: array, maxItems: 32, items: { type: array, maxItems: 32, items: { type: string, minLength: 1, maxLength: 4096 } } } }, additionalProperties: false }
+        - { type: object, required: [kind, answers], properties: { kind: { const: answered }, answers: { type: array, maxItems: 32, description: "One answer array per question, in the same order as QuestionItem.questions. Offered option labels and, when allowFreeForm is true, ordinary custom strings are sent directly in each array.", items: { type: array, minItems: 1, maxItems: 32, items: { type: string, minLength: 1, maxLength: 4096, pattern: '\S' } } } }, additionalProperties: false }
     QuestionItem: { type: object, required: [id, type, createdAt, requestId, questions, status], properties: { id: { type: string }, type: { const: question }, createdAt: { type: number }, requestId: { type: string }, conversationId: { type: string, minLength: 1, maxLength: 512, description: "Conversation that owns this request. See PermissionItem.conversationId." }, questions: { type: array, items: { $ref: '#/components/schemas/StructuredQuestion' } }, status: { enum: [pending, resolved] }, outcome: { $ref: '#/components/schemas/QuestionOutcome' } }, additionalProperties: false }
-    ConversationSnapshot: { type: object, required: [conversation, generation, cursor, items], properties: { conversation: { $ref: '#/components/schemas/ConversationSummary' }, generation: { type: string }, cursor: { type: string }, items: { type: array, items: { $ref: '#/components/schemas/ConversationItem' } }, olderCursor: { type: string } }, additionalProperties: false }
+    ConversationConfiguration:
+      type: object
+      description: Effective configuration reported for this conversation. An absent field is unknown or agent-controlled, not an invitation to select the first offered value.
+      properties:
+        model: { $ref: '#/components/schemas/ModelSelection' }
+        mode: { type: string, minLength: 1, maxLength: 512 }
+        variant: { type: string, minLength: 1, maxLength: 512, description: "Reasoning variant of `model`. Invalid without `model` in the same configuration record." }
+      dependentRequired: { variant: [model] }
+      additionalProperties: false
+    ConversationSnapshot: { type: object, required: [conversation, configuration, generation, cursor, items], properties: { conversation: { $ref: '#/components/schemas/ConversationSummary' }, configuration: { $ref: '#/components/schemas/ConversationConfiguration' }, generation: { type: string }, cursor: { type: string }, items: { type: array, items: { $ref: '#/components/schemas/ConversationItem' } }, olderCursor: { type: string } }, additionalProperties: false }
     ChatMutationRequest: { type: object, required: [requestId], properties: { requestId: { type: string, minLength: 1, maxLength: 512 } }, additionalProperties: false }
+    ConversationRenameRequest:
+      type: object
+      required: [requestId, title]
+      properties:
+        requestId: { type: string, minLength: 1, maxLength: 512 }
+        title: { type: string, minLength: 1, maxLength: 200, pattern: '\S', x-uatu-maxUtf8Bytes: 200, description: "Replacement title. The server trims leading and trailing whitespace, then requires a non-empty value of at most 200 UTF-8 bytes. The byte limit can be stricter than maxLength for non-ASCII text." }
+      additionalProperties: false
+    ConversationRenameResult: { type: object, required: [conversation], properties: { conversation: { $ref: '#/components/schemas/ConversationSummary' } }, additionalProperties: false }
     ChatPromptRequest: { type: object, required: [requestId, text], properties: { requestId: { type: string, minLength: 1, maxLength: 512 }, text: { type: string, minLength: 1, maxLength: 65536 }, model: { $ref: '#/components/schemas/ModelSelection' }, mode: { type: string, minLength: 1, maxLength: 512 }, variant: { type: string, minLength: 1, maxLength: 512, description: "How the selected model should reason (a variant it advertises). Requires `model` in the same request: a variant names an effort OF a model, and pairing them keeps validation independent of server-side memory of the conversation's current model." } }, dependentRequired: { variant: [model] }, additionalProperties: false }
-    ChatPromptAccepted: { type: object, required: [messageId, delivery], properties: { messageId: { type: string }, delivery: { enum: [steer, queue] }, conversation: { $ref: '#/components/schemas/ConversationSummary' } }, additionalProperties: false }
+    ChatPromptAccepted: { type: object, required: [messageId, delivery, configuration], properties: { messageId: { type: string }, delivery: { enum: [steer, queue] }, configuration: { $ref: '#/components/schemas/ConversationConfiguration' }, conversation: { $ref: '#/components/schemas/ConversationSummary' } }, additionalProperties: false }
     ChatCancelResult: { type: object, required: [cancelled], properties: { cancelled: { const: true } }, additionalProperties: false }
     PermissionResponseRequest: { type: object, required: [requestId, outcome], properties: { requestId: { type: string, minLength: 1, maxLength: 512 }, outcome: { enum: [approved-once, approved-session, rejected] } }, additionalProperties: false }
     PermissionResult: { type: object, required: [outcome], properties: { outcome: { enum: [approved-once, approved-session, rejected] } }, additionalProperties: false }
@@ -913,6 +958,8 @@ components:
         - { type: object, required: [generation, sequence, conversationId, type, itemId], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: item.remove }, itemId: { type: string } }, additionalProperties: false }
         - { type: object, required: [generation, sequence, conversationId, type, itemId, delta], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: item.text_delta }, itemId: { type: string }, delta: { type: string, minLength: 1 } }, additionalProperties: false }
         - { type: object, required: [generation, sequence, conversationId, type, status], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: conversation.status }, status: { $ref: '#/components/schemas/ConversationStatus' }, message: { type: string } }, additionalProperties: false }
+        - { type: object, required: [generation, sequence, conversationId, type, configuration], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: conversation.configuration }, configuration: { $ref: '#/components/schemas/ConversationConfiguration' } }, additionalProperties: false }
+        - { type: object, required: [generation, sequence, conversationId, type, conversation], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: conversation.updated }, conversation: { allOf: [{ $ref: '#/components/schemas/ConversationSummary' }], description: "Updated summary for this conversation. Its id is the event conversationId." } }, additionalProperties: false }
         - { $ref: '#/components/schemas/ChatResyncEvent' }
     ChatResyncEvent: { type: object, required: [generation, sequence, conversationId, type, reason], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: resync }, reason: { enum: [generation-changed, retention-gap, invalid-cursor] } }, additionalProperties: false }
     DocumentMeta:

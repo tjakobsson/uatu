@@ -35,7 +35,7 @@ import {
 import { terminalBackendAvailable } from "../../src/terminal/backend";
 import { createTerminalServer } from "../../src/terminal/server";
 import { FakeE2EChatService } from "./chat-service";
-import type { ChatCapability, ConversationItem, ConversationStatus } from "../../src/chat/types";
+import type { ChatCapability, ChatModel, ConversationConfiguration, ConversationItem, ConversationStatus } from "../../src/chat/types";
 
 // One-shot artificial latency for GET /api/terminal/sessions, armed by tests
 // that need two inventory reads to complete out of order (the switcher's
@@ -161,12 +161,15 @@ async function handleE2EChat(request: Request): Promise<Response> {
     itemId?: string;
     delta?: string;
     status?: ConversationStatus;
+    message?: string;
     capabilities?: ChatCapability[];
+    models?: ChatModel[];
     child?: boolean;
+    configuration?: ConversationConfiguration;
   };
   switch (body.action) {
     case "seed":
-      return Response.json(chatService.seed(body.title ?? "Fixture conversation", body.items ?? [], body.older ?? [], body.child ?? false));
+      return Response.json(chatService.seed(body.title ?? "Fixture conversation", body.items ?? [], body.older ?? [], body.child ?? false, body.configuration));
     case "item":
       if (body.conversationId && body.item) return Response.json(chatService.publishItem(body.conversationId, body.item));
       break;
@@ -177,15 +180,21 @@ async function handleE2EChat(request: Request): Promise<Response> {
       break;
     case "status":
       if (body.conversationId && body.status) {
-        chatService.publishStatus(body.conversationId, body.status);
+        chatService.publishStatus(body.conversationId, body.status, body.message);
         return Response.json({ ok: true });
       }
       break;
+    case "configuration":
+      if (body.conversationId && body.configuration) return Response.json(chatService.publishConfiguration(body.conversationId, body.configuration));
+      break;
+    case "nextConversationConfiguration":
+      chatService.configureNextConversation(body.configuration ?? {});
+      return Response.json({ ok: true });
     case "disconnect":
       chatService.disconnect();
       return Response.json({ ok: true });
     case "stats":
-      return Response.json({ statusCalls: chatService.statusCalls, promptAttempts: chatService.promptAttempts, promptModes: chatService.promptModes, promptVariants: chatService.promptVariants });
+      return Response.json({ statusCalls: chatService.statusCalls, promptAttempts: chatService.promptAttempts, promptModes: chatService.promptModes, promptVariants: chatService.promptVariants, promptConfigurations: chatService.promptConfigurations });
     case "failPrompt":
       chatService.failPrompt();
       return Response.json({ ok: true });
@@ -201,8 +210,14 @@ async function handleE2EChat(request: Request): Promise<Response> {
     case "declareOnly":
       chatService.declareOnly(body.capabilities ?? []);
       return Response.json({ ok: true });
+    case "models":
+      chatService.setModels(body.models ?? []);
+      return Response.json({ ok: true });
     case "resync":
       chatService.rotateGeneration();
+      return Response.json({ ok: true });
+    case "restart":
+      chatService.restart();
       return Response.json({ ok: true });
   }
   return Response.json({ error: "invalid chat control" }, { status: 400 });

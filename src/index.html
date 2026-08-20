@@ -691,7 +691,12 @@
             <div class="chat-conversation-controls">
               <label class="sr-only" for="chat-conversation-select">Conversation</label>
               <select id="chat-conversation-select" aria-label="Conversation"></select>
-              <button id="chat-new-conversation" class="chat-secondary-button" type="button">New</button>
+              <button id="chat-rename-conversation" class="icon-button chat-rename-button" type="button" aria-label="Rename conversation" title="Rename conversation" hidden>
+                <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+                  <path d="M3 11.5V13h1.5l7.8-7.8-1.5-1.5L3 11.5Zm8.9-8.9 1.5 1.5.7-.7a1.05 1.05 0 0 0-1.5-1.5l-.7.7Z" fill="currentColor"/>
+                </svg>
+              </button>
+              <button id="chat-new-conversation" class="chat-secondary-button" type="button" aria-label="New conversation">New conversation</button>
               <button id="chat-collapse" class="icon-button chat-collapse-button" type="button" aria-label="Collapse chat panel" title="Collapse chat panel">
                 <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
                   <path
@@ -706,6 +711,12 @@
               </button>
             </div>
           </header>
+          <form id="chat-rename-form" class="chat-rename-form" hidden>
+            <label for="chat-rename-title">Conversation title</label>
+            <input id="chat-rename-title" type="text" maxlength="200" autocomplete="off" />
+            <button class="chat-primary-button" type="submit">Rename</button>
+            <button id="chat-rename-cancel" class="chat-secondary-button" type="button">Cancel</button>
+          </form>
           <div id="chat-state" class="chat-state" role="status" aria-live="polite">Loading chat…</div>
           <div id="chat-find-slot" class="find-slot"></div>
           <!-- The timeline and the subagent drill-down share one box: the
@@ -719,7 +730,7 @@
               <!-- Liveness while the agent has the prompt but nothing has come
                    back yet — a local model loading its weights holds this
                    state for a long while with nothing else saying so. -->
-              <div id="chat-waiting" class="chat-waiting" role="status" hidden>
+              <div id="chat-waiting" class="chat-waiting" hidden>
                 <span class="chat-waiting-pulse" aria-hidden="true"></span>
                 <span id="chat-waiting-label"></span>
               </div>
@@ -773,37 +784,64 @@
           <form id="chat-composer" class="chat-composer" hidden>
             <label class="sr-only" id="chat-input-label" for="chat-input">Send a message</label>
             <div id="chat-command-menu" class="chat-command-menu" role="listbox" aria-label="Slash commands" hidden></div>
-            <textarea id="chat-input" rows="1" placeholder="Send a message…" aria-describedby="chat-composer-status" aria-controls="chat-command-menu" aria-expanded="false" aria-autocomplete="list"></textarea>
+            <textarea id="chat-input" rows="1" placeholder="Send a message…" aria-describedby="chat-composer-error" aria-controls="chat-command-menu" aria-expanded="false" aria-autocomplete="list"></textarea>
+            <p id="chat-composer-error" class="chat-composer-error" hidden></p>
             <div class="chat-composer-actions">
-              <!-- How full the context window is, beside the turn status: a
-                   conversation gave no sign of this until it overflowed. The
-                   collapsed summary carries the fill on its own; opening it
-                   shows the breakdown the agent reported. -->
+              <!-- How full the context window is. The collapsed summary carries
+                   the fill on its own; opening it shows the reported breakdown. -->
               <details id="chat-context-usage" class="chat-context-usage" hidden>
                 <summary>
-                  <span id="chat-context-usage-meter" class="chat-context-meter" aria-hidden="true"><span class="chat-context-meter-fill"></span></span>
-                  <span id="chat-context-usage-label" class="chat-context-label"></span>
+                  <span id="chat-context-usage-meter" class="chat-context-meter"><span class="chat-context-meter-fill" aria-hidden="true"></span><span id="chat-context-usage-label" class="chat-context-label"></span></span>
                 </summary>
                 <dl id="chat-context-usage-breakdown" class="chat-context-breakdown"></dl>
               </details>
-              <span id="chat-composer-status" role="status" aria-live="polite">Ready</span>
-              <label class="sr-only" for="chat-mode-select">Mode</label>
-              <select id="chat-mode-select" class="chat-model-select" aria-label="Chat mode" hidden></select>
-              <label class="sr-only" for="chat-model-select">Model</label>
-              <select id="chat-model-select" class="chat-model-select" aria-label="Chat model" disabled>
-                <option>Loading models...</option>
-              </select>
-              <label class="sr-only" for="chat-variant-select">Reasoning</label>
-              <select id="chat-variant-select" class="chat-model-select" aria-label="Reasoning effort" hidden></select>
-              <button id="chat-cancel" class="chat-secondary-button" type="button" hidden>Cancel</button>
+              <button id="chat-configuration-trigger" class="chat-configuration-trigger" type="button" aria-haspopup="dialog" aria-controls="chat-configuration-dialog" aria-expanded="false" disabled>
+                <span id="chat-configuration-summary" class="chat-configuration-summary">Chat settings</span>
+                <span id="chat-configuration-details" class="chat-configuration-details" hidden>
+                  <span id="chat-configuration-mode-summary" class="chat-configuration-detail"></span>
+                  <span id="chat-configuration-variant-summary" class="chat-configuration-detail chat-configuration-reasoning" hidden>
+                    <svg viewBox="0 0 20 20" width="14" height="14" aria-hidden="true">
+                      <path d="M8.5 4.5A3 3 0 0 0 3.7 7a3 3 0 0 0 .5 5.7A3 3 0 0 0 8.5 16m3-11.5A3 3 0 0 1 16.3 7a3 3 0 0 1-.5 5.7A3 3 0 0 1 11.5 16M8.5 4.5V16m3-11.5V16M6 9h2.5m3 2H14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    <span id="chat-configuration-variant-value"></span>
+                  </span>
+                </span>
+              </button>
+              <span id="chat-composer-status" class="chat-composer-status" data-state="ready" aria-label="Ready" title="Ready" role="img"></span>
+              <span id="chat-composer-status-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span>
               <button id="chat-send" class="chat-primary-button" type="submit" aria-label="Send message" title="Send message" disabled>
                 <span class="chat-send-label">Send</span>
                 <svg class="chat-send-icon" viewBox="0 0 20 20" width="18" height="18" aria-hidden="true">
-                  <path d="M10 16V4m0 0L5.5 8.5M10 4l4.5 4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path class="chat-send-arrow" d="M10 16V4m0 0L5.5 8.5M10 4l4.5 4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path class="chat-send-cancel" d="M5 5l10 10M15 5L5 15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
               </button>
             </div>
           </form>
+          <span id="chat-copy-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span>
+          <dialog id="chat-configuration-dialog" class="chat-configuration-dialog" aria-labelledby="chat-configuration-title">
+            <div class="chat-configuration-sheet">
+              <header class="chat-configuration-header">
+                <h2 id="chat-configuration-title">Chat configuration</h2>
+                <button id="chat-configuration-done" class="chat-secondary-button" type="button">Done</button>
+              </header>
+              <section id="chat-configuration-models-section" class="chat-configuration-models-section">
+                <label for="chat-configuration-search">Find a model</label>
+                <input id="chat-configuration-search" type="search" autocomplete="off" placeholder="Search models and providers">
+                <output id="chat-configuration-result-status" class="chat-configuration-result-status" aria-live="polite"></output>
+                <p id="chat-configuration-empty" class="chat-configuration-empty" hidden></p>
+                <div id="chat-configuration-models" class="chat-configuration-models"></div>
+              </section>
+              <footer class="chat-configuration-footer">
+                <label id="chat-configuration-mode-section" hidden>Mode
+                  <select id="chat-configuration-mode" aria-label="Chat mode"></select>
+                </label>
+                <label id="chat-configuration-variant-section" hidden>Reasoning
+                  <select id="chat-configuration-variant" aria-label="Reasoning effort"></select>
+                </label>
+              </footer>
+            </div>
+          </dialog>
         </section>
       </div>
         <div

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { deriveConversationTitle, InteractionConflictError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, OpenCodeChatAdapter, parseSlashCommand } from "./adapter";
+import { ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, OpenCodeChatAdapter, parseSlashCommand } from "./adapter";
 import { normalizeProviderEvent } from "./normalization";
 import type { ChatAgent } from "./types";
 import type {
@@ -67,18 +67,23 @@ class FakeProvider implements OpenCodeProvider {
   listPermissions?: OpenCodeProvider["listPermissions"];
   listQuestions?: OpenCodeProvider["listQuestions"];
   listModes?: OpenCodeProvider["listModes"];
+  configurations = new Map<string, import("./types").ConversationConfiguration>();
+  newConfiguration: import("./types").ConversationConfiguration = {};
 
   async listCommands() { return this.commands; }
   async listModels() { return this.models; }
   async switchModel(sessionId: string, selection: ModelSelection) { this.modelSwitches.push({ sessionId, selection }); }
 
   async listSessions() { return this.sessions; }
-  async createSession(id: string) {
+  async newConversationConfiguration() { return this.newConfiguration; }
+  async createSession(id: string, configuration = {}) {
     const session = fixtureSession(id, process.cwd(), this.sessions.length + 1);
     this.sessions.push(session);
+    this.configurations.set(id, configuration);
     return session;
   }
   async getSession(id: string) { return this.sessions.find(session => session.id === id) ?? null; }
+  async getConversationConfiguration(id: string, _completeMessages?: ProviderMessage[]) { return this.configurations.get(id) ?? {}; }
   async listMessages(_sessionId: string, options: { cursor?: string; limit: number }) {
     return this.pages.get(options.cursor ?? "first") ?? { items: [] };
   }
@@ -134,6 +139,22 @@ describe("OpenCode conversation inventory and history", () => {
     const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd() });
 
     expect((await adapter.listConversations())[0]?.title).toBe("Investigate authenticated model discovery");
+  });
+
+  test("repairs a persisted default title from before the newest message page", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [{ ...fixtureSession("session"), title: "New session - 2026-08-15T12:00:00Z" }];
+    const first = { id: "first", type: "user", time: { created: 1 }, text: "Name the conversation from this prompt" };
+    const later = { id: "later", type: "user", time: { created: 101 }, text: "Do not use this later prompt" };
+    provider.pages.set("first", { items: [later], configurationItems: [first, later] });
+    provider.renameSession = async (id, title) => {
+      const renamed = { ...provider.sessions.find(session => session.id === id)!, title };
+      provider.sessions[0] = renamed;
+      return renamed;
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd() });
+
+    expect((await adapter.listConversations())[0]?.title).toBe("Name the conversation from this prompt");
   });
 
 
@@ -240,13 +261,16 @@ describe("OpenCode conversation inventory and history", () => {
 
   test("creates and looks up an empty workspace conversation", async () => {
     const provider = new FakeProvider();
+    provider.newConfiguration = { model: { providerId: "recent", modelId: "model" }, mode: "build" };
     const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "created" });
     const created = await adapter.createConversation();
     expect(created).toEqual(expect.objectContaining({
       conversation: expect.objectContaining({ id: "created" }),
+      configuration: provider.newConfiguration,
       generation: "g",
       items: [],
     }));
+    expect((await adapter.history("created")).configuration).toEqual(provider.newConfiguration);
     expect(await adapter.getConversation("created")).toEqual(expect.objectContaining({ id: "created" }));
   });
 
@@ -423,6 +447,316 @@ describe("filtered provider event pump", () => {
 });
 
 describe("prompt, abort, permission, and question mutations", () => {
+  test("snapshots recover provider-owned configuration and cache only while projected", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("a"), fixtureSession("b")];
+    provider.configurations.set("a", { model: { providerId: "openai", modelId: "gpt" }, mode: "build", variant: "high" });
+    let reads = 0;
+    const recover = provider.getConversationConfiguration.bind(provider);
+    provider.getConversationConfiguration = async id => { reads += 1; return recover(id); };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), maxProjections: 1 });
+
+    expect((await adapter.history("a")).configuration).toEqual(provider.configurations.get("a")!);
+    expect((await adapter.history("a")).configuration).toEqual(provider.configurations.get("a")!);
+    expect(reads).toBe(1);
+    await adapter.history("b");
+    await adapter.history("a");
+    expect(reads).toBe(3);
+  });
+
+  test("configuration recovery uses the complete provider source rather than the visible page", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const user = { info: { id: "user", role: "user", variant: "high" }, parts: [] };
+    const assistant = { info: { id: "assistant", role: "assistant" }, parts: [] };
+    provider.pages.set("first", { items: [assistant], configurationItems: [user, assistant] });
+    provider.getConversationConfiguration = async (_id, messages) => {
+      expect(messages).toEqual([user, assistant]);
+      return { model: { providerId: "openai", modelId: "gpt" }, mode: "build", variant: "high" };
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd() });
+
+    expect((await adapter.history("session", { limit: 1 })).configuration.variant).toBe("high");
+  });
+
+  test("a cold configuration read cannot overwrite a newer provider event", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const stale = { model: { providerId: "anthropic", modelId: "claude" }, mode: "plan" };
+    let reads = 0;
+    let readStarted!: () => void;
+    const started = new Promise<void>(resolve => { readStarted = resolve; });
+    let releaseRead!: () => void;
+    const gate = new Promise<void>(resolve => { releaseRead = resolve; });
+    provider.getConversationConfiguration = async () => {
+      reads += 1;
+      if (reads === 1) {
+        readStarted();
+        await gate;
+      }
+      return stale;
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const events = adapter.projectionForTests("session").replay.handoff(() => null).subscription;
+    const iterator = events[Symbol.asyncIterator]();
+    const pump = adapter.startEventPump();
+
+    const pendingHistory = adapter.history("session");
+    await started;
+    provider.eventQueue.push({
+      type: "session.next.model.switched",
+      properties: { sessionID: "session", model: { providerID: "openai", id: "gpt" } },
+    });
+    await Bun.sleep(0);
+    releaseRead();
+    await pendingHistory;
+    let event: ChatEvent | undefined;
+    while (event?.type !== "conversation.configuration") event = (await iterator.next()).value;
+
+    expect(reads).toBe(1);
+    expect(event.configuration).toEqual({ model: { providerId: "openai", modelId: "gpt" }, mode: "plan" });
+    expect((await adapter.history("session")).configuration).toEqual(event.configuration);
+    events.cancel();
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("accepted configuration is returned and published once to live and replay subscribers", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    provider.configurations.set("session", { model: { providerId: "anthropic", modelId: "claude" }, mode: "plan" });
+    provider.models[0] = { ...provider.models[0]!, variants: ["high"] };
+    provider.listModes = async () => [{ name: "plan", description: "" }, { name: "build", description: "" }];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "message" });
+    const first = await adapter.subscribe("session");
+    const second = await adapter.subscribe("session");
+    const cursor = first.snapshot.cursor;
+    const configuration = { model: { providerId: "anthropic", modelId: "claude" }, mode: "build", variant: "high" };
+
+    const accepted = await adapter.prompt("session", "request", "go", configuration.model, configuration.mode, configuration.variant);
+    expect(accepted.configuration).toEqual(configuration);
+    for (const subscription of [first.events, second.events]) {
+      const iterator = subscription[Symbol.asyncIterator]();
+      let event: ChatEvent | undefined;
+      while (event?.type !== "conversation.configuration") event = (await iterator.next()).value;
+      expect(event).toEqual(expect.objectContaining({ type: "conversation.configuration", configuration }));
+      subscription.cancel();
+    }
+
+    await adapter.prompt("session", "request", "go", configuration.model, configuration.mode, configuration.variant);
+    const replayed = await adapter.subscribe("session", { cursor });
+    const iterator = replayed.events[Symbol.asyncIterator]();
+    const events: ChatEvent[] = [];
+    while (!events.some(event => event.type === "conversation.configuration")) events.push((await iterator.next()).value!);
+    expect(events.filter(event => event.type === "conversation.configuration")).toHaveLength(1);
+    replayed.events.cancel();
+  });
+
+  test("a new conversation follows the last configuration accepted by this adapter", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("existing")];
+    provider.newConfiguration = { model: { providerId: "anthropic", modelId: "claude" }, mode: "build" };
+    provider.models.push({ selection: { providerId: "openai", modelId: "gpt" }, provider: "OpenAI", name: "GPT" });
+    provider.listModes = async () => [{ name: "build", description: "" }, { name: "plan", description: "" }];
+    let nextId = 0;
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), id: () => nextId++ === 0 ? "message" : "created" });
+    const selected = { model: { providerId: "openai", modelId: "gpt" }, mode: "plan" };
+
+    expect((await adapter.prompt("existing", "request", "go", selected.model, selected.mode)).configuration).toEqual(selected);
+    expect((await adapter.createConversation()).configuration).toEqual(selected);
+    expect(provider.configurations.get("created")).toEqual(selected);
+  });
+
+  test("an unknown accepted prompt does not erase durable new-conversation defaults", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("existing")];
+    provider.newConfiguration = { model: { providerId: "anthropic", modelId: "claude" }, mode: "build" };
+    let nextId = 0;
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), id: () => nextId++ === 0 ? "message" : "created" });
+
+    expect((await adapter.prompt("existing", "request", "go")).configuration).toEqual({});
+    expect((await adapter.createConversation()).configuration).toEqual(provider.newConfiguration);
+  });
+
+  test("provider-reported model and mode switches update effective configuration", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    provider.configurations.set("session", { model: { providerId: "anthropic", modelId: "claude" }, mode: "plan", variant: "old" });
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", coalesceWindowMs: 1 });
+    const { events } = await adapter.subscribe("session");
+    const iterator = events[Symbol.asyncIterator]();
+    const pump = adapter.startEventPump();
+    provider.eventQueue.push({ type: "session.next.model.switched", properties: { sessionID: "session", model: { providerID: "openai", id: "gpt" } } });
+    expect((await iterator.next()).value).toEqual(expect.objectContaining({
+      type: "conversation.configuration",
+      configuration: { model: { providerId: "openai", modelId: "gpt" }, mode: "plan" },
+    }));
+    provider.eventQueue.push({ type: "session.next.agent.switched", properties: { sessionID: "session", agent: "build" } });
+    expect((await iterator.next()).value).toEqual(expect.objectContaining({
+      type: "conversation.configuration",
+      configuration: { model: { providerId: "openai", modelId: "gpt" }, mode: "build" },
+    }));
+    events.cancel();
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("accepted prompts merge onto provider events processed during admission", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    provider.configurations.set("session", { model: { providerId: "anthropic", modelId: "claude" }, mode: "plan" });
+    provider.listModes = async () => [{ name: "plan", description: "" }, { name: "build", description: "" }];
+    let admitPrompt!: () => void;
+    const promptAdmitted = new Promise<void>(resolve => { admitPrompt = resolve; });
+    let releasePrompt!: () => void;
+    const promptGate = new Promise<void>(resolve => { releasePrompt = resolve; });
+    provider.prompt = async (_sessionId, input) => {
+      admitPrompt();
+      await promptGate;
+      return { messageId: input.id };
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "message" });
+    const subscription = await adapter.subscribe("session");
+    const iterator = subscription.events[Symbol.asyncIterator]();
+    const pump = adapter.startEventPump();
+
+    const pending = adapter.prompt("session", "request", "go", undefined, "build");
+    await promptAdmitted;
+    provider.eventQueue.push({
+      type: "session.next.model.switched",
+      properties: { sessionID: "session", model: { providerID: "openai", id: "gpt" } },
+    });
+    let event: ChatEvent | undefined;
+    while (event?.type !== "conversation.configuration") event = (await iterator.next()).value;
+    expect(event.configuration).toEqual({ model: { providerId: "openai", modelId: "gpt" }, mode: "plan" });
+    releasePrompt();
+
+    expect((await pending).configuration).toEqual({ model: { providerId: "openai", modelId: "gpt" }, mode: "build" });
+    subscription.events.cancel();
+    await adapter.stopEventPump();
+    await pump;
+  });
+
+  test("concurrent prompts commit configuration in admission order", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const anthropic = { providerId: "anthropic", modelId: "claude" };
+    const openai = { providerId: "openai", modelId: "gpt" };
+    provider.configurations.set("session", { model: anthropic });
+    provider.models.push({ selection: openai, provider: "OpenAI", name: "GPT" });
+    let enterFirst!: () => void;
+    let enterSecond!: () => void;
+    const firstEntered = new Promise<void>(resolve => { enterFirst = resolve; });
+    const secondEntered = new Promise<void>(resolve => { enterSecond = resolve; });
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const gates = [
+      new Promise<void>(resolve => { releaseFirst = resolve; }),
+      new Promise<void>(resolve => { releaseSecond = resolve; }),
+    ];
+    let calls = 0;
+    provider.prompt = async (_sessionId, input) => {
+      const call = calls++;
+      (call === 0 ? enterFirst : enterSecond)();
+      await gates[call];
+      return { messageId: input.id };
+    };
+    let message = 0;
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `message-${++message}` });
+
+    const first = adapter.prompt("session", "request-1", "use GPT", openai);
+    await firstEntered;
+    const second = adapter.prompt("session", "request-2", "use Claude", anthropic);
+    await Promise.resolve();
+    expect(calls).toBe(1);
+
+    releaseFirst();
+    await first;
+    await secondEntered;
+    releaseSecond();
+    expect((await second).configuration).toEqual({ model: anthropic });
+    expect((await adapter.history("session")).configuration).toEqual({ model: anthropic });
+  });
+
+  test("manual rename is confined, idempotent, preserves active turns, and prevents first-prompt overwrite", async () => {
+    const provider = new FakeProvider();
+    provider.agent.capabilities.push("conversation-rename");
+    provider.sessions = [{ ...fixtureSession("session"), title: "New session - now" }];
+    let renames = 0;
+    provider.renameSession = async (id, title) => {
+      renames += 1;
+      const renamed = { ...provider.sessions.find(session => session.id === id)!, title };
+      provider.sessions[0] = renamed;
+      return renamed;
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "message" });
+    const subscriber = await adapter.subscribe("session");
+    const [first, retry] = await Promise.all([
+      adapter.renameConversation("session", "rename-1", "  Manual title  "),
+      adapter.renameConversation("session", "rename-1", "different retry payload"),
+    ]);
+    expect(first).toEqual(retry);
+    expect(first.conversation.title).toBe("Manual title");
+    expect(renames).toBe(1);
+    expect((await subscriber.events[Symbol.asyncIterator]().next()).value).toEqual(expect.objectContaining({ type: "conversation.updated" }));
+    subscriber.events.cancel();
+    await adapter.prompt("session", "prompt-1", "This must not replace the manual title");
+    expect(renames).toBe(1);
+
+    await expect(adapter.renameConversation("session", "empty", "  ")).rejects.toBeInstanceOf(InvalidConversationTitleError);
+    await expect(adapter.renameConversation("session", "large", "é".repeat(101))).rejects.toBeInstanceOf(InvalidConversationTitleError);
+    adapter.projectionForTests("session").statusUpdate("running");
+    const whileRunning = await adapter.renameConversation("session", "running", "Renamed while running");
+    expect(whileRunning.conversation).toEqual(expect.objectContaining({ title: "Renamed while running", status: "running" }));
+    expect(adapter.projectionForTests("session").status).toBe("running");
+  });
+
+  test("a manual rename during prompt validation wins over first-prompt naming", async () => {
+    const provider = new FakeProvider();
+    provider.agent.capabilities.push("conversation-rename");
+    provider.sessions = [{ ...fixtureSession("session"), title: "New session - now" }];
+    let renames = 0;
+    provider.renameSession = async (id, title) => {
+      renames += 1;
+      const renamed = { ...provider.sessions.find(session => session.id === id)!, title };
+      provider.sessions[0] = renamed;
+      return renamed;
+    };
+    let validationStarted!: () => void;
+    const validating = new Promise<void>(resolve => { validationStarted = resolve; });
+    let releaseValidation!: () => void;
+    const validationGate = new Promise<void>(resolve => { releaseValidation = resolve; });
+    provider.listMessages = async () => {
+      validationStarted();
+      await validationGate;
+      return { items: [] };
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "message" });
+
+    const pending = adapter.prompt("session", "prompt-1", "Automatic title candidate");
+    await validating;
+    await adapter.renameConversation("session", "rename-1", "Manual title");
+    releaseValidation();
+    await pending;
+
+    expect(provider.sessions[0]?.title).toBe("Manual title");
+    expect(renames).toBe(1);
+  });
+
+  test("rename rejects unsupported and foreign-workspace provider outcomes", async () => {
+    const unsupported = new FakeProvider();
+    unsupported.sessions = [fixtureSession("session")];
+    await expect(new OpenCodeChatAdapter({ provider: unsupported, workspacePath: process.cwd() })
+      .renameConversation("session", "r1", "Title")).rejects.toBeInstanceOf(ConversationRenameUnsupportedError);
+
+    const foreign = new FakeProvider();
+    foreign.agent.capabilities.push("conversation-rename");
+    foreign.sessions = [fixtureSession("session")];
+    foreign.renameSession = async (id, title) => ({ ...fixtureSession(id, "/foreign"), title });
+    await expect(new OpenCodeChatAdapter({ provider: foreign, workspacePath: process.cwd() })
+      .renameConversation("session", "r2", "Title")).rejects.toBeInstanceOf(ConversationNotFoundError);
+  });
+
   test("recognizes only well-formed listed slash commands and separates arguments", () => {
     const commands = new FakeProvider().commands;
     expect(parseSlashCommand("/review   routing behavior ", commands)).toEqual({ name: "review", arguments: "routing behavior" });
@@ -438,7 +772,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     const model = { providerId: "anthropic", modelId: "claude" };
 
     const accepted = await adapter.prompt("session", "request", "/review   API compatibility", model);
-    expect(accepted).toEqual({ messageId: "message", delivery: "queue" });
+    expect(accepted).toEqual({ messageId: "message", delivery: "queue", configuration: { model } });
     expect(provider.commandCalls).toEqual([{ sessionId: "session", id: "message", name: "review", arguments: "API compatibility", model }]);
     expect(provider.prompts).toEqual([]);
 
@@ -645,6 +979,40 @@ describe("prompt, abort, permission, and question mutations", () => {
       expect.objectContaining({ requestId: "free", answers: [["Other"]] }),
       expect.objectContaining({ requestId: "reject", rejected: true }),
     ]);
+  });
+
+  test("invalid question answers neither reach the provider nor resolve the request", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const invalid = [
+      { id: "empty", multiple: true, custom: true, answers: [] },
+      { id: "whitespace", multiple: true, custom: true, answers: ["   "] },
+      { id: "single-extra", multiple: false, custom: true, answers: ["A", "Other"] },
+      { id: "unknown", multiple: false, custom: false, answers: ["Other"] },
+    ];
+
+    for (const testCase of invalid) {
+      applyEvent(adapter, "session", {
+        id: testCase.id,
+        type: "question.v2.asked",
+        data: {
+          id: testCase.id,
+          sessionID: "session",
+          timestamp: Date.now(),
+          questions: [{ question: "Choose", header: "Choice", options: [{ label: "A", description: "" }], multiple: testCase.multiple, custom: testCase.custom }],
+        },
+      });
+      await expect(adapter.respondQuestion("session", testCase.id, `client-${testCase.id}`, {
+        kind: "answered",
+        answers: [testCase.answers],
+      })).rejects.toBeInstanceOf(InteractionConflictError);
+      expect(adapter.projectionForTests("session").items().find(item => item.id === `question:${testCase.id}`)).toEqual(
+        expect.objectContaining({ status: "pending" }),
+      );
+    }
+
+    expect(provider.questionReplies).toEqual([]);
   });
 });
 

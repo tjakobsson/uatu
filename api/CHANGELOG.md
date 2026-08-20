@@ -2,6 +2,21 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required.
 
+## Hub 1 / Workspace 6 - Unreleased
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- Added `ConversationConfiguration`, with optional `model`, `mode`, and `variant`; `variant` requires `model`. `ConversationSnapshot` now requires `configuration`, and `ChatPromptAccepted` now returns the accepted effective `configuration`.
+- Added replayable `conversation.configuration` and `conversation.updated` `ChatEvent` variants for effective configuration and conversation-summary changes.
+- Added the capability-gated `workspaceRenameChatConversation` operation: `PATCH /s/{workspaceId}/api/chat/conversations/{conversationId}` accepts an idempotency `requestId` and a title that is trimmed, non-empty, and at most 200 UTF-8 bytes. It returns the updated conversation summary. Unsupported or conflicting renames return `409`; unknown conversations return `404`.
+- Added `conversation-rename` to the recognized positive `ChatAgent` capabilities.
+
+### Migration
+
+Strict workspace consumers must regenerate against Workspace revision 6 or widen their closed schemas before connecting. Snapshot decoders must accept and require `configuration`; prompt-acceptance decoders must accept and require `configuration`; stream decoders must accept `conversation.configuration` and `conversation.updated`. Configuration fields are optional, and absence means unknown or agent-controlled: clients must not substitute the first offered model, mode, or variant. A `variant` is only valid together with `model`. Capability-aware clients should expose rename only when `conversation-rename` is declared, send a unique `requestId`, and enforce the 200 UTF-8-byte trimmed-title limit rather than a 200-character limit. Clients that reject unknown event variants or newly required response fields are incompatible with revision 6.
+
 ## Hub 1 / Workspace 5 - Unreleased
 
 Compatibility: breaking (workspace)

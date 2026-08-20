@@ -151,6 +151,79 @@ The authenticated workspace API SHALL list resumable OpenCode conversations asso
 - **THEN** the client can request older items with an opaque server-issued cursor
 - **AND** items are not duplicated or reordered across adjacent pages
 
+### Requirement: Conversation configuration follows the conversation
+The normalized Chat API SHALL expose the effective model, mode, and reasoning variant of a conversation when the agent can determine them. This configuration SHALL be conversation state rather than physical client presentation state: opening the conversation from another authenticated client or after a workspace restart SHALL restore the same known configuration without relying on that client's browser storage.
+
+An absent configuration field SHALL mean that the agent's effective value is unknown or has not been explicitly selected. The surface MUST NOT replace an absent field with the first available option or claim that a default is the conversation's current value. Sending a prompt without a staged selection SHALL preserve the agent's effective configuration rather than silently switching it.
+
+A client MAY stage a different offered model, mode, or variant for its next prompt without changing another client. Once the agent accepts that prompt, the accepted configuration SHALL become the conversation's shared effective state and SHALL be published to subscribed clients. A client with no unsubmitted local selection SHALL update its controls from that publication; an explicitly staged selection remains local until submitted or discarded.
+
+#### Scenario: Another device restores an existing conversation
+- **WHEN** a user opens on a second device a conversation that previously accepted a prompt with a known model, mode, and reasoning variant
+- **THEN** Chat displays that known configuration on the second device
+- **AND** the second device does not derive the conversation's configuration from its own browser defaults
+
+#### Scenario: Restart recovers provider-owned configuration
+- **WHEN** the workspace restarts and a persisted conversation is opened again
+- **THEN** Chat recovers every configuration field the agent persisted with that conversation
+- **AND** a missing field is presented as unknown or agent-controlled rather than as a selected option
+
+#### Scenario: Unknown configuration does not switch the conversation
+- **WHEN** an existing conversation has no recoverable model or mode and the user sends a prompt without choosing one
+- **THEN** the request omits that selection
+- **AND** Chat does not switch the conversation to the first option listed by the current device
+
+#### Scenario: Accepted configuration reaches another open client
+- **WHEN** one client submits and the agent accepts a prompt with a different model, mode, or reasoning variant
+- **THEN** that configuration becomes the conversation's effective configuration
+- **AND** another subscribed client with no staged selection updates its controls without reopening the conversation
+
+#### Scenario: An unsubmitted choice remains local
+- **WHEN** one client selects a different offered model, mode, or variant but has not submitted a prompt
+- **THEN** the conversation's shared effective configuration is unchanged
+- **AND** another client neither displays nor applies the unsubmitted choice
+
+#### Scenario: Stale browser configuration is not authoritative
+- **WHEN** browser storage contains a per-conversation selection that disagrees with the configuration recovered from the agent
+- **THEN** the recovered conversation configuration wins
+- **AND** the stale browser value is not sent implicitly with the next prompt
+
+### Requirement: Users can rename resumable conversations
+Where the agent declares conversation renaming, the authenticated workspace API SHALL let a user replace a workspace conversation's title with a non-empty bounded title, and the Chat surface SHALL provide a rename affordance for the selected conversation. Renaming SHALL preserve the conversation identity, history, active turn, and effective configuration. The mutation SHALL be origin-protected under cookie authentication, workspace-confined, and idempotent under a client-generated request identifier.
+
+A successful rename SHALL update the conversation inventory and every subscribed client that displays that conversation. Where the agent does not declare renaming, the affordance SHALL be absent rather than inert. Automatic first-prompt title generation MAY still name a conversation that the user has not manually renamed, but SHALL NOT overwrite a user-supplied title.
+
+#### Scenario: Rename persists across clients and restart
+- **WHEN** a user renames a conversation and later opens it from another client or after a workspace restart
+- **THEN** the new title is displayed for the same conversation
+- **AND** its prior history and effective configuration remain intact
+
+#### Scenario: Rename updates another open client
+- **WHEN** one client successfully renames a conversation while another client is subscribed to it
+- **THEN** the subscribed client updates the displayed title without reopening the conversation
+
+#### Scenario: Invalid rename changes nothing
+- **WHEN** a rename supplies an empty, oversized, foreign-workspace, cross-origin, or otherwise invalid request
+- **THEN** the workspace rejects it without changing the persisted title
+
+#### Scenario: Retried rename is applied once
+- **WHEN** a client retries a rename with the same request identifier after losing the response
+- **THEN** the workspace returns the original result or current outcome
+- **AND** the agent receives the rename at most once
+
+#### Scenario: Unsupported rename has no control
+- **WHEN** the current agent does not declare conversation renaming
+- **THEN** Chat shows no rename affordance
+- **AND** conversation discovery and prompting remain available
+
+### Requirement: Conversation creation is named unambiguously
+The Chat action that creates another conversation with the current workspace agent SHALL be labelled `New conversation`. It MUST NOT be labelled `New agent`, because changing or adding the program Chat talks to is a separate operation.
+
+#### Scenario: Creation control names what it creates
+- **WHEN** Chat presents the action for creating an empty resumable conversation
+- **THEN** the action is labelled `New conversation`
+- **AND** activating it does not change the workspace agent
+
 ### Requirement: The workspace API exposes normalized chat operations
 The workspace API SHALL provide authenticated operations to list, create, and read conversations; start a prompt turn; cancel the active turn; answer a pending permission; and answer or reject a structured question. Mutation requests SHALL be origin-protected under cookie authentication, SHALL validate conversation ownership against the workspace directory, and SHALL use client-generated request identifiers to make network retries idempotent. Provider-specific payloads and credentials MUST NOT be exposed as the public contract when a normalized UatuCode representation exists.
 
@@ -361,6 +434,95 @@ A pending request SHALL remain discoverable and answerable even when the server 
 #### Scenario: Reconciliation failure preserves what is already shown
 - **WHEN** the server cannot read OpenCode's pending set while loading a conversation
 - **THEN** requests already known to the conversation remain visible and answerable
+
+### Requirement: Structured questions follow OpenCode custom-answer semantics
+For every structured question, Chat SHALL support a custom answer unless OpenCode explicitly reports `custom === false`. An omitted `custom` value MUST enable custom answers for both live question announcements and pending questions recovered from OpenCode. An explicit false value MUST suppress the custom-answer choice.
+
+Where custom answers are supported, Chat SHALL append a UI-only choice labelled "Type your own answer" to the provider's options. Selecting that choice SHALL reveal and focus a text input. The synthetic label MUST NOT be submitted to OpenCode. Chat SHALL trim the entered text and submit the non-empty result as an ordinary string in that question's answer array.
+
+For a single-select question, the custom choice SHALL be mutually exclusive with provider options. For a multi-select question, it SHALL be selectable alongside provider options and its entered text SHALL be appended as one additional answer string. Deselecting the custom choice SHALL hide its input and exclude its text from submission, but MUST preserve the text while the pending question remains mounted so selecting it again restores the draft.
+
+#### Scenario: Omitted custom flag enables a custom choice
+- **WHEN** OpenCode asks a question without a `custom` field
+- **THEN** Chat shows a "Type your own answer" choice
+- **AND** this behavior is the same for a live announcement and a recovered pending question
+
+#### Scenario: Explicit false suppresses custom answers
+- **WHEN** OpenCode asks a question with `custom === false`
+- **THEN** Chat does not show a custom-answer choice or input
+- **AND** only provider options can satisfy that question
+
+#### Scenario: Selecting custom reveals its input
+- **WHEN** the user selects "Type your own answer"
+- **THEN** its text input becomes visible and receives focus
+- **AND** the question remains unanswered until that input contains non-whitespace text
+
+#### Scenario: Single-select custom answer is submitted as text
+- **WHEN** the user selects the custom choice, enters text, and confirms a single-select question
+- **THEN** OpenCode receives the trimmed entered text as the question's one answer string
+- **AND** it does not receive the synthetic choice label
+
+#### Scenario: Multi-select combines options and custom text
+- **WHEN** the user selects provider options and the custom choice in a multi-select question, enters text, and confirms
+- **THEN** the answer array contains the selected provider labels and the trimmed custom text
+- **AND** the synthetic choice label is absent
+
+#### Scenario: Custom draft survives temporary deselection
+- **WHEN** the user types a custom answer, deselects the custom choice, and selects it again while the request remains pending
+- **THEN** the typed draft is restored
+- **AND** the draft is omitted from any answer submitted while the custom choice is deselected
+
+#### Scenario: Streaming preserves an unfinished custom answer
+- **WHEN** conversation updates arrive while the user is typing a custom answer in a pending question
+- **THEN** the selected custom choice, input visibility, focusable control, and typed draft remain intact
+
+### Requirement: Single-question choices require explicit confirmation
+A question form containing one single-select question SHALL retain the selected option without submitting it when the option is clicked. Chat SHALL expose an explicit Answer action and SHALL submit only when the user activates that action or performs the form's equivalent explicit submission. This rule SHALL apply whether custom answers are enabled or disabled.
+
+Existing multi-question stepping SHALL remain unchanged: intermediate confirmation advances to the next question, the final action submits all ordered answers, and earlier answers remain revisitable. Existing multi-select questions SHALL continue to require explicit confirmation and SHALL allow more than one selected answer.
+
+#### Scenario: Single provider option does not auto-submit
+- **WHEN** the user selects a provider option in a one-question single-select form
+- **THEN** the option remains selected and the Answer action becomes available
+- **AND** no response is sent until explicit confirmation
+
+#### Scenario: Single custom choice does not auto-submit
+- **WHEN** the user selects the custom choice and enters a valid answer in a one-question single-select form
+- **THEN** the custom answer remains staged and the Answer action becomes available
+- **AND** no response is sent until explicit confirmation
+
+#### Scenario: Multi-question stepping is preserved
+- **WHEN** a structured request contains more than one question
+- **THEN** confirming an answered intermediate question advances to the next question
+- **AND** the final confirmation submits one ordered answer array per question
+
+#### Scenario: Multi-select confirmation is preserved
+- **WHEN** a question allows multiple answers
+- **THEN** the user can select more than one provider option and an applicable custom answer
+- **AND** Chat waits for explicit confirmation before submitting them
+
+### Requirement: Question answers are semantically valid before provider reply
+Every answered question request SHALL contain exactly one answer array for each question in request order, and every such array MUST contain at least one non-empty string. A single-select answer array MUST contain exactly one string. A provider-option string MUST match an offered label, while any other string MUST be accepted only when that question supports custom answers. Chat MUST reject an invalid response without forwarding it to OpenCode or resolving the pending request.
+
+#### Scenario: Missing per-question answer is rejected
+- **WHEN** a response omits an answer array or provides an empty answer array for any question
+- **THEN** Chat rejects the response
+- **AND** OpenCode receives no reply
+
+#### Scenario: Empty custom text is rejected
+- **WHEN** a custom answer is empty after trimming
+- **THEN** Chat keeps the question pending and requires a non-empty answer
+- **AND** OpenCode receives no reply
+
+#### Scenario: Unknown answer is rejected when custom is disabled
+- **WHEN** a response contains a string that is not an offered option and the question explicitly disables custom answers
+- **THEN** Chat rejects the response
+- **AND** OpenCode receives no reply
+
+#### Scenario: Valid ordered answers reach OpenCode once
+- **WHEN** every question has a semantically valid answer and the user confirms the form
+- **THEN** OpenCode receives the ordered string arrays once
+- **AND** the request resolves everywhere it is shown under the existing ownership rules
 
 ### Requirement: Users can prompt, steer, and cancel the active conversation
 The Chat composer SHALL submit non-empty text to the selected conversation and clearly distinguish ready, sending, running, interrupted, and failed states. While OpenCode supports steering a running session, a subsequent submitted prompt SHALL be presented as a steer of the active turn rather than an unrelated concurrent turn. The user SHALL be able to cancel an active turn without deleting its completed history, and transport failure SHALL preserve the draft until acceptance is known.
@@ -626,3 +788,125 @@ A subagent's attribution SHALL reflect the subagent's own session — a subagent
 - **WHEN** the agent does not declare the context capability
 - **THEN** the context indicator and the subagent token figure are absent
 - **AND** the capabilities the agent does declare are unaffected
+
+### Requirement: Chat composer actions keep a stable one-line layout
+The Chat composer SHALL place context usage, one configuration trigger, routine status, and the Send/Cancel action in a deliberate non-wrapping action rail. The configuration trigger SHALL take the flexible space and truncate its visible label when necessary. Routine status and the trailing action SHALL keep fixed footprints, and routine lifecycle changes MUST NOT move either control or reorder the rail. Deliberate panel resizing can change the flexible label width but MUST NOT make individual controls jump between rows.
+
+Actionable failures SHALL remain visible as explanatory text outside the routine status footprint. Displaying or dismissing that text can change composer height but MUST NOT horizontally reorder the action rail. Textarea autosizing remains independent of action-rail stability.
+
+#### Scenario: Routine lifecycle keeps trailing controls stationary
+- **WHEN** a prompt moves through ready, sending, working, cancelling, and ready states at an unchanged Chat-panel width
+- **THEN** the routine status and Send/Cancel controls retain their dimensions and positions
+- **AND** the configuration trigger remains on the same row
+
+#### Scenario: Narrow desktop panel truncates configuration
+- **WHEN** the desktop Chat panel narrows while remaining open
+- **THEN** the configuration trigger label truncates to the available width
+- **AND** context, status, and Send/Cancel remain on one action row
+
+#### Scenario: Context usage does not displace the trailing action
+- **WHEN** context usage becomes available or its displayed value changes
+- **THEN** it does not move the routine status or Send/Cancel action
+- **AND** it does not create another action row
+
+#### Scenario: Failure remains explanatory
+- **WHEN** sending, cancellation, or the active turn fails
+- **THEN** Chat displays explanatory failure text
+- **AND** the action rail keeps its horizontal ordering
+
+### Requirement: Chat configuration uses one adaptive searchable picker
+Chat SHALL expose model, mode, and reasoning configuration through one configuration trigger rather than separate composer controls. The trigger SHALL summarize the displayed model when model selection is supported and SHALL have an accessible name that identifies every displayed configuration value. A capability the active agent does not declare MUST be absent from both the trigger summary and picker.
+
+The picker SHALL use one interaction layer. On desktop it SHALL remain constrained to the Chat panel and appear in relation to the trigger. In touch mode it SHALL appear as a bottom sheet sized to the current visual viewport above global Chat navigation. It MUST NOT open a second nested sheet for model selection.
+
+Model search SHALL operate on the already available model inventory and match case-insensitively across model name, provider name, provider identifier, and model identifier. Results SHALL identify the human-readable model first, show provider and provider/model identifiers as secondary information, group available models by provider, expose a result count, and distinguish the displayed selection without relying on colour alone. Empty groups SHALL disappear when filtering, and an empty result SHALL be stated explicitly.
+
+Choosing model, mode, or reasoning SHALL update the displayed staged configuration immediately and SHALL preserve the existing rule that staged values travel with the next prompt. An unavailable effective value SHALL remain identifiable but MUST NOT be offered as a newly selectable value. Where no explicit model override exists, the picker SHALL describe the agent-controlled choice without claiming a model Uatu does not know.
+
+#### Scenario: Desktop opens one anchored configuration panel
+- **WHEN** a desktop user activates the configuration trigger
+- **THEN** one configuration panel opens within the Chat panel's usable bounds
+- **AND** model search, mode, and applicable reasoning controls are available in that panel
+
+#### Scenario: Touch opens one viewport-aware bottom sheet
+- **WHEN** a touch user activates the configuration trigger
+- **THEN** one bottom sheet opens above Chat navigation within the current visual viewport
+- **AND** focusing model search keeps the sheet operable above the software keyboard
+
+#### Scenario: Search matches model identity fields
+- **WHEN** the user enters text matching a model name, provider name, provider id, or model id with different letter casing
+- **THEN** the corresponding model remains in the filtered result list
+- **AND** the result count reflects the filtered inventory
+
+#### Scenario: Search has no matches
+- **WHEN** no model matches the search text
+- **THEN** the picker states that no models match
+- **AND** it does not show empty provider groups
+
+#### Scenario: Selection remains staged until the next prompt
+- **WHEN** the user changes the model, mode, or reasoning and closes the picker
+- **THEN** the composer trigger reflects the staged configuration
+- **AND** the next prompt carries that configuration under the existing conversation configuration rules
+
+#### Scenario: Current unavailable model remains honest
+- **WHEN** a conversation reports a current model that is absent from the available inventory
+- **THEN** the picker identifies that current model as unavailable
+- **AND** it does not allow the unavailable value to be selected as a new override
+
+#### Scenario: Undeclared configuration capability is absent
+- **WHEN** the active agent does not declare model, mode, or reasoning support
+- **THEN** the corresponding value and control are absent from the picker
+- **AND** other declared configuration capabilities remain usable
+
+#### Scenario: Picker focus is contained and restored
+- **WHEN** the user opens the picker, navigates results with the keyboard, and dismisses it
+- **THEN** focus remains within the open picker
+- **AND** dismissal returns focus to the configuration trigger
+
+### Requirement: Routine Chat status is compact and accessible
+Chat SHALL represent routine composer states in an always-present fixed-size status region. Each state SHALL have a programmatic name and a non-colour-only visual distinction. Active-state motion MUST stop when the user prefers reduced motion. Significant transitions SHALL be announced without announcing elapsed-time ticks, and elapsed working time SHALL remain available outside the fixed visible footprint.
+
+#### Scenario: Assistive technology receives the current state
+- **WHEN** the routine status changes without variable-width visible text
+- **THEN** the current state has an accessible name
+- **AND** significant transitions are announced without repeating every streaming update
+
+#### Scenario: Reduced motion removes continuous animation
+- **WHEN** the user prefers reduced motion and Chat is working
+- **THEN** the state remains visually distinguishable
+- **AND** no continuous status animation runs
+
+### Requirement: Completed assistant content has scoped copy actions
+Each completed assistant message SHALL offer an accessible copy action that writes that message's normalized Markdown source to the clipboard, excluding timestamps, status labels, activity rows, copy-control labels, and other Chat chrome. Each fenced code block inside completed assistant content SHALL offer an accessible copy action that writes only the code content with its source line breaks, excluding syntax markup, fence delimiters, and controls.
+
+Copy controls SHALL be keyboard operable and directly reachable on coarse-pointer devices. Success and failure feedback SHALL be perceivable without resizing the message, code block, or composer. Clipboard failure MUST leave conversation content unchanged and MUST NOT produce an uncaught error. A message still streaming MUST NOT present its whole-message action as copying a completed answer.
+
+#### Scenario: Copy a completed assistant answer
+- **WHEN** the user activates copy on a completed assistant message containing prose and fenced code
+- **THEN** the clipboard receives that message's normalized Markdown
+- **AND** no surrounding Chat chrome or activity output is included
+
+#### Scenario: Copy one fenced code block
+- **WHEN** the user activates copy for a fenced code block in completed assistant content
+- **THEN** the clipboard receives only that block's code with its source line breaks
+- **AND** syntax markup, fences, and control labels are excluded
+
+#### Scenario: Streaming answer is not presented as complete
+- **WHEN** an assistant message is still streaming
+- **THEN** its whole-message completed-answer copy action is unavailable
+- **AND** the action becomes available when completion is known
+
+#### Scenario: Touch copy does not depend on hover
+- **WHEN** a coarse-pointer user views a completed answer or fenced code block
+- **THEN** each applicable copy action is reachable by tap
+- **AND** no hover state is required to reveal it
+
+#### Scenario: Copy feedback preserves geometry
+- **WHEN** a copy succeeds or fails
+- **THEN** Chat reports the outcome accessibly
+- **AND** the message, code block, composer, and surrounding timeline retain their dimensions
+
+#### Scenario: Clipboard failure is contained
+- **WHEN** clipboard access is unavailable or rejects the write
+- **THEN** conversation content remains unchanged
+- **AND** Chat reports failure without an uncaught error

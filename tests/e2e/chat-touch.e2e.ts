@@ -1,7 +1,7 @@
 import type { APIRequestContext, Page } from "@playwright/test";
 
 import type { ConversationItem } from "../../src/chat/types";
-import { openChatPanel } from "./chat-helpers";
+import { chooseChatModel, installClipboardMock, openChatConfiguration, openChatPanel, readClipboardMock } from "./chat-helpers";
 import { expect, test } from "./fixtures";
 
 test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
@@ -51,6 +51,90 @@ test("four tabs preserve chat state and keyboard navigation", async ({ page, req
   await expect(page.locator("#touch-tab-terminal")).toBeFocused();
   await page.keyboard.press("ArrowRight");
   await expect(page.locator("#touch-tab-files")).toBeFocused();
+});
+
+test("questions wait for Answer and send a custom choice as text", async ({ page, request }) => {
+  const question: ConversationItem = {
+    id: "question:touch-choice", type: "question", createdAt: 1, requestId: "touch-choice", status: "pending",
+    questions: [{
+      header: "Approach", prompt: "Which approach?", multiple: false, allowFreeForm: true,
+      options: [{ label: "Minimal", description: "Small change" }],
+    }],
+  };
+  await boot(page, request, { items: [question] });
+
+  const card = page.locator('[data-chat-item-id="question:touch-choice"]');
+  const answer = card.getByRole("button", { name: "Answer", exact: true });
+  let replies = 0;
+  page.on("request", request => {
+    if (new URL(request.url()).pathname.endsWith(`/questions/${question.requestId}`)) replies += 1;
+  });
+  await card.getByRole("radio", { name: "Minimal Small change" }).check();
+  await expect(answer).toBeEnabled();
+  await page.waitForTimeout(100);
+  expect(replies).toBe(0);
+
+  const custom = card.getByRole("radio", { name: "Type your own answer" });
+  const customInput = card.locator("[data-question-custom-input]");
+  await custom.check();
+  await expect(customInput).toBeVisible();
+  await expect(customInput).toBeFocused();
+  await customInput.fill("  Touch-friendly  ");
+
+  const response = page.waitForResponse(candidate => new URL(candidate.url()).pathname.endsWith(`/questions/${question.requestId}`));
+  await answer.click();
+  const payload = (await response).request().postDataJSON();
+  expect(payload).toMatchObject({ outcome: { kind: "answered", answers: [["Touch-friendly"]] } });
+  expect(payload.outcome.answers.flat()).not.toContain("Type your own answer");
+  await expect(card).toContainText("Answered");
+});
+
+test("composer stays flush and its trailing action becomes cancel without adding a row", async ({ page, request }) => {
+  const id = await boot(page, request);
+  await chooseChatModel(page, "Claude Sonnet");
+  await page.locator("#chat-configuration-mode").selectOption("build");
+  await page.locator("#chat-configuration-variant").selectOption("high");
+  await page.locator("#chat-configuration-done").click();
+  await page.locator("#chat-input").fill("Idle first line");
+  await page.locator("#chat-input").press("Enter");
+  await expect(page.locator("#chat-input")).toHaveValue("Idle first line\n");
+  await page.locator("#chat-input").fill("");
+  await control(request, { action: "status", conversationId: id, status: "running" });
+  await expect(page.locator("#chat-send")).toHaveAttribute("aria-label", "Cancel response");
+  await expect(page.locator("#chat-send .chat-send-cancel")).toBeVisible();
+  await page.locator("#chat-input").focus();
+  await expect(page.locator("html")).toHaveAttribute("data-chat-editing", "");
+
+  const geometry = await page.locator(".chat-composer-actions").evaluate(actions => {
+    const send = actions.querySelector<HTMLElement>("#chat-send")!.getBoundingClientRect();
+    const trigger = actions.querySelector<HTMLElement>("#chat-configuration-trigger")!.getBoundingClientRect();
+    const status = actions.querySelector<HTMLElement>("#chat-composer-status")!.getBoundingClientRect();
+    const bounds = actions.getBoundingClientRect();
+    const composer = actions.closest(".chat-composer")!;
+    const style = getComputedStyle(composer);
+    return {
+      sendTop: send.top,
+      sendBottom: send.bottom,
+      triggerBottom: trigger.bottom,
+      statusBottom: status.bottom,
+      sendRight: send.right,
+      boundsRight: bounds.right,
+      margin: style.margin,
+    };
+  });
+  expect(Math.abs(geometry.sendBottom - geometry.triggerBottom)).toBeLessThanOrEqual(3);
+  expect(Math.abs(geometry.statusBottom - geometry.triggerBottom)).toBeLessThanOrEqual(2);
+  expect(geometry.sendRight).toBeLessThanOrEqual(geometry.boundsRight + 1);
+  expect(geometry.margin).toBe("0px");
+
+  await page.locator("#chat-input").fill("First line");
+  await page.locator("#chat-input").press("Shift+Enter");
+  await expect(page.locator("#chat-input")).toHaveValue("First line\n");
+  await page.locator("#chat-input").fill("Steer from touch");
+  await expect(page.locator("#chat-send")).toHaveAttribute("aria-label", "Cancel response");
+  const steerResponse = page.waitForResponse(response => response.url().endsWith("/prompts"));
+  await page.locator("#chat-input").press("Enter");
+  expect((await steerResponse).request().postDataJSON()).toMatchObject({ text: "Steer from touch" });
 });
 
 test("a subagent transcript pushes as a screen and the back gesture pops it", async ({ page, request }) => {
@@ -137,20 +221,45 @@ test("software-keyboard geometry keeps the composer in the visual viewport", asy
     Object.defineProperty(window, "visualViewport", { configurable: true, value: viewport });
   });
   await boot(page, request);
-  await page.locator("#chat-input").focus();
-  await expect(page.locator("html")).toHaveAttribute("data-chat-editing", "");
-  await expect(page.locator("#touch-tab-bar")).toBeHidden();
+  await openChatConfiguration(page);
+  await expect(page.locator("#chat-configuration-done")).toBeFocused();
+  await expect(page.locator("#chat-configuration-search")).not.toBeFocused();
+  await expect(page.locator("#chat-configuration-search")).toHaveCSS("font-size", "16px");
+  await expect(page.locator("#chat-configuration-dialog")).toHaveAttribute("data-presentation", "touch");
+  const closedKeyboardBounds = await page.evaluate(() => {
+    const dialog = document.querySelector("#chat-configuration-dialog")!.getBoundingClientRect();
+    const surface = document.querySelector("#chat-surface")!.getBoundingClientRect();
+    const tabs = document.querySelector("#touch-tab-bar")!.getBoundingClientRect();
+    return { dialogBottom: dialog.bottom, surfaceBottom: surface.bottom, tabTop: tabs.top };
+  });
+  expect(closedKeyboardBounds.dialogBottom).toBeLessThanOrEqual(closedKeyboardBounds.surfaceBottom + 1);
+  expect(closedKeyboardBounds.dialogBottom).toBeLessThanOrEqual(closedKeyboardBounds.tabTop + 1);
+  await page.locator("#chat-configuration-search").focus();
   await page.evaluate(() => {
     const viewport = window.visualViewport as VisualViewport & { height: number };
     viewport.height = 460;
     viewport.dispatchEvent(new Event("resize"));
   });
+  const sheetGeometry = await page.evaluate(() => {
+    const dialog = document.querySelector("#chat-configuration-dialog")!.getBoundingClientRect();
+    return { top: dialog.top, bottom: dialog.bottom, visualHeight: window.visualViewport!.height };
+  });
+  expect(sheetGeometry.top).toBeGreaterThanOrEqual(0);
+  expect(sheetGeometry.bottom).toBeLessThanOrEqual(sheetGeometry.visualHeight + 1);
+  await page.locator("#chat-configuration-done").click();
+  await expect(page.locator("#chat-configuration-trigger")).toBeFocused();
+  await expect(page.locator("#chat-input")).toHaveCSS("font-size", "16px");
+  await page.locator("#chat-input").focus();
+  await expect(page.locator("html")).toHaveAttribute("data-chat-editing", "");
+  await expect(page.locator("#touch-tab-bar")).toBeHidden();
+  await page.evaluate(() => window.visualViewport!.dispatchEvent(new Event("resize")));
   await expect(page.locator("#chat-surface")).toHaveCSS("--chat-visual-height", "460px");
   const geometry = await page.evaluate(() => {
     const composer = document.querySelector("#chat-composer")!.getBoundingClientRect();
-    return { bottom: composer.bottom, visualHeight: window.visualViewport!.height };
+    return { bottom: composer.bottom, visualHeight: window.visualViewport!.height, marginBottom: getComputedStyle(document.querySelector("#chat-composer")!).marginBottom };
   });
   expect(geometry.bottom).toBeLessThanOrEqual(geometry.visualHeight + 1);
+  expect(geometry.marginBottom).toBe("0px");
 });
 
 test("pinned streaming follows while unpinned streaming offers jump to latest", async ({ page, request }) => {
@@ -178,7 +287,9 @@ test("history prepend and activity expansion preserve semantic position", async 
   await timeline.evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new Event("scroll")); });
   const anchor = page.locator(`[data-chat-item-id="${latest[0]!.id}"]`);
   const before = await anchor.evaluate(element => element.getBoundingClientRect().top);
+  const olderResponse = page.waitForResponse(response => response.url().includes("cursor=older"));
   await page.locator("#chat-load-older").click();
+  expect((await olderResponse).ok()).toBe(true);
   await expect(page.locator("#chat-items")).toContainText("older message 0");
   expect(await anchor.evaluate(element => element.getBoundingClientRect().top)).toBeCloseTo(before, 0);
 
@@ -219,6 +330,29 @@ test("a permission's long paths wrap instead of running off the screen", async (
     clientWidth: element.clientWidth,
   }));
   expect(timeline.scrollWidth).toBeLessThanOrEqual(timeline.clientWidth);
+});
+
+test("completed answer and code copy controls stay reachable without hover or reflow", async ({ page, request }) => {
+  await boot(page, request, { items: [{
+    id: "part:copy", type: "assistant_message", createdAt: 1,
+    markdown: "Touch answer\n\n```ts\nconst touch = true;\n```",
+  }] });
+  await installClipboardMock(page);
+  const message = page.locator('[data-chat-item-id="part:copy"]');
+  const answer = message.locator('[data-chat-copy="answer"]');
+  const code = message.locator('[data-chat-copy="code"]');
+  await expect(answer).toBeVisible();
+  await expect(code).toBeVisible();
+  await expect(answer).toHaveCSS("opacity", "1");
+  const before = await message.boundingBox();
+  await code.tap();
+  expect(await readClipboardMock(page)).toBe("const touch = true;\n");
+  await expect(code).toHaveAttribute("data-state", "copied");
+  const after = await message.boundingBox();
+  expect(after?.width).toBeCloseTo(before?.width ?? 0, 1);
+  expect(after?.height).toBeCloseTo(before?.height ?? 0, 1);
+  await answer.tap();
+  expect(await readClipboardMock(page)).toBe("Touch answer\n\n```ts\nconst touch = true;\n```");
 });
 
 test("rotation and live mode switching retain Chat without remounting", async ({ page, request }) => {

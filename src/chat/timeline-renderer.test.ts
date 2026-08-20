@@ -46,8 +46,12 @@ describe("TimelineRenderer", () => {
 
     const questionNode = host.querySelector('[data-chat-item-id="question:q1"]');
     const assistantNode = host.querySelector('[data-chat-item-id="part:a"]');
-    const freeForm = host.querySelector<HTMLInputElement>('input[type="text"]');
+    const customToggle = host.querySelector<HTMLInputElement>("[data-question-custom-toggle]");
+    const customEditor = host.querySelector<HTMLElement>("[data-question-custom-editor]");
+    const freeForm = host.querySelector<HTMLInputElement>("[data-question-custom-input]");
     expect(questionNode).not.toBeNull();
+    customToggle!.checked = true;
+    customEditor!.hidden = false;
     freeForm!.value = "typed answer";
 
     const dirty = renderer.render(host, projectionWith([{ ...assistant, markdown: "Hello world" }, question]), new Set());
@@ -56,7 +60,115 @@ describe("TimelineRenderer", () => {
     expect(host.querySelector('[data-chat-item-id="part:a"]')).toBe(assistantNode);
     expect(assistantNode!.textContent).toContain("Hello world");
     expect(host.querySelector('[data-chat-item-id="question:q1"]')).toBe(questionNode);
-    expect(host.querySelector<HTMLInputElement>('input[type="text"]')!.value).toBe("typed answer");
+    expect(host.querySelector<HTMLInputElement>("[data-question-custom-toggle]")!.checked).toBe(true);
+    expect(host.querySelector<HTMLElement>("[data-question-custom-editor]")!.hidden).toBe(false);
+    expect(host.querySelector<HTMLInputElement>("[data-question-custom-input]")!.value).toBe("typed answer");
+  });
+
+  test("keeps the assistant shell stable and adds idempotent copy actions only on completion", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const assistant: ConversationItem = {
+      id: "part:copy",
+      type: "assistant_message",
+      createdAt: 1,
+      markdown: "Before\n\n```ts\nconst a = 1;\n```\n\n```sh\necho ok\n```",
+    };
+    renderer.render(host, projectionWith([assistant]), new Set());
+    const article = host.querySelector<HTMLElement>(".chat-assistant-message")!;
+    const content = article.querySelector<HTMLElement>(".chat-assistant-content")!;
+    expect(article.querySelectorAll("[data-chat-copy]")).toHaveLength(0);
+
+    renderer.render(host, projectionWith([assistant], { status: "completed" }), new Set());
+    expect(host.querySelector(".chat-assistant-message")).toBe(article);
+    expect(article.querySelector(".chat-assistant-content")).toBe(content);
+    expect(article.querySelectorAll("[data-chat-copy='answer']")).toHaveLength(1);
+    expect(article.querySelectorAll("[data-chat-copy='code']")).toHaveLength(2);
+    expect([...article.querySelectorAll("pre > code")].map(code => code.textContent)).toEqual(["const a = 1;\n", "echo ok\n"]);
+
+    renderer.render(host, projectionWith([assistant], { status: "completed" }), new Set());
+    expect(article.querySelectorAll("[data-chat-copy]")).toHaveLength(3);
+  });
+
+  test("patches cumulative completed Markdown without replacing shell actions", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const assistant: ConversationItem = { id: "part:done", type: "assistant_message", createdAt: 1, completedAt: 2, markdown: "Hello" };
+    renderer.render(host, projectionWith([assistant]), new Set());
+    const article = host.querySelector<HTMLElement>(".chat-assistant-message")!;
+    const answerCopy = article.querySelector("[data-chat-copy='answer']");
+    renderer.render(host, projectionWith([{ ...assistant, markdown: "Hello again" }]), new Set());
+    expect(host.querySelector(".chat-assistant-message")).toBe(article);
+    expect(article.querySelector("[data-chat-copy='answer']")).toBe(answerCopy);
+    expect(article.querySelector(".chat-assistant-content")?.textContent).toContain("Hello again");
+  });
+
+  test("does not mark a streaming assistant complete when a steer follows it", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const assistant: ConversationItem = { id: "part:steered", type: "assistant_message", createdAt: 1, markdown: "Working" };
+    const steer: ConversationItem = { id: "message:steer", type: "user_message", createdAt: 2, text: "Use the smaller approach" };
+
+    renderer.render(host, projectionWith([assistant, steer]), new Set());
+    const article = host.querySelector<HTMLElement>('[data-chat-item-id="part:steered"]')!;
+    expect(article.dataset.complete).toBe("false");
+    expect(article.querySelector("[data-chat-copy='answer']")).toBeNull();
+
+    renderer.render(host, projectionWith([{ ...assistant, markdown: "Working after steer" }, steer]), new Set());
+    expect(host.querySelector('[data-chat-item-id="part:steered"]')).toBe(article);
+    expect(article.querySelector(".chat-assistant-content")?.textContent).toContain("Working after steer");
+    expect(article.querySelector("[data-chat-copy='answer']")).toBeNull();
+  });
+
+  test("keeps a prior turn complete while the next turn is active", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const firstAnswer: ConversationItem = { id: "part:first", type: "assistant_message", createdAt: 1, markdown: "First answer" };
+    renderer.render(host, projectionWith([firstAnswer], { status: "completed" }), new Set());
+    const article = host.querySelector<HTMLElement>('[data-chat-item-id="part:first"]')!;
+    const copy = article.querySelector("[data-chat-copy='answer']");
+    expect(copy).not.toBeNull();
+
+    const nextPrompt: ConversationItem = { id: "message:next", type: "user_message", createdAt: 2, text: "Next question" };
+    renderer.render(host, projectionWith([firstAnswer, nextPrompt], { status: "sending" }), new Set());
+    expect(host.querySelector('[data-chat-item-id="part:first"]')).toBe(article);
+    expect(article.dataset.complete).toBe("true");
+    expect(article.querySelector("[data-chat-copy='answer']")).toBe(copy);
+  });
+
+  test("renders custom answers as a synthetic peer choice with a separate hidden input", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    renderer.render(host, projectionWith([question]), new Set());
+
+    const panel = host.querySelector("[data-question-panel]")!;
+    const options = [...panel.querySelectorAll(".chat-question-option")];
+    const toggle = panel.querySelector<HTMLInputElement>("[data-question-custom-toggle]")!;
+    const editor = panel.querySelector<HTMLElement>("[data-question-custom-editor]")!;
+    const input = panel.querySelector<HTMLInputElement>("[data-question-custom-input]")!;
+    expect(options.map(option => option.textContent?.trim())).toEqual(["a", "b", "Type your own answer"]);
+    expect(toggle.type).toBe("radio");
+    expect(toggle.name).toBe("q-0");
+    expect(editor.hidden).toBe(true);
+    expect(input.name).toBe("q-0-custom-text");
+    expect(toggle.getAttribute("aria-controls")).toBe(input.id);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  test("uses a checkbox for multi-select custom answers and omits custom UI when disabled", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const multi = {
+      ...question,
+      questions: [{ ...question.questions[0]!, multiple: true }],
+    } satisfies ConversationItem;
+    renderer.render(host, projectionWith([multi]), new Set());
+    expect(host.querySelector<HTMLInputElement>("[data-question-custom-toggle]")!.type).toBe("checkbox");
+    expect(host.querySelectorAll(".chat-question-option")).toHaveLength(3);
+
+    renderer.render(host, projectionWith([{ ...question, questions: [{ ...question.questions[0]!, allowFreeForm: false }] }]), new Set());
+    expect(host.querySelector("[data-question-custom-toggle]")).toBeNull();
+    expect(host.querySelector("[data-question-custom-input]")).toBeNull();
   });
 
   test("unchanged items are not touched when a new item is appended", () => {
@@ -119,6 +231,7 @@ describe("TimelineRenderer", () => {
     // The outcome recedes into the summary; the form is gone.
     expect(host.querySelector(".chat-request-trace")!.textContent).toBe("Answered");
     expect(host.querySelector("details.chat-request")!.hasAttribute("open")).toBe(false);
+    expect(host.querySelector("[data-question-custom-toggle]")).toBeNull();
   });
 
   test("drafts render, update their label, and disappear when reconciled", () => {

@@ -1,4 +1,4 @@
-import type { ChatAgent, ChatMode, ChatCommand, ChatModel, ModelSelection, StructuredQuestion } from "./types";
+import type { ChatAgent, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ModelSelection, StructuredQuestion } from "./types";
 
 // `conversationId` is the owning session, like PendingPermission's: the global
 // list is filtered by the adapter, which is what lets a parent discover its
@@ -23,6 +23,9 @@ export type ProviderSession = {
 export type ProviderPage<T> = {
   items: T[];
   nextCursor?: string;
+  // Providers that already loaded the complete backing collection can expose
+  // it for configuration recovery without making the visible page unbounded.
+  configurationItems?: T[];
 };
 
 export type ProviderMessage = Record<string, unknown>;
@@ -56,8 +59,10 @@ export interface OpenCodeProvider {
   switchModel(sessionId: string, selection: ModelSelection, variant?: string): Promise<void>;
   renameSession?(sessionId: string, title: string): Promise<ProviderSession>;
   listSessions(): Promise<ProviderSession[]>;
-  createSession(id: string): Promise<ProviderSession>;
+  newConversationConfiguration(): Promise<ConversationConfiguration>;
+  createSession(id: string, configuration?: ConversationConfiguration): Promise<ProviderSession>;
   getSession(id: string): Promise<ProviderSession | null>;
+  getConversationConfiguration(sessionId: string, completeMessages?: ProviderMessage[]): Promise<ConversationConfiguration>;
   listMessages(sessionId: string, options: { cursor?: string; limit: number }): Promise<ProviderPage<ProviderMessage>>;
   events(signal: AbortSignal): AsyncIterable<ProviderEvent>;
   prompt(sessionId: string, input: { id: string; text: string; delivery: "steer" | "queue"; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;

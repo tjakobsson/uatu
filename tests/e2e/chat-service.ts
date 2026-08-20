@@ -4,8 +4,10 @@ import type { WorkspaceChatService } from "../../src/chat/service";
 import { ConversationNotFoundError } from "../../src/chat/workspace";
 import type {
   ChatCapability,
+  ChatModel,
   ChatEvent,
   ChatAvailability,
+  ConversationConfiguration,
   ConversationItem,
   ConversationSnapshot,
   ConversationSummary,
@@ -20,8 +22,10 @@ export class FakeE2EChatService implements WorkspaceChatService {
   private readonly conversations = new Map<string, ConversationSummary>();
   private readonly items = new Map<string, Map<string, ConversationItem>>();
   private readonly replay = new Map<string, ConversationReplay>();
+  private readonly configurations = new Map<string, ConversationConfiguration>();
   private readonly receipts = new Map<string, unknown>();
   private readonly olderItems = new Map<string, ConversationItem[]>();
+  private nextCreatedConfiguration: ConversationConfiguration = {};
   // Conversations a subagent runs as. The real adapter keeps them out of the
   // picker (a child session has a parentId), and Chat's drill-down navigation
   // depends on that, so the fake has to keep the same shape.
@@ -37,6 +41,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
   promptAttempts: string[] = [];
   promptModes: string[] = [];
   promptVariants: string[] = [];
+  promptConfigurations: ConversationConfiguration[] = [];
   // When set, the next prompt stalls half a second and then rejects —
   // enough of a window for a test to deterministically switch conversations
   // while the request is in flight.
@@ -50,8 +55,16 @@ export class FakeE2EChatService implements WorkspaceChatService {
   // The capabilities this fake declares. A test can narrow them to drive the
   // surface an agent that offers less produces — the one path a workspace with
   // a single real agent can never reach on its own.
-  private static readonly DEFAULT_CAPABILITIES: ChatCapability[] = ["modes", "models", "commands", "questions", "permissions", "subagents", "variants", "context"];
+  private static readonly DEFAULT_CAPABILITIES: ChatCapability[] = ["modes", "models", "commands", "questions", "permissions", "subagents", "variants", "context", "conversation-rename"];
   private capabilities: ChatCapability[] = [...FakeE2EChatService.DEFAULT_CAPABILITIES];
+  private modelInventory: ChatModel[] = FakeE2EChatService.defaultModels();
+
+  private static defaultModels(): ChatModel[] {
+    return [
+      { selection: { providerId: "anthropic", modelId: "claude-sonnet" }, provider: "Anthropic", name: "Claude Sonnet", variants: ["high", "xhigh"], contextLimit: 200000 },
+      { selection: { providerId: "openai", modelId: "gpt-5" }, provider: "OpenAI", name: "GPT-5", contextLimit: 100000 },
+    ];
+  }
 
   async status(): Promise<ChatAvailability> {
     this.statusCalls += 1;
@@ -64,6 +77,14 @@ export class FakeE2EChatService implements WorkspaceChatService {
 
   declareOnly(capabilities: ChatCapability[]): void {
     this.capabilities = capabilities;
+  }
+
+  setModels(models: ChatModel[]): void {
+    this.modelInventory = structuredClone(models);
+  }
+
+  configureNextConversation(configuration: ConversationConfiguration): void {
+    this.nextCreatedConfiguration = structuredClone(configuration);
   }
 
   async retry(): Promise<ChatAvailability> {
@@ -100,10 +121,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
   }
 
   async models() {
-    return [
-      { selection: { providerId: "anthropic", modelId: "claude-sonnet" }, provider: "Anthropic", name: "Claude Sonnet", variants: ["high", "xhigh"], contextLimit: 200000 },
-      { selection: { providerId: "openai", modelId: "gpt-5" }, provider: "OpenAI", name: "GPT-5", contextLimit: 100000 },
-    ];
+    return structuredClone(this.modelInventory);
   }
 
   async modes() {
@@ -138,6 +156,8 @@ export class FakeE2EChatService implements WorkspaceChatService {
     };
     this.conversations.set(id, conversation);
     this.items.set(id, new Map());
+    this.configurations.set(id, this.nextCreatedConfiguration);
+    this.nextCreatedConfiguration = {};
     this.replay.set(id, new ConversationReplay(this.generation, id, 64 * 1024));
     return this.snapshot(id);
   }
@@ -171,13 +191,25 @@ export class FakeE2EChatService implements WorkspaceChatService {
     messageId: string;
     delivery: "steer" | "queue";
     conversation?: ConversationSummary;
+    configuration: ConversationConfiguration;
   }> {
     if (mode) this.promptModes.push(mode);
     if (variant) this.promptVariants.push(variant);
     const key = `prompt:${id}:${requestId}`;
-    const existing = this.receipts.get(key) as { messageId: string; delivery: "steer" | "queue"; conversation?: ConversationSummary } | undefined;
+    const existing = this.receipts.get(key) as { messageId: string; delivery: "steer" | "queue"; configuration: ConversationConfiguration; conversation?: ConversationSummary } | undefined;
     if (existing) return existing;
     const conversation = this.require(id);
+    const previousConfiguration = this.configurations.get(id) ?? {};
+    const configuration: ConversationConfiguration = {
+      ...previousConfiguration,
+      ...(model ? { model } : {}),
+      ...(mode ? { mode } : {}),
+    };
+    if (model) {
+      if (variant) configuration.variant = variant;
+      else delete configuration.variant;
+    } else if (variant) configuration.variant = variant;
+    this.promptConfigurations.push(structuredClone(configuration));
     this.promptAttempts.push(requestId);
     if (this.failNextPrompt) {
       this.failNextPrompt = false;
@@ -201,8 +233,26 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.items.get(id)!.set(item.id, item);
     this.replay.get(id)!.publish({ type: "item.upsert", item });
     this.setStatus(id, "running");
-    const result = { messageId, delivery, ...(renamed ? { conversation: renamed } : {}) };
+    this.configurations.set(id, configuration);
+    this.nextCreatedConfiguration = structuredClone(configuration);
+    if (JSON.stringify(previousConfiguration) !== JSON.stringify(configuration)) {
+      this.replay.get(id)!.publish({ type: "conversation.configuration", configuration });
+    }
+    const result = { messageId, delivery, configuration, ...(renamed ? { conversation: renamed } : {}) };
     this.receipts.set(key, result);
+    return result;
+  }
+
+  async renameConversation(id: string, requestId: string, rawTitle: string): Promise<{ conversation: ConversationSummary }> {
+    const key = `rename:${id}:${requestId}`;
+    const existing = this.receipts.get(key) as { conversation: ConversationSummary } | undefined;
+    if (existing) return existing;
+    const current = this.require(id);
+    const conversation = { ...current, title: rawTitle.trim(), updatedAt: this.nextId++ };
+    this.conversations.set(id, conversation);
+    const result = { conversation };
+    this.receipts.set(key, result);
+    this.replay.get(id)!.publish({ type: "conversation.updated", conversation });
     return result;
   }
 
@@ -249,6 +299,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.promptAttempts = [];
     this.promptModes = [];
     this.promptVariants = [];
+    this.promptConfigurations = [];
     this.failNextPrompt = false;
     this.failNextHistory = false;
     this.failNextOlderHistory = false;
@@ -256,15 +307,18 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.conversations.clear();
     this.items.clear();
     this.replay.clear();
+    this.configurations.clear();
     this.receipts.clear();
     this.olderItems.clear();
+    this.nextCreatedConfiguration = {};
     this.children.clear();
     // A narrowed agent is one test's setup, not the fixture's resting state:
     // left in place it reaches whichever test boots against this worker next.
     this.capabilities = [...FakeE2EChatService.DEFAULT_CAPABILITIES];
+    this.modelInventory = FakeE2EChatService.defaultModels();
   }
 
-  seed(title: string, items: ConversationItem[], older: ConversationItem[] = [], child = false): ConversationSnapshot {
+  seed(title: string, items: ConversationItem[], older: ConversationItem[] = [], child = false, configuration: ConversationConfiguration = {}): ConversationSnapshot {
     const id = `conversation-${this.nextId++}`;
     const conversation: ConversationSummary = {
       id,
@@ -276,6 +330,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.conversations.set(id, conversation);
     if (child) this.children.add(id);
     this.items.set(id, new Map(items.map(item => [item.id, item])));
+    this.configurations.set(id, configuration);
     this.replay.set(id, new ConversationReplay(this.generation, id, 64 * 1024));
     if (older.length) this.olderItems.set(id, older);
     return this.snapshot(id);
@@ -294,8 +349,14 @@ export class FakeE2EChatService implements WorkspaceChatService {
     return this.replay.get(id)!.publish({ type: "item.text_delta", itemId, delta });
   }
 
-  publishStatus(id: string, status: ConversationSummary["status"]): void {
-    this.setStatus(id, status);
+  publishStatus(id: string, status: ConversationSummary["status"], message?: string): void {
+    this.setStatus(id, status, message);
+  }
+
+  publishConfiguration(id: string, configuration: ConversationConfiguration): ChatEvent {
+    this.require(id);
+    this.configurations.set(id, configuration);
+    return this.replay.get(id)!.publish({ type: "conversation.configuration", configuration });
   }
 
   disconnect(): void {
@@ -311,6 +372,10 @@ export class FakeE2EChatService implements WorkspaceChatService {
     }
   }
 
+  restart(): void {
+    this.rotateGeneration();
+  }
+
   private require(id: string): ConversationSummary {
     const conversation = this.conversations.get(id);
     if (!conversation) throw new ConversationNotFoundError();
@@ -321,15 +386,16 @@ export class FakeE2EChatService implements WorkspaceChatService {
     const conversation = this.require(id);
     return {
       conversation,
+      configuration: this.configurations.get(id) ?? {},
       generation: this.generation,
       cursor: this.replay.get(id)!.latestCursor(),
       items: [...this.items.get(id)!.values()],
     };
   }
 
-  private setStatus(id: string, status: ConversationSummary["status"]): void {
+  private setStatus(id: string, status: ConversationSummary["status"], message?: string): void {
     const conversation = this.require(id);
     this.conversations.set(id, { ...conversation, status, updatedAt: this.nextId });
-    this.replay.get(id)!.publish({ type: "conversation.status", status });
+    this.replay.get(id)!.publish({ type: "conversation.status", status, ...(message ? { message } : {}) });
   }
 }

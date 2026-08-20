@@ -1,7 +1,7 @@
 {
   "event": "state",
   "data": {
-    "workspaceApiRevision": 1,
+    "workspaceApiRevision": 6,
     "roots": [],
     "repositories": [],
     "compareTarget": "base",
