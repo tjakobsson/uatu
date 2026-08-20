@@ -20,7 +20,7 @@ export async function copyChatText(
 
   const previous = feedbackTimers.get(button);
   if (previous !== undefined) cancel(previous);
-  const originalLabel = button.dataset.chatCopy === "code" ? "Copy code block" : "Copy completed answer";
+  const originalLabel = "Copy code block";
   button.dataset.state = copied ? "copied" : "failed";
   button.setAttribute("aria-label", copied ? "Copied" : "Copy failed");
   button.title = copied ? "Copied" : "Copy failed";

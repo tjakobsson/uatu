@@ -192,7 +192,7 @@ test.describe("desktop OpenCode chat", () => {
     expect(elapsedSeconds(await page.locator("#chat-composer-status").getAttribute("title"))).toBeGreaterThanOrEqual(before);
   });
 
-  test("streams Markdown, exposes scoped copy on completion, and updates one tool entry in place", async ({ page, request }) => {
+  test("streams Markdown, exposes code copy on completion, and updates one tool entry in place", async ({ page, request }) => {
     const seeded = await control(request, { action: "seed", title: "Streaming", items: [] }) as { conversation: { id: string } };
     await page.reload();
     await openChatPanel(page);
@@ -207,22 +207,25 @@ test.describe("desktop OpenCode chat", () => {
     await expect(assistantNode.locator("[data-chat-copy='answer']")).toHaveCount(0);
     await control(request, { action: "item", conversationId: id, item: { ...assistant, markdown: "## Result\n\n**streamed** safely\n\n```ts\nconst value = 1;\n```" } });
     await control(request, { action: "status", conversationId: id, status: "completed" });
-    await expect(assistantNode.locator("[data-chat-copy='answer']")).toHaveCount(1);
+    await expect(assistantNode.locator("[data-chat-copy='answer']")).toHaveCount(0);
     await expect(assistantNode.locator("[data-chat-copy='code']")).toHaveCount(1);
-    const answerCopyGeometry = await assistantNode.evaluate(element => {
-      const content = element.querySelector(".chat-assistant-content")!.getBoundingClientRect();
-      const control = element.querySelector<HTMLElement>("[data-chat-copy='answer']")!;
+    const codeCopyGeometry = await assistantNode.evaluate(element => {
+      const pre = element.querySelector("pre")!.getBoundingClientRect();
+      const control = element.querySelector<HTMLElement>("[data-chat-copy='code']")!;
       const copy = control.getBoundingClientRect();
-      return { contentBottom: content.bottom, copyTop: copy.top, width: copy.width, borderWidth: getComputedStyle(control).borderTopWidth };
+      return { preRight: pre.right, copyRight: copy.right, width: copy.width, borderWidth: getComputedStyle(control).borderTopWidth };
     });
-    expect(answerCopyGeometry.copyTop).toBeGreaterThanOrEqual(answerCopyGeometry.contentBottom);
-    expect(answerCopyGeometry.width).toBeLessThanOrEqual(22);
-    expect(parseFloat(answerCopyGeometry.borderWidth)).toBeGreaterThan(0);
+    expect(codeCopyGeometry.copyRight).toBeLessThan(codeCopyGeometry.preRight);
+    expect(codeCopyGeometry.width).toBeGreaterThanOrEqual(32);
+    expect(parseFloat(codeCopyGeometry.borderWidth)).toBeGreaterThan(0);
     await installClipboardMock(page);
+    const beforeCopy = await assistantNode.boundingBox();
     await assistantNode.locator("[data-chat-copy='code']").click();
     expect(await readClipboardMock(page)).toBe("const value = 1;\n");
-    await assistantNode.locator("[data-chat-copy='answer']").click();
-    expect(await readClipboardMock(page)).toBe("## Result\n\n**streamed** safely\n\n```ts\nconst value = 1;\n```");
+    await expect(assistantNode.locator("[data-chat-copy='code']")).toHaveAttribute("data-state", "copied");
+    const afterCopy = await assistantNode.boundingBox();
+    expect(afterCopy?.width).toBeCloseTo(beforeCopy?.width ?? 0, 1);
+    expect(afterCopy?.height).toBeCloseTo(beforeCopy?.height ?? 0, 1);
 
     const running: ConversationItem = { id: "tool:read", type: "tool", createdAt: 11, name: "Read", status: "running", input: "README.md" };
     await control(request, { action: "item", conversationId: id, item: running });

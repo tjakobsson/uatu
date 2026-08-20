@@ -1,7 +1,7 @@
 import type { APIRequestContext, Page } from "@playwright/test";
 
 import type { ConversationConfiguration, ConversationItem } from "../../src/chat/types";
-import { chooseChatModel, installClipboardMock, openChatConfiguration, openChatPanel, readClipboardMock } from "./chat-helpers";
+import { chooseChatModel, openChatConfiguration, openChatPanel } from "./chat-helpers";
 import { expect, test } from "./fixtures";
 
 async function bootChat(page: Page, request: APIRequestContext): Promise<void> {
@@ -158,9 +158,7 @@ test.describe("chat panels and navigation", () => {
     const track = page.locator("#chat-subagents");
     await expect(track).toBeVisible();
     await expect(track.locator("summary")).toContainText("1 of 2 subagents working · Audit styles");
-    await installClipboardMock(page);
-    await page.locator('[data-chat-item-id="part:parent"] [data-chat-copy="answer"]').click();
-    expect(await readClipboardMock(page)).toBe("parent findings");
+    await expect(page.locator('[data-chat-item-id="part:parent"] [data-chat-copy="answer"]')).toHaveCount(0);
 
     await track.locator("summary").click();
     await expect(track.locator("li")).toHaveCount(2);
@@ -172,8 +170,7 @@ test.describe("chat panels and navigation", () => {
     await expect(drilldown).toBeVisible();
     await expect(page.locator("#chat-drilldown-items")).toContainText("child findings");
     await expect(page.locator("#chat-drilldown-title")).toHaveText("explore · Review renderer");
-    await page.locator('#chat-drilldown-items [data-chat-item-id="part:child"] [data-chat-copy="answer"]').click();
-    expect(await readClipboardMock(page)).toBe("child findings");
+    await expect(page.locator('#chat-drilldown-items [data-chat-item-id="part:child"] [data-chat-copy="answer"]')).toHaveCount(0);
     await expect(page.locator("#chat-conversation-select")).toHaveValue(parent);
     // The picker lists conversations you can start and resume; a subagent's
     // transcript is neither, so it is absent from it entirely.

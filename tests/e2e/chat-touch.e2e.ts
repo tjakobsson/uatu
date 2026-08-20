@@ -332,7 +332,7 @@ test("a permission's long paths wrap instead of running off the screen", async (
   expect(timeline.scrollWidth).toBeLessThanOrEqual(timeline.clientWidth);
 });
 
-test("completed answer and code copy controls stay reachable without hover or reflow", async ({ page, request }) => {
+test("completed code copy stays reachable without hover or reflow", async ({ page, request }) => {
   await boot(page, request, { items: [{
     id: "part:copy", type: "assistant_message", createdAt: 1,
     markdown: "Touch answer\n\n```ts\nconst touch = true;\n```",
@@ -341,9 +341,9 @@ test("completed answer and code copy controls stay reachable without hover or re
   const message = page.locator('[data-chat-item-id="part:copy"]');
   const answer = message.locator('[data-chat-copy="answer"]');
   const code = message.locator('[data-chat-copy="code"]');
-  await expect(answer).toBeVisible();
+  await expect(answer).toHaveCount(0);
   await expect(code).toBeVisible();
-  await expect(answer).toHaveCSS("opacity", "1");
+  await expect(code).toHaveCSS("opacity", "1");
   const before = await message.boundingBox();
   await code.tap();
   expect(await readClipboardMock(page)).toBe("const touch = true;\n");
@@ -351,8 +351,6 @@ test("completed answer and code copy controls stay reachable without hover or re
   const after = await message.boundingBox();
   expect(after?.width).toBeCloseTo(before?.width ?? 0, 1);
   expect(after?.height).toBeCloseTo(before?.height ?? 0, 1);
-  await answer.tap();
-  expect(await readClipboardMock(page)).toBe("Touch answer\n\n```ts\nconst touch = true;\n```");
 });
 
 test("rotation and live mode switching retain Chat without remounting", async ({ page, request }) => {
