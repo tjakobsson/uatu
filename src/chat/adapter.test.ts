@@ -448,6 +448,48 @@ describe("prompt, abort, permission, and question mutations", () => {
     expect(reads).toBe(3);
   });
 
+  test("a cold configuration read cannot overwrite a newer provider event", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const stale = { model: { providerId: "anthropic", modelId: "claude" }, mode: "plan" };
+    let reads = 0;
+    let readStarted!: () => void;
+    const started = new Promise<void>(resolve => { readStarted = resolve; });
+    let releaseRead!: () => void;
+    const gate = new Promise<void>(resolve => { releaseRead = resolve; });
+    provider.getConversationConfiguration = async () => {
+      reads += 1;
+      if (reads === 1) {
+        readStarted();
+        await gate;
+      }
+      return stale;
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const events = adapter.projectionForTests("session").replay.handoff(() => null).subscription;
+    const iterator = events[Symbol.asyncIterator]();
+    const pump = adapter.startEventPump();
+
+    const pendingHistory = adapter.history("session");
+    await started;
+    provider.eventQueue.push({
+      type: "session.next.model.switched",
+      properties: { sessionID: "session", model: { providerID: "openai", id: "gpt" } },
+    });
+    await Bun.sleep(0);
+    releaseRead();
+    await pendingHistory;
+    let event: ChatEvent | undefined;
+    while (event?.type !== "conversation.configuration") event = (await iterator.next()).value;
+
+    expect(reads).toBe(1);
+    expect(event.configuration).toEqual({ model: { providerId: "openai", modelId: "gpt" }, mode: "plan" });
+    expect((await adapter.history("session")).configuration).toEqual(event.configuration);
+    events.cancel();
+    await adapter.stopEventPump();
+    await pump;
+  });
+
   test("accepted configuration is returned and published once to live and replay subscribers", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];

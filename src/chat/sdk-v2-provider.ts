@@ -230,7 +230,7 @@ export class SdkV2Provider implements OpenCodeProvider {
     return session;
   }
 
-  async getConversationConfiguration(sessionId: string): Promise<ConversationConfiguration> {
+  async getConversationConfiguration(sessionId: string, messages?: ProviderMessage[]): Promise<ConversationConfiguration> {
     const sessions: unknown[] = [];
     const classic = await this.client.session.get({ sessionID: sessionId, directory: this.directory }) as Result<unknown>;
     if (classic.data) {
@@ -244,7 +244,7 @@ export class SdkV2Provider implements OpenCodeProvider {
       const response = native.data as { data?: unknown };
       sessions.unshift(response.data ?? response);
     }
-    return normalizePersistedConversationConfiguration(sessions, await this.allMessages(sessionId));
+    return normalizePersistedConversationConfiguration(sessions, messages ?? await this.allMessages(sessionId));
   }
 
   /**

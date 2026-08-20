@@ -4,7 +4,7 @@ import { boundedSet } from "../shared/bounded-map";
 import { ProviderUpdateCoalescer } from "./coalescer";
 import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage, type NormalizedProviderUpdate } from "./normalization";
 import { mergeAssistantMessage, sameUsage, TOKEN_USAGE_COMPONENTS } from "./usage";
-import { UnsupportedVariantSelectionError, type OpenCodeProvider, type ProviderPermissionReply, type ProviderSession } from "./provider";
+import { UnsupportedVariantSelectionError, type OpenCodeProvider, type ProviderMessage, type ProviderPermissionReply, type ProviderSession } from "./provider";
 import { IdempotencyReceipts } from "./receipts";
 import { ConversationReplay, type ReplaySubscription } from "./replay";
 import { ProviderTextReconciler } from "./text-reconciler";
@@ -135,6 +135,7 @@ export class OpenCodeChatAdapter {
   // Provider-owned state. This cache only avoids repeated reads while a
   // projection is warm; every miss recovers through the provider seam.
   private readonly configurations = new Map<string, ConversationConfiguration>();
+  private readonly configurationReads = new Map<string, Promise<ConversationConfiguration>>();
   // Mirrors a running OpenCode TUI: once this adapter accepts a prompt, the
   // next conversation starts from that process-local selection. A fresh
   // adapter falls back to OpenCode's durable config/recent-model policy.
@@ -256,10 +257,12 @@ export class OpenCodeChatAdapter {
     // re-applies such events idempotently.
     const replayCursor = this.projection(id).replay.latestCursor();
     const cursor = options.cursor ? decodeHistoryCursor(options.cursor) : undefined;
-    const [page, configuration] = await Promise.all([
-      this.provider.listMessages(id, { cursor: cursor?.provider, limit: options.limit ?? DEFAULT_PAGE_SIZE }),
-      this.configuration(id),
-    ]);
+    const page = await this.provider.listMessages(id, { cursor: cursor?.provider, limit: options.limit ?? DEFAULT_PAGE_SIZE });
+    // The initial page contains the newest persisted records already read by
+    // the provider. Reuse them for configuration recovery instead of sweeping
+    // the complete transcript a second time. Older-page requests normally hit
+    // the warm cache; on a cold cache they fall back to the provider sweep.
+    const configuration = await this.configuration(id, cursor ? undefined : page.items);
     const items = page.items.flatMap(message => normalizeProviderMessage(message));
     // Stable sort with no id tiebreaker: parts of one message share the
     // message's timestamp, so ties must fall back to the provider's own part
@@ -1152,12 +1155,23 @@ export class OpenCodeChatAdapter {
     return session;
   }
 
-  private async configuration(id: string): Promise<ConversationConfiguration> {
+  private async configuration(id: string, messages?: ProviderMessage[]): Promise<ConversationConfiguration> {
     const cached = this.configurations.get(id);
     if (cached) return cached;
-    const configuration = await this.provider.getConversationConfiguration(id);
-    this.configurations.set(id, configuration);
-    return configuration;
+    const existing = this.configurationReads.get(id);
+    if (existing) return existing;
+    const read = this.provider.getConversationConfiguration(id, messages).then(configuration => {
+      // Prompt acceptance may have populated the cache while the provider read
+      // was in flight. That newer value wins over the earlier recovered state.
+      const current = this.configurations.get(id);
+      if (current) return current;
+      this.configurations.set(id, configuration);
+      return configuration;
+    }).finally(() => {
+      if (this.configurationReads.get(id) === read) this.configurationReads.delete(id);
+    });
+    this.configurationReads.set(id, read);
+    return read;
   }
 
   private projection(id: string): ConversationProjection {

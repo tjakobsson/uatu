@@ -59,7 +59,7 @@ export interface OpenCodeProvider {
   newConversationConfiguration(): Promise<ConversationConfiguration>;
   createSession(id: string, configuration?: ConversationConfiguration): Promise<ProviderSession>;
   getSession(id: string): Promise<ProviderSession | null>;
-  getConversationConfiguration(sessionId: string): Promise<ConversationConfiguration>;
+  getConversationConfiguration(sessionId: string, messages?: ProviderMessage[]): Promise<ConversationConfiguration>;
   listMessages(sessionId: string, options: { cursor?: string; limit: number }): Promise<ProviderPage<ProviderMessage>>;
   events(signal: AbortSignal): AsyncIterable<ProviderEvent>;
   prompt(sessionId: string, input: { id: string; text: string; delivery: "steer" | "queue"; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;

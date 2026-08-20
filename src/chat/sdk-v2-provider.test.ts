@@ -70,6 +70,39 @@ describe("OpenCode v2 identity policy", () => {
     });
   });
 
+  test("configuration recovery reuses messages already loaded for history", async () => {
+    let messageReads = 0;
+    const client = {
+      session: {
+        get: async () => ({ data: { ...session("ses_reuse"), metadata: { "uatu.transport": "compatibility" } } }),
+        messages: async () => { messageReads += 1; return { data: [] }; },
+      },
+      v2: {
+        session: {
+          get: async () => ({ error: { message: "missing" }, response: { status: 404 } }),
+          messages: async () => { messageReads += 1; return { data: { data: [], cursor: { next: null } } }; },
+        },
+      },
+    } as unknown as OpencodeClient;
+    const provider = new SdkV2Provider(client, "/workspace");
+    const messages = [{
+      info: {
+        id: "msg_user",
+        role: "user",
+        time: { created: 1 },
+        agent: "plan",
+        model: { providerID: "openai", modelID: "gpt" },
+      },
+      parts: [],
+    }];
+
+    expect(await provider.getConversationConfiguration("ses_reuse", messages)).toEqual({
+      model: { providerId: "openai", modelId: "gpt" },
+      mode: "plan",
+    });
+    expect(messageReads).toBe(0);
+  });
+
   test("resolves new conversations with OpenCode's durable cold-TUI policy", () => {
     const agents = [
       { name: "plan", mode: "primary" },
