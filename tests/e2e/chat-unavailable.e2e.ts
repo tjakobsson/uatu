@@ -45,7 +45,7 @@ test.describe("chat startup failure", () => {
     await page.locator(".chat-unavailable__retry").click();
     await expect(page.locator(".chat-unavailable")).toHaveCount(0);
     await expect(state).not.toHaveClass(/is-error/);
-    const newButton = page.getByRole("button", { name: "New" });
+    const newButton = page.getByRole("button", { name: "New conversation" });
     await expect(newButton).toBeEnabled();
     await newButton.click();
     await expect(page.locator("#chat-conversation-select")).not.toHaveValue("");

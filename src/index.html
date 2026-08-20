@@ -691,7 +691,12 @@
             <div class="chat-conversation-controls">
               <label class="sr-only" for="chat-conversation-select">Conversation</label>
               <select id="chat-conversation-select" aria-label="Conversation"></select>
-              <button id="chat-new-conversation" class="chat-secondary-button" type="button">New</button>
+              <button id="chat-rename-conversation" class="icon-button chat-rename-button" type="button" aria-label="Rename conversation" title="Rename conversation" hidden>
+                <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+                  <path d="M3 11.5V13h1.5l7.8-7.8-1.5-1.5L3 11.5Zm8.9-8.9 1.5 1.5.7-.7a1.05 1.05 0 0 0-1.5-1.5l-.7.7Z" fill="currentColor"/>
+                </svg>
+              </button>
+              <button id="chat-new-conversation" class="chat-secondary-button" type="button" aria-label="New conversation">New conversation</button>
               <button id="chat-collapse" class="icon-button chat-collapse-button" type="button" aria-label="Collapse chat panel" title="Collapse chat panel">
                 <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
                   <path
@@ -706,6 +711,12 @@
               </button>
             </div>
           </header>
+          <form id="chat-rename-form" class="chat-rename-form" hidden>
+            <label for="chat-rename-title">Conversation title</label>
+            <input id="chat-rename-title" type="text" maxlength="200" autocomplete="off" />
+            <button class="chat-primary-button" type="submit">Rename</button>
+            <button id="chat-rename-cancel" class="chat-secondary-button" type="button">Cancel</button>
+          </form>
           <div id="chat-state" class="chat-state" role="status" aria-live="polite">Loading chat…</div>
           <div id="chat-find-slot" class="find-slot"></div>
           <!-- The timeline and the subagent drill-down share one box: the

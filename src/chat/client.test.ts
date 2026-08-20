@@ -22,7 +22,8 @@ describe("chat API client", () => {
       if (String(url).endsWith("conversations")) return init?.method === "POST"
         ? Response.json(snapshot(), { status: 201 })
         : Response.json({ conversations: [snapshot().conversation] });
-      if (String(url).includes("prompts")) return Response.json({ messageId: "m1", delivery: "queue" }, { status: 202 });
+       if (String(url).includes("prompts")) return Response.json({ messageId: "m1", delivery: "queue", configuration: { model: { providerId: "anthropic", modelId: "claude" } } }, { status: 202 });
+       if (init?.method === "PATCH") return Response.json({ conversation: { ...snapshot().conversation, title: "Renamed" } });
       return Response.json(snapshot());
     }) as typeof fetch;
     const client = new ChatApiClient(fetcher);
@@ -32,6 +33,7 @@ describe("chat API client", () => {
     await client.conversations();
     await client.snapshot("c/1");
     await client.prompt("c/1", "r1", "hello", { providerId: "anthropic", modelId: "claude" });
+    await client.renameConversation("c/1", "r2", "Renamed");
     expect(requests.every(request => request.url.startsWith("/s/work/api/chat/"))).toBe(true);
     expect(requests[4]!.url).toContain("c%2F1");
     expect(JSON.parse(requests[5]!.init!.body as string)).toEqual({
@@ -39,6 +41,7 @@ describe("chat API client", () => {
       text: "hello",
       model: { providerId: "anthropic", modelId: "claude" },
     });
+    expect(requests[6]!.init?.method).toBe("PATCH");
   });
 
   test("reconnects from the latest event cursor and cleanup closes the stream", () => {
@@ -117,6 +120,7 @@ class FakeEventSource {
 function snapshot() {
   return {
     conversation: { id: "c/1", title: "Chat", createdAt: 1, updatedAt: 1, status: "idle" },
+    configuration: {},
     generation: "g",
     cursor: "cursor",
     items: [],

@@ -19,6 +19,7 @@ function provider(): OpenCodeProvider {
     async listSessions() { return []; },
     async createSession() { throw new Error("unused"); },
     async getSession() { return null; },
+    async getConversationConfiguration() { return {}; },
     async listMessages() { return { items: [] }; },
     async *events(signal) { while (!signal.aborted) await new Promise(resolve => signal.addEventListener("abort", resolve, { once: true })); },
     async prompt() { throw new Error("unused"); },

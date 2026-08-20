@@ -6,6 +6,7 @@ import type {
   ChatCapability,
   ChatEvent,
   ChatAvailability,
+  ConversationConfiguration,
   ConversationItem,
   ConversationSnapshot,
   ConversationSummary,
@@ -20,6 +21,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
   private readonly conversations = new Map<string, ConversationSummary>();
   private readonly items = new Map<string, Map<string, ConversationItem>>();
   private readonly replay = new Map<string, ConversationReplay>();
+  private readonly configurations = new Map<string, ConversationConfiguration>();
   private readonly receipts = new Map<string, unknown>();
   private readonly olderItems = new Map<string, ConversationItem[]>();
   // Conversations a subagent runs as. The real adapter keeps them out of the
@@ -37,6 +39,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
   promptAttempts: string[] = [];
   promptModes: string[] = [];
   promptVariants: string[] = [];
+  promptConfigurations: ConversationConfiguration[] = [];
   // When set, the next prompt stalls half a second and then rejects —
   // enough of a window for a test to deterministically switch conversations
   // while the request is in flight.
@@ -50,7 +53,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
   // The capabilities this fake declares. A test can narrow them to drive the
   // surface an agent that offers less produces — the one path a workspace with
   // a single real agent can never reach on its own.
-  private static readonly DEFAULT_CAPABILITIES: ChatCapability[] = ["modes", "models", "commands", "questions", "permissions", "subagents", "variants", "context"];
+  private static readonly DEFAULT_CAPABILITIES: ChatCapability[] = ["modes", "models", "commands", "questions", "permissions", "subagents", "variants", "context", "conversation-rename"];
   private capabilities: ChatCapability[] = [...FakeE2EChatService.DEFAULT_CAPABILITIES];
 
   async status(): Promise<ChatAvailability> {
@@ -138,6 +141,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     };
     this.conversations.set(id, conversation);
     this.items.set(id, new Map());
+    this.configurations.set(id, {});
     this.replay.set(id, new ConversationReplay(this.generation, id, 64 * 1024));
     return this.snapshot(id);
   }
@@ -171,13 +175,25 @@ export class FakeE2EChatService implements WorkspaceChatService {
     messageId: string;
     delivery: "steer" | "queue";
     conversation?: ConversationSummary;
+    configuration: ConversationConfiguration;
   }> {
     if (mode) this.promptModes.push(mode);
     if (variant) this.promptVariants.push(variant);
     const key = `prompt:${id}:${requestId}`;
-    const existing = this.receipts.get(key) as { messageId: string; delivery: "steer" | "queue"; conversation?: ConversationSummary } | undefined;
+    const existing = this.receipts.get(key) as { messageId: string; delivery: "steer" | "queue"; configuration: ConversationConfiguration; conversation?: ConversationSummary } | undefined;
     if (existing) return existing;
     const conversation = this.require(id);
+    const previousConfiguration = this.configurations.get(id) ?? {};
+    const configuration: ConversationConfiguration = {
+      ...previousConfiguration,
+      ...(model ? { model } : {}),
+      ...(mode ? { mode } : {}),
+    };
+    if (model) {
+      if (variant) configuration.variant = variant;
+      else delete configuration.variant;
+    } else if (variant) configuration.variant = variant;
+    this.promptConfigurations.push(structuredClone(configuration));
     this.promptAttempts.push(requestId);
     if (this.failNextPrompt) {
       this.failNextPrompt = false;
@@ -201,8 +217,25 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.items.get(id)!.set(item.id, item);
     this.replay.get(id)!.publish({ type: "item.upsert", item });
     this.setStatus(id, "running");
-    const result = { messageId, delivery, ...(renamed ? { conversation: renamed } : {}) };
+    this.configurations.set(id, configuration);
+    if (JSON.stringify(previousConfiguration) !== JSON.stringify(configuration)) {
+      this.replay.get(id)!.publish({ type: "conversation.configuration", configuration });
+    }
+    const result = { messageId, delivery, configuration, ...(renamed ? { conversation: renamed } : {}) };
     this.receipts.set(key, result);
+    return result;
+  }
+
+  async renameConversation(id: string, requestId: string, rawTitle: string): Promise<{ conversation: ConversationSummary }> {
+    const key = `rename:${id}:${requestId}`;
+    const existing = this.receipts.get(key) as { conversation: ConversationSummary } | undefined;
+    if (existing) return existing;
+    const current = this.require(id);
+    const conversation = { ...current, title: rawTitle.trim(), updatedAt: this.nextId++ };
+    this.conversations.set(id, conversation);
+    const result = { conversation };
+    this.receipts.set(key, result);
+    this.replay.get(id)!.publish({ type: "conversation.updated", conversation });
     return result;
   }
 
@@ -249,6 +282,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.promptAttempts = [];
     this.promptModes = [];
     this.promptVariants = [];
+    this.promptConfigurations = [];
     this.failNextPrompt = false;
     this.failNextHistory = false;
     this.failNextOlderHistory = false;
@@ -256,6 +290,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.conversations.clear();
     this.items.clear();
     this.replay.clear();
+    this.configurations.clear();
     this.receipts.clear();
     this.olderItems.clear();
     this.children.clear();
@@ -264,7 +299,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.capabilities = [...FakeE2EChatService.DEFAULT_CAPABILITIES];
   }
 
-  seed(title: string, items: ConversationItem[], older: ConversationItem[] = [], child = false): ConversationSnapshot {
+  seed(title: string, items: ConversationItem[], older: ConversationItem[] = [], child = false, configuration: ConversationConfiguration = {}): ConversationSnapshot {
     const id = `conversation-${this.nextId++}`;
     const conversation: ConversationSummary = {
       id,
@@ -276,6 +311,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.conversations.set(id, conversation);
     if (child) this.children.add(id);
     this.items.set(id, new Map(items.map(item => [item.id, item])));
+    this.configurations.set(id, configuration);
     this.replay.set(id, new ConversationReplay(this.generation, id, 64 * 1024));
     if (older.length) this.olderItems.set(id, older);
     return this.snapshot(id);
@@ -298,6 +334,12 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.setStatus(id, status);
   }
 
+  publishConfiguration(id: string, configuration: ConversationConfiguration): ChatEvent {
+    this.require(id);
+    this.configurations.set(id, configuration);
+    return this.replay.get(id)!.publish({ type: "conversation.configuration", configuration });
+  }
+
   disconnect(): void {
     for (const subscription of this.subscriptions) subscription.cancel();
     this.subscriptions.clear();
@@ -311,6 +353,10 @@ export class FakeE2EChatService implements WorkspaceChatService {
     }
   }
 
+  restart(): void {
+    this.rotateGeneration();
+  }
+
   private require(id: string): ConversationSummary {
     const conversation = this.conversations.get(id);
     if (!conversation) throw new ConversationNotFoundError();
@@ -321,6 +367,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     const conversation = this.require(id);
     return {
       conversation,
+      configuration: this.configurations.get(id) ?? {},
       generation: this.generation,
       cursor: this.replay.get(id)!.latestCursor(),
       items: [...this.items.get(id)!.values()],

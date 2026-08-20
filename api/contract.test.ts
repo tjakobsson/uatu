@@ -85,3 +85,23 @@ describe("streaming protocol is closed", () => {
     expect(new Uint8Array([0, 255, 10])).toBeInstanceOf(Uint8Array);
   });
 });
+
+describe("conversation configuration and rename", () => {
+  test("configuration requires a model when a variant is present", async () => {
+    const openapi = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
+    const validate = createAjv().compile(schemaForAjv(openapi.components.schemas.ConversationConfiguration, openapi.components.schemas));
+    expect(validate({})).toBe(true);
+    expect(validate({ model: { providerId: "anthropic", modelId: "claude" }, variant: "high" })).toBe(true);
+    expect(validate({ variant: "high" })).toBe(false);
+  });
+
+  test("rename request is closed and documents the UTF-8 byte limit", async () => {
+    const openapi = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
+    const schema = openapi.components.schemas.ConversationRenameRequest as { properties: { title: Record<string, unknown> } };
+    const validate = createAjv().compile(schemaForAjv(openapi.components.schemas.ConversationRenameRequest, openapi.components.schemas));
+    expect(validate({ requestId: "rename-1", title: "New title" })).toBe(true);
+    expect(validate({ requestId: "rename-1", title: "   " })).toBe(false);
+    expect(validate({ requestId: "rename-1", title: "New title", extra: true })).toBe(false);
+    expect(schema.properties.title["x-uatu-maxUtf8Bytes"]).toBe(200);
+  });
+});

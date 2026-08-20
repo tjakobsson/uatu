@@ -6,6 +6,7 @@ import {
   parseChatEvent,
   parseChatModel,
   parseConversationItem,
+  parseConversationConfiguration,
   parseConversationSnapshot,
   parseConversationSummary,
   parseInteractionRequest,
@@ -84,6 +85,7 @@ describe("chat domain validation", () => {
 
     const snapshot = {
       conversation: summary,
+      configuration: { model: { providerId: "anthropic", modelId: "claude" }, mode: "build", variant: "high" },
       generation: "generation-1",
       cursor: "generation-1:10",
       items,
@@ -114,7 +116,9 @@ describe("chat domain validation", () => {
       { ...base, sequence: 2, type: "item.remove", itemId: "notice-1" },
       { ...base, sequence: 3, type: "item.text_delta", itemId: "assistant-1", delta: " More" },
       { ...base, sequence: 4, type: "conversation.status", status: "completed" },
-      { ...base, sequence: 5, type: "resync", reason: "retention-gap" },
+      { ...base, sequence: 5, type: "conversation.configuration", configuration: { model: { providerId: "anthropic", modelId: "claude" }, variant: "high" } },
+      { ...base, sequence: 6, type: "conversation.updated", conversation: summary },
+      { ...base, sequence: 7, type: "resync", reason: "retention-gap" },
     ];
     for (const event of events) expect(parseChatEvent(event)).toBeDefined();
   });
@@ -129,6 +133,14 @@ describe("chat domain validation", () => {
       () => parseChatEvent({ generation: "g", sequence: 1.5, conversationId: "c", type: "item.remove", itemId: "i" }),
     ];
     for (const parse of invalid) expect(parse).toThrow();
+  });
+
+  test("strictly validates normalized conversation configuration", () => {
+    expect(parseConversationConfiguration({})).toEqual({});
+    expect(parseConversationConfiguration({ model: { providerId: "openai", modelId: "gpt" }, mode: "build", variant: "high" })).toBeDefined();
+    expect(() => parseConversationConfiguration({ variant: "high" })).toThrow(/requires a model/);
+    expect(() => parseConversationConfiguration({ model: { providerId: "openai", modelId: "gpt" }, extra: true })).toThrow(/unknown/);
+    expect(() => parseConversationConfiguration({ mode: "" })).toThrow();
   });
 
   test("token usage parses on assistant and tool items and stays a closed shape", () => {
@@ -153,6 +165,7 @@ describe("chat domain validation", () => {
     expect(() => parseInteractionRequest({ ...items[7], status: "pending", outcome: { kind: "rejected" } })).toThrow(/pending/);
     expect(() => parseConversationSnapshot({
       conversation: summary,
+      configuration: {},
       generation: "g",
       cursor: "c",
       items: [],

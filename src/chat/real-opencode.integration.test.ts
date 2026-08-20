@@ -62,6 +62,73 @@ describe.skipIf(!enabled)("real OpenCode integration", () => {
     if (endpoint) await expect(fetch(`${endpoint}/global/health`)).rejects.toThrow();
   }, 60_000);
 
+  test("recovers persisted configuration through a fresh provider and adapter", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-real-opencode-configuration-"));
+    temporaryRoots.push(root);
+    const workspace = path.join(root, "workspace");
+    const configDirectory = path.join(root, "config");
+    const dataDirectory = path.join(root, "data");
+    await Promise.all([mkdir(workspace), mkdir(configDirectory), mkdir(dataDirectory)]);
+    await writeFile(path.join(workspace, "README.md"), "# Isolated OpenCode configuration smoke\n", "utf8");
+    const configPath = path.join(configDirectory, "opencode.json");
+    await writeFile(configPath, process.env.UATU_REAL_OPENCODE_CONFIG_CONTENT ?? JSON.stringify({ autoupdate: false, share: "disabled" }), "utf8");
+
+    const runtime = new OpenCodeService({
+      workspacePath: workspace,
+      env: {
+        ...process.env,
+        HOME: root,
+        XDG_CONFIG_HOME: configDirectory,
+        XDG_DATA_HOME: dataDirectory,
+        OPENCODE_CONFIG: configPath,
+        OPENCODE_CONFIG_DIR: configDirectory,
+      },
+    });
+    const writer = new LazyOpenCodeChatService({ workspacePath: workspace, runtime });
+    let reader: LazyOpenCodeChatService | undefined;
+    try {
+      expect((await writer.status()).state).toBe("ready");
+      const [models, modes] = await Promise.all([writer.models(), writer.modes()]);
+      const model = models.find(candidate => candidate.variants?.length) ?? models[0];
+      const mode = modes[0];
+      expect(model).toBeDefined();
+      expect(mode).toBeDefined();
+      const variant = model!.variants?.[0];
+      const expected = {
+        model: model!.selection,
+        mode: mode!.name,
+        ...(variant ? { variant } : {}),
+      };
+
+      const created = await writer.createConversation();
+      const accepted = await writer.prompt(
+        created.conversation.id,
+        crypto.randomUUID(),
+        "Reply slowly with the word configuration.",
+        model!.selection,
+        mode!.name,
+        variant,
+      );
+      expect(accepted.configuration).toEqual(expected);
+
+      // This service constructs another provider and adapter against the same
+      // running server. The first adapter's accepted-configuration cache is
+      // unreachable, so the snapshot must recover from OpenCode's records.
+      reader = new LazyOpenCodeChatService({ workspacePath: workspace, runtime });
+      expect((await reader.status()).state).toBe("ready");
+      const deadline = Date.now() + 15_000;
+      let recovered = (await reader.history(created.conversation.id)).configuration;
+      while (Date.now() < deadline && JSON.stringify(recovered) !== JSON.stringify(expected)) {
+        await Bun.sleep(250);
+        recovered = (await reader.history(created.conversation.id)).configuration;
+      }
+      expect(recovered).toEqual(expected);
+      await reader.cancel(created.conversation.id, crypto.randomUUID());
+    } finally {
+      await Promise.all([writer.dispose(), reader?.dispose()]);
+    }
+  }, 60_000);
+
   /**
    * The one thing a fake cannot answer: whether OpenCode's live
    * `message.updated` (which carries the message's tokens but no part) reliably

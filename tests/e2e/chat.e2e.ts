@@ -23,11 +23,11 @@ test.describe("desktop OpenCode chat", () => {
   test.beforeEach(async ({ page, request }) => bootChat(page, request));
 
   test("creates, resumes, steers, cancels, and retains the mounted surface", async ({ page }) => {
-    await page.getByRole("button", { name: "New" }).click();
+    await page.getByRole("button", { name: "New conversation" }).click();
     await expect(page.locator("#chat-conversation-select")).not.toHaveValue("");
     const firstId = await page.locator("#chat-conversation-select").inputValue();
     const modelSelect = page.locator("#chat-model-select");
-    await expect(modelSelect.locator("option")).toHaveText(["Anthropic: Claude Sonnet", "OpenAI: GPT-5"]);
+    await expect(modelSelect.locator("option")).toHaveText(["Model: agent default", "Anthropic: Claude Sonnet", "OpenAI: GPT-5"]);
     await modelSelect.selectOption({ label: "OpenAI: GPT-5" });
 
     const input = page.locator("#chat-input");
@@ -75,7 +75,7 @@ test.describe("desktop OpenCode chat", () => {
     await expect(modelSelect.locator("option:checked")).toHaveText("OpenAI: GPT-5");
     await expect(page.locator("#chat-title")).toHaveText("Initial prompt");
 
-    await page.getByRole("button", { name: "New" }).click();
+    await page.getByRole("button", { name: "New conversation" }).click();
     await expect(page.locator("#chat-conversation-select")).not.toHaveValue(firstId);
     await page.locator("#chat-conversation-select").selectOption(firstId);
     await expect(page.locator("#chat-items")).toContainText("Initial prompt");
@@ -83,9 +83,9 @@ test.describe("desktop OpenCode chat", () => {
   });
 
   test("switches the mode for a prompt and defaults to the agent's own", async ({ page }) => {
-    await page.getByRole("button", { name: "New" }).click();
+    await page.getByRole("button", { name: "New conversation" }).click();
     const modeSelect = page.locator("#chat-mode-select");
-    await expect(modeSelect.locator("option")).toHaveText(["Mode: default", "Mode: Build", "Mode: Plan"]);
+    await expect(modeSelect.locator("option")).toHaveText(["Mode: agent default", "Mode: Build", "Mode: Plan"]);
     await expect(modeSelect).toHaveValue("");
 
     const input = page.locator("#chat-input");
@@ -102,9 +102,7 @@ test.describe("desktop OpenCode chat", () => {
     await input.press("Enter");
     expect((await switched).request().postDataJSON()).toMatchObject({ mode: "build" });
 
-    // No way back to "default": the mode is session state in the agent, so a
-    // prompt omitting it would keep Build while the picker claimed default.
-    await expect(modeSelect.locator('option[value=""]')).toBeDisabled();
+    await expect(modeSelect).toHaveValue("build");
   });
 
   // The surface takes its name from what the agent reported, so a workspace
@@ -120,12 +118,15 @@ test.describe("desktop OpenCode chat", () => {
   // A model that advertises reasoning variants gets a control for them, sent
   // with the prompt; a model without variants shows none.
   test("offers a model's reasoning variants and sends the chosen one", async ({ page, request }) => {
-    await page.getByRole("button", { name: "New" }).click();
+    await page.getByRole("button", { name: "New conversation" }).click();
     const variantSelect = page.locator("#chat-variant-select");
     const modelSelect = page.locator("#chat-model-select");
-    // Claude Sonnet (the default) advertises high/xhigh; GPT-5 advertises none.
+    // Unknown configuration selects no inventory default. Choosing Claude
+    // explicitly reveals its high/xhigh variants; GPT-5 advertises none.
+    await expect(modelSelect).toHaveValue("");
+    await modelSelect.selectOption({ label: "Anthropic: Claude Sonnet" });
     await expect(variantSelect).toBeVisible();
-    await expect(variantSelect.locator("option")).toHaveText(["Reasoning: default", "Reasoning: high", "Reasoning: xhigh"]);
+    await expect(variantSelect.locator("option")).toHaveText(["Reasoning: agent default", "Reasoning: high", "Reasoning: xhigh"]);
     await modelSelect.selectOption({ label: "OpenAI: GPT-5" });
     await expect(variantSelect).toBeHidden();
     await modelSelect.selectOption({ label: "Anthropic: Claude Sonnet" });
@@ -146,13 +147,13 @@ test.describe("desktop OpenCode chat", () => {
     await page.reload();
     await openChatPanel(page);
     await expect(page.locator("#chat-state")).not.toContainText("Loading chat");
-    await page.getByRole("button", { name: "New" }).click();
+    await page.getByRole("button", { name: "New conversation" }).click();
     await expect(page.locator("#chat-model-select")).toBeVisible();
     await expect(page.locator("#chat-mode-select")).toHaveCount(0);
   });
 
   test("completes slash commands at the caret without sending prematurely", async ({ page }) => {
-    await page.getByRole("button", { name: "New" }).click();
+    await page.getByRole("button", { name: "New conversation" }).click();
     const input = page.locator("#chat-input");
     await input.fill("Use /rev");
     const menu = page.locator("#chat-command-menu");
@@ -171,7 +172,7 @@ test.describe("desktop OpenCode chat", () => {
   });
 
   test("keeps an active turn timer across conversation navigation", async ({ page }) => {
-    await page.getByRole("button", { name: "New" }).click();
+    await page.getByRole("button", { name: "New conversation" }).click();
     await expect(page.locator("#chat-conversation-select")).not.toHaveValue("");
     const firstId = await page.locator("#chat-conversation-select").inputValue();
     await page.locator("#chat-input").fill("Keep timing this turn");
@@ -181,7 +182,7 @@ test.describe("desktop OpenCode chat", () => {
     const before = elapsedSeconds(await page.locator("#chat-composer-status").textContent());
     expect(before).toBeGreaterThanOrEqual(1);
 
-    await page.getByRole("button", { name: "New" }).click();
+    await page.getByRole("button", { name: "New conversation" }).click();
     await expect(page.locator("#chat-conversation-select")).not.toHaveValue(firstId);
     await page.locator("#chat-conversation-select").selectOption(firstId);
     await expect(page.locator("#chat-composer-status")).toContainText("Working");
@@ -277,7 +278,7 @@ test.describe("desktop OpenCode chat", () => {
   });
 
   test("resending after a failure reuses the request id for at-most-once delivery", async ({ page, request }) => {
-    await page.getByRole("button", { name: "New" }).click();
+    await page.getByRole("button", { name: "New conversation" }).click();
     await expect(page.locator("#chat-conversation-select")).not.toHaveValue("");
     await control(request, { action: "failPrompt" });
     await page.locator("#chat-input").fill("retry me");

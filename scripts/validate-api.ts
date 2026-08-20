@@ -113,6 +113,8 @@ export async function validateApi(): Promise<void> {
     "examples/sse/clone-output.json": "CloneOutput",
     "examples/sse/clone-result.json": "CloneResult",
     "examples/sse/chat-event.json": "ChatEvent",
+    "examples/sse/chat-configuration.json": "ChatEvent",
+    "examples/sse/chat-conversation-updated.json": "ChatEvent",
     "examples/sse/chat-resync.json": "ChatResyncEvent",
     "examples/ndjson/search-file.json": "SearchStreamItem",
     "examples/ndjson/search-done.json": "SearchStreamItem",

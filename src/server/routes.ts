@@ -11,7 +11,7 @@
 
 import type { Serve } from "bun";
 
-import { InteractionConflictError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError } from "../chat/adapter";
+import { ConversationMutationConflictError, ConversationRenameUnsupportedError, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError } from "../chat/adapter";
 import { encodeReplayCursor } from "../chat/replay";
 import { ChatUnavailableError, type WorkspaceChatService } from "../chat/service";
 import type { ModelSelection, PermissionOutcome, QuestionOutcome } from "../chat/types";
@@ -393,6 +393,7 @@ export function buildRoutes(deps: BuildRoutesDeps): Serve.Routes<unknown, string
 const CHAT_ID_LIMIT = 512;
 const CHAT_CURSOR_LIMIT = 2_048;
 const CHAT_PROMPT_BYTES = 64 * 1024;
+const CHAT_TITLE_BYTES = 200;
 const CHAT_BODY_BYTES = 128 * 1024;
 const CHAT_KEEPALIVE_MS = 15_000;
 
@@ -474,6 +475,15 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         }
         return run(() => deps.chatService.history(id, { cursor, limit }));
       },
+      PATCH: async (request: RouteRequest) => chatMutation(request, ["requestId", "title"], async (id, body) => {
+        const requestId = bodyIdentity(body, "requestId");
+        if (requestId instanceof Response) return requestId;
+        if (typeof body.title !== "string") return chatError(400, "title must be a string");
+        const title = body.title.trim();
+        if (!title) return chatError(400, "title must not be empty");
+        if (Buffer.byteLength(title) > CHAT_TITLE_BYTES) return chatError(400, "title is too large");
+        return run(() => deps.chatService.renameConversation(id, requestId, title));
+      }),
     },
     [p("/api/chat/conversations/:conversationId/events")]: {
       GET: async (request: RouteRequest) => {
@@ -703,6 +713,9 @@ function parseNameSelection(value: unknown, noun: "mode" | "variant"): string | 
 function normalizedChatError(error: unknown): Response {
   if (error instanceof ConversationNotFoundError) return chatError(404, "conversation not found");
   if (error instanceof InteractionConflictError) return chatError(409, error.message);
+  if (error instanceof ConversationMutationConflictError) return chatError(409, error.message);
+  if (error instanceof ConversationRenameUnsupportedError) return chatError(409, error.message);
+  if (error instanceof InvalidConversationTitleError) return chatError(400, error.message);
   if (error instanceof InvalidModelSelectionError) return chatError(400, error.message);
   if (error instanceof InvalidModeSelectionError) return chatError(400, error.message);
   if (error instanceof InvalidVariantSelectionError) return chatError(400, error.message);

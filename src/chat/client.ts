@@ -5,6 +5,7 @@ import type {
   ChatCommand,
   ChatEvent,
   ChatModel,
+  ConversationConfiguration,
   ConversationSnapshot,
   ConversationSummary,
   ModelSelection,
@@ -18,6 +19,7 @@ import {
   parseChatEvent,
   parseChatModel,
   parseConversationSnapshot,
+  parseConversationConfiguration,
   parseConversationSummary,
 } from "./validation";
 
@@ -91,19 +93,33 @@ export class ChatApiClient {
   prompt(conversationId: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string): Promise<{
     messageId: string;
     delivery: "steer" | "queue";
+    configuration: ConversationConfiguration;
     conversation?: ConversationSummary;
   }> {
     return this.mutate(
       appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/prompts`),
       { requestId, text, ...(model ? { model } : {}), ...(mode ? { mode } : {}), ...(variant ? { variant } : {}) },
       value => {
-        const result = value as { messageId: string; delivery: "steer" | "queue"; conversation?: unknown };
+        const result = value as { messageId: string; delivery: "steer" | "queue"; configuration?: unknown; conversation?: unknown };
         return {
           messageId: result.messageId,
           delivery: result.delivery,
+          configuration: parseConversationConfiguration(result.configuration),
           ...(result.conversation ? { conversation: parseConversationSummary(result.conversation) } : {}),
         };
       },
+    );
+  }
+
+  renameConversation(conversationId: string, requestId: string, title: string): Promise<{ conversation: ConversationSummary }> {
+    return this.mutate(
+      appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}`),
+      { requestId, title },
+      value => {
+        const result = value as { conversation?: unknown };
+        return { conversation: parseConversationSummary(result.conversation) };
+      },
+      "PATCH",
     );
   }
 
@@ -177,8 +193,8 @@ export class ChatApiClient {
     return this.request(path, undefined, parse);
   }
 
-  private async mutate<T>(path: string, body: unknown, parse: (value: unknown) => T): Promise<T> {
-    return this.request(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }, parse);
+  private async mutate<T>(path: string, body: unknown, parse: (value: unknown) => T, method = "POST"): Promise<T> {
+    return this.request(path, { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) }, parse);
   }
 
   private async request<T>(url: string, init: RequestInit | undefined, parse: (value: unknown) => T): Promise<T> {

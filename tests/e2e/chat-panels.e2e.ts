@@ -1,6 +1,6 @@
 import type { APIRequestContext, Page } from "@playwright/test";
 
-import type { ConversationItem } from "../../src/chat/types";
+import type { ConversationConfiguration, ConversationItem } from "../../src/chat/types";
 import { openChatPanel } from "./chat-helpers";
 import { expect, test } from "./fixtures";
 
@@ -19,8 +19,14 @@ async function control(request: APIRequestContext, body: Record<string, unknown>
   return response.json();
 }
 
-async function seedAndOpen(page: Page, request: APIRequestContext, title: string, items: ConversationItem[]): Promise<string> {
-  const seeded = await control(request, { action: "seed", title, items }) as { conversation: { id: string } };
+async function seedAndOpen(
+  page: Page,
+  request: APIRequestContext,
+  title: string,
+  items: ConversationItem[],
+  configuration?: ConversationConfiguration,
+): Promise<string> {
+  const seeded = await control(request, { action: "seed", title, items, ...(configuration ? { configuration } : {}) }) as { conversation: { id: string } };
   await page.reload();
   await openChatPanel(page);
   await expect(page.locator("#chat-conversation-select")).toHaveValue(seeded.conversation.id);
@@ -317,7 +323,7 @@ test.describe("chat panels and navigation", () => {
       { id: "usage:m1", type: "assistant_message", createdAt: 2, markdown: "", usage: { input: 4_000, output: 100 } },
       { id: "part:a2", type: "assistant_message", createdAt: 3, markdown: "The latest answer." },
       { id: "usage:m2", type: "assistant_message", createdAt: 3, markdown: "", usage: { input: 30_000, output: 1_200, reasoning: 400, cacheRead: 20_000, cacheWrite: 2_000 } },
-    ]);
+    ], { model: { providerId: "anthropic", modelId: "claude-sonnet" } });
 
     // Populated from history, before any new turn — and from the newest
     // message's carrier, not the first one.

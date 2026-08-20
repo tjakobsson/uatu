@@ -20,7 +20,7 @@ import {
   removeAcceptedDraft,
   type ChatProjection,
 } from "./projection";
-import type { ChatAgent, ChatCapability, ChatMode, ChatAvailability, ChatCommand, ChatModel, ConversationItem, ConversationSummary, ModelSelection, PermissionOutcome, QuestionOutcome, TokenUsage } from "./types";
+import type { ChatAgent, ChatCapability, ChatMode, ChatAvailability, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationSummary, ModelSelection, PermissionOutcome, QuestionOutcome, TokenUsage } from "./types";
 import { formatDiagnostics } from "./diagnostics";
 
 const PRESENTATION_KEY = "uatu:chat-presentation";
@@ -32,25 +32,12 @@ type Presentation = {
   expanded: string[];
   anchors: Record<string, TimelineAnchor>;
   workingSince: Record<string, number>;
-  // `model` is the default for a conversation never chosen for; `models`
-  // remembers the per-conversation choice. One global value made the picker
-  // claim whatever was last chosen anywhere, for every conversation.
-  model?: ModelSelection;
-  models: Record<string, ModelSelection>;
-  // Same shape for the mode (Build/Plan/...). Empty means the agent's own
-  // default: the picker never claims to know a session's current mode.
-  mode?: string;
-  modes: Record<string, string>;
-  // The reasoning variant, per conversation and as a global default — the same
-  // storage as the model. Empty means the model's own default effort.
-  variant?: string;
-  variants: Record<string, string>;
   // Dismissed finished-subagent entry ids, per conversation — dismissal is a
   // user statement that must survive reload.
   dismissedSubagents: Record<string, string[]>;
 };
 
-const EMPTY_PRESENTATION: Presentation = { drafts: {}, expanded: [], anchors: {}, workingSince: {}, models: {}, modes: {}, variants: {}, dismissedSubagents: {} };
+const EMPTY_PRESENTATION: Presentation = { drafts: {}, expanded: [], anchors: {}, workingSince: {}, dismissedSubagents: {} };
 
 export function initChat(): void {
   const surface = document.querySelector<HTMLElement>("#chat-surface");
@@ -59,6 +46,10 @@ export function initChat(): void {
   const state = document.querySelector<HTMLElement>("#chat-state");
   const select = document.querySelector<HTMLSelectElement>("#chat-conversation-select");
   const newButton = document.querySelector<HTMLButtonElement>("#chat-new-conversation");
+  const renameButton = document.querySelector<HTMLButtonElement>("#chat-rename-conversation");
+  const renameForm = document.querySelector<HTMLFormElement>("#chat-rename-form");
+  const renameInput = document.querySelector<HTMLInputElement>("#chat-rename-title");
+  const renameCancel = document.querySelector<HTMLButtonElement>("#chat-rename-cancel");
   const olderButton = document.querySelector<HTMLButtonElement>("#chat-load-older");
   const latestButton = document.querySelector<HTMLButtonElement>("#chat-latest");
   const form = document.querySelector<HTMLFormElement>("#chat-composer");
@@ -102,6 +93,7 @@ export function initChat(): void {
   let modes: ChatMode[] = [];
   let commands: ChatCommand[] = [];
   let projection: ChatProjection | null = null;
+  const stagedConfigurations = new Map<string, ConversationConfiguration>();
   let stream: ChatEventStream | null = null;
   let selectionGeneration = 0;
   // Viewing child X of parent Y. A subagent transcript is a drill-down into a
@@ -219,6 +211,8 @@ export function initChat(): void {
     // An agent that does not report token usage has no context readout to
     // show, and a permanently empty meter would claim otherwise.
     if (!declares("context")) contextUsage?.remove();
+    if (!declares("conversation-rename")) renameButton?.remove();
+    else if (renameButton) renameButton.hidden = false;
   };
   nameAgent();
 
@@ -283,8 +277,6 @@ export function initChat(): void {
       for (const key of Object.keys(presentation.drafts)) if (!known.has(key)) delete presentation.drafts[key];
       for (const key of Object.keys(presentation.anchors)) if (!known.has(key)) delete presentation.anchors[key];
       for (const key of Object.keys(presentation.workingSince)) if (!known.has(key)) delete presentation.workingSince[key];
-      for (const key of Object.keys(presentation.models)) if (!known.has(key)) delete presentation.models[key];
-      for (const key of Object.keys(presentation.variants)) if (!known.has(key)) delete presentation.variants[key];
       for (const key of Object.keys(presentation.dismissedSubagents)) if (!known.has(key)) delete presentation.dismissedSubagents[key];
     }
     while (expanded.size > MAX_EXPANDED_ENTRIES) {
@@ -855,9 +847,9 @@ export function initChat(): void {
     sendLabel.textContent = action;
     send.setAttribute("aria-label", `${action} message`);
     send.title = `${action} message`;
-    modelSelect.disabled = submitting || models.length === 0;
-    if (modeSelect?.isConnected) modeSelect.disabled = submitting || modes.length === 0;
-    if (variantSelect?.isConnected) variantSelect.disabled = submitting;
+    modelSelect.disabled = submitting || !projection || models.length === 0;
+    if (modeSelect?.isConnected) modeSelect.disabled = submitting || !projection || modes.length === 0;
+    if (variantSelect?.isConnected) variantSelect.disabled = submitting || !projection;
     cancel.hidden = !running;
     olderButton.hidden = !projection?.olderCursor;
     composerStatus.textContent = composerNote ?? workingText();
@@ -876,97 +868,130 @@ export function initChat(): void {
       modelSelect.disabled = true;
       return;
     }
+    modelSelect.append(new Option("Model: agent default", ""));
     for (const model of models) {
       modelSelect.append(new Option(`${model.provider}: ${model.name}`, modelValue(model.selection)));
     }
-    const stored = presentation.model && models.some(model => sameModel(model.selection, presentation.model!))
-      ? presentation.model
-      : models[0]!.selection;
-    presentation.model = stored;
-    applyModel(projection?.conversationId ?? presentation.selectedId);
+    applyModel();
     renderVariants();
-    save();
     syncControls();
   };
 
   /**
    * Reasoning variants belong to the selected model, so the list is rebuilt
-   * whenever the model changes — and the target conversation rides in as the
-   * argument on a conversation switch, because at that moment `projection`
-   * still names the previous one. A model that offers none hides the control
+   * whenever the model changes. A model that offers none hides the control
    * (like an absent mode list), and the whole control is removed when the
    * agent does not declare the capability — checked as `isConnected`, since
    * the removed node is still reachable from this closure and repopulating it
    * would let a stored variant ride along with no visible control saying so.
-   * "Default" leads, meaning the model's own effort, and a chosen variant is
-   * remembered per conversation like the model.
+   * An unknown variant makes no claim and is omitted from a prompt.
    */
-  const renderVariants = (conversationId = projection?.conversationId ?? presentation.selectedId) => {
+  const renderVariants = () => {
     if (!variantSelect?.isConnected) return;
     const selected = models.find(model => modelValue(model.selection) === modelSelect.value);
     const variants = selected?.variants ?? [];
+    const configuration = displayedConfiguration();
     variantSelect.replaceChildren();
-    variantSelect.hidden = variants.length === 0;
-    if (variants.length === 0) return;
-    variantSelect.append(new Option("Reasoning: default", ""));
+    if (variants.length === 0) {
+      if (configuration.model && configuration.variant) {
+        const unavailable = new Option(`Reasoning: ${configuration.variant} (current, unavailable)`, configuration.variant);
+        unavailable.disabled = true;
+        variantSelect.append(unavailable);
+        variantSelect.value = configuration.variant;
+        variantSelect.hidden = false;
+      } else {
+        variantSelect.hidden = true;
+      }
+      return;
+    }
+    variantSelect.hidden = false;
+    variantSelect.append(new Option("Reasoning: agent default", ""));
     for (const variant of variants) variantSelect.append(new Option(`Reasoning: ${variant}`, variant));
-    const offered = (name: string | undefined) => (name && Array.from(variantSelect.options).some(option => option.value === name) ? name : undefined);
-    variantSelect.value = offered(conversationId ? presentation.variants[conversationId] : undefined) ?? offered(presentation.variant) ?? "";
+    const effectiveVariant = projection?.configuration?.model && selected && sameModel(projection.configuration.model, selected.selection)
+      ? projection.configuration.variant
+      : undefined;
+    const variant = configuration.variant ?? effectiveVariant;
+    if (variant && !variants.includes(variant)) {
+      const unavailable = new Option(`Reasoning: ${variant} (current, unavailable)`, variant);
+      unavailable.disabled = true;
+      variantSelect.append(unavailable);
+    }
+    variantSelect.value = variant ?? "";
   };
 
   /**
-   * The mode picker leads with "default" rather than claiming a value: the
-   * session's current mode is the agent's state, not ours, and a session
-   * stuck in a read-only mode is exactly the case where lying would hurt.
-   * Choosing a named mode sends it with every prompt from then on.
+   * The leading option is selected only while the agent has not reported a
+   * mode. A recovered mode that is no longer offered stays visible as current
+   * but cannot be newly selected.
    */
   const renderModes = () => {
     if (!modeSelect) return;
     modeSelect.replaceChildren();
     modeSelect.hidden = modes.length === 0;
     if (modes.length === 0) return;
-    modeSelect.append(new Option("Mode: default", ""));
+    modeSelect.append(new Option("Mode: agent default", ""));
     for (const mode of modes) {
       const option = new Option(modeLabel(mode.name), mode.name);
       if (mode.description) option.title = mode.description;
       modeSelect.append(option);
     }
-    applyMode(projection?.conversationId ?? presentation.selectedId);
+    applyMode();
     syncControls();
   };
 
-  const applyMode = (conversationId: string | undefined) => {
+  const applyMode = () => {
     if (!modeSelect || modes.length === 0) return;
-    const known = (name: string | undefined) => (name && modes.some(mode => mode.name === name) ? name : undefined);
-    const chosen = known(conversationId ? presentation.modes[conversationId] : undefined);
-    // Once a named mode has been chosen for this conversation there is no
-    // default to go back to: the mode is session state in the agent, and a
-    // prompt that omits it keeps the previous choice — offering "default"
-    // then would display one mode and run another.
-    const defaultOption = modeSelect.options[0];
-    if (defaultOption && defaultOption.value === "") defaultOption.disabled = chosen !== undefined;
-    modeSelect.value = chosen ?? known(presentation.mode) ?? "";
+    const mode = displayedConfiguration().mode;
+    if (mode && !modes.some(candidate => candidate.name === mode)) {
+      const unavailable = new Option(`${modeLabel(mode)} (current, unavailable)`, mode);
+      unavailable.disabled = true;
+      modeSelect.append(unavailable);
+    }
+    modeSelect.value = mode ?? "";
   };
 
   /**
-   * Points the picker at the conversation's own model, falling back to the
-   * global default and then the first available model. A stored selection the
-   * server no longer offers is ignored rather than shown as a live choice.
+   * Points the picker at staged or effective conversation state. An absent
+   * value stays agent-controlled, and an unavailable current model remains
+   * visible without pretending it can be selected again.
    */
-  const applyModel = (conversationId: string | undefined) => {
+  const applyModel = () => {
     if (models.length === 0) return;
-    const known = (selection: ModelSelection | undefined) =>
-      selection && models.some(model => sameModel(model.selection, selection)) ? selection : undefined;
-    const chosen = known(conversationId ? presentation.models[conversationId] : undefined)
-      ?? known(presentation.model)
-      ?? models[0]!.selection;
-    modelSelect.value = modelValue(chosen);
+    const model = displayedConfiguration().model;
+    if (model && !models.some(candidate => sameModel(candidate.selection, model))) {
+      const unavailable = new Option(`Current model (unavailable): ${model.providerId}/${model.modelId}`, modelValue(model));
+      unavailable.disabled = true;
+      modelSelect.append(unavailable);
+    }
+    modelSelect.value = model ? modelValue(model) : "";
+  };
+
+  const displayedConfiguration = (): ConversationConfiguration => {
+    if (!projection) return {};
+    const staged = stagedConfigurations.get(projection.conversationId);
+    const configuration = { ...projection.configuration, ...staged };
+    if (staged?.model && projection.configuration?.model && !sameModel(staged.model, projection.configuration.model) && staged.variant === undefined) {
+      delete configuration.variant;
+    }
+    return configuration;
+  };
+
+  const setStagedConfiguration = (conversationId: string, configuration: ConversationConfiguration) => {
+    if (configuration.model || configuration.mode || configuration.variant) stagedConfigurations.set(conversationId, configuration);
+    else stagedConfigurations.delete(conversationId);
+  };
+
+  const renderConfiguration = () => {
+    if (!modelSelect.isConnected) return;
+    renderModels();
+    renderModes();
   };
 
   const selectConversation = async (id: string) => {
     // Choosing a conversation is leaving whatever turn was being drilled into:
     // the drill-down is a view over the parent, and the parent is changing.
     closeChildConversation();
+    if (renameForm) renameForm.hidden = true;
     const token = ++selectionGeneration;
     stream?.close();
     stream = null;
@@ -977,17 +1002,12 @@ export function initChat(): void {
       if (currentAnchor) presentation.anchors[projection.conversationId] = currentAnchor;
     }
     presentation.selectedId = id;
-    applyModel(id);
-    // The variant list belongs to the model, and the model just changed to
-    // this conversation's — the rebuild validates the stored variant against
-    // the new model's options rather than the previous conversation's.
-    renderVariants(id);
-    applyMode(id);
     const conversation = conversations.find(item => item.id === id);
     if (chatTitle) chatTitle.textContent = conversation ? displayConversationTitle(conversation) : chatHeading();
     form.hidden = false;
     save();
     projection = null;
+    renderConfiguration();
     syncContextIndicator();
     input.value = presentation.drafts[id] ?? "";
     autosize(input);
@@ -997,6 +1017,8 @@ export function initChat(): void {
       const snapshot = await api.snapshot(id);
       if (token !== selectionGeneration) return;
       projection = projectionFromSnapshot(snapshot, acceptedDrafts);
+      conversations = conversations.map(item => item.id === snapshot.conversation.id ? snapshot.conversation : item);
+      renderConfiguration();
       announce(snapshot.items.length ? "" : "Start this conversation by sending a message.");
       anchor.restore(presentation.anchors[id] ?? null);
       scheduleRender(false, false);
@@ -1009,6 +1031,14 @@ export function initChat(): void {
             return;
           }
           projection = result.projection;
+          if (event.type === "conversation.configuration") renderConfiguration();
+          if (event.type === "conversation.updated") {
+            conversations = conversations.map(conversation => conversation.id === event.conversation.id ? event.conversation : conversation);
+            const option = Array.from(select.options).find(candidate => candidate.value === event.conversation.id);
+            if (option) option.text = displayConversationTitle(event.conversation);
+            if (chatTitle) chatTitle.textContent = displayConversationTitle(event.conversation);
+            if (renameInput && renameForm && !renameForm.hidden && document.activeElement !== renameInput) renameInput.value = event.conversation.title;
+          }
           if (result.outcome === "applied") { announce(""); scheduleRender(true); }
         },
         resync: () => { if (token === selectionGeneration) void selectConversation(id); },
@@ -1037,38 +1067,37 @@ export function initChat(): void {
 
   select.addEventListener("change", () => { if (select.value) void selectConversation(select.value); });
   modelSelect.addEventListener("change", () => {
-    renderVariants();
+    if (!projection) return;
     const selection = models.find(model => modelValue(model.selection) === modelSelect.value)?.selection;
-    if (!selection) return;
-    presentation.model = selection;
-    if (projection) presentation.models[projection.conversationId] = selection;
-    save();
+    const staged = { ...stagedConfigurations.get(projection.conversationId) };
+    if (!selection || (projection.configuration?.model && sameModel(selection, projection.configuration.model))) delete staged.model;
+    else staged.model = selection;
+    delete staged.variant;
+    setStagedConfiguration(projection.conversationId, staged);
+    applyModel();
+    renderVariants();
     // The fill is measured against the selected model's window, so choosing a
     // different model restates it rather than leaving the old percentage up.
     syncContextIndicator();
   });
   variantSelect?.addEventListener("change", () => {
+    if (!projection) return;
+    const staged = { ...stagedConfigurations.get(projection.conversationId) };
     const name = variantSelect.value || undefined;
-    if (name) presentation.variant = name; else delete presentation.variant;
-    if (projection) {
-      if (name) presentation.variants[projection.conversationId] = name;
-      else delete presentation.variants[projection.conversationId];
-    }
-    save();
+    if (!name || name === projection.configuration?.variant) delete staged.variant;
+    else staged.variant = name;
+    setStagedConfiguration(projection.conversationId, staged);
+    renderVariants();
   });
   modeSelect?.addEventListener("change", () => {
+    if (!projection) return;
     const name = modeSelect.value || undefined;
     if (name && !modes.some(mode => mode.name === name)) return;
-    if (name) presentation.mode = name;
-    else delete presentation.mode;
-    if (projection) {
-      if (name) presentation.modes[projection.conversationId] = name;
-      else delete presentation.modes[projection.conversationId];
-    }
-    save();
-    // Re-derives the default option's availability: choosing a named mode
-    // locks "default" for this conversation from now on.
-    applyMode(projection?.conversationId ?? presentation.selectedId);
+    const staged = { ...stagedConfigurations.get(projection.conversationId) };
+    if (!name || name === projection.configuration?.mode) delete staged.mode;
+    else staged.mode = name;
+    setStagedConfiguration(projection.conversationId, staged);
+    applyMode();
   });
   newButton.addEventListener("click", async () => {
     newButton.disabled = true;
@@ -1082,6 +1111,54 @@ export function initChat(): void {
       select.value = snapshot.conversation.id;
     } catch (error) { announce(messageOf(error), true); }
     finally { newButton.disabled = false; }
+  });
+
+  renameButton?.addEventListener("click", () => {
+    if (!projection || !renameForm || !renameInput || !declares("conversation-rename")) return;
+    renameInput.value = projection.conversation?.title ?? "";
+    renameForm.hidden = false;
+    renameInput.focus();
+    renameInput.select();
+  });
+  renameCancel?.addEventListener("click", () => {
+    if (renameForm) renameForm.hidden = true;
+    renameButton?.focus();
+  });
+  renameForm?.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (!projection || !renameInput) return;
+    const conversationId = projection.conversationId;
+    const title = renameInput.value.trim();
+    if (!title) {
+      announce("Conversation title must not be empty", true);
+      renameInput.focus();
+      return;
+    }
+    if (new TextEncoder().encode(title).byteLength > 200) {
+      announce("Conversation title must be at most 200 bytes", true);
+      renameInput.focus();
+      return;
+    }
+    const controls = renameForm.querySelectorAll<HTMLButtonElement | HTMLInputElement>("button, input");
+    controls.forEach(control => { control.disabled = true; });
+    try {
+      const { conversation } = await api.renameConversation(conversationId, newRequestId(), title);
+      conversations = conversations.map(item => item.id === conversation.id ? conversation : item);
+      const option = Array.from(select.options).find(candidate => candidate.value === conversation.id);
+      if (option) option.text = displayConversationTitle(conversation);
+      if (projection?.conversationId === conversation.id) {
+        projection = { ...projection, conversation };
+        if (chatTitle) chatTitle.textContent = displayConversationTitle(conversation);
+      }
+      renameForm.hidden = true;
+      announce("");
+      renameButton?.focus();
+    } catch (error) {
+      announce(messageOf(error), true);
+      renameInput.focus();
+    } finally {
+      controls.forEach(control => { control.disabled = false; });
+    }
   });
 
   olderButton.addEventListener("click", async () => {
@@ -1625,8 +1702,11 @@ export function initChat(): void {
     // `isConnected`, not just non-null: the control is removed when the agent
     // does not declare the capability, and a detached select must not smuggle
     // a stored variant onto the wire with nothing on screen saying so.
-    const selectedVariant = variantSelect?.isConnected && !variantSelect.hidden ? (variantSelect.value || undefined) : undefined;
-    const selectedMode = modeSelect?.value || undefined;
+    const selectedVariant = variantSelect?.isConnected && !variantSelect.hidden
+      && models.find(model => modelValue(model.selection) === modelSelect.value)?.variants?.includes(variantSelect.value)
+      ? variantSelect.value
+      : undefined;
+    const selectedMode = modes.some(mode => mode.name === modeSelect?.value) ? modeSelect!.value : undefined;
     const wasRunning = projection.status === "running" || projection.status === "sending";
     submitting = true;
     // Optimistic send: the message shows immediately and the input clears;
@@ -1642,6 +1722,7 @@ export function initChat(): void {
     try {
       const accepted = await api.prompt(conversationId, requestId, text, selectedModel, selectedMode, selectedVariant);
       retryRequests.delete(conversationId);
+      stagedConfigurations.delete(conversationId);
       if (accepted.conversation) {
         conversations = conversations.map(conversation => conversation.id === accepted.conversation!.id ? accepted.conversation! : conversation);
         const option = Array.from(select.options).find(candidate => candidate.value === accepted.conversation!.id);
@@ -1649,8 +1730,10 @@ export function initChat(): void {
         if (chatTitle) chatTitle.textContent = displayConversationTitle(accepted.conversation);
       }
       if (projection?.conversationId === conversationId) {
+        projection = { ...projection, configuration: accepted.configuration };
         if (wasRunning) queued.add(`message:${accepted.messageId}`);
         projection = confirmAcceptedDraft(projection, { requestId, messageId: accepted.messageId, text });
+        renderConfiguration();
         scheduleRender(true);
       }
       noteComposer(accepted.delivery === "steer" ? "Steer accepted" : "Message accepted");
@@ -1846,14 +1929,6 @@ function autosize(input: HTMLTextAreaElement): void {
   input.style.height = `${Math.min(input.scrollHeight, 192)}px`;
 }
 
-// The shape this key had before agent/mode/subagent were separated.
-type LegacyPresentation = { agent?: unknown; agents?: unknown };
-
-function stringOrLegacy(value: unknown, legacy: unknown): string | undefined {
-  if (typeof value === "string") return value;
-  return typeof legacy === "string" ? legacy : undefined;
-}
-
 function readPresentation(): Presentation {
   try {
     const raw = presentationLocalStorage()?.getItem(PRESENTATION_KEY);
@@ -1865,25 +1940,9 @@ function readPresentation(): Presentation {
       expanded: Array.isArray(value.expanded) ? value.expanded.filter(item => typeof item === "string") : [],
       anchors: value.anchors && typeof value.anchors === "object" ? value.anchors : {},
       workingSince: parseStoredTimestamps(value.workingSince),
-      model: parseStoredModel(value.model),
-      models: parseStoredModels(value.models),
-      // `agent`/`agents` are this key's pre-rename names. Dropping them would
-      // reset a saved mode to "default" while the agent's session still runs
-      // the old one — the picker would display one mode and run another, which
-      // is the exact lie applyMode() exists to prevent. Read once; the next
-      // save writes only the new names.
-      mode: stringOrLegacy(value.mode, (value as LegacyPresentation).agent),
-      modes: parseStoredNames(value.modes ?? (value as LegacyPresentation).agents),
-      variant: typeof value.variant === "string" ? value.variant : undefined,
-      variants: parseStoredNames(value.variants),
       dismissedSubagents: parseStoredIdLists(value.dismissedSubagents),
     };
   } catch { return structuredClone(EMPTY_PRESENTATION); }
-}
-
-function parseStoredNames(value: unknown): Record<string, string> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
 }
 
 function parseStoredIdLists(value: unknown): Record<string, string[]> {
@@ -1897,22 +1956,6 @@ function parseStoredTimestamps(value: unknown): Record<string, number> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, number] =>
     typeof entry[1] === "number" && Number.isFinite(entry[1]) && entry[1] >= 0));
-}
-
-function parseStoredModel(value: unknown): ModelSelection | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const model = value as Partial<ModelSelection>;
-  return typeof model.providerId === "string" && typeof model.modelId === "string"
-    ? { providerId: model.providerId, modelId: model.modelId }
-    : undefined;
-}
-
-function parseStoredModels(value: unknown): Record<string, ModelSelection> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  const entries = Object.entries(value)
-    .map(([id, selection]) => [id, parseStoredModel(selection)] as const)
-    .filter((entry): entry is [string, ModelSelection] => entry[1] !== undefined);
-  return Object.fromEntries(entries);
 }
 
 /**

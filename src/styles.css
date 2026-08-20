@@ -4935,6 +4935,35 @@ body.is-resizing-chat .chat-resizer {
   border-bottom: 1px solid var(--border-soft);
 }
 
+.chat-rename-form {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.65rem 1.5rem;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--surface-raised);
+}
+
+.chat-rename-form[hidden] {
+  display: none;
+}
+
+.chat-rename-form label {
+  color: var(--text-subtle);
+  font-size: 0.8em;
+}
+
+.chat-rename-form input {
+  min-width: 0;
+  flex: 1;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--border-medium);
+  border-radius: 0.45rem;
+  color: var(--text-strong);
+  background: var(--surface);
+  font: inherit;
+}
+
 .chat-state.is-error,
 .chat-notice.is-error {
   color: var(--danger, #cf4f57);
@@ -6082,6 +6111,15 @@ html[data-ui-mode="touch"] .chat-conversation-controls select {
   min-width: 0;
   max-width: none;
   padding-block: 0.35rem;
+}
+
+html[data-ui-mode="touch"] .chat-rename-form {
+  flex-wrap: wrap;
+  padding: 0.55rem 0.75rem;
+}
+
+html[data-ui-mode="touch"] .chat-rename-form label {
+  flex: 1 0 100%;
 }
 
 html[data-ui-mode="touch"] .chat-timeline {

@@ -53,6 +53,7 @@ channels:
     lifecycle:
       replay: Send an opaque cursor query parameter or Last-Event-ID; retained later events are replayed in sequence before live events.
       replayLimit: Replay is byte-bounded independently for each conversation.
+      updates: A `conversation.configuration` ChatEvent publishes a newly effective model, mode, or variant after prompt acceptance or an agent-side change. A `conversation.updated` ChatEvent publishes summary changes such as a persisted rename. Both are ordered, replayable, and idempotent projections of conversation state.
       reconnection: A generation mismatch, invalid cursor, or retention gap emits one typed resync event and closes; fetch a fresh snapshot before reconnecting.
       keepalive: Comment frames may be sent while no chat event is available.
       cancellation: Client disconnect or stream cancellation removes the subscriber.

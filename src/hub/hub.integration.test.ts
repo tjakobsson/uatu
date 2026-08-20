@@ -1202,6 +1202,7 @@ describe("hub end to end", () => {
       ["GET", "/s/myproject/api/chat/conversations", "/s/{workspaceId}/api/chat/conversations"],
       ["POST", "/s/myproject/api/chat/conversations", "/s/{workspaceId}/api/chat/conversations", {}],
       ["GET", "/s/myproject/api/chat/conversations/local", "/s/{workspaceId}/api/chat/conversations/{conversationId}"],
+      ["PATCH", "/s/myproject/api/chat/conversations/local", "/s/{workspaceId}/api/chat/conversations/{conversationId}", { requestId: "stopped-rename", title: "Renamed" }],
       ["GET", "/s/myproject/api/chat/conversations/local/events", "/s/{workspaceId}/api/chat/conversations/{conversationId}/events"],
       ["POST", "/s/myproject/api/chat/conversations/local/cancel", "/s/{workspaceId}/api/chat/conversations/{conversationId}/cancel", { requestId: "stopped" }],
       ["POST", "/s/myproject/api/chat/conversations/local/permissions/request", "/s/{workspaceId}/api/chat/conversations/{conversationId}/permissions/{interactionId}", { requestId: "stopped", outcome: "rejected" }],

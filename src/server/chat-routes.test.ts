@@ -5,6 +5,7 @@ import { ConversationReplay, encodeReplayCursor } from "../chat/replay";
 import type { WorkspaceChatService } from "../chat/service";
 import type { ChatAvailability, ConversationSnapshot, ConversationSummary, ModelSelection, PermissionOutcome, QuestionOutcome } from "../chat/types";
 import { ConversationNotFoundError } from "../chat/workspace";
+import { ConversationMutationConflictError, ConversationRenameUnsupportedError } from "../chat/adapter";
 import { buildRoutes } from "./routes";
 
 const TOKEN = "chat-test-token";
@@ -14,6 +15,7 @@ class FakeChatService implements WorkspaceChatService {
   readonly replay = new ConversationReplay("generation", "local", 10_000);
   prompts = 0;
   retries = 0;
+  renames = 0;
   private promptResult: { messageId: string; delivery: "steer" | "queue" } | undefined;
   selectedModel: ModelSelection | undefined;
   selectedAgent: string | undefined;
@@ -39,7 +41,12 @@ class FakeChatService implements WorkspaceChatService {
       this.prompts += 1;
       this.promptResult = { messageId: requestId, delivery: "queue" };
     }
-    return this.promptResult;
+    return { ...this.promptResult, configuration: { ...(model ? { model } : {}), ...(agent ? { mode: agent } : {}) } };
+  }
+  async renameConversation(id: string, _requestId: string, title: string) {
+    this.require(id);
+    this.renames += 1;
+    return { conversation: { ...this.conversation, title } };
   }
   async cancel(id: string) { this.require(id); return { cancelled: true } as const; }
   async respondPermission(id: string, _interactionId: string, _requestId: string, outcome: PermissionOutcome) { this.require(id); return { outcome }; }
@@ -47,7 +54,7 @@ class FakeChatService implements WorkspaceChatService {
   async dispose() {}
 
   private snapshot(): ConversationSnapshot {
-    return { conversation: this.conversation, generation: "generation", cursor: this.replay.latestCursor(), items: [] };
+    return { conversation: this.conversation, configuration: {}, generation: "generation", cursor: this.replay.latestCursor(), items: [] };
   }
   private require(id: string) { if (id !== "local") throw new ConversationNotFoundError(); }
 }
@@ -173,6 +180,55 @@ describe("workspace chat routes", () => {
     expect(unknown.status).toBe(404);
     expect(foreign.status).toBe(404);
     expect(await unknown.text()).toBe(await foreign.text());
+  });
+
+  test("renames through the authenticated same-origin conversation mutation with a strict bounded body", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/:conversationId"] as {
+      PATCH(request: Request & { params: Record<string, string> }): Promise<Response>;
+    };
+    const send = (body: unknown, origin = "http://127.0.0.1:4711") => handler.PATCH(request("/api/chat/conversations/local", {
+      method: "PATCH",
+      headers: { origin, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }, { conversationId: "local" }) as never);
+
+    expect((await send({ requestId: "r1", title: "Renamed" }, "https://attacker.example")).status).toBe(403);
+    expect((await send({ requestId: "r1", title: "Renamed", directory: "/tmp" })).status).toBe(400);
+    expect((await send({ requestId: "r1", title: "   " })).status).toBe(400);
+    expect((await send({ requestId: "r1", title: "é".repeat(101) })).status).toBe(400);
+    expect((await send({ title: "Missing receipt" })).status).toBe(400);
+    const renamed = await send({ requestId: "r1", title: "  Renamed  " });
+    expect(renamed.status).toBe(200);
+    expect(await renamed.json()).toEqual({ conversation: expect.objectContaining({ id: "local", title: "Renamed" }) });
+    expect(service.renames).toBe(1);
+
+    const unauthenticated = new Request("http://127.0.0.1:4711/api/chat/conversations/local", {
+      method: "PATCH",
+      headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" },
+      body: JSON.stringify({ requestId: "r2", title: "No" }),
+    }) as Request & { params: Record<string, string> };
+    unauthenticated.params = { conversationId: "local" };
+    expect((await handler.PATCH(unauthenticated)).status).toBe(401);
+  });
+
+  test("normalizes rename not-found, unsupported, and running conflicts", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/:conversationId"] as {
+      PATCH(request: Request & { params: Record<string, string> }): Promise<Response>;
+    };
+    const send = () => handler.PATCH(request("/api/chat/conversations/local", {
+      method: "PATCH",
+      headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" },
+      body: JSON.stringify({ requestId: crypto.randomUUID(), title: "Title" }),
+    }, { conversationId: "local" }) as never);
+
+    service.renameConversation = async () => { throw new ConversationRenameUnsupportedError(); };
+    expect((await send()).status).toBe(409);
+    service.renameConversation = async () => { throw new ConversationMutationConflictError("conversation is running"); };
+    expect((await send()).status).toBe(409);
+    service.renameConversation = async () => { throw new ConversationNotFoundError(); };
+    expect((await send()).status).toBe(404);
   });
 
   test("streams retained events immediately with replay IDs and no-buffering headers", async () => {

@@ -8,6 +8,7 @@ import type {
   ChatEvent,
   ChatModel,
   ChatStartupDiagnostics,
+  ConversationConfiguration,
   ConversationItem,
   ConversationSnapshot,
   ConversationStatus,
@@ -114,6 +115,18 @@ function expectModelSelection(value: unknown): void {
   expectKeys(selection, ["providerId", "modelId"], "model selection");
   expectIdentity(selection.providerId, "provider id");
   expectIdentity(selection.modelId, "model id");
+}
+
+export function parseConversationConfiguration(value: unknown): ConversationConfiguration {
+  const record = expectRecord(value, "conversation configuration");
+  expectKeys(record, ["model", "mode", "variant"], "conversation configuration");
+  if (record.model !== undefined) expectModelSelection(record.model);
+  if (record.mode !== undefined) expectIdentity(record.mode, "configuration mode");
+  if (record.variant !== undefined) {
+    expectIdentity(record.variant, "configuration variant");
+    if (record.model === undefined) throw new Error("configuration variant requires a model");
+  }
+  return value as ConversationConfiguration;
 }
 
 // Capabilities are declared positively, so an unknown name is not an error —
@@ -305,8 +318,9 @@ export function parseConversationItem(value: unknown): ConversationItem {
 
 export function parseConversationSnapshot(value: unknown): ConversationSnapshot {
   const record = expectRecord(value, "conversation snapshot");
-  expectKeys(record, ["conversation", "generation", "cursor", "items", "olderCursor"], "conversation snapshot");
+  expectKeys(record, ["conversation", "configuration", "generation", "cursor", "items", "olderCursor"], "conversation snapshot");
   parseConversationSummary(record.conversation);
+  parseConversationConfiguration(record.configuration);
   expectIdentity(record.generation, "generation");
   expectNonEmptyString(record.cursor, "cursor");
   if (!Array.isArray(record.items)) throw new Error("snapshot items must be an array");
@@ -342,6 +356,15 @@ export function parseChatEvent(value: unknown): ChatEvent {
       expectKeys(record, ["generation", "sequence", "conversationId", "type", "status", "message"], "status event");
       parseConversationStatus(record.status);
       expectOptionalString(record.message, "status message");
+      break;
+    case "conversation.configuration":
+      expectKeys(record, ["generation", "sequence", "conversationId", "type", "configuration"], "configuration event");
+      parseConversationConfiguration(record.configuration);
+      break;
+    case "conversation.updated":
+      expectKeys(record, ["generation", "sequence", "conversationId", "type", "conversation"], "conversation update event");
+      parseConversationSummary(record.conversation);
+      if ((record.conversation as ConversationSummary).id !== record.conversationId) throw new Error("updated conversation id does not match event");
       break;
     case "resync":
       expectKeys(record, ["generation", "sequence", "conversationId", "type", "reason"], "resync event");

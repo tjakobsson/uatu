@@ -1,5 +1,5 @@
 import { mergeAssistantMessage } from "./usage";
-import type { ChatEvent, ConversationItem, ConversationSnapshot, ConversationStatus } from "./types";
+import type { ChatEvent, ConversationConfiguration, ConversationItem, ConversationSnapshot, ConversationStatus, ConversationSummary } from "./types";
 
 export type AcceptedDraft = { requestId: string; messageId: string; text: string };
 export type ChatProjection = {
@@ -7,6 +7,8 @@ export type ChatProjection = {
   generation: string;
   sequence: number;
   cursor: string;
+  conversation?: ConversationSummary;
+  configuration?: ConversationConfiguration;
   items: ConversationItem[];
   status: ConversationStatus;
   olderCursor?: string;
@@ -22,6 +24,8 @@ export function projectionFromSnapshot(snapshot: ConversationSnapshot, acceptedD
     generation: snapshot.generation,
     sequence,
     cursor: snapshot.cursor,
+    conversation: snapshot.conversation,
+    configuration: snapshot.configuration,
     items: deduplicate(snapshot.items),
     status: snapshot.conversation.status,
     olderCursor: snapshot.olderCursor,
@@ -68,6 +72,8 @@ export function applyChatEvent(current: ChatProjection, event: ChatEvent, cursor
 
   let items = current.items;
   let status = current.status;
+  let conversation = current.conversation;
+  let configuration = current.configuration;
   if (event.type === "item.upsert") {
     const index = items.findIndex(item => item.id === event.item.id);
     const existing = index < 0 ? undefined : items[index];
@@ -79,6 +85,12 @@ export function applyChatEvent(current: ChatProjection, event: ChatEvent, cursor
     items = items.map(item => item.id === event.itemId ? appendDelta(item, event.delta) : item);
   } else if (event.type === "conversation.status") {
     status = event.status;
+    if (conversation) conversation = { ...conversation, status: event.status };
+  } else if (event.type === "conversation.configuration") {
+    configuration = event.configuration;
+  } else if (event.type === "conversation.updated") {
+    conversation = event.conversation;
+    status = event.conversation.status;
   }
   return {
     projection: {
@@ -87,6 +99,8 @@ export function applyChatEvent(current: ChatProjection, event: ChatEvent, cursor
       cursor,
       items,
       status,
+      conversation,
+      configuration,
       acceptedDrafts: reconcileDrafts(current.acceptedDrafts, items),
     },
     outcome: "applied",

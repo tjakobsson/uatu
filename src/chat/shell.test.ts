@@ -46,6 +46,9 @@ describe("chat shell accessibility", () => {
     expect(document.querySelector("#chat-composer-status")?.getAttribute("aria-live")).toBe("polite");
     expect(document.querySelector("#chat-model-select")?.getAttribute("aria-label")).toBe("Chat model");
     expect(document.querySelector("#chat-conversation-select")?.getAttribute("aria-label")).toBe("Conversation");
+    expect(document.querySelector("#chat-rename-conversation")?.getAttribute("aria-label")).toBe("Rename conversation");
+    expect(document.querySelector("#chat-new-conversation")?.textContent).toBe("New conversation");
+    expect(html).not.toContain("New agent");
     expect(document.querySelector("#chat-command-menu")?.getAttribute("role")).toBe("listbox");
     expect(document.querySelector("#chat-input")?.getAttribute("aria-controls")).toBe("chat-command-menu");
   });

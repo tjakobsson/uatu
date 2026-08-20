@@ -1,4 +1,4 @@
-import type { ChatAgent, ChatMode, ChatCommand, ChatModel, ModelSelection, StructuredQuestion } from "./types";
+import type { ChatAgent, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ModelSelection, StructuredQuestion } from "./types";
 
 // `conversationId` is the owning session, like PendingPermission's: the global
 // list is filtered by the adapter, which is what lets a parent discover its
@@ -58,6 +58,7 @@ export interface OpenCodeProvider {
   listSessions(): Promise<ProviderSession[]>;
   createSession(id: string): Promise<ProviderSession>;
   getSession(id: string): Promise<ProviderSession | null>;
+  getConversationConfiguration(sessionId: string): Promise<ConversationConfiguration>;
   listMessages(sessionId: string, options: { cursor?: string; limit: number }): Promise<ProviderPage<ProviderMessage>>;
   events(signal: AbortSignal): AsyncIterable<ProviderEvent>;
   prompt(sessionId: string, input: { id: string; text: string; delivery: "steer" | "queue"; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;

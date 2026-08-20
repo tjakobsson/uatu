@@ -1,9 +1,70 @@
 import { describe, expect, test } from "bun:test";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2/client";
 
-import { SdkV2Provider, stableProviderId } from "./sdk-v2-provider";
+import { normalizePersistedConversationConfiguration, SdkV2Provider, stableProviderId } from "./sdk-v2-provider";
 
 describe("OpenCode v2 identity policy", () => {
+  test("declares durable conversation rename support", () => {
+    const provider = new SdkV2Provider({} as OpencodeClient, "/workspace");
+    expect(provider.describe().capabilities).toContain("conversation-rename");
+  });
+
+  test("normalizes native and compatibility persisted configuration without inventing fields", () => {
+    expect(normalizePersistedConversationConfiguration([{
+      model: { providerID: "openai", id: "gpt-5", variant: "high" },
+      agent: "build",
+    }], [])).toEqual({ model: { providerId: "openai", modelId: "gpt-5" }, mode: "build", variant: "high" });
+
+    expect(normalizePersistedConversationConfiguration([], [{
+      info: {
+        id: "msg_user",
+        role: "user",
+        time: { created: 2 },
+        agent: "plan",
+        model: { providerID: "anthropic", modelID: "claude" },
+        variant: "max",
+      },
+      parts: [],
+    }])).toEqual({ model: { providerId: "anthropic", modelId: "claude" }, mode: "plan", variant: "max" });
+
+    expect(normalizePersistedConversationConfiguration([], [{
+      info: { id: "msg_assistant", role: "assistant", time: { created: 1 }, mode: "build", modelID: "claude", providerID: "anthropic" },
+      parts: [],
+    }])).toEqual({ model: { providerId: "anthropic", modelId: "claude" }, mode: "build" });
+    expect(normalizePersistedConversationConfiguration([], [{ info: { id: "msg", role: "user", time: { created: 1 }, variant: "high" }, parts: [] }])).toEqual({});
+  });
+
+  test("a fresh provider reconstructs configuration from persisted records", async () => {
+    const persisted = [{
+      info: {
+        id: "msg_user",
+        role: "user",
+        time: { created: 1 },
+        agent: "build",
+        model: { providerID: "openai", modelID: "gpt-5", variant: "high" },
+      },
+      parts: [],
+    }];
+    const client = {
+      session: {
+        get: async () => ({ data: { ...session("ses_restart"), metadata: { "uatu.transport": "compatibility" } } }),
+        messages: async () => ({ data: persisted }),
+      },
+      v2: {
+        session: {
+          get: async () => ({ error: { message: "missing" }, response: { status: 404 } }),
+          messages: async () => ({ data: { data: [], cursor: { next: null } } }),
+        },
+      },
+    } as unknown as OpencodeClient;
+
+    const restarted = new SdkV2Provider(client, "/workspace");
+    expect(await restarted.getConversationConfiguration("ses_restart")).toEqual({
+      model: { providerId: "openai", modelId: "gpt-5" },
+      mode: "build",
+      variant: "high",
+    });
+  });
   test("lists models from every authenticated provider", async () => {
     const client = {
       provider: {

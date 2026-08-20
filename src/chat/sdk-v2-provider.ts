@@ -15,7 +15,7 @@ import type {
   ProviderSession,
 } from "./provider";
 import { normalizeQuestion, permissionDiff } from "./normalization";
-import type { ChatAgent, ChatMode, ChatCommand, ChatModel, ModelSelection } from "./types";
+import type { ChatAgent, ChatMode, ChatCommand, ChatModel, ConversationConfiguration, ModelSelection } from "./types";
 
 type Result<T> = { data?: T; error?: unknown };
 
@@ -73,7 +73,7 @@ export class SdkV2Provider implements OpenCodeProvider {
     return {
       id: "opencode",
       name: "OpenCode",
-      capabilities: ["modes", "models", "commands", "questions", "permissions", "subagents", "variants", "context"],
+      capabilities: ["modes", "models", "commands", "questions", "permissions", "subagents", "variants", "context", "conversation-rename"],
     };
   }
 
@@ -196,6 +196,23 @@ export class SdkV2Provider implements OpenCodeProvider {
     const session = toSession(response.data ?? response);
     this.inheritTransport(session);
     return session;
+  }
+
+  async getConversationConfiguration(sessionId: string): Promise<ConversationConfiguration> {
+    const sessions: unknown[] = [];
+    const classic = await this.client.session.get({ sessionID: sessionId, directory: this.directory }) as Result<unknown>;
+    if (classic.data) {
+      sessions.push(classic.data);
+      if (isCompatibilitySession(classic.data)) this.compatibilitySessions.add(sessionId);
+    } else ensureLookupMiss(classic);
+
+    const native = await this.client.v2.session.get({ sessionID: sessionId }) as Result<unknown>;
+    if (native.error !== undefined) ensureLookupMiss(native);
+    else if (native.data) {
+      const response = native.data as { data?: unknown };
+      sessions.unshift(response.data ?? response);
+    }
+    return normalizePersistedConversationConfiguration(sessions, await this.allMessages(sessionId));
   }
 
   /**
@@ -518,6 +535,64 @@ function toSession(value: unknown): ProviderSession {
 function isCompatibilitySession(value: unknown): boolean {
   const metadata = (value as { metadata?: Record<string, unknown> })?.metadata;
   return metadata?.["uatu.transport"] === "compatibility";
+}
+
+export function normalizePersistedConversationConfiguration(
+  sessions: unknown[],
+  messages: unknown[],
+): ConversationConfiguration {
+  const configuration: ConversationConfiguration = {};
+  let sessionReportedModel = false;
+  for (const value of sessions) {
+    const candidate = configurationRecord(value);
+    if (!configuration.model && candidate.model) {
+      configuration.model = candidate.model;
+      sessionReportedModel = true;
+      if (candidate.variant) configuration.variant = candidate.variant;
+    }
+    if (!configuration.mode && candidate.mode) configuration.mode = candidate.mode;
+  }
+
+  const records = messages.map(message => {
+    const envelope = asRecord(message);
+    const info = Object.keys(asRecord(envelope.info)).length > 0 ? asRecord(envelope.info) : envelope;
+    return { info, createdAt: messageCreatedAt(message) };
+  }).sort((left, right) => right.createdAt - left.createdAt);
+  // The accepted user record is the prompt's declaration. Prefer it over an
+  // assistant record, whose compatibility shape cannot represent a variant.
+  const ordered = [
+    ...records.filter(({ info }) => info.role === "user" || info.type === "user"),
+    ...records.filter(({ info }) => info.role !== "user" && info.type !== "user"),
+  ];
+  for (const { info } of ordered) {
+    const candidate = configurationRecord(info);
+    if (!configuration.model && candidate.model) {
+      configuration.model = candidate.model;
+      if (candidate.variant) configuration.variant = candidate.variant;
+    } else if (!sessionReportedModel && configuration.model && !configuration.variant && candidate.model
+      && candidate.model.providerId === configuration.model.providerId && candidate.model.modelId === configuration.model.modelId
+      && candidate.variant) {
+      configuration.variant = candidate.variant;
+    }
+    if (!configuration.mode && candidate.mode) configuration.mode = candidate.mode;
+    if (configuration.model && configuration.mode && (configuration.variant || sessionReportedModel)) break;
+  }
+  return configuration;
+}
+
+function configurationRecord(value: unknown): ConversationConfiguration {
+  const record = asRecord(value);
+  const modelRecord = asRecord(record.model);
+  const providerId = stringValue(record.providerID ?? record.providerId) ?? stringValue(modelRecord.providerID ?? modelRecord.providerId);
+  const modelId = stringValue(record.modelID ?? record.modelId) ?? stringValue(modelRecord.id ?? modelRecord.modelID ?? modelRecord.modelId);
+  const model = providerId && modelId ? { providerId, modelId } : undefined;
+  const mode = stringValue(record.agent ?? record.mode);
+  const variant = model ? stringValue(record.variant ?? modelRecord.variant) : undefined;
+  return { ...(model ? { model } : {}), ...(mode ? { mode } : {}), ...(variant ? { variant } : {}) };
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value ? value : undefined;
 }
 
 async function* mergeProviderEvents(streams: AsyncIterable<unknown>[], signal: AbortSignal): AsyncIterable<ProviderEvent> {

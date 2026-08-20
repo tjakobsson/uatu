@@ -14,6 +14,7 @@ import type {
   ChatEvent,
   ChatCommand,
   ChatModel,
+  ConversationConfiguration,
   ConversationItem,
   ConversationSnapshot,
   ConversationStatus,
@@ -58,6 +59,27 @@ export class InvalidVariantSelectionError extends Error {
   constructor(message = "selected variant is not available") {
     super(message);
     this.name = "InvalidVariantSelectionError";
+  }
+}
+
+export class InvalidConversationTitleError extends Error {
+  constructor(message = "conversation title must be non-empty and at most 200 bytes") {
+    super(message);
+    this.name = "InvalidConversationTitleError";
+  }
+}
+
+export class ConversationRenameUnsupportedError extends Error {
+  constructor() {
+    super("conversation rename is not supported");
+    this.name = "ConversationRenameUnsupportedError";
+  }
+}
+
+export class ConversationMutationConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConversationMutationConflictError";
   }
 }
 
@@ -110,9 +132,9 @@ export class OpenCodeChatAdapter {
   private readonly coalesceWindowMs: number | undefined;
   private readonly metrics: ChatEventMetrics | undefined;
   private readonly countedEventTypes = new Set<string>();
-  private readonly lastModel = new Map<string, ModelSelection>();
-  private readonly lastMode = new Map<string, string>();
-  private readonly lastVariant = new Map<string, string>();
+  // Provider-owned state. This cache only avoids repeated reads while a
+  // projection is warm; every miss recovers through the provider seam.
+  private readonly configurations = new Map<string, ConversationConfiguration>();
   // A subagent's own cost and model, kept per message within the child session.
   // Per message because `message.updated` restates growing tokens rather than
   // adding to them, and removing the newest message must reveal the preceding
@@ -206,8 +228,10 @@ export class OpenCodeChatAdapter {
     const session = await this.provider.createSession(this.id());
     await this.requireSession(session.id);
     const projection = this.projection(session.id);
+    const configuration = await this.configuration(session.id);
     return {
       conversation: this.summary(session),
+      configuration,
       generation: this.generation,
       cursor: projection.replay.latestCursor(),
       items: [],
@@ -227,7 +251,10 @@ export class OpenCodeChatAdapter {
     // re-applies such events idempotently.
     const replayCursor = this.projection(id).replay.latestCursor();
     const cursor = options.cursor ? decodeHistoryCursor(options.cursor) : undefined;
-    const page = await this.provider.listMessages(id, { cursor: cursor?.provider, limit: options.limit ?? DEFAULT_PAGE_SIZE });
+    const [page, configuration] = await Promise.all([
+      this.provider.listMessages(id, { cursor: cursor?.provider, limit: options.limit ?? DEFAULT_PAGE_SIZE }),
+      this.configuration(id),
+    ]);
     const items = page.items.flatMap(message => normalizeProviderMessage(message));
     // Stable sort with no id tiebreaker: parts of one message share the
     // message's timestamp, so ties must fall back to the provider's own part
@@ -370,6 +397,7 @@ export class OpenCodeChatAdapter {
     projection.seed(items);
     return {
       conversation: this.summary(session, projection.status),
+      configuration,
       generation: this.generation,
       cursor: replayCursor,
       items,
@@ -383,8 +411,10 @@ export class OpenCodeChatAdapter {
   }> {
     const session = await this.requireSession(id);
     const projection = this.projection(id);
+    const configuration = await this.configuration(id);
     const handoff = projection.replay.handoff(cursor => ({
       conversation: this.summary(session, projection.status),
+      configuration,
       generation: this.generation,
       cursor,
       items: projection.items(),
@@ -417,15 +447,17 @@ export class OpenCodeChatAdapter {
   async prompt(conversationId: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string): Promise<{
     messageId: string;
     delivery: "steer" | "queue";
+    configuration: ConversationConfiguration;
     conversation?: ConversationSummary;
   }> {
     if (!text.trim()) throw new Error("prompt must not be empty");
     return this.receipts.run(`prompt:${conversationId}:${requestId}`, async () => {
       let session = await this.requireSession(conversationId);
       const projection = this.projection(conversationId);
+      const currentConfiguration = await this.configuration(conversationId);
       const delivery = projection.status === "running" ? "steer" : "queue";
       const messageId = this.id();
-      const previousModel = model ? this.lastModel.get(conversationId) : undefined;
+      const previousModel = model ? currentConfiguration.model : undefined;
       const modelChanged = model !== undefined && (!previousModel || !sameSelection(previousModel, model));
       // One list serves the model check and the variant check below; only a
       // change pays the round trip.
@@ -433,18 +465,13 @@ export class OpenCodeChatAdapter {
       if (model && modelChanged) {
         available = await this.provider.listModels();
         if (!available.some(candidate => sameSelection(candidate.selection, model))) throw new InvalidModelSelectionError();
-        this.lastModel.set(conversationId, model);
-        // A variant is valid only for the model it was checked against, so a
-        // model change re-arms the variant check.
-        this.lastVariant.delete(conversationId);
       }
       // Same freshness rule as the model: only a change pays the list round
       // trip, and an unknown name is refused rather than passed through for
       // OpenCode to interpret.
-      if (mode && this.lastMode.get(conversationId) !== mode) {
+      if (mode && currentConfiguration.mode !== mode) {
         const modes = await this.modes();
         if (!modes.some(candidate => candidate.name === mode)) throw new InvalidModeSelectionError();
-        this.lastMode.set(conversationId, mode);
       }
       // A variant is refused unless the model it would ride advertises it —
       // variants are per-model, and an unknown one passed through would
@@ -456,12 +483,11 @@ export class OpenCodeChatAdapter {
       // freshness rule as the model and mode: a variant is re-sent with every
       // prompt of a conversation, so validating it every time would pay a
       // provider round trip per message rather than per change.
-      const variantModel = variant ? model ?? this.lastModel.get(conversationId) : model;
-      if (variant && this.lastVariant.get(conversationId) !== variant) {
+      const variantModel = variant ? model ?? currentConfiguration.model : model;
+      if (variant && (modelChanged || currentConfiguration.variant !== variant)) {
         available ??= await this.provider.listModels();
         const selected = variantModel && available.find(candidate => sameSelection(candidate.selection, variantModel));
         if (!selected?.variants?.includes(variant)) throw new InvalidVariantSelectionError();
-        this.lastVariant.set(conversationId, variant);
       }
       // Emptiness is checked before dispatch (afterwards the store already
       // holds this prompt), but the rename itself waits for admission — a
@@ -493,14 +519,28 @@ export class OpenCodeChatAdapter {
             session = await this.provider.renameSession!(conversationId, deriveConversationTitle(text));
             if (!await isSessionInWorkspace(session.directory, this.workspacePath)) throw new ConversationNotFoundError();
             conversation = this.summary(session, projection.status);
+            projection.replay.publish({ type: "conversation.updated", conversation });
           } catch { /* cosmetic — listConversations repairs default titles later */ }
         }
         projection.upsert({ id: `message:${accepted.messageId}`, type: "user_message", createdAt: Date.now(), text, requestId });
+        const configuration: ConversationConfiguration = {
+          ...currentConfiguration,
+          ...(model ? { model } : {}),
+          ...(mode ? { mode } : {}),
+        };
+        if (model) {
+          if (variant) configuration.variant = variant;
+          else delete configuration.variant;
+        } else if (variant) configuration.variant = variant;
+        this.configurations.set(conversationId, configuration);
+        if (!sameConfiguration(currentConfiguration, configuration)) {
+          projection.replay.publish({ type: "conversation.configuration", configuration });
+        }
         // A fast command can finish its whole turn while the dispatch
         // resolves; the pump's terminal status then outranks our optimistic
         // promotion, or the turn sticks at "working" forever.
         if (projection.status === "sending") projection.statusUpdate("running");
-        return { messageId: accepted.messageId, delivery, ...(conversation ? { conversation } : {}) };
+        return { messageId: accepted.messageId, delivery, configuration, ...(conversation ? { conversation } : {}) };
       } catch (error) {
         const mapped = error instanceof UnsupportedVariantSelectionError
           ? new InvalidVariantSelectionError(error.message)
@@ -508,6 +548,23 @@ export class OpenCodeChatAdapter {
         if (!steering && projection.status === "sending") projection.statusUpdate("failed", errorMessage(mapped));
         throw mapped;
       }
+    });
+  }
+
+  async renameConversation(conversationId: string, requestId: string, rawTitle: string): Promise<{ conversation: ConversationSummary }> {
+    const title = rawTitle.trim();
+    if (!title || Buffer.byteLength(title) > 200) throw new InvalidConversationTitleError();
+    if (!this.provider.renameSession || !this.agent().capabilities.includes("conversation-rename")) {
+      throw new ConversationRenameUnsupportedError();
+    }
+    return this.receipts.run(`rename:${conversationId}:${requestId}`, async () => {
+      await this.requireSession(conversationId);
+      if (this.liveTurns.has(conversationId)) throw new ConversationMutationConflictError("conversation is running");
+      const renamed = await this.provider.renameSession!(conversationId, title);
+      if (!await isSessionInWorkspace(renamed.directory, this.workspacePath)) throw new ConversationNotFoundError();
+      const conversation = this.summary(renamed);
+      this.projection(conversationId).replay.publish({ type: "conversation.updated", conversation });
+      return { conversation };
     });
   }
 
@@ -877,7 +934,8 @@ export class OpenCodeChatAdapter {
         // or token report — exactly what a message with only tool or
         // reasoning parts emits. Attribution must see those; only an event
         // carrying nothing at all is skipped.
-        if (normalized.updates.length === 0 && normalized.assistantUsage === undefined && normalized.assistantModel === undefined && normalized.removedMessageId === undefined) continue;
+        if (normalized.updates.length === 0 && normalized.assistantUsage === undefined && normalized.assistantModel === undefined
+          && normalized.removedMessageId === undefined && normalized.configuration === undefined) continue;
         // Confinement is checked per event as it arrives, never at flush time:
         // a session that moves out of the workspace must stop publishing from
         // that moment, and events received while it was confined stay valid.
@@ -888,6 +946,19 @@ export class OpenCodeChatAdapter {
           throw error;
         }
         if (signal.aborted) break;
+        if (normalized.configuration) {
+          const current = await this.configuration(normalized.conversationId);
+          const configuration = { ...current, ...normalized.configuration };
+          if (normalized.replaceModel && normalized.configuration.model) {
+            configuration.model = normalized.configuration.model;
+            if (normalized.configuration.variant) configuration.variant = normalized.configuration.variant;
+            else delete configuration.variant;
+          }
+          this.configurations.set(normalized.conversationId, configuration);
+          if (!sameConfiguration(current, configuration)) {
+            this.projection(normalized.conversationId).replay.publish({ type: "conversation.configuration", configuration });
+          }
+        }
         coalescer.push(normalized.conversationId, normalized.updates);
         // OpenCode never emits `question.v2.asked`, so the arrival of the
         // `question` tool part is the only live signal that a question was
@@ -1061,6 +1132,14 @@ export class OpenCodeChatAdapter {
     return session;
   }
 
+  private async configuration(id: string): Promise<ConversationConfiguration> {
+    const cached = this.configurations.get(id);
+    if (cached) return cached;
+    const configuration = await this.provider.getConversationConfiguration(id);
+    this.configurations.set(id, configuration);
+    return configuration;
+  }
+
   private projection(id: string): ConversationProjection {
     const existing = this.projections.get(id);
     if (existing) {
@@ -1080,9 +1159,7 @@ export class OpenCodeChatAdapter {
       // Evicted conversations lose their replay ring; a returning client's
       // stale cursor resolves to a retention-gap resync, which is safe.
       this.projections.delete(candidateId);
-      this.lastModel.delete(candidateId);
-      this.lastMode.delete(candidateId);
-      this.lastVariant.delete(candidateId);
+      this.configurations.delete(candidateId);
       const prefix = `${candidateId}${ATTRIBUTION_SEPARATOR}`;
       for (const key of this.attributionReconstructions.keys()) {
         if (key.startsWith(prefix)) this.attributionEpochs.set(key, (this.attributionEpochs.get(key) ?? 0) + 1);
@@ -1126,6 +1203,14 @@ function isDefaultConversationTitle(title: string): boolean {
 
 function sameSelection(left: ModelSelection, right: ModelSelection): boolean {
   return left.providerId === right.providerId && left.modelId === right.modelId;
+}
+
+function sameConfiguration(left: ConversationConfiguration, right: ConversationConfiguration): boolean {
+  return left.mode === right.mode
+    && left.variant === right.variant
+    && (left.model === undefined
+      ? right.model === undefined
+      : right.model !== undefined && sameSelection(left.model, right.model));
 }
 
 export class ConversationProjection {

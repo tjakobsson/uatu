@@ -4,6 +4,7 @@ import { addAcceptedDraft, applyChatEvent, prependSnapshot, projectionFromSnapsh
 
 const snapshot = (items: ConversationSnapshot["items"] = []): ConversationSnapshot => ({
   conversation: { id: "c1", title: "Chat", createdAt: 1, updatedAt: 1, status: "running" },
+  configuration: {},
   generation: "g1",
   cursor: Buffer.from(JSON.stringify({ v: 1, g: "g1", s: 4 })).toString("base64url"),
   items,
@@ -41,5 +42,22 @@ describe("chat projection", () => {
     const current = projectionFromSnapshot(snapshot([{ id: "new", type: "user_message", createdAt: 2, text: "new" }]));
     const page = snapshot([{ id: "old", type: "user_message", createdAt: 1, text: "old" }, { id: "new", type: "user_message", createdAt: 2, text: "new" }]);
     expect(prependSnapshot(current, page).items.map(item => item.id)).toEqual(["old", "new"]);
+  });
+
+  test("projects configuration and conversation updates in sequence", () => {
+    const initial = projectionFromSnapshot({
+      ...snapshot(),
+      configuration: { model: { providerId: "anthropic", modelId: "claude" }, mode: "plan" },
+    });
+    const configured = applyChatEvent(initial, {
+      generation: "g1", sequence: 5, conversationId: "c1", type: "conversation.configuration",
+      configuration: { model: { providerId: "openai", modelId: "gpt" }, mode: "build" },
+    });
+    expect(configured.projection.configuration).toEqual({ model: { providerId: "openai", modelId: "gpt" }, mode: "build" });
+    const renamed = applyChatEvent(configured.projection, {
+      generation: "g1", sequence: 6, conversationId: "c1", type: "conversation.updated",
+      conversation: { ...snapshot().conversation, title: "Renamed" },
+    });
+    expect(renamed.projection.conversation?.title).toBe("Renamed");
   });
 });
