@@ -5,7 +5,7 @@ import { ConversationReplay, encodeReplayCursor } from "../chat/replay";
 import type { WorkspaceChatService } from "../chat/service";
 import type { ChatAvailability, ConversationSnapshot, ConversationSummary, ModelSelection, PermissionOutcome, QuestionOutcome } from "../chat/types";
 import { ConversationNotFoundError } from "../chat/workspace";
-import { ConversationMutationConflictError, ConversationRenameUnsupportedError } from "../chat/adapter";
+import { ConversationRenameUnsupportedError } from "../chat/adapter";
 import { buildRoutes } from "./routes";
 
 const TOKEN = "chat-test-token";
@@ -213,7 +213,7 @@ describe("workspace chat routes", () => {
     expect((await handler.PATCH(unauthenticated)).status).toBe(401);
   });
 
-  test("normalizes rename not-found, unsupported, and running conflicts", async () => {
+  test("normalizes rename not-found and unsupported errors", async () => {
     const service = new FakeChatService();
     const handler = routes(service)["/api/chat/conversations/:conversationId"] as {
       PATCH(request: Request & { params: Record<string, string> }): Promise<Response>;
@@ -225,8 +225,6 @@ describe("workspace chat routes", () => {
     }, { conversationId: "local" }) as never);
 
     service.renameConversation = async () => { throw new ConversationRenameUnsupportedError(); };
-    expect((await send()).status).toBe(409);
-    service.renameConversation = async () => { throw new ConversationMutationConflictError("conversation is running"); };
     expect((await send()).status).toBe(409);
     service.renameConversation = async () => { throw new ConversationNotFoundError(); };
     expect((await send()).status).toBe(404);

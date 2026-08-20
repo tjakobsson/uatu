@@ -76,13 +76,6 @@ export class ConversationRenameUnsupportedError extends Error {
   }
 }
 
-export class ConversationMutationConflictError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "ConversationMutationConflictError";
-  }
-}
-
 // Just the slice of MetricsRegistry the adapter needs, so chat does not depend
 // on the debug module's shape.
 export type ChatEventMetrics = { inc(name: string, delta?: number): void };
@@ -595,7 +588,6 @@ export class OpenCodeChatAdapter {
     }
     return this.receipts.run(`rename:${conversationId}:${requestId}`, async () => {
       await this.requireSession(conversationId);
-      if (this.liveTurns.has(conversationId)) throw new ConversationMutationConflictError("conversation is running");
       const renamed = await this.provider.renameSession!(conversationId, title);
       if (!await isSessionInWorkspace(renamed.directory, this.workspacePath)) throw new ConversationNotFoundError();
       const conversation = this.summary(renamed);

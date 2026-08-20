@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { ConversationMutationConflictError, ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, OpenCodeChatAdapter, parseSlashCommand } from "./adapter";
+import { ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, OpenCodeChatAdapter, parseSlashCommand } from "./adapter";
 import { normalizeProviderEvent } from "./normalization";
 import type { ChatAgent } from "./types";
 import type {
@@ -662,7 +662,7 @@ describe("prompt, abort, permission, and question mutations", () => {
     expect((await adapter.history("session")).configuration).toEqual({ model: anthropic });
   });
 
-  test("manual rename is confined, idempotent, conflict-aware, and prevents first-prompt overwrite", async () => {
+  test("manual rename is confined, idempotent, preserves active turns, and prevents first-prompt overwrite", async () => {
     const provider = new FakeProvider();
     provider.agent.capabilities.push("conversation-rename");
     provider.sessions = [{ ...fixtureSession("session"), title: "New session - now" }];
@@ -690,7 +690,9 @@ describe("prompt, abort, permission, and question mutations", () => {
     await expect(adapter.renameConversation("session", "empty", "  ")).rejects.toBeInstanceOf(InvalidConversationTitleError);
     await expect(adapter.renameConversation("session", "large", "é".repeat(101))).rejects.toBeInstanceOf(InvalidConversationTitleError);
     adapter.projectionForTests("session").statusUpdate("running");
-    await expect(adapter.renameConversation("session", "running", "Blocked")).rejects.toBeInstanceOf(ConversationMutationConflictError);
+    const whileRunning = await adapter.renameConversation("session", "running", "Renamed while running");
+    expect(whileRunning.conversation).toEqual(expect.objectContaining({ title: "Renamed while running", status: "running" }));
+    expect(adapter.projectionForTests("session").status).toBe("running");
   });
 
   test("a manual rename during prompt validation wins over first-prompt naming", async () => {
