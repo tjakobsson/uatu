@@ -1,6 +1,8 @@
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2/client";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 
 import { boundedSet } from "../shared/bounded-map";
 import { UnsupportedVariantSelectionError } from "./provider";
@@ -117,6 +119,30 @@ export class SdkV2Provider implements OpenCodeProvider {
       .sort((left, right) => left.provider.localeCompare(right.provider) || left.name.localeCompare(right.name));
   }
 
+  async newConversationConfiguration(): Promise<ConversationConfiguration> {
+    const [config, agentPayload, providerPayload, preferences] = await Promise.all([
+      this.client.config.get({ directory: this.directory }).then(unwrap),
+      this.client.app.agents({ directory: this.directory }).then(unwrap),
+      this.client.config.providers({ directory: this.directory }).then(unwrap),
+      this.modelPreferences(),
+    ]);
+    const agents = Array.isArray(agentPayload) ? agentPayload : asArray(asRecord(agentPayload).data);
+    return resolveNewConversationConfiguration(config, agents, providerPayload, preferences);
+  }
+
+  private async modelPreferences(): Promise<unknown> {
+    try {
+      const paths = asRecord(unwrap(await this.client.path.get({ directory: this.directory })));
+      const state = stringValue(paths.state);
+      if (!state) return {};
+      return JSON.parse(await readFile(path.join(state, "model.json"), "utf8"));
+    } catch {
+      // TUI preference state is an optional hint. Configured/provider defaults
+      // still make a new conversation usable when it is absent or malformed.
+      return {};
+    }
+  }
+
   async switchModel(sessionId: string, selection: ModelSelection, variant?: string): Promise<void> {
     ensureSuccess(await this.client.v2.session.switchModel({
       sessionID: sessionId,
@@ -165,10 +191,16 @@ export class SdkV2Provider implements OpenCodeProvider {
     return [...sessions.values()];
   }
 
-  async createSession(_id: string): Promise<ProviderSession> {
+  async createSession(_id: string, configuration: ConversationConfiguration = {}): Promise<ProviderSession> {
     const session = toSession(unwrap(await this.client.session.create({
       directory: this.directory,
       metadata: { "uatu.transport": "compatibility" },
+      ...(configuration.mode ? { agent: configuration.mode } : {}),
+      ...(configuration.model ? { model: {
+        providerID: configuration.model.providerId,
+        id: configuration.model.modelId,
+        ...(configuration.variant ? { variant: configuration.variant } : {}),
+      } } : {}),
     })));
     this.compatibilitySessions.add(session.id);
     return session;
@@ -535,6 +567,77 @@ function toSession(value: unknown): ProviderSession {
 function isCompatibilitySession(value: unknown): boolean {
   const metadata = (value as { metadata?: Record<string, unknown> })?.metadata;
   return metadata?.["uatu.transport"] === "compatibility";
+}
+
+export function resolveNewConversationConfiguration(
+  configValue: unknown,
+  agentValues: unknown[],
+  providerValue: unknown,
+  preferenceValue: unknown,
+): ConversationConfiguration {
+  const config = asRecord(configValue);
+  const providersPayload = asRecord(providerValue);
+  const providers = asArray(providersPayload.providers).map(asRecord);
+  const defaults = asRecord(providersPayload.default);
+  const agents = agentValues.map(asRecord).filter(agent =>
+    agent.hidden !== true && agent.mode !== "subagent" && typeof agent.name === "string" && agent.name.length > 0);
+  const configuredMode = stringValue(config.default_agent);
+  const selectedAgent = agents.find(agent => agent.name === configuredMode)
+    ?? agents.find(agent => agent.name === "build")
+    ?? agents[0];
+
+  const offeredModel = (selection: ModelSelection | undefined): ModelSelection | undefined => {
+    if (!selection) return undefined;
+    const provider = providers.find(candidate => candidate.id === selection.providerId);
+    if (!provider) return undefined;
+    const model = Object.values(asRecord(provider.models)).map(asRecord)
+      .find(candidate => candidate.id === selection.modelId);
+    return model ? selection : undefined;
+  };
+  const modelFromRecord = (value: unknown): ModelSelection | undefined => {
+    const model = asRecord(value);
+    const providerId = stringValue(model.providerID ?? model.providerId);
+    const modelId = stringValue(model.modelID ?? model.modelId ?? model.id);
+    return providerId && modelId ? offeredModel({ providerId, modelId }) : undefined;
+  };
+  const modelFromName = (value: unknown): ModelSelection | undefined => {
+    const name = stringValue(value);
+    const separator = name?.indexOf("/") ?? -1;
+    return name && separator > 0
+      ? offeredModel({ providerId: name.slice(0, separator), modelId: name.slice(separator + 1) })
+      : undefined;
+  };
+
+  const preferences = asRecord(preferenceValue);
+  const recent = asArray(preferences.recent).map(modelFromRecord).find(Boolean);
+  const firstProvider = providers[0];
+  const providerId = firstProvider ? stringValue(firstProvider.id) : undefined;
+  const defaultModelId = providerId ? stringValue(defaults[providerId]) : undefined;
+  const firstModel = firstProvider
+    ? Object.values(asRecord(firstProvider.models)).map(asRecord).map(model => stringValue(model.id)).find(Boolean)
+    : undefined;
+  const fallback = providerId && (defaultModelId ?? firstModel)
+    ? offeredModel({ providerId, modelId: (defaultModelId ?? firstModel)! })
+    : undefined;
+  const model = modelFromRecord(selectedAgent?.model)
+    ?? modelFromName(config.model)
+    ?? recent
+    ?? fallback;
+
+  let variant: string | undefined;
+  if (model) {
+    const selectedProvider = providers.find(provider => provider.id === model.providerId);
+    const selectedModel = Object.values(asRecord(selectedProvider?.models)).map(asRecord)
+      .find(candidate => candidate.id === model.modelId);
+    const stored = stringValue(asRecord(preferences.variant)[`${model.providerId}/${model.modelId}`]);
+    if (stored && stored !== "default" && Object.hasOwn(asRecord(selectedModel?.variants), stored)) variant = stored;
+  }
+
+  return {
+    ...(model ? { model } : {}),
+    ...(selectedAgent ? { mode: selectedAgent.name as string } : {}),
+    ...(variant ? { variant } : {}),
+  };
 }
 
 export function normalizePersistedConversationConfiguration(

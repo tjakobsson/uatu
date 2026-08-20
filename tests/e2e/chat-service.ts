@@ -224,6 +224,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.replay.get(id)!.publish({ type: "item.upsert", item });
     this.setStatus(id, "running");
     this.configurations.set(id, configuration);
+    this.nextCreatedConfiguration = structuredClone(configuration);
     if (JSON.stringify(previousConfiguration) !== JSON.stringify(configuration)) {
       this.replay.get(id)!.publish({ type: "conversation.configuration", configuration });
     }

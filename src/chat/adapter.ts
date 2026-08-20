@@ -135,6 +135,10 @@ export class OpenCodeChatAdapter {
   // Provider-owned state. This cache only avoids repeated reads while a
   // projection is warm; every miss recovers through the provider seam.
   private readonly configurations = new Map<string, ConversationConfiguration>();
+  // Mirrors a running OpenCode TUI: once this adapter accepts a prompt, the
+  // next conversation starts from that process-local selection. A fresh
+  // adapter falls back to OpenCode's durable config/recent-model policy.
+  private newConversationDefaults: ConversationConfiguration | undefined;
   // A subagent's own cost and model, kept per message within the child session.
   // Per message because `message.updated` restates growing tokens rather than
   // adding to them, and removing the newest message must reveal the preceding
@@ -225,13 +229,11 @@ export class OpenCodeChatAdapter {
   }
 
   async createConversation(): Promise<ConversationSnapshot> {
-    const session = await this.provider.createSession(this.id());
+    const configuration = this.newConversationDefaults ?? await this.provider.newConversationConfiguration();
+    const session = await this.provider.createSession(this.id(), configuration);
     await this.requireSession(session.id);
     const projection = this.projection(session.id);
-    // OpenCode resolves its configured default model when it creates a session,
-    // just as the TUI does. Read that resolved state rather than hiding it
-    // behind an unknowable client-side "default" choice.
-    const configuration = await this.configuration(session.id);
+    this.configurations.set(session.id, configuration);
     return {
       conversation: this.summary(session),
       configuration,
@@ -546,6 +548,11 @@ export class OpenCodeChatAdapter {
           else delete configuration.variant;
         } else if (variant) configuration.variant = variant;
         this.configurations.set(conversationId, configuration);
+        // An entirely unknown resumed conversation does not tell us what
+        // OpenCode actually chose, so it must not erase the durable cold-TUI
+        // fallback. Known accepted models do become this adapter's last-used
+        // selection, matching a running TUI.
+        if (configuration.model) this.newConversationDefaults = configuration;
         if (!sameConfiguration(latestConfiguration, configuration)) {
           projection.replay.publish({ type: "conversation.configuration", configuration });
         }

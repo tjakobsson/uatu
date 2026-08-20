@@ -61,6 +61,11 @@ test.describe("conversation configuration and rename", () => {
       await expect(second.page.locator("#chat-model-select")).toHaveValue(JSON.stringify(["anthropic", "claude-sonnet"]));
       await expect(second.page.locator("#chat-mode-select")).toHaveValue("build");
       await expect(second.page.locator("#chat-variant-select")).toHaveValue("xhigh");
+
+      await page.getByRole("button", { name: "New conversation", exact: true }).click();
+      await expect(page.locator("#chat-model-select")).toHaveValue(JSON.stringify(["anthropic", "claude-sonnet"]));
+      await expect(page.locator("#chat-mode-select")).toHaveValue("build");
+      await expect(page.locator("#chat-variant-select")).toHaveValue("xhigh");
     } finally {
       await second.context.close();
     }

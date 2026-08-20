@@ -17,6 +17,7 @@ function provider(): OpenCodeProvider {
     async listModels() { return []; },
     async switchModel() {},
     async listSessions() { return []; },
+    async newConversationConfiguration() { return {}; },
     async createSession() { throw new Error("unused"); },
     async getSession() { return null; },
     async getConversationConfiguration() { return {}; },

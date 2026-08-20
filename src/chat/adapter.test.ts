@@ -68,15 +68,18 @@ class FakeProvider implements OpenCodeProvider {
   listQuestions?: OpenCodeProvider["listQuestions"];
   listModes?: OpenCodeProvider["listModes"];
   configurations = new Map<string, import("./types").ConversationConfiguration>();
+  newConfiguration: import("./types").ConversationConfiguration = {};
 
   async listCommands() { return this.commands; }
   async listModels() { return this.models; }
   async switchModel(sessionId: string, selection: ModelSelection) { this.modelSwitches.push({ sessionId, selection }); }
 
   async listSessions() { return this.sessions; }
-  async createSession(id: string) {
+  async newConversationConfiguration() { return this.newConfiguration; }
+  async createSession(id: string, configuration = {}) {
     const session = fixtureSession(id, process.cwd(), this.sessions.length + 1);
     this.sessions.push(session);
+    this.configurations.set(id, configuration);
     return session;
   }
   async getSession(id: string) { return this.sessions.find(session => session.id === id) ?? null; }
@@ -242,21 +245,16 @@ describe("OpenCode conversation inventory and history", () => {
 
   test("creates and looks up an empty workspace conversation", async () => {
     const provider = new FakeProvider();
-    let configurationReads = 0;
-    provider.getConversationConfiguration = async () => {
-      configurationReads += 1;
-      return { model: { providerId: "provider-default", modelId: "model" } };
-    };
+    provider.newConfiguration = { model: { providerId: "recent", modelId: "model" }, mode: "build" };
     const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "created" });
     const created = await adapter.createConversation();
     expect(created).toEqual(expect.objectContaining({
       conversation: expect.objectContaining({ id: "created" }),
-      configuration: { model: { providerId: "provider-default", modelId: "model" } },
+      configuration: provider.newConfiguration,
       generation: "g",
       items: [],
     }));
-    expect(configurationReads).toBe(1);
-    expect((await adapter.history("created")).configuration).toEqual({ model: { providerId: "provider-default", modelId: "model" } });
+    expect((await adapter.history("created")).configuration).toEqual(provider.newConfiguration);
     expect(await adapter.getConversation("created")).toEqual(expect.objectContaining({ id: "created" }));
   });
 
@@ -479,6 +477,32 @@ describe("prompt, abort, permission, and question mutations", () => {
     while (!events.some(event => event.type === "conversation.configuration")) events.push((await iterator.next()).value!);
     expect(events.filter(event => event.type === "conversation.configuration")).toHaveLength(1);
     replayed.events.cancel();
+  });
+
+  test("a new conversation follows the last configuration accepted by this adapter", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("existing")];
+    provider.newConfiguration = { model: { providerId: "anthropic", modelId: "claude" }, mode: "build" };
+    provider.models.push({ selection: { providerId: "openai", modelId: "gpt" }, provider: "OpenAI", name: "GPT" });
+    provider.listModes = async () => [{ name: "build", description: "" }, { name: "plan", description: "" }];
+    let nextId = 0;
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), id: () => nextId++ === 0 ? "message" : "created" });
+    const selected = { model: { providerId: "openai", modelId: "gpt" }, mode: "plan" };
+
+    expect((await adapter.prompt("existing", "request", "go", selected.model, selected.mode)).configuration).toEqual(selected);
+    expect((await adapter.createConversation()).configuration).toEqual(selected);
+    expect(provider.configurations.get("created")).toEqual(selected);
+  });
+
+  test("an unknown accepted prompt does not erase durable new-conversation defaults", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("existing")];
+    provider.newConfiguration = { model: { providerId: "anthropic", modelId: "claude" }, mode: "build" };
+    let nextId = 0;
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), id: () => nextId++ === 0 ? "message" : "created" });
+
+    expect((await adapter.prompt("existing", "request", "go")).configuration).toEqual({});
+    expect((await adapter.createConversation()).configuration).toEqual(provider.newConfiguration);
   });
 
   test("provider-reported model and mode switches update effective configuration", async () => {

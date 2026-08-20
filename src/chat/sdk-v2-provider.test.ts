@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2/client";
 
-import { normalizePersistedConversationConfiguration, SdkV2Provider, stableProviderId } from "./sdk-v2-provider";
+import { normalizePersistedConversationConfiguration, resolveNewConversationConfiguration, SdkV2Provider, stableProviderId } from "./sdk-v2-provider";
 
 describe("OpenCode v2 identity policy", () => {
   test("declares durable conversation rename support", () => {
@@ -68,6 +68,51 @@ describe("OpenCode v2 identity policy", () => {
       mode: "build",
       variant: "high",
     });
+  });
+
+  test("resolves new conversations with OpenCode's durable cold-TUI policy", () => {
+    const agents = [
+      { name: "plan", mode: "primary" },
+      { name: "build", mode: "primary", model: { providerID: "anthropic", modelID: "claude" } },
+      { name: "explore", mode: "subagent", model: { providerID: "openai", modelID: "gpt" } },
+    ];
+    const providers = {
+      providers: [
+        { id: "openai", models: { gpt: { id: "gpt", variants: { high: {} } } } },
+        { id: "anthropic", models: { claude: { id: "claude", variants: { max: {} } } } },
+      ],
+      default: { openai: "gpt", anthropic: "claude" },
+    };
+    const preferences = {
+      recent: [{ providerID: "openai", modelID: "gpt" }],
+      variant: { "anthropic/claude": "max", "openai/gpt": "default" },
+    };
+
+    // The built-in default is Build, and its configured model outranks config
+    // and recency. A currently advertised durable variant follows the model.
+    expect(resolveNewConversationConfiguration(
+      { model: "openai/gpt" },
+      agents,
+      providers,
+      preferences,
+    )).toEqual({ model: { providerId: "anthropic", modelId: "claude" }, mode: "build", variant: "max" });
+
+    // A configured default agent wins. Without an agent model, workspace
+    // config wins recency, while the TUI's "default" sentinel stays absent.
+    expect(resolveNewConversationConfiguration(
+      { default_agent: "plan", model: "openai/gpt" },
+      agents,
+      providers,
+      preferences,
+    )).toEqual({ model: { providerId: "openai", modelId: "gpt" }, mode: "plan" });
+
+    // With no configured model, the most recently selected valid model wins.
+    expect(resolveNewConversationConfiguration(
+      { default_agent: "plan" },
+      agents,
+      providers,
+      { recent: [{ providerID: "anthropic", modelID: "claude" }], variant: { "anthropic/claude": "stale" } },
+    )).toEqual({ model: { providerId: "anthropic", modelId: "claude" }, mode: "plan" });
   });
   test("lists models from every authenticated provider", async () => {
     const client = {
@@ -331,8 +376,17 @@ describe("OpenCode v2 identity policy", () => {
     } as unknown as OpencodeClient;
     const provider = new SdkV2Provider(client, "/workspace");
 
-    expect((await provider.createSession("client-uuid")).id).toBe("ses_provider");
-    expect(createInput).toEqual({ directory: "/workspace", metadata: { "uatu.transport": "compatibility" } });
+    expect((await provider.createSession("client-uuid", {
+      model: { providerId: "openai", modelId: "gpt-5.6-sol" },
+      mode: "plan",
+      variant: "high",
+    })).id).toBe("ses_provider");
+    expect(createInput).toEqual({
+      directory: "/workspace",
+      metadata: { "uatu.transport": "compatibility" },
+      agent: "plan",
+      model: { providerID: "openai", id: "gpt-5.6-sol", variant: "high" },
+    });
 
     const model = { providerId: "openai", modelId: "gpt-5.6-sol" };
     const first = await provider.prompt("ses_provider", { id: "client-uuid", text: "hello", delivery: "queue", model });

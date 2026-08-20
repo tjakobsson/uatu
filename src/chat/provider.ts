@@ -56,7 +56,8 @@ export interface OpenCodeProvider {
   switchModel(sessionId: string, selection: ModelSelection, variant?: string): Promise<void>;
   renameSession?(sessionId: string, title: string): Promise<ProviderSession>;
   listSessions(): Promise<ProviderSession[]>;
-  createSession(id: string): Promise<ProviderSession>;
+  newConversationConfiguration(): Promise<ConversationConfiguration>;
+  createSession(id: string, configuration?: ConversationConfiguration): Promise<ProviderSession>;
   getSession(id: string): Promise<ProviderSession | null>;
   getConversationConfiguration(sessionId: string): Promise<ConversationConfiguration>;
   listMessages(sessionId: string, options: { cursor?: string; limit: number }): Promise<ProviderPage<ProviderMessage>>;
