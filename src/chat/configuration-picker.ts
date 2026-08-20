@@ -61,7 +61,6 @@ export type PickerGeometryInput = {
   layoutHeight: number;
   visualTop: number;
   visualHeight: number;
-  bottomInset: number;
 };
 
 export type PickerGeometry = {
@@ -139,7 +138,6 @@ type PickerEnvironment = {
   onModeChange: (listener: (mode: UiMode) => void) => () => void;
   visualViewport: () => Pick<VisualViewport, "height" | "offsetTop" | "addEventListener" | "removeEventListener"> | null;
   layoutHeight: () => number;
-  bottomInset: () => number;
   addResizeListener: (listener: () => void) => void;
   removeResizeListener: (listener: () => void) => void;
   defer: (callback: () => void) => void;
@@ -196,7 +194,6 @@ export function createChatConfigurationPicker(
     onModeChange: options.environment?.onModeChange ?? onUiModeChange,
     visualViewport: options.environment?.visualViewport ?? (() => browser?.visualViewport ?? null),
     layoutHeight: options.environment?.layoutHeight ?? (() => browser?.innerHeight ?? 0),
-    bottomInset: options.environment?.bottomInset ?? (() => 0),
     addResizeListener: options.environment?.addResizeListener ?? (listener => browser?.addEventListener("resize", listener)),
     removeResizeListener: options.environment?.removeResizeListener ?? (listener => browser?.removeEventListener("resize", listener)),
     defer: options.environment?.defer ?? (callback => requestAnimationFrame(callback)),
@@ -373,6 +370,9 @@ export function createChatConfigurationPicker(
   const applyGeometry = (): void => {
     if (!open) return;
     const viewport = environment.visualViewport();
+    // ChatViewportController already sizes the touch surface above the visible
+    // tab bar and its safe area, reclaiming that space when the keyboard covers
+    // it. Clamp to that surface instead of subtracting the inset a second time.
     const geometry = chatConfigurationPickerGeometry({
       mode: environment.mode(),
       surface: elements.surface.getBoundingClientRect(),
@@ -380,7 +380,6 @@ export function createChatConfigurationPicker(
       layoutHeight: environment.layoutHeight(),
       visualTop: viewport?.offsetTop ?? 0,
       visualHeight: viewport?.height ?? environment.layoutHeight(),
-      bottomInset: environment.bottomInset(),
     });
     elements.dialog.dataset.presentation = geometry.presentation;
     elements.dialog.style.setProperty("--chat-configuration-left", `${geometry.left}px`);

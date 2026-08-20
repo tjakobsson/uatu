@@ -225,6 +225,14 @@ test("software-keyboard geometry keeps the composer in the visual viewport", asy
   await expect(page.locator("#chat-configuration-done")).toBeFocused();
   await expect(page.locator("#chat-configuration-search")).not.toBeFocused();
   await expect(page.locator("#chat-configuration-dialog")).toHaveAttribute("data-presentation", "touch");
+  const closedKeyboardBounds = await page.evaluate(() => {
+    const dialog = document.querySelector("#chat-configuration-dialog")!.getBoundingClientRect();
+    const surface = document.querySelector("#chat-surface")!.getBoundingClientRect();
+    const tabs = document.querySelector("#touch-tab-bar")!.getBoundingClientRect();
+    return { dialogBottom: dialog.bottom, surfaceBottom: surface.bottom, tabTop: tabs.top };
+  });
+  expect(closedKeyboardBounds.dialogBottom).toBeLessThanOrEqual(closedKeyboardBounds.surfaceBottom + 1);
+  expect(closedKeyboardBounds.dialogBottom).toBeLessThanOrEqual(closedKeyboardBounds.tabTop + 1);
   await page.locator("#chat-configuration-search").focus();
   await page.evaluate(() => {
     const viewport = window.visualViewport as VisualViewport & { height: number };

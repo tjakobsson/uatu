@@ -65,7 +65,6 @@ describe("chatConfigurationPickerGeometry", () => {
     layoutHeight: 800,
     visualTop: 0,
     visualHeight: 800,
-    bottomInset: 0,
   };
 
   it("anchors desktop geometry above the trigger and clamps it to Chat", () => {
@@ -78,14 +77,13 @@ describe("chatConfigurationPickerGeometry", () => {
     });
   });
 
-  it("uses the visual viewport and navigation inset for touch geometry", () => {
+  it("intersects the visual viewport with the already-inset touch surface", () => {
     expect(chatConfigurationPickerGeometry({
       ...base,
       mode: "touch",
       surface: { top: 10, right: 390, bottom: 750, left: 0, width: 390, height: 740 },
       visualTop: 10,
       visualHeight: 500,
-      bottomInset: 60,
     })).toEqual({ presentation: "touch", left: 0, width: 390, bottom: 290, maxHeight: 500 });
   });
 });
@@ -142,7 +140,6 @@ function fixture(mode: "desktop" | "touch" = "desktop") {
       onModeChange: () => () => {},
       visualViewport: () => null,
       layoutHeight: () => 800,
-      bottomInset: () => 0,
       addResizeListener: () => {},
       removeResizeListener: () => {},
       defer: callback => callback(),

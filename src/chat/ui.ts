@@ -1038,7 +1038,12 @@ export function initChat(): void {
   const stageVariant = (name: string | undefined) => {
     if (!projection) return;
     const staged = { ...stagedConfigurations.get(projection.conversationId) };
-    if (!name || name === projection.configuration?.variant) delete staged.variant;
+    const displayedModel = staged.model ?? projection.configuration?.model;
+    const effectiveModel = projection.configuration?.model;
+    const effectiveModelApplies = displayedModel === undefined
+      ? effectiveModel === undefined
+      : effectiveModel !== undefined && sameModel(displayedModel, effectiveModel);
+    if (!name || (effectiveModelApplies && name === projection.configuration?.variant)) delete staged.variant;
     else staged.variant = name;
     setStagedConfiguration(projection.conversationId, staged);
     renderConfiguration();

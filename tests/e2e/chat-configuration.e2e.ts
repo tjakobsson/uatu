@@ -206,6 +206,30 @@ test.describe("conversation configuration and rename", () => {
     await expect(page.locator("#chat-configuration-trigger")).toBeFocused();
   });
 
+  test("stages a same-named reasoning variant after changing models", async ({ page, request }) => {
+    await request.post("/__e2e/reset");
+    const inventory: ChatModel[] = [
+      { selection: { providerId: "first", modelId: "model-a" }, provider: "First", name: "Model A", variants: ["high"] },
+      { selection: { providerId: "second", modelId: "model-b" }, provider: "Second", name: "Model B", variants: ["high"] },
+    ];
+    await control(request, { action: "models", models: inventory });
+    await control(request, {
+      action: "seed", title: "Shared variant", items: [],
+      configuration: { model: inventory[0]!.selection, variant: "high" },
+    });
+    await boot(page, await token(request));
+
+    await chooseChatModel(page, "Model B");
+    await page.locator("#chat-configuration-variant").selectOption("high");
+    await page.locator("#chat-configuration-done").click();
+    await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: Model B.*Reasoning: high/);
+
+    await page.locator("#chat-input").fill("keep high reasoning");
+    const sent = page.waitForResponse(response => response.url().endsWith("/prompts"));
+    await page.locator("#chat-send").click();
+    expect((await sent).request().postDataJSON()).toMatchObject({ model: inventory[1]!.selection, variant: "high" });
+  });
+
   test("propagates and persists rename, hides unsupported rename, and names creation exactly", async ({ page, request, browser }) => {
     await request.post("/__e2e/reset");
     await control(request, { action: "seed", title: "Before rename", items: [], configuration: {} });

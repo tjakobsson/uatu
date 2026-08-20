@@ -76,9 +76,14 @@ export class TimelineRenderer {
       // cached node is only reused when it would render identically.
       const foreign = (item.type === "permission" || item.type === "question")
         && item.conversationId !== undefined && item.conversationId !== projection.conversationId;
-      const completedAssistant = item.type === "assistant_message" && assistantMessageComplete(visible, visibleIndex, projection.status);
-      const variant = [todo?.label ?? "", todo?.task ?? "", String(isQueued), duration === undefined ? "" : String(duration), String(foreign), String(allowSubagents), String(completedAssistant)].join("\u0001");
       const entry = this.entries.get(item.id);
+      // Completion is monotonic for an item. A new turn makes the conversation
+      // active again, but must not revoke copy actions from an answer that was
+      // already observed in a terminal state. A steer never reaches that state,
+      // so its still-streaming assistant remains incomplete.
+      const completedAssistant = item.type === "assistant_message"
+        && (entry?.node.dataset.complete === "true" || assistantMessageComplete(visible, visibleIndex, projection.status));
+      const variant = [todo?.label ?? "", todo?.task ?? "", String(isQueued), duration === undefined ? "" : String(duration), String(foreign), String(allowSubagents), String(completedAssistant)].join("\u0001");
       if (entry && entry.item === item && entry.active === active && entry.variant === variant) {
         nodes.set(item.id, entry.node);
         continue;

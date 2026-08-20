@@ -120,6 +120,22 @@ describe("TimelineRenderer", () => {
     expect(article.querySelector("[data-chat-copy='answer']")).toBeNull();
   });
 
+  test("keeps a prior turn complete while the next turn is active", () => {
+    const renderer = new TimelineRenderer();
+    const host = target();
+    const firstAnswer: ConversationItem = { id: "part:first", type: "assistant_message", createdAt: 1, markdown: "First answer" };
+    renderer.render(host, projectionWith([firstAnswer], { status: "completed" }), new Set());
+    const article = host.querySelector<HTMLElement>('[data-chat-item-id="part:first"]')!;
+    const copy = article.querySelector("[data-chat-copy='answer']");
+    expect(copy).not.toBeNull();
+
+    const nextPrompt: ConversationItem = { id: "message:next", type: "user_message", createdAt: 2, text: "Next question" };
+    renderer.render(host, projectionWith([firstAnswer, nextPrompt], { status: "sending" }), new Set());
+    expect(host.querySelector('[data-chat-item-id="part:first"]')).toBe(article);
+    expect(article.dataset.complete).toBe("true");
+    expect(article.querySelector("[data-chat-copy='answer']")).toBe(copy);
+  });
+
   test("renders custom answers as a synthetic peer choice with a separate hidden input", () => {
     const renderer = new TimelineRenderer();
     const host = target();
