@@ -53,13 +53,14 @@ test("four tabs preserve chat state and keyboard navigation", async ({ page, req
   await expect(page.locator("#touch-tab-files")).toBeFocused();
 });
 
-test("composer controls wrap without placing Send on its own row", async ({ page, request }) => {
+test("composer stays flush and its trailing action becomes cancel without adding a row", async ({ page, request }) => {
   const id = await boot(page, request);
   await page.locator("#chat-model-select").selectOption({ label: "Anthropic: Claude Sonnet" });
   await page.locator("#chat-mode-select").selectOption("build");
   await page.locator("#chat-variant-select").selectOption("high");
   await control(request, { action: "status", conversationId: id, status: "running" });
-  await expect(page.locator("#chat-cancel")).toBeVisible();
+  await expect(page.locator("#chat-send")).toHaveAttribute("aria-label", "Cancel response");
+  await expect(page.locator("#chat-send .chat-send-cancel")).toBeVisible();
   await page.locator("#chat-input").focus();
   await expect(page.locator("html")).toHaveAttribute("data-chat-editing", "");
 
@@ -67,17 +68,21 @@ test("composer controls wrap without placing Send on its own row", async ({ page
     const send = actions.querySelector<HTMLElement>("#chat-send")!.getBoundingClientRect();
     const controls = actions.querySelector<HTMLElement>(".chat-composer-controls")!.getBoundingClientRect();
     const bounds = actions.getBoundingClientRect();
+    const composer = actions.closest(".chat-composer")!;
+    const style = getComputedStyle(composer);
     return {
       sendTop: send.top,
       sendBottom: send.bottom,
       controlsBottom: controls.bottom,
       sendRight: send.right,
       boundsRight: bounds.right,
+      margin: style.margin,
     };
   });
   expect(Math.abs(geometry.sendBottom - geometry.controlsBottom)).toBeLessThanOrEqual(1);
   expect(geometry.sendTop).toBeLessThan(geometry.controlsBottom);
   expect(geometry.sendRight).toBeLessThanOrEqual(geometry.boundsRight + 1);
+  expect(geometry.margin).toBe("0px");
 });
 
 test("a subagent transcript pushes as a screen and the back gesture pops it", async ({ page, request }) => {
@@ -175,9 +180,10 @@ test("software-keyboard geometry keeps the composer in the visual viewport", asy
   await expect(page.locator("#chat-surface")).toHaveCSS("--chat-visual-height", "460px");
   const geometry = await page.evaluate(() => {
     const composer = document.querySelector("#chat-composer")!.getBoundingClientRect();
-    return { bottom: composer.bottom, visualHeight: window.visualViewport!.height };
+    return { bottom: composer.bottom, visualHeight: window.visualViewport!.height, marginBottom: getComputedStyle(document.querySelector("#chat-composer")!).marginBottom };
   });
   expect(geometry.bottom).toBeLessThanOrEqual(geometry.visualHeight + 1);
+  expect(geometry.marginBottom).toBe("0px");
 });
 
 test("pinned streaming follows while unpinned streaming offers jump to latest", async ({ page, request }) => {

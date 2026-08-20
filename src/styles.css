@@ -5453,6 +5453,18 @@ body.is-resizing-chat .chat-resizer {
   display: block;
 }
 
+.chat-send-cancel {
+  display: none;
+}
+
+#chat-send[data-action="cancel"] .chat-send-arrow {
+  display: none;
+}
+
+#chat-send[data-action="cancel"] .chat-send-cancel {
+  display: block;
+}
+
 /* The agent has the prompt and nothing has come back yet. The pulse is the
    liveness signal (Paseo-style square); the label restates the status and
    elapsed time, whose composer twin is visually hidden in touch mode. */
@@ -6139,7 +6151,7 @@ html[data-ui-mode="touch"] .chat-request summary {
 }
 
 html[data-ui-mode="touch"] .chat-composer {
-  margin: 0.5rem 0.65rem calc(0.5rem + env(safe-area-inset-bottom));
+  margin: 0;
   padding: 0.45rem 0.55rem;
   border: 1px solid var(--border-medium);
   border-radius: 1rem;
@@ -6215,10 +6227,6 @@ html[data-ui-mode="touch"][data-chat-input-focused] .touch-tab-bar,
 html[data-ui-mode="touch"][data-chat-editing] .touch-tab-bar,
 html[data-ui-mode="touch"]:has(#chat-input:focus) .touch-tab-bar {
   display: none;
-}
-
-html[data-ui-mode="touch"][data-chat-keyboard] .chat-composer {
-  margin-bottom: 0.4rem;
 }
 
 html[data-ui-mode="touch"] #chat-composer-status {

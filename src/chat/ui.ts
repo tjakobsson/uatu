@@ -60,7 +60,6 @@ export function initChat(): void {
   const modelSelect = document.querySelector<HTMLSelectElement>("#chat-model-select");
   const modeSelect = document.querySelector<HTMLSelectElement>("#chat-mode-select");
   const variantSelect = document.querySelector<HTMLSelectElement>("#chat-variant-select");
-  const cancel = document.querySelector<HTMLButtonElement>("#chat-cancel");
   const composerStatus = document.querySelector<HTMLElement>("#chat-composer-status");
   const waiting = document.querySelector<HTMLElement>("#chat-waiting");
   const waitingLabel = document.querySelector<HTMLElement>("#chat-waiting-label");
@@ -81,7 +80,7 @@ export function initChat(): void {
   const drilldownState = document.querySelector<HTMLElement>("#chat-drilldown-state");
   const drilldownBack = document.querySelector<HTMLButtonElement>("#chat-drilldown-back");
   const drilldownOlder = document.querySelector<HTMLButtonElement>("#chat-drilldown-older");
-  if (!surface || !timeline || !items || !state || !select || !newButton || !olderButton || !latestButton || !form || !input || !commandMenu || !send || !sendLabel || !modelSelect || !cancel || !composerStatus) return;
+  if (!surface || !timeline || !items || !state || !select || !newButton || !olderButton || !latestButton || !form || !input || !commandMenu || !send || !sendLabel || !modelSelect || !composerStatus) return;
 
   const api = new ChatApiClient();
   const anchor = new TimelineAnchorController();
@@ -147,6 +146,7 @@ export function initChat(): void {
   let rendering = false;
   let renderFrame: number | null = null;
   let submitting = false;
+  let cancelling = false;
   // A failed send leaves acceptance unknown — the server may already hold a
   // receipt for the request. Resubmitting the same text reuses its id so the
   // receipt dedupes instead of starting a second agent turn. Keyed per
@@ -842,15 +842,16 @@ export function initChat(): void {
       clearInterval(workingTimer);
       workingTimer = null;
     }
-    send.disabled = submitting || !projection || !input.value.trim();
-    const action = running ? "Steer" : "Send";
+    send.type = running ? "button" : "submit";
+    send.dataset.action = running ? "cancel" : "send";
+    send.disabled = running ? cancelling || !projection : submitting || !projection || !input.value.trim();
+    const action = running ? "Cancel" : "Send";
     sendLabel.textContent = action;
-    send.setAttribute("aria-label", `${action} message`);
-    send.title = `${action} message`;
+    send.setAttribute("aria-label", running ? "Cancel response" : "Send message");
+    send.title = running ? "Cancel response" : "Send message";
     modelSelect.disabled = submitting || !projection || models.length === 0;
     if (modeSelect?.isConnected) modeSelect.disabled = submitting || !projection || modes.length === 0;
     if (variantSelect?.isConnected) variantSelect.disabled = submitting || !projection;
-    cancel.hidden = !running;
     olderButton.hidden = !projection?.olderCursor;
     composerStatus.textContent = composerNote ?? workingText();
     syncWaiting();
@@ -1705,6 +1706,15 @@ export function initChat(): void {
   send.addEventListener("pointerdown", event => {
     if (event.pointerType === "touch") event.preventDefault();
   });
+  send.addEventListener("click", async () => {
+    if (!projection || (projection.status !== "running" && projection.status !== "sending") || cancelling) return;
+    cancelling = true;
+    noteComposer("Cancelling...");
+    syncControls();
+    try { await api.cancel(projection.conversationId, newRequestId()); }
+    catch (error) { announce(messageOf(error), true); }
+    finally { cancelling = false; syncControls(); }
+  });
   form.addEventListener("submit", async event => {
     event.preventDefault();
     if (!projection || !input.value.trim() || submitting) return;
@@ -1778,15 +1788,6 @@ export function initChat(): void {
     submitting = false;
     syncControls();
   });
-  cancel.addEventListener("click", async () => {
-    if (!projection) return;
-    cancel.disabled = true;
-    noteComposer("Cancelling...");
-    try { await api.cancel(projection.conversationId, newRequestId()); }
-    catch (error) { announce(messageOf(error), true); }
-    finally { cancel.disabled = false; }
-  });
-
   const observer = typeof ResizeObserver === "function" ? new ResizeObserver(() => {
     if (anchor.isPinned()) timeline.scrollTop = anchor.afterMutation(geometry());
     else if (anchor.currentAnchor()) timeline.scrollTop = anchor.afterMutation(geometry());

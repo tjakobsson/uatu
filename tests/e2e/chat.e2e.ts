@@ -42,16 +42,15 @@ test.describe("desktop OpenCode chat", () => {
     await expect(page.locator("#chat-conversation-select option:checked")).toHaveText("Initial prompt");
     await expect(modelSelect).toBeEnabled();
     await expect(page.locator("#chat-items")).toContainText("Initial prompt");
-    // The send button is icon-only; the action it would take rides on the
-    // accessible name (and the sr-only label the toHaveText would also see).
-    await expect(page.locator("#chat-send")).toHaveAttribute("aria-label", "Steer message");
+    // The fixed trailing action becomes cancel while the turn is live.
+    await expect(page.locator("#chat-send")).toHaveAttribute("aria-label", "Cancel response");
     // With a turn in flight and nothing back yet, the timeline says so.
     await expect(page.locator("#chat-waiting")).toBeVisible();
     await expect(page.locator("#chat-waiting")).toContainText("Working");
 
     await input.fill("Use the smaller approach");
     const steerResponse = page.waitForResponse(response => response.url().endsWith("/prompts"));
-    await page.locator("#chat-send").click();
+    await input.press("Enter");
     expect(await (await steerResponse).json()).toMatchObject({ delivery: "steer" });
     await expect(page.locator("#chat-items")).toContainText("Use the smaller approach");
 
@@ -66,7 +65,7 @@ test.describe("desktop OpenCode chat", () => {
     await expect(input).toHaveValue("draft retained across surfaces");
     await expect(modelSelect.locator("option:checked")).toHaveText("OpenAI: GPT-5");
 
-    await page.locator("#chat-cancel").click();
+    await page.locator("#chat-send").click();
     await expect(page.locator("#chat-composer-status")).toHaveText("Cancelled");
     await expect(page.locator("#chat-items")).toContainText("Initial prompt");
 

@@ -807,12 +807,12 @@
                 </select>
                 <label class="sr-only" for="chat-variant-select">Reasoning</label>
                 <select id="chat-variant-select" class="chat-model-select" aria-label="Reasoning effort" hidden></select>
-                <button id="chat-cancel" class="chat-secondary-button" type="button" hidden>Cancel</button>
               </div>
               <button id="chat-send" class="chat-primary-button" type="submit" aria-label="Send message" title="Send message" disabled>
                 <span class="chat-send-label">Send</span>
                 <svg class="chat-send-icon" viewBox="0 0 20 20" width="18" height="18" aria-hidden="true">
-                  <path d="M10 16V4m0 0L5.5 8.5M10 4l4.5 4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path class="chat-send-arrow" d="M10 16V4m0 0L5.5 8.5M10 4l4.5 4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path class="chat-send-cancel" d="M5 5l10 10M15 5L5 15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
               </button>
             </div>
