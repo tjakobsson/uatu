@@ -5215,7 +5215,22 @@ body.is-resizing-chat .chat-resizer {
 .chat-answer-actions {
   display: flex;
   justify-content: flex-end;
-  margin-top: 0.2rem;
+  margin-top: 0.1rem;
+}
+
+.chat-answer-copy {
+  width: 1.3rem;
+  height: 1.3rem;
+  min-height: 1.3rem;
+  border-color: var(--text-subtle);
+  border-radius: 0.28rem;
+}
+
+.chat-answer-copy::before,
+.chat-answer-copy::after {
+  width: 0.46rem;
+  height: 0.54rem;
+  border-width: 1.25px;
 }
 
 .chat-code-copy {
@@ -5700,40 +5715,27 @@ body.is-resizing-chat .chat-resizer {
   position: relative;
   display: grid;
   place-items: center;
-  width: 3rem;
-  height: 1.3rem;
+  width: 2rem;
+  height: 2rem;
   border: 1.5px solid var(--border-medium);
-  border-radius: 0.25rem;
+  border-radius: 50%;
   background: var(--surface);
-}
-
-.chat-context-meter::after {
-  content: "";
-  position: absolute;
-  right: -0.24rem;
-  width: 0.16rem;
-  height: 0.55rem;
-  border-radius: 0 0.12rem 0.12rem 0;
-  background: var(--border-medium);
 }
 
 .chat-context-meter-fill {
   position: absolute;
-  top: 2px;
-  bottom: 2px;
-  left: 2px;
-  width: 0;
-  max-width: calc(100% - 4px);
-  border-radius: 0.12rem;
-  background: var(--text-subtle);
-  opacity: 0.32;
+  inset: 2px;
+  border-radius: 50%;
+  color: var(--text-subtle);
+  background: conic-gradient(from -90deg, currentColor 0 var(--context-fill, 0%), transparent var(--context-fill, 0%) 100%);
+  opacity: 0.42;
 }
 
 .chat-context-label {
   position: relative;
   z-index: 1;
   color: var(--text-strong);
-  font-size: 0.64rem;
+  font-size: 0.58rem;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   line-height: 1;
@@ -5742,11 +5744,11 @@ body.is-resizing-chat .chat-resizer {
 /* Never colour alone — the figure beside the meter always states the fill, so
    the warning tiers are an emphasis on something already legible. */
 .chat-context-usage[data-fill="high"] .chat-context-meter-fill {
-  background: var(--warning, #b8860b);
+  color: var(--warning, #b8860b);
 }
 
 .chat-context-usage[data-fill="full"] .chat-context-meter-fill {
-  background: var(--danger, #c0392b);
+  color: var(--danger, #c0392b);
 }
 
 .chat-context-usage[data-fill="full"] > summary,

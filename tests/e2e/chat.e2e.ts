@@ -211,10 +211,13 @@ test.describe("desktop OpenCode chat", () => {
     await expect(assistantNode.locator("[data-chat-copy='code']")).toHaveCount(1);
     const answerCopyGeometry = await assistantNode.evaluate(element => {
       const content = element.querySelector(".chat-assistant-content")!.getBoundingClientRect();
-      const copy = element.querySelector("[data-chat-copy='answer']")!.getBoundingClientRect();
-      return { contentBottom: content.bottom, copyTop: copy.top };
+      const control = element.querySelector<HTMLElement>("[data-chat-copy='answer']")!;
+      const copy = control.getBoundingClientRect();
+      return { contentBottom: content.bottom, copyTop: copy.top, width: copy.width, borderWidth: getComputedStyle(control).borderTopWidth };
     });
     expect(answerCopyGeometry.copyTop).toBeGreaterThanOrEqual(answerCopyGeometry.contentBottom);
+    expect(answerCopyGeometry.width).toBeLessThanOrEqual(22);
+    expect(parseFloat(answerCopyGeometry.borderWidth)).toBeGreaterThan(0);
     await installClipboardMock(page);
     await assistantNode.locator("[data-chat-copy='code']").click();
     expect(await readClipboardMock(page)).toBe("const value = 1;\n");

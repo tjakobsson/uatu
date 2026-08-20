@@ -340,6 +340,14 @@ test.describe("chat panels and navigation", () => {
     // 30k + 20k cache read + 2k cache write = 52k of the fixture model's 200k.
     // Output is excluded: it is what came back, not what occupies the window.
     await expect(page.locator("#chat-context-usage-label")).toHaveText("26%");
+    const meter = page.locator("#chat-context-usage-meter");
+    await expect(meter).toHaveCSS("border-radius", "50%");
+    const fillPresentation = await meter.locator(".chat-context-meter-fill").evaluate(element => ({
+      amount: (element as HTMLElement).style.getPropertyValue("--context-fill"),
+      background: getComputedStyle(element).backgroundImage,
+    }));
+    expect(fillPresentation.amount).toBe("26%");
+    expect(fillPresentation.background).toContain("conic-gradient");
 
     await indicator.locator("summary").click();
     const breakdown = page.locator("#chat-context-usage-breakdown");

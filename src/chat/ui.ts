@@ -572,7 +572,7 @@ export function initChat(): void {
     const used = contextTokens(usage);
     const limit = models.find(model => modelValue(model.selection) === reportingModel)?.contextLimit;
     const fraction = limit && limit > 0 ? Math.min(1, used / limit) : undefined;
-    contextUsageFill.style.width = `${Math.round((fraction ?? 0) * 100)}%`;
+    contextUsageFill.style.setProperty("--context-fill", `${Math.round((fraction ?? 0) * 100)}%`);
     // The figure states the fill in words as well as in width, so the tier
     // colouring below is emphasis on something already legible rather than
     // the only signal.
