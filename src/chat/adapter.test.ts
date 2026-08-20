@@ -621,6 +621,47 @@ describe("prompt, abort, permission, and question mutations", () => {
     await pump;
   });
 
+  test("concurrent prompts commit configuration in admission order", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const anthropic = { providerId: "anthropic", modelId: "claude" };
+    const openai = { providerId: "openai", modelId: "gpt" };
+    provider.configurations.set("session", { model: anthropic });
+    provider.models.push({ selection: openai, provider: "OpenAI", name: "GPT" });
+    let enterFirst!: () => void;
+    let enterSecond!: () => void;
+    const firstEntered = new Promise<void>(resolve => { enterFirst = resolve; });
+    const secondEntered = new Promise<void>(resolve => { enterSecond = resolve; });
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const gates = [
+      new Promise<void>(resolve => { releaseFirst = resolve; }),
+      new Promise<void>(resolve => { releaseSecond = resolve; }),
+    ];
+    let calls = 0;
+    provider.prompt = async (_sessionId, input) => {
+      const call = calls++;
+      (call === 0 ? enterFirst : enterSecond)();
+      await gates[call];
+      return { messageId: input.id };
+    };
+    let message = 0;
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `message-${++message}` });
+
+    const first = adapter.prompt("session", "request-1", "use GPT", openai);
+    await firstEntered;
+    const second = adapter.prompt("session", "request-2", "use Claude", anthropic);
+    await Promise.resolve();
+    expect(calls).toBe(1);
+
+    releaseFirst();
+    await first;
+    await secondEntered;
+    releaseSecond();
+    expect((await second).configuration).toEqual({ model: anthropic });
+    expect((await adapter.history("session")).configuration).toEqual({ model: anthropic });
+  });
+
   test("manual rename is confined, idempotent, conflict-aware, and prevents first-prompt overwrite", async () => {
     const provider = new FakeProvider();
     provider.agent.capabilities.push("conversation-rename");

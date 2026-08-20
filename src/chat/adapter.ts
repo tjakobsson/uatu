@@ -136,6 +136,7 @@ export class OpenCodeChatAdapter {
   // projection is warm; every miss recovers through the provider seam.
   private readonly configurations = new Map<string, ConversationConfiguration>();
   private readonly configurationReads = new Map<string, Promise<ConversationConfiguration>>();
+  private readonly promptAdmissions = new Map<string, Promise<void>>();
   // Mirrors a running OpenCode TUI: once this adapter accepts a prompt, the
   // next conversation starts from that process-local selection. A fresh
   // adapter falls back to OpenCode's durable config/recent-model policy.
@@ -457,7 +458,7 @@ export class OpenCodeChatAdapter {
     conversation?: ConversationSummary;
   }> {
     if (!text.trim()) throw new Error("prompt must not be empty");
-    return this.receipts.run(`prompt:${conversationId}:${requestId}`, async () => {
+    return this.receipts.run(`prompt:${conversationId}:${requestId}`, () => this.enqueuePromptAdmission(conversationId, async () => {
       let session = await this.requireSession(conversationId);
       const projection = this.projection(conversationId);
       const currentConfiguration = await this.configuration(conversationId);
@@ -569,7 +570,21 @@ export class OpenCodeChatAdapter {
         if (!steering && projection.status === "sending") projection.statusUpdate("failed", errorMessage(mapped));
         throw mapped;
       }
+    }));
+  }
+
+  // OpenCode applies prompts to one conversation in admission order. Keep the
+  // matching cache commit in that same order even if provider requests settle
+  // out of order; a failed admission must not block the next request.
+  private enqueuePromptAdmission<T>(conversationId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.promptAdmissions.get(conversationId) ?? Promise.resolve();
+    const next = previous.then(operation, operation);
+    const tail = next.then(() => undefined, () => undefined);
+    this.promptAdmissions.set(conversationId, tail);
+    void tail.then(() => {
+      if (this.promptAdmissions.get(conversationId) === tail) this.promptAdmissions.delete(conversationId);
     });
+    return next;
   }
 
   async renameConversation(conversationId: string, requestId: string, rawTitle: string): Promise<{ conversation: ConversationSummary }> {
