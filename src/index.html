@@ -796,7 +796,16 @@
                 <dl id="chat-context-usage-breakdown" class="chat-context-breakdown"></dl>
               </details>
               <button id="chat-configuration-trigger" class="chat-configuration-trigger" type="button" aria-haspopup="dialog" aria-controls="chat-configuration-dialog" aria-expanded="false" disabled>
-                <span id="chat-configuration-summary">Chat settings</span>
+                <span id="chat-configuration-summary" class="chat-configuration-summary">Chat settings</span>
+                <span id="chat-configuration-details" class="chat-configuration-details" hidden>
+                  <span id="chat-configuration-mode-summary" class="chat-configuration-detail"></span>
+                  <span id="chat-configuration-variant-summary" class="chat-configuration-detail chat-configuration-reasoning" hidden>
+                    <svg viewBox="0 0 20 20" width="14" height="14" aria-hidden="true">
+                      <path d="M8.5 4.5A3 3 0 0 0 3.7 7a3 3 0 0 0 .5 5.7A3 3 0 0 0 8.5 16m3-11.5A3 3 0 0 1 16.3 7a3 3 0 0 1-.5 5.7A3 3 0 0 1 11.5 16M8.5 4.5V16m3-11.5V16M6 9h2.5m3 2H14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    <span id="chat-configuration-variant-value"></span>
+                  </span>
+                </span>
               </button>
               <span id="chat-composer-status" class="chat-composer-status" data-state="ready" aria-label="Ready" title="Ready" role="img"></span>
               <span id="chat-composer-status-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span>

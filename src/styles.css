@@ -5858,6 +5858,10 @@ body.is-resizing-chat .chat-resizer {
 }
 
 .chat-configuration-trigger {
+  container-type: inline-size;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
   overflow: hidden;
   min-width: 0;
   min-height: 2.25rem;
@@ -5874,10 +5878,45 @@ body.is-resizing-chat .chat-resizer {
   cursor: pointer;
 }
 
-.chat-configuration-trigger > span {
+.chat-configuration-summary {
+  flex: 1 1 auto;
   display: block;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.chat-configuration-details {
+  display: none;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--text-subtle);
+}
+
+.chat-configuration-detail {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.18rem;
+}
+
+.chat-configuration-detail[hidden] {
+  display: none;
+}
+
+.chat-configuration-detail::before {
+  content: "·";
+  color: var(--border-medium);
+}
+
+.chat-configuration-reasoning svg {
+  display: block;
+}
+
+@container (min-width: 14rem) {
+  .chat-configuration-details:not([hidden]) {
+    display: flex;
+  }
 }
 
 .chat-configuration-trigger:disabled {

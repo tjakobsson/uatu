@@ -157,10 +157,23 @@ test.describe("desktop chat panel layout", () => {
     await expect(page.locator("#chat-composer-error")).toContainText("fixture failure");
   });
 
-  test("the desktop configuration dialog stays within Chat and restores trigger focus", async ({ page, request }) => {
-    await request.post("/__e2e/chat", { data: { action: "seed", title: "Picker geometry", items: [] } });
+  test("wide Chat shows mode and reasoning while the shorter desktop picker stays in bounds", async ({ page, request }) => {
+    await request.post("/__e2e/chat", { data: {
+      action: "seed", title: "Picker geometry", items: [],
+      configuration: { model: { providerId: "anthropic", modelId: "claude-sonnet" }, mode: "build", variant: "high" },
+    } });
     await page.reload();
     await openChatPanel(page);
+    await expect(page.locator("#chat-configuration-details")).toBeVisible();
+    await expect(page.locator("#chat-configuration-mode-summary")).toHaveText("Build");
+    await expect(page.locator("#chat-configuration-variant-value")).toHaveText("High");
+    await expect(page.locator("#chat-configuration-variant-summary svg")).toBeVisible();
+    await page.evaluate(() => document.documentElement.style.setProperty("--chat-fraction", "0.28"));
+    await page.waitForTimeout(350);
+    await expect(page.locator("#chat-configuration-details")).toBeHidden();
+    await page.evaluate(() => document.documentElement.style.setProperty("--chat-fraction", "0.45"));
+    await page.waitForTimeout(350);
+    await expect(page.locator("#chat-configuration-details")).toBeVisible();
     await openChatConfiguration(page);
     await expect(page.locator("#chat-configuration-search")).toBeFocused();
     await expect(page.locator("#chat-configuration-dialog")).toHaveAttribute("data-presentation", "desktop");
@@ -173,6 +186,7 @@ test.describe("desktop chat panel layout", () => {
     expect(bounds.dialog.right).toBeLessThanOrEqual(bounds.surface.right);
     expect(bounds.dialog.top).toBeGreaterThanOrEqual(bounds.surface.top);
     expect(bounds.dialog.bottom).toBeLessThanOrEqual(bounds.surface.bottom);
+    expect(bounds.dialog.bottom - bounds.dialog.top).toBeLessThanOrEqual(482);
     await page.keyboard.press("Escape");
     await expect(page.locator("#chat-configuration-dialog")).toBeHidden();
     await expect(page.locator("#chat-configuration-trigger")).toBeFocused();

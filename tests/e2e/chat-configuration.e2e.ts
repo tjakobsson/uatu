@@ -38,14 +38,14 @@ test.describe("conversation configuration and rename", () => {
     const second = await secondClient(browser, credential);
     try {
       for (const client of [page, second.page]) {
-        await expect(client.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: GPT-5.*Mode: plan/);
+        await expect(client.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: GPT-5.*Mode: Plan/);
       }
 
       await chooseChatModel(page, "Claude Sonnet");
       await page.locator("#chat-configuration-mode").selectOption("build");
       await page.locator("#chat-configuration-variant").selectOption("xhigh");
       await page.locator("#chat-configuration-done").click();
-      await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: Claude Sonnet.*Mode: build.*Reasoning: xhigh/);
+      await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: Claude Sonnet.*Mode: Build.*Reasoning: Xhigh/);
       await page.locator("#chat-input").fill("share this configuration");
       const accepted = page.waitForResponse(response => response.url().endsWith("/prompts"));
       await page.locator("#chat-send").click();
@@ -53,10 +53,10 @@ test.describe("conversation configuration and rename", () => {
         model: { providerId: "anthropic", modelId: "claude-sonnet" }, mode: "build", variant: "xhigh",
       });
 
-      await expect(second.page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: Claude Sonnet.*Mode: build.*Reasoning: xhigh/);
+      await expect(second.page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: Claude Sonnet.*Mode: Build.*Reasoning: Xhigh/);
 
       await page.getByRole("button", { name: "New conversation", exact: true }).click();
-      await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: Claude Sonnet.*Mode: build.*Reasoning: xhigh/);
+      await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: Claude Sonnet.*Mode: Build.*Reasoning: Xhigh/);
     } finally {
       await second.context.close();
     }
@@ -93,7 +93,7 @@ test.describe("conversation configuration and rename", () => {
     });
     await openChatConfiguration(page);
     await expect(page.locator(".chat-configuration-model:disabled")).toContainText("retired/old-model");
-    await expect(page.locator("#chat-configuration-mode option:checked")).toHaveText("audit (current, unavailable)");
+    await expect(page.locator("#chat-configuration-mode option:checked")).toHaveText("Audit (current, unavailable)");
     await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide")));
     const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("uatu:presentation:v1:%2F:uatu:chat-presentation") ?? "{}"));
     expect(stored).not.toHaveProperty("models");
@@ -110,14 +110,14 @@ test.describe("conversation configuration and rename", () => {
       configuration: { model: { providerId: "anthropic", modelId: "claude-sonnet" }, mode: "build", variant: "xhigh" },
     });
     await boot(page, await token(request));
-    await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Reasoning: xhigh/);
+    await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Reasoning: Xhigh/);
 
     await control(request, {
       action: "nextConversationConfiguration",
       configuration: { model: { providerId: "anthropic", modelId: "claude-sonnet" }, mode: "build" },
     });
     await page.getByRole("button", { name: "New conversation", exact: true }).click();
-    await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: Claude Sonnet.*Mode: build.*Reasoning: chosen by Fixture Agent/);
+    await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: Claude Sonnet.*Mode: Build.*Reasoning: chosen by Fixture Agent/);
     await openChatConfiguration(page);
     await expect(page.locator("#chat-configuration-variant option").filter({ hasText: "current, unavailable" })).toHaveCount(0);
   });
@@ -148,7 +148,7 @@ test.describe("conversation configuration and rename", () => {
       action: "configuration", conversationId: seeded.conversation.id,
       configuration: { model: { providerId: "openai", modelId: "gpt-5" }, mode: "plan" },
     });
-    await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: Claude Sonnet.*Mode: build.*Reasoning: high/);
+    await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: Claude Sonnet.*Mode: Build.*Reasoning: High/);
 
     await page.locator("#chat-input").fill("accept staged choices");
     await page.locator("#chat-send").click();
@@ -156,7 +156,7 @@ test.describe("conversation configuration and rename", () => {
     await control(request, { action: "restart" });
     await page.reload();
     await openChatPanel(page);
-    await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: Claude Sonnet.*Mode: build.*Reasoning: high/);
+    await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: Claude Sonnet.*Mode: Build.*Reasoning: High/);
   });
 
   test("filters a large grouped inventory across every identity field with keyboard selection", async ({ page, request }) => {
@@ -222,7 +222,7 @@ test.describe("conversation configuration and rename", () => {
     await chooseChatModel(page, "Model B");
     await page.locator("#chat-configuration-variant").selectOption("high");
     await page.locator("#chat-configuration-done").click();
-    await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: Model B.*Reasoning: high/);
+    await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: Model B.*Reasoning: High/);
 
     await page.locator("#chat-input").fill("keep high reasoning");
     const sent = page.waitForResponse(response => response.url().endsWith("/prompts"));

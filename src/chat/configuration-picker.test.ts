@@ -5,6 +5,7 @@ import {
   agentControlledModelLabel,
   chatConfigurationPickerGeometry,
   createChatConfigurationPicker,
+  configurationOptionLabel,
   filterChatModels,
   groupChatModels,
   modelIdentityLabel,
@@ -55,6 +56,8 @@ describe("configuration picker model helpers", () => {
     expect(agentControlledModelLabel()).toBe("Let the agent choose");
     expect(modelResultCountLabel(0)).toBe("0 models");
     expect(modelResultCountLabel(1)).toBe("1 model");
+    expect(configurationOptionLabel("build")).toBe("Build");
+    expect(configurationOptionLabel("PLAN")).toBe("PLAN");
   });
 });
 
@@ -73,7 +76,7 @@ describe("chatConfigurationPickerGeometry", () => {
       left: 608,
       width: 384,
       bottom: 118,
-      maxHeight: 624,
+      maxHeight: 480,
     });
   });
 
@@ -179,6 +182,8 @@ describe("configuration picker controller", () => {
     expect(elements.resultStatus.textContent).toBe("3 models");
     expect(elements.modeSection!.hidden).toBe(false);
     expect(elements.variantSection!.hidden).toBe(false);
+    expect([...elements.modeSelect!.options].map(option => option.textContent)).toEqual(["Build", "Plan"]);
+    expect([...elements.variantSelect!.options].map(option => option.textContent)).toEqual(["Fast", "Deep"]);
 
     elements.search.value = "OPENAI";
     elements.search.dispatchEvent(new fixtureValue.window.Event("input"));

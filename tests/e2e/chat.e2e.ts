@@ -85,7 +85,7 @@ test.describe("desktop OpenCode chat", () => {
     await page.getByRole("button", { name: "New conversation" }).click();
     await openChatConfiguration(page);
     const modeSelect = page.locator("#chat-configuration-mode");
-    await expect(modeSelect.locator("option")).toHaveText(["Let Fixture Agent choose", "build", "plan"]);
+    await expect(modeSelect.locator("option")).toHaveText(["Let Fixture Agent choose", "Build", "Plan"]);
     await expect(modeSelect).toHaveValue("");
     await page.locator("#chat-configuration-done").click();
 

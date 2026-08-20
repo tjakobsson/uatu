@@ -23,7 +23,7 @@ import {
 import type { ChatAgent, ChatCapability, ChatMode, ChatAvailability, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationSummary, ModelSelection, PermissionOutcome, QuestionOutcome, TokenUsage } from "./types";
 import { formatDiagnostics } from "./diagnostics";
 import { collectQuestionAnswers, showQuestionPanel, syncQuestionControl, syncQuestionForm } from "./question-form";
-import { createChatConfigurationPicker, type ChatConfigurationPickerController } from "./configuration-picker";
+import { configurationOptionLabel, createChatConfigurationPicker, type ChatConfigurationPickerController } from "./configuration-picker";
 import { copyChatText } from "./copy-actions";
 
 const PRESENTATION_KEY = "uatu:chat-presentation";
@@ -62,6 +62,10 @@ export function initChat(): void {
   const sendLabel = document.querySelector<HTMLElement>("#chat-send .chat-send-label");
   const configurationTrigger = document.querySelector<HTMLButtonElement>("#chat-configuration-trigger");
   const configurationSummary = document.querySelector<HTMLElement>("#chat-configuration-summary");
+  const configurationDetails = document.querySelector<HTMLElement>("#chat-configuration-details");
+  const configurationModeSummary = document.querySelector<HTMLElement>("#chat-configuration-mode-summary");
+  const configurationVariantSummary = document.querySelector<HTMLElement>("#chat-configuration-variant-summary");
+  const configurationVariantValue = document.querySelector<HTMLElement>("#chat-configuration-variant-value");
   const configurationDialog = document.querySelector<HTMLDialogElement>("#chat-configuration-dialog");
   const configurationSearch = document.querySelector<HTMLInputElement>("#chat-configuration-search");
   const configurationModelsSection = document.querySelector<HTMLElement>("#chat-configuration-models-section");
@@ -96,7 +100,7 @@ export function initChat(): void {
   const drilldownState = document.querySelector<HTMLElement>("#chat-drilldown-state");
   const drilldownBack = document.querySelector<HTMLButtonElement>("#chat-drilldown-back");
   const drilldownOlder = document.querySelector<HTMLButtonElement>("#chat-drilldown-older");
-  if (!surface || !timeline || !items || !state || !select || !newButton || !olderButton || !latestButton || !form || !input || !commandMenu || !send || !sendLabel || !configurationTrigger || !configurationSummary || !configurationDialog || !configurationSearch || !configurationModelsSection || !configurationModels || !configurationResultStatus || !configurationEmpty || !configurationDone || !composerStatus || !composerStatusLive || !composerError || !copyStatus) return;
+  if (!surface || !timeline || !items || !state || !select || !newButton || !olderButton || !latestButton || !form || !input || !commandMenu || !send || !sendLabel || !configurationTrigger || !configurationSummary || !configurationDetails || !configurationModeSummary || !configurationVariantSummary || !configurationVariantValue || !configurationDialog || !configurationSearch || !configurationModelsSection || !configurationModels || !configurationResultStatus || !configurationEmpty || !configurationDone || !composerStatus || !composerStatusLive || !composerError || !copyStatus) return;
 
   const api = new ChatApiClient();
   const anchor = new TimelineAnchorController();
@@ -930,10 +934,17 @@ export function initChat(): void {
     configurationSummary.textContent = declares("models")
       ? displayedModel?.name ?? (configuration.model ? `${configuration.model.providerId}/${configuration.model.modelId}` : `Let ${agent?.name ?? "OpenCode"} choose`)
       : "Chat settings";
+    const showMode = declares("modes") && modes.length > 0;
+    const showReasoning = declares("variants") && Boolean(displayedModel?.variants?.length);
+    configurationModeSummary.hidden = !showMode;
+    configurationModeSummary.textContent = showMode ? configurationOptionLabel(configuration.mode ?? "auto") : "";
+    configurationVariantSummary.hidden = !showReasoning;
+    configurationVariantValue.textContent = showReasoning ? configurationOptionLabel(configuration.variant ?? "auto") : "";
+    configurationDetails.hidden = !showMode && !showReasoning;
     const accessibleValues = [
       declares("models") ? `Model: ${displayedModel?.name ?? (configuration.model ? `${configuration.model.providerId}/${configuration.model.modelId}, unavailable` : `chosen by ${agent?.name ?? "the agent"}`)}` : "",
-      declares("modes") && modes.length > 0 ? `Mode: ${configuration.mode ?? `chosen by ${agent?.name ?? "the agent"}`}` : "",
-      declares("variants") && displayedModel?.variants?.length ? `Reasoning: ${configuration.variant ?? `chosen by ${agent?.name ?? "the agent"}`}` : "",
+      showMode ? `Mode: ${configuration.mode ? configurationOptionLabel(configuration.mode) : `chosen by ${agent?.name ?? "the agent"}`}` : "",
+      showReasoning ? `Reasoning: ${configuration.variant ? configurationOptionLabel(configuration.variant) : `chosen by ${agent?.name ?? "the agent"}`}` : "",
     ].filter(Boolean);
     configurationTrigger.setAttribute("aria-label", accessibleValues.length > 0 ? `Chat configuration. ${accessibleValues.join(". ")}` : "Chat settings");
     configurationPicker?.update({ agent, models, modes, configuration });

@@ -52,6 +52,10 @@ export function modelResultCountLabel(count: number): string {
   return `${count} ${count === 1 ? "model" : "models"}`;
 }
 
+export function configurationOptionLabel(value: string): string {
+  return value ? value.charAt(0).toLocaleUpperCase() + value.slice(1) : value;
+}
+
 type Rect = Pick<DOMRect, "top" | "right" | "bottom" | "left" | "width" | "height">;
 
 export type PickerGeometryInput = {
@@ -73,6 +77,7 @@ export type PickerGeometry = {
 
 const DIALOG_GAP = 8;
 const DESKTOP_WIDTH = 420;
+const DESKTOP_MAX_HEIGHT = 480;
 
 export function chatConfigurationPickerGeometry(input: PickerGeometryInput): PickerGeometry {
   const surfaceLeft = Math.max(0, input.surface.left);
@@ -99,7 +104,7 @@ export function chatConfigurationPickerGeometry(input: PickerGeometryInput): Pic
     left,
     width,
     bottom: Math.max(0, input.layoutHeight - input.trigger.top + DIALOG_GAP),
-    maxHeight: Math.max(0, input.trigger.top - input.surface.top - DIALOG_GAP * 2),
+    maxHeight: Math.min(DESKTOP_MAX_HEIGHT, Math.max(0, input.trigger.top - input.surface.top - DIALOG_GAP * 2)),
   };
 }
 
@@ -256,10 +261,10 @@ export function createChatConfigurationPicker(
       elements.modeSelect.replaceChildren();
       if (modeAvailable) {
         if (!state.configuration.mode) addOption(elements.modeSelect, `Let ${state.agent?.name || "the agent"} choose`, "");
-        for (const mode of state.modes) addOption(elements.modeSelect, mode.name, mode.name);
+        for (const mode of state.modes) addOption(elements.modeSelect, configurationOptionLabel(mode.name), mode.name);
         const selectedMode = state.configuration.mode;
         if (selectedMode && !state.modes.some(mode => mode.name === selectedMode)) {
-          addOption(elements.modeSelect, `${selectedMode} (current, unavailable)`, selectedMode, true);
+          addOption(elements.modeSelect, `${configurationOptionLabel(selectedMode)} (current, unavailable)`, selectedMode, true);
         }
         selectOption(elements.modeSelect, selectedMode ?? "");
       }
@@ -273,10 +278,10 @@ export function createChatConfigurationPicker(
       elements.variantSelect.replaceChildren();
       if (variantAvailable) {
         if (!state.configuration.variant) addOption(elements.variantSelect, `Let ${state.agent?.name || "the agent"} choose reasoning`, "");
-        for (const variant of variants) addOption(elements.variantSelect, variant, variant);
+        for (const variant of variants) addOption(elements.variantSelect, configurationOptionLabel(variant), variant);
         const selectedVariant = state.configuration.variant;
         if (selectedVariant && !variants.includes(selectedVariant)) {
-          addOption(elements.variantSelect, `${selectedVariant} (current, unavailable)`, selectedVariant, true);
+          addOption(elements.variantSelect, `${configurationOptionLabel(selectedVariant)} (current, unavailable)`, selectedVariant, true);
         }
         selectOption(elements.variantSelect, selectedVariant ?? "");
       }
