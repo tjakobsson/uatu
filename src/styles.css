@@ -5145,7 +5145,6 @@ body.is-resizing-chat .chat-resizer {
 
 .chat-assistant-message {
   position: relative;
-  padding-right: 2.5rem;
   overflow-wrap: anywhere;
 }
 
@@ -5160,34 +5159,73 @@ body.is-resizing-chat .chat-resizer {
 }
 
 .chat-copy-action {
+  position: relative;
   display: inline-grid;
   place-items: center;
-  width: 2rem;
-  height: 2rem;
-  min-height: 2rem;
+  width: 1.75rem;
+  height: 1.75rem;
+  min-height: 1.75rem;
   padding: 0;
   border: 1px solid var(--border-medium);
   border-radius: 0.4rem;
   color: var(--text-subtle);
   background: var(--surface-raised);
   font: inherit;
-  font-size: 0.75rem;
-  font-weight: 700;
-  line-height: 1;
   cursor: pointer;
 }
 
-.chat-answer-copy,
-.chat-code-copy {
+.chat-copy-action::before,
+.chat-copy-action::after {
+  content: "";
   position: absolute;
-  z-index: 1;
-  top: 0;
-  right: 0;
+  box-sizing: border-box;
+  width: 0.62rem;
+  height: 0.72rem;
+  border: 1.5px solid currentColor;
+  border-radius: 0.12rem;
+}
+
+.chat-copy-action::before {
+  transform: translate(0.12rem, 0.1rem);
+}
+
+.chat-copy-action::after {
+  transform: translate(-0.12rem, -0.1rem);
+  background: var(--surface-raised);
+}
+
+.chat-copy-action[data-state]::before {
+  content: "✓";
+  width: auto;
+  height: auto;
+  border: 0;
+  font-size: 0.8rem;
+  font-weight: 700;
+  transform: none;
+}
+
+.chat-copy-action[data-state="failed"]::before {
+  content: "!";
+}
+
+.chat-copy-action[data-state]::after {
+  display: none;
+}
+
+.chat-answer-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 0.2rem;
 }
 
 .chat-code-copy {
+  position: absolute;
+  z-index: 1;
   top: 0.4rem;
   right: 0.4rem;
+  width: 2rem;
+  height: 2rem;
+  min-height: 2rem;
 }
 
 .chat-copy-action[data-state="copied"] {
@@ -5204,8 +5242,8 @@ body.is-resizing-chat .chat-resizer {
     transition: opacity 120ms ease;
   }
 
-  .chat-assistant-message:hover > .chat-answer-copy,
-  .chat-assistant-message:focus-within > .chat-answer-copy,
+  .chat-assistant-message:hover .chat-answer-copy,
+  .chat-assistant-message:focus-within .chat-answer-copy,
   .chat-assistant-content pre:hover > .chat-code-copy,
   .chat-assistant-content pre:focus-within > .chat-code-copy,
   .chat-copy-action:focus-visible {
@@ -5647,7 +5685,6 @@ body.is-resizing-chat .chat-resizer {
 .chat-context-usage > summary {
   display: flex;
   align-items: center;
-  gap: 0.35rem;
   list-style: none;
   cursor: pointer;
   color: var(--text-subtle);
@@ -5660,20 +5697,46 @@ body.is-resizing-chat .chat-resizer {
 }
 
 .chat-context-meter {
-  display: block;
-  overflow: hidden;
-  width: 2.5rem;
-  height: 0.35rem;
-  border: 1px solid var(--border-medium);
-  border-radius: 0.2rem;
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 3rem;
+  height: 1.3rem;
+  border: 1.5px solid var(--border-medium);
+  border-radius: 0.25rem;
   background: var(--surface);
 }
 
+.chat-context-meter::after {
+  content: "";
+  position: absolute;
+  right: -0.24rem;
+  width: 0.16rem;
+  height: 0.55rem;
+  border-radius: 0 0.12rem 0.12rem 0;
+  background: var(--border-medium);
+}
+
 .chat-context-meter-fill {
-  display: block;
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: 2px;
   width: 0;
-  height: 100%;
+  max-width: calc(100% - 4px);
+  border-radius: 0.12rem;
   background: var(--text-subtle);
+  opacity: 0.32;
+}
+
+.chat-context-label {
+  position: relative;
+  z-index: 1;
+  color: var(--text-strong);
+  font-size: 0.64rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
 }
 
 /* Never colour alone — the figure beside the meter always states the fill, so
@@ -6444,6 +6507,12 @@ html[data-ui-mode="touch"] .chat-composer textarea {
   border: 0;
   outline: 0;
   background: transparent;
+  font-size: 16px;
+}
+
+html[data-ui-mode="touch"] .chat-configuration-dialog input,
+html[data-ui-mode="touch"] .chat-configuration-dialog select {
+  font-size: 16px;
 }
 
 html[data-ui-mode="touch"] .chat-composer-actions {

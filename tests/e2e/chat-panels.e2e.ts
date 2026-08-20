@@ -316,8 +316,8 @@ test.describe("chat panels and navigation", () => {
   });
 
   // A conversation gave no sign of how full its context window was until it
-  // overflowed. The figure has to read without opening anything — opening it
-  // only adds the breakdown.
+  // overflowed. The battery percentage reads without opening anything;
+  // opening it adds the exact token figures.
   test("the context indicator reads the fill on open and expands to the breakdown", async ({ page, request }) => {
     // The shape normalization produces: a message's spend rides its own
     // `usage:<id>` carrier with empty markdown, never a text part — a message
@@ -339,13 +339,13 @@ test.describe("chat panels and navigation", () => {
     await expect(page.locator("#chat-items .chat-assistant-message")).toHaveCount(2);
     // 30k + 20k cache read + 2k cache write = 52k of the fixture model's 200k.
     // Output is excluded: it is what came back, not what occupies the window.
-    await expect(page.locator("#chat-context-usage-label")).toHaveText("52k/200k · 26%");
+    await expect(page.locator("#chat-context-usage-label")).toHaveText("26%");
 
     await indicator.locator("summary").click();
     const breakdown = page.locator("#chat-context-usage-breakdown");
     await expect(breakdown).toBeVisible();
-    await expect(breakdown.locator("dt")).toHaveText(["Input", "Cache read", "Cache write", "Reasoning", "Output"]);
-    await expect(breakdown.locator("dd")).toHaveText(["30,000", "20,000", "2,000", "400", "1,200"]);
+    await expect(breakdown.locator("dt")).toHaveText(["In context", "Limit", "Input", "Cache read", "Cache write", "Reasoning", "Output"]);
+    await expect(breakdown.locator("dd")).toHaveText(["52,000", "200,000", "30,000", "20,000", "2,000", "400", "1,200"]);
   });
 
   test("a conversation with no reported usage claims nothing", async ({ page, request }) => {
@@ -375,25 +375,25 @@ test.describe("chat panels and navigation", () => {
       { id: "usage:m1", type: "assistant_message", createdAt: 2, markdown: "", usage: { input: 30_000, cacheRead: 20_000 }, model: { providerId: "anthropic", modelId: "claude-sonnet" } },
     ]);
     const label = page.locator("#chat-context-usage-label");
-    await expect(label).toHaveText("50k/200k · 25%");
+    await expect(label).toHaveText("25%");
 
     // Selecting a future model does not reinterpret model A's existing usage
     // against model B's smaller window.
     await chooseChatModel(page, "GPT-5");
     await page.locator("#chat-configuration-done").click();
-    await expect(label).toHaveText("50k/200k · 25%");
+    await expect(label).toHaveText("25%");
 
     // OpenCode announces the next assistant message with zeroed counters, then
     // restates that carrier once real input accounting is available.
     await control(request, { action: "item", conversationId, item: {
       id: "usage:m2", type: "assistant_message", createdAt: 3, markdown: "", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, model: { providerId: "openai", modelId: "gpt-5" },
     } });
-    await expect(label).toHaveText("50k/200k · 25%");
+    await expect(label).toHaveText("25%");
 
     await control(request, { action: "item", conversationId, item: {
       id: "usage:m2", type: "assistant_message", createdAt: 3, markdown: "", usage: { input: 60_000, output: 500, cacheRead: 10_000, cacheWrite: 0 }, model: { providerId: "openai", modelId: "gpt-5" },
     } });
-    await expect(label).toHaveText("70k/100k · 70%");
+    await expect(label).toHaveText("70%");
   });
 
   test("an agent that does not declare context reporting leaves no readout behind", async ({ page, request }) => {

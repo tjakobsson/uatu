@@ -22,7 +22,6 @@ export async function copyChatText(
   if (previous !== undefined) cancel(previous);
   const originalLabel = button.dataset.chatCopy === "code" ? "Copy code block" : "Copy completed answer";
   button.dataset.state = copied ? "copied" : "failed";
-  button.textContent = copied ? "✓" : "!";
   button.setAttribute("aria-label", copied ? "Copied" : "Copy failed");
   button.title = copied ? "Copied" : "Copy failed";
   announce(copied ? "Copied to clipboard" : "Could not copy to clipboard");
@@ -31,7 +30,6 @@ export async function copyChatText(
     if (feedbackTimers.get(button) !== timer) return;
     feedbackTimers.delete(button);
     delete button.dataset.state;
-    button.textContent = "C";
     button.setAttribute("aria-label", originalLabel);
     button.title = originalLabel;
   }, CHAT_COPY_FEEDBACK_MS);

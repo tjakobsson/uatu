@@ -224,6 +224,7 @@ test("software-keyboard geometry keeps the composer in the visual viewport", asy
   await openChatConfiguration(page);
   await expect(page.locator("#chat-configuration-done")).toBeFocused();
   await expect(page.locator("#chat-configuration-search")).not.toBeFocused();
+  await expect(page.locator("#chat-configuration-search")).toHaveCSS("font-size", "16px");
   await expect(page.locator("#chat-configuration-dialog")).toHaveAttribute("data-presentation", "touch");
   const closedKeyboardBounds = await page.evaluate(() => {
     const dialog = document.querySelector("#chat-configuration-dialog")!.getBoundingClientRect();
@@ -247,6 +248,7 @@ test("software-keyboard geometry keeps the composer in the visual viewport", asy
   expect(sheetGeometry.bottom).toBeLessThanOrEqual(sheetGeometry.visualHeight + 1);
   await page.locator("#chat-configuration-done").click();
   await expect(page.locator("#chat-configuration-trigger")).toBeFocused();
+  await expect(page.locator("#chat-input")).toHaveCSS("font-size", "16px");
   await page.locator("#chat-input").focus();
   await expect(page.locator("html")).toHaveAttribute("data-chat-editing", "");
   await expect(page.locator("#touch-tab-bar")).toBeHidden();

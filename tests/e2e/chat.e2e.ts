@@ -209,6 +209,12 @@ test.describe("desktop OpenCode chat", () => {
     await control(request, { action: "status", conversationId: id, status: "completed" });
     await expect(assistantNode.locator("[data-chat-copy='answer']")).toHaveCount(1);
     await expect(assistantNode.locator("[data-chat-copy='code']")).toHaveCount(1);
+    const answerCopyGeometry = await assistantNode.evaluate(element => {
+      const content = element.querySelector(".chat-assistant-content")!.getBoundingClientRect();
+      const copy = element.querySelector("[data-chat-copy='answer']")!.getBoundingClientRect();
+      return { contentBottom: content.bottom, copyTop: copy.top };
+    });
+    expect(answerCopyGeometry.copyTop).toBeGreaterThanOrEqual(answerCopyGeometry.contentBottom);
     await installClipboardMock(page);
     await assistantNode.locator("[data-chat-copy='code']").click();
     expect(await readClipboardMock(page)).toBe("const value = 1;\n");

@@ -572,14 +572,13 @@ export function initChat(): void {
     // The figure states the fill in words as well as in width, so the tier
     // colouring below is emphasis on something already legible rather than
     // the only signal.
-    contextUsageLabel.textContent = fraction === undefined
-      ? `${formatTokens(used)} in context`
-      : `${formatTokens(used)}/${formatTokens(limit!)} · ${Math.round(fraction * 100)}%`;
+    contextUsageLabel.textContent = fraction === undefined ? "?" : `${Math.round(fraction * 100)}%`;
     contextUsage.dataset.fill = fraction === undefined ? "unknown" : fraction >= 0.9 ? "full" : fraction >= 0.75 ? "high" : "normal";
     contextUsage.title = fraction === undefined
       ? `${used.toLocaleString()} tokens in the context window`
       : `${used.toLocaleString()} of ${limit!.toLocaleString()} tokens in the context window`;
-    const rows: Array<[string, number]> = [];
+    const rows: Array<[string, number]> = [["In context", used]];
+    if (limit !== undefined) rows.push(["Limit", limit]);
     if (usage.input !== undefined) rows.push(["Input", usage.input]);
     if (usage.cacheRead !== undefined) rows.push(["Cache read", usage.cacheRead]);
     if (usage.cacheWrite !== undefined) rows.push(["Cache write", usage.cacheWrite]);

@@ -21,11 +21,9 @@ describe("copyChatText", () => {
       });
       expect(copied).toBe(result);
       expect(control.dataset.state).toBe(state);
-      expect(control.textContent).toBe(result ? "✓" : "!");
       expect(announcements).toEqual([message]);
       reset?.();
       expect(control.dataset.state).toBeUndefined();
-      expect(control.textContent).toBe("C");
       expect(control.getAttribute("aria-label")).toBe("Copy code block");
     }
   });
