@@ -58,9 +58,50 @@ const roots: RootGroup[] = [
 ];
 
 describe("shouldRefreshPreview", () => {
-  test("refreshes when the selected document changes on disk", () => {
-    expect(shouldRefreshPreview("/tmp/docs/README.md", "/tmp/docs/README.md")).toBe(true);
-    expect(shouldRefreshPreview("/tmp/docs/README.md", "/tmp/docs/guides/setup.md")).toBe(false);
+  const withReadme = (changes: Partial<RootGroup["docs"][number]>): RootGroup[] => [{
+    ...roots[0]!,
+    docs: roots[0]!.docs.map(doc => doc.name === "README.md" ? { ...doc, ...changes } : { ...doc }),
+  }];
+
+  test("uses the selected event identity even when metadata is unchanged", () => {
+    expect(shouldRefreshPreview("/tmp/docs/README.md", "/tmp/docs/README.md", roots, roots)).toBe(true);
+    expect(shouldRefreshPreview("/tmp/docs/README.md", "/tmp/docs/guides/setup.md", roots, roots)).toBe(false);
+  });
+
+  test("detects the selected document inside a multi-file snapshot", () => {
+    expect(shouldRefreshPreview(
+      "/tmp/docs/README.md",
+      "/tmp/docs/guides/setup.md",
+      roots,
+      withReadme({ mtimeMs: 8 }),
+    )).toBe(true);
+  });
+
+  test("does not refresh for an unchanged selected document", () => {
+    expect(shouldRefreshPreview(
+      "/tmp/docs/README.md",
+      null,
+      roots,
+      withReadme({}),
+    )).toBe(false);
+  });
+
+  test("detects a kind change", () => {
+    expect(shouldRefreshPreview(
+      "/tmp/docs/README.md",
+      "/tmp/docs/guides/setup.md",
+      roots,
+      withReadme({ kind: "binary" }),
+    )).toBe(true);
+  });
+
+  test("reconciles a changed snapshot without an event identity", () => {
+    expect(shouldRefreshPreview(
+      "/tmp/docs/README.md",
+      null,
+      roots,
+      withReadme({ mtimeMs: 9 }),
+    )).toBe(true);
   });
 });
 

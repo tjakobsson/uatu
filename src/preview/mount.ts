@@ -37,6 +37,7 @@ import { clearUpdateSignal, syncFileFactsStrip } from "./file-facts-strip";
 import { attachMetadataCardToggleListener, renderMetadataCard } from "./metadata-card";
 import { syncViewToggle } from "./view-mode";
 import { setPreviewMode } from "../shell/selection";
+import { createDocumentLoadGuard } from "./load-generation";
 
 export type RenderedDocumentAuthor = { name: string; email?: string };
 
@@ -79,6 +80,8 @@ const previewShellElement: HTMLElement = previewShellElementMaybe;
 // (preserve scroll — the user is mid-read and a file-watcher reload must not
 // yank them back to the top).
 let lastLoadedDocumentId: string | null = null;
+const documentLoadGuard = createDocumentLoadGuard();
+const alwaysCurrent = () => true;
 
 // `DocumentDiffPayload` is imported from `./document-diff-view` (above) so
 // the client type stays in lockstep with the renderer's view of the
@@ -107,7 +110,24 @@ export function forgetDocumentCache(documentId: string): void {
 // network fetch (loadDocument). In single layout this renders just the
 // given payload; in split layouts it ensures both Source and Rendered
 // representations are cached and renders them together.
-export async function applyDocumentPayload(payload: RenderedDocument): Promise<void> {
+export async function applyDocumentPayload(
+  payload: RenderedDocument,
+  isCurrent?: () => boolean,
+): Promise<void> {
+  if (!isCurrent) {
+    const loadToken = documentLoadGuard.begin(
+      payload.id,
+      appState.viewMode,
+      appState.viewLayout,
+    );
+    isCurrent = () => documentLoadGuard.isCurrent(
+      loadToken,
+      appState.selectedId,
+      appState.viewMode,
+      appState.viewLayout,
+    );
+  }
+  if (!isCurrent()) return;
   // Common header / title updates are payload-driven and identical across
   // single and split layouts.
   setPreviewMode({ kind: "document" });
@@ -124,11 +144,12 @@ export async function applyDocumentPayload(payload: RenderedDocument): Promise<v
   syncFileFactsStrip({ kind: "document", facts: payload.fileFacts });
 
   if (appState.viewLayout === "single" || !documentSupportsSplit(payload)) {
-    await renderSinglePayload(payload);
+    await renderSinglePayload(payload, isCurrent);
   } else {
-    await renderSplitForDocument(payload);
+    await renderSplitForDocument(payload, isCurrent);
   }
 
+  if (!isCurrent()) return;
   syncViewToggle(payload);
   syncLayoutChooser(payload);
   // The previous document's content (and any selection within it) was just
@@ -172,7 +193,11 @@ export function firstAvailableViewMode(payload: RenderedDocument | null): ViewMo
 
 // Render a single-pane layout for the given payload. This is the legacy
 // (pre-split) DOM shape: #preview itself carries the body content directly.
-export async function renderSinglePayload(payload: RenderedDocument): Promise<void> {
+export async function renderSinglePayload(
+  payload: RenderedDocument,
+  isCurrent: () => boolean = alwaysCurrent,
+): Promise<void> {
+  if (!isCurrent()) return;
   previewElement.classList.remove("is-split", "is-split-h", "is-split-v");
   previewElement.removeAttribute("data-auto-stack");
   const cardHtml = renderMetadataCard(payload.metadata);
@@ -188,6 +213,7 @@ export async function renderSinglePayload(payload: RenderedDocument): Promise<vo
   // The renderer does not know what scrolls; we do, so we hand it the
   // resolver rather than let it guess (#186).
   await renderMermaidDiagrams(previewElement, currentMermaidThemeInputs(), previewObserverRoot);
+  if (!isCurrent()) return;
   // Source rendering — for text/source files always, and for markdown /
   // asciidoc when the user is in Source view — needs the line-number gutter
   // so the inspector pane can produce accurate `@path#L<a>-<b>` references.
@@ -207,7 +233,11 @@ export async function renderSinglePayload(payload: RenderedDocument): Promise<vo
 // the cache, fetch it without clearing the visible content (the caller has
 // already populated the header / type chip from `payload`). Falls back to
 // single rendering when the additional fetch fails.
-export async function renderSplitForDocument(payload: RenderedDocument): Promise<void> {
+export async function renderSplitForDocument(
+  payload: RenderedDocument,
+  isCurrent: () => boolean = alwaysCurrent,
+): Promise<void> {
+  if (!isCurrent()) return;
   const cache = documentViewCache.get(payload.id) ?? {};
   let sourcePayload = cache.source;
   let renderedPayload = cache.rendered;
@@ -220,6 +250,7 @@ export async function renderSplitForDocument(payload: RenderedDocument): Promise
       sourcePayload ? Promise.resolve(null) : fetchDocumentView(payload.id, "source"),
       renderedPayload ? Promise.resolve(null) : fetchDocumentView(payload.id, "rendered"),
     ]);
+    if (!isCurrent()) return;
     if (fetchedSource) {
       rememberDocumentPayload(fetchedSource);
       sourcePayload = fetchedSource;
@@ -230,10 +261,10 @@ export async function renderSplitForDocument(payload: RenderedDocument): Promise
     }
   }
   if (!sourcePayload || !renderedPayload) {
-    await renderSinglePayload(payload);
+    await renderSinglePayload(payload, isCurrent);
     return;
   }
-  await renderSplitPayloads(sourcePayload, renderedPayload);
+  await renderSplitPayloads(sourcePayload, renderedPayload, isCurrent);
 }
 
 // Fetch a single view of a document via the existing /api/document endpoint.
@@ -262,7 +293,9 @@ export async function fetchDocumentView(
 export async function renderSplitPayloads(
   sourcePayload: RenderedDocument,
   renderedPayload: RenderedDocument,
+  isCurrent: () => boolean = alwaysCurrent,
 ): Promise<void> {
+  if (!isCurrent()) return;
   const orientation: "split-h" | "split-v" =
     appState.viewLayout === "split-v" ? "split-v" : "split-h";
   const orientationClass = orientation === "split-h" ? "is-split-h" : "is-split-v";
@@ -297,6 +330,7 @@ export async function renderSplitPayloads(
   // Lazy install (resolves on setup, diagrams stream in) — see the
   // single-pane call above.
   await renderMermaidDiagrams(renderedPane, currentMermaidThemeInputs(), previewObserverRoot);
+  if (!isCurrent()) return;
   attachLineNumbers(sourcePane);
   applySourceWrap(sourcePane, appState.wrap);
   attachCopyButtons(sourcePane);
@@ -318,6 +352,15 @@ export async function renderSplitPayloads(
 }
 
 export async function loadDocument(documentId: string) {
+  const requestedView = appState.viewMode;
+  const requestedLayout = appState.viewLayout;
+  const loadToken = documentLoadGuard.begin(documentId, requestedView, requestedLayout);
+  const isCurrent = () => documentLoadGuard.isCurrent(
+    loadToken,
+    appState.selectedId,
+    appState.viewMode,
+    appState.viewLayout,
+  );
   // A document *switch* (different id than what's currently mounted) resets
   // the preview scroll to the top so the user lands at the beginning of the
   // new doc. An in-place *refresh* (same id, e.g. file-watcher reload of the
@@ -381,6 +424,7 @@ export async function loadDocument(documentId: string) {
     contextualAppUrl(appUrl(`/api/document?id=${encodeURIComponent(documentId)}&view=${encodeURIComponent(apiView)}`)),
   );
 
+  if (!isCurrent()) return;
   if (!response.ok) {
     setPreviewMode({ kind: "empty" });
     renderEmptyPreview("Document unavailable", "The selected file no longer exists.");
@@ -388,6 +432,7 @@ export async function loadDocument(documentId: string) {
   }
 
   const payload = (await response.json()) as RenderedDocument;
+  if (!isCurrent()) return;
   rememberDocumentPayload(payload);
-  await applyDocumentPayload(payload);
+  await applyDocumentPayload(payload, isCurrent);
 }

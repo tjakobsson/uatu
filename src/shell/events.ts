@@ -104,7 +104,12 @@ export function connectEvents() {
     const payload = JSON.parse((event as MessageEvent<string>).data) as StatePayload;
     const previousSelectedId = appState.selectedId;
     const previousScope = appState.scope;
-    const shouldReload = shouldRefreshPreview(previousSelectedId, payload.changedId);
+    const shouldReload = shouldRefreshPreview(
+      previousSelectedId,
+      payload.changedId,
+      appState.roots,
+      payload.roots,
+    );
 
     applyServerSnapshot(payload);
     if (!scopesEqual(previousScope, payload.scope)) {

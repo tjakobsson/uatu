@@ -65,7 +65,7 @@ describe("TimelineRenderer", () => {
     expect(host.querySelector<HTMLInputElement>("[data-question-custom-input]")!.value).toBe("typed answer");
   });
 
-  test("keeps the assistant shell stable and adds idempotent copy actions only on completion", () => {
+  test("keeps the assistant shell stable and adds idempotent code copy only on completion", () => {
     const renderer = new TimelineRenderer();
     const host = target();
     const assistant: ConversationItem = {
@@ -82,24 +82,23 @@ describe("TimelineRenderer", () => {
     renderer.render(host, projectionWith([assistant], { status: "completed" }), new Set());
     expect(host.querySelector(".chat-assistant-message")).toBe(article);
     expect(article.querySelector(".chat-assistant-content")).toBe(content);
-    expect(article.querySelectorAll("[data-chat-copy='answer']")).toHaveLength(1);
+    expect(article.querySelectorAll("[data-chat-copy='answer']")).toHaveLength(0);
     expect(article.querySelectorAll("[data-chat-copy='code']")).toHaveLength(2);
     expect([...article.querySelectorAll("pre > code")].map(code => code.textContent)).toEqual(["const a = 1;\n", "echo ok\n"]);
 
     renderer.render(host, projectionWith([assistant], { status: "completed" }), new Set());
-    expect(article.querySelectorAll("[data-chat-copy]")).toHaveLength(3);
+    expect(article.querySelectorAll("[data-chat-copy]")).toHaveLength(2);
   });
 
-  test("patches cumulative completed Markdown without replacing shell actions", () => {
+  test("patches cumulative completed Markdown without adding answer actions", () => {
     const renderer = new TimelineRenderer();
     const host = target();
     const assistant: ConversationItem = { id: "part:done", type: "assistant_message", createdAt: 1, completedAt: 2, markdown: "Hello" };
     renderer.render(host, projectionWith([assistant]), new Set());
     const article = host.querySelector<HTMLElement>(".chat-assistant-message")!;
-    const answerCopy = article.querySelector("[data-chat-copy='answer']");
     renderer.render(host, projectionWith([{ ...assistant, markdown: "Hello again" }]), new Set());
     expect(host.querySelector(".chat-assistant-message")).toBe(article);
-    expect(article.querySelector("[data-chat-copy='answer']")).toBe(answerCopy);
+    expect(article.querySelector("[data-chat-copy='answer']")).toBeNull();
     expect(article.querySelector(".chat-assistant-content")?.textContent).toContain("Hello again");
   });
 
@@ -123,17 +122,19 @@ describe("TimelineRenderer", () => {
   test("keeps a prior turn complete while the next turn is active", () => {
     const renderer = new TimelineRenderer();
     const host = target();
-    const firstAnswer: ConversationItem = { id: "part:first", type: "assistant_message", createdAt: 1, markdown: "First answer" };
+    const firstAnswer: ConversationItem = { id: "part:first", type: "assistant_message", createdAt: 1, markdown: "First answer\n\n```ts\nconst first = true;\n```" };
     renderer.render(host, projectionWith([firstAnswer], { status: "completed" }), new Set());
     const article = host.querySelector<HTMLElement>('[data-chat-item-id="part:first"]')!;
-    const copy = article.querySelector("[data-chat-copy='answer']");
+    const copy = article.querySelector("[data-chat-copy='code']");
     expect(copy).not.toBeNull();
+    expect(article.querySelector("[data-chat-copy='answer']")).toBeNull();
 
     const nextPrompt: ConversationItem = { id: "message:next", type: "user_message", createdAt: 2, text: "Next question" };
     renderer.render(host, projectionWith([firstAnswer, nextPrompt], { status: "sending" }), new Set());
     expect(host.querySelector('[data-chat-item-id="part:first"]')).toBe(article);
     expect(article.dataset.complete).toBe("true");
-    expect(article.querySelector("[data-chat-copy='answer']")).toBe(copy);
+    expect(article.querySelector("[data-chat-copy='code']")).toBe(copy);
+    expect(article.querySelector("[data-chat-copy='answer']")).toBeNull();
   });
 
   test("renders custom answers as a synthetic peer choice with a separate hidden input", () => {

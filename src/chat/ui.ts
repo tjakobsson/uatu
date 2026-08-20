@@ -1269,19 +1269,15 @@ export function initChat(): void {
   const wireItemInteractions = (container: HTMLElement, sourceProjection: () => ChatProjection | null) => {
     container.addEventListener("click", event => {
       const target = (event.target as Element).closest<HTMLElement>("[data-file-ref], [data-permission-outcome], [data-question-reject], [data-open-conversation], [data-chat-copy]");
-      const source = sourceProjection();
-      if (!target || !source) return;
+      if (!target) return;
       if (target instanceof HTMLButtonElement && target.dataset.chatCopy) {
-        const itemElement = target.closest<HTMLElement>("[data-chat-item-id]");
-        const item = source.items.find(candidate => candidate.id === itemElement?.dataset.chatItemId);
-        if (!item || item.type !== "assistant_message") return;
-        const text = target.dataset.chatCopy === "code"
-          ? target.closest("pre")?.querySelector(":scope > code")?.textContent
-          : item.markdown;
+        const text = target.closest("pre")?.querySelector(":scope > code")?.textContent;
         if (text === undefined || text === null) return;
         void copyChatText(target, text, message => { copyStatus.textContent = message; });
         return;
       }
+      const source = sourceProjection();
+      if (!source) return;
       if (target.dataset.openConversation) {
         openChildConversation(target.dataset.openConversation, subagentLabelFor(target.dataset.openConversation, source));
         return;

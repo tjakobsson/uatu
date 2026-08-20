@@ -40,13 +40,6 @@ test("relative image references in a README are served natively from the watched
     "utf8",
   );
 
-  // Reload to force a fresh /api/state + /api/document fetch. Rule D would
-  // ordinarily reload README in place when the SSE state event arrives, but
-  // the watcher's debounce can coalesce the hero.svg + README.md writes into
-  // a single event whose `changedId` is hero.svg, leaving the SPA's cached
-  // README content untouched. Under parallel test load this race is
-  // observable; the reload sidesteps it deterministically.
-  await page.reload();
   await expect(page.locator("#preview-path")).toHaveText("README.md");
   const img = page.locator('#preview img[alt="hero"]');
   await expect(img).toBeVisible();
@@ -62,6 +55,55 @@ test("relative image references in a README are served natively from the watched
   const response = await request.get("/hero.svg");
   expect(response.ok()).toBe(true);
   expect(response.headers()["content-type"]).toContain("image/svg");
+});
+
+test("a multi-file burst refreshes the active document when another path is nominated", async ({ page }) => {
+  const marker = `Burst refresh ${Date.now()}`;
+  await expect(page.locator("#preview-path")).toHaveText("README.md");
+
+  await page.evaluate(async () => {
+    const state = window as unknown as {
+      __uatuWatchEvents?: Array<string | null>;
+      __uatuWatchSource?: EventSource;
+    };
+    state.__uatuWatchEvents = [];
+    const source = new EventSource("/api/events");
+    state.__uatuWatchSource = source;
+    source.addEventListener("state", event => {
+      const payload = JSON.parse((event as MessageEvent<string>).data) as { changedId: string | null };
+      state.__uatuWatchEvents!.push(payload.changedId);
+    });
+    await new Promise<void>((resolve, reject) => {
+      source.addEventListener("open", () => resolve(), { once: true });
+      source.addEventListener("error", () => reject(new Error("watch observer failed to connect")), { once: true });
+    });
+  });
+  await expect.poll(() => page.evaluate(() => (
+    window as unknown as { __uatuWatchEvents?: Array<string | null> }
+  ).__uatuWatchEvents?.length ?? 0)).toBeGreaterThan(0);
+  const eventCount = await page.evaluate(() => (
+    window as unknown as { __uatuWatchEvents: Array<string | null> }
+  ).__uatuWatchEvents.length);
+
+  await fs.writeFile(workspacePath("README.md"), `# Uatu\n\n${marker}\n`, "utf8");
+  // Both writes pass through awaitWriteFinish with the same spacing, so the
+  // later binary event is the debounce batch's representative path.
+  await page.waitForTimeout(50);
+  await fs.writeFile(
+    workspacePath("hero.svg"),
+    `<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>`,
+    "utf8",
+  );
+
+  await expect(page.locator("#preview")).toContainText(marker);
+  await expect(page.locator("#preview-path")).toHaveText("README.md");
+  await expect.poll(() => page.evaluate(() => (
+    window as unknown as { __uatuWatchEvents: Array<string | null> }
+  ).__uatuWatchEvents.length)).toBeGreaterThan(eventCount);
+  const nominated = await page.evaluate(() => (
+    window as unknown as { __uatuWatchEvents: Array<string | null> }
+  ).__uatuWatchEvents.at(-1));
+  expect(nominated).toBeNull();
 });
 
 test("server falls back with 404 for paths outside every watched root", async ({ request }) => {

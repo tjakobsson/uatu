@@ -475,21 +475,6 @@ export function decorateAssistantCopyActions(container: HTMLElement): void {
   if (!article || article.dataset.complete !== "true") return;
   const content = article.querySelector<HTMLElement>(".chat-assistant-content");
   if (!content) return;
-  if (!article.querySelector(":scope > .chat-answer-actions > [data-chat-copy='answer']")) {
-    let actions = article.querySelector<HTMLElement>(":scope > .chat-answer-actions");
-    if (!actions) {
-      actions = document.createElement("div");
-      actions.className = "chat-answer-actions";
-      article.append(actions);
-    }
-    const copy = document.createElement("button");
-    copy.type = "button";
-    copy.className = "chat-copy-action chat-answer-copy";
-    copy.dataset.chatCopy = "answer";
-    copy.setAttribute("aria-label", "Copy completed answer");
-    copy.title = "Copy completed answer";
-    actions.append(copy);
-  }
   for (const pre of content.querySelectorAll<HTMLPreElement>("pre")) {
     if (!pre.querySelector(":scope > code") || pre.querySelector(":scope > [data-chat-copy='code']")) continue;
     const copy = document.createElement("button");
