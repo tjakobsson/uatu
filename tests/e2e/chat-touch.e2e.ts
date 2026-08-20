@@ -83,6 +83,15 @@ test("composer stays flush and its trailing action becomes cancel without adding
   expect(geometry.sendTop).toBeLessThan(geometry.controlsBottom);
   expect(geometry.sendRight).toBeLessThanOrEqual(geometry.boundsRight + 1);
   expect(geometry.margin).toBe("0px");
+
+  await page.locator("#chat-input").fill("First line");
+  await page.locator("#chat-input").press("Shift+Enter");
+  await expect(page.locator("#chat-input")).toHaveValue("First line\n");
+  await page.locator("#chat-input").fill("Steer from touch");
+  await expect(page.locator("#chat-send")).toHaveAttribute("aria-label", "Cancel response");
+  const steerResponse = page.waitForResponse(response => response.url().endsWith("/prompts"));
+  await page.locator("#chat-input").press("Enter");
+  expect((await steerResponse).request().postDataJSON()).toMatchObject({ text: "Steer from touch" });
 });
 
 test("a subagent transcript pushes as a screen and the back gesture pops it", async ({ page, request }) => {

@@ -1689,8 +1689,7 @@ export function initChat(): void {
       return;
     }
     if (commandMatch && event.key === "Escape") { event.preventDefault(); closeCommandMenu(); return; }
-    if (event.key === "Enter" && !event.shiftKey && !event.isComposing
-      && (event.metaKey || event.ctrlKey || document.documentElement.dataset.uiMode !== "touch")) {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       form.requestSubmit();
     }
