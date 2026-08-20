@@ -676,6 +676,7 @@ describe("history across both OpenCode message stores", () => {
     const provider = new SdkV2Provider(client([{ data: [] }], legacy), "/workspace");
     const newest = await provider.listMessages("ses_legacy", { limit: 2 });
     expect(newest.items.map(item => (item as { info: { id: string } }).info.id)).toEqual(["msg_2", "msg_3"]);
+    expect(newest.configurationItems?.map(item => (item as { info: { id: string } }).info.id)).toEqual(["msg_1", "msg_2", "msg_3"]);
     expect(newest.nextCursor).toBe("1");
 
     const older = await provider.listMessages("ses_legacy", { limit: 2, cursor: newest.nextCursor });

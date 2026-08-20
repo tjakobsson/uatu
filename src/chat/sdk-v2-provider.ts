@@ -277,6 +277,7 @@ export class SdkV2Provider implements OpenCodeProvider {
     return {
       items: merged.slice(start, end),
       nextCursor: start > 0 ? String(start) : undefined,
+      configurationItems: merged,
     };
   }
 

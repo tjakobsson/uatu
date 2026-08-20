@@ -83,7 +83,7 @@ class FakeProvider implements OpenCodeProvider {
     return session;
   }
   async getSession(id: string) { return this.sessions.find(session => session.id === id) ?? null; }
-  async getConversationConfiguration(id: string) { return this.configurations.get(id) ?? {}; }
+  async getConversationConfiguration(id: string, _completeMessages?: ProviderMessage[]) { return this.configurations.get(id) ?? {}; }
   async listMessages(_sessionId: string, options: { cursor?: string; limit: number }) {
     return this.pages.get(options.cursor ?? "first") ?? { items: [] };
   }
@@ -446,6 +446,21 @@ describe("prompt, abort, permission, and question mutations", () => {
     await adapter.history("b");
     await adapter.history("a");
     expect(reads).toBe(3);
+  });
+
+  test("configuration recovery uses the complete provider source rather than the visible page", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const user = { info: { id: "user", role: "user", variant: "high" }, parts: [] };
+    const assistant = { info: { id: "assistant", role: "assistant" }, parts: [] };
+    provider.pages.set("first", { items: [assistant], configurationItems: [user, assistant] });
+    provider.getConversationConfiguration = async (_id, messages) => {
+      expect(messages).toEqual([user, assistant]);
+      return { model: { providerId: "openai", modelId: "gpt" }, mode: "build", variant: "high" };
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd() });
+
+    expect((await adapter.history("session", { limit: 1 })).configuration.variant).toBe("high");
   });
 
   test("a cold configuration read cannot overwrite a newer provider event", async () => {

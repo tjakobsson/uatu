@@ -23,6 +23,9 @@ export type ProviderSession = {
 export type ProviderPage<T> = {
   items: T[];
   nextCursor?: string;
+  // Providers that already loaded the complete backing collection can expose
+  // it for configuration recovery without making the visible page unbounded.
+  configurationItems?: T[];
 };
 
 export type ProviderMessage = Record<string, unknown>;
@@ -59,7 +62,7 @@ export interface OpenCodeProvider {
   newConversationConfiguration(): Promise<ConversationConfiguration>;
   createSession(id: string, configuration?: ConversationConfiguration): Promise<ProviderSession>;
   getSession(id: string): Promise<ProviderSession | null>;
-  getConversationConfiguration(sessionId: string, messages?: ProviderMessage[]): Promise<ConversationConfiguration>;
+  getConversationConfiguration(sessionId: string, completeMessages?: ProviderMessage[]): Promise<ConversationConfiguration>;
   listMessages(sessionId: string, options: { cursor?: string; limit: number }): Promise<ProviderPage<ProviderMessage>>;
   events(signal: AbortSignal): AsyncIterable<ProviderEvent>;
   prompt(sessionId: string, input: { id: string; text: string; delivery: "steer" | "queue"; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;

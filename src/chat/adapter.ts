@@ -258,11 +258,9 @@ export class OpenCodeChatAdapter {
     const replayCursor = this.projection(id).replay.latestCursor();
     const cursor = options.cursor ? decodeHistoryCursor(options.cursor) : undefined;
     const page = await this.provider.listMessages(id, { cursor: cursor?.provider, limit: options.limit ?? DEFAULT_PAGE_SIZE });
-    // The initial page contains the newest persisted records already read by
-    // the provider. Reuse them for configuration recovery instead of sweeping
-    // the complete transcript a second time. Older-page requests normally hit
-    // the warm cache; on a cold cache they fall back to the provider sweep.
-    const configuration = await this.configuration(id, cursor ? undefined : page.items);
+    // Some providers page locally after loading the complete transcript. Reuse
+    // that complete source for recovery, never the bounded visible page.
+    const configuration = await this.configuration(id, page.configurationItems);
     const items = page.items.flatMap(message => normalizeProviderMessage(message));
     // Stable sort with no id tiebreaker: parts of one message share the
     // message's timestamp, so ties must fall back to the provider's own part
