@@ -4,6 +4,7 @@ import type { WorkspaceChatService } from "../../src/chat/service";
 import { ConversationNotFoundError } from "../../src/chat/workspace";
 import type {
   ChatCapability,
+  ChatModel,
   ChatEvent,
   ChatAvailability,
   ConversationConfiguration,
@@ -56,6 +57,14 @@ export class FakeE2EChatService implements WorkspaceChatService {
   // a single real agent can never reach on its own.
   private static readonly DEFAULT_CAPABILITIES: ChatCapability[] = ["modes", "models", "commands", "questions", "permissions", "subagents", "variants", "context", "conversation-rename"];
   private capabilities: ChatCapability[] = [...FakeE2EChatService.DEFAULT_CAPABILITIES];
+  private modelInventory: ChatModel[] = FakeE2EChatService.defaultModels();
+
+  private static defaultModels(): ChatModel[] {
+    return [
+      { selection: { providerId: "anthropic", modelId: "claude-sonnet" }, provider: "Anthropic", name: "Claude Sonnet", variants: ["high", "xhigh"], contextLimit: 200000 },
+      { selection: { providerId: "openai", modelId: "gpt-5" }, provider: "OpenAI", name: "GPT-5", contextLimit: 100000 },
+    ];
+  }
 
   async status(): Promise<ChatAvailability> {
     this.statusCalls += 1;
@@ -68,6 +77,10 @@ export class FakeE2EChatService implements WorkspaceChatService {
 
   declareOnly(capabilities: ChatCapability[]): void {
     this.capabilities = capabilities;
+  }
+
+  setModels(models: ChatModel[]): void {
+    this.modelInventory = structuredClone(models);
   }
 
   configureNextConversation(configuration: ConversationConfiguration): void {
@@ -108,10 +121,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
   }
 
   async models() {
-    return [
-      { selection: { providerId: "anthropic", modelId: "claude-sonnet" }, provider: "Anthropic", name: "Claude Sonnet", variants: ["high", "xhigh"], contextLimit: 200000 },
-      { selection: { providerId: "openai", modelId: "gpt-5" }, provider: "OpenAI", name: "GPT-5", contextLimit: 100000 },
-    ];
+    return structuredClone(this.modelInventory);
   }
 
   async modes() {
@@ -305,6 +315,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     // A narrowed agent is one test's setup, not the fixture's resting state:
     // left in place it reaches whichever test boots against this worker next.
     this.capabilities = [...FakeE2EChatService.DEFAULT_CAPABILITIES];
+    this.modelInventory = FakeE2EChatService.defaultModels();
   }
 
   seed(title: string, items: ConversationItem[], older: ConversationItem[] = [], child = false, configuration: ConversationConfiguration = {}): ConversationSnapshot {
@@ -338,8 +349,8 @@ export class FakeE2EChatService implements WorkspaceChatService {
     return this.replay.get(id)!.publish({ type: "item.text_delta", itemId, delta });
   }
 
-  publishStatus(id: string, status: ConversationSummary["status"]): void {
-    this.setStatus(id, status);
+  publishStatus(id: string, status: ConversationSummary["status"], message?: string): void {
+    this.setStatus(id, status, message);
   }
 
   publishConfiguration(id: string, configuration: ConversationConfiguration): ChatEvent {
@@ -382,9 +393,9 @@ export class FakeE2EChatService implements WorkspaceChatService {
     };
   }
 
-  private setStatus(id: string, status: ConversationSummary["status"]): void {
+  private setStatus(id: string, status: ConversationSummary["status"], message?: string): void {
     const conversation = this.require(id);
     this.conversations.set(id, { ...conversation, status, updatedAt: this.nextId });
-    this.replay.get(id)!.publish({ type: "conversation.status", status });
+    this.replay.get(id)!.publish({ type: "conversation.status", status, ...(message ? { message } : {}) });
   }
 }

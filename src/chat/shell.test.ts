@@ -43,8 +43,14 @@ describe("chat shell accessibility", () => {
   test("labels the timeline, composer, chooser, status, and request controls", () => {
     expect(document.querySelector("#chat-timeline")?.getAttribute("role")).toBe("log");
     expect(document.querySelector('label[for="chat-input"]')).not.toBeNull();
-    expect(document.querySelector("#chat-composer-status")?.getAttribute("aria-live")).toBe("polite");
-    expect(document.querySelector("#chat-model-select")?.getAttribute("aria-label")).toBe("Chat model");
+    expect(document.querySelector("#chat-composer-status")?.getAttribute("role")).toBe("img");
+    expect(document.querySelector("#chat-composer-status")?.getAttribute("aria-label")).toBe("Ready");
+    expect(document.querySelector("#chat-composer-status-live")?.getAttribute("aria-live")).toBe("polite");
+    expect(document.querySelector("#chat-composer-error")).not.toBeNull();
+    expect(document.querySelector("#chat-configuration-trigger")?.getAttribute("aria-haspopup")).toBe("dialog");
+    expect(document.querySelector("#chat-configuration-trigger")?.getAttribute("aria-controls")).toBe("chat-configuration-dialog");
+    expect(document.querySelectorAll("#chat-model-select, #chat-mode-select, #chat-variant-select")).toHaveLength(0);
+    expect(document.querySelector("#chat-configuration-dialog")?.getAttribute("aria-labelledby")).toBe("chat-configuration-title");
     expect(document.querySelector("#chat-conversation-select")?.getAttribute("aria-label")).toBe("Conversation");
     expect(document.querySelector("#chat-rename-conversation")?.getAttribute("aria-label")).toBe("Rename conversation");
     expect(document.querySelector("#chat-new-conversation")?.textContent).toBe("New conversation");

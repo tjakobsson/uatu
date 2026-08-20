@@ -1,7 +1,7 @@
 import type { APIRequestContext, Page } from "@playwright/test";
 
 import type { ConversationItem } from "../../src/chat/types";
-import { openChatPanel } from "./chat-helpers";
+import { chooseChatModel, installClipboardMock, openChatConfiguration, openChatPanel, readClipboardMock } from "./chat-helpers";
 import { expect, test } from "./fixtures";
 
 async function bootChat(page: Page, request: APIRequestContext): Promise<void> {
@@ -26,21 +26,21 @@ test.describe("desktop OpenCode chat", () => {
     await page.getByRole("button", { name: "New conversation" }).click();
     await expect(page.locator("#chat-conversation-select")).not.toHaveValue("");
     const firstId = await page.locator("#chat-conversation-select").inputValue();
-    const modelSelect = page.locator("#chat-model-select");
-    await expect(modelSelect.locator("option")).toHaveText(["Model: current unknown", "Anthropic: Claude Sonnet", "OpenAI: GPT-5"]);
-    await modelSelect.selectOption({ label: "OpenAI: GPT-5" });
+    const configurationTrigger = page.locator("#chat-configuration-trigger");
+    await chooseChatModel(page, "GPT-5");
+    await page.locator("#chat-configuration-done").click();
 
     const input = page.locator("#chat-input");
     await input.fill("Initial prompt");
     const firstResponse = page.waitForResponse(response => response.url().endsWith("/prompts"));
     await input.press("Enter");
-    await expect(modelSelect).toBeDisabled();
+    await expect(configurationTrigger).toBeDisabled();
     const response = await firstResponse;
     expect(response.request().postDataJSON()).toMatchObject({ model: { providerId: "openai", modelId: "gpt-5" } });
     expect(await response.json()).toMatchObject({ delivery: "queue", conversation: { title: "Initial prompt" } });
     await expect(page.locator("#chat-title")).toHaveText("Initial prompt");
     await expect(page.locator("#chat-conversation-select option:checked")).toHaveText("Initial prompt");
-    await expect(modelSelect).toBeEnabled();
+    await expect(configurationTrigger).toBeEnabled();
     await expect(page.locator("#chat-items")).toContainText("Initial prompt");
     // The fixed trailing action becomes cancel while the turn is live.
     await expect(page.locator("#chat-send")).toHaveAttribute("aria-label", "Cancel response");
@@ -63,15 +63,15 @@ test.describe("desktop OpenCode chat", () => {
     await expect(page.locator(".preview-shell")).toBeVisible();
     await openChatPanel(page);
     await expect(input).toHaveValue("draft retained across surfaces");
-    await expect(modelSelect.locator("option:checked")).toHaveText("OpenAI: GPT-5");
+    await expect(configurationTrigger).toContainText("GPT-5");
 
     await page.locator("#chat-send").click();
-    await expect(page.locator("#chat-composer-status")).toHaveText("Cancelled");
+    await expect(page.locator("#chat-composer-status")).toHaveAttribute("aria-label", "Cancelled");
     await expect(page.locator("#chat-items")).toContainText("Initial prompt");
 
     await page.reload();
     await openChatPanel(page);
-    await expect(modelSelect.locator("option:checked")).toHaveText("OpenAI: GPT-5");
+    await expect(configurationTrigger).toContainText("GPT-5");
     await expect(page.locator("#chat-title")).toHaveText("Initial prompt");
 
     await page.getByRole("button", { name: "New conversation" }).click();
@@ -83,9 +83,11 @@ test.describe("desktop OpenCode chat", () => {
 
   test("switches the mode for a prompt and defaults to the agent's own", async ({ page }) => {
     await page.getByRole("button", { name: "New conversation" }).click();
-    const modeSelect = page.locator("#chat-mode-select");
-    await expect(modeSelect.locator("option")).toHaveText(["Mode: current unknown", "Mode: Build", "Mode: Plan"]);
+    await openChatConfiguration(page);
+    const modeSelect = page.locator("#chat-configuration-mode");
+    await expect(modeSelect.locator("option")).toHaveText(["Let Fixture Agent choose", "build", "plan"]);
     await expect(modeSelect).toHaveValue("");
+    await page.locator("#chat-configuration-done").click();
 
     const input = page.locator("#chat-input");
     await input.fill("stay on the default mode");
@@ -95,7 +97,9 @@ test.describe("desktop OpenCode chat", () => {
 
     // Stuck in a read-only mode is the whole point: choosing Build must
     // reach the provider with the next prompt.
-    await modeSelect.selectOption({ label: "Mode: Build" });
+    await openChatConfiguration(page);
+    await modeSelect.selectOption("build");
+    await page.locator("#chat-configuration-done").click();
     await input.fill("now write some code");
     const switched = page.waitForResponse(response => response.url().endsWith("/prompts"));
     await input.press("Enter");
@@ -118,18 +122,17 @@ test.describe("desktop OpenCode chat", () => {
   // with the prompt; a model without variants shows none.
   test("offers a model's reasoning variants and sends the chosen one", async ({ page, request }) => {
     await page.getByRole("button", { name: "New conversation" }).click();
-    const variantSelect = page.locator("#chat-variant-select");
-    const modelSelect = page.locator("#chat-model-select");
+    const variantSelect = page.locator("#chat-configuration-variant");
     // Unknown configuration selects no inventory default. Choosing Claude
     // explicitly reveals its high/xhigh variants; GPT-5 advertises none.
-    await expect(modelSelect).toHaveValue("");
-    await modelSelect.selectOption({ label: "Anthropic: Claude Sonnet" });
+    await chooseChatModel(page, "Claude Sonnet");
     await expect(variantSelect).toBeVisible();
-    await expect(variantSelect.locator("option")).toHaveText(["Reasoning: current unknown", "Reasoning: high", "Reasoning: xhigh"]);
-    await modelSelect.selectOption({ label: "OpenAI: GPT-5" });
+    await expect(variantSelect.locator("option")).toHaveText(["Let Fixture Agent choose reasoning", "high", "xhigh"]);
+    await page.locator(".chat-configuration-model", { hasText: "GPT-5" }).click();
     await expect(variantSelect).toBeHidden();
-    await modelSelect.selectOption({ label: "Anthropic: Claude Sonnet" });
-    await variantSelect.selectOption({ label: "Reasoning: xhigh" });
+    await page.locator(".chat-configuration-model", { hasText: "Claude Sonnet" }).click();
+    await variantSelect.selectOption("xhigh");
+    await page.locator("#chat-configuration-done").click();
 
     const input = page.locator("#chat-input");
     await input.fill("think hard about this");
@@ -147,8 +150,9 @@ test.describe("desktop OpenCode chat", () => {
     await openChatPanel(page);
     await expect(page.locator("#chat-state")).not.toContainText("Loading chat");
     await page.getByRole("button", { name: "New conversation" }).click();
-    await expect(page.locator("#chat-model-select")).toBeVisible();
-    await expect(page.locator("#chat-mode-select")).toHaveCount(0);
+    await openChatConfiguration(page);
+    await expect(page.locator("#chat-configuration-models-section")).toBeVisible();
+    await expect(page.locator("#chat-configuration-mode-section")).toBeHidden();
   });
 
   test("completes slash commands at the caret without sending prematurely", async ({ page }) => {
@@ -176,28 +180,40 @@ test.describe("desktop OpenCode chat", () => {
     const firstId = await page.locator("#chat-conversation-select").inputValue();
     await page.locator("#chat-input").fill("Keep timing this turn");
     await page.locator("#chat-input").press("Enter");
-    await expect(page.locator("#chat-composer-status")).toContainText("Working");
+    await expect(page.locator("#chat-composer-status")).toHaveAttribute("aria-label", "Working");
     await page.waitForTimeout(1_100);
-    const before = elapsedSeconds(await page.locator("#chat-composer-status").textContent());
+    const before = elapsedSeconds(await page.locator("#chat-composer-status").getAttribute("title"));
     expect(before).toBeGreaterThanOrEqual(1);
 
     await page.getByRole("button", { name: "New conversation" }).click();
     await expect(page.locator("#chat-conversation-select")).not.toHaveValue(firstId);
     await page.locator("#chat-conversation-select").selectOption(firstId);
-    await expect(page.locator("#chat-composer-status")).toContainText("Working");
-    expect(elapsedSeconds(await page.locator("#chat-composer-status").textContent())).toBeGreaterThanOrEqual(before);
+    await expect(page.locator("#chat-composer-status")).toHaveAttribute("aria-label", "Working");
+    expect(elapsedSeconds(await page.locator("#chat-composer-status").getAttribute("title"))).toBeGreaterThanOrEqual(before);
   });
 
-  test("streams Markdown and updates one tool entry in place", async ({ page, request }) => {
+  test("streams Markdown, exposes scoped copy on completion, and updates one tool entry in place", async ({ page, request }) => {
     const seeded = await control(request, { action: "seed", title: "Streaming", items: [] }) as { conversation: { id: string } };
     await page.reload();
     await openChatPanel(page);
     const id = seeded.conversation.id;
+    await control(request, { action: "status", conversationId: id, status: "running" });
     const assistant: ConversationItem = { id: "part:answer", type: "assistant_message", createdAt: 10, markdown: "## Result\n\n" };
     await control(request, { action: "item", conversationId: id, item: assistant });
     await control(request, { action: "delta", conversationId: id, itemId: assistant.id, delta: "**streamed** safely" });
     await expect(page.locator("#chat-items h2")).toHaveText("Result");
     await expect(page.locator("#chat-items strong")).toHaveText("streamed");
+    const assistantNode = page.locator('[data-chat-item-id="part:answer"]');
+    await expect(assistantNode.locator("[data-chat-copy='answer']")).toHaveCount(0);
+    await control(request, { action: "item", conversationId: id, item: { ...assistant, markdown: "## Result\n\n**streamed** safely\n\n```ts\nconst value = 1;\n```" } });
+    await control(request, { action: "status", conversationId: id, status: "completed" });
+    await expect(assistantNode.locator("[data-chat-copy='answer']")).toHaveCount(1);
+    await expect(assistantNode.locator("[data-chat-copy='code']")).toHaveCount(1);
+    await installClipboardMock(page);
+    await assistantNode.locator("[data-chat-copy='code']").click();
+    expect(await readClipboardMock(page)).toBe("const value = 1;\n");
+    await assistantNode.locator("[data-chat-copy='answer']").click();
+    expect(await readClipboardMock(page)).toBe("## Result\n\n**streamed** safely\n\n```ts\nconst value = 1;\n```");
 
     const running: ConversationItem = { id: "tool:read", type: "tool", createdAt: 11, name: "Read", status: "running", input: "README.md" };
     await control(request, { action: "item", conversationId: id, item: running });
@@ -350,7 +366,7 @@ test.describe("desktop OpenCode chat", () => {
     await control(request, { action: "failPrompt" });
     await page.locator("#chat-input").fill("retry me");
     await page.locator("#chat-send").click();
-    await expect(page.locator("#chat-composer-status")).toHaveText("Message not accepted; draft restored");
+    await expect(page.locator("#chat-composer-error")).toContainText("Draft restored");
     await expect(page.locator("#chat-input")).toHaveValue("retry me");
 
     await page.locator("#chat-send").click();
@@ -371,7 +387,7 @@ test.describe("desktop OpenCode chat", () => {
     await control(request, { action: "failPrompt" });
     await page.locator("#chat-input").fill("cross retry");
     await page.locator("#chat-send").click();
-    await expect(page.locator("#chat-composer-status")).toHaveText("Message not accepted; draft restored");
+    await expect(page.locator("#chat-composer-error")).toContainText("Draft restored");
 
     await page.locator("#chat-conversation-select").selectOption(second.conversation.id);
     await page.locator("#chat-input").fill("unrelated message");
@@ -403,7 +419,7 @@ test.describe("desktop OpenCode chat", () => {
     // Switch away inside the fixture's 500ms in-flight window, before the
     // rejection lands.
     await page.locator("#chat-conversation-select").selectOption(second.conversation.id);
-    await expect(page.locator("#chat-composer-status")).toHaveText("Message not accepted; draft restored");
+    await expect(page.locator("#chat-composer-error")).toContainText("Draft restored");
 
     await page.locator("#chat-conversation-select").selectOption(first.conversation.id);
     await expect(page.locator("#chat-input")).toHaveValue("doomed message");

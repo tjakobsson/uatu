@@ -1,7 +1,7 @@
 import type { APIRequestContext, Browser, BrowserContext, Page } from "@playwright/test";
 
-import type { ConversationConfiguration } from "../../src/chat/types";
-import { openChatPanel } from "./chat-helpers";
+import type { ChatModel, ConversationConfiguration } from "../../src/chat/types";
+import { chooseChatModel, openChatConfiguration, openChatPanel } from "./chat-helpers";
 import { expect, test } from "./fixtures";
 
 async function control(request: APIRequestContext, body: Record<string, unknown>): Promise<any> {
@@ -38,19 +38,14 @@ test.describe("conversation configuration and rename", () => {
     const second = await secondClient(browser, credential);
     try {
       for (const client of [page, second.page]) {
-        await expect(client.locator("#chat-model-select")).toHaveValue(JSON.stringify(["openai", "gpt-5"]));
-        await expect(client.locator("#chat-mode-select")).toHaveValue("plan");
-        await expect(client.locator('#chat-model-select option[value=""]')).toBeDisabled();
-        await expect(client.locator('#chat-mode-select option[value=""]')).toBeDisabled();
+        await expect(client.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: GPT-5.*Mode: plan/);
       }
 
-      await page.locator("#chat-model-select").selectOption({ label: "Anthropic: Claude Sonnet" });
-      await page.locator("#chat-mode-select").selectOption("build");
-      await page.locator("#chat-variant-select").selectOption("xhigh");
-      await expect(page.locator('#chat-model-select option[value=""]')).toHaveText("Use current model");
-      await expect(page.locator('#chat-model-select option[value=""]')).toBeEnabled();
-      await expect(page.locator('#chat-mode-select option[value=""]')).toHaveText("Use current mode");
-      await expect(page.locator('#chat-mode-select option[value=""]')).toBeEnabled();
+      await chooseChatModel(page, "Claude Sonnet");
+      await page.locator("#chat-configuration-mode").selectOption("build");
+      await page.locator("#chat-configuration-variant").selectOption("xhigh");
+      await page.locator("#chat-configuration-done").click();
+      await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: Claude Sonnet.*Mode: build.*Reasoning: xhigh/);
       await page.locator("#chat-input").fill("share this configuration");
       const accepted = page.waitForResponse(response => response.url().endsWith("/prompts"));
       await page.locator("#chat-send").click();
@@ -58,14 +53,10 @@ test.describe("conversation configuration and rename", () => {
         model: { providerId: "anthropic", modelId: "claude-sonnet" }, mode: "build", variant: "xhigh",
       });
 
-      await expect(second.page.locator("#chat-model-select")).toHaveValue(JSON.stringify(["anthropic", "claude-sonnet"]));
-      await expect(second.page.locator("#chat-mode-select")).toHaveValue("build");
-      await expect(second.page.locator("#chat-variant-select")).toHaveValue("xhigh");
+      await expect(second.page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: Claude Sonnet.*Mode: build.*Reasoning: xhigh/);
 
       await page.getByRole("button", { name: "New conversation", exact: true }).click();
-      await expect(page.locator("#chat-model-select")).toHaveValue(JSON.stringify(["anthropic", "claude-sonnet"]));
-      await expect(page.locator("#chat-mode-select")).toHaveValue("build");
-      await expect(page.locator("#chat-variant-select")).toHaveValue("xhigh");
+      await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: Claude Sonnet.*Mode: build.*Reasoning: xhigh/);
     } finally {
       await second.context.close();
     }
@@ -86,9 +77,7 @@ test.describe("conversation configuration and rename", () => {
     ));
     await page.reload();
     await openChatPanel(page);
-    await expect(page.locator("#chat-model-select")).toHaveValue("");
-    await expect(page.locator("#chat-model-select option:checked")).toHaveText("Model: current unknown");
-    await expect(page.locator("#chat-mode-select")).toHaveValue("");
+    await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: chosen by Fixture Agent.*Mode: chosen by Fixture Agent/);
 
     await page.locator("#chat-input").fill("do not invent defaults");
     const sent = page.waitForResponse(response => response.url().endsWith("/prompts"));
@@ -102,9 +91,9 @@ test.describe("conversation configuration and rename", () => {
       action: "configuration", conversationId: seeded.conversation.id,
       configuration: { model: { providerId: "retired", modelId: "old-model" }, mode: "audit", variant: "deep" },
     });
-    await expect(page.locator("#chat-model-select option:checked")).toHaveText("Current model (unavailable): retired/old-model");
-    await expect(page.locator("#chat-mode-select option:checked")).toHaveText("Mode: Audit (current, unavailable)");
-    await expect(page.locator("#chat-variant-select option:checked")).toHaveText("Reasoning: deep (current, unavailable)");
+    await openChatConfiguration(page);
+    await expect(page.locator(".chat-configuration-model:disabled")).toContainText("retired/old-model");
+    await expect(page.locator("#chat-configuration-mode option:checked")).toHaveText("audit (current, unavailable)");
     await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide")));
     const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("uatu:presentation:v1:%2F:uatu:chat-presentation") ?? "{}"));
     expect(stored).not.toHaveProperty("models");
@@ -121,17 +110,16 @@ test.describe("conversation configuration and rename", () => {
       configuration: { model: { providerId: "anthropic", modelId: "claude-sonnet" }, mode: "build", variant: "xhigh" },
     });
     await boot(page, await token(request));
-    await expect(page.locator("#chat-variant-select")).toHaveValue("xhigh");
+    await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Reasoning: xhigh/);
 
     await control(request, {
       action: "nextConversationConfiguration",
       configuration: { model: { providerId: "anthropic", modelId: "claude-sonnet" }, mode: "build" },
     });
     await page.getByRole("button", { name: "New conversation", exact: true }).click();
-    await expect(page.locator("#chat-model-select option:checked")).toHaveText("Anthropic: Claude Sonnet");
-    await expect(page.locator("#chat-mode-select")).toHaveValue("build");
-    await expect(page.locator("#chat-variant-select option:checked")).toHaveText("Reasoning: current unknown");
-    await expect(page.locator("#chat-variant-select option").filter({ hasText: "current, unavailable" })).toHaveCount(0);
+    await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: Claude Sonnet.*Mode: build.*Reasoning: chosen by Fixture Agent/);
+    await openChatConfiguration(page);
+    await expect(page.locator("#chat-configuration-variant option").filter({ hasText: "current, unavailable" })).toHaveCount(0);
   });
 
   test("keeps staged choices during a remote update and recovers configuration after restart", async ({ page, request }) => {
@@ -141,27 +129,26 @@ test.describe("conversation configuration and rename", () => {
       configuration: { model: { providerId: "openai", modelId: "gpt-5" }, mode: "plan" },
     }) as { conversation: { id: string } };
     await boot(page, await token(request));
-    await page.locator("#chat-model-select").selectOption({ label: "Anthropic: Claude Sonnet" });
-    await page.locator("#chat-mode-select").selectOption("build");
-    await page.locator("#chat-variant-select").selectOption("high");
+    await chooseChatModel(page, "Claude Sonnet");
+    await page.locator("#chat-configuration-mode").selectOption("build");
+    await page.locator("#chat-configuration-variant").selectOption("high");
 
     // Choosing the non-claiming options discards local overrides and returns
     // the controls to the effective conversation state.
-    await page.locator("#chat-mode-select").selectOption("");
-    await expect(page.locator("#chat-mode-select")).toHaveValue("plan");
-    await page.locator("#chat-model-select").selectOption("");
-    await expect(page.locator("#chat-model-select")).toHaveValue(JSON.stringify(["openai", "gpt-5"]));
-    await page.locator("#chat-model-select").selectOption({ label: "Anthropic: Claude Sonnet" });
-    await page.locator("#chat-mode-select").selectOption("build");
-    await page.locator("#chat-variant-select").selectOption("high");
+    await page.locator("#chat-configuration-mode").selectOption("plan");
+    await expect(page.locator("#chat-configuration-mode")).toHaveValue("plan");
+    await page.locator(".chat-configuration-model", { hasText: "GPT-5" }).click();
+    await expect(page.locator(".chat-configuration-model[aria-pressed='true']")).toContainText("GPT-5");
+    await page.locator(".chat-configuration-model", { hasText: "Claude Sonnet" }).click();
+    await page.locator("#chat-configuration-mode").selectOption("build");
+    await page.locator("#chat-configuration-variant").selectOption("high");
+    await page.locator("#chat-configuration-done").click();
 
     await control(request, {
       action: "configuration", conversationId: seeded.conversation.id,
       configuration: { model: { providerId: "openai", modelId: "gpt-5" }, mode: "plan" },
     });
-    await expect(page.locator("#chat-model-select")).toHaveValue(JSON.stringify(["anthropic", "claude-sonnet"]));
-    await expect(page.locator("#chat-mode-select")).toHaveValue("build");
-    await expect(page.locator("#chat-variant-select")).toHaveValue("high");
+    await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: Claude Sonnet.*Mode: build.*Reasoning: high/);
 
     await page.locator("#chat-input").fill("accept staged choices");
     await page.locator("#chat-send").click();
@@ -169,9 +156,54 @@ test.describe("conversation configuration and rename", () => {
     await control(request, { action: "restart" });
     await page.reload();
     await openChatPanel(page);
-    await expect(page.locator("#chat-model-select")).toHaveValue(JSON.stringify(["anthropic", "claude-sonnet"]));
-    await expect(page.locator("#chat-mode-select")).toHaveValue("build");
-    await expect(page.locator("#chat-variant-select")).toHaveValue("high");
+    await expect(page.locator("#chat-configuration-trigger")).toHaveAttribute("aria-label", /Model: Claude Sonnet.*Mode: build.*Reasoning: high/);
+  });
+
+  test("filters a large grouped inventory across every identity field with keyboard selection", async ({ page, request }) => {
+    await request.post("/__e2e/reset");
+    const inventory: ChatModel[] = Array.from({ length: 120 }, (_, index) => ({
+      selection: { providerId: `provider-${index % 12}`, modelId: `model-${index}` },
+      provider: `Provider ${index % 12}`,
+      name: `Model ${index}`,
+    }));
+    inventory.push(
+      { selection: { providerId: "human-provider", modelId: "plain-id" }, provider: "Plain Provider", name: "Nebula Human Name" },
+      { selection: { providerId: "provider-name-id", modelId: "plain-model" }, provider: "Acme Labs", name: "Plain Human" },
+      { selection: { providerId: "unique-provider-id", modelId: "another-model" }, provider: "Ordinary Provider", name: "Ordinary Human" },
+      { selection: { providerId: "last-provider", modelId: "unique-model-id" }, provider: "Last Provider", name: "Last Human" },
+    );
+    await control(request, { action: "models", models: inventory });
+    await control(request, { action: "seed", title: "Large inventory", items: [], configuration: {} });
+    await boot(page, await token(request));
+    await openChatConfiguration(page);
+    await expect(page.locator("#chat-configuration-result-status")).toHaveText("124 models");
+
+    const search = page.locator("#chat-configuration-search");
+    for (const [query, result] of [
+      ["NEBULA HUMAN", "Nebula Human Name"],
+      ["acme LABS", "Plain Human"],
+      ["UNIQUE-PROVIDER-ID", "Ordinary Human"],
+      ["UNIQUE-MODEL-ID", "Last Human"],
+    ] as const) {
+      await search.fill(query);
+      await expect(page.locator("#chat-configuration-result-status")).toHaveText("1 model");
+      await expect(page.locator(".chat-configuration-provider")).toHaveCount(1);
+      await expect(page.locator(".chat-configuration-model-name")).toHaveText(result);
+    }
+
+    await search.fill("no matching identity");
+    await expect(page.locator("#chat-configuration-result-status")).toHaveText("0 models");
+    await expect(page.locator(".chat-configuration-provider")).toHaveCount(0);
+    await expect(page.locator("#chat-configuration-empty")).toHaveText("No models match your search.");
+
+    await search.fill("UNIQUE-MODEL-ID");
+    await search.press("ArrowDown");
+    await expect(page.locator(".chat-configuration-model")).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.locator(".chat-configuration-model[aria-pressed='true']")).toContainText("Last Human");
+    await page.locator("#chat-configuration-done").click();
+    await expect(page.locator("#chat-configuration-trigger")).toContainText("Last Human");
+    await expect(page.locator("#chat-configuration-trigger")).toBeFocused();
   });
 
   test("propagates and persists rename, hides unsupported rename, and names creation exactly", async ({ page, request, browser }) => {

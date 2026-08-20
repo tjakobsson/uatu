@@ -6,7 +6,7 @@
 
 import type { APIRequestContext, Page } from "@playwright/test";
 
-import { openChatPanel } from "./chat-helpers";
+import { openChatConfiguration, openChatPanel } from "./chat-helpers";
 import { expect, test } from "./fixtures";
 
 const FIND = "ControlOrMeta+f";
@@ -112,5 +112,69 @@ test.describe("desktop chat panel layout", () => {
     expect(rightBoxes.terminal.right).toBeGreaterThanOrEqual(rightBoxes.width - 1);
     expect(rightBoxes.chat.left).toBeGreaterThanOrEqual(rightBoxes.preview.right);
     expect(rightBoxes.terminal.left).toBeGreaterThanOrEqual(rightBoxes.chat.right);
+  });
+
+  test("the composer rail keeps trailing geometry across widths and routine states", async ({ page, request }) => {
+    await request.post("/__e2e/chat", { data: { action: "seed", title: "Rail geometry", items: [] } });
+    await page.reload();
+    await openChatPanel(page);
+    await expect(page.locator("#chat-configuration-trigger")).toBeEnabled();
+    const conversationId = await page.locator("#chat-conversation-select").inputValue();
+    const measure = () => page.evaluate(() => {
+      const rect = (selector: string) => {
+        const value = document.querySelector(selector)!.getBoundingClientRect();
+        return { top: value.top, left: value.left, right: value.right, width: value.width, height: value.height };
+      };
+      return { rail: rect(".chat-composer-actions"), trigger: rect("#chat-configuration-trigger"), status: rect("#chat-composer-status"), send: rect("#chat-send") };
+    });
+
+    for (const fraction of [0.28, 0.42, 0.6]) {
+      await page.evaluate(value => document.documentElement.style.setProperty("--chat-fraction", String(value)), fraction);
+      await page.waitForTimeout(350);
+      const ready = await measure();
+      expect(ready.trigger.top + ready.trigger.height / 2).toBeCloseTo(ready.status.top + ready.status.height / 2, 0);
+      expect(ready.status.top + ready.status.height / 2).toBeCloseTo(ready.send.top + ready.send.height / 2, 0);
+      expect(ready.send.right).toBeLessThanOrEqual(ready.rail.right + 1);
+      for (const status of ["sending", "running", "failed", "idle"] as const) {
+        await request.post("/__e2e/chat", { data: { action: "status", conversationId, status, ...(status === "failed" ? { message: "fixture failure" } : {}) } });
+        await expect(page.locator("#chat-composer-status")).toHaveAttribute("aria-label", status === "running" ? "Working" : status === "idle" ? "Ready" : status[0]!.toUpperCase() + status.slice(1));
+        const current = await measure();
+        expect(current.status.width).toBeCloseTo(ready.status.width, 1);
+        expect(current.status.left).toBeCloseTo(ready.status.left, 1);
+        expect(current.send.left).toBeCloseTo(ready.send.left, 1);
+      }
+    }
+    const withoutContext = await measure();
+    await request.post("/__e2e/chat", { data: {
+      action: "item", conversationId,
+      item: { id: "usage:rail", type: "assistant_message", createdAt: 1, markdown: "", usage: { input: 50_000 }, model: { providerId: "anthropic", modelId: "claude-sonnet" } },
+    } });
+    await expect(page.locator("#chat-context-usage")).toBeVisible();
+    const withContext = await measure();
+    expect(withContext.rail.right - withContext.status.right).toBeCloseTo(withoutContext.rail.right - withoutContext.status.right, 1);
+    expect(withContext.rail.right - withContext.send.right).toBeCloseTo(withoutContext.rail.right - withoutContext.send.right, 1);
+    expect(withContext.send.left - withContext.status.right).toBeCloseTo(withoutContext.send.left - withoutContext.status.right, 1);
+    await expect(page.locator("#chat-composer-error")).toContainText("fixture failure");
+  });
+
+  test("the desktop configuration dialog stays within Chat and restores trigger focus", async ({ page, request }) => {
+    await request.post("/__e2e/chat", { data: { action: "seed", title: "Picker geometry", items: [] } });
+    await page.reload();
+    await openChatPanel(page);
+    await openChatConfiguration(page);
+    await expect(page.locator("#chat-configuration-search")).toBeFocused();
+    await expect(page.locator("#chat-configuration-dialog")).toHaveAttribute("data-presentation", "desktop");
+    const bounds = await page.evaluate(() => {
+      const surface = document.querySelector("#chat-surface")!.getBoundingClientRect();
+      const dialog = document.querySelector("#chat-configuration-dialog")!.getBoundingClientRect();
+      return { surface: { left: surface.left, right: surface.right, top: surface.top, bottom: surface.bottom }, dialog: { left: dialog.left, right: dialog.right, top: dialog.top, bottom: dialog.bottom } };
+    });
+    expect(bounds.dialog.left).toBeGreaterThanOrEqual(bounds.surface.left);
+    expect(bounds.dialog.right).toBeLessThanOrEqual(bounds.surface.right);
+    expect(bounds.dialog.top).toBeGreaterThanOrEqual(bounds.surface.top);
+    expect(bounds.dialog.bottom).toBeLessThanOrEqual(bounds.surface.bottom);
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#chat-configuration-dialog")).toBeHidden();
+    await expect(page.locator("#chat-configuration-trigger")).toBeFocused();
   });
 });

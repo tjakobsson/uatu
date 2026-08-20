@@ -2,6 +2,7 @@ import { expect, test } from "./fixtures";
 
 import { treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";
+import { installClipboardMock, readClipboardMock } from "./chat-helpers";
 
 test.beforeEach(async ({ page, request }) => {
   await standardBeforeEach(page, request);
@@ -260,8 +261,8 @@ test("action bar is gated to Rendered view", async ({ page }) => {
   await expect(page.locator("#copy-source-action")).toBeVisible();
 });
 
-test("copy-source copies the raw document text to the clipboard", async ({ page, context }) => {
-  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+test("copy-source copies the raw document text to the clipboard", async ({ page }) => {
+  await installClipboardMock(page);
   await treeRow(page, "asciidoc-cheatsheet.adoc").click();
   // Wait for the document SWITCH, not just the button: #copy-source-action
   // is already visible for the initially-loaded README, and copying before
@@ -272,7 +273,7 @@ test("copy-source copies the raw document text to the clipboard", async ({ page,
   await page.locator("#copy-source-action").click();
   await expect(page.locator("#copy-source-action")).toHaveClass(/is-copied/);
 
-  const clipboard = await page.evaluate(() => navigator.clipboard.readText());
+  const clipboard = await readClipboardMock(page);
   expect(clipboard).toContain("= AsciiDoc Cheat Sheet");
   expect(clipboard).toContain(":toc:");
 });

@@ -2,6 +2,7 @@ import { expect, test } from "./fixtures";
 
 import { treeRow } from "./tree-helpers";
 import { standardBeforeEach } from "./fixtures";
+import { installClipboardMock, readClipboardMock } from "./chat-helpers";
 
 test.beforeEach(async ({ page, request }) => {
   await standardBeforeEach(page, request);
@@ -11,12 +12,12 @@ test.afterEach(async ({ request }) => {
   await request.post("/__e2e/reset");
 });
 
-test("code blocks expose a copy-to-clipboard control", async ({ page, context, request }) => {
-  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+test("code blocks expose a copy-to-clipboard control", async ({ page, request }) => {
   await request.post("/__e2e/reset", {
     data: { extras: { "config.yaml": "key: value\nport: 4321\n" } },
   });
   await page.goto("/");
+  await installClipboardMock(page);
   await treeRow(page, "config.yaml").click();
 
   const copyButton = page.locator("#preview pre .code-copy");
@@ -25,7 +26,7 @@ test("code blocks expose a copy-to-clipboard control", async ({ page, context, r
   await copyButton.click();
   await expect(copyButton).toHaveText("Copied!");
 
-  const clipboard = await page.evaluate(() => navigator.clipboard.readText());
+  const clipboard = await readClipboardMock(page);
   expect(clipboard).toContain("key: value");
   expect(clipboard).toContain("port: 4321");
   // Critical: clipboard must NOT contain the line-number gutter contents.

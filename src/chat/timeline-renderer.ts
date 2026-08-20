@@ -67,7 +67,7 @@ export class TimelineRenderer {
     const visible = projection.items.filter(item => !(item.type === "assistant_message" && item.markdown === ""));
 
     const nodes = new Map<string, HTMLElement>();
-    for (const item of visible) {
+    for (const [visibleIndex, item] of visible.entries()) {
       const active = activeRequests.has(item.id);
       const todo = todoLabels.get(item.id);
       const isQueued = queued.has(item.id);
@@ -76,13 +76,15 @@ export class TimelineRenderer {
       // cached node is only reused when it would render identically.
       const foreign = (item.type === "permission" || item.type === "question")
         && item.conversationId !== undefined && item.conversationId !== projection.conversationId;
-      const variant = [todo?.label ?? "", todo?.task ?? "", String(isQueued), duration === undefined ? "" : String(duration), String(foreign), String(allowSubagents)].join("\u0001");
+      const completedAssistant = item.type === "assistant_message" && assistantMessageComplete(visible, visibleIndex, projection.status);
+      const variant = [todo?.label ?? "", todo?.task ?? "", String(isQueued), duration === undefined ? "" : String(duration), String(foreign), String(allowSubagents), String(completedAssistant)].join("\u0001");
       const entry = this.entries.get(item.id);
       if (entry && entry.item === item && entry.active === active && entry.variant === variant) {
         nodes.set(item.id, entry.node);
         continue;
       }
-      if (entry && entry.active === active && entry.variant === variant && patchInPlace(entry, item)) {
+      if (entry && entry.active === active && patchInPlace(entry, item, completedAssistant)) {
+        entry.variant = variant;
         nodes.set(item.id, entry.node);
         dirty.push(entry.node);
         continue;
@@ -115,7 +117,8 @@ export class TimelineRenderer {
       // auto-open rule for the rest of the run, so a tool that keeps talking
       // cannot reopen a row the reader shut.
       const readerClosed = entry?.node.hasAttribute(READER_CLOSED) ?? false;
-      const node = buildNode(renderItem(item, open, active, todo, isQueued, duration, foreign, readerClosed, allowSubagents));
+      const node = buildNode(renderItem(item, open, active, todo, isQueued, duration, foreign, readerClosed, allowSubagents, completedAssistant));
+      if (completedAssistant) decorateAssistantCopyActions(node);
       entry?.node.remove();
       this.entries.set(item.id, { node, item, active, variant });
       nodes.set(item.id, node);
@@ -372,11 +375,16 @@ function formatWorked(ms: number): string {
 }
 
 /** Streaming-friendly updates that avoid rebuilding the node. */
-function patchInPlace(entry: RenderedEntry, item: ConversationItem): boolean {
+function patchInPlace(entry: RenderedEntry, item: ConversationItem, completedAssistant = false): boolean {
   const current = entry.item;
   if (current.type !== item.type) return false;
   if (item.type === "assistant_message" && current.type === "assistant_message") {
-    if (current.markdown !== item.markdown) entry.node.innerHTML = renderChatMarkdown(item.markdown);
+    const content = entry.node.querySelector<HTMLElement>(".chat-assistant-content");
+    if (!content) return false;
+    if (current.markdown !== item.markdown) content.innerHTML = renderChatMarkdown(item.markdown);
+    entry.node.dataset.complete = String(completedAssistant);
+    if (completedAssistant) decorateAssistantCopyActions(entry.node);
+    else entry.node.querySelectorAll("[data-chat-copy]").forEach(control => control.remove());
     entry.item = item;
     return true;
   }
@@ -418,13 +426,13 @@ function renderDraft(draft: AcceptedDraft): string {
   return `<article class="chat-item chat-user-message is-pending" data-chat-item-id="draft-${escapeHtmlAttribute(draft.requestId)}"><p>${escapeHtml(draft.text)}</p><small>${label}</small></article>`;
 }
 
-export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, queued = false, durationMs?: number, foreign = false, readerClosed = false, allowSubagents = true): string {
+export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, queued = false, durationMs?: number, foreign = false, readerClosed = false, allowSubagents = true, completedAssistant = false): string {
   const id = escapeHtmlAttribute(item.id);
   const stamp = timestampAttribute(item.createdAt);
   // A message sent mid-turn is accepted but not yet acted on. Without a mark
   // it looks identical to one the agent has already read.
   if (item.type === "user_message") return `<article class="chat-item chat-user-message${queued ? " is-queued" : ""}" data-chat-item-id="${id}"${stamp}><div>${escapeHtml(item.text)}</div>${queued ? `<small class="chat-queued-tag">Queued — the agent is still working</small>` : ""}</article>`;
-  if (item.type === "assistant_message") return `<article class="chat-item chat-assistant-message markdown-body" data-chat-item-id="${id}"${stamp}>${renderChatMarkdown(item.markdown)}</article>`;
+  if (item.type === "assistant_message") return `<article class="chat-item chat-assistant-message" data-chat-item-id="${id}" data-complete="${completedAssistant}"${stamp}><div class="chat-assistant-content markdown-body">${renderChatMarkdown(item.markdown)}</div></article>`;
   if (item.type === "turn_status") {
     const worked = durationMs === undefined ? "" : formatWorked(durationMs);
     return `<footer class="chat-item chat-turn-status is-${item.status}" data-chat-item-id="${id}"${stamp} role="status">${escapeHtml(statusLabel(item.status))}${item.message ? `: ${escapeHtml(item.message)}` : ""}${worked ? ` <span class="chat-turn-worked">· worked ${worked}</span>` : ""}</footer>`;
@@ -445,6 +453,44 @@ export function renderItem(item: ConversationItem, open: boolean, activeRequest:
   // Reasoning has no streamed output to auto-open for; it opens only when the
   // reader says so.
   return activityShell(id, item.status, reasoningLabel(item), undefined, `<pre>${escapeHtml(item.text)}</pre>`, open, false, readerClosed, stamp);
+}
+
+function assistantMessageComplete(items: readonly ConversationItem[], index: number, status: ConversationStatus): boolean {
+  const item = items[index];
+  if (!item || item.type !== "assistant_message") return false;
+  if (item.completedAt !== undefined) return true;
+  if (items.slice(index + 1).some(candidate => candidate.type === "user_message" || candidate.type === "turn_status")) return true;
+  return status !== "sending" && status !== "running";
+}
+
+export function decorateAssistantCopyActions(container: HTMLElement): void {
+  const article = container.matches(".chat-assistant-message")
+    ? container
+    : container.querySelector<HTMLElement>(".chat-assistant-message");
+  if (!article || article.dataset.complete !== "true") return;
+  const content = article.querySelector<HTMLElement>(".chat-assistant-content");
+  if (!content) return;
+  if (!article.querySelector(":scope > [data-chat-copy='answer']")) {
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "chat-copy-action chat-answer-copy";
+    copy.dataset.chatCopy = "answer";
+    copy.setAttribute("aria-label", "Copy completed answer");
+    copy.title = "Copy completed answer";
+    copy.textContent = "C";
+    article.append(copy);
+  }
+  for (const pre of content.querySelectorAll<HTMLPreElement>("pre")) {
+    if (!pre.querySelector(":scope > code") || pre.querySelector(":scope > [data-chat-copy='code']")) continue;
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "chat-copy-action chat-code-copy";
+    copy.dataset.chatCopy = "code";
+    copy.setAttribute("aria-label", "Copy code block");
+    copy.title = "Copy code block";
+    copy.textContent = "C";
+    pre.append(copy);
+  }
 }
 
 // How much of a tool's output to show before it becomes a show-more (finished)

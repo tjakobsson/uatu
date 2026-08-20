@@ -16,6 +16,8 @@
 // once at boot.
 
 import { appUrl } from "../shared/app-url";
+import { writeClipboardText } from "../shared/clipboard";
+import type { ViewMode } from "../shared/types";
 import { contextualAppUrl } from "../shell/watch-context";
 import {
   previewScrollEventTarget,
@@ -24,8 +26,6 @@ import {
 } from "../shell/preview-scroll-root";
 import { coarsePointer, onUiModeChange } from "../shell/ui-mode";
 import { presentationLocalStorage } from "../shell/presentation-storage";
-import type { ViewMode } from "../shared/types";
-import { copyToClipboard } from "./code-block";
 import { copySourceButton, outlineToggleButton } from "./header";
 import { collectHeadings, type OutlineHeading } from "./outline-headings";
 import {
@@ -737,8 +737,8 @@ async function handleCopySource(): Promise<void> {
     const scratch = document.createElement("div");
     scratch.innerHTML = payload.html ?? "";
     const text = scratch.textContent ?? "";
-    await copyToClipboard(text);
-    flashActionIcon(copySourceButton, "is-copied");
+    const copied = await writeClipboardText(text);
+    flashActionIcon(copySourceButton, copied ? "is-copied" : "is-failed");
   } catch {
     flashActionIcon(copySourceButton, "is-failed");
   }

@@ -1,7 +1,7 @@
 import type { APIRequestContext, Page } from "@playwright/test";
 
 import type { ConversationConfiguration, ConversationItem } from "../../src/chat/types";
-import { openChatPanel } from "./chat-helpers";
+import { chooseChatModel, installClipboardMock, openChatConfiguration, openChatPanel, readClipboardMock } from "./chat-helpers";
 import { expect, test } from "./fixtures";
 
 async function bootChat(page: Page, request: APIRequestContext): Promise<void> {
@@ -150,6 +150,7 @@ test.describe("chat panels and navigation", () => {
       { id: "part:child", type: "assistant_message", createdAt: 1, markdown: "child findings" },
     ] }) as { conversation: { id: string } };
     const parent = await seedAndOpen(page, request, "Fan-out", [
+      { id: "part:parent", type: "assistant_message", createdAt: 1, markdown: "parent findings" },
       { id: "tool:agent1", type: "tool", createdAt: 2, name: "task", status: "completed", input: JSON.stringify({ description: "Review renderer", subagent_type: "explore", prompt: "go" }), childConversationId: child.conversation.id },
       { id: "tool:agent2", type: "tool", createdAt: 3, name: "task", status: "running", input: JSON.stringify({ description: "Audit styles", subagent_type: "general", prompt: "go" }) },
     ]);
@@ -157,6 +158,9 @@ test.describe("chat panels and navigation", () => {
     const track = page.locator("#chat-subagents");
     await expect(track).toBeVisible();
     await expect(track.locator("summary")).toContainText("1 of 2 subagents working · Audit styles");
+    await installClipboardMock(page);
+    await page.locator('[data-chat-item-id="part:parent"] [data-chat-copy="answer"]').click();
+    expect(await readClipboardMock(page)).toBe("parent findings");
 
     await track.locator("summary").click();
     await expect(track.locator("li")).toHaveCount(2);
@@ -168,6 +172,8 @@ test.describe("chat panels and navigation", () => {
     await expect(drilldown).toBeVisible();
     await expect(page.locator("#chat-drilldown-items")).toContainText("child findings");
     await expect(page.locator("#chat-drilldown-title")).toHaveText("explore · Review renderer");
+    await page.locator('#chat-drilldown-items [data-chat-item-id="part:child"] [data-chat-copy="answer"]').click();
+    expect(await readClipboardMock(page)).toBe("child findings");
     await expect(page.locator("#chat-conversation-select")).toHaveValue(parent);
     // The picker lists conversations you can start and resume; a subagent's
     // transcript is neither, so it is absent from it entirely.
@@ -373,7 +379,8 @@ test.describe("chat panels and navigation", () => {
 
     // Selecting a future model does not reinterpret model A's existing usage
     // against model B's smaller window.
-    await page.locator("#chat-model-select").selectOption({ label: "OpenAI: GPT-5" });
+    await chooseChatModel(page, "GPT-5");
+    await page.locator("#chat-configuration-done").click();
     await expect(label).toHaveText("50k/200k · 25%");
 
     // OpenCode announces the next assistant message with zeroed counters, then
@@ -397,7 +404,9 @@ test.describe("chat panels and navigation", () => {
     ]);
     // Absent, not empty — and what the agent does declare is unaffected.
     await expect(page.locator("#chat-context-usage")).toHaveCount(0);
-    await expect(page.locator("#chat-model-select")).toBeVisible();
+    await openChatConfiguration(page);
+    await expect(page.locator("#chat-configuration-models-section")).toBeVisible();
+    await page.locator("#chat-configuration-done").click();
     const track = page.locator("#chat-subagents");
     await track.locator("summary").click();
     await expect(track.locator("li")).toContainText("explore · Review renderer");

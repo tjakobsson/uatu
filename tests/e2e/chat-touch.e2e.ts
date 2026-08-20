@@ -1,7 +1,7 @@
 import type { APIRequestContext, Page } from "@playwright/test";
 
 import type { ConversationItem } from "../../src/chat/types";
-import { openChatPanel } from "./chat-helpers";
+import { chooseChatModel, installClipboardMock, openChatConfiguration, openChatPanel, readClipboardMock } from "./chat-helpers";
 import { expect, test } from "./fixtures";
 
 test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
@@ -91,9 +91,10 @@ test("questions wait for Answer and send a custom choice as text", async ({ page
 
 test("composer stays flush and its trailing action becomes cancel without adding a row", async ({ page, request }) => {
   const id = await boot(page, request);
-  await page.locator("#chat-model-select").selectOption({ label: "Anthropic: Claude Sonnet" });
-  await page.locator("#chat-mode-select").selectOption("build");
-  await page.locator("#chat-variant-select").selectOption("high");
+  await chooseChatModel(page, "Claude Sonnet");
+  await page.locator("#chat-configuration-mode").selectOption("build");
+  await page.locator("#chat-configuration-variant").selectOption("high");
+  await page.locator("#chat-configuration-done").click();
   await page.locator("#chat-input").fill("Idle first line");
   await page.locator("#chat-input").press("Enter");
   await expect(page.locator("#chat-input")).toHaveValue("Idle first line\n");
@@ -106,21 +107,23 @@ test("composer stays flush and its trailing action becomes cancel without adding
 
   const geometry = await page.locator(".chat-composer-actions").evaluate(actions => {
     const send = actions.querySelector<HTMLElement>("#chat-send")!.getBoundingClientRect();
-    const controls = actions.querySelector<HTMLElement>(".chat-composer-controls")!.getBoundingClientRect();
+    const trigger = actions.querySelector<HTMLElement>("#chat-configuration-trigger")!.getBoundingClientRect();
+    const status = actions.querySelector<HTMLElement>("#chat-composer-status")!.getBoundingClientRect();
     const bounds = actions.getBoundingClientRect();
     const composer = actions.closest(".chat-composer")!;
     const style = getComputedStyle(composer);
     return {
       sendTop: send.top,
       sendBottom: send.bottom,
-      controlsBottom: controls.bottom,
+      triggerBottom: trigger.bottom,
+      statusBottom: status.bottom,
       sendRight: send.right,
       boundsRight: bounds.right,
       margin: style.margin,
     };
   });
-  expect(Math.abs(geometry.sendBottom - geometry.controlsBottom)).toBeLessThanOrEqual(1);
-  expect(geometry.sendTop).toBeLessThan(geometry.controlsBottom);
+  expect(Math.abs(geometry.sendBottom - geometry.triggerBottom)).toBeLessThanOrEqual(3);
+  expect(Math.abs(geometry.statusBottom - geometry.triggerBottom)).toBeLessThanOrEqual(2);
   expect(geometry.sendRight).toBeLessThanOrEqual(geometry.boundsRight + 1);
   expect(geometry.margin).toBe("0px");
 
@@ -218,14 +221,28 @@ test("software-keyboard geometry keeps the composer in the visual viewport", asy
     Object.defineProperty(window, "visualViewport", { configurable: true, value: viewport });
   });
   await boot(page, request);
-  await page.locator("#chat-input").focus();
-  await expect(page.locator("html")).toHaveAttribute("data-chat-editing", "");
-  await expect(page.locator("#touch-tab-bar")).toBeHidden();
+  await openChatConfiguration(page);
+  await expect(page.locator("#chat-configuration-done")).toBeFocused();
+  await expect(page.locator("#chat-configuration-search")).not.toBeFocused();
+  await expect(page.locator("#chat-configuration-dialog")).toHaveAttribute("data-presentation", "touch");
+  await page.locator("#chat-configuration-search").focus();
   await page.evaluate(() => {
     const viewport = window.visualViewport as VisualViewport & { height: number };
     viewport.height = 460;
     viewport.dispatchEvent(new Event("resize"));
   });
+  const sheetGeometry = await page.evaluate(() => {
+    const dialog = document.querySelector("#chat-configuration-dialog")!.getBoundingClientRect();
+    return { top: dialog.top, bottom: dialog.bottom, visualHeight: window.visualViewport!.height };
+  });
+  expect(sheetGeometry.top).toBeGreaterThanOrEqual(0);
+  expect(sheetGeometry.bottom).toBeLessThanOrEqual(sheetGeometry.visualHeight + 1);
+  await page.locator("#chat-configuration-done").click();
+  await expect(page.locator("#chat-configuration-trigger")).toBeFocused();
+  await page.locator("#chat-input").focus();
+  await expect(page.locator("html")).toHaveAttribute("data-chat-editing", "");
+  await expect(page.locator("#touch-tab-bar")).toBeHidden();
+  await page.evaluate(() => window.visualViewport!.dispatchEvent(new Event("resize")));
   await expect(page.locator("#chat-surface")).toHaveCSS("--chat-visual-height", "460px");
   const geometry = await page.evaluate(() => {
     const composer = document.querySelector("#chat-composer")!.getBoundingClientRect();
@@ -303,6 +320,29 @@ test("a permission's long paths wrap instead of running off the screen", async (
     clientWidth: element.clientWidth,
   }));
   expect(timeline.scrollWidth).toBeLessThanOrEqual(timeline.clientWidth);
+});
+
+test("completed answer and code copy controls stay reachable without hover or reflow", async ({ page, request }) => {
+  await boot(page, request, { items: [{
+    id: "part:copy", type: "assistant_message", createdAt: 1,
+    markdown: "Touch answer\n\n```ts\nconst touch = true;\n```",
+  }] });
+  await installClipboardMock(page);
+  const message = page.locator('[data-chat-item-id="part:copy"]');
+  const answer = message.locator('[data-chat-copy="answer"]');
+  const code = message.locator('[data-chat-copy="code"]');
+  await expect(answer).toBeVisible();
+  await expect(code).toBeVisible();
+  await expect(answer).toHaveCSS("opacity", "1");
+  const before = await message.boundingBox();
+  await code.tap();
+  expect(await readClipboardMock(page)).toBe("const touch = true;\n");
+  await expect(code).toHaveAttribute("data-state", "copied");
+  const after = await message.boundingBox();
+  expect(after?.width).toBeCloseTo(before?.width ?? 0, 1);
+  expect(after?.height).toBeCloseTo(before?.height ?? 0, 1);
+  await answer.tap();
+  expect(await readClipboardMock(page)).toBe("Touch answer\n\n```ts\nconst touch = true;\n```");
 });
 
 test("rotation and live mode switching retain Chat without remounting", async ({ page, request }) => {

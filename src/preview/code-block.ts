@@ -1,8 +1,8 @@
 // Code-block adornments: line-number gutters and copy buttons for any
-// `<pre><code>` block inside the preview, plus the shared clipboard
-// primitives. Extracted from `app.ts` so the rendering-time DOM massaging
-// lives with the rest of the preview pipeline.
+// `<pre><code>` block inside the preview. Extracted from `app.ts` so the
+// rendering-time DOM massaging lives with the rest of the preview pipeline.
 
+import { writeClipboardText } from "../shared/clipboard";
 import { splitHighlightedLines } from "./highlight-lines";
 
 // Restructure each <pre><code> in the container into one `.uatu-cl` block per
@@ -99,10 +99,9 @@ export function attachCopyButtons(container: HTMLElement) {
     button.addEventListener("click", async event => {
       event.preventDefault();
       const text = code.textContent ?? "";
-      try {
-        await navigator.clipboard.writeText(text);
+      if (await writeClipboardText(text)) {
         flashCopyButton(button, "Copied!", "is-copied");
-      } catch {
+      } else {
         flashCopyButton(button, "Failed", "is-failed");
       }
     });
@@ -118,38 +117,4 @@ export function flashCopyButton(button: HTMLButtonElement, label: string, modifi
     button.textContent = "Copy";
     button.classList.remove(modifier);
   }, 1500);
-}
-
-export async function copyToClipboard(text: string): Promise<void> {
-  // Prefer the modern API (works on localhost which is a secure context).
-  // Fall back to a hidden-textarea + execCommand if the API is missing or
-  // throws — defensive against locked-down browsers, even though uatu's
-  // localhost target rarely hits that path.
-  try {
-    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
-      await navigator.clipboard.writeText(text);
-      return;
-    }
-  } catch {
-    // Fall through to legacy path below.
-  }
-  const scratch = document.createElement("textarea");
-  scratch.value = text;
-  scratch.setAttribute("readonly", "");
-  scratch.style.position = "fixed";
-  scratch.style.opacity = "0";
-  document.body.appendChild(scratch);
-  scratch.select();
-  try {
-    document.execCommand("copy");
-  } catch {
-    // Best effort — swallow the error so the caller's `.then()` still
-    // runs and the user sees the "Copied" flash. The localhost target
-    // makes this fallback path rare in practice; if it ever fires AND
-    // execCommand also fails, the user gets a false-positive
-    // confirmation. Acceptable at this scale; revisit if real users
-    // report broken pastes.
-  } finally {
-    document.body.removeChild(scratch);
-  }
 }
