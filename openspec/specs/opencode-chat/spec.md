@@ -877,14 +877,14 @@ Chat SHALL represent routine composer states in an always-present fixed-size sta
 - **AND** no continuous status animation runs
 
 ### Requirement: Completed assistant content has scoped copy actions
-Each completed assistant message SHALL offer an accessible copy action that writes that message's normalized Markdown source to the clipboard, excluding timestamps, status labels, activity rows, copy-control labels, and other Chat chrome. Each fenced code block inside completed assistant content SHALL offer an accessible copy action that writes only the code content with its source line breaks, excluding syntax markup, fence delimiters, and controls.
+Each fenced code block inside completed assistant content SHALL offer an accessible copy action that writes only the code content with its source line breaks, excluding syntax markup, fence delimiters, and controls. Completed assistant messages MUST NOT present a whole-answer copy action.
 
-Copy controls SHALL be keyboard operable and directly reachable on coarse-pointer devices. Success and failure feedback SHALL be perceivable without resizing the message, code block, or composer. Clipboard failure MUST leave conversation content unchanged and MUST NOT produce an uncaught error. A message still streaming MUST NOT present its whole-message action as copying a completed answer.
+Code-block copy controls SHALL be keyboard operable and directly reachable on coarse-pointer devices. Success and failure feedback SHALL be perceivable without resizing the message, code block, or composer. Clipboard failure MUST leave conversation content unchanged and MUST NOT produce an uncaught error.
 
 #### Scenario: Copy a completed assistant answer
-- **WHEN** the user activates copy on a completed assistant message containing prose and fenced code
-- **THEN** the clipboard receives that message's normalized Markdown
-- **AND** no surrounding Chat chrome or activity output is included
+- **WHEN** the user views a completed assistant message containing prose or fenced code
+- **THEN** the message does not present an action to copy the whole answer
+- **AND** each completed fenced code block retains its own scoped copy action
 
 #### Scenario: Copy one fenced code block
 - **WHEN** the user activates copy for a fenced code block in completed assistant content
@@ -893,16 +893,16 @@ Copy controls SHALL be keyboard operable and directly reachable on coarse-pointe
 
 #### Scenario: Streaming answer is not presented as complete
 - **WHEN** an assistant message is still streaming
-- **THEN** its whole-message completed-answer copy action is unavailable
-- **AND** the action becomes available when completion is known
+- **THEN** it does not present a whole-message copy action
+- **AND** completing the message does not add a whole-message copy action
 
 #### Scenario: Touch copy does not depend on hover
-- **WHEN** a coarse-pointer user views a completed answer or fenced code block
-- **THEN** each applicable copy action is reachable by tap
+- **WHEN** a coarse-pointer user views a fenced code block in completed assistant content
+- **THEN** its code-copy action is reachable by tap
 - **AND** no hover state is required to reveal it
 
 #### Scenario: Copy feedback preserves geometry
-- **WHEN** a copy succeeds or fails
+- **WHEN** a code-block copy succeeds or fails
 - **THEN** Chat reports the outcome accessibly
 - **AND** the message, code block, composer, and surrounding timeline retain their dimensions
 
