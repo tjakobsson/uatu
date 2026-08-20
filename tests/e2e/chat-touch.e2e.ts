@@ -58,6 +58,10 @@ test("composer stays flush and its trailing action becomes cancel without adding
   await page.locator("#chat-model-select").selectOption({ label: "Anthropic: Claude Sonnet" });
   await page.locator("#chat-mode-select").selectOption("build");
   await page.locator("#chat-variant-select").selectOption("high");
+  await page.locator("#chat-input").fill("Idle first line");
+  await page.locator("#chat-input").press("Enter");
+  await expect(page.locator("#chat-input")).toHaveValue("Idle first line\n");
+  await page.locator("#chat-input").fill("");
   await control(request, { action: "status", conversationId: id, status: "running" });
   await expect(page.locator("#chat-send")).toHaveAttribute("aria-label", "Cancel response");
   await expect(page.locator("#chat-send .chat-send-cancel")).toBeVisible();
