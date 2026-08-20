@@ -235,10 +235,67 @@ test.describe("desktop OpenCode chat", () => {
       questions: [{ header: "Approach", prompt: "Which implementation?", multiple: false, allowFreeForm: true, options: [{ label: "Minimal", description: "Small change" }] }],
     };
     await control(request, { action: "item", conversationId: id, item: question });
-    await page.getByRole("radio", { name: "Minimal Small change" }).check();
-    await page.getByRole("button", { name: "Answer", exact: true }).click();
-    await expect(page.locator('[data-chat-item-id="question:q-1"]')).toContainText("Answered");
-    await expect(page.getByRole("button", { name: "Answer", exact: true })).toHaveCount(0);
+    const questionCard = page.locator('[data-chat-item-id="question:q-1"]');
+    const answer = questionCard.getByRole("button", { name: "Answer", exact: true });
+    await expect(questionCard.getByRole("radio", { name: "Type your own answer" })).toBeVisible();
+
+    let replies = 0;
+    page.on("request", request => {
+      if (new URL(request.url()).pathname.endsWith(`/questions/${question.requestId}`)) replies += 1;
+    });
+    await questionCard.getByRole("radio", { name: "Minimal Small change" }).check();
+    await expect(answer).toBeEnabled();
+    await page.waitForTimeout(100);
+    expect(replies).toBe(0);
+
+    const response = page.waitForResponse(candidate => new URL(candidate.url()).pathname.endsWith(`/questions/${question.requestId}`));
+    await answer.click();
+    expect((await response).request().postDataJSON()).toMatchObject({ outcome: { kind: "answered", answers: [["Minimal"]] } });
+    await expect(questionCard).toContainText("Answered");
+    await expect(answer).toHaveCount(0);
+  });
+
+  test("renders recovered free-form policy and sends ordered mixed answers", async ({ page, request }) => {
+    const recovered: ConversationItem = {
+      id: "question:q-recovered", type: "question", createdAt: 20, requestId: "q-recovered", status: "pending",
+      questions: [{
+        header: "Parts", prompt: "Which parts?", multiple: true, allowFreeForm: true,
+        options: [{ label: "Parser", description: "Read input" }, { label: "Renderer", description: "Show output" }],
+      }],
+    };
+    const seeded = await control(request, { action: "seed", title: "Recovered question", items: [recovered] }) as { conversation: { id: string } };
+    await page.reload();
+    await openChatPanel(page);
+    await expect(page.locator("#chat-conversation-select")).toHaveValue(seeded.conversation.id);
+
+    const card = page.locator('[data-chat-item-id="question:q-recovered"]');
+    const custom = card.getByRole("checkbox", { name: "Type your own answer" });
+    const customInput = card.locator("[data-question-custom-input]");
+    await expect(custom).toBeVisible();
+    await expect(customInput).toBeHidden();
+    await card.getByRole("checkbox", { name: "Renderer Show output" }).check();
+    await custom.check();
+    await expect(customInput).toBeVisible();
+    await customInput.fill("  Tests  ");
+
+    const response = page.waitForResponse(candidate => new URL(candidate.url()).pathname.endsWith(`/questions/${recovered.requestId}`));
+    await card.getByRole("button", { name: "Answer", exact: true }).click();
+    const payload = (await response).request().postDataJSON();
+    expect(payload).toMatchObject({ outcome: { kind: "answered", answers: [["Renderer", "Tests"]] } });
+    expect(payload.outcome.answers.flat()).not.toContain("Type your own answer");
+
+    const fixed: ConversationItem = {
+      id: "question:q-fixed", type: "question", createdAt: 21, requestId: "q-fixed", status: "pending",
+      questions: [{
+        header: "Release", prompt: "Ship now?", multiple: false, allowFreeForm: false,
+        options: [{ label: "Yes", description: "Publish it" }],
+      }],
+    };
+    await control(request, { action: "item", conversationId: seeded.conversation.id, item: fixed });
+    const fixedCard = page.locator('[data-chat-item-id="question:q-fixed"]');
+    await expect(fixedCard.getByRole("radio", { name: "Yes Publish it" })).toBeVisible();
+    await expect(fixedCard.getByRole("radio", { name: "Type your own answer" })).toHaveCount(0);
+    await expect(fixedCard.locator("[data-question-custom-input]")).toHaveCount(0);
   });
 
   test("streaming beside a pending question keeps the answer being typed", async ({ page, request }) => {
@@ -253,7 +310,13 @@ test.describe("desktop OpenCode chat", () => {
     await control(request, { action: "item", conversationId: id, item: question });
     await control(request, { action: "item", conversationId: id, item: { id: "part:stream", type: "assistant_message", createdAt: 12, markdown: "Thinking" } });
 
-    const freeForm = page.locator('[data-chat-item-id="question:q-2"] input[type="text"]');
+    const card = page.locator('[data-chat-item-id="question:q-2"]');
+    const custom = card.getByRole("radio", { name: "Type your own answer" });
+    const freeForm = card.locator("[data-question-custom-input]");
+    await expect(freeForm).toBeHidden();
+    await custom.check();
+    await expect(freeForm).toBeVisible();
+    await expect(freeForm).toBeFocused();
     await freeForm.fill("my own answer");
 
     // The agent keeps streaming while the answer sits half-typed; a timeline
@@ -264,16 +327,21 @@ test.describe("desktop OpenCode chat", () => {
     await expect(page.locator('[data-chat-item-id="part:stream"]')).toContainText("Thinking about your");
     await expect(freeForm).toHaveValue("my own answer");
 
-    // Single choice: picking an option supersedes the half-typed "Other" —
-    // exactly one answer may reach the server.
-    await page.getByRole("radio", { name: "Minimal Small change" }).check();
-    await expect(freeForm).toHaveValue("");
+    // Single choice: a provider option hides the custom editor but keeps its
+    // draft available if the user returns to it.
+    await card.getByRole("radio", { name: "Minimal Small change" }).check();
+    await expect(freeForm).toBeHidden();
+    await expect(freeForm).toHaveValue("my own answer");
     await control(request, { action: "delta", conversationId: id, itemId: "part:stream", delta: " question" });
     await expect(page.locator('[data-chat-item-id="part:stream"]')).toContainText("Thinking about your question");
-    await expect(page.getByRole("radio", { name: "Minimal Small change" })).toBeChecked();
+    await expect(card.getByRole("radio", { name: "Minimal Small change" })).toBeChecked();
 
-    await page.getByRole("button", { name: "Answer", exact: true }).click();
-    await expect(page.locator('[data-chat-item-id="question:q-2"]')).toContainText("Answered");
+    await custom.check();
+    await expect(freeForm).toBeVisible();
+    await expect(freeForm).toHaveValue("my own answer");
+
+    await card.getByRole("button", { name: "Answer", exact: true }).click();
+    await expect(card).toContainText("Answered");
   });
 
   test("resending after a failure reuses the request id for at-most-once delivery", async ({ page, request }) => {

@@ -19,6 +19,7 @@ class FakeChatService implements WorkspaceChatService {
   private promptResult: { messageId: string; delivery: "steer" | "queue" } | undefined;
   selectedModel: ModelSelection | undefined;
   selectedAgent: string | undefined;
+  questionResponses: QuestionOutcome[] = [];
 
   async status(): Promise<ChatAvailability> { return { state: "ready", version: "test" }; }
   async retry(): Promise<ChatAvailability> { this.retries += 1; return this.status(); }
@@ -50,7 +51,7 @@ class FakeChatService implements WorkspaceChatService {
   }
   async cancel(id: string) { this.require(id); return { cancelled: true } as const; }
   async respondPermission(id: string, _interactionId: string, _requestId: string, outcome: PermissionOutcome) { this.require(id); return { outcome }; }
-  async respondQuestion(id: string, _interactionId: string, _requestId: string, outcome: QuestionOutcome) { this.require(id); return { outcome }; }
+  async respondQuestion(id: string, _interactionId: string, _requestId: string, outcome: QuestionOutcome) { this.require(id); this.questionResponses.push(outcome); return { outcome }; }
   async dispose() {}
 
   private snapshot(): ConversationSnapshot {
@@ -229,6 +230,22 @@ describe("workspace chat routes", () => {
     expect((await send()).status).toBe(409);
     service.renameConversation = async () => { throw new ConversationNotFoundError(); };
     expect((await send()).status).toBe(404);
+  });
+
+  test("rejects empty and whitespace-only question answers before calling the service", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/:conversationId/questions/:interactionId"] as {
+      POST(request: Request & { params: Record<string, string> }): Promise<Response>;
+    };
+    const send = (answers: string[][]) => handler.POST(request("/api/chat/conversations/local/questions/question-1", {
+      method: "POST",
+      headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" },
+      body: JSON.stringify({ requestId: crypto.randomUUID(), outcome: { kind: "answered", answers } }),
+    }, { conversationId: "local", interactionId: "question-1" }) as never);
+
+    expect((await send([[]])).status).toBe(400);
+    expect((await send([["   "]])).status).toBe(400);
+    expect(service.questionResponses).toEqual([]);
   });
 
   test("streams retained events immediately with replay IDs and no-buffering headers", async () => {

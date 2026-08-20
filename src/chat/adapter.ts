@@ -1365,7 +1365,10 @@ export class ConversationProjection {
     for (let index = 0; index < item.questions.length; index += 1) {
       const question = item.questions[index]!;
       const answers = outcome.answers[index]!;
-      if (!question.multiple && answers.length > 1) throw new InteractionConflictError("question does not allow multiple answers");
+      if (answers.length === 0 || answers.some(answer => typeof answer !== "string" || answer.trim().length === 0)) {
+        throw new InteractionConflictError("question requires a non-empty answer");
+      }
+      if (!question.multiple && answers.length !== 1) throw new InteractionConflictError("question requires exactly one answer");
       const labels = new Set(question.options.map(option => option.label));
       if (answers.some(answer => !labels.has(answer) && !question.allowFreeForm)) {
         throw new InteractionConflictError("question does not allow free-form answers");

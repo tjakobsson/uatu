@@ -676,9 +676,9 @@ function parseQuestionMutationOutcome(value: unknown): QuestionOutcome | Respons
   if (!Array.isArray(outcome.answers) || outcome.answers.length > 32) return chatError(400, "invalid question answers");
   let bytes = 0;
   for (const answers of outcome.answers) {
-    if (!Array.isArray(answers) || answers.length > 32) return chatError(400, "invalid question answers");
+    if (!Array.isArray(answers) || answers.length === 0 || answers.length > 32) return chatError(400, "invalid question answers");
     for (const answer of answers) {
-      if (typeof answer !== "string" || !answer || answer.length > 4_096) return chatError(400, "invalid question answer");
+      if (typeof answer !== "string" || !answer.trim() || answer.length > 4_096) return chatError(400, "invalid question answer");
       bytes += Buffer.byteLength(answer);
     }
   }

@@ -105,3 +105,21 @@ describe("conversation configuration and rename", () => {
     expect(schema.properties.title["x-uatu-maxUtf8Bytes"]).toBe(200);
   });
 });
+
+describe("structured question answers", () => {
+  test("requires ordered non-empty answer arrays and documents custom strings", async () => {
+    const openapi = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
+    const schema = openapi.components.schemas.QuestionOutcome as {
+      oneOf: Array<{ properties?: { answers?: { description?: string; items?: { minItems?: number } } } }>;
+    };
+    const answered = schema.oneOf.find(branch => branch.properties?.answers)?.properties?.answers;
+    const validate = createAjv().compile(schemaForAjv(openapi.components.schemas.QuestionOutcome, openapi.components.schemas));
+
+    expect(validate({ kind: "answered", answers: [["Option"], ["custom text"]] })).toBe(true);
+    expect(validate({ kind: "answered", answers: [[]] })).toBe(false);
+    expect(validate({ kind: "answered", answers: [["   "]] })).toBe(false);
+    expect(answered?.items?.minItems).toBe(1);
+    expect(answered?.description).toContain("same order");
+    expect(answered?.description).toContain("custom strings");
+  });
+});

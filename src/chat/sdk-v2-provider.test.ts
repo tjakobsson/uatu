@@ -543,6 +543,21 @@ describe("OpenCode v2 identity policy", () => {
     ]);
   });
 
+  test("pending questions enable custom answers unless explicitly disabled", async () => {
+    const client = {
+      question: {
+        list: async () => ({ data: [
+          { id: "que_omitted", sessionID: "ses_a", questions: [{ question: "Omitted", header: "Choice", options: [] }] },
+          { id: "que_true", sessionID: "ses_a", questions: [{ question: "True", header: "Choice", options: [], custom: true }] },
+          { id: "que_false", sessionID: "ses_a", questions: [{ question: "False", header: "Choice", options: [], custom: false }] },
+        ] }),
+      },
+    } as unknown as OpencodeClient;
+
+    const pending = await new SdkV2Provider(client, "/workspace").listQuestions();
+    expect(pending.map(request => request.questions[0]?.allowFreeForm)).toEqual([true, true, false]);
+  });
+
   test("inherits the compatibility store across the inventory even when children list first", async () => {
     const replies: string[] = [];
     const client = {

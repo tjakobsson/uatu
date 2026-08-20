@@ -53,6 +53,42 @@ test("four tabs preserve chat state and keyboard navigation", async ({ page, req
   await expect(page.locator("#touch-tab-files")).toBeFocused();
 });
 
+test("questions wait for Answer and send a custom choice as text", async ({ page, request }) => {
+  const question: ConversationItem = {
+    id: "question:touch-choice", type: "question", createdAt: 1, requestId: "touch-choice", status: "pending",
+    questions: [{
+      header: "Approach", prompt: "Which approach?", multiple: false, allowFreeForm: true,
+      options: [{ label: "Minimal", description: "Small change" }],
+    }],
+  };
+  await boot(page, request, { items: [question] });
+
+  const card = page.locator('[data-chat-item-id="question:touch-choice"]');
+  const answer = card.getByRole("button", { name: "Answer", exact: true });
+  let replies = 0;
+  page.on("request", request => {
+    if (new URL(request.url()).pathname.endsWith(`/questions/${question.requestId}`)) replies += 1;
+  });
+  await card.getByRole("radio", { name: "Minimal Small change" }).check();
+  await expect(answer).toBeEnabled();
+  await page.waitForTimeout(100);
+  expect(replies).toBe(0);
+
+  const custom = card.getByRole("radio", { name: "Type your own answer" });
+  const customInput = card.locator("[data-question-custom-input]");
+  await custom.check();
+  await expect(customInput).toBeVisible();
+  await expect(customInput).toBeFocused();
+  await customInput.fill("  Touch-friendly  ");
+
+  const response = page.waitForResponse(candidate => new URL(candidate.url()).pathname.endsWith(`/questions/${question.requestId}`));
+  await answer.click();
+  const payload = (await response).request().postDataJSON();
+  expect(payload).toMatchObject({ outcome: { kind: "answered", answers: [["Touch-friendly"]] } });
+  expect(payload.outcome.answers.flat()).not.toContain("Type your own answer");
+  await expect(card).toContainText("Answered");
+});
+
 test("composer stays flush and its trailing action becomes cancel without adding a row", async ({ page, request }) => {
   const id = await boot(page, request);
   await page.locator("#chat-model-select").selectOption({ label: "Anthropic: Claude Sonnet" });

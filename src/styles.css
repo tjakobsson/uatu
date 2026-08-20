@@ -6543,6 +6543,11 @@ body.terminal-transcript-open .touch-tab-bar {
   background: var(--accent-soft);
 }
 
+.chat-request .chat-question-option:has(input:disabled) {
+  opacity: 0.55;
+  cursor: default;
+}
+
 .chat-request .chat-question-option input {
   margin-top: 0.2rem;
   flex: 0 0 auto;
@@ -6557,6 +6562,20 @@ body.terminal-transcript-open .touch-tab-bar {
 
 .chat-question-option-label {
   color: var(--text-strong);
+}
+
+.chat-question-custom-editor {
+  display: block;
+  margin: -0.05rem 0 0.55rem 2rem;
+}
+
+.chat-question-custom-editor[hidden] {
+  display: none;
+}
+
+.chat-question-custom-editor input {
+  box-sizing: border-box;
+  width: 100%;
 }
 
 .chat-request fieldset {

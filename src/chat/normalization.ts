@@ -811,7 +811,7 @@ export function normalizeQuestion(value: unknown): StructuredQuestion {
       return { label: text(item.label), description: text(item.description) };
     }),
     multiple: question.multiple === true,
-    allowFreeForm: question.custom === true,
+    allowFreeForm: question.custom !== false,
   };
 }
 

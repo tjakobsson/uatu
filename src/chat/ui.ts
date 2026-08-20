@@ -22,6 +22,7 @@ import {
 } from "./projection";
 import type { ChatAgent, ChatCapability, ChatMode, ChatAvailability, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationSummary, ModelSelection, PermissionOutcome, QuestionOutcome, TokenUsage } from "./types";
 import { formatDiagnostics } from "./diagnostics";
+import { collectQuestionAnswers, showQuestionPanel, syncQuestionControl, syncQuestionForm } from "./question-form";
 
 const PRESENTATION_KEY = "uatu:chat-presentation";
 const SAVE_DEBOUNCE_MS = 400;
@@ -1251,50 +1252,6 @@ export function initChat(): void {
     }, true);
   };
 
-  /** A question is answered once any option is ticked or free-form text typed. */
-  const panelAnswered = (panel: HTMLElement): boolean =>
-    panel.querySelector("input[type=radio]:checked, input[type=checkbox]:checked") !== null
-    || [...panel.querySelectorAll<HTMLInputElement>("input[type=text]")].some(input => input.value.trim() !== "");
-
-  /**
-   * Drives the tab strip and the primary button: "Next" until the last
-   * question, "Answer" on it, disabled until the step in view is satisfied.
-   * A multi-select step needs at least one box ticked, never all of them.
-   */
-  const syncQuestionForm = (form: HTMLFormElement) => {
-    const panels = [...form.querySelectorAll<HTMLElement>("[data-question-panel]")];
-    if (panels.length === 0) return;
-    const activeIndex = Math.max(0, panels.findIndex(panel => !panel.hidden));
-    const answered = panels.map(panelAnswered);
-    form.querySelectorAll<HTMLButtonElement>("[data-question-tab]").forEach((tab, index) => {
-      tab.setAttribute("aria-selected", String(index === activeIndex));
-      tab.classList.toggle("is-active", index === activeIndex);
-      tab.classList.toggle("is-answered", answered[index] === true);
-    });
-    const primary = form.querySelector<HTMLButtonElement>("[data-question-primary]");
-    if (!primary) return;
-    const last = activeIndex === panels.length - 1;
-    primary.textContent = last ? "Answer" : "Next";
-    primary.disabled = last ? answered.some(value => !value) : !answered[activeIndex];
-  };
-
-  const showQuestionPanel = (form: HTMLFormElement, index: number) => {
-    form.querySelectorAll<HTMLElement>("[data-question-panel]").forEach((panel, at) => { panel.hidden = at !== index; });
-    syncQuestionForm(form);
-  };
-
-  // Radios and the "Other" free-form field share a name, and a single-choice
-  // question must submit exactly one answer — picking one side clears the
-  // other, so the form state always matches what FormData will produce.
-  const enforceSingleChoice = (input: HTMLInputElement, form: HTMLFormElement) => {
-    const siblings = form.querySelectorAll<HTMLInputElement>(`input[name="${CSS.escape(input.name)}"]`);
-    if (input.type === "radio") {
-      siblings.forEach(sibling => { if (sibling.type === "text") sibling.value = ""; });
-    } else if (input.type === "text" && input.value.trim() !== "") {
-      siblings.forEach(sibling => { if (sibling.type === "radio") sibling.checked = false; });
-    }
-  };
-
   // A failure reports where the reader is looking: a card answered inside the
   // drill-down speaks through the drill-down's own status line — in touch
   // mode that layer covers the parent's entirely, so a message sent to the
@@ -1364,25 +1321,13 @@ export function initChat(): void {
       const input = event.target as HTMLInputElement;
       const form = input.form;
       if (!form?.matches("form[data-question-form]")) return;
-      enforceSingleChoice(input, form);
-      syncQuestionForm(form);
-      // A lone single-choice question needs no confirmation step: picking the
-      // option is the answer. Anything with more questions, multiple allowed
-      // answers, or a free-form field keeps its explicit step.
-      if (input.type !== "radio") return;
-      const source = sourceProjection();
-      const item = source?.items.find(candidate => candidate.id === input.closest<HTMLElement>("[data-chat-item-id]")?.dataset.chatItemId);
-      if (!source || !item || item.type !== "question" || item.questions.length !== 1) return;
-      const question = item.questions[0]!;
-      if (question.multiple || question.allowFreeForm) return;
-      void resolveQuestion(source, item.id, { kind: "answered", answers: [[input.value]] });
+      syncQuestionControl(input, true);
     });
     container.addEventListener("input", event => {
       const input = event.target as HTMLInputElement;
       const form = input.form;
       if (!form?.matches("form[data-question-form]")) return;
-      enforceSingleChoice(input, form);
-      syncQuestionForm(form);
+      syncQuestionControl(input);
     });
     container.addEventListener("click", event => {
       const tab = (event.target as Element).closest<HTMLButtonElement>("[data-question-tab]");
@@ -1404,8 +1349,7 @@ export function initChat(): void {
         showQuestionPanel(questionForm, activeIndex + 1);
         return;
       }
-      const data = new FormData(questionForm);
-      const answers = item.questions.map((_, index) => data.getAll(`q-${index}`).map(String).filter(Boolean));
+      const answers = collectQuestionAnswers(questionForm);
       // The button is disabled until every step is satisfied, so this only
       // catches a form submitted some other way (Enter in the free-form field).
       const missing = answers.flatMap((answer, index) => answer.length === 0 ? [index] : []);

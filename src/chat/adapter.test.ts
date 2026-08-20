@@ -921,6 +921,40 @@ describe("prompt, abort, permission, and question mutations", () => {
       expect.objectContaining({ requestId: "reject", rejected: true }),
     ]);
   });
+
+  test("invalid question answers neither reach the provider nor resolve the request", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const invalid = [
+      { id: "empty", multiple: true, custom: true, answers: [] },
+      { id: "whitespace", multiple: true, custom: true, answers: ["   "] },
+      { id: "single-extra", multiple: false, custom: true, answers: ["A", "Other"] },
+      { id: "unknown", multiple: false, custom: false, answers: ["Other"] },
+    ];
+
+    for (const testCase of invalid) {
+      applyEvent(adapter, "session", {
+        id: testCase.id,
+        type: "question.v2.asked",
+        data: {
+          id: testCase.id,
+          sessionID: "session",
+          timestamp: Date.now(),
+          questions: [{ question: "Choose", header: "Choice", options: [{ label: "A", description: "" }], multiple: testCase.multiple, custom: testCase.custom }],
+        },
+      });
+      await expect(adapter.respondQuestion("session", testCase.id, `client-${testCase.id}`, {
+        kind: "answered",
+        answers: [testCase.answers],
+      })).rejects.toBeInstanceOf(InteractionConflictError);
+      expect(adapter.projectionForTests("session").items().find(item => item.id === `question:${testCase.id}`)).toEqual(
+        expect.objectContaining({ status: "pending" }),
+      );
+    }
+
+    expect(provider.questionReplies).toEqual([]);
+  });
 });
 
 describe("discarded event accounting", () => {
