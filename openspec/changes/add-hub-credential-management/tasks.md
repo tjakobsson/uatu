@@ -53,7 +53,7 @@
 - [x] 8.1 Add authenticated routes for credential/tool listing, public-key export, generate/import, unlock/lock, enable/disable, assignment, testing, and confirmed deletion using explicit public response DTOs.
 - [x] 8.2 Apply POST plus same-origin enforcement, no-store secret responses, bounded/rate-limited expensive operations, strict content validation, and request-body-safe errors to every mutation.
 - [x] 8.3 Add API integration tests for cross-user trust-model behavior, cross-origin rejection, malformed inputs, reference conflicts, transactional deletion, restart state, and absence of private material.
-- [x] 8.4 Extend Hub shutdown ordering so clone jobs and workspace sessions stop before owned credential agents, while optional runtime failures do not block unrelated capabilities.
+- [x] 8.4 Extend Hub shutdown ordering so request acceptance stops first, clone jobs and workspace sessions stop before owned credential agents, and final SSH agent shutdown drains in-flight credential operations through the runtime gate, while optional runtime failures do not block unrelated capabilities.
 
 ## 9. Authenticated Page Experience
 

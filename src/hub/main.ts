@@ -253,14 +253,28 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     console.error("uatu hub: shutting down");
     void (async () => {
       try {
+        // Stop accepting requests before teardown: an already-accepted
+        // credential operation could otherwise restart the SSH agent after
+        // shutdown observed it stopped, orphaning its socket past exit.
+        server.stop(true);
         await stopHubRuntime({
           cloneJobs: server.cloneJobs,
           sessions,
-          sshAgent,
+          sshAgent: {
+            // Final agent shutdown goes through the runtime gate: in-flight
+            // gated operations drain first, and swapping the service to null
+            // keeps any operation still waiting on the gate from starting a
+            // replacement agent.
+            shutdown: () => sshRuntime.replace(async () => {
+              const agent = sshAgent;
+              sshAgent = null;
+              sshCredentials = null;
+              await agent?.shutdown();
+            }),
+          },
           openPgp: openPgpCredentials,
         });
       } finally {
-        server.stop(true);
         process.exit(0);
       }
     })();

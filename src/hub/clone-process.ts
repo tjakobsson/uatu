@@ -97,10 +97,14 @@ export class CloneProcessAdapter implements CloneProcessFactory {
     const env = { ...this.env };
     if (options.credential?.type === "ssh") {
       env.SSH_AUTH_SOCK = options.credential.agentSocket;
+      // OpenSSH expands %-tokens inside IdentityAgent/IdentityFile values
+      // even through shell quoting, so a state directory containing `%h`
+      // would resolve to a different path; `%%` is the literal form.
+      const sshOptionValue = (value: string) => shellQuote(value.replaceAll("%", "%%"));
       env.GIT_SSH_COMMAND = [
         shellQuote(options.credential.sshPath),
-        `-o IdentityAgent=${shellQuote(options.credential.agentSocket)}`,
-        `-o IdentityFile=${shellQuote(options.credential.publicKeyPath)}`,
+        `-o IdentityAgent=${sshOptionValue(options.credential.agentSocket)}`,
+        `-o IdentityFile=${sshOptionValue(options.credential.publicKeyPath)}`,
         "-o IdentitiesOnly=yes",
       ].join(" ");
     }
