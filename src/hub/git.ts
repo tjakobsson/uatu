@@ -4,6 +4,8 @@
 // run as the daemon's OS user with its ambient git config/credentials —
 // the hub stores no credentials of its own.
 
+import { spawnSync } from "node:child_process";
+
 export type GitProbeResult =
   | { kind: "repository"; toplevel: string }
   | { kind: "not-a-repository" }
@@ -13,7 +15,55 @@ export type GitProbeResult =
   // preflight report.
   | { kind: "indeterminate"; detail: string };
 
-async function runGit(args: string[], cwd?: string, executable = "git"): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+const GIT_PROBE_TIMEOUT_MS = 5_000;
+const GIT_OUTPUT_LIMIT = 64 * 1024;
+
+type GitRunOptions = { timeoutMs?: number; outputLimit?: number };
+
+async function collectGitOutput(
+  stream: ReadableStream<Uint8Array>,
+  limit: number,
+  signal: AbortSignal,
+  stop: () => void,
+): Promise<{ text: string; exceeded: boolean }> {
+  const reader = stream.getReader();
+  const cancel = () => { void reader.cancel().catch(() => undefined); };
+  signal.addEventListener("abort", cancel, { once: true });
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  let exceeded = false;
+  try {
+    for (;;) {
+      if (signal.aborted) break;
+      const next = await reader.read();
+      if (next.done) break;
+      const remaining = limit - size;
+      if (remaining > 0) {
+        chunks.push(next.value.slice(0, remaining));
+        size += Math.min(remaining, next.value.length);
+      }
+      if (next.value.length > remaining) {
+        exceeded = true;
+        stop();
+        break;
+      }
+    }
+  } catch (error) {
+    if (!signal.aborted) throw error;
+  } finally {
+    signal.removeEventListener("abort", cancel);
+    if (signal.aborted) await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+  return { text: new TextDecoder().decode(Buffer.concat(chunks.map(chunk => Buffer.from(chunk)))), exceeded };
+}
+
+async function runGit(
+  args: string[],
+  cwd?: string,
+  executable = "git",
+  options: GitRunOptions = {},
+): Promise<{ exitCode: number; stdout: string; stderr: string; timedOut: boolean; outputExceeded: boolean }> {
   let child: ReturnType<typeof Bun.spawn>;
   try {
     child = Bun.spawn([executable, ...args], {
@@ -21,20 +71,60 @@ async function runGit(args: string[], cwd?: string, executable = "git"): Promise
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
+      detached: process.platform !== "win32",
     });
   } catch (error) {
-    return { exitCode: -1, stdout: "", stderr: error instanceof Error ? error.message : String(error) };
+    return { exitCode: -1, stdout: "", stderr: error instanceof Error ? error.message : String(error), timedOut: false, outputExceeded: false };
   }
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(child.stdout as ReadableStream<Uint8Array>).text(),
-    new Response(child.stderr as ReadableStream<Uint8Array>).text(),
-    child.exited,
-  ]);
-  return { exitCode, stdout, stderr };
+  const controller = new AbortController();
+  const stop = () => {
+    controller.abort();
+    if (process.platform === "win32" && child.pid > 0) {
+      spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+        stdio: "ignore",
+        timeout: 1_000,
+        windowsHide: true,
+      });
+    }
+    if (process.platform !== "win32" && child.pid > 0) {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+        return;
+      } catch {
+        // Fall through to the direct child.
+      }
+    }
+    try { child.kill("SIGKILL"); } catch { /* Already exited. */ }
+  };
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    stop();
+  }, options.timeoutMs ?? GIT_PROBE_TIMEOUT_MS);
+  try {
+    const stdoutPromise = collectGitOutput(child.stdout as ReadableStream<Uint8Array>, options.outputLimit ?? GIT_OUTPUT_LIMIT, controller.signal, stop);
+    const stderrPromise = collectGitOutput(child.stderr as ReadableStream<Uint8Array>, options.outputLimit ?? GIT_OUTPUT_LIMIT, controller.signal, stop);
+    const exitCode = await child.exited;
+    const drains = Promise.all([stdoutPromise, stderrPromise]);
+    let drainTimer: ReturnType<typeof setTimeout> | undefined;
+    const drainTimeout = new Promise<[Awaited<typeof stdoutPromise>, Awaited<typeof stderrPromise>]>(resolve => {
+      drainTimer = setTimeout(() => {
+        stop();
+        void drains.then(resolve);
+      }, 100);
+    });
+    const [stdout, stderr] = await Promise.race([drains, drainTimeout]).finally(() => clearTimeout(drainTimer));
+    return { exitCode, stdout: stdout.text, stderr: stderr.text, timedOut, outputExceeded: stdout.exceeded || stderr.exceeded };
+  } finally {
+    clearTimeout(timer);
+    controller.abort();
+  }
 }
 
-export async function probeGitRepository(folder: string, executable = "git"): Promise<GitProbeResult> {
-  const result = await runGit(["rev-parse", "--show-toplevel"], folder, executable);
+export async function probeGitRepository(folder: string, executable = "git", options: GitRunOptions = {}): Promise<GitProbeResult> {
+  const result = await runGit(["rev-parse", "--show-toplevel"], folder, executable, options);
+  if (result.outputExceeded) return { kind: "indeterminate", detail: "git repository probe exceeded the output limit" };
+  if (result.timedOut) return { kind: "indeterminate", detail: "git repository probe timed out" };
   if (result.exitCode === 0) {
     return { kind: "repository", toplevel: result.stdout.trim() };
   }

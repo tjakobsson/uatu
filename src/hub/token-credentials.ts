@@ -56,9 +56,16 @@ export class TokenCredentialManager {
           enabled: true,
           metadata: { host, ...(input.username === undefined ? {} : { username: input.username }) },
         }, () => id, now) as TokenCredentialRecord;
-      } catch (error) {
-        await this.secrets.delete(id).catch(() => undefined);
-        throw error;
+      } catch (metadataError) {
+        try {
+          if (!await this.secrets.delete(id)) throw new Error(`token secret compensation did not delete: ${id}`);
+        } catch (cleanupError) {
+          throw new AggregateError(
+            [metadataError, cleanupError],
+            `token metadata creation and secret compensation failed: ${id}`,
+          );
+        }
+        throw metadataError;
       }
     });
   }

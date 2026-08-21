@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, lstat, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { CredentialMetadataStore } from "./credential-store";
@@ -64,6 +64,7 @@ describe("managed SSH credential lifecycle", () => {
     let id = 0;
     const service = new SshCredentialService({
       secretsDirectory: credentialSecretsPath(root),
+      runtimeDirectory: credentialRuntimePath(root),
       metadataStore: metadata,
       agent,
       sshKeygenPath: wrappedKeygen,
@@ -116,6 +117,7 @@ describe("managed SSH credential lifecycle", () => {
     await metadata.assign({ workspaceId: "uatu", credentialId: generated.id, role: "signing" });
     const failingDelete = new SshCredentialService({
       secretsDirectory: credentialSecretsPath(root),
+      runtimeDirectory: credentialRuntimePath(root),
       metadataStore: metadata,
       agent,
       sshKeygenPath: wrappedKeygen,
@@ -130,7 +132,12 @@ describe("managed SSH credential lifecycle", () => {
     expect(await service.delete(generated.id, true)).toBe(true);
 
     expect(await readFile(credentialsPath(root), "utf8")).not.toContain(passphrase);
-    expect(await readFile(audit, "utf8")).not.toContain(passphrase);
+    const toolAudit = await readFile(audit, "utf8");
+    expect(toolAudit).not.toContain(passphrase);
+    expect(toolAudit).toContain(`SSH_ASKPASS=${credentialRuntimePath(root)}/.`);
+    expect(toolAudit).toContain(`UATU_SSH_ASKPASS_PIPE=${credentialRuntimePath(root)}/.`);
+    expect(toolAudit).not.toContain(`SSH_ASKPASS=${credentialSecretsPath(root)}/`);
+    expect((await readdir(credentialRuntimePath(root))).some(file => file.endsWith(".askpass") || file.endsWith(".pipe"))).toBe(false);
   }, 30_000);
 
   test("imports an unencrypted key without a passphrase and automatically reloads it", async () => {
@@ -145,6 +152,7 @@ describe("managed SSH credential lifecycle", () => {
     const explicitLocks = new Set<string>();
     const service = new SshCredentialService({
       secretsDirectory: credentialSecretsPath(root),
+      runtimeDirectory: credentialRuntimePath(root),
       metadataStore: metadata,
       agent,
       sshKeygenPath: found.keygen,
@@ -167,6 +175,7 @@ describe("managed SSH credential lifecycle", () => {
     // shared lock set keeps the explicit lock in force.
     const rebuilt = new SshCredentialService({
       secretsDirectory: credentialSecretsPath(root),
+      runtimeDirectory: credentialRuntimePath(root),
       metadataStore: metadata,
       agent,
       sshKeygenPath: found.keygen,
@@ -201,6 +210,7 @@ describe("managed SSH credential lifecycle", () => {
     agents.push(agent);
     const service = new SshCredentialService({
       secretsDirectory: credentialSecretsPath(root),
+      runtimeDirectory: credentialRuntimePath(root),
       metadataStore: metadata,
       agent,
       sshKeygenPath: found.keygen,
@@ -222,6 +232,269 @@ describe("managed SSH credential lifecycle", () => {
     expect(remaining.output).toContain("no identities");
   }, 30_000);
 
+  test("readiness queued behind an explicit lock does not auto-load the key", async () => {
+    const found = await tools();
+    const root = await stateRoot("uatu-ssh-readiness-lock-race-");
+    const source = path.join(root, "source");
+    expect((await run(found.keygen, ["-q", "-t", "ed25519", "-N", "", "-f", source], cleanEnv())).code).toBe(0);
+    const failAdds = path.join(root, "fail-adds");
+    const controlledAdd = path.join(root, "controlled-ssh-add");
+    await writeFile(controlledAdd, [
+      "#!/bin/sh",
+      `if [ -f '${failAdds}' ] && [ "$1" != '-d' ] && [ "$1" != '-T' ]; then`,
+      "  /bin/sleep 0.2",
+      "  exit 1",
+      "fi",
+      `exec '${found.add}' "$@"`,
+    ].join("\n"), { mode: 0o700 });
+    const metadata = new CredentialMetadataStore(credentialsPath(root));
+    await metadata.load();
+    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent });
+    agents.push(agent);
+    const service = new SshCredentialService({
+      secretsDirectory: credentialSecretsPath(root),
+      runtimeDirectory: credentialRuntimePath(root),
+      metadataStore: metadata,
+      agent,
+      sshKeygenPath: found.keygen,
+      sshAddPath: controlledAdd,
+      createId: () => "readiness-race",
+    });
+    const imported = await service.import("Race", ["ssh-authentication"], await readFile(source, "utf8"), "");
+    await service.lock(imported.id);
+    await service.setEnabled(imported.id, false);
+    await service.setEnabled(imported.id, true);
+    await writeFile(failAdds, "fail\n");
+
+    const failingUnlock = service.unlock(imported.id, "");
+    const locking = service.lock(imported.id);
+    const readiness = service.testUsability(imported.id);
+    await expect(failingUnlock).rejects.toThrow("could not be unlocked");
+    await expect(locking).resolves.toBeUndefined();
+    expect(await readiness).toBe(false);
+    expect((await run(found.add, ["-l"], { ...cleanEnv(), SSH_AUTH_SOCK: agent.socketPath })).output).toContain("no identities");
+
+    await rm(failAdds);
+    await service.unlock(imported.id, "");
+    expect(await service.testUsability(imported.id)).toBe(true);
+  }, 30_000);
+
+  test("failed import removes an identity loaded by ssh-add before deleting its backing", async () => {
+    const found = await tools();
+    const root = await stateRoot("uatu-ssh-import-rollback-");
+    const source = path.join(root, "source");
+    expect((await run(found.keygen, ["-q", "-t", "ed25519", "-N", "", "-f", source], cleanEnv())).code).toBe(0);
+    const addThenFail = path.join(root, "add-then-fail");
+    await writeFile(addThenFail, [
+      "#!/bin/sh",
+      "case \"$1\" in",
+      `  -*) exec '${found.add}' "$@" ;;`,
+      "esac",
+      `'${found.add}' "$@" >/dev/null 2>&1`,
+      "exit 1",
+    ].join("\n"), { mode: 0o700 });
+    const metadata = new CredentialMetadataStore(credentialsPath(root));
+    await metadata.load();
+    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent });
+    agents.push(agent);
+    const service = new SshCredentialService({
+      secretsDirectory: credentialSecretsPath(root),
+      runtimeDirectory: credentialRuntimePath(root),
+      metadataStore: metadata,
+      agent,
+      sshKeygenPath: found.keygen,
+      sshAddPath: addThenFail,
+      createId: () => "rollback",
+    });
+
+    await expect(service.import("Rollback", ["ssh-authentication"], await readFile(source, "utf8"), ""))
+      .rejects.toThrow("could not be unlocked");
+    expect(metadata.snapshot().credentials).toHaveLength(0);
+    expect(await Bun.file(path.join(credentialSecretsPath(root), "rollback.key")).exists()).toBe(false);
+    expect(await Bun.file(path.join(credentialSecretsPath(root), "rollback.key.pub")).exists()).toBe(false);
+    expect((await run(found.add, ["-l"], { ...cleanEnv(), SSH_AUTH_SOCK: agent.socketPath })).output).toContain("no identities");
+  }, 30_000);
+
+  test("failed import preserves catalog and backing when a possibly loaded identity cannot be removed", async () => {
+    const found = await tools();
+    const root = await stateRoot("uatu-ssh-import-cleanup-failure-");
+    const source = path.join(root, "source");
+    expect((await run(found.keygen, ["-q", "-t", "ed25519", "-N", "", "-f", source], cleanEnv())).code).toBe(0);
+    const brokenAdd = path.join(root, "broken-cleanup-ssh-add");
+    await writeFile(brokenAdd, [
+      "#!/bin/sh",
+      "case \"$1\" in",
+      "  -d) exit 1 ;;",
+      `  -*) exec '${found.add}' "$@" ;;`,
+      "esac",
+      `'${found.add}' "$@" >/dev/null 2>&1`,
+      "exit 1",
+    ].join("\n"), { mode: 0o700 });
+    const metadata = new CredentialMetadataStore(credentialsPath(root));
+    await metadata.load();
+    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent });
+    agents.push(agent);
+    const shutdown = agent.shutdown.bind(agent);
+    agent.shutdown = async () => { throw new Error("simulated agent cleanup failure"); };
+    const service = new SshCredentialService({
+      secretsDirectory: credentialSecretsPath(root),
+      runtimeDirectory: credentialRuntimePath(root),
+      metadataStore: metadata,
+      agent,
+      sshKeygenPath: found.keygen,
+      sshAddPath: brokenAdd,
+      createId: () => "cleanup-failure",
+    });
+    try {
+      await expect(service.import("Cleanup failure", ["ssh-authentication"], await readFile(source, "utf8"), ""))
+        .rejects.toThrow("possibly loaded identity could not be removed");
+      expect(metadata.snapshot().credentials.map(item => item.id)).toEqual(["cleanup-failure"]);
+      expect(await Bun.file(path.join(credentialSecretsPath(root), "cleanup-failure.key")).exists()).toBe(true);
+      expect(await Bun.file(path.join(credentialSecretsPath(root), "cleanup-failure.key.pub")).exists()).toBe(true);
+    } finally {
+      agent.shutdown = shutdown;
+      await shutdown();
+    }
+  }, 30_000);
+
+  test("bounds mkfifo setup and removes partial runtime artifacts", async () => {
+    const found = await tools();
+    const root = await stateRoot("uatu-ssh-mkfifo-timeout-");
+    const metadata = new CredentialMetadataStore(credentialsPath(root));
+    await metadata.load();
+    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent });
+    agents.push(agent);
+    const generatingService = new SshCredentialService({
+      secretsDirectory: credentialSecretsPath(root),
+      runtimeDirectory: credentialRuntimePath(root),
+      metadataStore: metadata,
+      agent,
+      sshKeygenPath: found.keygen,
+      sshAddPath: found.add,
+      createId: () => "fifo-timeout",
+    });
+    const credential = await generatingService.generate("FIFO timeout", ["ssh-authentication"], "fifo-timeout-secret");
+    const fifoAudit = path.join(root, "fifo-path");
+    const fakeMkfifo = path.join(root, "mkfifo");
+    const delayedArtifact = path.join(credentialRuntimePath(root), "delayed.pipe");
+    await writeFile(fakeMkfifo, [
+      "#!/bin/sh",
+      `printf '%s\\n' "$3" > '${fifoAudit}'`,
+      `(sleep 1; touch '${delayedArtifact}') &`,
+      "/bin/sleep 5",
+    ].join("\n"), { mode: 0o700 });
+    const boundedService = new SshCredentialService({
+      secretsDirectory: credentialSecretsPath(root),
+      runtimeDirectory: credentialRuntimePath(root),
+      metadataStore: metadata,
+      agent,
+      sshKeygenPath: found.keygen,
+      sshAddPath: found.add,
+      mkfifoPath: fakeMkfifo,
+      operationTimeoutMs: 500,
+    });
+
+    const started = Date.now();
+    await expect(boundedService.unlock(credential.id, "fifo-timeout-secret"))
+      .rejects.toThrow("passphrase channel could not be created");
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(await readFile(fifoAudit, "utf8")).toStartWith(`${credentialRuntimePath(root)}/.`);
+    expect((await readdir(credentialRuntimePath(root))).some(file => file.endsWith(".askpass") || file.endsWith(".pipe"))).toBe(false);
+    expect((await readdir(credentialSecretsPath(root))).some(file => file.endsWith(".askpass") || file.endsWith(".pipe"))).toBe(false);
+    await Bun.sleep(1_200);
+    expect(await Bun.file(delayedArtifact).exists()).toBe(false);
+  }, 30_000);
+
+  test("timeouts terminate descendants retaining PTY and stdout handles", async () => {
+    const found = await tools();
+    const root = await stateRoot("uatu-ssh-descendant-timeout-");
+    const metadata = new CredentialMetadataStore(credentialsPath(root));
+    await metadata.load();
+    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent });
+    agents.push(agent);
+    const script = async (name: string, marker: string): Promise<string> => {
+      const executable = path.join(root, name);
+      await writeFile(executable, [
+        "#!/bin/sh",
+        `(sleep 1; touch '${marker}') &`,
+        "/bin/sleep 5",
+      ].join("\n"), { mode: 0o700 });
+      return executable;
+    };
+
+    const ptyMarker = path.join(root, "pty-descendant-survived");
+    const ptyKeygen = await script("pty-keygen", ptyMarker);
+    const ptyService = new SshCredentialService({
+      secretsDirectory: credentialSecretsPath(root),
+      runtimeDirectory: credentialRuntimePath(root),
+      metadataStore: metadata,
+      agent,
+      sshKeygenPath: ptyKeygen,
+      sshAddPath: found.add,
+      operationTimeoutMs: 200,
+      createId: () => "pty-timeout",
+    });
+    const ptyStarted = Date.now();
+    await expect(ptyService.generate("PTY timeout", ["ssh-authentication"], "pty-timeout-secret"))
+      .rejects.toThrow("generation failed");
+    expect(Date.now() - ptyStarted).toBeLessThan(1_500);
+
+    const stdoutMarker = path.join(root, "stdout-descendant-survived");
+    const stdoutKeygen = await script("stdout-keygen", stdoutMarker);
+    const stdoutService = new SshCredentialService({
+      secretsDirectory: credentialSecretsPath(root),
+      runtimeDirectory: credentialRuntimePath(root),
+      metadataStore: metadata,
+      agent,
+      sshKeygenPath: stdoutKeygen,
+      sshAddPath: found.add,
+      operationTimeoutMs: 200,
+      createId: () => "stdout-timeout",
+    });
+    const stdoutStarted = Date.now();
+    await expect(stdoutService.import("stdout timeout", ["ssh-signing"], "not an SSH key\n", ""))
+      .rejects.toThrow("could not be unlocked");
+    expect(Date.now() - stdoutStarted).toBeLessThan(1_500);
+
+    const source = path.join(root, "askpass-source");
+    expect((await run(found.keygen, ["-q", "-t", "ed25519", "-N", "askpass-secret", "-f", source], cleanEnv())).code).toBe(0);
+    const setupService = new SshCredentialService({
+      secretsDirectory: credentialSecretsPath(root),
+      runtimeDirectory: credentialRuntimePath(root),
+      metadataStore: metadata,
+      agent,
+      sshKeygenPath: found.keygen,
+      sshAddPath: found.add,
+      createId: () => "askpass-timeout",
+    });
+    const credential = await setupService.import(
+      "askpass timeout",
+      ["ssh-authentication"],
+      await readFile(source, "utf8"),
+      "askpass-secret",
+    );
+    await setupService.lock(credential.id);
+    const askpassMarker = path.join(root, "askpass-descendant-survived");
+    const slowAdd = await script("slow-add", askpassMarker);
+    const askpassService = new SshCredentialService({
+      secretsDirectory: credentialSecretsPath(root),
+      runtimeDirectory: credentialRuntimePath(root),
+      metadataStore: metadata,
+      agent,
+      sshKeygenPath: found.keygen,
+      sshAddPath: slowAdd,
+      operationTimeoutMs: 200,
+    });
+    const askpassStarted = Date.now();
+    await expect(askpassService.unlock(credential.id, "askpass-secret")).rejects.toThrow("could not be unlocked");
+    expect(Date.now() - askpassStarted).toBeLessThan(1_500);
+
+    await Bun.sleep(1_100);
+    expect(await Bun.file(ptyMarker).exists()).toBe(false);
+    expect(await Bun.file(stdoutMarker).exists()).toBe(false);
+    expect(await Bun.file(askpassMarker).exists()).toBe(false);
+  }, 30_000);
+
   test("deleting a locked key keeps other loaded identities available", async () => {
     const found = await tools();
     const root = await stateRoot("uatu-ssh-delete-locked-");
@@ -232,6 +505,7 @@ describe("managed SSH credential lifecycle", () => {
     let id = 0;
     const service = new SshCredentialService({
       secretsDirectory: credentialSecretsPath(root),
+      runtimeDirectory: credentialRuntimePath(root),
       metadataStore: metadata,
       agent,
       sshKeygenPath: found.keygen,
@@ -266,6 +540,7 @@ describe("managed SSH credential lifecycle", () => {
     let id = 0;
     const service = new SshCredentialService({
       secretsDirectory: credentialSecretsPath(root),
+      runtimeDirectory: credentialRuntimePath(root),
       metadataStore: metadata,
       agent,
       sshKeygenPath: found.keygen,
@@ -311,6 +586,7 @@ describe("managed SSH credential lifecycle", () => {
     agents.push(hubAgent);
     const service = new SshCredentialService({
       secretsDirectory: credentialSecretsPath(hubRoot),
+      runtimeDirectory: credentialRuntimePath(hubRoot),
       metadataStore: metadata,
       agent: hubAgent,
       sshKeygenPath: found.keygen,
@@ -344,6 +620,7 @@ async function wrapper(root: string, name: string, executable: string, audit: st
   const filePath = path.join(root, `${name}-wrapper.sh`);
   await writeFile(filePath, [
     "#!/bin/sh",
+    `printf 'SSH_ASKPASS=%s UATU_SSH_ASKPASS_PIPE=%s\\n' "$SSH_ASKPASS" "$UATU_SSH_ASKPASS_PIPE" >> '${audit}'`,
     `printf '%s\\n' \"$0 $* SSH_AUTH_SOCK=\${SSH_AUTH_SOCK-}\" >> '${audit}'`,
     `exec '${executable}' \"$@\"`,
   ].join("\n"), { mode: 0o700 });

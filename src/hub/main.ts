@@ -21,6 +21,7 @@ import { PersonalWorkspaceStateStore } from "./personal-state";
 import {
   ensureCredentialStateDirs,
   ensureStateDir,
+  acquireHubStateLease,
   credentialGnuPgPath,
   credentialRuntimePath,
   credentialSecretsPath,
@@ -44,27 +45,81 @@ export type RunHubOptions = {
   exitOnStdinClose?: boolean;
 };
 
+export type HubRuntimeShutdownResult = {
+  ok: boolean;
+  stateLeaseSafeToRelease: boolean;
+};
+
 export async function stopHubRuntime(parts: {
   cloneJobs: { close(): Promise<void> };
+  credentialTools?: { shutdown(): Promise<void> } | null;
   sessions: { stopAll(): Promise<void> };
   sshAgent?: { shutdown(): Promise<void> } | null;
   openPgp?: { shutdown(): Promise<unknown> } | null;
   reportError?: (message: string) => void;
-}): Promise<void> {
+}): Promise<HubRuntimeShutdownResult> {
   const report = parts.reportError ?? (message => console.error(message));
+  const failures = new Set<string>();
   const settle = async (label: string, operation: () => Promise<unknown>) => {
     const [result] = await Promise.allSettled([Promise.resolve().then(operation)]);
-    if (result?.status === "rejected") report(`uatu hub: ${label} shutdown failed`);
+    if (result?.status === "rejected") {
+      failures.add(label);
+      report(`uatu hub: ${label} shutdown failed`);
+    }
     return result;
   };
   await settle("clone job", () => parts.cloneJobs.close());
+  await settle("credential tool", () => parts.credentialTools?.shutdown() ?? Promise.resolve());
   await settle("workspace session", () => parts.sessions.stopAll());
   const agents = await Promise.allSettled([
     Promise.resolve().then(() => parts.sshAgent?.shutdown()),
     Promise.resolve().then(() => parts.openPgp?.shutdown()),
   ]);
-  if (agents[0]?.status === "rejected") report("uatu hub: SSH agent shutdown failed");
-  if (agents[1]?.status === "rejected") report("uatu hub: OpenPGP agent shutdown failed");
+  if (agents[0]?.status === "rejected") {
+    failures.add("SSH agent");
+    report("uatu hub: SSH agent shutdown failed");
+  }
+  if (agents[1]?.status === "rejected") {
+    failures.add("OpenPGP agent");
+    report("uatu hub: OpenPGP agent shutdown failed");
+  }
+  return {
+    ok: failures.size === 0,
+    stateLeaseSafeToRelease: !failures.has("clone job") && !failures.has("workspace session"),
+  };
+}
+
+export async function shutdownHub(parts: {
+  stopServer(): void;
+  stateLease: { release(): Promise<void> };
+  cloneJobs: { close(): Promise<void> };
+  credentialTools?: { shutdown(): Promise<void> } | null;
+  sessions: { stopAll(): Promise<void> };
+  sshAgent?: { shutdown(): Promise<void> } | null;
+  openPgp?: { shutdown(): Promise<unknown> } | null;
+  reportError?: (message: string) => void;
+}): Promise<number> {
+  const report = parts.reportError ?? (message => console.error(message));
+  let serverStopped = true;
+  try {
+    parts.stopServer();
+  } catch {
+    serverStopped = false;
+    report("uatu hub: server shutdown failed");
+  }
+  const runtime = await stopHubRuntime({ ...parts, reportError: report });
+  let leaseReleased = false;
+  if (serverStopped && runtime.stateLeaseSafeToRelease) {
+    try {
+      await parts.stateLease.release();
+      leaseReleased = true;
+    } catch (error) {
+      report(`uatu hub: state-root lease release failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  } else {
+    report("uatu hub: retaining state-root lease after incomplete shutdown");
+  }
+  return serverStopped && runtime.ok && leaseReleased ? 0 : 1;
 }
 
 // Coordinates credential operations with runtime replacement. An operation
@@ -128,6 +183,23 @@ export function createCredentialRuntimeGate<Service>(current: () => Service): {
   };
 }
 
+export async function applyCredentialRuntimeAtomically<State>(
+  previous: State,
+  next: State,
+  apply: (state: State, force: boolean) => Promise<void>,
+): Promise<void> {
+  try {
+    await apply(next, false);
+  } catch (error) {
+    try {
+      await apply(previous, true);
+    } catch (restoreError) {
+      throw new AggregateError([error, restoreError], "credential runtime application and restoration failed");
+    }
+    throw error;
+  }
+}
+
 export async function runHub(options: RunHubOptions): Promise<void> {
   const config = await loadHubConfig(options.configPath);
   if (options.port !== undefined) {
@@ -136,7 +208,9 @@ export async function runHub(options: RunHubOptions): Promise<void> {
 
   const stateRoot = config.stateDir ?? resolveHubStateRoot();
   await ensureStateDir(stateRoot);
-  await ensureCredentialStateDirs(stateRoot);
+  const stateLease = await acquireHubStateLease(stateRoot);
+  try {
+    await ensureCredentialStateDirs(stateRoot);
   const sessionStore = new HubSessionStore(sessionsPath(stateRoot));
   await sessionStore.load();
 
@@ -152,7 +226,12 @@ export async function runHub(options: RunHubOptions): Promise<void> {
 
   const credentialTokens = new CredentialTokenStore(credentialTokenStorePath(stateRoot));
   const credentialToolStore = new CredentialToolOverrideStore(credentialToolsPath(stateRoot));
-  const credentialTools = new CredentialToolManager(credentialToolStore);
+  const credentialTools = new CredentialToolManager(
+    credentialToolStore,
+    undefined,
+    undefined,
+    () => applyCredentialRuntime(),
+  );
   await Promise.all([credentialTokens.load(), credentialTools.load()]);
   let sshAgent: ManagedSshAgent | null = null;
   let sshCredentials: SshCredentialService | null = null;
@@ -171,9 +250,8 @@ export async function runHub(options: RunHubOptions): Promise<void> {
   const contextTools = { ssh: null, git: null, gpg: null, sshKeygen: null, gh: null, glab: null } as {
     ssh: string | null; git: string | null; gpg: string | null; sshKeygen: string | null; gh: string | null; glab: string | null;
   };
-  const refreshCredentialRuntime = async () => {
-    const paths = new Map(credentialTools.list().map(tool => [tool.tool, readyToolPath(tool)]));
-    const sshChanged = (["ssh-agent", "ssh-keygen", "ssh-add"] as const).some(tool => paths.get(tool) !== activePaths.get(tool));
+  const refreshCredentialRuntime = async (paths: Map<string, string | null>, force: boolean) => {
+    const sshChanged = force || (["ssh-agent", "ssh-keygen", "ssh-add"] as const).some(tool => paths.get(tool) !== activePaths.get(tool));
     if (sshChanged) {
       await sshRuntime.replace(async () => {
         const agentPath = paths.get("ssh-agent");
@@ -183,12 +261,13 @@ export async function runHub(options: RunHubOptions): Promise<void> {
         // rebuilds the service around the running agent: restarting would
         // drop every loaded identity, and encrypted keys cannot be restored
         // without their discarded passphrases.
-        if (agentPath !== activePaths.get("ssh-agent")) {
+        if (force || agentPath !== activePaths.get("ssh-agent")) {
           await sshAgent?.shutdown();
           sshAgent = agentPath ? new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(stateRoot), sshAgentPath: agentPath }) : null;
         }
         sshCredentials = sshAgent && keygenPath && addPath ? new SshCredentialService({
           secretsDirectory: credentialSecretsPath(stateRoot),
+          runtimeDirectory: credentialRuntimePath(stateRoot),
           metadataStore: credentialMetadata,
           agent: sshAgent,
           sshKeygenPath: keygenPath,
@@ -197,7 +276,7 @@ export async function runHub(options: RunHubOptions): Promise<void> {
         }) : null;
       });
     }
-    if (!openPgpCredentials || paths.get("gpg") !== activePaths.get("gpg") || paths.get("gpgconf") !== activePaths.get("gpgconf") || openPgpRecoveryPending) {
+    if (force || !openPgpCredentials || paths.get("gpg") !== activePaths.get("gpg") || paths.get("gpgconf") !== activePaths.get("gpgconf") || openPgpRecoveryPending) {
       // Replacement drains the old manager's in-flight operations first: a
       // detached operation could otherwise restart the shared GnuPG agent
       // after a later shutdown killed it through the replacement manager.
@@ -241,7 +320,15 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     contextTools.glab = paths.get("glab") ?? null;
     activePaths = paths;
   };
-  await refreshCredentialRuntime();
+  const applyCredentialRuntime = () => applyCredentialRuntimeAtomically(
+    activePaths,
+    new Map(credentialTools.list().map(tool => [tool.tool, readyToolPath(tool)])),
+    refreshCredentialRuntime,
+  );
+  await refreshCredentialRuntime(
+    new Map(credentialTools.list().map(tool => [tool.tool, readyToolPath(tool)])),
+    false,
+  );
   const requireSshService = (service: SshCredentialService | null): SshCredentialService => {
     if (!service) throw new Error("OpenSSH credential tooling is unavailable");
     return service;
@@ -303,7 +390,7 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     sessions,
     sessionStore,
     personalState,
-    gitCommand: () => activePaths.get("git") ?? "git",
+    gitCommand: () => activePaths.get("git") ?? path.join(stateRoot, ".unavailable-git"),
     cloneCredentials,
     credentialApi: {
       metadata: credentialMetadata,
@@ -312,7 +399,6 @@ export async function runHub(options: RunHubOptions): Promise<void> {
       openpgp: openPgpOperations,
       tokens: tokenCredentials,
       workspaceExists: workspaceId => registry.byId(workspaceId) !== undefined,
-      toolsChanged: refreshCredentialRuntime,
     },
   });
 
@@ -330,54 +416,53 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     shuttingDown = true;
     console.error("uatu hub: shutting down");
     void (async () => {
-      try {
-        // Stop accepting requests before teardown: an already-accepted
-        // credential operation could otherwise restart the SSH agent after
-        // shutdown observed it stopped, orphaning its socket past exit.
-        server.stop(true);
-        await stopHubRuntime({
-          cloneJobs: server.cloneJobs,
-          sessions,
-          sshAgent: {
-            // Final agent shutdown goes through the runtime gate: in-flight
-            // gated operations drain first, and swapping the service to null
-            // keeps any operation still waiting on the gate from starting a
-            // replacement agent.
-            shutdown: () => sshRuntime.replace(async () => {
-              const agent = sshAgent;
-              sshAgent = null;
-              sshCredentials = null;
-              await agent?.shutdown();
-            }),
-          },
-          openPgp: {
-            // Same shape for OpenPGP: drain gated operations, then swap in a
-            // tooling-unavailable manager before killing the agent, so a
-            // waiting operation cannot restart the shared GnuPG agent after
-            // exit.
-            shutdown: () => openPgpRuntime.replace(async () => {
-              const previous = openPgpCredentials;
-              openPgpCredentials = new OpenPgpCredentialManager({
-                gnupgHome: credentialGnuPgPath(stateRoot),
-                metadataStore: credentialMetadata,
-                gpgPath: null,
-                gpgconfPath: null,
-              });
-              const results = await previous.shutdown();
-              // shutdown() reports failure as readiness, not rejection: a
-              // failed kill with tooling configured means the Hub-owned
-              // agent may survive exit with cached passphrases — surface it
-              // through stopHubRuntime instead of exiting silently.
-              const gpgConfigured = (activePaths.get("gpg") ?? activePaths.get("gpgconf") ?? null) !== null;
-              if (gpgConfigured && results.some(result => result.status === "unavailable")) {
-                throw new Error("the Hub OpenPGP agent could not be stopped");
-              }
-            }),
-          },
-        });
-      } finally {
-        process.exit(0);
-      }
+      // Stop accepting requests before teardown: an already-accepted
+      // credential operation could otherwise restart the SSH agent after
+      // shutdown observed it stopped, orphaning its socket past exit.
+      const exitCode = await shutdownHub({
+        stopServer: () => server.stop(true),
+        stateLease,
+        cloneJobs: server.cloneJobs,
+        credentialTools,
+        sessions,
+        sshAgent: {
+          // Final agent shutdown goes through the runtime gate: in-flight
+          // gated operations drain first, and swapping the service to null
+          // keeps any operation still waiting on the gate from starting a
+          // replacement agent.
+          shutdown: () => sshRuntime.replace(async () => {
+            const agent = sshAgent;
+            sshAgent = null;
+            sshCredentials = null;
+            await agent?.shutdown();
+          }),
+        },
+        openPgp: {
+          // Same shape for OpenPGP: drain gated operations, then swap in a
+          // tooling-unavailable manager before killing the agent, so a
+          // waiting operation cannot restart the shared GnuPG agent after
+          // exit.
+          shutdown: () => openPgpRuntime.replace(async () => {
+            const previous = openPgpCredentials;
+            openPgpCredentials = new OpenPgpCredentialManager({
+              gnupgHome: credentialGnuPgPath(stateRoot),
+              metadataStore: credentialMetadata,
+              gpgPath: null,
+              gpgconfPath: null,
+            });
+            const results = await previous.shutdown();
+            // shutdown() reports failure as readiness, not rejection: a
+            // failed kill with tooling configured means the Hub-owned
+            // agent may survive exit with cached passphrases — surface it
+            // through stopHubRuntime instead of exiting silently.
+            const gpgConfigured = (activePaths.get("gpg") ?? activePaths.get("gpgconf") ?? null) !== null;
+            if (gpgConfigured && results.some(result => result.status === "unavailable")) {
+              throw new Error("the Hub OpenPGP agent could not be stopped");
+            }
+          }),
+        },
+      });
+      process.exit(exitCode);
     })();
   };
 
@@ -401,6 +486,14 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     process.stdin.resume();
     process.stdin.on("end", onStdinGone);
     process.stdin.on("close", onStdinGone);
+  }
+  } catch (error) {
+    try {
+      await stateLease.release();
+    } catch (releaseError) {
+      throw new AggregateError([error, releaseError], "Hub startup and state-root lease release failed");
+    }
+    throw error;
   }
 }
 

@@ -81,6 +81,32 @@ describe("ManagedSshAgent", () => {
     expect(JSON.parse(await readFile(path.join(runtime, "ssh-agent.json"), "utf8")).pid).not.toBe(impossiblePid);
   });
 
+  test("preserves a missing-socket record whose pid is still live", async () => {
+    const { runtime, executable } = await fixture();
+    const ownershipPath = path.join(runtime, "ssh-agent.json");
+    const record = {
+      version: 1,
+      nonce: "live-owner",
+      pid: process.pid,
+      socketDevice: 1,
+      socketInode: 1,
+    };
+    await writeFile(ownershipPath, JSON.stringify(record), { mode: 0o600 });
+    let spawned = false;
+    const agent = new ManagedSshAgent({
+      runtimeDirectory: runtime,
+      sshAgentPath: executable,
+      spawn() {
+        spawned = true;
+        throw new Error("must not spawn");
+      },
+    });
+
+    await expect(agent.start()).rejects.toThrow(`names live process ${process.pid}, but its socket is missing`);
+    expect(spawned).toBe(false);
+    expect(JSON.parse(await readFile(ownershipPath, "utf8"))).toEqual(record);
+  });
+
   test("removes owned artifacts after an unexpected agent exit and restarts", async () => {
     const { runtime, executable } = await fixture();
     const agent = new ManagedSshAgent({ runtimeDirectory: runtime, sshAgentPath: executable });

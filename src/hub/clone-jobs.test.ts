@@ -597,9 +597,35 @@ describe("CloneJobManager state machine", () => {
     expect(await f.manager.cancel("alice", jobId)).toBe("cleanup-failed");
     const callsAfterFailure = f.processes[0].terminateCalls;
 
-    await f.manager.close();
+    await expect(f.manager.close()).rejects.toThrow("failed to terminate all clone processes");
 
     expect(f.processes[0].terminateCalls).toBe(callsAfterFailure + 2);
+  });
+
+  test("shutdown attempts every process before reporting permanent termination failures", async () => {
+    const f = fixture();
+    const first = f.manager.create("alice", "remote", "/tmp/unreapable-one");
+    const second = f.manager.create("alice", "remote", "/tmp/unreapable-two");
+    await tick();
+    f.processes[0].failTerminate(new Error("first process group survived"));
+    f.processes[1].failTerminate(new Error("second process group survived"));
+    expect(await f.manager.cancel("alice", first.jobId)).toBe("cleanup-failed");
+    expect(await f.manager.cancel("alice", second.jobId)).toBe("cleanup-failed");
+    const callsBeforeClose = f.processes.map(process => process.terminateCalls);
+
+    let failure: unknown;
+    try {
+      await f.manager.close();
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).errors.map(error => String(error))).toEqual([
+      expect.stringContaining("first process group survived"),
+      expect.stringContaining("second process group survived"),
+    ]);
+    expect(f.processes.map(process => process.terminateCalls)).toEqual(callsBeforeClose.map(calls => calls + 2));
   });
 
   test("rolls registration back on start failure without deleting the target", async () => {
@@ -647,6 +673,49 @@ describe("CloneJobManager input, timers, and cleanup", () => {
     f.processes[0].exit(0);
     await tick();
     expect(f.manager.input("alice", jobId, "later")).toBe("inactive");
+  });
+
+  test("removes echoed input from live and replay output across chunk boundaries", async () => {
+    const f = fixture();
+    const { jobId } = f.manager.create("alice", "remote", "/tmp/redacted");
+    await tick();
+    const live: string[] = [];
+    f.manager.subscribe("alice", jobId, 0, event => {
+      if (event.type === "output") live.push(event.data.output);
+    });
+    const secret = "split-response";
+    expect(f.manager.input("alice", jobId, secret)).toBe("accepted");
+    f.starts[0].onOutput("before split-");
+    f.starts[0].onOutput("response after");
+    f.processes[0].exit(1);
+    await tick();
+
+    expect(live.join("")).toContain("before ");
+    expect(live.join("")).toContain(" after");
+    expect(live.join("")).not.toContain(secret);
+    expect(JSON.stringify(capture(f.manager, "alice", jobId))).not.toContain(secret);
+  });
+
+  test.each(["exit", "disconnect"] as const)("drops a possible secret prefix on clone %s", async outcome => {
+    const f = fixture();
+    const { jobId } = f.manager.create("alice", "remote", `/tmp/redacted-${outcome}`);
+    await tick();
+    const live: string[] = [];
+    f.manager.subscribe("alice", jobId, 0, event => {
+      if (event.type === "output") live.push(event.data.output);
+    });
+    expect(f.manager.input("alice", jobId, "submitted-secret")).toBe("accepted");
+    f.starts[0].onOutput("safe output\nsubmitted-sec");
+
+    if (outcome === "exit") {
+      f.processes[0].exit(1);
+      await tick();
+    } else {
+      await f.manager.cancel("alice", jobId);
+    }
+
+    expect(live.join("")).toBe("safe output\n");
+    expect(JSON.stringify(capture(f.manager, "alice", jobId))).not.toContain("submitted-sec");
   });
 
   test("input and output reset inactivity; inactivity and lifetime time out and terminate", async () => {

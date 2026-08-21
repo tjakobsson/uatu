@@ -17,6 +17,12 @@ import { normalizeProviderHost, type OpenPgpCredentialRecord, type SshCredential
 const tempDirectories: string[] = [];
 const createdAt = "2026-08-20T00:00:00.000Z";
 
+function requiredTool(name: string): string {
+  const executable = Bun.which(name);
+  if (!executable || !path.isAbsolute(executable)) throw new Error(`test requires an absolute path to ${name}`);
+  return executable;
+}
+
 afterEach(async () => {
   await Promise.all(tempDirectories.splice(0).map(directory => rm(directory, { recursive: true, force: true })));
 });
@@ -204,6 +210,9 @@ describe("local workspace credential projection", () => {
 
   test("selects assigned SSH, HTTPS, provider, and signing credentials without replacing unrelated Git config", async () => {
     const { root, home, workspace } = await fixture();
+    const sshPath = requiredTool("ssh");
+    const gitPath = requiredTool("git");
+    const sshKeygenPath = requiredTool("ssh-keygen");
     const managedGh = path.join(root, "custom-provider-cli");
     await writeFile(managedGh, "#!/bin/sh\nprintf 'managed-gh\\n'\n", { mode: 0o700 });
     const ssh: SshCredentialRecord = {
@@ -230,7 +239,7 @@ describe("local workspace credential projection", () => {
       stateRoot: path.join(root, "state with quote '"),
       sshAgentSocket: path.join(root, "managed-agent.sock"),
       gnupgHome: path.join(root, "gnupg"),
-      tools: { ssh: "/usr/bin/ssh", git: "/usr/bin/git", gpg: "/usr/bin/gpg", sshKeygen: "/usr/bin/ssh-keygen", gh: managedGh, glab: null },
+      tools: { ssh: sshPath, git: gitPath, gpg: null, sshKeygen: sshKeygenPath, gh: managedGh, glab: null },
       authentication: [
         { host: "git.example.com", credential: ssh },
         { host: "github.com", credential: token, token: "provider-secret" },
@@ -253,10 +262,10 @@ describe("local workspace credential projection", () => {
 
     expect(projected.runtimeDirectory.startsWith(workspace.path)).toBe(false);
     expect(projected.env.SSH_AUTH_SOCK).toBe(path.join(root, "managed-agent.sock"));
-    expect(projected.env.GIT_SSH_COMMAND).toStartWith("'/usr/bin/ssh' -F ");
+    expect(projected.env.GIT_SSH_COMMAND).toStartWith(`'${sshPath}' -F `);
     expect(projected.env.GH_TOKEN).toBe("provider-secret");
     expect(projected.env.PATH?.split(path.delimiter)[0]).toBe(path.join(projected.runtimeDirectory, "tool-bin"));
-    expect(await readlink(path.join(projected.runtimeDirectory, "tool-bin", "git"))).toBe("/usr/bin/git");
+    expect(await readlink(path.join(projected.runtimeDirectory, "tool-bin", "git"))).toBe(gitPath);
     expect(Bun.spawnSync(["gh"], { env: projected.env, stdout: "pipe" }).stdout.toString()).toBe("managed-gh\n");
     expect(projected.env.GIT_ASKPASS).toBeUndefined();
     expect(gitConfig(workspace.path, projected.env, "user.name")).toBe("Ambient User");
@@ -265,7 +274,7 @@ describe("local workspace credential projection", () => {
     expect(gitConfig(workspace.path, projected.env, "credential.https://github.com.helper")).toContain("git-credential-token-1");
 
     const sshConfig = await readFile(path.join(projected.runtimeDirectory, "ssh_config"), "utf8");
-    expect(sshConfig).toContain("Host git.example.com");
+    expect(sshConfig).toContain("Host git.example.com git.example.com.");
     expect(sshConfig).toContain(`IdentityAgent "${context.sshAgentSocket}"`);
     expect(sshConfig).toContain("IdentityFile none");
     expect(sshConfig).not.toContain("/ambient-agent.sock");
@@ -302,7 +311,7 @@ describe("local workspace credential projection", () => {
     });
 
     const sshConfig = await readFile(path.join(projected.runtimeDirectory, "ssh_config"), "utf8");
-    expect(sshConfig).toContain('Match host git.example.com exec "test %p = 2222"');
+    expect(sshConfig).toContain('Match host git.example.com,git.example.com. exec "test %p = 2222"');
     // An explicit 443 stays port-restricted — the URL parser would have
     // erased it as the HTTPS default and widened the match to every port.
     const port443 = await buildLocalCredentialEnvironment({
@@ -320,7 +329,7 @@ describe("local workspace credential projection", () => {
       uatuArgv: ["uatu"],
     });
     const config443 = await readFile(path.join(port443.runtimeDirectory, "ssh_config"), "utf8");
-    expect(config443).toContain('Match host ssh.example.com exec "test %p = 443"');
+    expect(config443).toContain('Match host ssh.example.com,ssh.example.com. exec "test %p = 443"');
     expect(config443).not.toContain("Host ssh.example.com");
     expect(sshConfig).toContain(`IdentityAgent "${agentSocket.replaceAll("%", "%%")}"`);
     expect(sshConfig).toContain(`IdentityFile "${path.join(projected.runtimeDirectory, "ssh-port.pub").replaceAll("%", "%%")}"`);
@@ -373,7 +382,7 @@ describe("local workspace credential projection", () => {
     const sshConfig = await readFile(configPath, "utf8");
     // IdentityFile is additive across matching blocks, so the broad block
     // must exclude the port another assignment claims.
-    expect(sshConfig).toContain('Match host git.example.com exec "test %p != 2222"');
+    expect(sshConfig).toContain('Match host git.example.com,git.example.com. exec "test %p != 2222"');
     const onPort = Bun.spawnSync(["ssh", "-G", "-F", configPath, "-p", "2222", "git.example.com"], { stdout: "pipe", stderr: "pipe" });
     const onDefault = Bun.spawnSync(["ssh", "-G", "-F", configPath, "git.example.com"], { stdout: "pipe", stderr: "pipe" });
     expect(onPort.exitCode).toBe(0);
@@ -382,6 +391,204 @@ describe("local workspace credential projection", () => {
     expect(onDefault.exitCode).toBe(0);
     expect(onDefault.stdout.toString()).toContain("broad.pub");
     expect(onDefault.stdout.toString()).not.toContain("ported.pub");
+  });
+
+  test("selects a direct SSH assignment for every OpenSSH port option form", async () => {
+    const { root, workspace } = await fixture();
+    const sshCapture = path.join(root, "ssh-capture");
+    await writeFile(sshCapture, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n", { mode: 0o700 });
+    const credential: SshCredentialRecord = {
+      id: "ported",
+      name: "ported",
+      type: "ssh",
+      capabilities: ["ssh-authentication"],
+      enabled: true,
+      createdAt,
+      metadata: { publicKey: "ssh-ed25519 AAAAPORTED uatu", fingerprint: "SHA256:ported" },
+    };
+    const projected = await buildLocalCredentialEnvironment({
+      workspace,
+      context: {
+        revision: "port-options",
+        runtimeRoot: path.join(root, "runtime"),
+        stateRoot: root,
+        sshAgentSocket: path.join(root, "agent.sock"),
+        gnupgHome: path.join(root, "gnupg"),
+        tools: { ssh: sshCapture, git: null, gpg: null, sshKeygen: null, gh: null, glab: null },
+        authentication: [{ host: "git.example.com:2222", credential }],
+        signing: null,
+      },
+      uatuArgv: ["uatu"],
+      sourceEnv: { PATH: process.env.PATH },
+    });
+    const forms = [
+      ["-p", "2222"],
+      ["-p2222"],
+      ["-o", "Port=2222"],
+      ["-o", "pOrT 2222"],
+      ["-oPort=2222"],
+      ["-oPoRt", "2222"],
+      ["-o", "PORT", "2222"],
+    ];
+
+    for (const form of forms) {
+      const result = Bun.spawnSync(["ssh", "-l", "git", ...form, "git.example.com"], {
+        env: projected.env,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.toString()).toContain("IdentityFile=");
+      expect(result.stdout.toString()).toContain("ported.pub");
+    }
+  });
+
+  test("preserves special characters in direct SSH option paths", async () => {
+    const { root, workspace } = await fixture();
+    const sshPath = requiredTool("ssh");
+    const runtimeRoot = path.join(root, `runtime space 'quote" #hash %percent`);
+    const agentSocket = path.join(root, `agent space 'quote" #hash %h.sock`);
+    const credential: SshCredentialRecord = {
+      id: "special-path",
+      name: "special path",
+      type: "ssh",
+      capabilities: ["ssh-authentication"],
+      enabled: true,
+      createdAt,
+      metadata: { publicKey: "ssh-ed25519 AAAASPECIAL uatu", fingerprint: "SHA256:special" },
+    };
+    const projected = await buildLocalCredentialEnvironment({
+      workspace,
+      context: {
+        revision: "special-paths",
+        runtimeRoot,
+        stateRoot: root,
+        sshAgentSocket: agentSocket,
+        gnupgHome: path.join(root, "gnupg"),
+        tools: { ssh: sshPath, git: null, gpg: null, sshKeygen: null, gh: null, glab: null },
+        authentication: [{ host: "git.example.com", credential }],
+        signing: null,
+      },
+      uatuArgv: ["uatu"],
+      sourceEnv: { PATH: process.env.PATH },
+    });
+
+    const result = Bun.spawnSync(["ssh", "-G", "git.example.com"], {
+      env: projected.env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const publicKeyPath = path.join(projected.runtimeDirectory, "special-path.pub");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain(`identityagent ${agentSocket}`);
+    expect(result.stdout.toString()).toContain(`identityfile ${publicKeyPath.replaceAll("%", "%%")}`);
+  });
+
+  test("matches retained SSH assignments for equivalent original host spellings", async () => {
+    const { root, workspace } = await fixture();
+    const sshPath = requiredTool("ssh");
+    const ssh = (id: string): SshCredentialRecord => ({
+      id,
+      name: id,
+      type: "ssh",
+      capabilities: ["ssh-authentication"],
+      enabled: true,
+      createdAt,
+      metadata: { publicKey: `ssh-ed25519 AAAA${id.toUpperCase()} uatu`, fingerprint: `SHA256:${id}` },
+    });
+    const projected = await buildLocalCredentialEnvironment({
+      workspace,
+      context: {
+        revision: "spellings",
+        runtimeRoot: path.join(root, "runtime"),
+        stateRoot: root,
+        sshAgentSocket: path.join(root, "agent.sock"),
+        gnupgHome: path.join(root, "gnupg"),
+        tools: { ssh: sshPath, git: null, gpg: null, sshKeygen: null, gh: null, glab: null },
+        authentication: [
+          { host: "github.com", credential: ssh("dns") },
+          { host: "[2001:db8::1]", credential: ssh("ipv6") },
+          { host: "[::ffff:c000:201]", credential: ssh("ipv4-embedded") },
+        ],
+        signing: null,
+      },
+      uatuArgv: ["uatu"],
+      sourceEnv: { PATH: process.env.PATH },
+    });
+
+    const dns = Bun.spawnSync(["ssh", "-G", "GitHub.COM."], { env: projected.env, stdout: "pipe", stderr: "pipe" });
+    const ipv6Spellings = [
+      "2001:0db8:0000:0000:0000:0000:0000:0001",
+      "2001:db8:0:0:0::1",
+      "2001:0db8::0:1",
+    ];
+    expect(dns.exitCode).toBe(0);
+    expect(dns.stdout.toString()).toContain("dns.pub");
+    expect(dns.stdout.toString()).not.toContain("ipv6.pub");
+    for (const spelling of ipv6Spellings) {
+      const ipv6 = Bun.spawnSync(["ssh", "-G", spelling], { env: projected.env, stdout: "pipe", stderr: "pipe" });
+      expect(ipv6.exitCode).toBe(0);
+      expect(ipv6.stdout.toString()).toContain("ipv6.pub");
+      expect(ipv6.stdout.toString()).not.toContain("dns.pub");
+    }
+    const embedded = Bun.spawnSync(["ssh", "-G", "::ffff:192.0.2.1"], {
+      env: projected.env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(embedded.exitCode).toBe(0);
+    expect(embedded.stdout.toString()).toContain("ipv4-embedded.pub");
+    expect(projected.env.PATH?.split(path.delimiter)[0]).toBe(path.join(projected.runtimeDirectory, "tool-bin"));
+
+    const configPath = path.join(projected.runtimeDirectory, "ssh_config");
+    const configMatch = Bun.spawnSync([sshPath, "-G", "-F", configPath, "2001:db8:0:0:0::1"], {
+      env: projected.env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(configMatch.exitCode).toBe(0);
+    expect(configMatch.stdout.toString()).toContain("ipv6.pub");
+
+    const bypass = Bun.spawnSync([sshPath, "-G", "GitHub.COM."], {
+      env: projected.env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(bypass.stdout.toString()).not.toContain("dns.pub");
+  });
+
+  test("quotes workspace credential helper command paths", async () => {
+    const { root, workspace } = await fixture();
+    const gitPath = requiredTool("git");
+    const helperCommand = path.join(root, "uatu helper;safe");
+    await writeFile(helperCommand, "#!/bin/sh\nprintf 'username=managed\\npassword=secret\\n'\n", { mode: 0o700 });
+    const token: TokenCredentialRecord = {
+      id: "token-shell",
+      name: "shell-safe token",
+      type: "token",
+      capabilities: ["https-git"],
+      enabled: true,
+      createdAt,
+      metadata: { host: "github.com" },
+    };
+    const projected = await buildLocalCredentialEnvironment({
+      workspace,
+      context: {
+        revision: "helper-shell",
+        runtimeRoot: path.join(root, "runtime with spaces"),
+        stateRoot: path.join(root, "state;safe"),
+        sshAgentSocket: null,
+        gnupgHome: path.join(root, "gnupg"),
+        tools: { ssh: null, git: gitPath, gpg: null, sshKeygen: null, gh: null, glab: null },
+        authentication: [{ host: "github.com", credential: token, token: "secret" }],
+        signing: null,
+      },
+      uatuArgv: [helperCommand, "argument with spaces"],
+      sourceEnv: { PATH: process.env.PATH },
+    });
+
+    expect(await gitCredentialFill(workspace.path, projected.env)).toBe(0);
+    expect(gitConfig(workspace.path, projected.env, "credential.https://github.com.helper")).toStartWith("!'");
   });
 
   test("uses a distinct runtime directory for each session generation", async () => {
@@ -402,7 +609,10 @@ describe("local workspace credential projection", () => {
     await writeFile(marker, "replacement");
 
     expect(first.runtimeDirectory).not.toBe(second.runtimeDirectory);
-    expect(await Bun.file(first.runtimeDirectory).exists()).toBe(false);
+    expect((await readdir(path.dirname(first.runtimeDirectory))).sort()).toEqual([
+      path.basename(first.runtimeDirectory),
+      path.basename(second.runtimeDirectory),
+    ].sort());
     await rm(first.runtimeDirectory, { recursive: true, force: true });
     expect(await Bun.file(marker).exists()).toBe(true);
   });
@@ -538,6 +748,29 @@ describe("local workspace credential projection", () => {
     expect(gitConfig(workspace.path, projected.env, "gpg.program")).toBe("/managed/gpg");
   });
 
+  test("uses an isolated GnuPG home when no signing credential is assigned", async () => {
+    const { root, home, workspace } = await fixture();
+    const projected = await buildLocalCredentialEnvironment({
+      workspace,
+      context: {
+        revision: "unsigned",
+        runtimeRoot: path.join(root, "runtime"),
+        stateRoot: root,
+        sshAgentSocket: null,
+        gnupgHome: path.join(root, "daemon-gnupg"),
+        tools: { ssh: null, git: null, gpg: null, sshKeygen: null, gh: null, glab: null },
+        authentication: [],
+        signing: null,
+      },
+      uatuArgv: ["uatu"],
+      sourceEnv: { HOME: home, PATH: process.env.PATH },
+    });
+
+    expect(projected.env.GNUPGHOME).toBe(path.join(projected.runtimeDirectory, "gnupg-empty"));
+    expect(projected.env.GNUPGHOME).not.toBe(path.join(home, ".gnupg"));
+    expect(projected.env.GNUPGHOME).not.toBe(path.join(root, "daemon-gnupg"));
+  });
+
   test("removes ambient credentials when there are no assignments and documents the same-UID bypass", async () => {
     const { root, home, workspace } = await fixture();
     const marker = path.join(root, "ambient-helper-used");
@@ -580,7 +813,7 @@ describe("local workspace credential projection", () => {
     });
 
     expect(projected.env.SSH_AUTH_SOCK).toBeUndefined();
-    expect(projected.env.GNUPGHOME).toBeUndefined();
+    expect(projected.env.GNUPGHOME).toBe(path.join(projected.runtimeDirectory, "gnupg-empty"));
     expect(projected.env.GH_TOKEN).toBeUndefined();
     expect(projected.env.GITLAB_TOKEN).toBeUndefined();
     expect(await gitCredentialFill(workspace.path, projected.env)).not.toBe(0);
@@ -610,6 +843,21 @@ describe("clone credential resolution", () => {
     // The retained-assignment path feeds this host to metadata.assign, whose
     // parser accepts only the normalized representation.
     expect(normalizeProviderHost("[2001:db8::1]")).toBe("[2001:db8::1]");
+  });
+
+  test("accepts absolute SCP paths without treating drive paths as remotes", () => {
+    expect(parseCloneRemote("git@example.com:/srv/git/repo.git")).toEqual({ transport: "ssh", host: "example.com" });
+    expect(parseCloneRemote("g:repo.git")).toEqual({ transport: "ssh", host: "g" });
+    expect(parseCloneRemote("C:/work/repo")).toEqual({ transport: "other" });
+    expect(parseCloneRemote("C:work/repo")).toEqual({ transport: "other" });
+    expect(parseCloneRemote("C:\\work\\repo")).toEqual({ transport: "other" });
+    expect(parseCloneRemote("/tmp/name:repo")).toEqual({ transport: "other" });
+  });
+
+  test("preserves an explicit HTTPS default port", () => {
+    expect(parseCloneRemote("https://GitHub.COM.:443/acme/repo.git")).toEqual({ transport: "https", host: "github.com:443" });
+    expect(parseCloneRemote("https://GitHub.COM.:443/acme/repo.git?ref=main#readme")).toEqual({ transport: "https", host: "github.com:443" });
+    expect(parseCloneRemote("https://github.com/acme/repo.git")).toEqual({ transport: "https", host: "github.com" });
   });
 
   test("resolves only an unlocked compatible SSH credential", async () => {
@@ -695,5 +943,16 @@ describe("clone credential resolution", () => {
     await expect(resolver.resolve("git@gitlab.com:acme/repo.git", token.id)).rejects.toThrow("not compatible");
     expect(await resolver.resolve("https://github.com/acme/repo.git")).toBeUndefined();
     await expect(resolver.resolve("https://user:secret@github.com/acme/repo.git")).rejects.toThrow("embedded credentials");
+
+    const explicitPort = await metadata.create({
+      name: "GitHub 443",
+      type: "token",
+      capabilities: ["https-git"],
+      enabled: true,
+      metadata: { host: "github.com:443" },
+    }, () => "token-443", () => new Date(createdAt));
+    await tokens.set(explicitPort.id, "port-secret");
+    expect((await resolver.resolve("https://github.com:443/another/page/repo.git?ref=main", explicitPort.id))?.host)
+      .toBe("github.com:443");
   });
 });

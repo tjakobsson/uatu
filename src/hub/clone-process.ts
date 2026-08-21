@@ -46,13 +46,34 @@ export type CloneProcessAdapterOptions = {
 
 export function buildCloneEnvironment(source: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const env = stripAmbientCredentialEnvironment(source);
+  for (const key of ["GIT_SSL_CERT", "GIT_SSL_KEY", "GIT_SSL_CERT_PASSWORD_PROTECTED", "GIT_PROXY_COMMAND"]) {
+    delete env[key];
+  }
   env.GIT_TERMINAL_PROMPT = "1";
   env.SSH_ASKPASS_REQUIRE = "never";
+  // Clone has no repository config yet. Excluding the system and global
+  // layers blocks ambient URL rewrites, HTTP headers, TLS client keys, and
+  // credential helpers without trying to enumerate host-scoped keys.
+  env.GIT_CONFIG_NOSYSTEM = "1";
+  env.GIT_CONFIG_GLOBAL = "/dev/null";
+  // libcurl otherwise treats ~/.netrc as an optional ambient credential
+  // source even when Git credential helpers are disabled.
+  env.HOME = "/dev/null";
   return env;
 }
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function openSshOption(name: string, value: string): string {
+  const quoted = value
+    .replaceAll("%", "%%")
+    .replaceAll("\\", "\\\\")
+    .replaceAll('"', '\\"');
+  // Keep the double quotes through shell parsing. OpenSSH then treats the
+  // whole path as one option value rather than tokenizing spaces or '#'.
+  return shellQuote(`${name}="${quoted}"`);
 }
 
 export function buildCloneArguments(url: string, target: string, credential?: CloneCredentialProcessContext): string[] {
@@ -104,15 +125,11 @@ export class CloneProcessAdapter implements CloneProcessFactory {
     env.GIT_SSH_COMMAND = "ssh -F /dev/null -o IdentityAgent=none -o IdentityFile=none -o IdentitiesOnly=yes";
     if (options.credential?.type === "ssh") {
       env.SSH_AUTH_SOCK = options.credential.agentSocket;
-      // OpenSSH expands %-tokens inside IdentityAgent/IdentityFile values
-      // even through shell quoting, so a state directory containing `%h`
-      // would resolve to a different path; `%%` is the literal form.
-      const sshOptionValue = (value: string) => shellQuote(value.replaceAll("%", "%%"));
       env.GIT_SSH_COMMAND = [
         shellQuote(options.credential.sshPath),
         "-F /dev/null",
-        `-o IdentityAgent=${sshOptionValue(options.credential.agentSocket)}`,
-        `-o IdentityFile=${sshOptionValue(options.credential.publicKeyPath)}`,
+        `-o ${openSshOption("IdentityAgent", options.credential.agentSocket)}`,
+        `-o ${openSshOption("IdentityFile", options.credential.publicKeyPath)}`,
         "-o IdentitiesOnly=yes",
       ].join(" ");
     }

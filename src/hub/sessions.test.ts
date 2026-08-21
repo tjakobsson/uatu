@@ -197,6 +197,37 @@ describe("SessionManager.stop during an in-flight start", () => {
     expect(stopped).toBe(true);
     expect(sessions.runningIds()).toEqual([]);
   });
+
+  test("stopAll attempts every session and aggregates failures", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-stopall-fail-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    await registry.register("/srv/workspaces/first");
+    await registry.register("/srv/workspaces/second");
+    const stopped: string[] = [];
+    const backend: SessionBackend = {
+      start: async workspace => ({
+        ...fakeSession(workspace.id),
+        stop: async () => {
+          stopped.push(workspace.id);
+          throw new Error(`${workspace.id} refused stop`);
+        },
+      }),
+    };
+    const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
+    await Promise.all([sessions.start("first"), sessions.start("second")]);
+
+    let failure: unknown;
+    try {
+      await sessions.stopAll();
+    } catch (error) {
+      failure = error;
+    }
+    expect(new Set(stopped)).toEqual(new Set(["first", "second"]));
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).errors).toHaveLength(2);
+  });
 });
 
 describe("SessionManager start during an in-flight stop", () => {

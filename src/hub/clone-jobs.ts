@@ -72,6 +72,8 @@ type Job = {
   expiryTimer?: unknown;
   registered?: WorkspaceEntry;
   credential?: ResolvedCloneCredential;
+  sensitiveInputs: string[];
+  pendingOutput: string;
   retainAssignment: boolean;
   assigned: boolean;
   done: Promise<void>;
@@ -138,6 +140,8 @@ export class CloneJobManager {
       target: normalizedTarget,
       phase: "cloning",
       credential: options.credential,
+      sensitiveInputs: [],
+      pendingOutput: "",
       retainAssignment: options.retainAssignment === true,
       assigned: false,
       events: [],
@@ -181,7 +185,12 @@ export class CloneJobManager {
     if (!job) return "not-found";
     if (job.result || job.stop || job.phase !== "cloning" || !job.process) return "inactive";
     if (new TextEncoder().encode(value).byteLength > this.maxInputBytes) return "too-large";
-    if (!job.process.writeLine(value)) return "inactive";
+    const addedSensitiveInput = value !== "" && !job.sensitiveInputs.includes(value);
+    if (addedSensitiveInput) job.sensitiveInputs.push(value);
+    if (!job.process.writeLine(value)) {
+      if (addedSensitiveInput) job.sensitiveInputs.splice(job.sensitiveInputs.indexOf(value), 1);
+      return "inactive";
+    }
     this.resetInactivity(job);
     return "accepted";
   }
@@ -199,22 +208,28 @@ export class CloneJobManager {
   async close(): Promise<void> {
     this.closed = true;
     const tracked = [...this.jobs.values()].filter(job => !job.result || job.process);
-    await Promise.all(tracked.map(async job => {
+    const failures = (await Promise.all(tracked.map(async job => {
       if (!job.result) {
         await this.requestStop(job, { status: "cancelled", target: job.target });
         await job.done;
       }
+      let terminationError: unknown;
       for (let attempt = 0; job.process && attempt < SHUTDOWN_CLEANUP_ATTEMPTS; attempt += 1) {
         try {
           await this.terminateProcess(job);
-        } catch {
+        } catch (error) {
+          terminationError = error;
           if (attempt + 1 < SHUTDOWN_CLEANUP_ATTEMPTS) {
             await new Promise(resolve => setTimeout(resolve, 25));
           }
         }
       }
       if (!job.process) this.reservations.delete(job.target);
-    }));
+      return job.process
+        ? new Error(`failed to terminate clone job '${job.id}': ${errorText(terminationError)}`)
+        : undefined;
+    }))).filter((failure): failure is Error => failure !== undefined);
+    if (failures.length > 0) throw new AggregateError(failures, "failed to terminate all clone processes");
   }
 
   private owned(owner: string, id: string): Job | undefined {
@@ -249,7 +264,8 @@ export class CloneJobManager {
             credential: job.credential?.process,
             onOutput: output => {
               if (!job.result) {
-                this.emit(job, "output", { output });
+                const safe = this.filterOutput(job, output);
+                if (safe !== "") this.emit(job, "output", { output: safe });
                 this.resetInactivity(job);
               }
             },
@@ -262,6 +278,7 @@ export class CloneJobManager {
       }
       this.clearTimer(job.inactivityTimer);
       job.inactivityTimer = undefined;
+      this.flushOutput(job);
       if (job.stop) {
         await this.finish(job, job.stop);
         return;
@@ -382,6 +399,7 @@ export class CloneJobManager {
 
   private async finish(job: Job, result: CloneJobResult): Promise<void> {
     if (job.result) return;
+    this.flushOutput(job);
     if (job.process && result.status !== "succeeded" && result.status !== "cleanup-failed") {
       try {
         await this.terminateProcess(job);
@@ -405,6 +423,8 @@ export class CloneJobManager {
     job.subscribers.clear();
     job.url = "";
     job.credential = undefined;
+    job.sensitiveInputs.length = 0;
+    job.pendingOutput = "";
     job.resolveDone();
     job.expiryTimer = this.timer.set(() => {
       if (job.process) return;
@@ -495,6 +515,36 @@ export class CloneJobManager {
     if (job.result || job.stop || job.phase !== "cloning") return;
     this.clearTimer(job.inactivityTimer);
     job.inactivityTimer = this.timer.set(() => void this.requestTimeout(job, "inactivity"), this.inactivityMs);
+  }
+
+  private filterOutput(job: Job, chunk: string, final = false): string {
+    let value = job.pendingOutput + chunk;
+    job.pendingOutput = "";
+    for (const secret of job.sensitiveInputs) {
+      while (value.includes(secret)) value = value.replaceAll(secret, "");
+    }
+    if (value === "") return value;
+
+    let held = 0;
+    for (const secret of job.sensitiveInputs) {
+      const maximum = Math.min(secret.length - 1, value.length);
+      for (let length = maximum; length > held; length -= 1) {
+        if (value.endsWith(secret.slice(0, length))) {
+          held = length;
+          break;
+        }
+      }
+    }
+    if (held > 0) {
+      if (!final) job.pendingOutput = value.slice(-held);
+      return value.slice(0, -held);
+    }
+    return value;
+  }
+
+  private flushOutput(job: Job): void {
+    const safe = this.filterOutput(job, "", true);
+    if (safe !== "") this.emit(job, "output", { output: safe });
   }
 
   private clearTimer(handle: unknown): void {

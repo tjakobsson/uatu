@@ -4,7 +4,7 @@
 
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -85,6 +85,56 @@ describe("LocalProcessBackend", () => {
 });
 
 describe("LocalProcessBackend stdout parsing", () => {
+  test("does not report a successful stop when signaling throws and exit is unconfirmed", async () => {
+    let actual: ReturnType<typeof Bun.spawn> | undefined;
+    const backend = new LocalProcessBackend({
+      uatuArgv: ["ignored"],
+      terminationGraceMs: 10,
+      spawn() {
+        actual = Bun.spawn(["sh", "-c", "printf 'http://127.0.0.1:43212/s/kill-throw/\\n'; sleep 30"], {
+          stdin: "pipe",
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        return new Proxy(actual, {
+          get(target, property) {
+            if (property === "kill") return () => { throw new Error("signal failed"); };
+            const value = Reflect.get(target, property, target);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+      },
+    });
+    const session = await backend.start(
+      { id: "kill-throw", path: "/tmp", backend: "local" },
+      "/s/kill-throw/",
+      EMPTY_RESOLVED_CREDENTIAL_CONTEXT,
+    );
+    try {
+      await expect(session.stop()).rejects.toThrow("exit could not be confirmed");
+    } finally {
+      actual?.kill("SIGKILL");
+      await actual?.exited;
+    }
+  });
+
+  test("removes the projected generation when spawn throws synchronously", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-hub-spawn-throw-"));
+    tempDirectories.push(root);
+    const credentials = structuredClone(EMPTY_RESOLVED_CREDENTIAL_CONTEXT);
+    credentials.runtimeRoot = path.join(root, "runtime");
+    const backend = new LocalProcessBackend({
+      uatuArgv: ["uatu"],
+      spawn() {
+        throw new Error("synchronous spawn failure");
+      },
+    });
+
+    await expect(backend.start({ id: "spawn-throw", path: root, backend: "local" }, "/s/spawn-throw/", credentials))
+      .rejects.toThrow("synchronous spawn failure");
+    expect(await readdir(path.join(credentials.runtimeRoot, "sessions", "spawn-throw"))).toEqual([]);
+  });
+
   test(
     "a URL split across stream chunks is parsed only once the line completes",
     async () => {

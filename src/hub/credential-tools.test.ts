@@ -224,19 +224,29 @@ describe("credential tool probes", () => {
     expect(toolInstallationGuidance("gpg", "darwin")).toContain("macOS");
     expect(toolInstallationGuidance("gpg", "linux")).toContain("system package manager");
   });
+
+  test("timeout does not wait for a descendant holding the output pipes", async () => {
+    const { filePath } = await executable("gpg");
+    await writeFile(filePath, "#!/bin/sh\n(sleep 30) &\nsleep 30\n", { mode: 0o700 });
+    const started = Date.now();
+    const result = await probeCredentialTool({ tool: "gpg", path: filePath, source: "override" }, 20);
+    expect(result.results).toContainEqual({ layer: "version", status: "unavailable", message: "Version probe timed out." });
+    expect(Date.now() - started).toBeLessThan(3_000);
+  });
 });
 
 describe("CredentialToolManager", () => {
   test("reports a stale persisted override without failing startup", async () => {
     const storePath = await tempPathForStore();
     const configured = await executable("configured-git");
+    const ambient = await executable("git");
     const store = new CredentialToolOverrideStore(storePath);
     await store.load();
     await store.set({ tool: "git", path: configured.filePath });
     await rm(configured.filePath);
 
     const restartedStore = new CredentialToolOverrideStore(storePath);
-    const manager = new CredentialToolManager(restartedStore, "");
+    const manager = new CredentialToolManager(restartedStore, ambient.directory);
     await manager.load();
 
     expect(restartedStore.get("git")?.path).toBe(configured.filePath);
@@ -326,6 +336,159 @@ describe("CredentialToolManager", () => {
 
     expect(store.get("git")?.path).toBe(second.filePath);
     expect(manager.list().find(item => item.tool === "git")?.path).toBe(second.filePath);
+  });
+
+  test("restores persistence, readiness, and runtime when runtime application fails", async () => {
+    const storePath = await tempPathForStore();
+    const first = await executable("first-git");
+    const second = await executable("second-git");
+    const store = new CredentialToolOverrideStore(storePath);
+    const probe = async (discovery: Awaited<ReturnType<typeof discoverExecutable>>) => ({
+      tool: discovery.tool,
+      path: discovery.path,
+      version: discovery.path,
+      results: [{ layer: "version" as const, status: "ready" as const, message: "ready" }],
+      guidance: null,
+    });
+    let manager!: CredentialToolManager;
+    let runtimePath: string | null = null;
+    let rejectSecond = true;
+    manager = new CredentialToolManager(store, "", probe, async () => {
+      const next = manager.list().find(value => value.tool === "git")?.path ?? null;
+      if (next === second.filePath && rejectSecond) {
+        rejectSecond = false;
+        throw new Error("runtime replacement failed");
+      }
+      runtimePath = next;
+    });
+    await manager.load();
+    await manager.setOverride("git", first.filePath);
+
+    await expect(manager.setOverride("git", second.filePath)).rejects.toThrow("runtime replacement failed");
+    expect(store.get("git")?.path).toBe(first.filePath);
+    expect(manager.list().find(value => value.tool === "git")?.path).toBe(first.filePath);
+    expect(runtimePath as string | null).toBe(first.filePath);
+  });
+
+  test("aggregates runtime application and restoration failures", async () => {
+    const storePath = await tempPathForStore();
+    const first = await executable("first-git");
+    const second = await executable("second-git");
+    const store = new CredentialToolOverrideStore(storePath);
+    const probe = async (discovery: Awaited<ReturnType<typeof discoverExecutable>>) => ({
+      tool: discovery.tool,
+      path: discovery.path,
+      version: discovery.path,
+      results: [{ layer: "version" as const, status: "ready" as const, message: "ready" }],
+      guidance: null,
+    });
+    let failRuntime = false;
+    const manager = new CredentialToolManager(store, "", probe, async () => {
+      if (failRuntime) throw new Error("runtime apply failed");
+    });
+    await manager.load();
+    await manager.setOverride("git", first.filePath);
+    failRuntime = true;
+
+    let failure: unknown;
+    try {
+      await manager.setOverride("git", second.filePath);
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).errors.map(error => (error as Error).message)).toEqual([
+      "runtime apply failed",
+      "runtime apply failed",
+    ]);
+    expect(store.get("git")?.path).toBe(first.filePath);
+    expect(manager.list().find(value => value.tool === "git")?.path).toBe(first.filePath);
+  });
+
+  test("restores readiness and runtime when re-probe runtime application fails", async () => {
+    const storePath = await tempPathForStore();
+    const git = await executable("git");
+    const store = new CredentialToolOverrideStore(storePath);
+    let probedVersion = "first";
+    const probe = async (discovery: Awaited<ReturnType<typeof discoverExecutable>>) => ({
+      tool: discovery.tool,
+      path: discovery.path,
+      version: probedVersion,
+      results: [{ layer: "version" as const, status: "ready" as const, message: "ready" }],
+      guidance: null,
+    });
+    let manager!: CredentialToolManager;
+    let runtimeVersion: string | null = null;
+    let rejectSecond = true;
+    manager = new CredentialToolManager(store, git.directory, probe, async () => {
+      const next = manager.list().find(value => value.tool === "git")?.version ?? null;
+      if (next === "second" && rejectSecond) {
+        rejectSecond = false;
+        throw new Error("runtime replacement failed");
+      }
+      runtimeVersion = next;
+    });
+    await manager.load();
+    await manager.reprobeAll();
+    expect(runtimeVersion as string | null).toBe("first");
+    probedVersion = "second";
+
+    await expect(manager.reprobeAll()).rejects.toThrow("runtime replacement failed");
+    expect(manager.list().find(value => value.tool === "git")?.version).toBe("first");
+    expect(runtimeVersion as string | null).toBe("first");
+  });
+
+  test("aggregates re-probe application and restoration failures", async () => {
+    const storePath = await tempPathForStore();
+    const git = await executable("git");
+    const store = new CredentialToolOverrideStore(storePath);
+    let probedVersion = "first";
+    const probe = async (discovery: Awaited<ReturnType<typeof discoverExecutable>>) => ({
+      tool: discovery.tool,
+      path: discovery.path,
+      version: probedVersion,
+      results: [{ layer: "version" as const, status: "ready" as const, message: "ready" }],
+      guidance: null,
+    });
+    let failRuntime = false;
+    const manager = new CredentialToolManager(store, git.directory, probe, async () => {
+      if (failRuntime) throw new Error("runtime apply failed");
+    });
+    await manager.load();
+    failRuntime = true;
+    probedVersion = "second";
+
+    let failure: unknown;
+    try {
+      await manager.reprobeAll();
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).message).toBe("tool re-probe failed and restoration failed");
+    expect((failure as AggregateError).errors.map(error => (error as Error).message)).toEqual([
+      "runtime apply failed",
+      "runtime apply failed",
+    ]);
+    expect(manager.list().find(value => value.tool === "git")?.version).toBe("first");
+  });
+
+  test("shutdown cancels and drains active probes", async () => {
+    const storePath = await tempPathForStore();
+    const hung = await executable("git");
+    const marker = path.join(path.dirname(hung.filePath), "started");
+    await writeFile(hung.filePath, `#!/bin/sh\ntouch '${marker}'\n(sleep 30) &\nsleep 30\n`, { mode: 0o700 });
+    const store = new CredentialToolOverrideStore(storePath);
+    await store.load();
+    await store.set({ tool: "git", path: hung.filePath });
+    const manager = new CredentialToolManager(store, "");
+    const loading = manager.load();
+    for (let attempt = 0; attempt < 100 && !await Bun.file(marker).exists(); attempt += 1) await Bun.sleep(10);
+
+    const started = Date.now();
+    await manager.shutdown();
+    await loading;
+    expect(Date.now() - started).toBeLessThan(3_000);
   });
 });
 

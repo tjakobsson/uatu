@@ -140,6 +140,13 @@ describe("settings page", () => {
     expect([...document.querySelectorAll("textarea")].every(input => input.textContent === "")).toBe(true);
     expect(document.querySelector('#ssh-import-form input[type="file"][name="privateKeyFile"]')).not.toBeNull();
     expect(document.querySelector("#ssh-import-form .paste-option textarea[name=privateKey]")).not.toBeNull();
+    for (const id of ["ssh-private-key", "openpgp-private-key"]) {
+      expect(document.querySelector(`#${id}.secret-paste-masked`)).not.toBeNull();
+      const reveal = document.querySelector(`[data-reveal-secret="${id}"]`);
+      expect(reveal?.textContent).toBe("Reveal");
+      expect(reveal?.getAttribute("aria-controls")).toBe(id);
+      expect(reveal?.getAttribute("aria-pressed")).toBe("false");
+    }
     expect(document.getElementById("workspace-credential-assignments")).not.toBeNull();
     expect(document.querySelector("details.workspace-credential-section")?.hasAttribute("open")).toBe(false);
     expect(document.querySelectorAll("[data-form-error][role=alert]").length).toBe(5);
@@ -162,8 +169,10 @@ describe("settings page", () => {
     expect(html).toContain("openCredentialIds.has(credential.id)");
     expect(html).toContain("Assign selected");
     expect(html).toContain("Selected credentials replace the current defaults");
-    // A failed signing half rolls the committed authentication half back.
-    expect(html).toContain("authenticationAssigned && signing.value");
+    expect(html).toContain('"/credential-assignments"');
+    expect(html).toContain("authentication: { credentialId: authentication.value");
+    expect(html).not.toContain("authenticationAssigned");
+    expect(html).not.toContain("previousAuthentication");
     expect(html).toContain('host.disabled = !selected');
     expect(html).toContain('value === "github-cli" || value === "gitlab-cli"');
     expect(html).toContain("Authentication host");
@@ -181,6 +190,7 @@ describe("settings page", () => {
     expect(html).toContain("Choose exactly one private key source");
     expect(html).toContain("file.size > 1024 * 1024");
     expect(html).toContain("const body = await buildBody(data, form)");
+    expect(html).toContain('classList.toggle("secret-paste-masked")');
     expect(html).toContain('input[type="file"]');
     expect(html).toContain('toolError.setAttribute("role", "alert")');
     expect(html).not.toContain('showError("")');

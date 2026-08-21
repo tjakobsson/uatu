@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, mkdir, readFile, rm, stat } from "node:fs/promises";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { promises as fs } from "node:fs";
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -42,6 +43,49 @@ describe("CredentialMetadataStore", () => {
     await reloaded.load();
     expect(reloaded.snapshot().credentials).toEqual([SSH_CREDENTIAL]);
     expect((await stat(filePath)).mode & 0o777).toBe(0o600);
+  });
+
+  test("replaces an existing state file with the temp file's owner-only mode", async () => {
+    const filePath = await tempPath("credentials.json");
+    await writeFile(filePath, JSON.stringify({ version: 1, credentials: [], assignments: [] }), { mode: 0o644 });
+    const store = new CredentialMetadataStore(filePath);
+    await store.load();
+
+    await store.transaction(state => state.credentials.push(SSH_CREDENTIAL));
+
+    expect((await stat(filePath)).mode & 0o777).toBe(0o600);
+  });
+
+  test("commits without a fallible chmod after the destination rename", async () => {
+    const filePath = await tempPath("credentials.json");
+    const chmodSpy = spyOn(fs, "chmod").mockRejectedValue(new Error("injected chmod failure"));
+    try {
+      const store = new CredentialMetadataStore(filePath);
+      await store.load();
+
+      await store.transaction(state => state.credentials.push(SSH_CREDENTIAL));
+
+      expect(chmodSpy).not.toHaveBeenCalled();
+      expect(store.snapshot().credentials).toEqual([SSH_CREDENTIAL]);
+      expect(JSON.parse(await readFile(filePath, "utf8")).credentials).toEqual([SSH_CREDENTIAL]);
+    } finally {
+      chmodSpy.mockRestore();
+    }
+  });
+
+  test("does not overwrite or remove a colliding temp file", async () => {
+    const filePath = await tempPath("credentials.json");
+    const collision = `${filePath}.${process.pid}.1.tmp`;
+    await writeFile(collision, "collision-marker", { mode: 0o600 });
+    const store = new CredentialMetadataStore(filePath);
+    await store.load();
+
+    await expect(store.transaction(state => state.credentials.push(SSH_CREDENTIAL))).rejects.toMatchObject({ code: "EEXIST" });
+    expect(await readFile(collision, "utf8")).toBe("collision-marker");
+    expect(await Bun.file(filePath).exists()).toBe(false);
+
+    await store.transaction(state => state.credentials.push(SSH_CREDENTIAL));
+    expect(store.snapshot().credentials).toEqual([SSH_CREDENTIAL]);
   });
 
   test("serializes concurrent mutations without losing updates", async () => {
@@ -152,6 +196,23 @@ describe("CredentialMetadataStore", () => {
       role: "authentication",
       host: "github.com",
     });
+  });
+
+  test("commits paired replacements in one transaction or not at all", async () => {
+    const filePath = await tempPath("credentials.json");
+    const store = new CredentialMetadataStore(filePath);
+    await store.load();
+    await store.transaction(state => state.credentials.push(SSH_CREDENTIAL));
+    await store.assign({ workspaceId: "uatu", credentialId: "ssh-1", role: "authentication", host: "github.com" });
+    const before = store.snapshot();
+
+    await expect(store.assignMany([
+      { workspaceId: "uatu", credentialId: "ssh-1", role: "authentication", host: "github.com" },
+      { workspaceId: "uatu", credentialId: "missing", role: "signing" },
+    ], true)).rejects.toThrow("unknown credential: missing");
+
+    expect(store.snapshot()).toEqual(before);
+    expect(JSON.parse(await readFile(filePath, "utf8"))).toEqual(before);
   });
 
   test("validates assignment capability and token host", async () => {

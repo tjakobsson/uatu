@@ -141,11 +141,19 @@ export class CredentialApi {
 
   async listCredentials(): Promise<PublicCredentialDto[]> {
     const state = this.services.metadata.snapshot();
-    return Promise.all(state.credentials.map(async credential => toPublicCredentialDto(
-      credential,
-      state.assignments.filter(item => item.credentialId === credential.id),
-      await this.readiness(credential.id),
-    )));
+    return Promise.all(state.credentials.map(async credential => {
+      let readiness: ReadinessResult[];
+      try {
+        readiness = await this.readiness(credential.id);
+      } catch {
+        readiness = [{ layer: "runtime", status: "unavailable", message: "Credential readiness could not be determined." }];
+      }
+      return toPublicCredentialDto(
+        credential,
+        state.assignments.filter(item => item.credentialId === credential.id),
+        readiness,
+      );
+    }));
   }
 
   listTools() {
@@ -262,6 +270,36 @@ export class CredentialApi {
       ? { workspaceId, credentialId, role: body.role, host: scalar(body.host, "provider host", MAX_NAME_BYTES) }
       : { workspaceId, credentialId, role: body.role };
     return this.services.metadata.assign(assignment, body.replace === true);
+  }
+
+  async assignWorkspace(workspaceIdValue: string, body: JsonObject): Promise<CredentialAssignment[]> {
+    fields(body, ["authentication", "signing"]);
+    const workspaceId = id(workspaceIdValue, "workspace id");
+    if (!this.services.workspaceExists(workspaceId)) throw new Error(`unknown workspace: ${workspaceId}`);
+    if (body.authentication === undefined && body.signing === undefined) {
+      throw new Error("at least one credential assignment is required");
+    }
+    const assignments: CredentialAssignment[] = [];
+    if (body.authentication !== undefined) {
+      const authentication = object(body.authentication);
+      fields(authentication, ["credentialId", "host"]);
+      assignments.push({
+        workspaceId,
+        credentialId: id(authentication.credentialId, "authentication credential id"),
+        role: "authentication",
+        host: scalar(authentication.host, "provider host", MAX_NAME_BYTES),
+      });
+    }
+    if (body.signing !== undefined) {
+      const signing = object(body.signing);
+      fields(signing, ["credentialId"]);
+      assignments.push({
+        workspaceId,
+        credentialId: id(signing.credentialId, "signing credential id"),
+        role: "signing",
+      });
+    }
+    return this.services.metadata.assignMany(assignments, true);
   }
 
   // `stop` is consumed by the route, which runs this unassignment inside the

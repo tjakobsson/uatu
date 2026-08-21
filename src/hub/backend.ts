@@ -52,6 +52,7 @@ export type LocalBackendOptions = {
   uatuArgv?: string[];
   spawn?: typeof Bun.spawn;
   env?: NodeJS.ProcessEnv;
+  terminationGraceMs?: number;
 };
 
 export function resolveUatuArgv(): string[] {
@@ -66,11 +67,13 @@ export class LocalProcessBackend implements SessionBackend {
   private readonly uatuArgv: string[];
   private readonly spawn: typeof Bun.spawn;
   private readonly env: NodeJS.ProcessEnv;
+  private readonly terminationGraceMs: number;
 
   constructor(options: LocalBackendOptions = {}) {
     this.uatuArgv = options.uatuArgv ?? resolveUatuArgv();
     this.spawn = options.spawn ?? Bun.spawn;
     this.env = options.env ?? process.env;
+    this.terminationGraceMs = options.terminationGraceMs ?? SIGTERM_GRACE_MS;
   }
 
   async start(workspace: WorkspaceEntry, basePath: string, credentials: ResolvedCredentialContext): Promise<RunningSession> {
@@ -97,18 +100,24 @@ export class LocalProcessBackend implements SessionBackend {
       uatuArgv: this.uatuArgv,
       sourceEnv: this.env,
     });
-    const child = this.spawn(argv, {
-      // stdin stays a pipe we hold open — closing it (including by hub
-      // death) is the child's signal to exit.
-      stdin: "pipe",
-      stdout: "pipe",
-      stderr: "pipe",
-      // Explicit rather than implicit: Bun's default inherit snapshots the
-      // environment at process start and does not see later mutations. The hub
-      // builds this argv itself, so environment is the only channel an operator
-      // knob (UATU_OPENCODE_STARTUP_TIMEOUT_MS) has into a session's Chat.
-      env: projected.env,
-    });
+    let child: Subprocess<"pipe", "pipe", "pipe">;
+    try {
+      child = this.spawn(argv, {
+        // stdin stays a pipe we hold open — closing it (including by hub
+        // death) is the child's signal to exit.
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+        // Explicit rather than implicit: Bun's default inherit snapshots the
+        // environment at process start and does not see later mutations. The hub
+        // builds this argv itself, so environment is the only channel an operator
+        // knob (UATU_OPENCODE_STARTUP_TIMEOUT_MS) has into a session's Chat.
+        env: projected.env,
+      });
+    } catch (error) {
+      await fs.rm(projected.runtimeDirectory, { recursive: true, force: true });
+      throw error;
+    }
 
     const stderrTail = collectTail(child.stderr);
 
@@ -117,7 +126,7 @@ export class LocalProcessBackend implements SessionBackend {
       const line = await readFirstUrlLine(child.stdout, URL_LINE_TIMEOUT_MS, child);
       url = new URL(line);
     } catch (error) {
-      await terminate(child);
+      await terminate(child, this.terminationGraceMs);
       await fs.rm(projected.runtimeDirectory, { recursive: true, force: true });
       const tail = stderrTail.snapshot();
       const detail = tail ? `\n${tail}` : "";
@@ -133,7 +142,7 @@ export class LocalProcessBackend implements SessionBackend {
       token: url.searchParams.get("t"),
       exited: child.exited.then(code => code ?? null).catch(() => null),
       stop: async () => {
-        await terminate(child);
+        await terminate(child, this.terminationGraceMs);
         await fs.rm(projected.runtimeDirectory, { recursive: true, force: true });
       },
     };
@@ -205,24 +214,30 @@ function collectTail(stream: ReadableStream<Uint8Array>): { snapshot(): string }
   return { snapshot: () => tail.trim() };
 }
 
-async function terminate(child: Subprocess): Promise<void> {
+async function terminate(child: Subprocess, graceMs: number): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) {
     return;
   }
   try {
     child.kill("SIGTERM");
   } catch {
-    return;
+    if (child.exitCode !== null || child.signalCode !== null) return;
   }
-  const grace = new Promise<void>(resolve => setTimeout(resolve, SIGTERM_GRACE_MS));
-  const exited = child.exited.then(() => "exited" as const).catch(() => "exited" as const);
+  const grace = new Promise<void>(resolve => setTimeout(resolve, graceMs));
+  const exited = child.exited.then(() => "exited" as const, () => "unconfirmed" as const);
   const winner = await Promise.race([exited, grace.then(() => "timeout" as const)]);
-  if (winner === "timeout") {
+  if (winner !== "exited") {
     try {
       child.kill("SIGKILL");
     } catch {
-      // Already gone.
+      if (child.exitCode !== null || child.signalCode !== null) return;
     }
-    await child.exited.catch(() => undefined);
+    const killed = await Promise.race([
+      child.exited.then(() => true, () => false),
+      new Promise<false>(resolve => setTimeout(() => resolve(false), graceMs)),
+    ]);
+    if (!killed && child.exitCode === null && child.signalCode === null) {
+      throw new Error("session child exit could not be confirmed after termination");
+    }
   }
 }

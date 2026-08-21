@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { constants as fsConstants, promises as fs } from "node:fs";
 import path from "node:path";
 
@@ -21,6 +22,7 @@ export type OpenPgpCommand = {
   env: Record<string, string>;
   input?: string;
   timeoutMs: number;
+  signal?: AbortSignal;
 };
 
 export type OpenPgpCommandResult = {
@@ -45,13 +47,18 @@ export type OpenPgpCredentialManagerOptions = {
 async function collectBounded(
   stream: ReadableStream<Uint8Array>,
   limit: number,
+  signal: AbortSignal,
+  onExceeded: () => void,
 ): Promise<{ text: string; exceeded: boolean }> {
   const reader = stream.getReader();
+  const cancel = () => { void reader.cancel().catch(() => undefined); };
+  signal.addEventListener("abort", cancel, { once: true });
   const chunks: Uint8Array[] = [];
   let size = 0;
   let exceeded = false;
   try {
     for (;;) {
+      if (signal.aborted) break;
       const next = await reader.read();
       if (next.done) break;
       const remaining = limit - size;
@@ -59,9 +66,17 @@ async function collectBounded(
         chunks.push(next.value.slice(0, remaining));
         size += Math.min(next.value.length, remaining);
       }
-      if (next.value.length > remaining) exceeded = true;
+      if (next.value.length > remaining) {
+        exceeded = true;
+        onExceeded();
+        break;
+      }
     }
+  } catch (error) {
+    if (!signal.aborted) throw error;
   } finally {
+    signal.removeEventListener("abort", cancel);
+    if (signal.aborted) await reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
   const bytes = new Uint8Array(size);
@@ -79,6 +94,7 @@ export const runOpenPgpCommand: OpenPgpCommandRunner = async command => {
     stdout: "pipe",
     stderr: "pipe",
     env: command.env,
+    detached: process.platform !== "win32",
   });
   if (command.input !== undefined) {
     const stdin = child.stdin as { write(value: string): unknown; end(): unknown };
@@ -86,20 +102,49 @@ export const runOpenPgpCommand: OpenPgpCommandRunner = async command => {
     stdin.end();
   }
   let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
+  const streams = new AbortController();
+  const kill = () => {
+    streams.abort();
+    if (process.platform === "win32" && child.pid > 0) {
+      spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+        stdio: "ignore",
+        timeout: 1_000,
+        windowsHide: true,
+      });
+    }
+    if (process.platform !== "win32" && child.pid > 0) {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+        return;
+      } catch {
+        // Fall through to direct-child termination.
+      }
+    }
     try {
       child.kill("SIGKILL");
     } catch {
-      // The command may have exited while the timeout callback was queued.
+      // The command may already have exited.
     }
+  };
+  const onAbort = () => kill();
+  command.signal?.addEventListener("abort", onAbort, { once: true });
+  const timer = setTimeout(() => {
+    timedOut = true;
+    kill();
   }, command.timeoutMs);
   try {
-    const [stdout, stderr, exitCode] = await Promise.all([
-      collectBounded(child.stdout, COMMAND_OUTPUT_LIMIT),
-      collectBounded(child.stderr, COMMAND_OUTPUT_LIMIT),
-      child.exited,
-    ]);
+    const stdoutPromise = collectBounded(child.stdout, COMMAND_OUTPUT_LIMIT, streams.signal, kill);
+    const stderrPromise = collectBounded(child.stderr, COMMAND_OUTPUT_LIMIT, streams.signal, kill);
+    const exitCode = await child.exited;
+    const drains = Promise.all([stdoutPromise, stderrPromise]);
+    let drainTimer: ReturnType<typeof setTimeout> | undefined;
+    const drainTimeout = new Promise<[Awaited<typeof stdoutPromise>, Awaited<typeof stderrPromise>]>(resolve => {
+      drainTimer = setTimeout(() => {
+        kill();
+        void drains.then(resolve);
+      }, 100);
+    });
+    const [stdout, stderr] = await Promise.race([drains, drainTimeout]).finally(() => clearTimeout(drainTimer));
     return {
       exitCode,
       timedOut,
@@ -108,6 +153,8 @@ export const runOpenPgpCommand: OpenPgpCommandRunner = async command => {
     };
   } finally {
     clearTimeout(timer);
+    streams.abort();
+    command.signal?.removeEventListener("abort", onAbort);
   }
 };
 
@@ -248,15 +295,16 @@ export class OpenPgpCredentialManager {
       this.assertFingerprintAvailable(fingerprint);
       const imported = await this.gpg(["--import"], privateKey);
       if (!this.succeeded(imported)) {
-        await this.deleteUnreferencedKey(fingerprint);
-        throw new Error("OpenPGP private key import failed.");
+        return this.rollbackUnreferencedKey(fingerprint, new Error("OpenPGP private key import failed."));
       }
       const secret = await this.gpg(["--with-colons", "--list-secret-keys", fingerprint]);
       if (!this.succeeded(secret)
         || fingerprintFromColonOutput(secret.stdout) !== fingerprint
         || !hasSigningSecret(secret.stdout)) {
-        await this.deleteUnreferencedKey(fingerprint);
-        throw new Error("Imported OpenPGP material does not contain a signing secret key.");
+        return this.rollbackUnreferencedKey(
+          fingerprint,
+          new Error("Imported OpenPGP material does not contain a signing secret key."),
+        );
       }
       return this.persistCredential(name, fingerprint);
     });
@@ -401,8 +449,7 @@ export class OpenPgpCredentialManager {
       });
       return credential as OpenPgpCredentialRecord;
     } catch (error) {
-      await this.deleteUnreferencedKey(fingerprint);
-      throw error;
+      return this.rollbackUnreferencedKey(fingerprint, error);
     }
   }
 
@@ -419,7 +466,20 @@ export class OpenPgpCredentialManager {
 
   private async deleteUnreferencedKey(fingerprint: string): Promise<void> {
     if (this.hasFingerprint(fingerprint)) return;
-    await this.gpg(["--yes", "--delete-secret-and-public-key", fingerprint]).catch(() => undefined);
+    const deleted = await this.gpg(["--yes", "--delete-secret-and-public-key", fingerprint]);
+    if (!this.succeeded(deleted)) throw new Error("OpenPGP key cleanup failed.");
+  }
+
+  private async rollbackUnreferencedKey(fingerprint: string, operationError: unknown): Promise<never> {
+    try {
+      await this.deleteUnreferencedKey(fingerprint);
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [operationError, cleanupError],
+        `OpenPGP operation and key cleanup failed: ${fingerprint}`,
+      );
+    }
+    throw operationError;
   }
 
   private challengeFiles(): { challenge: string; signature: string } {

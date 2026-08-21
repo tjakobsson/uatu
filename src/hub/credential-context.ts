@@ -86,8 +86,9 @@ export const EMPTY_CLONE_CREDENTIAL_RESOLVER: CloneCredentialResolver = {
 type CloneRemote = { transport: "ssh" | "https" | "other"; host?: string };
 
 export function parseCloneRemote(remote: string): CloneRemote {
-  const scp = /^(?:[^@/:\s]+@)?(\[[^\]]+\]|[^/:\s]+):[^/].*$/.exec(remote);
-  if (scp && !/^[A-Za-z]:[\\/]/.test(remote)) {
+  const scp = /^(?:[^@/:\s]+@)?(\[[^\]]+\]|[^/:\s]+):(.+)$/.exec(remote);
+  const windowsDrivePath = /^[A-Za-z]:(?:[\\/]|.*[\\/])/.test(remote);
+  if (scp && !windowsDrivePath && !/^[a-z][a-z0-9+.-]*:\/\//i.test(remote)) {
     // An IPv6 literal keeps its brackets — that is the normalized host form
     // assignments store and validate; only decorative brackets around a
     // plain host are stripped. The result goes through the same host
@@ -114,7 +115,10 @@ export function parseCloneRemote(remote: string): CloneRemote {
     throw new Error("clone URL must not contain embedded credentials");
   }
   if (parsed.protocol === "https:") {
-    return { transport: "https", host: normalizeProviderHost(parsed.host) };
+    // URL.port intentionally erases an explicit default port. Retain the
+    // authority spelling so an assignment to :443 remains port-specific.
+    const authority = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]+)/i.exec(remote)?.[1] ?? parsed.host;
+    return { transport: "https", host: normalizeProviderHost(authority) };
   }
   if (parsed.protocol === "ssh:" || parsed.protocol === "git+ssh:") {
     return { transport: "ssh", host: normalizeProviderHost(parsed.host) };
@@ -427,19 +431,234 @@ function sshAssignmentHost(host: string): { hostname: string; port: string } {
   };
 }
 
+function canonicalIpv6(hostname: string): string | null {
+  if (!hostname.includes(":")) return null;
+  const halves = hostname.split("::");
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(":") : [];
+  const right = halves[1] ? halves[1].split(":") : [];
+  const missing = 8 - left.length - right.length;
+  if (missing < 0 || (halves.length === 1 && missing !== 0)) return null;
+  const words = [...left, ...Array(missing).fill("0"), ...right];
+  if (words.length !== 8 || words.some(word => !/^[0-9a-f]{1,4}$/i.test(word))) return null;
+  return words.map(word => word.replace(/^0+(?=.)/, "").toLowerCase()).join(":");
+}
+
+function sshAssignmentHostnames(hostname: string): string[] {
+  if (canonicalIpv6(hostname)) return [hostname];
+  return [hostname, `${hostname}.`];
+}
+
+const SSH_CANONICAL_HOST_FUNCTION = `canonical_ssh_host() {
+  value=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  value=\${value#[}
+  value=\${value%]}
+  value=\${value%.}
+  case $value in
+    *:*) ;;
+    *) printf '%s\\n' "$value"; return ;;
+  esac
+  case $value in
+    *[!0-9a-f:.]*) printf '%s\\n' "$value"; return ;;
+  esac
+  case $value in
+    *.*)
+      ipv4=\${value##*:}
+      prefix=\${value%:*}
+      old_ifs=$IFS
+      IFS=.
+      set -- $ipv4
+      IFS=$old_ifs
+      [ "$#" -eq 4 ] || { printf '%s\\n' "$value"; return; }
+      for octet in "$@"; do
+        case $octet in ''|*[!0-9]*) printf '%s\\n' "$value"; return ;; esac
+      done
+      first=\${1#0}; first=\${first#0}; first=\${first#0}; first=\${first:-0}
+      second=\${2#0}; second=\${second#0}; second=\${second#0}; second=\${second:-0}
+      third=\${3#0}; third=\${third#0}; third=\${third#0}; third=\${third:-0}
+      fourth=\${4#0}; fourth=\${fourth#0}; fourth=\${fourth#0}; fourth=\${fourth:-0}
+      [ "$first" -le 255 ] 2>/dev/null && [ "$second" -le 255 ] 2>/dev/null &&
+        [ "$third" -le 255 ] 2>/dev/null && [ "$fourth" -le 255 ] 2>/dev/null || {
+          printf '%s\\n' "$value"; return;
+        }
+      value="$prefix:$(printf '%x:%x' "$((first * 256 + second))" "$((third * 256 + fourth))")"
+      ;;
+  esac
+  case $value in
+    *::*) left=\${value%%::*}; right=\${value#*::}; compressed=1 ;;
+    *) left=$value; right=; compressed=0 ;;
+  esac
+  left_words=
+  left_count=0
+  old_ifs=$IFS
+  IFS=:
+  for word in $left; do
+    word=\${word#0}; word=\${word#0}; word=\${word#0}; word=\${word:-0}
+    left_words=\${left_words:+$left_words:}$word
+    left_count=$((left_count + 1))
+  done
+  right_words=
+  right_count=0
+  for word in $right; do
+    word=\${word#0}; word=\${word#0}; word=\${word#0}; word=\${word:-0}
+    right_words=\${right_words:+$right_words:}$word
+    right_count=$((right_count + 1))
+  done
+  IFS=$old_ifs
+  missing=$((8 - left_count - right_count))
+  if [ "$missing" -lt 0 ] || { [ "$compressed" -eq 0 ] && [ "$missing" -ne 0 ]; } ||
+    { [ "$compressed" -eq 1 ] && [ "$missing" -eq 0 ]; }; then
+    printf '%s\\n' "$value"
+    return
+  fi
+  result=$left_words
+  while [ "$missing" -gt 0 ]; do
+    result=\${result:+$result:}0
+    missing=$((missing - 1))
+  done
+  [ -n "$right_words" ] && result=\${result:+$result:}$right_words
+  printf '%s\\n' "$result"
+}`;
+
+function sshMatchExecQuote(command: string): string {
+  return `"${command.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+}
+
+function sshIpv6MatchCommand(
+  matcherPath: string,
+  hostname: string,
+  port: string,
+  excludedPorts: string[],
+): string {
+  const mode = port ? "equal" : excludedPorts.length > 0 ? "exclude" : "any";
+  const ports = port ? [port] : excludedPorts;
+  return [matcherPath.replaceAll("%", "%%"), canonicalIpv6(hostname)!, "%h", mode, "%p", ...ports]
+    .map(shellQuote)
+    .join(" ");
+}
+
 // IdentityFile is additive across matching blocks, so a broad host block must
 // exclude every port that another assignment claims for the same hostname —
 // otherwise a connection to that port would offer both credentials' keys.
-function sshAssignmentMatch(host: string, portsByHostname: Map<string, Set<string>>): string {
+function sshAssignmentMatch(host: string, portsByHostname: Map<string, Set<string>>, matcherPath: string): string {
   const { hostname, port } = sshAssignmentHost(host);
-  if (port) return `Match host ${hostname} exec "test %p = ${port}"`;
   const excluded = [...(portsByHostname.get(hostname) ?? [])].sort();
-  if (excluded.length === 0) return `Host ${hostname}`;
-  return `Match host ${hostname} exec "test ${excluded.map(value => `%p != ${value}`).join(" -a ")}"`;
+  if (canonicalIpv6(hostname)) {
+    return `Match exec ${sshMatchExecQuote(sshIpv6MatchCommand(matcherPath, hostname, port, excluded))}`;
+  }
+  const hosts = sshAssignmentHostnames(hostname).join(",");
+  if (port) return `Match host ${hosts} exec "test %p = ${port}"`;
+  if (excluded.length === 0) return `Host ${sshAssignmentHostnames(hostname).join(" ")}`;
+  return `Match host ${hosts} exec "test ${excluded.map(value => `%p != ${value}`).join(" -a ")}"`;
 }
 
 function sshConfigQuote(value: string): string {
   return `"${value.replaceAll("%", "%%").replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+}
+
+function sshHostMatcherScript(): string {
+  return [
+    "#!/bin/sh",
+    SSH_CANONICAL_HOST_FUNCTION,
+    "expected=$1",
+    "actual=$2",
+    "mode=$3",
+    "actual_port=$4",
+    "shift 4",
+    "[ \"$(canonical_ssh_host \"$actual\")\" = \"$expected\" ] || exit 1",
+    "case $mode in",
+    "  equal) [ \"$actual_port\" = \"$1\" ] || exit 1 ;;",
+    "  exclude) for excluded_port in \"$@\"; do [ \"$actual_port\" != \"$excluded_port\" ] || exit 1; done ;;",
+    "esac",
+    "",
+  ].join("\n");
+}
+
+function sshShimScript(
+  executable: string,
+  configPath: string,
+  authentication: ResolvedAuthenticationCredential[],
+  publicKeys: Map<string, string>,
+  agentSocket: string | null,
+): string {
+  const assignments = authentication.filter(
+    (item): item is Extract<ResolvedAuthenticationCredential, { credential: SshCredentialRecord }> => item.credential.type === "ssh",
+  );
+  const portsByHostname = new Map<string, Set<string>>();
+  for (const assignment of assignments) {
+    const { hostname, port } = sshAssignmentHost(assignment.host);
+    if (!port) continue;
+    const ports = portsByHostname.get(hostname) ?? new Set<string>();
+    ports.add(port);
+    portsByHostname.set(hostname, ports);
+  }
+  const rules = assignments
+    .sort((a, b) => Number(Boolean(sshAssignmentHost(b.host).port)) - Number(Boolean(sshAssignmentHost(a.host).port)))
+    .map(assignment => {
+      const { hostname, port } = sshAssignmentHost(assignment.host);
+      const canonicalHostname = canonicalIpv6(hostname);
+      const hostCondition = (canonicalHostname ? [canonicalHostname] : sshAssignmentHostnames(hostname))
+        .map(value => `[ "$host" = ${shellQuote(value)} ]`)
+        .join(" || ");
+      const excluded = [...(portsByHostname.get(hostname) ?? [])]
+        .map(value => `[ "$port" != ${shellQuote(value)} ]`)
+        .join(" && ");
+      const condition = port
+        ? `( ${hostCondition} ) && [ "$port" = ${shellQuote(port)} ]`
+        : `( ${hostCondition} )${excluded ? ` && ${excluded}` : ""}`;
+      return [
+        `if ${condition}; then`,
+        `  exec ${shellQuote(executable)} -F ${shellQuote(configPath)} -o ${shellQuote(`IdentityAgent=${sshConfigQuote(agentSocket!)}`)} -o ${shellQuote(`IdentityFile=${sshConfigQuote(publicKeys.get(assignment.credential.id)!)}`)} -o IdentitiesOnly=yes "$@"`,
+        "fi",
+      ].join("\n");
+    });
+  return [
+    "#!/bin/sh",
+    SSH_CANONICAL_HOST_FUNCTION,
+    "destination=",
+    "port=22",
+    "takes_value=",
+    "for argument in \"$@\"; do",
+    "  if [ -n \"$takes_value\" ]; then",
+    "    [ \"$takes_value\" = port ] && port=$argument",
+    "    if [ \"$takes_value\" = option ]; then",
+    "      option=$(printf '%s' \"$argument\" | tr '[:upper:]' '[:lower:]')",
+    "      case $option in",
+    "        port=*) port=${argument#*=} ;;",
+    "        'port '*) port=${argument#* } ;;",
+    "        port) takes_value=option_port; continue ;;",
+    "      esac",
+    "    fi",
+    "    [ \"$takes_value\" = option_port ] && port=$argument",
+    "    takes_value=",
+    "    continue",
+    "  fi",
+    "  case $argument in",
+    "    -p) takes_value=port ;;",
+    "    -o) takes_value=option ;;",
+    "    -[BbcDEeFIiJLlmOQRSWw]) takes_value=other ;;",
+    "    -p*) port=${argument#-p} ;;",
+    "    -o*)",
+    "      option=${argument#-o}",
+    "      option_lower=$(printf '%s' \"$option\" | tr '[:upper:]' '[:lower:]')",
+    "      case $option_lower in",
+    "        port=*) port=${option#*=} ;;",
+    "        'port '*) port=${option#* } ;;",
+    "        port) takes_value=option_port ;;",
+    "      esac",
+    "      ;;",
+    "    -*) ;;",
+    "    *) destination=$argument; break ;;",
+    "  esac",
+    "done",
+    "host=${destination##*@}",
+    "host=${host#[}",
+    "host=${host%]}",
+    "host=$(canonical_ssh_host \"$host\")",
+    ...rules,
+    `exec ${shellQuote(executable)} -F ${shellQuote(configPath)} "$@"`,
+    "",
+  ].join("\n");
 }
 
 async function writeCredentialHelper(
@@ -472,7 +691,6 @@ export async function buildLocalCredentialEnvironment(options: {
   assertUnambiguousProviderCliAssignments(context.authentication);
   const runtimeRoot = context.runtimeRoot || path.join(os.tmpdir(), `uatu-empty-credential-runtime-${process.pid}`);
   const workspaceRuntimeDirectory = path.join(runtimeRoot, "sessions", safeWorkspaceId(workspace.id));
-  await fs.rm(workspaceRuntimeDirectory, { recursive: true, force: true });
   const runtimeDirectory = path.join(workspaceRuntimeDirectory, randomUUID());
   try {
     await fs.mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
@@ -496,7 +714,9 @@ async function projectLocalCredentialEnvironment(
   const { workspace, context } = options;
   const env = stripAmbientCredentialEnvironment(options.sourceEnv);
   const sshConfigPath = path.join(runtimeDirectory, "ssh_config");
+  const sshMatcherPath = path.join(runtimeDirectory, "ssh-host-match");
   const sshLines: string[] = [];
+  const sshPublicKeys = new Map<string, string>();
   const gitEntries: Array<[string, string]> = [
     ["credential.helper", ""],
     ["commit.gpgsign", "false"],
@@ -504,17 +724,21 @@ async function projectLocalCredentialEnvironment(
   ];
   let usesSshAgent = false;
   let toolBinCreated = false;
-  const exposedTools = new Set<"git" | "gh" | "glab">();
+  const exposedTools = new Set<"ssh" | "git" | "gh" | "glab">();
 
-  const exposeTool = async (name: "git" | "gh" | "glab", executable: string): Promise<void> => {
-    if (exposedTools.has(name)) return;
+  const toolBin = async (): Promise<string> => {
     const providerBin = path.join(runtimeDirectory, "tool-bin");
     if (!toolBinCreated) {
       await fs.mkdir(providerBin, { mode: 0o700 });
       toolBinCreated = true;
       env.PATH = env.PATH ? `${providerBin}${path.delimiter}${env.PATH}` : providerBin;
     }
-    await fs.symlink(executable, path.join(providerBin, name));
+    return providerBin;
+  };
+
+  const exposeTool = async (name: "git" | "gh" | "glab", executable: string): Promise<void> => {
+    if (exposedTools.has(name)) return;
+    await fs.symlink(executable, path.join(await toolBin(), name));
     exposedTools.add(name);
   };
 
@@ -535,8 +759,9 @@ async function projectLocalCredentialEnvironment(
     if (assignment.credential.type === "ssh") {
       const publicKeyPath = path.join(runtimeDirectory, `${assignment.credential.id}.pub`);
       await fs.writeFile(publicKeyPath, `${assignment.credential.metadata.publicKey}\n`, { mode: 0o600 });
+      sshPublicKeys.set(assignment.credential.id, publicKeyPath);
       sshLines.push(
-        sshAssignmentMatch(assignment.host, sshPortsByHostname),
+        sshAssignmentMatch(assignment.host, sshPortsByHostname, sshMatcherPath),
         `  IdentityAgent ${sshConfigQuote(context.sshAgentSocket!)}`,
         `  IdentityFile ${sshConfigQuote(publicKeyPath)}`,
         "  IdentitiesOnly yes",
@@ -551,7 +776,7 @@ async function projectLocalCredentialEnvironment(
           context.stateRoot,
           options.uatuArgv,
         );
-        gitEntries.push([`credential.${hostUrl}.helper`, helper]);
+        gitEntries.push([`credential.${hostUrl}.helper`, `!${shellQuote(helper)} "$@"`]);
       }
       if (assignment.credential.capabilities.includes("github-cli") && context.tools.gh) {
         await exposeTool("gh", context.tools.gh);
@@ -584,17 +809,33 @@ async function projectLocalCredentialEnvironment(
     env.GNUPGHOME = context.gnupgHome;
   }
 
+  await fs.writeFile(sshMatcherPath, sshHostMatcherScript(), { mode: 0o700 });
+  await fs.chmod(sshMatcherPath, 0o700);
   sshLines.push("Host *", "  IdentityAgent none", "  IdentityFile none", "  IdentitiesOnly yes", "");
   await fs.writeFile(sshConfigPath, sshLines.join("\n"), { mode: 0o600 });
   await fs.chmod(sshConfigPath, 0o600);
+  if (context.tools.ssh) {
+    const sshShim = path.join(await toolBin(), "ssh");
+    await fs.writeFile(sshShim, sshShimScript(
+      context.tools.ssh,
+      sshConfigPath,
+      context.authentication,
+      sshPublicKeys,
+      context.sshAgentSocket,
+    ), { mode: 0o700 });
+    await fs.chmod(sshShim, 0o700);
+    exposedTools.add("ssh");
+  }
   env.GIT_SSH_COMMAND = `${context.tools.ssh ? shellQuote(context.tools.ssh) : "ssh"} -F ${shellQuote(sshConfigPath)}`;
   if (usesSshAgent) env.SSH_AUTH_SOCK = context.sshAgentSocket!;
 
   const emptyGithub = path.join(runtimeDirectory, "github-empty");
   const emptyGitlab = path.join(runtimeDirectory, "gitlab-empty");
-  await Promise.all([emptyGithub, emptyGitlab].map(directory => fs.mkdir(directory, { mode: 0o700 })));
+  const emptyGnupg = path.join(runtimeDirectory, "gnupg-empty");
+  await Promise.all([emptyGithub, emptyGitlab, emptyGnupg].map(directory => fs.mkdir(directory, { mode: 0o700 })));
   env.GH_CONFIG_DIR ??= emptyGithub;
   env.GLAB_CONFIG_DIR ??= emptyGitlab;
+  env.GNUPGHOME ??= emptyGnupg;
   Object.assign(env, gitConfigEnvironment(gitEntries));
   return { env, runtimeDirectory };
 }

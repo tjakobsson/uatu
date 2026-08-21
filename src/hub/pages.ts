@@ -287,6 +287,8 @@ const SHARED_STYLE = `
   .paste-option { border-top: 1px solid var(--border-soft); padding-top: 0.45rem; }
   .paste-option summary { cursor: pointer; color: var(--text-subtle); font-size: 0.72rem; font-weight: 600; }
   .paste-option textarea { margin-top: 0.35rem; }
+  .secret-paste-heading { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
+  textarea.secret-paste-masked { -webkit-text-security: disc; }
   .restart-required { color: var(--attention); font-weight: 600; }
   .tool-row { align-items: flex-start; }
   .tool-controls { flex: 1; min-width: 0; }
@@ -519,7 +521,7 @@ function authenticatedPage(pageName: AuthenticatedPage, authenticatedUser: strin
       <label>Private key file<input name="privateKeyFile" type="file" /></label>
       <details class="paste-option">
         <summary>Paste a private key instead</summary>
-        <label>Private key<textarea name="privateKey"></textarea></label>
+        <label><span class="secret-paste-heading">Private key <button type="button" data-reveal-secret="ssh-private-key" aria-controls="ssh-private-key" aria-pressed="false">Reveal</button></span><textarea id="ssh-private-key" class="secret-paste-masked" name="privateKey" autocomplete="off"></textarea></label>
       </details>
       <label>Existing passphrase, if any<input name="passphrase" type="password" autocomplete="off" /></label>
       <p class="empty" style="padding-top: 0;">The key keeps its current passphrase. Keys without one stay available without unlocking.</p>
@@ -541,7 +543,7 @@ function authenticatedPage(pageName: AuthenticatedPage, authenticatedUser: strin
     <summary>Import OpenPGP private key</summary>
     <form id="openpgp-import-form" class="form-stack">
       <label>Name<input name="name" type="text" required /></label>
-      <label>Private key<textarea name="privateKey" required></textarea></label>
+      <label><span class="secret-paste-heading">Private key <button type="button" data-reveal-secret="openpgp-private-key" aria-controls="openpgp-private-key" aria-pressed="false">Reveal</button></span><textarea id="openpgp-private-key" class="secret-paste-masked" name="privateKey" autocomplete="off" required></textarea></label>
       <p class="local-error" data-form-error role="alert" hidden></p>
       <div><button class="primary" type="submit">Import OpenPGP key</button></div>
     </form>
@@ -954,37 +956,13 @@ function workspaceAssignmentForm(actionError) {
       return;
     }
     await withBusy(button, "Assigning…", async () => {
-      // Captured before the replacement so a failed signing half can put the
-      // replaced authentication default back.
-      const requestedHost = host.value.trim().toLowerCase().replace(/\.$/, "");
-      const previousAuthentication = workspaceAssignmentEntries(workspace.value).find(entry =>
-        entry.assignment.role === "authentication" && entry.assignment.host === requestedHost);
-      let authenticationAssigned = false;
       try {
-        if (authentication.value) {
-          await api(credentialPath + "/" + encodeURIComponent(authentication.value) + "/assign", {
-            workspaceId: workspace.value, role: "authentication", host: host.value.trim(), replace: true,
-          });
-          authenticationAssigned = true;
-        }
-        if (signing.value) await api(credentialPath + "/" + encodeURIComponent(signing.value) + "/assign", {
-          workspaceId: workspace.value, role: "signing", replace: true,
+        await api("/api/hub/workspaces/" + encodeURIComponent(workspace.value) + "/credential-assignments", {
+          ...(authentication.value ? { authentication: { credentialId: authentication.value, host: host.value.trim() } } : {}),
+          ...(signing.value ? { signing: { credentialId: signing.value } } : {}),
         });
         await Promise.all([loadSettingsState(), loadCredentials()]);
       } catch (error) {
-        // A failed second half must not leave the paired form half-applied:
-        // undo the committed authentication replacement, restore the default
-        // it displaced, and refresh so the UI shows what actually persisted.
-        if (authenticationAssigned && signing.value && previousAuthentication?.credential.id !== authentication.value) {
-          try {
-            await api(credentialPath + "/" + encodeURIComponent(authentication.value) + "/unassign", {
-              workspaceId: workspace.value, role: "authentication", host: host.value.trim(),
-            });
-            if (previousAuthentication) await api(credentialPath + "/" + encodeURIComponent(previousAuthentication.credential.id) + "/assign", {
-              workspaceId: workspace.value, role: "authentication", host: previousAuthentication.assignment.host, replace: true,
-            });
-          } catch {}
-        }
         try { await Promise.all([loadSettingsState(), loadCredentials()]); } catch {}
         setLocalError(actionError, error.message);
       }
@@ -1780,6 +1758,15 @@ function bindCredentialForm(id, endpoint, buildBody) {
 }
 function initSettingsPage() {
   initSharedUidAdvisory();
+  for (const reveal of document.querySelectorAll("[data-reveal-secret]")) {
+    const field = document.getElementById(reveal.dataset.revealSecret);
+    reveal.onclick = () => {
+      const masked = field.classList.toggle("secret-paste-masked");
+      reveal.textContent = masked ? "Reveal" : "Hide";
+      reveal.setAttribute("aria-pressed", String(!masked));
+      field.focus();
+    };
+  }
   bindCredentialForm("ssh-generate-form", credentialPath + "/ssh/generate", (data, form) => ({
     name: data.get("name"), capabilities: values(form, "capabilities"), passphrase: data.get("passphrase"),
   }));

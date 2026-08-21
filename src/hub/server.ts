@@ -83,6 +83,16 @@ function json(status: number, body: unknown, headers?: Record<string, string>): 
   return Response.json(body, { status, headers });
 }
 
+const NO_STORE_HEADERS = { "cache-control": "no-store" };
+
+function closedJsonObject(value: unknown, allowed: readonly string[]): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("request body must be an object");
+  const body = value as Record<string, unknown>;
+  const accepted = new Set(allowed);
+  if (Object.keys(body).some(key => !accepted.has(key))) throw new Error("request contains an unknown field");
+  return body;
+}
+
 function htmlResponse(body: string, status = 200): Response {
   return new Response(body, {
     status,
@@ -108,6 +118,13 @@ export function createHubFetchHandler(deps: HubDeps) {
   const limiter = new LoginRateLimiter();
   const credentialLimiter = new CredentialOperationRateLimiter();
   const credentialApi = deps.credentialApi ? new CredentialApi(deps.credentialApi) : null;
+  const withCredentialLocks = <T>(credentialIds: string[], operation: () => Promise<T>): Promise<T> => {
+    const ids = [...new Set(credentialIds)].sort();
+    const acquire = (index: number): Promise<T> => index === ids.length
+      ? operation()
+      : deps.credentialApi!.metadata.runExclusiveCredential(ids[index]!, () => acquire(index + 1));
+    return acquire(0);
+  };
   // Disable, lock, and delete are revocations: they run under every
   // assigned workspace's lifecycle queue (acquired in sorted order, so
   // concurrent revocations cannot deadlock), or a session start could
@@ -183,7 +200,7 @@ export function createHubFetchHandler(deps: HubDeps) {
       return htmlResponse(loginPage({ next: formTarget(nextTarget) }));
     }
     if (request.method !== "POST") {
-      return new Response("method not allowed", { status: 405 });
+      return new Response("method not allowed", { status: 405, headers: NO_STORE_HEADERS });
     }
     // Where this request returns to. Seeded from the URL — the form posts to
     // /login?next=… precisely so the branches that answer before the body is
@@ -200,7 +217,7 @@ export function createHubFetchHandler(deps: HubDeps) {
     const isJson = (request.headers.get("content-type") ?? "").includes("application/json");
     if (!isSameOriginRequest(request)) {
       return isJson
-        ? json(403, { error: "cross-origin login rejected" })
+        ? json(403, { error: "cross-origin login rejected" }, NO_STORE_HEADERS)
         : errorPage("cross-origin login rejected", 403);
     }
 
@@ -210,7 +227,7 @@ export function createHubFetchHandler(deps: HubDeps) {
     );
     if (!limiter.allow(ip)) {
       return isJson
-        ? json(429, { error: "too many attempts — wait a minute and try again" })
+        ? json(429, { error: "too many attempts — wait a minute and try again" }, NO_STORE_HEADERS)
         : errorPage("too many attempts — wait a minute and try again", 429);
     }
 
@@ -241,7 +258,7 @@ export function createHubFetchHandler(deps: HubDeps) {
       }
     } catch {
       return isJson
-        ? json(400, { error: "malformed login request" })
+        ? json(400, { error: "malformed login request" }, NO_STORE_HEADERS)
         : errorPage("malformed login request", 400);
     }
 
@@ -250,7 +267,7 @@ export function createHubFetchHandler(deps: HubDeps) {
       limiter.recordFailure(ip);
       // Deliberately identical for wrong password and unknown user.
       return isJson
-        ? json(401, { error: "invalid credentials" })
+        ? json(401, { error: "invalid credentials" }, NO_STORE_HEADERS)
         : errorPage("invalid credentials", 401);
     }
     limiter.reset(ip);
@@ -266,7 +283,7 @@ export function createHubFetchHandler(deps: HubDeps) {
       // cookie jar is signed in at once.
       return Response.json(
         { sessionId: record.id, user: user.name },
-        { status: 200, headers: { "set-cookie": setCookie } },
+        { status: 200, headers: { "set-cookie": setCookie, ...NO_STORE_HEADERS } },
       );
     }
     return new Response(null, {
@@ -276,6 +293,7 @@ export function createHubFetchHandler(deps: HubDeps) {
         // rode the form or the URL; the dashboard otherwise.
         location: returnTarget,
         "set-cookie": setCookie,
+        ...NO_STORE_HEADERS,
       },
     });
   };
@@ -439,11 +457,11 @@ export function createHubFetchHandler(deps: HubDeps) {
   // A clone is a user-owned, addressable job: creation returns immediately;
   // output is replayable SSE; input and cancellation are POST mutations.
   const createCloneJob = async (request: Request, owner: string): Promise<Response> => {
-    let body: { url?: unknown; dest?: unknown; folderName?: unknown; credentialId?: unknown; retainAssignment?: unknown };
+    let body: Record<string, unknown>;
     try {
-      body = (await request.json()) as typeof body;
+      body = closedJsonObject(await request.json(), ["url", "dest", "folderName", "credentialId", "retainAssignment"]);
     } catch {
-      return json(400, { error: "invalid JSON body" });
+      return json(400, { error: "invalid JSON body or unknown field" });
     }
     const url = typeof body.url === "string" ? body.url.trim() : "";
     if (url === "" || cloneTargetName(url) === null) {
@@ -628,7 +646,7 @@ export function createHubFetchHandler(deps: HubDeps) {
         const next = safeReturnPath(pathname + url.search);
         return Response.redirect(next === "/" ? "/login" : `/login?next=${encodeURIComponent(next)}`, 303);
       }
-      return json(401, { error: "authentication required" });
+      return json(401, { error: "authentication required" }, NO_STORE_HEADERS);
     }
 
     // Proxied session traffic. Validate the browser's origin BEFORE any
@@ -642,7 +660,7 @@ export function createHubFetchHandler(deps: HubDeps) {
     const sessionMatch = SESSION_PATH.exec(pathname);
     if (sessionMatch) {
       if (!csrfOk(request, session.transport)) {
-        return json(403, { error: "cross-origin request rejected" });
+        return json(403, { error: "cross-origin request rejected" }, NO_STORE_HEADERS);
       }
       let workspaceId: string;
       try {
@@ -758,7 +776,27 @@ export function createHubFetchHandler(deps: HubDeps) {
         return json(405, { error: "method not allowed" });
       }
       if (!csrfOk(request, session.transport)) {
-        return json(403, { error: "cross-origin request rejected" });
+        return json(403, { error: "cross-origin request rejected" }, NO_STORE_HEADERS);
+      }
+      const workspaceCredentialAssignments = /^\/api\/hub\/workspaces\/([^/]+)\/credential-assignments$/.exec(pathname);
+      if (workspaceCredentialAssignments && credentialApi) {
+        const headers = NO_STORE_HEADERS;
+        try {
+          const workspaceId = decodeURIComponent(workspaceCredentialAssignments[1]!);
+          const body = await readCredentialJson(request);
+          const credentialIds = [body.authentication, body.signing].flatMap(value => {
+            if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+            return typeof (value as Record<string, unknown>).credentialId === "string"
+              ? [(value as Record<string, string>).credentialId]
+              : [];
+          });
+          const assignments = await sessions.runExclusive(workspaceId, () =>
+            withCredentialLocks(credentialIds, () => credentialApi.assignWorkspace(workspaceId, body)));
+          return json(200, { assignments }, headers);
+        } catch (error) {
+          const mapped = credentialApiError(error);
+          return json(mapped.status, { error: mapped.message }, headers);
+        }
       }
       if (credentialApi && (pathname.startsWith(`${CREDENTIAL_PATH}/`) || pathname.startsWith(`${CREDENTIAL_TOOL_PATH}/`))) {
         const headers = { "cache-control": "no-store" };
@@ -864,18 +902,18 @@ export function createHubFetchHandler(deps: HubDeps) {
           if (result === "cleanup-failed") return json(500, { error: "clone job cleanup failed; review the job output and workspace state" });
           return json(200, { status: result });
         }
-        let body: { input?: unknown };
+        let body: Record<string, unknown>;
         try {
-          body = (await request.json()) as typeof body;
+          body = closedJsonObject(await request.json(), ["input"]);
         } catch {
-          return json(400, { error: "invalid JSON body" });
+          return json(400, { error: "invalid JSON body or unknown field" }, NO_STORE_HEADERS);
         }
-        if (typeof body.input !== "string") return json(400, { error: "a terminal response is required" });
+        if (typeof body.input !== "string") return json(400, { error: "a terminal response is required" }, NO_STORE_HEADERS);
         const result = cloneJobs.input(session.user, jobId, body.input);
-        if (result === "not-found") return json(404, { error: "clone job not found" });
-        if (result === "inactive") return json(409, { error: "clone job is not accepting input" });
-        if (result === "too-large") return json(413, { error: "terminal response is too large" });
-        return json(200, { accepted: true });
+        if (result === "not-found") return json(404, { error: "clone job not found" }, NO_STORE_HEADERS);
+        if (result === "inactive") return json(409, { error: "clone job is not accepting input" }, NO_STORE_HEADERS);
+        if (result === "too-large") return json(413, { error: "terminal response is too large" }, NO_STORE_HEADERS);
+        return json(200, { accepted: true }, NO_STORE_HEADERS);
       }
       const action = /^\/api\/hub\/sessions\/([^/]+)\/(start|stop)$/.exec(pathname);
       if (action) {
@@ -901,8 +939,12 @@ export function createHubFetchHandler(deps: HubDeps) {
       const forget = /^\/api\/hub\/workspaces\/([^/]+)\/forget$/.exec(pathname);
       if (forget) {
         const workspaceId = decodeURIComponent(forget[1]!);
-        if (!registry.byId(workspaceId)) {
+        const workspace = registry.byId(workspaceId);
+        if (!workspace) {
           return json(404, { error: `unknown workspace: ${workspaceId}` });
+        }
+        if (cloneJobs.isTargetReserved(workspace.path)) {
+          return json(409, { error: `workspace is being finalized by a clone job: ${workspaceId}` });
         }
         try {
           await sessions.runWhileStopped(workspaceId, () =>

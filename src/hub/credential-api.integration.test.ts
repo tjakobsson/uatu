@@ -549,6 +549,97 @@ describe("credential API integration", () => {
     expect(f.metadata.snapshot().assignments).toHaveLength(1);
   });
 
+  test("atomically assigns authentication and signing under both credential locks", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));
+    roots.push(root);
+    const f = await fixture(root);
+    const authentication = await f.metadata.create({
+      name: "Authentication key",
+      type: "ssh",
+      enabled: false,
+      capabilities: ["ssh-authentication"],
+      metadata: { publicKey: "ssh-ed25519 AAAAauth", fingerprint: "SHA256:auth" },
+    }, () => "auth-key");
+    const signing = await f.metadata.create({
+      name: "Signing key",
+      type: "ssh",
+      enabled: false,
+      capabilities: ["ssh-signing"],
+      metadata: { publicKey: "ssh-ed25519 AAAAsign", fingerprint: "SHA256:sign" },
+    }, () => "sign-key");
+    const origin = `http://127.0.0.1:${f.server.port}`;
+    const cookie = await login(origin, "alice", "alice password");
+
+    const originalRunExclusiveCredential = f.metadata.runExclusiveCredential.bind(f.metadata);
+    const enteredCredentialIds = new Set<string>();
+    let markAuthenticationLockEntered!: () => void;
+    let markSigningLockEntered!: () => void;
+    let releaseTransaction!: () => void;
+    const authenticationLockEntered = new Promise<void>(resolve => { markAuthenticationLockEntered = resolve; });
+    const signingLockEntered = new Promise<void>(resolve => { markSigningLockEntered = resolve; });
+    const transactionGate = new Promise<void>(resolve => { releaseTransaction = resolve; });
+    f.metadata.runExclusiveCredential = <T>(credentialId: string, operation: () => Promise<T>) =>
+      originalRunExclusiveCredential(credentialId, async () => {
+        enteredCredentialIds.add(credentialId);
+        if (credentialId === authentication.id) markAuthenticationLockEntered();
+        if (credentialId === signing.id) {
+          markSigningLockEntered();
+          await transactionGate;
+        }
+        return operation();
+      });
+    const assigning = post(origin, cookie, `/api/hub/workspaces/${f.workspace.id}/credential-assignments`, {
+      authentication: { credentialId: authentication.id, host: "github.com" },
+      signing: { credentialId: signing.id },
+    });
+    await Promise.all([authenticationLockEntered, signingLockEntered]);
+    expect(enteredCredentialIds).toEqual(new Set([authentication.id, signing.id]));
+    expect(f.metadata.snapshot().assignments).toEqual([]);
+
+    releaseTransaction();
+    const response = await assigning;
+    expect(response.status).toBe(200);
+    await assertContract("POST", "/api/hub/workspaces/{workspaceId}/credential-assignments", response);
+    expect((await response.json()) as unknown).toEqual({ assignments: [
+      { workspaceId: f.workspace.id, credentialId: authentication.id, role: "authentication", host: "github.com" },
+      { workspaceId: f.workspace.id, credentialId: signing.id, role: "signing" },
+    ] });
+    expect(f.metadata.snapshot().assignments).toHaveLength(2);
+  });
+
+  test("degrades one failed readiness probe without failing credential inventory", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));
+    roots.push(root);
+    const f = await fixture(root);
+    await f.metadata.create({
+      name: "Unavailable signing key",
+      type: "openpgp",
+      enabled: true,
+      capabilities: ["openpgp-signing"],
+      metadata: { publicKey: "public", fingerprint: "C".repeat(40) },
+    }, () => "broken-readiness");
+    await f.metadata.create({
+      name: "Disabled token",
+      type: "token",
+      enabled: false,
+      capabilities: ["https-git"],
+      metadata: { host: "github.com" },
+    }, () => "healthy-item");
+    f.openpgp.readiness = async () => { throw new Error("gpg probe crashed"); };
+    const origin = `http://127.0.0.1:${f.server.port}`;
+    const cookie = await login(origin, "alice", "alice password");
+
+    const response = await fetch(`${origin}/api/hub/credentials`, { headers: { cookie } });
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as { credentials: Array<{ id: string; readiness: Array<{ layer: string; status: string; message: string }> }> };
+    expect(payload.credentials.find(item => item.id === "broken-readiness")?.readiness).toEqual([{
+      layer: "runtime",
+      status: "unavailable",
+      message: "Credential readiness could not be determined.",
+    }]);
+    expect(payload.credentials.find(item => item.id === "healthy-item")?.readiness[0]?.message).toBe("The credential is disabled.");
+  });
+
   test("refuses to unassign a running workspace without stop", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));
     roots.push(root);
@@ -734,7 +825,7 @@ describe("credential API integration", () => {
         }
       }
     }
-    expect(documented.size).toBe(18);
+    expect(documented.size).toBe(19);
     expect([...documented].filter(id => !coveredOperations.has(id))).toEqual([]);
   });
 });

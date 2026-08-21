@@ -178,6 +178,8 @@ export class SessionManager {
     // Every workspace with a live child OR a pending/queued start gets a
     // stop enqueued behind whatever it is doing.
     const ids = new Set([...this.running.keys(), ...this.starting.keys()]);
-    await Promise.all([...ids].map(id => this.stop(id).catch(() => undefined)));
+    const results = await Promise.allSettled([...ids].map(id => this.stop(id)));
+    const failures = results.flatMap(result => result.status === "rejected" ? [result.reason] : []);
+    if (failures.length > 0) throw new AggregateError(failures, "one or more workspace sessions failed to stop");
   }
 }

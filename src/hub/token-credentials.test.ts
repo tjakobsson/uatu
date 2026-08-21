@@ -120,6 +120,39 @@ describe("TokenCredentialManager", () => {
     expect(defaults).toEqual([{ workspaceId: "w1", credentialId: "token-2", role: "authentication", host: "gitlab.com" }]);
   });
 
+  test("preserves metadata and secret-compensation failures from create", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "uatu-token-credentials-"));
+    tempDirectories.push(directory);
+    const metadata = new CredentialMetadataStore(path.join(directory, "missing", "credentials.json"));
+    class FailingCompensationStore extends CredentialTokenStore {
+      override async delete(): Promise<boolean> {
+        throw new Error("secret compensation failed");
+      }
+    }
+    const secrets = new FailingCompensationStore(path.join(directory, "tokens.json"));
+    const manager = new TokenCredentialManager(metadata, secrets);
+    await manager.load();
+
+    let failure: unknown;
+    try {
+      await manager.create({
+        name: "GitHub",
+        host: "github.com",
+        token: "sentinel-provider-token",
+        capabilities: ["https-git"],
+      }, () => "token-1");
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(AggregateError);
+    const errors = (failure as AggregateError).errors;
+    expect(errors).toHaveLength(2);
+    expect((errors[0] as NodeJS.ErrnoException).code).toBe("ENOENT");
+    expect(errors[1]).toMatchObject({ message: "secret compensation failed" });
+    expect(secrets.get("token-1")).toBe("sentinel-provider-token");
+  });
+
   test("rejects ambiguous provider capabilities and host paths", async () => {
     const fixture = await manager();
     await expect(fixture.manager.create({

@@ -178,6 +178,18 @@ export class ManagedSshAgent {
     } catch (error) {
       if (!isMissing(error)) throw error;
     }
+    let live = false;
+    try {
+      process.kill(record.pid, 0);
+      live = true;
+    } catch (error) {
+      live = (error as NodeJS.ErrnoException).code === "EPERM";
+    }
+    if (live) {
+      throw new Error(
+        `SSH agent ownership record names live process ${record.pid}, but its socket is missing; stop that process or remove the record after verifying it is stale`,
+      );
+    }
     await fs.rm(this.ownershipPath);
   }
 

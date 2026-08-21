@@ -1,5 +1,6 @@
 import { constants, promises as fs } from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 
 import {
   CREDENTIAL_TOOLS,
@@ -115,13 +116,50 @@ type ProcessProbeResult = {
   output: string;
 };
 
-async function collectBounded(stream: ReadableStream<Uint8Array>, limit: number): Promise<{ text: string; exceeded: boolean }> {
+type ActiveProbe = {
+  child: ReturnType<typeof Bun.spawn>;
+  cancel: () => void;
+};
+
+function killProbe(active: ActiveProbe): void {
+  active.cancel();
+  if (process.platform === "win32" && active.child.pid > 0) {
+    spawnSync("taskkill", ["/PID", String(active.child.pid), "/T", "/F"], {
+      stdio: "ignore",
+      timeout: 1_000,
+      windowsHide: true,
+    });
+  }
+  if (process.platform !== "win32" && active.child.pid > 0) {
+    try {
+      process.kill(-active.child.pid, "SIGKILL");
+      return;
+    } catch {
+      // Fall back to the direct child if its process group has already gone.
+    }
+  }
+  try {
+    active.child.kill("SIGKILL");
+  } catch {
+    // The direct child may already have exited.
+  }
+}
+
+async function collectBounded(
+  stream: ReadableStream<Uint8Array>,
+  limit: number,
+  signal: AbortSignal,
+  onExceeded: () => void,
+): Promise<{ text: string; exceeded: boolean }> {
   const reader = stream.getReader();
+  const cancel = () => { void reader.cancel().catch(() => undefined); };
+  signal.addEventListener("abort", cancel, { once: true });
   const chunks: Uint8Array[] = [];
   let size = 0;
   let exceeded = false;
   try {
     for (;;) {
+      if (signal.aborted) break;
       const next = await reader.read();
       if (next.done) break;
       const remaining = limit - size;
@@ -129,9 +167,17 @@ async function collectBounded(stream: ReadableStream<Uint8Array>, limit: number)
         chunks.push(next.value.slice(0, remaining));
         size += Math.min(next.value.length, remaining);
       }
-      if (next.value.length > remaining) exceeded = true;
+      if (next.value.length > remaining) {
+        exceeded = true;
+        onExceeded();
+        break;
+      }
     }
+  } catch (error) {
+    if (!signal.aborted) throw error;
   } finally {
+    signal.removeEventListener("abort", cancel);
+    if (signal.aborted) await reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
   const bytes = new Uint8Array(size);
@@ -143,28 +189,41 @@ async function collectBounded(stream: ReadableStream<Uint8Array>, limit: number)
   return { text: new TextDecoder().decode(bytes), exceeded };
 }
 
-async function runProbe(executablePath: string, args: string[], timeoutMs: number): Promise<ProcessProbeResult> {
+async function runProbe(
+  executablePath: string,
+  args: string[],
+  timeoutMs: number,
+  activeProbes?: Set<ActiveProbe>,
+): Promise<ProcessProbeResult> {
   const child = Bun.spawn([executablePath, ...args], {
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
     env: { PATH: process.env.PATH ?? "", LANG: "C", LC_ALL: "C" },
+    detached: process.platform !== "win32",
   });
+  const controller = new AbortController();
+  const active: ActiveProbe = { child, cancel: () => controller.abort() };
+  activeProbes?.add(active);
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
-    try {
-      child.kill("SIGKILL");
-    } catch {
-      // The process may have exited between the timer firing and the signal.
-    }
+    killProbe(active);
   }, timeoutMs);
   try {
-    const [stdout, stderr, exitCode] = await Promise.all([
-      collectBounded(child.stdout, PROBE_OUTPUT_LIMIT),
-      collectBounded(child.stderr, PROBE_OUTPUT_LIMIT),
-      child.exited,
-    ]);
+    const terminateForOutput = () => killProbe(active);
+    const stdoutPromise = collectBounded(child.stdout, PROBE_OUTPUT_LIMIT, controller.signal, terminateForOutput);
+    const stderrPromise = collectBounded(child.stderr, PROBE_OUTPUT_LIMIT, controller.signal, terminateForOutput);
+    const exitCode = await child.exited;
+    const streams = Promise.all([stdoutPromise, stderrPromise]);
+    let drainTimer: ReturnType<typeof setTimeout> | undefined;
+    const drainTimeout = new Promise<[Awaited<typeof stdoutPromise>, Awaited<typeof stderrPromise>]>(resolve => {
+      drainTimer = setTimeout(() => {
+        killProbe(active);
+        void streams.then(resolve);
+      }, 100);
+    });
+    const [stdout, stderr] = await Promise.race([streams, drainTimeout]).finally(() => clearTimeout(drainTimer));
     return {
       exitCode,
       timedOut,
@@ -173,6 +232,8 @@ async function runProbe(executablePath: string, args: string[], timeoutMs: numbe
     };
   } finally {
     clearTimeout(timer);
+    controller.abort();
+    activeProbes?.delete(active);
   }
 }
 
@@ -192,6 +253,7 @@ export function toolInstallationGuidance(tool: CredentialTool, platform: NodeJS.
 export async function probeCredentialTool(
   discovery: ToolDiscovery,
   timeoutMs = PROBE_TIMEOUT_MS,
+  activeProbes?: Set<ActiveProbe>,
 ): Promise<PublicToolReadinessDto> {
   const results: ReadinessResult[] = [];
   if (discovery.invalid) {
@@ -217,7 +279,7 @@ export async function probeCredentialTool(
   results.push({ layer: "binary", status: "ready", message: "Executable is available." });
   let probe: ProcessProbeResult;
   try {
-    probe = await runProbe(discovery.path, VERSION_ARGUMENTS[discovery.tool], timeoutMs);
+    probe = await runProbe(discovery.path, VERSION_ARGUMENTS[discovery.tool], timeoutMs, activeProbes);
   } catch {
     results.push({ layer: "version", status: "unavailable", message: "Version probe could not start." });
     return { tool: discovery.tool, path: discovery.path, version: null, results, guidance: toolInstallationGuidance(discovery.tool) };
@@ -261,11 +323,17 @@ export function readyToolPath(readiness: PublicToolReadinessDto | undefined): st
 export class CredentialToolManager {
   private readiness = new Map<CredentialTool, PublicToolReadinessDto>();
   private operationChain: Promise<unknown> = Promise.resolve();
+  private readonly activeProbes = new Set<ActiveProbe>();
+  private closing = false;
 
   constructor(
     private readonly store: CredentialToolOverrideStore,
     private readonly servicePath: string | undefined = process.env.PATH,
-    private readonly probe: (discovery: ToolDiscovery) => Promise<PublicToolReadinessDto> = probeCredentialTool,
+    private readonly probe: (discovery: ToolDiscovery) => Promise<PublicToolReadinessDto> = discovery => {
+      if (this.closing) throw new Error("credential tool manager is shutting down");
+      return probeCredentialTool(discovery, PROBE_TIMEOUT_MS, this.activeProbes);
+    },
+    private readonly applyRuntime: () => Promise<void> = async () => undefined,
   ) {}
 
   load(): Promise<void> {
@@ -287,6 +355,7 @@ export class CredentialToolManager {
         throw new Error(`tool override failed validation: ${tool}`);
       }
       const previous = this.store.get(tool);
+      const previousReadiness = new Map(this.readiness);
       await this.store.set({ tool, path: executablePath });
       try {
         await this.probeAll();
@@ -294,14 +363,22 @@ export class CredentialToolManager {
         if (persisted.results.some(layer => layer.status === "unavailable")) {
           throw new Error(`tool override failed validation: ${tool}`);
         }
+        await this.applyRuntime();
       } catch (error) {
+        const rollbackErrors: unknown[] = [];
         try {
           if (previous) await this.store.set(previous);
           else await this.store.delete(tool);
-          await this.probeAll();
         } catch (rollbackError) {
-          throw new AggregateError([error, rollbackError], `tool override failed validation and rollback: ${tool}`);
+          rollbackErrors.push(rollbackError);
         }
+        this.readiness = previousReadiness;
+        try {
+          await this.applyRuntime();
+        } catch (rollbackError) {
+          rollbackErrors.push(rollbackError);
+        }
+        if (rollbackErrors.length > 0) throw new AggregateError([error, ...rollbackErrors], `tool override failed and restoration failed: ${tool}`);
         throw error;
       }
       return structuredClone(this.readiness.get(tool)!);
@@ -310,14 +387,54 @@ export class CredentialToolManager {
 
   clearOverride(tool: CredentialTool): Promise<PublicToolReadinessDto> {
     return this.enqueue(async () => {
+      const previous = this.store.get(tool);
+      const previousReadiness = new Map(this.readiness);
       await this.store.delete(tool);
-      await this.probeAll();
+      try {
+        await this.probeAll();
+        await this.applyRuntime();
+      } catch (error) {
+        const rollbackErrors: unknown[] = [];
+        try {
+          if (previous) await this.store.set(previous);
+        } catch (rollbackError) {
+          rollbackErrors.push(rollbackError);
+        }
+        this.readiness = previousReadiness;
+        try {
+          await this.applyRuntime();
+        } catch (rollbackError) {
+          rollbackErrors.push(rollbackError);
+        }
+        if (rollbackErrors.length > 0) throw new AggregateError([error, ...rollbackErrors], `tool override clear failed and restoration failed: ${tool}`);
+        throw error;
+      }
       return structuredClone(this.readiness.get(tool)!);
     });
   }
 
   reprobeAll(): Promise<void> {
-    return this.enqueue(() => this.probeAll());
+    return this.enqueue(async () => {
+      const previousReadiness = new Map(this.readiness);
+      try {
+        await this.probeAll();
+        await this.applyRuntime();
+      } catch (error) {
+        this.readiness = previousReadiness;
+        try {
+          await this.applyRuntime();
+        } catch (rollbackError) {
+          throw new AggregateError([error, rollbackError], "tool re-probe failed and restoration failed");
+        }
+        throw error;
+      }
+    });
+  }
+
+  async shutdown(): Promise<void> {
+    this.closing = true;
+    for (const active of this.activeProbes) killProbe(active);
+    await this.operationChain.catch(() => undefined);
   }
 
   private async probeAll(): Promise<void> {
@@ -328,6 +445,7 @@ export class CredentialToolManager {
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.closing) return Promise.reject(new Error("credential tool manager is shutting down"));
     const next = this.operationChain.then(operation, operation);
     this.operationChain = next.catch(() => undefined);
     return next;

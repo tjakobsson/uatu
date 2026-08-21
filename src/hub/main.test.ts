@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
-import { createCredentialRuntimeGate, passwordFromPipedInput, stopHubRuntime } from "./main";
+import {
+  applyCredentialRuntimeAtomically,
+  createCredentialRuntimeGate,
+  passwordFromPipedInput,
+  shutdownHub,
+  stopHubRuntime,
+} from "./main";
 
 describe("passwordFromPipedInput", () => {
   test("strips exactly one trailing line terminator", () => {
@@ -114,11 +120,68 @@ describe("createCredentialRuntimeGate", () => {
   });
 });
 
+describe("applyCredentialRuntimeAtomically", () => {
+  test("restores bookkeeping and every manager after a partial replacement", async () => {
+    let activePaths = "old";
+    let sshAgent = "old";
+    let sshManager = "old";
+    let openPgpManager = "old";
+    const calls: string[] = [];
+    let failOpenPgp = true;
+    const apply = async (paths: string, force: boolean) => {
+      calls.push(`${paths}:${force}`);
+      if (force || paths !== activePaths) {
+        sshAgent = paths;
+        sshManager = paths;
+      }
+      if (paths === "new" && failOpenPgp) {
+        failOpenPgp = false;
+        throw new Error("OpenPGP replacement failed");
+      }
+      if (force || paths !== activePaths) openPgpManager = paths;
+      activePaths = paths;
+    };
+
+    await expect(applyCredentialRuntimeAtomically("old", "new", apply)).rejects.toThrow("OpenPGP replacement failed");
+    expect(calls).toEqual(["new:false", "old:true"]);
+    expect({ activePaths, sshAgent, sshManager, openPgpManager }).toEqual({
+      activePaths: "old",
+      sshAgent: "old",
+      sshManager: "old",
+      openPgpManager: "old",
+    });
+  });
+
+  test("aggregates application and forced restoration failures without clearing bookkeeping", async () => {
+    let activePaths = "old";
+    let manager = "old";
+    const apply = async (paths: string, force: boolean) => {
+      manager = paths;
+      if (force) throw new Error("restoration failed");
+      throw new Error("application failed");
+    };
+
+    let failure: unknown;
+    try {
+      await applyCredentialRuntimeAtomically(activePaths, "new", apply);
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).errors.map(error => (error as Error).message)).toEqual([
+      "application failed",
+      "restoration failed",
+    ]);
+    expect(activePaths).toBe("old");
+    expect(manager).toBe("old");
+  });
+});
+
 describe("Hub runtime shutdown", () => {
   test("stops clone jobs and sessions before agents and isolates cleanup failures", async () => {
     const calls: string[] = [];
     const errors: string[] = [];
-    await stopHubRuntime({
+    const result = await stopHubRuntime({
       cloneJobs: {
         async close() {
           calls.push("clones");
@@ -154,5 +217,59 @@ describe("Hub runtime shutdown", () => {
       "uatu hub: workspace session shutdown failed",
       "uatu hub: SSH agent shutdown failed",
     ]);
+    expect(result).toEqual({ ok: false, stateLeaseSafeToRelease: false });
+  });
+
+  test("signal shutdown exits nonzero and retains the lease when clones or sessions remain unreaped", async () => {
+    const calls: string[] = [];
+    const errors: string[] = [];
+    const exitCode = await shutdownHub({
+      stopServer() { calls.push("server"); },
+      stateLease: {
+        async release() { calls.push("lease"); },
+      },
+      cloneJobs: {
+        async close() {
+          calls.push("clones");
+          throw new Error("clone process survived");
+        },
+      },
+      credentialTools: {
+        async shutdown() { calls.push("tools"); },
+      },
+      sessions: {
+        async stopAll() {
+          calls.push("sessions");
+          throw new Error("session process survived");
+        },
+      },
+      sshAgent: {
+        async shutdown() { calls.push("ssh"); },
+      },
+      openPgp: {
+        async shutdown() { calls.push("openpgp"); },
+      },
+      reportError(message) { errors.push(message); },
+    });
+
+    expect(exitCode).toBe(1);
+    expect(calls).toContain("tools");
+    expect(calls).toContain("ssh");
+    expect(calls).toContain("openpgp");
+    expect(calls).not.toContain("lease");
+    expect(errors).toContain("uatu hub: retaining state-root lease after incomplete shutdown");
+  });
+
+  test("clean signal shutdown releases the lease and exits zero", async () => {
+    let releases = 0;
+    const exitCode = await shutdownHub({
+      stopServer() {},
+      stateLease: { async release() { releases += 1; } },
+      cloneJobs: { async close() {} },
+      sessions: { async stopAll() {} },
+    });
+
+    expect(exitCode).toBe(0);
+    expect(releases).toBe(1);
   });
 });

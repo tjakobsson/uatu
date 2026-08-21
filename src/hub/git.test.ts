@@ -57,6 +57,28 @@ describe("probeGitRepository", () => {
     execFileSync("mkdir", ["-p", sub]);
     expect((await probeGitRepository(sub)).kind).toBe("repository");
   });
+
+  test("caps repository probe output", async () => {
+    const dir = await tempDir();
+    const executable = path.join(dir, "managed-git");
+    await writeFile(executable, "#!/bin/sh\ndd if=/dev/zero bs=1024 count=1 2>/dev/null\n", { mode: 0o755 });
+
+    const started = Date.now();
+    const probe = await probeGitRepository(dir, executable, { timeoutMs: 1_000, outputLimit: 128 });
+    expect(probe).toEqual({ kind: "indeterminate", detail: "git repository probe exceeded the output limit" });
+    expect(Date.now() - started).toBeLessThan(3_000);
+  });
+
+  test("times out without waiting for a descendant holding the output pipes", async () => {
+    const dir = await tempDir();
+    const executable = path.join(dir, "managed-git");
+    await writeFile(executable, "#!/bin/sh\n(sleep 30) &\nsleep 30\n", { mode: 0o755 });
+
+    const started = Date.now();
+    const probe = await probeGitRepository(dir, executable, { timeoutMs: 20 });
+    expect(probe).toEqual({ kind: "indeterminate", detail: "git repository probe timed out" });
+    expect(Date.now() - started).toBeLessThan(3_000);
+  });
 });
 
 describe("gitInit", () => {

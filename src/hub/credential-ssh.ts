@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { constants, promises as fs } from "node:fs";
 import path from "node:path";
 
@@ -16,10 +17,12 @@ type SshCapability = Extract<CredentialCapability, "ssh-authentication" | "ssh-s
 
 export type SshCredentialServiceOptions = {
   secretsDirectory: string;
+  runtimeDirectory: string;
   metadataStore: CredentialMetadataStore;
   agent: ManagedSshAgent;
   sshKeygenPath: string;
   sshAddPath: string;
+  mkfifoPath?: string;
   servicePath?: string;
   operationTimeoutMs?: number;
   createId?: () => string;
@@ -30,6 +33,31 @@ export type SshCredentialServiceOptions = {
 };
 
 type PtyResult = { exitCode: number; publicOutput: string };
+
+type SpawnedProcess = ReturnType<typeof Bun.spawn>;
+
+function terminateDetachedProcess(child: SpawnedProcess): void {
+  if (process.platform === "win32" && child.pid > 0) {
+    spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+      stdio: "ignore",
+      timeout: 1_000,
+      windowsHide: true,
+    });
+  }
+  if (process.platform !== "win32" && child.pid > 0) {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+      return;
+    } catch {
+      // Fall through if the process group exited at the timeout boundary.
+    }
+  }
+  try {
+    child.kill("SIGKILL");
+  } catch {
+    // The direct child may already have exited.
+  }
+}
 
 // The public operation surface consumers hold instead of the class, so the
 // hub can interpose a facade that serializes operations with SSH runtime
@@ -116,17 +144,20 @@ async function runSecretPty(options: {
     },
   });
   const child = Bun.spawn([options.executable, ...options.args], {
-    detached: true,
+    detached: process.platform !== "win32",
     terminal,
     env: options.env,
   });
+  let terminalClosed = false;
+  const closeTerminal = () => {
+    if (terminalClosed) return;
+    terminalClosed = true;
+    terminal.close();
+  };
   const timer = setTimeout(() => {
     if (!processExited) {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        // The process may exit at the timeout boundary.
-      }
+      terminateDetachedProcess(child);
+      closeTerminal();
     }
   }, options.timeoutMs);
   try {
@@ -137,7 +168,7 @@ async function runSecretPty(options: {
     return { exitCode, publicOutput: output };
   } finally {
     clearTimeout(timer);
-    terminal.close();
+    closeTerminal();
   }
 }
 
@@ -147,15 +178,17 @@ async function runQuiet(
   env: Record<string, string>,
   timeoutMs: number,
 ): Promise<number> {
-  const child = Bun.spawn([executable, ...args], { stdin: "ignore", stdout: "ignore", stderr: "ignore", env });
+  const child = Bun.spawn([executable, ...args], {
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+    env,
+    detached: process.platform !== "win32",
+  });
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
-    try {
-      child.kill("SIGKILL");
-    } catch {
-      // The process may exit at the timeout boundary.
-    }
+    terminateDetachedProcess(child);
   }, timeoutMs);
   try {
     const exitCode = (await child.exited) ?? 1;
@@ -165,25 +198,50 @@ async function runQuiet(
   }
 }
 
+async function executableFromPath(name: string, environmentPath: string): Promise<string> {
+  for (const directory of environmentPath.split(path.delimiter)) {
+    if (directory === "") continue;
+    const candidate = path.join(directory, name);
+    try {
+      await fs.access(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // Try the next service PATH entry.
+    }
+  }
+  throw new Error(`${name} is unavailable`);
+}
+
 async function readPublicKey(executable: string, args: string[], env: Record<string, string>, timeoutMs: number): Promise<PtyResult> {
-  const child = Bun.spawn([executable, ...args], { stdin: "ignore", stdout: "pipe", stderr: "ignore", env });
-  let processExited = false;
+  const child = Bun.spawn([executable, ...args], {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "ignore",
+    env,
+    detached: process.platform !== "win32",
+  });
+  const reader = child.stdout.getReader();
+  let timedOut = false;
   const timer = setTimeout(() => {
-    if (!processExited) child.kill("SIGKILL");
+    timedOut = true;
+    terminateDetachedProcess(child);
+    void reader.cancel().catch(() => undefined);
   }, timeoutMs);
   try {
-    const reader = child.stdout.getReader();
     const chunks: Uint8Array[] = [];
     let size = 0;
-    for (;;) {
-      const next = await reader.read();
-      if (next.done) break;
-      const remaining = MAX_PUBLIC_OUTPUT_BYTES - size;
-      if (remaining > 0) chunks.push(next.value.slice(0, remaining));
-      size += Math.min(next.value.length, Math.max(remaining, 0));
+    try {
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) break;
+        const remaining = MAX_PUBLIC_OUTPUT_BYTES - size;
+        if (remaining > 0) chunks.push(next.value.slice(0, remaining));
+        size += Math.min(next.value.length, Math.max(remaining, 0));
+      }
+    } catch (error) {
+      if (!timedOut) throw error;
     }
     const exitCode = (await child.exited) ?? 1;
-    processExited = true;
     const bytes = new Uint8Array(size);
     let offset = 0;
     for (const chunk of chunks) {
@@ -193,6 +251,8 @@ async function readPublicKey(executable: string, args: string[], env: Record<str
     return { exitCode, publicOutput: new TextDecoder().decode(bytes) };
   } finally {
     clearTimeout(timer);
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
   }
 }
 
@@ -201,6 +261,7 @@ async function runSecretAskpass(options: {
   args: string[];
   env: Record<string, string>;
   passphrase: string;
+  mkfifoPath: string;
   runtimeDirectory: string;
   timeoutMs: number;
 }): Promise<number> {
@@ -210,21 +271,16 @@ async function runSecretAskpass(options: {
   let secretPipe: Awaited<ReturnType<typeof fs.open>> | undefined;
   try {
     await fs.writeFile(askpassPath, "#!/bin/sh\nIFS= read -r secret < \"$UATU_SSH_ASKPASS_PIPE\"\nprintf '%s\\n' \"$secret\"\n", { mode: 0o700 });
-    let mkfifo;
+    let mkfifoExitCode: number;
     try {
-      mkfifo = Bun.spawn(["mkfifo", "-m", "600", secretPipePath], {
-        stdin: "ignore",
-        stdout: "ignore",
-        stderr: "ignore",
-        env: options.env,
-      });
+      mkfifoExitCode = await runQuiet(options.mkfifoPath, ["-m", "600", secretPipePath], options.env, options.timeoutMs);
     } catch {
       throw new Error("SSH passphrase channel could not be created");
     }
-    if (await mkfifo.exited !== 0) throw new Error("SSH passphrase channel could not be created");
+    if (mkfifoExitCode !== 0) throw new Error("SSH passphrase channel could not be created");
     secretPipe = await fs.open(secretPipePath, constants.O_RDWR);
     const child = Bun.spawn([options.executable, ...options.args], {
-      detached: true,
+      detached: process.platform !== "win32",
       stdin: "ignore",
       stdout: "ignore",
       stderr: "ignore",
@@ -240,11 +296,7 @@ async function runSecretAskpass(options: {
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        // The process may exit at the timeout boundary.
-      }
+      terminateDetachedProcess(child);
     }, options.timeoutMs);
     try {
       const exitCode = (await child.exited) ?? 1;
@@ -326,6 +378,7 @@ export class SshCredentialService {
     let privateCreated = false;
     let publicCreated = false;
     let credentialCreated = false;
+    let unlockAttempted = false;
     try {
       await fs.writeFile(privatePath, privateKey, { flag: "wx", mode: 0o600 });
       privateCreated = true;
@@ -354,14 +407,29 @@ export class SshCredentialService {
         metadata,
       }, () => id) as SshCredentialRecord;
       credentialCreated = true;
+      unlockAttempted = true;
       await this.unlock(id, passphrase);
       return credential;
     } catch (error) {
-      if (credentialCreated) await this.options.metadataStore.deleteCredential(id, true).catch(() => undefined);
-      await Promise.all([
+      if (unlockAttempted) {
+        try {
+          await this.enqueueCredential(id, () => this.removeIdentityNow(id));
+        } catch (cleanupError) {
+          throw new AggregateError(
+            [error, cleanupError],
+            "SSH credential import failed and its possibly loaded identity could not be removed",
+          );
+        }
+      }
+      const cleanupResults = await Promise.allSettled([
+        ...(credentialCreated ? [this.options.metadataStore.deleteCredential(id, true)] : []),
         ...(privateCreated ? [fs.rm(privatePath, { force: true })] : []),
         ...(publicCreated ? [fs.rm(publicPath, { force: true })] : []),
       ]);
+      const cleanupErrors = cleanupResults.flatMap(result => result.status === "rejected" ? [result.reason] : []);
+      if (cleanupErrors.length > 0) {
+        throw new AggregateError([error, ...cleanupErrors], "SSH credential import and cleanup failed");
+      }
       throw error;
     }
   }
@@ -384,7 +452,8 @@ export class SshCredentialService {
       args: [privatePath],
       env: this.agentEnvironment(socket),
       passphrase,
-      runtimeDirectory: this.options.secretsDirectory,
+      mkfifoPath: this.options.mkfifoPath ?? await executableFromPath("mkfifo", this.servicePath),
+      runtimeDirectory: this.options.runtimeDirectory,
       timeoutMs: this.timeoutMs,
     });
     if (exitCode !== 0 || !(await this.usable(credentialId, id => this.unlockNow(id, "")))) {
@@ -458,15 +527,13 @@ export class SshCredentialService {
     return deleted;
   }
 
-  // The auto-load goes through the public queued unlock so it cannot land an
-  // identity a concurrent revocation is removing. The queued flavor is safe
-  // here because readiness checks never run inside a credential chain; the
-  // in-chain caller (unlockNow) passes its unqueued self instead.
+  // Auto-load joins the credential chain so it cannot land an identity after
+  // a concurrent revocation, then rechecks the explicit lock in that chain.
   testUsability(credentialId: string): Promise<boolean> {
-    return this.usable(credentialId, id => this.unlock(id, ""));
+    return this.usable(credentialId, id => this.enqueueCredential(id, () => this.autoLoadNow(id)));
   }
 
-  private async usable(credentialId: string, load: (credentialId: string) => Promise<void>): Promise<boolean> {
+  private async usable(credentialId: string, load: (credentialId: string) => Promise<boolean | void>): Promise<boolean> {
     const credential = this.credential(credentialId);
     if (!credential.enabled) return false;
     try {
@@ -474,11 +541,18 @@ export class SshCredentialService {
       if (this.explicitlyLocked.has(credentialId)) return false;
       const privateKey = await fs.readFile(credentialFile(this.options.secretsDirectory, credentialId), "utf8");
       if (encryptedPrivateKey(privateKey)) return false;
-      await load(credentialId);
-      return true;
+      return (await load(credentialId)) !== false;
     } catch {
       return false;
     }
+  }
+
+  private async autoLoadNow(credentialId: string): Promise<boolean> {
+    // The earlier readiness check happens outside the credential chain. A
+    // user Lock may have run before this queued load gets its turn.
+    if (this.explicitlyLocked.has(credentialId)) return false;
+    await this.unlockNow(credentialId, "");
+    return true;
   }
 
   private enqueueCredential<T>(credentialId: string, operation: () => Promise<T>): Promise<T> {
@@ -508,6 +582,28 @@ export class SshCredentialService {
     // shutdown is the fallback only while this key is provably still loaded,
     // so deleting a locked key cannot lock every other credential.
     if (exitCode !== 0 && await this.agentHasKey(credentialId)) await this.options.agent.shutdown();
+  }
+
+  private async removeIdentityNow(credentialId: string): Promise<void> {
+    const socket = this.options.agent.currentSocket();
+    if (!socket) return;
+    const publicPath = `${credentialFile(this.options.secretsDirectory, credentialId)}.pub`;
+    const exitCode = await runQuiet(this.options.sshAddPath, ["-d", publicPath], this.agentEnvironment(socket), this.timeoutMs);
+    if (exitCode === 0) return;
+    const probeExitCode = await runQuiet(
+      this.options.sshAddPath,
+      ["-T", publicPath],
+      this.agentEnvironment(socket),
+      this.timeoutMs,
+    );
+    if (probeExitCode === 1) return;
+    // A loaded key (0) or an inconclusive probe must fail closed by stopping
+    // the managed agent before catalog or backing deletion can proceed.
+    try {
+      await this.options.agent.shutdown();
+    } catch (error) {
+      throw new Error("SSH credential identity cleanup failed", { cause: error });
+    }
   }
 
   private credential(credentialId: string): SshCredentialRecord {

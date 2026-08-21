@@ -7,6 +7,7 @@ import { CredentialMetadataStore } from "./credential-store";
 import {
   OPENPGP_SIGNING_CHALLENGE,
   OpenPgpCredentialManager,
+  runOpenPgpCommand,
   type OpenPgpCommand,
   type OpenPgpCommandRunner,
 } from "./openpgp-credentials";
@@ -189,6 +190,64 @@ describe("OpenPgpCredentialManager generation and import", () => {
     expect(store.snapshot().credentials).toEqual([]);
   });
 
+  for (const [label, deletionFailure] of [
+    ["nonzero", { exitCode: 2 }],
+    ["timed out", { timedOut: true }],
+    ["output capped", { outputExceeded: true }],
+  ] as const) {
+    test(`preserves generation and cleanup errors when rollback deletion is ${label}`, async () => {
+      const fake = fakeGpg();
+      const run: OpenPgpCommandRunner = async command => {
+        const result = await fake.run(command);
+        if (command.args.includes("--export")) return { ...result, exitCode: 2 };
+        if (command.args.includes("--delete-secret-and-public-key")) return { ...result, ...deletionFailure };
+        return result;
+      };
+      const { manager, store } = await fixture(run);
+
+      let failure: unknown;
+      try {
+        await manager.generate({ name: "Generation rollback", userId: "Test <test@example.test>", passphrase: "secret" });
+      } catch (error) {
+        failure = error;
+      }
+
+      expect(failure).toBeInstanceOf(AggregateError);
+      expect((failure as AggregateError).errors.map(error => (error as Error).message)).toEqual([
+        "OpenPGP public-key export failed.",
+        "OpenPGP key cleanup failed.",
+      ]);
+      expect(store.snapshot().credentials).toEqual([]);
+    });
+
+    test(`preserves import and cleanup errors when rollback deletion is ${label}`, async () => {
+      const fake = fakeGpg();
+      const run: OpenPgpCommandRunner = async command => {
+        const result = await fake.run(command);
+        if (command.args.includes("--list-secret-keys")) {
+          return { ...result, stdout: result.stdout.replace(":s:::", ":e:::") };
+        }
+        if (command.args.includes("--delete-secret-and-public-key")) return { ...result, ...deletionFailure };
+        return result;
+      };
+      const { manager, store } = await fixture(run);
+
+      let failure: unknown;
+      try {
+        await manager.import({ name: "Import rollback", privateKey: "private-key-input" });
+      } catch (error) {
+        failure = error;
+      }
+
+      expect(failure).toBeInstanceOf(AggregateError);
+      expect((failure as AggregateError).errors.map(error => (error as Error).message)).toEqual([
+        "Imported OpenPGP material does not contain a signing secret key.",
+        "OpenPGP key cleanup failed.",
+      ]);
+      expect(store.snapshot().credentials).toEqual([]);
+    });
+  }
+
   test("maps a stale or unstartable GnuPG path to sanitized readiness", async () => {
     const { manager, store } = await fixture(async () => {
       throw new Error("ambient-home/sentinel-command-error");
@@ -346,6 +405,7 @@ describe("OpenPgpCredentialManager lifecycle and capability", () => {
     const deleting = manager.delete("pgp-1", true);
     await deleteReached;
     const replacement = store.assign({ workspaceId: "uatu", credentialId: "pgp-2", role: "signing" });
+    replacement.catch(() => undefined);
     await Bun.sleep(1);
     releaseDelete();
 
@@ -404,5 +464,24 @@ describe("OpenPGP ambient separation", () => {
       if (previousAgent === undefined) delete process.env.GPG_AGENT_INFO;
       else process.env.GPG_AGENT_INFO = previousAgent;
     }
+  });
+});
+
+describe("runOpenPgpCommand", () => {
+  test("timeout does not wait for a descendant holding the output pipes", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-openpgp-timeout-"));
+    tempDirectories.push(root);
+    const script = path.join(root, "gpg-like");
+    await writeFile(script, "#!/bin/sh\n(sleep 30) &\nsleep 30\n", { mode: 0o700 });
+
+    const started = Date.now();
+    const result = await runOpenPgpCommand({
+      executable: script,
+      args: [],
+      env: { PATH: process.env.PATH ?? "" },
+      timeoutMs: 20,
+    });
+    expect(result.timedOut).toBe(true);
+    expect(Date.now() - started).toBeLessThan(3_000);
   });
 });

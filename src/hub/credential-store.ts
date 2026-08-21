@@ -101,12 +101,19 @@ class AtomicStateWriter {
 
   async write(value: unknown): Promise<void> {
     const temp = `${this.filePath}.${process.pid}.${(this.saveCounter += 1)}.tmp`;
+    let tempCreated = false;
     try {
-      await fs.writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+      const handle = await fs.open(temp, "wx", 0o600);
+      tempCreated = true;
+      try {
+        await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+      } finally {
+        await handle.close();
+      }
       await fs.rename(temp, this.filePath);
-      await fs.chmod(this.filePath, 0o600);
+      tempCreated = false;
     } catch (error) {
-      await fs.rm(temp, { recursive: true, force: true }).catch(() => undefined);
+      if (tempCreated) await fs.rm(temp, { force: true }).catch(() => undefined);
       throw error;
     }
   }
@@ -185,35 +192,47 @@ export class CredentialMetadataStore extends SerializedStore {
   }
 
   assign(value: unknown, replace = false): Promise<CredentialAssignment> {
-    const assignment = parseCredentialState({
+    return this.assignMany([value], replace).then(assignments => assignments[0]!);
+  }
+
+  assignMany(values: unknown[], replace = false): Promise<CredentialAssignment[]> {
+    const assignments = parseCredentialState({
       version: CREDENTIAL_STATE_VERSION,
       credentials: [],
-      assignments: [value],
-    }).assignments[0]!;
+      assignments: values,
+    }).assignments;
+    if (assignments.length === 0) throw new Error("at least one credential assignment is required");
     return this.enqueue(async () => {
       const next = clone(this.state);
-      const credential = next.credentials.find(item => item.id === assignment.credentialId);
-      if (!credential) throw new Error(`unknown credential: ${assignment.credentialId}`);
-      this.assertAssignmentCapability(credential, assignment);
+      const committed: CredentialAssignment[] = [];
+      for (const assignment of assignments) {
+        const credential = next.credentials.find(item => item.id === assignment.credentialId);
+        if (!credential) throw new Error(`unknown credential: ${assignment.credentialId}`);
+        this.assertAssignmentCapability(credential, assignment);
 
-      const conflictIndex = next.assignments.findIndex(existing => (
-        existing.workspaceId === assignment.workspaceId
-        && existing.role === assignment.role
-        && (existing.role === "signing" || existing.host === (assignment as typeof existing).host)
-      ));
-      if (conflictIndex !== -1) {
-        const existing = next.assignments[conflictIndex]!;
-        if (existing.credentialId === assignment.credentialId) return clone(existing);
-        if (!replace) {
-          throw new Error(`credential assignment conflicts with existing default: ${existing.credentialId}`);
+        const conflictIndex = next.assignments.findIndex(existing => (
+          existing.workspaceId === assignment.workspaceId
+          && existing.role === assignment.role
+          && (existing.role === "signing" || existing.host === (assignment as typeof existing).host)
+        ));
+        if (conflictIndex !== -1) {
+          const existing = next.assignments[conflictIndex]!;
+          if (existing.credentialId === assignment.credentialId) {
+            committed.push(existing);
+            continue;
+          }
+          if (!replace) {
+            throw new Error(`credential assignment conflicts with existing default: ${existing.credentialId}`);
+          }
+          next.assignments.splice(conflictIndex, 1);
         }
-        next.assignments.splice(conflictIndex, 1);
+        next.assignments.push(assignment);
+        committed.push(assignment);
       }
-      next.assignments.push(assignment);
       const parsed = parseCredentialState(next);
       await this.writer.write(parsed);
       this.state = parsed;
-      return clone(assignment);
+      return clone(committed);
     });
   }
 

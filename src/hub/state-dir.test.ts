@@ -10,6 +10,7 @@ import {
   credentialsPath,
   credentialTokenStorePath,
   credentialToolsPath,
+  acquireHubStateLease,
   ensureCredentialStateDirs,
   ensureStateDir,
   personalWorkspaceStatePath,
@@ -71,6 +72,65 @@ describe("ensureStateDir", () => {
     await mkdir(stateRoot, { mode: 0o700 });
     await chmod(stateRoot, 0o755);
     await expect(ensureStateDir(stateRoot)).rejects.toThrow(/must be mode 0700, accessible only by its owner/);
+  });
+});
+
+describe("Hub state-root lease", () => {
+  test("rejects a second live owner and releases for the next Hub", async () => {
+    const stateRoot = await tempStateRoot();
+    await ensureStateDir(stateRoot);
+    const first = await acquireHubStateLease(stateRoot);
+    await expect(acquireHubStateLease(stateRoot)).rejects.toThrow(`already in use by process ${process.pid}`);
+    await first.release();
+    const second = await acquireHubStateLease(stateRoot);
+    await second.release();
+  });
+
+  test("recovers a lease whose owner no longer exists", async () => {
+    const stateRoot = await tempStateRoot();
+    await ensureStateDir(stateRoot);
+    const leasePath = path.join(stateRoot, ".hub-lease");
+    await mkdir(leasePath, { mode: 0o700 });
+    await writeFile(path.join(leasePath, "owner.json"), JSON.stringify({
+      version: 1,
+      pid: 2_147_483_647,
+      nonce: "stale",
+    }), { mode: 0o600 });
+
+    const lease = await acquireHubStateLease(stateRoot);
+    await lease.release();
+    expect(await Bun.file(path.join(leasePath, "owner.json")).exists()).toBe(false);
+  });
+
+  test("a delayed stale contender cannot move or delete a newly acquired lease", async () => {
+    const stateRoot = await tempStateRoot();
+    await ensureStateDir(stateRoot);
+    const leasePath = path.join(stateRoot, ".hub-lease");
+    await mkdir(leasePath, { mode: 0o700 });
+    await writeFile(path.join(leasePath, "owner.json"), JSON.stringify({
+      version: 1,
+      pid: 2_147_483_647,
+      nonce: "stale",
+    }), { mode: 0o600 });
+    let releaseContender!: () => void;
+    let staleObserved!: () => void;
+    const contenderGate = new Promise<void>(resolve => { releaseContender = resolve; });
+    const observed = new Promise<void>(resolve => { staleObserved = resolve; });
+    const delayed = acquireHubStateLease(stateRoot, {
+      staleOwnerObserved: async () => {
+        staleObserved();
+        await contenderGate;
+      },
+    });
+    await observed;
+
+    const winner = await acquireHubStateLease(stateRoot);
+    const winnerOwner = await Bun.file(path.join(leasePath, "owner.json")).text();
+    releaseContender();
+    await expect(delayed).rejects.toThrow(`already in use by process ${process.pid}`);
+
+    expect(await Bun.file(path.join(leasePath, "owner.json")).text()).toBe(winnerOwner);
+    await winner.release();
   });
 });
 
