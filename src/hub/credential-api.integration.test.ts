@@ -380,6 +380,48 @@ describe("credential API integration", () => {
     expect(f.metadata.snapshot().assignments).toHaveLength(1);
   });
 
+  test("serializes assignment with workspace forget", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));
+    roots.push(root);
+    const f = await fixture(root);
+    const credential = await f.metadata.create({
+      name: "Racing token",
+      type: "token",
+      enabled: true,
+      capabilities: ["https-git"],
+      metadata: { host: "github.com" },
+    });
+    const originalAssign = f.metadata.assign.bind(f.metadata);
+    let markAssignReached!: () => void;
+    let releaseAssign!: () => void;
+    const assignReached = new Promise<void>(resolve => { markAssignReached = resolve; });
+    const assignGate = new Promise<void>(resolve => { releaseAssign = resolve; });
+    f.metadata.assign = async (...args) => {
+      markAssignReached();
+      await assignGate;
+      return originalAssign(...args);
+    };
+    const origin = `http://127.0.0.1:${f.server.port}`;
+    const cookie = await login(origin, "alice", "alice password");
+    const assigning = post(origin, cookie, `/api/hub/credentials/${credential.id}/assign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+    });
+    await assignReached;
+    let forgetSettled = false;
+    const forgetting = post(origin, cookie, `/api/hub/workspaces/${f.workspace.id}/forget`, {})
+      .finally(() => { forgetSettled = true; });
+    await Bun.sleep(5);
+    expect(forgetSettled).toBe(false);
+
+    releaseAssign();
+    expect((await assigning).status).toBe(200);
+    expect((await forgetting).status).toBe(200);
+    expect(f.registry.byId(f.workspace.id)).toBeUndefined();
+    expect(f.metadata.snapshot().assignments).toEqual([]);
+  });
+
   test("assigns provider-only tokens and removes only the selected authentication host", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));
     roots.push(root);

@@ -3,7 +3,7 @@
 - [x] 1.1 Add credential, capability, assignment, tool-override, readiness, and public-DTO types with strict parsers that reject unknown or secret-bearing public fields.
 - [x] 1.2 Add state-dir path helpers and bootstrap owner-only `credential-secrets`, `credential-gnupg`, and ownership-preserving `credential-runtime` directories, including symlink and unsafe-permission rejection tests.
 - [x] 1.3 Implement the serialized atomic credential metadata store, token secret store, and tool-override store with rollback-on-write-failure and restart persistence tests.
-- [x] 1.4 Implement assignment mutation rules, including stable credential ids, no assignments by default, one authentication default per provider host, host-specific removal, one signing default per workspace, forget cleanup, and transactional delete-and-unassign.
+- [x] 1.4 Implement assignment mutation rules, including stable credential ids, no assignments by default, one authentication default per provider host, host-specific removal, one signing default per workspace, assignment/forget serialization, forget cleanup, and transactional delete-and-unassign.
 
 ## 2. Tool Discovery And Diagnostics
 
@@ -22,7 +22,7 @@
 ## 4. Managed OpenPGP Credentials
 
 - [x] 4.1 Implement dedicated-`GNUPGHOME` generation and import of OpenPGP signing keys, returning only public key and fingerprint metadata and degrading cleanly when GnuPG is unavailable.
-- [x] 4.2 Implement explicit OpenPGP unlock through a bounded loopback signing probe, agent-cache readiness detection, metadata-scoped disable/delete behavior, and Hub-shutdown-only `gpg-agent` termination.
+- [x] 4.2 Implement explicit OpenPGP unlock through a bounded loopback signing probe, agent-cache readiness detection, metadata-scoped disable/delete behavior with cleanup rollback under the metadata lock, and Hub-shutdown-only `gpg-agent` termination.
 - [x] 4.3 Add local sign-and-verify capability tests using a fixed challenge and tests proving passphrases, pinentry responses, and private exports never enter retained output or API DTOs.
 - [x] 4.4 Add integration coverage proving the Hub GnuPG home and lifecycle remain separate from an existing system GnuPG home and agent.
 

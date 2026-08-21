@@ -261,6 +261,43 @@ describe("OpenPgpCredentialManager lifecycle and capability", () => {
     expect(store.snapshot().credentials.map(credential => credential.id)).toEqual(["pgp-1"]);
   });
 
+  test("holds metadata mutations until failed key deletion rolls back", async () => {
+    const fake = fakeGpg();
+    let markDeleteReached!: () => void;
+    let releaseDelete!: () => void;
+    const deleteReached = new Promise<void>(resolve => { markDeleteReached = resolve; });
+    const deleteGate = new Promise<void>(resolve => { releaseDelete = resolve; });
+    const failing: OpenPgpCommandRunner = async command => {
+      const result = await fake.run(command);
+      if (command.args.includes("--delete-secret-and-public-key")) {
+        markDeleteReached();
+        await deleteGate;
+        return { ...result, exitCode: 2 };
+      }
+      return result;
+    };
+    const { manager, store } = await fixture(failing);
+    await createCredential(store);
+    await store.create({
+      name: "Replacement",
+      type: "openpgp",
+      capabilities: ["openpgp-signing"],
+      enabled: true,
+      metadata: { fingerprint: "B".repeat(40), publicKey: PUBLIC_KEY },
+    }, () => "pgp-2");
+    await store.assign({ workspaceId: "uatu", credentialId: "pgp-1", role: "signing" });
+
+    const deleting = manager.delete("pgp-1", true);
+    await deleteReached;
+    const replacement = store.assign({ workspaceId: "uatu", credentialId: "pgp-2", role: "signing" });
+    await Bun.sleep(1);
+    releaseDelete();
+
+    await expect(deleting).rejects.toThrow("OpenPGP credential deletion failed.");
+    await expect(replacement).rejects.toThrow("conflicts");
+    expect(store.snapshot().assignments).toEqual([{ workspaceId: "uatu", credentialId: "pgp-1", role: "signing" }]);
+  });
+
   test("keeps a shared key when deleting a legacy duplicate record", async () => {
     const fake = fakeGpg();
     const { manager, store } = await fixture(fake.run);

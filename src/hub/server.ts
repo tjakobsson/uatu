@@ -745,8 +745,16 @@ export function createHubFetchHandler(deps: HubDeps) {
             if (operation === "unlock") return json(200, { credential: await credentialApi.unlock(credentialId, body) }, headers);
             if (operation === "lock") return json(200, { credential: await credentialApi.lock(credentialId, body) }, headers);
             if (operation === "enable" || operation === "disable") return json(200, { credential: await credentialApi.setEnabled(credentialId, body, operation === "enable") }, headers);
-            if (operation === "assign") return json(200, { assignment: await credentialApi.assign(credentialId, body) }, headers);
-            if (operation === "unassign") return json(200, { removed: await credentialApi.unassign(credentialId, body) }, headers);
+            if (operation === "assign") {
+              const workspaceId = typeof body.workspaceId === "string" ? body.workspaceId : "";
+              const assignment = await sessions.runExclusive(workspaceId, () => credentialApi.assign(credentialId, body));
+              return json(200, { assignment }, headers);
+            }
+            if (operation === "unassign") {
+              const workspaceId = typeof body.workspaceId === "string" ? body.workspaceId : "";
+              const removed = await sessions.runExclusive(workspaceId, () => credentialApi.unassign(credentialId, body));
+              return json(200, { removed }, headers);
+            }
             if (operation === "test") return json(200, { results: await credentialApi.test(credentialId, body) }, headers);
             return json(200, { deleted: await credentialApi.delete(credentialId, body) }, headers);
           }

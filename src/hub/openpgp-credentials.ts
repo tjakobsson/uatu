@@ -311,16 +311,11 @@ export class OpenPgpCredentialManager {
       const credential = snapshot.credentials.find(item => item.id === credentialId);
       if (!credential) return false;
       if (credential.type !== "openpgp") throw new Error(`credential is not OpenPGP: ${credentialId}`);
-      const removed = await this.metadataStore.deleteCredential(credentialId, unassign);
-      if (!removed) return false;
-      if (this.hasFingerprint(credential.metadata.fingerprint)) return true;
-      const deleted = await this.gpg(["--yes", "--delete-secret-and-public-key", credential.metadata.fingerprint]);
-      if (this.succeeded(deleted)) return true;
-      await this.metadataStore.transaction(state => {
-        state.credentials.push(credential);
-        state.assignments.push(...snapshot.assignments.filter(item => item.credentialId === credentialId));
+      return this.metadataStore.deleteCredentialWithCleanup(credentialId, unassign, async () => {
+        if (this.hasFingerprint(credential.metadata.fingerprint)) return;
+        const deleted = await this.gpg(["--yes", "--delete-secret-and-public-key", credential.metadata.fingerprint]);
+        if (!this.succeeded(deleted)) throw new Error("OpenPGP credential deletion failed.");
       });
-      throw new Error("OpenPGP credential deletion failed.");
     });
   }
 

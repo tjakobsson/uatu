@@ -1458,9 +1458,8 @@ async function loadCloneCredentials() {
 function remoteKind(url) {
   const value = url.trim().toLowerCase();
   if (value.startsWith("https://")) return "https";
-  if (value.startsWith("ssh://") || value.startsWith("git@")) return "ssh";
-  const at = value.indexOf("@");
-  if (at > 0 && value.indexOf(":", at) > at) return "ssh";
+  if (value.startsWith("ssh://")) return "ssh";
+  if (/^(?:[^@/:\\s]+@)?(?:\\[[^\\]]+\\]|[^/:\\s]+):[^/].*$/.test(value) && !/^[a-z]:[\\\\/]/.test(value)) return "ssh";
   return null;
 }
 function cloneCompatible(credential, kind, url) {

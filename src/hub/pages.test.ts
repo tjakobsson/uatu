@@ -109,6 +109,8 @@ describe("clone page", () => {
     expect(html).toContain("isCredentialLocked(selectedCredential)");
     expect(html).toContain("request.credentialId = selectedCredential.id");
     expect(html).toContain("request.retainAssignment = cloneRetainAssignment.checked");
+    expect(html).toContain('(?:[^@/:\\s]+@)?');
+    expect(html).not.toContain("at > 0");
   });
 });
 
