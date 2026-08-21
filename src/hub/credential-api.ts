@@ -5,6 +5,7 @@ import type { OpenPgpCredentialManager } from "./openpgp-credentials";
 import type { TokenCredentialManager } from "./token-credentials";
 import {
   CREDENTIAL_TOOLS,
+  normalizeProviderHost,
   toPublicCredentialDto,
   type CredentialAssignment,
   type CredentialTool,
@@ -134,6 +135,8 @@ export async function readCredentialJson(request: Request): Promise<JsonObject> 
 }
 
 export class CredentialApi {
+  private toolOperationChain: Promise<unknown> = Promise.resolve();
+
   constructor(private readonly services: CredentialApiServices) {}
 
   async listCredentials(): Promise<PublicCredentialDto[]> {
@@ -260,10 +263,20 @@ export class CredentialApi {
   }
 
   async unassign(credentialId: string, body: JsonObject): Promise<boolean> {
-    fields(body, ["workspaceId", "role"]);
+    fields(body, ["workspaceId", "role", "host"]);
     const workspaceId = id(body.workspaceId, "workspace id");
     if (body.role !== undefined && body.role !== "authentication" && body.role !== "signing") throw new Error("assignment role is invalid");
-    return this.services.metadata.unassign(workspaceId, credentialId, body.role as CredentialAssignment["role"] | undefined);
+    if (body.role === "authentication" && body.host === undefined) throw new Error("authentication assignment host is required");
+    if (body.role !== "authentication" && body.host !== undefined) throw new Error("host applies only to authentication assignments");
+    const host = body.host === undefined
+      ? undefined
+      : normalizeProviderHost(scalar(body.host, "provider host", MAX_NAME_BYTES));
+    return this.services.metadata.unassign(
+      workspaceId,
+      credentialId,
+      body.role as CredentialAssignment["role"] | undefined,
+      host,
+    );
   }
 
   async test(credentialId: string, body: JsonObject): Promise<ReadinessResult[]> {
@@ -290,19 +303,29 @@ export class CredentialApi {
   async setTool(tool: string, body: JsonObject) {
     if (!(CREDENTIAL_TOOLS as readonly string[]).includes(tool)) throw new Error("credential tool is invalid");
     fields(body, ["path"]);
-    const result = body.path === null
-      ? await this.services.tools.clearOverride(tool as CredentialTool)
-      : await this.services.tools.setOverride(tool as CredentialTool, text(body.path, "tool path", 32_768));
-    await this.services.toolsChanged?.();
-    return result;
+    return this.enqueueToolOperation(async () => {
+      const result = body.path === null
+        ? await this.services.tools.clearOverride(tool as CredentialTool)
+        : await this.services.tools.setOverride(tool as CredentialTool, text(body.path, "tool path", 32_768));
+      await this.services.toolsChanged?.();
+      return result;
+    });
   }
 
   async testTool(tool: string, body: JsonObject) {
     if (!(CREDENTIAL_TOOLS as readonly string[]).includes(tool)) throw new Error("credential tool is invalid");
     fields(body, []);
-    await this.services.tools.reprobeAll();
-    await this.services.toolsChanged?.();
-    return this.services.tools.list().find(item => item.tool === tool)!;
+    return this.enqueueToolOperation(async () => {
+      await this.services.tools.reprobeAll();
+      await this.services.toolsChanged?.();
+      return this.services.tools.list().find(item => item.tool === tool)!;
+    });
+  }
+
+  private enqueueToolOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const next = this.toolOperationChain.then(operation, operation);
+    this.toolOperationChain = next.catch(() => undefined);
+    return next;
   }
 
   private credential(credentialId: string) {

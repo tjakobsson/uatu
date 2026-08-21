@@ -95,6 +95,10 @@ The Hub SHALL store HTTPS/provider credentials with an explicit provider host an
 - **WHEN** one workspace assigns provider-CLI credentials for two hosts of the same provider
 - **THEN** workspace startup rejects the ambiguous provider CLI context instead of exposing either host's token as the other's
 
+#### Scenario: Provider-only token is assigned
+- **WHEN** a token declares a provider-CLI capability without HTTPS Git and is assigned to a workspace
+- **THEN** the Hub configures that provider CLI without exposing the token through the Git credential helper
+
 ### Requirement: Hub assigns credentials to workspaces without overstating isolation
 New credentials SHALL have no workspace assignments by default. An authenticated user SHALL be able to grant and revoke credentials for selected registered workspaces, and the Hub SHALL configure normal Git, signing, and provider-tool selection from those assignments when it starts a clone job or workspace session. Assignments SHALL permit at most one default authentication credential per provider host and one default commit-signing credential per workspace so normal tool selection is deterministic. For the local backend, every assignment surface and API SHALL identify the workspace boundary as advisory because all workspaces share the daemon OS UID, and SHALL warn that another local workspace may be able to discover or exercise credentials outside its assignments. The persisted assignment model MUST distinguish individual credentials so a future isolated backend can project and enforce only the selected set.
 
@@ -111,6 +115,10 @@ New credentials SHALL have no workspace assignments by default. An authenticated
 #### Scenario: Conflicting defaults are rejected
 - **WHEN** a workspace already has a default authentication credential for `github.com` or a default commit-signing credential and a user assigns another conflicting default
 - **THEN** the Hub requires the user to replace the existing default rather than persisting an ambiguous selection
+
+#### Scenario: One authentication host is unassigned
+- **WHEN** the same credential is assigned to one workspace for multiple authentication hosts and the user removes one host assignment
+- **THEN** the Hub preserves that credential's assignments for the other hosts
 
 #### Scenario: Assigned key is locked
 - **WHEN** any assigned SSH or OpenPGP key is not usable even though its shared agent is running

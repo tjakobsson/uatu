@@ -70,7 +70,7 @@ At session start the Hub resolves assignments into a credential context passed t
 - SSH Git transport gets a generated SSH configuration selecting the assigned public key and managed agent socket, including hostname-and-port matching for nonstandard ports.
 - SSH signing gets `gpg.format=ssh`, the assigned public-key path, and the managed agent socket.
 - OpenPGP signing gets `gpg.format=openpgp`, the assigned fingerprint, configured `gpg` path, and dedicated GnuPG home.
-- HTTPS Git gets a Git credential-helper command scoped to the assigned credential and provider host.
+- HTTPS Git gets a Git credential-helper command scoped to the assigned credential and provider host. Provider-only tokens omit this helper and configure only their declared CLI.
 - `gh`/`glab` get provider-specific runtime configuration rooted outside the workspace; raw tokens are not placed in repository remotes or command arguments.
 
 The generated Git command-scope configuration takes precedence over repository/global defaults for managed fields while leaving unrelated user Git configuration available. The exact environment/config representation stays internal to the backend. A local process can unset it, inspect same-UID runtime files, or reach the shared agent; the UI and API warning describe that limitation.

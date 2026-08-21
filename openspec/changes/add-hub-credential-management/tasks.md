@@ -3,14 +3,14 @@
 - [x] 1.1 Add credential, capability, assignment, tool-override, readiness, and public-DTO types with strict parsers that reject unknown or secret-bearing public fields.
 - [x] 1.2 Add state-dir path helpers and bootstrap owner-only `credential-secrets`, `credential-gnupg`, and ownership-preserving `credential-runtime` directories, including symlink and unsafe-permission rejection tests.
 - [x] 1.3 Implement the serialized atomic credential metadata store, token secret store, and tool-override store with rollback-on-write-failure and restart persistence tests.
-- [x] 1.4 Implement assignment mutation rules, including stable credential ids, no assignments by default, one authentication default per provider host, one signing default per workspace, forget cleanup, and transactional delete-and-unassign.
+- [x] 1.4 Implement assignment mutation rules, including stable credential ids, no assignments by default, one authentication default per provider host, host-specific removal, one signing default per workspace, forget cleanup, and transactional delete-and-unassign.
 
 ## 2. Tool Discovery And Diagnostics
 
 - [x] 2.1 Implement bounded executable discovery and absolute-path validation for OpenSSH, GnuPG, Git, `gh`, and `glab` without shell interpolation.
 - [x] 2.2 Implement layered version/runtime/readiness probes with timeouts, output caps, sanitized structured results, and independent degradation per capability.
 - [x] 2.3 Add platform-specific installation/path guidance and tests proving diagnostics do not include environment values, command input, private material, or unbounded stderr.
-- [x] 2.4 Persist validated tool overrides, re-probe them at startup and after mutation, and keep a failed override from replacing the last usable configuration.
+- [x] 2.4 Persist validated tool overrides, serialize mutation with re-probing, re-probe them at startup and after mutation, and keep a failed override from replacing the last usable configuration.
 
 ## 3. Managed SSH Credentials
 
@@ -28,7 +28,7 @@
 
 ## 5. HTTPS And Provider Credentials
 
-- [x] 5.1 Add HTTPS/provider token creation, host normalization, declared Git/provider-CLI capabilities, enable/disable/delete behavior, and owner-only persistence.
+- [x] 5.1 Add HTTPS/provider token creation, host normalization, assignable Git/provider-CLI capabilities including provider-only tokens, enable/disable/delete behavior, and owner-only persistence.
 - [x] 5.2 Add the compiled binary's internal Git credential-helper mode using the standard stdin/stdout protocol, exact protocol/host matching, bounded input, and no logging.
 - [x] 5.3 Add `gh` and `glab` runtime adapters that create provider-specific configuration outside repositories, reject ambiguous multi-host projection, and report unsupported or missing CLI versions independently.
 - [x] 5.4 Add tests proving tokens never appear in remote URLs, process arguments, repository files, API responses, clone output, or mismatched-host credential-helper responses.

@@ -169,7 +169,7 @@ export function createStoredCloneCredentialResolver(options: {
       });
     },
     async unassign(workspaceId, selected) {
-      await options.metadata.unassign(workspaceId, selected.credentialId, "authentication");
+      await options.metadata.unassign(workspaceId, selected.credentialId, "authentication", selected.host);
     },
   };
 }
@@ -433,13 +433,15 @@ export async function buildLocalCredentialEnvironment(options: {
       usesSshAgent = true;
     } else {
       const tokenAssignment = assignment as Extract<ResolvedAuthenticationCredential, { credential: TokenCredentialRecord }>;
-      const helper = await writeCredentialHelper(
-        runtimeDirectory,
-        assignment.credential.id,
-        context.stateRoot,
-        options.uatuArgv,
-      );
-      gitEntries.push([`credential.${hostUrl}.helper`, helper]);
+      if (assignment.credential.capabilities.includes("https-git")) {
+        const helper = await writeCredentialHelper(
+          runtimeDirectory,
+          assignment.credential.id,
+          context.stateRoot,
+          options.uatuArgv,
+        );
+        gitEntries.push([`credential.${hostUrl}.helper`, helper]);
+      }
       if (assignment.credential.capabilities.includes("github-cli") && context.tools.gh) {
         await exposeTool("gh", context.tools.gh);
         Object.assign(env, (await createProviderRuntime(

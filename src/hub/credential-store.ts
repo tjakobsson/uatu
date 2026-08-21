@@ -200,13 +200,14 @@ export class CredentialMetadataStore extends SerializedStore {
     });
   }
 
-  unassign(workspaceId: string, credentialId: string, role?: CredentialAssignment["role"]): Promise<boolean> {
+  unassign(workspaceId: string, credentialId: string, role?: CredentialAssignment["role"], host?: string): Promise<boolean> {
     return this.enqueue(async () => {
       const next = clone(this.state);
       const retained = next.assignments.filter(assignment => !(
         assignment.workspaceId === workspaceId
         && assignment.credentialId === credentialId
         && (role === undefined || assignment.role === role)
+        && (host === undefined || (assignment.role === "authentication" && assignment.host === host))
       ));
       if (retained.length === next.assignments.length) return false;
       next.assignments = retained;
@@ -300,7 +301,11 @@ export class CredentialMetadataStore extends SerializedStore {
       }
       return;
     }
-    if (!credential.capabilities.some(capability => capability === "ssh-authentication" || capability === "https-git")) {
+    if (!credential.capabilities.some(capability =>
+      capability === "ssh-authentication"
+      || capability === "https-git"
+      || capability === "github-cli"
+      || capability === "gitlab-cli")) {
       throw new Error(`credential does not support authentication: ${credential.id}`);
     }
     if (credential.type === "token" && credential.metadata.host !== assignment.host) {

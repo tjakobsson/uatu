@@ -773,7 +773,8 @@ function credentialHost(credential) {
 function credentialSupportsRole(credential, role) {
   return role === "signing"
     ? credential.capabilities.some(value => value === "ssh-signing" || value === "openpgp-signing")
-    : credential.capabilities.some(value => value === "ssh-authentication" || value === "https-git");
+    : credential.capabilities.some(value =>
+      value === "ssh-authentication" || value === "https-git" || value === "github-cli" || value === "gitlab-cli");
 }
 function makeReadiness(results) {
   const container = el("div", "readiness");
@@ -970,6 +971,7 @@ async function removeWorkspaceAssignment(entry, workspace, button, actionError) 
   if (!workspace.running) {
     await credentialAction(entry.credential.id, "unassign", {
       workspaceId: workspace.id, role: entry.assignment.role,
+      ...(entry.assignment.role === "authentication" ? { host: entry.assignment.host } : {}),
     }, button, "…", actionError);
     return;
   }
@@ -981,6 +983,7 @@ async function removeWorkspaceAssignment(entry, workspace, button, actionError) 
       await api("/api/hub/sessions/" + encodeURIComponent(workspace.id) + "/stop");
       await api(credentialPath + "/" + encodeURIComponent(entry.credential.id) + "/unassign", {
         workspaceId: workspace.id, role: entry.assignment.role,
+        ...(entry.assignment.role === "authentication" ? { host: entry.assignment.host } : {}),
       });
       await Promise.all([loadSettingsState(), loadCredentials()]);
     } catch (error) { setLocalError(actionError, error.message); }

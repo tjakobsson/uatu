@@ -9,7 +9,7 @@ import type { HubConfig } from "./config";
 import { EMPTY_CREDENTIAL_CONTEXT_RESOLVER } from "./credential-context";
 import { CredentialMetadataStore, CredentialTokenStore, CredentialToolOverrideStore } from "./credential-store";
 import { CredentialToolManager } from "./credential-tools";
-import { credentialApiError } from "./credential-api";
+import { CredentialApi, credentialApiError } from "./credential-api";
 import { OpenPgpCredentialManager } from "./openpgp-credentials";
 import { PersonalWorkspaceStateStore } from "./personal-state";
 import { WorkspaceRegistry } from "./registry";
@@ -118,6 +118,52 @@ describe("credential API integration", () => {
       message: "SSH credential could not be unlocked",
     });
   });
+
+  test("serializes tool mutations through runtime refresh", async () => {
+    let activePath = "";
+    let releaseFirstRefresh!: () => void;
+    let markFirstRefresh!: () => void;
+    const firstRefresh = new Promise<void>(resolve => { markFirstRefresh = resolve; });
+    const firstRefreshGate = new Promise<void>(resolve => { releaseFirstRefresh = resolve; });
+    const published: string[] = [];
+    const tools = {
+      async setOverride(_tool: string, executablePath: string) {
+        activePath = executablePath;
+        return { tool: "git", path: executablePath, version: "test", results: [], guidance: null };
+      },
+      async clearOverride() { throw new Error("not used"); },
+      async reprobeAll() {},
+      list() { return [{ tool: "git", path: activePath, version: "test", results: [], guidance: null }]; },
+    } as unknown as CredentialToolManager;
+    const api = new CredentialApi({
+      metadata: {} as CredentialMetadataStore,
+      tools,
+      ssh: null,
+      openpgp: {} as OpenPgpCredentialManager,
+      tokens: {} as TokenCredentialManager,
+      workspaceExists: () => false,
+      async toolsChanged() {
+        const pathAtStart = activePath;
+        if (pathAtStart === "/first") {
+          markFirstRefresh();
+          await firstRefreshGate;
+        }
+        published.push(pathAtStart);
+      },
+    });
+
+    const first = api.setTool("git", { path: "/first" });
+    await firstRefresh;
+    const second = api.setTool("git", { path: "/second" });
+    await Bun.sleep(1);
+    expect(activePath).toBe("/first");
+    releaseFirstRefresh();
+    await Promise.all([first, second]);
+
+    expect(published).toEqual(["/first", "/second"]);
+    expect(activePath).toBe("/second");
+  });
+
   test("reports deduplicated assigned credential names in populated Hub state", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));
     roots.push(root);
@@ -334,6 +380,49 @@ describe("credential API integration", () => {
     expect(f.metadata.snapshot().assignments).toHaveLength(1);
   });
 
+  test("assigns provider-only tokens and removes only the selected authentication host", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));
+    roots.push(root);
+    const f = await fixture(root);
+    const ssh = await f.metadata.create({
+      name: "Shared SSH key",
+      type: "ssh",
+      enabled: true,
+      capabilities: ["ssh-authentication"],
+      metadata: { publicKey: "ssh-ed25519 AAAATEST uatu", fingerprint: "SHA256:test" },
+    });
+    await f.metadata.assign({ workspaceId: f.workspace.id, credentialId: ssh.id, role: "authentication", host: "one.example.com" });
+    await f.metadata.assign({ workspaceId: f.workspace.id, credentialId: ssh.id, role: "authentication", host: "two.example.com" });
+    const origin = `http://127.0.0.1:${f.server.port}`;
+    const cookie = await login(origin, "alice", "alice password");
+    const provider = await post(origin, cookie, "/api/hub/credentials/token", {
+      name: "GitHub CLI",
+      host: "github.example.com",
+      token: "provider-only-secret",
+      capabilities: ["github-cli"],
+    });
+    const providerId = ((await provider.json()) as { credential: { id: string } }).credential.id;
+
+    expect((await post(origin, cookie, `/api/hub/credentials/${providerId}/assign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.example.com",
+    })).status).toBe(200);
+    const removed = await post(origin, cookie, `/api/hub/credentials/${ssh.id}/unassign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "one.example.com",
+    });
+    expect(removed.status).toBe(200);
+    expect(f.metadata.snapshot().assignments).toContainEqual({
+      workspaceId: f.workspace.id,
+      credentialId: ssh.id,
+      role: "authentication",
+      host: "two.example.com",
+    });
+    expect(f.metadata.snapshot().assignments.some(assignment => assignment.credentialId === ssh.id && assignment.role === "authentication" && assignment.host === "one.example.com")).toBe(false);
+  });
+
   test("returns an error when OpenPGP unlock does not make the key ready", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));
     roots.push(root);
@@ -386,7 +475,7 @@ describe("credential API integration", () => {
       ["lock", {}, "lock", 400],
       ["enable", {}, "enable", 200],
       ["assign", { workspaceId: f.workspace.id, role: "authentication", host: "github.com" }, "assign", 200],
-      ["unassign", { workspaceId: f.workspace.id, role: "authentication" }, "unassign", 200],
+      ["unassign", { workspaceId: f.workspace.id, role: "authentication", host: "github.com" }, "unassign", 200],
       ["test", {}, "test", 200],
       ["delete", { confirm: true }, "delete", 200],
     ];

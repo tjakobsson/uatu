@@ -227,6 +227,42 @@ describe("CredentialToolManager", () => {
     expect(restartedStore.get("git")?.path).toBe(good.filePath);
     expect(restarted.list().find(item => item.tool === "git")?.version).toBe("test 1.0");
   });
+
+  test("serializes overlapping override mutations through their reprobes", async () => {
+    const storePath = await tempPathForStore();
+    const first = await executable("first-git");
+    const second = await executable("second-git");
+    const store = new CredentialToolOverrideStore(storePath);
+    let firstPathProbes = 0;
+    let releaseFirstReprobe!: () => void;
+    let markFirstReprobe!: () => void;
+    const firstReprobe = new Promise<void>(resolve => { markFirstReprobe = resolve; });
+    const firstReprobeGate = new Promise<void>(resolve => { releaseFirstReprobe = resolve; });
+    const probe = async (discovery: Awaited<ReturnType<typeof discoverExecutable>>) => {
+      if (discovery.path === first.filePath && ++firstPathProbes === 2) {
+        markFirstReprobe();
+        await firstReprobeGate;
+      }
+      return {
+        tool: discovery.tool,
+        path: discovery.path,
+        version: discovery.path ?? "missing",
+        results: [{ layer: "version" as const, status: "ready" as const, message: "test result" }],
+        guidance: null,
+      };
+    };
+    const manager = new CredentialToolManager(store, "", probe);
+    await manager.load();
+    const firstMutation = manager.setOverride("git", first.filePath);
+    await firstReprobe;
+    const secondMutation = manager.setOverride("git", second.filePath);
+    await Bun.sleep(1);
+    releaseFirstReprobe();
+    await Promise.all([firstMutation, secondMutation]);
+
+    expect(store.get("git")?.path).toBe(second.filePath);
+    expect(manager.list().find(item => item.tool === "git")?.path).toBe(second.filePath);
+  });
 });
 
 async function tempPathForStore(): Promise<string> {

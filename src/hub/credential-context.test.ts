@@ -308,6 +308,39 @@ describe("local workspace credential projection", () => {
     })).rejects.toThrow("only one provider host");
   });
 
+  test("projects a provider-only token without exposing it to Git", async () => {
+    const { root, workspace } = await fixture();
+    const managedGh = path.join(root, "managed-gh");
+    await writeFile(managedGh, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    const providerOnly: TokenCredentialRecord = {
+      id: "provider-only",
+      name: "GitHub CLI",
+      type: "token",
+      capabilities: ["github-cli"],
+      enabled: true,
+      createdAt,
+      metadata: { host: "github.example.com" },
+    };
+    const projected = await buildLocalCredentialEnvironment({
+      workspace,
+      context: {
+        revision: "provider-only",
+        runtimeRoot: path.join(root, "runtime"),
+        stateRoot: root,
+        sshAgentSocket: null,
+        gnupgHome: path.join(root, "gnupg"),
+        tools: { git: null, gpg: null, sshKeygen: null, gh: managedGh, glab: null },
+        authentication: [{ host: providerOnly.metadata.host, credential: providerOnly, token: "provider-secret" }],
+        signing: null,
+      },
+      uatuArgv: ["uatu"],
+    });
+
+    expect(projected.env.GH_ENTERPRISE_TOKEN).toBe("provider-secret");
+    expect(await Bun.file(path.join(projected.runtimeDirectory, "git-credential-provider-only")).exists()).toBe(false);
+    expect(gitConfig(workspace.path, projected.env, "credential.https://github.example.com.helper")).toBe("");
+  });
+
   test("projects an OpenPGP signing assignment through the dedicated GnuPG home", async () => {
     const { root, home, workspace } = await fixture();
     const signing: OpenPgpCredentialRecord = {

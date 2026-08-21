@@ -227,6 +227,7 @@ export function readyToolPath(readiness: PublicToolReadinessDto | undefined): st
 
 export class CredentialToolManager {
   private readiness = new Map<CredentialTool, PublicToolReadinessDto>();
+  private operationChain: Promise<unknown> = Promise.resolve();
 
   constructor(
     private readonly store: CredentialToolOverrideStore,
@@ -234,36 +235,52 @@ export class CredentialToolManager {
     private readonly probe: (discovery: ToolDiscovery) => Promise<PublicToolReadinessDto> = probeCredentialTool,
   ) {}
 
-  async load(): Promise<void> {
-    await this.store.load();
-    await this.reprobeAll();
+  load(): Promise<void> {
+    return this.enqueue(async () => {
+      await this.store.load();
+      await this.probeAll();
+    });
   }
 
   list(): PublicToolReadinessDto[] {
     return CREDENTIAL_TOOLS.map(tool => this.readiness.get(tool)).filter(value => value !== undefined).map(value => structuredClone(value));
   }
 
-  async setOverride(tool: CredentialTool, executablePath: string): Promise<PublicToolReadinessDto> {
-    const discovery = await discoverExecutable(tool, { override: executablePath, path: this.servicePath });
-    const result = await this.probe(discovery);
-    if (result.results.some(layer => layer.layer === "version" && layer.status !== "ready")) {
-      throw new Error(`tool override failed validation: ${tool}`);
-    }
-    await this.store.set({ tool, path: executablePath });
-    await this.reprobeAll();
-    return structuredClone(this.readiness.get(tool)!);
+  setOverride(tool: CredentialTool, executablePath: string): Promise<PublicToolReadinessDto> {
+    return this.enqueue(async () => {
+      const discovery = await discoverExecutable(tool, { override: executablePath, path: this.servicePath });
+      const result = await this.probe(discovery);
+      if (result.results.some(layer => layer.layer === "version" && layer.status !== "ready")) {
+        throw new Error(`tool override failed validation: ${tool}`);
+      }
+      await this.store.set({ tool, path: executablePath });
+      await this.probeAll();
+      return structuredClone(this.readiness.get(tool)!);
+    });
   }
 
-  async clearOverride(tool: CredentialTool): Promise<PublicToolReadinessDto> {
-    await this.store.delete(tool);
-    await this.reprobeAll();
-    return structuredClone(this.readiness.get(tool)!);
+  clearOverride(tool: CredentialTool): Promise<PublicToolReadinessDto> {
+    return this.enqueue(async () => {
+      await this.store.delete(tool);
+      await this.probeAll();
+      return structuredClone(this.readiness.get(tool)!);
+    });
   }
 
-  async reprobeAll(): Promise<void> {
+  reprobeAll(): Promise<void> {
+    return this.enqueue(() => this.probeAll());
+  }
+
+  private async probeAll(): Promise<void> {
     const overrides = Object.fromEntries(this.store.list().map(value => [value.tool, value.path]));
     const discoveries = await discoverCredentialTools(overrides, this.servicePath);
     const results = await Promise.all(discoveries.map(discovery => this.probe(discovery)));
     this.readiness = new Map(results.map(result => [result.tool, result]));
+  }
+
+  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const next = this.operationChain.then(operation, operation);
+    this.operationChain = next.catch(() => undefined);
+    return next;
   }
 }

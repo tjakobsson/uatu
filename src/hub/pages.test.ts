@@ -158,10 +158,12 @@ describe("settings page", () => {
     expect(html).toContain("Assign selected");
     expect(html).toContain("Selected credentials replace the current defaults");
     expect(html).toContain('host.disabled = !selected');
+    expect(html).toContain('value === "github-cli" || value === "gitlab-cli"');
     expect(html).toContain("Authentication host");
     expect(html).toContain("No workspace credentials assigned.");
     expect(html).toContain("workspaceAssignmentEntries");
     expect(html).toContain("removeWorkspaceAssignment(entry, workspace, remove, actionError)");
+    expect(html).toContain('{ host: entry.assignment.host }');
     expect(html).toContain("Stop it and remove its");
     expect(html).toContain("Its shells will be terminated.");
     expect(html.indexOf('/sessions/" + encodeURIComponent(workspace.id) + "/stop')).toBeLessThan(

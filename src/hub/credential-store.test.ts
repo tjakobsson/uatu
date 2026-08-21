@@ -164,6 +164,41 @@ describe("CredentialMetadataStore", () => {
     })).rejects.toThrow(/does not support signing/);
   });
 
+  test("assigns provider-only tokens and unassigns one authentication host at a time", async () => {
+    const filePath = await tempPath("credentials.json");
+    const store = new CredentialMetadataStore(filePath);
+    await store.load();
+    await store.transaction(state => state.credentials.push(
+      {
+        id: "provider-only",
+        name: "GitHub CLI token",
+        type: "token",
+        capabilities: ["github-cli"],
+        enabled: true,
+        createdAt: "2026-08-20T12:00:00Z",
+        metadata: { host: "github.example.com" },
+      },
+      SSH_CREDENTIAL,
+    ));
+    await store.assign({
+      workspaceId: "uatu",
+      credentialId: "provider-only",
+      role: "authentication",
+      host: "github.example.com",
+    });
+    await store.assign({ workspaceId: "uatu", credentialId: "ssh-1", role: "authentication", host: "one.example.com" });
+    await store.assign({ workspaceId: "uatu", credentialId: "ssh-1", role: "authentication", host: "two.example.com" });
+
+    expect(await store.unassign("uatu", "ssh-1", "authentication", "one.example.com")).toBe(true);
+    expect(store.snapshot().assignments).toContainEqual({
+      workspaceId: "uatu",
+      credentialId: "ssh-1",
+      role: "authentication",
+      host: "two.example.com",
+    });
+    expect(store.snapshot().assignments.some(assignment => assignment.role === "authentication" && assignment.host === "one.example.com")).toBe(false);
+  });
+
   test("cleans assignments on workspace forget and deletes references only when confirmed", async () => {
     const filePath = await tempPath("credentials.json");
     const store = new CredentialMetadataStore(filePath);
