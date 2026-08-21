@@ -70,7 +70,7 @@ describe("ensureStateDir", () => {
     await rm(stateRoot);
     await mkdir(stateRoot, { mode: 0o700 });
     await chmod(stateRoot, 0o755);
-    await expect(ensureStateDir(stateRoot)).rejects.toThrow(/unsafe permissions/);
+    await expect(ensureStateDir(stateRoot)).rejects.toThrow(/must be mode 0700, accessible only by its owner/);
   });
 });
 

@@ -59,7 +59,9 @@ async function assertPrivateDirectory(directory: string): Promise<void> {
   const stats = await fs.lstat(directory);
   if (stats.isSymbolicLink()) throw new Error(`refusing symlink for Hub private directory: ${directory}`);
   if (!stats.isDirectory()) throw new Error(`Hub private path is not a directory: ${directory}`);
-  if ((stats.mode & 0o077) !== 0) throw new Error(`unsafe permissions on Hub private directory: ${directory}`);
+  if ((stats.mode & 0o077) !== 0) {
+    throw new Error(`unsafe permissions on Hub private directory (must be mode 0700, accessible only by its owner): ${directory}`);
+  }
   if (typeof process.getuid === "function" && stats.uid !== process.getuid()) {
     throw new Error(`Hub private directory is not owned by the current user: ${directory}`);
   }
