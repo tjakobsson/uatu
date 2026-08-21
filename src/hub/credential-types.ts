@@ -204,7 +204,15 @@ export function normalizeProviderHost(value: string): string {
   if (parsed.pathname !== "/") throw new Error("provider host must not contain a path");
   const hostname = parsed.hostname.endsWith(".") ? parsed.hostname.slice(0, -1) : parsed.hostname;
   if (!hostname) throw new Error("provider host is invalid");
-  return `${hostname.toLowerCase()}${parsed.port ? `:${parsed.port}` : ""}`;
+  const lower = hostname.toLowerCase();
+  // Generated OpenSSH configuration matches on this value, so it must be a
+  // literal DNS name or IP address: the URL parser preserves OpenSSH pattern
+  // metacharacters, and a host of `*` would emit `Host *` and apply the
+  // credential to every SSH destination.
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(lower) && !/^\[[0-9a-f:.]+\]$/.test(lower)) {
+    throw new Error("provider host must be a DNS name or IP address");
+  }
+  return `${lower}${parsed.port ? `:${parsed.port}` : ""}`;
 }
 
 function normalizedHost(value: unknown, context: string): string {

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   type CredentialRecord,
+  normalizeProviderHost,
   parseCredentialAssignment,
   parseCredentialRecord,
   parseCredentialState,
@@ -24,6 +25,20 @@ const SSH_CREDENTIAL: CredentialRecord = {
     fingerprint: "SHA256:example",
   },
 };
+
+describe("provider host normalization", () => {
+  test("accepts only literal DNS names and IP addresses — never OpenSSH pattern metacharacters", () => {
+    expect(normalizeProviderHost("GitHub.COM.")).toBe("github.com");
+    expect(normalizeProviderHost("git.example.com:2222")).toBe("git.example.com:2222");
+    expect(normalizeProviderHost("192.0.2.7")).toBe("192.0.2.7");
+    expect(normalizeProviderHost("[2001:db8::1]")).toBe("[2001:db8::1]");
+    // `Host *` in generated SSH configuration would apply the credential to
+    // every destination.
+    for (const host of ["*", "*.example.com", "git?example.com", "github.com*"]) {
+      expect(() => normalizeProviderHost(host)).toThrow(/DNS name or IP address|HTTPS host/);
+    }
+  });
+});
 
 describe("credential state validation", () => {
   test("parses each credential type and assignment role", () => {
