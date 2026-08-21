@@ -98,7 +98,7 @@ describe("SSH agent supervisor", () => {
       "const socketPath = Bun.argv[Bun.argv.indexOf('-a') + 1];",
       "const listener = Bun.listen({ unix: socketPath, socket: { data() {} } });",
       "chmodSync(socketPath, 0o600);",
-      `process.on('SIGTERM', () => writeFileSync(${JSON.stringify(termMarker)}, 'term\\n'));`,
+      "process.on('SIGTERM', () => writeFileSync(new URL('term-received', import.meta.url), 'term\\n'));",
       "await new Promise(() => {});",
       "listener.stop(true);",
     ].join("\n"), { mode: 0o700 });
