@@ -155,6 +155,19 @@ describe("managed SSH credential lifecycle", () => {
     expect(await service.testUsability(imported.id)).toBe(true);
     await agent.shutdown();
     expect(await service.testUsability(imported.id)).toBe(true);
+
+    // An explicit Lock sticks: readiness checks must not auto-load the
+    // unencrypted key back into the agent until an explicit unlock.
+    await service.lock(imported.id);
+    expect(await service.testUsability(imported.id)).toBe(false);
+    expect(await service.testUsability(imported.id)).toBe(false);
+    await service.unlock(imported.id, "");
+    expect(await service.testUsability(imported.id)).toBe(true);
+    // Disable locks; re-enable restores auto-load, as after a Hub restart.
+    await service.setEnabled(imported.id, false);
+    await service.setEnabled(imported.id, true);
+    expect(await service.testUsability(imported.id)).toBe(true);
+
     await agent.shutdown();
     await rm(path.join(credentialSecretsPath(root), `${imported.id}.key`));
     expect(await service.testUsability(imported.id)).toBe(false);

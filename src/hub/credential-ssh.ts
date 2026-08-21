@@ -260,6 +260,11 @@ export class SshCredentialService {
   private readonly timeoutMs: number;
   private readonly createId: () => string;
   private readonly removeFile: (filePath: string) => Promise<void>;
+  // Unencrypted keys are auto-loaded on demand, so an explicit Lock must be
+  // remembered or the next readiness check would silently re-add the key.
+  // Runtime state by design: the agent's contents do not survive a Hub
+  // restart either.
+  private readonly explicitlyLocked = new Set<string>();
 
   constructor(private readonly options: SshCredentialServiceOptions) {
     this.servicePath = options.servicePath ?? process.env.PATH ?? "";
@@ -372,10 +377,14 @@ export class SshCredentialService {
     if (exitCode !== 0 || !(await this.testUsability(credentialId))) {
       throw new Error("SSH credential could not be unlocked");
     }
+    this.explicitlyLocked.delete(credentialId);
   }
 
   async lock(credentialId: string): Promise<void> {
     this.credential(credentialId);
+    // Set before removal so a concurrent readiness check cannot auto-load
+    // the key back between the agent removal and the lock response.
+    this.explicitlyLocked.add(credentialId);
     const socket = this.options.agent.currentSocket();
     if (!socket) return;
     const exitCode = await runQuiet(
@@ -398,13 +407,16 @@ export class SshCredentialService {
       credential.enabled = enabled;
     });
     if (!enabled) await this.lock(credentialId);
+    // Re-enabling restores the credential's normal readiness behavior; an
+    // unencrypted key becomes auto-loadable again, as after a Hub restart.
+    else this.explicitlyLocked.delete(credentialId);
   }
 
   async delete(credentialId: string, unassign = false): Promise<boolean> {
     this.credential(credentialId);
     const privatePath = credentialFile(this.options.secretsDirectory, credentialId);
     const publicPath = `${privatePath}.pub`;
-    return this.options.metadataStore.deleteCredentialWithCleanup(credentialId, unassign, async credential => {
+    const deleted = await this.options.metadataStore.deleteCredentialWithCleanup(credentialId, unassign, async credential => {
       await this.lockBacking(credentialId);
       await this.removeFile(publicPath);
       try {
@@ -419,6 +431,8 @@ export class SshCredentialService {
         throw error;
       }
     });
+    if (deleted) this.explicitlyLocked.delete(credentialId);
+    return deleted;
   }
 
   async testUsability(credentialId: string): Promise<boolean> {
@@ -426,6 +440,7 @@ export class SshCredentialService {
     if (!credential.enabled) return false;
     try {
       if (await this.agentHasKey(credentialId)) return true;
+      if (this.explicitlyLocked.has(credentialId)) return false;
       const privateKey = await fs.readFile(credentialFile(this.options.secretsDirectory, credentialId), "utf8");
       if (encryptedPrivateKey(privateKey)) return false;
       await this.unlock(credentialId, "");

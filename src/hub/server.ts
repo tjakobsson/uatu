@@ -107,11 +107,11 @@ export function createHubFetchHandler(deps: HubDeps) {
   const limiter = new LoginRateLimiter();
   const credentialLimiter = new CredentialOperationRateLimiter();
   const credentialApi = deps.credentialApi ? new CredentialApi(deps.credentialApi) : null;
-  // Disable and delete are revocations: they run under every assigned
-  // workspace's lifecycle queue (acquired in sorted order, so concurrent
-  // revocations cannot deadlock), or a session start could capture the
-  // credential while the API reports it revoked. Assignment writes take a
-  // single workspace's queue, so nesting cannot cycle.
+  // Disable, lock, and delete are revocations: they run under every
+  // assigned workspace's lifecycle queue (acquired in sorted order, so
+  // concurrent revocations cannot deadlock), or a session start could
+  // capture the credential while the API reports it revoked. Assignment
+  // writes take a single workspace's queue, so nesting cannot cycle.
   const revokeExclusive = async <T>(credentialId: string, operation: () => Promise<T>): Promise<T> => {
     const workspaceIds = [...new Set(
       (deps.credentialApi?.metadata.snapshot().assignments ?? [])
@@ -760,7 +760,7 @@ export function createHubFetchHandler(deps: HubDeps) {
               if (!credentialLimiter.allow(`${session.user}:${client}:passphrase`, 10)) return json(429, { error: "too many credential operations; wait a minute and try again" }, headers);
             }
             if (operation === "unlock") return json(200, { credential: await credentialApi.unlock(credentialId, body) }, headers);
-            if (operation === "lock") return json(200, { credential: await credentialApi.lock(credentialId, body) }, headers);
+            if (operation === "lock") return json(200, { credential: await revokeExclusive(credentialId, () => credentialApi.lock(credentialId, body)) }, headers);
             if (operation === "enable" || operation === "disable") return json(200, { credential: await revokeExclusive(credentialId, () => credentialApi.setEnabled(credentialId, body, operation === "enable")) }, headers);
             if (operation === "assign") {
               const workspaceId = typeof body.workspaceId === "string" ? body.workspaceId : "";
