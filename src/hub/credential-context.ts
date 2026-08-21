@@ -33,6 +33,8 @@ export type ResolvedCredentialContext = {
   tools: {
     gpg: string | null;
     sshKeygen: string | null;
+    gh: string | null;
+    glab: string | null;
   };
   authentication: ResolvedAuthenticationCredential[];
   signing: ResolvedSigningCredential | null;
@@ -177,7 +179,7 @@ export const EMPTY_RESOLVED_CREDENTIAL_CONTEXT: ResolvedCredentialContext = {
   stateRoot: "",
   sshAgentSocket: null,
   gnupgHome: "",
-  tools: { gpg: null, sshKeygen: null },
+  tools: { gpg: null, sshKeygen: null, gh: null, glab: null },
   authentication: [],
   signing: null,
 };
@@ -215,7 +217,7 @@ function contextRevision(options: StoredCredentialContextResolverOptions, worksp
   const tokens = state.credentials
     .filter((credential): credential is TokenCredentialRecord => credential.type === "token")
     .map(credential => [credential.id, createHash("sha256").update(options.tokens.get(credential.id) ?? "").digest("hex")]);
-  return createHash("sha256").update(JSON.stringify({ ...state, tokens })).digest("hex");
+  return createHash("sha256").update(JSON.stringify({ ...state, tokens, tools: options.tools })).digest("hex");
 }
 
 export function createStoredCredentialContextResolver(
@@ -370,6 +372,20 @@ export async function buildLocalCredentialEnvironment(options: {
     ["tag.gpgsign", "false"],
   ];
   let usesSshAgent = false;
+  let providerBinCreated = false;
+  const exposedProviderClis = new Set<"gh" | "glab">();
+
+  const exposeProviderCli = async (name: "gh" | "glab", executable: string): Promise<void> => {
+    if (exposedProviderClis.has(name)) return;
+    const providerBin = path.join(runtimeDirectory, "provider-bin");
+    if (!providerBinCreated) {
+      await fs.mkdir(providerBin, { mode: 0o700 });
+      providerBinCreated = true;
+      env.PATH = env.PATH ? `${providerBin}${path.delimiter}${env.PATH}` : providerBin;
+    }
+    await fs.symlink(executable, path.join(providerBin, name));
+    exposedProviderClis.add(name);
+  };
 
   for (const assignment of context.authentication) {
     const hostUrl = `https://${assignment.host}`;
@@ -392,12 +408,14 @@ export async function buildLocalCredentialEnvironment(options: {
         options.uatuArgv,
       );
       gitEntries.push([`credential.${hostUrl}.helper`, helper]);
-      if (assignment.credential.capabilities.includes("github-cli")) {
+      if (assignment.credential.capabilities.includes("github-cli") && context.tools.gh) {
+        await exposeProviderCli("gh", context.tools.gh);
         Object.assign(env, (await createProviderRuntime(
           "github", runtimeDirectory, workspace.path, tokenAssignment.credential, tokenAssignment.token,
         )).env);
       }
-      if (assignment.credential.capabilities.includes("gitlab-cli")) {
+      if (assignment.credential.capabilities.includes("gitlab-cli") && context.tools.glab) {
+        await exposeProviderCli("glab", context.tools.glab);
         Object.assign(env, (await createProviderRuntime(
           "gitlab", runtimeDirectory, workspace.path, tokenAssignment.credential, tokenAssignment.token,
         )).env);

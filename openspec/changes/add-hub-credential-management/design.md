@@ -55,7 +55,7 @@ One agent per credential or workspace was rejected for the local backend. Standa
 
 ### D4: Unlock is an explicit settings operation, not an arbitrary-process prompt bridge
 
-SSH generation/import/unlock runs in a private bounded PTY so `ssh-keygen`/`ssh-add` can read a passphrase without placing it in process arguments; terminal echo is disabled before the secret is written and all captured output is sanitized. Unlock loads the identity into the managed agent. Lock removes the identity. Agent contents are runtime state, so SSH credentials return locked after Hub restart.
+SSH generation and encrypted-key import/unlock run in a private bounded PTY so `ssh-keygen`/`ssh-add` can read the key's passphrase without placing it in process arguments; terminal echo is disabled before the secret is written and all captured output is sanitized. Import keeps the private key's existing encryption rather than changing its passphrase. Unencrypted imports use bounded non-interactive public-key derivation and are automatically loaded whenever the managed agent is recreated. Agent contents are runtime state, so protected SSH credentials return locked after Hub restart.
 
 OpenPGP unlock performs a bounded signing probe through the dedicated GnuPG home using loopback secret input, allowing `gpg-agent` to establish its normal cache. The secret is discarded immediately. A locked credential used by a workspace fails with an actionable message; arbitrary Git processes do not trigger a browser modal. This avoids a general cross-process pinentry routing service and makes user intent explicit.
 

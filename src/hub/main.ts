@@ -9,7 +9,7 @@ import { LocalProcessBackend, resolveUatuArgv } from "./backend";
 import { ManagedSshAgent } from "./credential-ssh-agent";
 import { SshCredentialService } from "./credential-ssh";
 import { CredentialMetadataStore, CredentialTokenStore, CredentialToolOverrideStore } from "./credential-store";
-import { CredentialToolManager } from "./credential-tools";
+import { CredentialToolManager, readyToolPath } from "./credential-tools";
 import { OpenPgpCredentialManager } from "./openpgp-credentials";
 import { TokenCredentialManager } from "./token-credentials";
 import { createStoredCloneCredentialResolver, createStoredCredentialContextResolver } from "./credential-context";
@@ -89,29 +89,45 @@ export async function runHub(options: RunHubOptions): Promise<void> {
   const credentialToolStore = new CredentialToolOverrideStore(credentialToolsPath(stateRoot));
   const credentialTools = new CredentialToolManager(credentialToolStore);
   await Promise.all([credentialMetadata.load(), credentialTokens.load(), credentialTools.load()]);
-  const tools = new Map(credentialTools.list().map(tool => [tool.tool, tool.path]));
-  const sshAgentPath = tools.get("ssh-agent");
-  const sshAgent = sshAgentPath
-    ? new ManagedSshAgent({
-        runtimeDirectory: credentialRuntimePath(stateRoot),
-        sshAgentPath,
-      })
-    : null;
-  const sshCredentials = sshAgent && tools.get("ssh-keygen") && tools.get("ssh-add")
-    ? new SshCredentialService({
+  let sshAgent: ManagedSshAgent | null = null;
+  let sshCredentials: SshCredentialService | null = null;
+  let openPgpCredentials: OpenPgpCredentialManager;
+  let activePaths = new Map<string, string | null>();
+  const contextTools = { gpg: null, sshKeygen: null, gh: null, glab: null } as {
+    gpg: string | null; sshKeygen: string | null; gh: string | null; glab: string | null;
+  };
+  const refreshCredentialRuntime = async () => {
+    const paths = new Map(credentialTools.list().map(tool => [tool.tool, readyToolPath(tool)]));
+    const sshChanged = (["ssh-agent", "ssh-keygen", "ssh-add"] as const).some(tool => paths.get(tool) !== activePaths.get(tool));
+    if (sshChanged) {
+      await sshAgent?.shutdown();
+      const agentPath = paths.get("ssh-agent");
+      const keygenPath = paths.get("ssh-keygen");
+      const addPath = paths.get("ssh-add");
+      sshAgent = agentPath ? new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(stateRoot), sshAgentPath: agentPath }) : null;
+      sshCredentials = sshAgent && keygenPath && addPath ? new SshCredentialService({
         secretsDirectory: credentialSecretsPath(stateRoot),
         metadataStore: credentialMetadata,
         agent: sshAgent,
-        sshKeygenPath: tools.get("ssh-keygen")!,
-        sshAddPath: tools.get("ssh-add")!,
-      })
-    : null;
-  const openPgpCredentials = new OpenPgpCredentialManager({
-    gnupgHome: credentialGnuPgPath(stateRoot),
-    metadataStore: credentialMetadata,
-    gpgPath: tools.get("gpg") ?? null,
-    gpgconfPath: tools.get("gpgconf") ?? null,
-  });
+        sshKeygenPath: keygenPath,
+        sshAddPath: addPath,
+      }) : null;
+    }
+    if (!openPgpCredentials || paths.get("gpg") !== activePaths.get("gpg") || paths.get("gpgconf") !== activePaths.get("gpgconf")) {
+      openPgpCredentials = new OpenPgpCredentialManager({
+        gnupgHome: credentialGnuPgPath(stateRoot),
+        metadataStore: credentialMetadata,
+        gpgPath: paths.get("gpg") ?? null,
+        gpgconfPath: paths.get("gpgconf") ?? null,
+      });
+    }
+    contextTools.gpg = paths.get("gpg") ?? null;
+    contextTools.sshKeygen = paths.get("ssh-keygen") ?? null;
+    contextTools.gh = paths.get("gh") ?? null;
+    contextTools.glab = paths.get("glab") ?? null;
+    activePaths = paths;
+  };
+  await refreshCredentialRuntime();
   const tokenCredentials = new TokenCredentialManager(credentialMetadata, credentialTokens);
   const credentialContexts = createStoredCredentialContextResolver({
     metadata: credentialMetadata,
@@ -120,10 +136,7 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     runtimeRoot: credentialRuntimePath(stateRoot),
     gnupgHome: credentialGnuPgPath(stateRoot),
     sshAgentSocket: () => sshAgent?.currentSocket(),
-    tools: {
-      gpg: tools.get("gpg") ?? null,
-      sshKeygen: tools.get("ssh-keygen") ?? null,
-    },
+    tools: contextTools,
   });
   const sessions = new SessionManager(registry, { local: new LocalProcessBackend() }, credentialContexts);
   const cloneCredentials = createStoredCloneCredentialResolver({
@@ -145,10 +158,11 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     credentialApi: {
       metadata: credentialMetadata,
       tools: credentialTools,
-      ssh: sshCredentials,
-      openpgp: openPgpCredentials,
+      get ssh() { return sshCredentials; },
+      get openpgp() { return openPgpCredentials; },
       tokens: tokenCredentials,
       workspaceExists: workspaceId => registry.byId(workspaceId) !== undefined,
+      toolsChanged: refreshCredentialRuntime,
     },
   });
 

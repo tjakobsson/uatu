@@ -139,6 +139,24 @@ describe("credential tool probes", () => {
     });
   });
 
+  test("enforces provider CLI minimum versions", async () => {
+    const gh = await executable("gh");
+    await writeFile(gh.filePath, "#!/bin/sh\nprintf 'gh version 1.99.0\\n'\n", { mode: 0o700 });
+    expect((await probeCredentialTool({ tool: "gh", path: gh.filePath, source: "override" })).results).toContainEqual({
+      layer: "version",
+      status: "unavailable",
+      message: "GitHub CLI 2.0 or newer is required.",
+    });
+    await writeFile(gh.filePath, "#!/bin/sh\nprintf 'gh version 2.0.0\\n'\n", { mode: 0o700 });
+    expect((await probeCredentialTool({ tool: "gh", path: gh.filePath, source: "override" })).version).toBe("gh version 2.0.0");
+
+    const glab = await executable("glab");
+    await writeFile(glab.filePath, "#!/bin/sh\nprintf 'glab 1.21.0\\n'\n", { mode: 0o700 });
+    expect((await probeCredentialTool({ tool: "glab", path: glab.filePath, source: "override" })).version).toBeNull();
+    await writeFile(glab.filePath, "#!/bin/sh\nprintf 'glab 1.22.0\\n'\n", { mode: 0o700 });
+    expect((await probeCredentialTool({ tool: "glab", path: glab.filePath, source: "override" })).version).toBe("glab 1.22.0");
+  });
+
   test("sanitizes failures without retaining stderr, environment, or unbounded output", async () => {
     const { filePath } = await executable("git");
     await writeFile(filePath, "#!/bin/sh\nprintf '%*s' 9000 '' | tr ' ' x >&2\nprintf 'sentinel-secret' >&2\nexit 2\n", { mode: 0o700 });

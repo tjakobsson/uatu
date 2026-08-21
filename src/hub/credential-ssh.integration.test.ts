@@ -96,7 +96,6 @@ describe("managed SSH credential lifecycle", () => {
       passphrase,
     );
     expect(imported.metadata.fingerprint).toBe(generated.metadata.fingerprint);
-    await service.unlock(imported.id, passphrase);
     expect(await service.testUsability(imported.id)).toBe(true);
     expect(await service.delete(imported.id)).toBe(true);
     expect(await Bun.file(path.join(credentialSecretsPath(root), `${imported.id}.key`)).exists()).toBe(false);
@@ -113,6 +112,30 @@ describe("managed SSH credential lifecycle", () => {
 
     expect(await readFile(credentialsPath(root), "utf8")).not.toContain(passphrase);
     expect(await readFile(audit, "utf8")).not.toContain(passphrase);
+  }, 30_000);
+
+  test("imports an unencrypted key without a passphrase and automatically reloads it", async () => {
+    const found = await tools();
+    const root = await stateRoot("uatu-ssh-unencrypted-");
+    const source = path.join(root, "source");
+    expect((await run(found.keygen, ["-q", "-t", "ed25519", "-N", "", "-f", source], cleanEnv())).code).toBe(0);
+    const metadata = new CredentialMetadataStore(credentialsPath(root));
+    await metadata.load();
+    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent });
+    agents.push(agent);
+    const service = new SshCredentialService({
+      secretsDirectory: credentialSecretsPath(root),
+      metadataStore: metadata,
+      agent,
+      sshKeygenPath: found.keygen,
+      sshAddPath: found.add,
+      createId: () => "unencrypted",
+    });
+
+    const imported = await service.import("Unencrypted", ["ssh-authentication"], await readFile(source, "utf8"), "");
+    expect(await service.testUsability(imported.id)).toBe(true);
+    await agent.shutdown();
+    expect(await service.testUsability(imported.id)).toBe(true);
   }, 30_000);
 
   test("uses only the Hub socket and leaves an ambient agent and its identities unchanged", async () => {

@@ -828,7 +828,10 @@ export function createHubFetchHandler(deps: HubDeps) {
         }
         try {
           await sessions.runWhileStopped(workspaceId, () =>
-            personalState.forgetWorkspace(workspaceId, () => registry.remove(workspaceId))
+            personalState.forgetWorkspace(workspaceId, async () => {
+              await deps.credentialApi?.metadata.removeWorkspaceAssignments(workspaceId);
+              return registry.remove(workspaceId);
+            })
           );
           return json(200, { id: workspaceId, forgotten: true });
         } catch (error) {

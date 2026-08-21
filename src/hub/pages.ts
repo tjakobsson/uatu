@@ -500,7 +500,8 @@ function authenticatedPage(pageName: AuthenticatedPage, authenticatedUser: strin
         <summary>Paste a private key instead</summary>
         <label>Private key<textarea name="privateKey"></textarea></label>
       </details>
-      <label>Passphrase<input name="passphrase" type="password" autocomplete="off" required /></label>
+      <label>Existing passphrase, if any<input name="passphrase" type="password" autocomplete="off" /></label>
+      <p class="empty" style="padding-top: 0;">The key keeps its current passphrase. Keys without one stay available without unlocking.</p>
       <p class="local-error" data-form-error role="alert" hidden></p>
       <div><button class="primary" type="submit">Import SSH key</button></div>
     </form>

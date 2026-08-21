@@ -15,7 +15,7 @@
 ## 3. Managed SSH Credentials
 
 - [x] 3.1 Implement a supervised Hub-owned `ssh-agent` using a fixed owner-only runtime socket, lazy startup, ownership tracking, stale-state recovery, and bounded shutdown.
-- [x] 3.2 Implement passphrase-protected SSH key generation and private-key import through a private no-echo PTY, storing native key files owner-only and deriving public metadata without exposing secrets.
+- [x] 3.2 Implement passphrase-protected SSH key generation and private-key import that preserves existing key protection, using a private no-echo PTY for encrypted keys and automatic loading for unencrypted keys while storing native key files owner-only and deriving public metadata without exposing secrets.
 - [x] 3.3 Implement SSH unlock, lock, disable, delete, and usability tests through the managed agent, with all passphrases excluded from argv, environment, logs, captured output, and persistence.
 - [x] 3.4 Add integration tests with an ambient fake/system agent proving Hub startup, key operations, and shutdown use only the Hub socket and never signal or mutate the ambient agent.
 

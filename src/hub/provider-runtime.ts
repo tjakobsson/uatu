@@ -27,11 +27,15 @@ function parseVersion(value: string | null): [number, number] | undefined {
   return match ? [Number(match[1]), Number(match[2])] : undefined;
 }
 
+export function providerCliVersionSupported(provider: Provider, value: string | null): boolean {
+  const version = parseVersion(value);
+  const minimum = MINIMUM_VERSION[provider];
+  return version !== undefined && (version[0] > minimum[0] || (version[0] === minimum[0] && version[1] >= minimum[1]));
+}
+
 export function providerCliSupport(provider: Provider, readiness: PublicToolReadinessDto | undefined): ProviderCliSupport {
   if (!readiness?.path) return { provider, status: "missing", version: null };
-  const version = parseVersion(readiness.version);
-  const minimum = MINIMUM_VERSION[provider];
-  const supported = version !== undefined && (version[0] > minimum[0] || (version[0] === minimum[0] && version[1] >= minimum[1]));
+  const supported = providerCliVersionSupported(provider, readiness.version);
   return { provider, status: supported ? "supported" : "unsupported", version: readiness.version };
 }
 

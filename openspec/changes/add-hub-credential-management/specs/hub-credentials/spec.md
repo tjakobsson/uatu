@@ -43,7 +43,7 @@ The Hub SHALL auto-detect the executables required by each credential capability
 - **AND** the persisted path is used only after validation succeeds
 
 ### Requirement: Hub supports SSH authentication and signing credentials
-The Hub SHALL generate passphrase-protected SSH keys and import supported existing SSH private keys for authentication, commit signing, or both as explicitly declared by the user. It SHALL expose the public key for registration with a Git provider, load an unlocked key only into the Hub-managed SSH agent, and remove the identity when the credential is locked or deleted. Passphrases submitted for generation or unlock MUST NOT be persisted, logged, included in diagnostics, or returned by an API.
+The Hub SHALL generate passphrase-protected SSH keys and import supported existing SSH private keys for authentication, commit signing, or both as explicitly declared by the user. Imported keys SHALL retain their existing passphrase protection: the supplied existing passphrase unlocks an encrypted key, while a key without a passphrase remains usable without an unlock operation. The Hub SHALL expose the public key for registration with a Git provider and load private identities only into the Hub-managed SSH agent. Passphrases submitted for generation, import, or unlock MUST NOT be persisted, logged, included in diagnostics, or returned by an API.
 
 #### Scenario: User generates an SSH signing key
 - **WHEN** an authenticated user provides a name and passphrase and generates an SSH credential for commit signing
@@ -54,6 +54,16 @@ The Hub SHALL generate passphrase-protected SSH keys and import supported existi
 - **WHEN** an SSH credential is locked or the Hub has restarted without it being unlocked
 - **THEN** new authentication or signing operations cannot use its private key
 - **AND** settings reports that an unlock is required
+
+#### Scenario: User imports an SSH key with its existing protection
+- **WHEN** an authenticated user imports an encrypted SSH private key and supplies its existing passphrase
+- **THEN** the Hub preserves the key unchanged and loads it into the managed agent for immediate use
+- **AND** the passphrase is discarded after the operation
+
+#### Scenario: User imports an SSH key without a passphrase
+- **WHEN** an authenticated user imports an unencrypted SSH private key with an empty passphrase
+- **THEN** the Hub accepts and loads the key without prompting for an invented passphrase
+- **AND** the Hub automatically reloads that key when its managed agent is recreated
 
 ### Requirement: Hub supports OpenPGP commit-signing credentials
 When compatible GnuPG tooling is available, the Hub SHALL generate or import OpenPGP signing keys in a dedicated Hub GnuPG home, expose the public key and fingerprint, and make unlocked signing available through the Hub-owned OpenPGP agent. Private-key passphrases and pinentry responses submitted through the Hub MUST be handled as secrets and MUST NOT be persisted or replayed. OpenPGP unavailability MUST produce an actionable capability error rather than preventing Hub startup.

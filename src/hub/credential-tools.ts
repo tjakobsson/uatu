@@ -8,6 +8,7 @@ import {
   type ReadinessResult,
 } from "./credential-types";
 import { CredentialToolOverrideStore } from "./credential-store";
+import { providerCliVersionSupported } from "./provider-runtime";
 
 const MAX_PATH_ENTRIES = 128;
 const MAX_PATH_LENGTH = 32_768;
@@ -198,6 +199,10 @@ export async function probeCredentialTool(
     results.push({ layer: "version", status: "unavailable", message: "Version probe exceeded the output limit." });
   } else if (!acceptedExit || !version) {
     results.push({ layer: "version", status: "unavailable", message: "Executable did not report a compatible version." });
+  } else if (discovery.tool === "gh" && !providerCliVersionSupported("github", version)) {
+    results.push({ layer: "version", status: "unavailable", message: "GitHub CLI 2.0 or newer is required." });
+  } else if (discovery.tool === "glab" && !providerCliVersionSupported("gitlab", version)) {
+    results.push({ layer: "version", status: "unavailable", message: "GitLab CLI 1.22 or newer is required." });
   } else {
     results.push({ layer: "version", status: "ready", message: "Compatible version was reported." });
   }
@@ -210,6 +215,10 @@ export async function probeCredentialTool(
     results,
     guidance: ready ? null : toolInstallationGuidance(discovery.tool),
   };
+}
+
+export function readyToolPath(readiness: PublicToolReadinessDto | undefined): string | null {
+  return readiness?.path && readiness.results.every(result => result.status !== "unavailable") ? readiness.path : null;
 }
 
 export class CredentialToolManager {

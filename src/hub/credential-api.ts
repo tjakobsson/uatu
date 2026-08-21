@@ -28,6 +28,7 @@ export type CredentialApiServices = {
   openpgp: OpenPgpCredentialManager;
   tokens: TokenCredentialManager;
   workspaceExists(workspaceId: string): boolean;
+  toolsChanged?(): Promise<void>;
 };
 
 export class CredentialOperationRateLimiter {
@@ -63,8 +64,8 @@ function scalar(value: unknown, label: string, maxBytes: number): string {
   return parsed;
 }
 
-function secret(value: unknown, label: string): string {
-  const parsed = text(value, label, MAX_PASSPHRASE_BYTES);
+function secret(value: unknown, label: string, allowEmpty = false): string {
+  const parsed = text(value, label, MAX_PASSPHRASE_BYTES, allowEmpty);
   if (/\p{Cc}/u.test(parsed)) throw new Error(`${label} contains invalid characters`);
   return parsed;
 }
@@ -176,7 +177,7 @@ export class CredentialApi {
       scalar(body.name, "credential name", MAX_NAME_BYTES),
       stringArray(body.capabilities, ["ssh-authentication", "ssh-signing"], "SSH capabilities") as Array<"ssh-authentication" | "ssh-signing">,
       text(body.privateKey, "SSH private key", MAX_KEY_BYTES),
-      secret(body.passphrase, "passphrase"),
+      secret(body.passphrase, "passphrase", true),
     );
     return this.dto(credential.id);
   }
@@ -218,7 +219,10 @@ export class CredentialApi {
     const credential = this.credential(credentialId);
     const passphrase = secret(body.passphrase, "passphrase");
     if (credential.type === "ssh") await this.requireSsh().unlock(credentialId, passphrase);
-    else if (credential.type === "openpgp") await this.services.openpgp.unlock(credentialId, passphrase);
+    else if (credential.type === "openpgp") {
+      const failure = (await this.services.openpgp.unlock(credentialId, passphrase)).find(result => result.status === "unavailable");
+      if (failure) throw new Error(failure.message);
+    }
     else throw new Error("token credentials do not support unlock");
     return this.dto(credentialId);
   }
@@ -286,14 +290,18 @@ export class CredentialApi {
   async setTool(tool: string, body: JsonObject) {
     if (!(CREDENTIAL_TOOLS as readonly string[]).includes(tool)) throw new Error("credential tool is invalid");
     fields(body, ["path"]);
-    if (body.path === null) return this.services.tools.clearOverride(tool as CredentialTool);
-    return this.services.tools.setOverride(tool as CredentialTool, text(body.path, "tool path", 32_768));
+    const result = body.path === null
+      ? await this.services.tools.clearOverride(tool as CredentialTool)
+      : await this.services.tools.setOverride(tool as CredentialTool, text(body.path, "tool path", 32_768));
+    await this.services.toolsChanged?.();
+    return result;
   }
 
   async testTool(tool: string, body: JsonObject) {
     if (!(CREDENTIAL_TOOLS as readonly string[]).includes(tool)) throw new Error("credential tool is invalid");
     fields(body, []);
     await this.services.tools.reprobeAll();
+    await this.services.toolsChanged?.();
     return this.services.tools.list().find(item => item.tool === tool)!;
   }
 
@@ -337,7 +345,8 @@ export function credentialApiError(error: unknown): { status: number; message: s
   const message = error instanceof Error ? error.message : "credential operation failed";
   if (/assigned to|conflicts|disabled|locked|requires unlock/.test(message)) return { status: 409, message };
   if (/unknown credential|unknown workspace/.test(message)) return { status: 404, message };
-  if (/unavailable/.test(message)) return { status: 503, message };
+  if (/unavailable|did not cache/.test(message)) return { status: 503, message };
+  if (/unlock failed/.test(message)) return { status: 400, message };
   if (/must|invalid|unknown field|does not|cannot|exceeds|requires confirmation|not support|not have|failed validation|host/.test(message)) {
     return { status: 400, message };
   }

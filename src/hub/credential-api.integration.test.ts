@@ -88,7 +88,7 @@ async function fixture(root: string) {
     },
   });
   servers.push(server);
-  return { server, metadata, tokenStore, workspace, state };
+  return { server, metadata, tokenStore, workspace, state, openpgp };
 }
 
 async function login(origin: string, name: string, password: string): Promise<string> {
@@ -282,6 +282,46 @@ describe("credential API integration", () => {
     expect(f.metadata.snapshot().assignments).toEqual([]);
     expect(f.tokenStore.get(credentialId)).toBeUndefined();
   }, 30_000);
+
+  test("removes credential assignments when a workspace is forgotten", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));
+    roots.push(root);
+    const f = await fixture(root);
+    const credential = await f.metadata.create({
+      name: "Forgotten token",
+      type: "token",
+      enabled: true,
+      capabilities: ["https-git"],
+      metadata: { host: "github.com" },
+    });
+    await f.metadata.assign({ workspaceId: f.workspace.id, credentialId: credential.id, role: "authentication", host: "github.com" });
+    const origin = `http://127.0.0.1:${f.server.port}`;
+    const cookie = await login(origin, "alice", "alice password");
+
+    const response = await post(origin, cookie, `/api/hub/workspaces/${f.workspace.id}/forget`, {});
+    expect(response.status).toBe(200);
+    expect(f.metadata.snapshot().assignments).toEqual([]);
+  });
+
+  test("returns an error when OpenPGP unlock does not make the key ready", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));
+    roots.push(root);
+    const f = await fixture(root);
+    const credential = await f.metadata.create({
+      name: "Signing key",
+      type: "openpgp",
+      enabled: true,
+      capabilities: ["openpgp-signing"],
+      metadata: { publicKey: "public", fingerprint: "A".repeat(40) },
+    });
+    f.openpgp.unlock = async () => [{ layer: "runtime", status: "unavailable", message: "OpenPGP unlock failed." }];
+    const origin = `http://127.0.0.1:${f.server.port}`;
+    const cookie = await login(origin, "alice", "alice password");
+
+    const response = await post(origin, cookie, `/api/hub/credentials/${credential.id}/unlock`, { passphrase: "wrong" });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "OpenPGP unlock failed." });
+  });
 
   test("every credential mutation route conforms to its public contract", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));

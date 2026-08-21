@@ -1221,7 +1221,7 @@ components:
     ImportSshCredentialRequest:
       type: object
       required: [name, capabilities, privateKey, passphrase]
-      properties: { name: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 256 }, capabilities: { type: array, minItems: 1, uniqueItems: true, items: { enum: [ssh-authentication, ssh-signing] } }, privateKey: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 1048576 }, passphrase: { $ref: '#/components/schemas/Passphrase' } }
+      properties: { name: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 256 }, capabilities: { type: array, minItems: 1, uniqueItems: true, items: { enum: [ssh-authentication, ssh-signing] } }, privateKey: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 1048576 }, passphrase: { type: string, maxLength: 4096, x-uatu-maxUtf8Bytes: 4096, description: "Existing key passphrase, or empty when the imported key is not encrypted. Never persisted or returned." } }
       additionalProperties: false
     GenerateOpenPgpCredentialRequest:
       type: object

@@ -154,15 +154,17 @@ GnuPG, `gh`, or `glab` disables only the capability that needs it.
 
 1. Open the authenticated dashboard's **Credentials** pane.
 2. Generate a passphrase-protected SSH key, import an existing SSH private
-   key, generate or import an OpenPGP signing key, or add an HTTPS/provider
-   token. Select only the capabilities the credential needs.
+   key with its current passphrase (or no passphrase if it has none), generate
+   or import an OpenPGP signing key, or add an HTTPS/provider token. Select
+   only the capabilities the credential needs.
 3. For SSH and OpenPGP credentials, use **Copy public key** and register the
    public material with the provider or Git server. The Hub does not register
    keys remotely.
-4. Unlock SSH and OpenPGP credentials, then run **Test**. Passphrases are used
-   for that operation and discarded. SSH and OpenPGP credentials return to a
-   locked state after a Hub restart; tokens remain usable until disabled or
-   deleted.
+4. Unlock protected SSH and OpenPGP credentials, then run **Test**.
+   Passphrases are used for that operation and discarded. Protected SSH and
+   OpenPGP credentials return to a locked state after a Hub restart. Imported
+   SSH keys without a passphrase are loaded automatically; tokens remain
+   usable until disabled or deleted.
 5. Assign an authentication default for each required provider host and, when
    needed, one commit-signing default per workspace. Restart any running
    workspace marked **Restart required**.
@@ -202,8 +204,8 @@ files:
 
 - `credentials.json` stores public metadata and assignments.
 - `credential-tools.json` stores validated executable overrides.
-- `credential-secrets/` stores passphrase-encrypted SSH private keys and the
-  owner-only token store.
+- `credential-secrets/` stores SSH private keys with their existing native
+  protection and the owner-only token store.
 - `credential-gnupg/` stores the Hub's private OpenPGP home.
 - `credential-runtime/` is temporary and must not be backed up or restored.
 
