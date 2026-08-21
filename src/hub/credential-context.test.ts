@@ -298,6 +298,25 @@ describe("local workspace credential projection", () => {
 
     const sshConfig = await readFile(path.join(projected.runtimeDirectory, "ssh_config"), "utf8");
     expect(sshConfig).toContain('Match host git.example.com exec "test %p = 2222"');
+    // An explicit 443 stays port-restricted — the URL parser would have
+    // erased it as the HTTPS default and widened the match to every port.
+    const port443 = await buildLocalCredentialEnvironment({
+      workspace,
+      context: {
+        revision: "port-443",
+        runtimeRoot: path.join(root, "runtime-443"),
+        stateRoot: root,
+        sshAgentSocket: agentSocket,
+        gnupgHome: path.join(root, "gnupg"),
+        tools: { ssh: "/managed/ssh", git: null, gpg: null, sshKeygen: null, gh: null, glab: null },
+        authentication: [{ host: "ssh.example.com:443", credential: ssh }],
+        signing: null,
+      },
+      uatuArgv: ["uatu"],
+    });
+    const config443 = await readFile(path.join(port443.runtimeDirectory, "ssh_config"), "utf8");
+    expect(config443).toContain('Match host ssh.example.com exec "test %p = 443"');
+    expect(config443).not.toContain("Host ssh.example.com");
     expect(sshConfig).toContain(`IdentityAgent "${agentSocket.replaceAll("%", "%%")}"`);
     expect(sshConfig).toContain(`IdentityFile "${path.join(projected.runtimeDirectory, "ssh-port.pub").replaceAll("%", "%%")}"`);
     expect(sshConfig).not.toContain("Host git.example.com:2222");

@@ -32,6 +32,12 @@ describe("provider host normalization", () => {
     expect(normalizeProviderHost("git.example.com:2222")).toBe("git.example.com:2222");
     expect(normalizeProviderHost("192.0.2.7")).toBe("192.0.2.7");
     expect(normalizeProviderHost("[2001:db8::1]")).toBe("[2001:db8::1]");
+    // An explicit :443 survives normalization: an SSH assignment for that
+    // port must not widen into a broad host match.
+    expect(normalizeProviderHost("ssh.example.com:443")).toBe("ssh.example.com:443");
+    expect(normalizeProviderHost("ssh.example.com.:0443")).toBe("ssh.example.com:443");
+    expect(normalizeProviderHost("https://ssh.example.com:443/")).toBe("ssh.example.com:443");
+    expect(normalizeProviderHost("ssh.example.com")).toBe("ssh.example.com");
     // `Host *` in generated SSH configuration would apply the credential to
     // every destination.
     for (const host of ["*", "*.example.com", "git?example.com", "github.com*"]) {

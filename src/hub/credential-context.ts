@@ -400,9 +400,16 @@ function assertUnambiguousProviderCliAssignments(authentication: ResolvedAuthent
   }
 }
 
+// Parsed directly rather than through the URL parser, which erases an
+// explicit :443 as the HTTPS default — an SSH assignment for that port must
+// generate a port-restricted match, not a broad host match. Assignment
+// hosts are already normalized (`name`, `name:port`, `[v6]`, `[v6]:port`).
 function sshAssignmentHost(host: string): { hostname: string; port: string } {
-  const parsed = new URL(`https://${host}`);
-  return { hostname: parsed.hostname.replace(/^\[|\]$/g, ""), port: parsed.port };
+  const parsed = /^(\[[^\]]+\]|[^:]+)(?::(\d+))?$/.exec(host);
+  return {
+    hostname: (parsed?.[1] ?? host).replace(/^\[|\]$/g, ""),
+    port: parsed?.[2] ?? "",
+  };
 }
 
 // IdentityFile is additive across matching blocks, so a broad host block must

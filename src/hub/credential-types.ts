@@ -212,7 +212,13 @@ export function normalizeProviderHost(value: string): string {
   if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(lower) && !/^\[[0-9a-f:.]+\]$/.test(lower)) {
     throw new Error("provider host must be a DNS name or IP address");
   }
-  return `${lower}${parsed.port ? `:${parsed.port}` : ""}`;
+  // The URL parser erases an explicitly supplied default port, but an SSH
+  // assignment for example.com:443 must stay restricted to port 443 — a
+  // broad host match would offer the key on every port.
+  const authority = (hasScheme ? value.slice(value.indexOf("://") + 3) : value).replace(/[/?#].*$/, "");
+  const explicitDefaultPort = /:0*443$/.test(authority);
+  const port = parsed.port || (explicitDefaultPort ? "443" : "");
+  return `${lower}${port ? `:${port}` : ""}`;
 }
 
 function normalizedHost(value: unknown, context: string): string {
