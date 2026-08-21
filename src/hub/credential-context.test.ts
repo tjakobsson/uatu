@@ -138,15 +138,20 @@ describe("local workspace credential projection", () => {
     await metadata.assign({ workspaceId: workspace.id, credentialId: secondSsh.id, role: "authentication", host: "two.example.com" });
     const checkedSsh: string[] = [];
     let openPgpUsable = false;
+    // No socket until the usability check runs — the post-restart shape:
+    // resolution must run usability (which lazily starts the agent) before
+    // reading the socket, or assigned workspaces could never start again.
+    let agentSocket: string | undefined;
     const resolver = createStoredCredentialContextResolver({
       metadata,
       tokens,
       stateRoot: root,
       runtimeRoot: path.join(root, "runtime"),
       gnupgHome: path.join(root, "gnupg"),
-      sshAgentSocket: () => "/managed/agent.sock",
+      sshAgentSocket: () => agentSocket,
       sshCredentialUsable: async credentialId => {
         checkedSsh.push(credentialId);
+        agentSocket = "/managed/agent.sock";
         return credentialId === firstSsh.id;
       },
       openPgpCredentialUsable: async () => openPgpUsable,
@@ -620,14 +625,21 @@ describe("clone credential resolution", () => {
       metadata: { publicKey: "ssh-ed25519 AAAATEST uatu", fingerprint: "SHA256:test" },
     }, () => "ssh-1", () => new Date(createdAt));
     let usable = false;
+    // No socket until the usability check runs — the post-restart shape:
+    // the lazily managed agent starts (and auto-loads unencrypted keys)
+    // through that check, so resolution must consult it first.
+    let socket: string | undefined;
     const resolver = createStoredCloneCredentialResolver({
       metadata,
       tokens,
       stateRoot: root,
-      sshAgentSocket: () => "/managed/agent.sock",
+      sshAgentSocket: () => socket,
       sshPath: () => "/managed/ssh",
       sshPublicKeyPath: id => path.join(root, `${id}.pub`),
-      sshCredentialUsable: async () => usable,
+      sshCredentialUsable: async () => {
+        if (usable) socket = "/managed/agent.sock";
+        return usable;
+      },
       uatuArgv: ["uatu"],
     });
 

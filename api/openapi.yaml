@@ -358,8 +358,9 @@ paths:
       operationId: hubUnassignCredential
       tags: [Hub credentials]
       summary: Remove a credential assignment from a workspace
+      description: A running workspace session must be stopped first or the request must carry stop:true; a catalog-only removal would leave the session's projected credential configuration in effect.
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UnassignCredentialRequest' } } } }
-      responses: { '200': { $ref: '#/components/responses/CredentialUnassigned' }, '400': { $ref: '#/components/responses/Error' }, '401': { $ref: '#/components/responses/Error' }, '403': { $ref: '#/components/responses/Error' }, '500': { $ref: '#/components/responses/Error' } }
+      responses: { '200': { $ref: '#/components/responses/CredentialUnassigned' }, '400': { $ref: '#/components/responses/Error' }, '401': { $ref: '#/components/responses/Error' }, '403': { $ref: '#/components/responses/Error' }, '409': { $ref: '#/components/responses/Error' }, '500': { $ref: '#/components/responses/Error' } }
   /api/hub/credentials/{credentialId}/test:
     parameters: [{ $ref: '#/components/parameters/CredentialId' }]
     post:

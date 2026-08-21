@@ -152,10 +152,17 @@ export function createStoredCloneCredentialResolver(options: {
         if (selected.type !== "ssh" || !selected.capabilities.includes("ssh-authentication")) {
           throw new Error("selected credential is not compatible with SSH clone transport");
         }
-        const agentSocket = options.sshAgentSocket();
         const sshPath = options.sshPath();
         if (!sshPath) throw new Error("selected SSH credential requires a configured SSH client");
-        if (!agentSocket || !(await options.sshCredentialUsable(selected.id))) {
+        // Usability first: after a Hub restart the lazily managed agent has
+        // no socket yet, and this check is what starts it and auto-loads an
+        // unencrypted key. Reading the socket first would report the key
+        // locked after every restart.
+        if (!(await options.sshCredentialUsable(selected.id))) {
+          throw new Error(`selected SSH credential is locked; unlock it before cloning: ${selected.id}`);
+        }
+        const agentSocket = options.sshAgentSocket();
+        if (!agentSocket) {
           throw new Error(`selected SSH credential is locked; unlock it before cloning: ${selected.id}`);
         }
         return {
@@ -295,13 +302,21 @@ export function createStoredCredentialContextResolver(
         .filter((item): item is Extract<ResolvedAuthenticationCredential, { credential: SshCredentialRecord }> => item.credential.type === "ssh")
         .map(item => item.credential.id));
       if (signing?.type === "ssh") sshCredentialIds.add(signing.id);
-      const sshAgentSocket = options.sshAgentSocket() ?? null;
       if (sshCredentialIds.size > 0 && !options.tools.ssh) {
         throw new Error("an assigned SSH credential requires a configured SSH client");
       }
-      if (sshCredentialIds.size > 0 && (!sshAgentSocket || !(await Promise.all(
+      // Usability before the socket read: after a Hub restart the lazily
+      // managed agent has no socket yet, and the usability check is what
+      // starts it and auto-loads unencrypted keys. Reading the socket first
+      // would block every assigned workspace start until something else
+      // touched the agent.
+      if (sshCredentialIds.size > 0 && !(await Promise.all(
         [...sshCredentialIds].map(credentialId => options.sshCredentialUsable(credentialId)),
-      )).every(Boolean))) {
+      )).every(Boolean)) {
+        throw new Error("an assigned SSH credential is locked; unlock it before starting the workspace");
+      }
+      const sshAgentSocket = options.sshAgentSocket() ?? null;
+      if (sshCredentialIds.size > 0 && !sshAgentSocket) {
         throw new Error("an assigned SSH credential is locked; unlock it before starting the workspace");
       }
       for (const item of authentication) {

@@ -10,6 +10,7 @@ Compatibility: breaking (Hub)
 
 - `CredentialToolName` now includes `ssh`; managed workspace and selected-clone SSH commands use its validated absolute path.
 - `UnassignCredentialRequest` gained optional `stop`. `stop: true` stops the workspace session and removes the assignment in one workspace lifecycle operation, so a concurrent start cannot land between the stop and the removal. This is additive for request consumers.
+- Unassigning a credential from a workspace whose session is running now returns `409` unless the request carries `stop: true`: the running child retains its projected credential configuration and the Hub-side helper serves tokens by id, so a catalog-only removal would report a revocation that is not in effect.
 
 ### Migration
 

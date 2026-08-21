@@ -62,7 +62,19 @@ async function fixture(root: string) {
     gpgPath: null,
     gpgconfPath: null,
   });
-  const sessions = new SessionManager(registry, {} as never, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
+  // A minimal startable backend so tests can exercise running-session
+  // gating (revocation vs a live child) without real processes.
+  const backend = {
+    start: async (entry: { id: string }) => ({
+      workspaceId: entry.id,
+      basePath: `/s/${entry.id}/`,
+      endpoint: { hostname: "127.0.0.1", port: 1 },
+      token: null,
+      exited: new Promise<number | null>(() => undefined),
+      stop: async () => {},
+    }),
+  };
+  const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
   const config: HubConfig = {
     host: "127.0.0.1",
     port: 0,
@@ -535,6 +547,49 @@ describe("credential API integration", () => {
     await revocation;
     expect((await assignment).status).toBe(200);
     expect(f.metadata.snapshot().assignments).toHaveLength(1);
+  });
+
+  test("refuses to unassign a running workspace without stop", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));
+    roots.push(root);
+    const f = await fixture(root);
+    const origin = `http://127.0.0.1:${f.server.port}`;
+    const cookie = await login(origin, "alice", "alice password");
+    const created = await post(origin, cookie, "/api/hub/credentials/token", {
+      name: "Live token",
+      host: "github.com",
+      token: "live-revocation-secret",
+      capabilities: ["https-git"],
+    });
+    const credentialId = ((await created.json()) as { credential: { id: string } }).credential.id;
+    expect((await post(origin, cookie, `/api/hub/credentials/${credentialId}/assign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+    })).status).toBe(200);
+    await f.sessions.start(f.workspace.id);
+
+    // The running child keeps its projected configuration and the Hub-side
+    // helper serves tokens by id, so a catalog-only removal would report a
+    // revocation that is not in effect.
+    const refused = await post(origin, cookie, `/api/hub/credentials/${credentialId}/unassign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+    });
+    expect(refused.status).toBe(409);
+    expect(f.metadata.snapshot().assignments).toHaveLength(1);
+
+    const stopped = await post(origin, cookie, `/api/hub/credentials/${credentialId}/unassign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+      stop: true,
+    });
+    expect(stopped.status).toBe(200);
+    expect(await stopped.json()).toEqual({ removed: true });
+    expect(f.sessions.isRunning(f.workspace.id)).toBe(false);
+    expect(f.metadata.snapshot().assignments).toEqual([]);
   });
 
   test("unassigns inside the stop lifecycle when stop is requested", async () => {

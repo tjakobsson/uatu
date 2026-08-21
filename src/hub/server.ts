@@ -810,7 +810,17 @@ export function createHubFetchHandler(deps: HubDeps) {
                 });
                 return json(200, { removed }, headers);
               }
-              const removed = await sessions.runExclusive(workspaceId, () => credentialApi.unassign(credentialId, body));
+              const removed = await sessions.runExclusive(workspaceId, () => {
+                // A running child keeps its projected credential
+                // configuration, and the Hub-side helper serves tokens by
+                // id — removing only the catalog assignment would report a
+                // revocation that is not in effect. The page sends
+                // stop: true for running workspaces; other clients must too.
+                if (sessions.isRunning(workspaceId)) {
+                  throw new Error("credential assignment removal conflicts with the running workspace session; stop it first or pass stop: true");
+                }
+                return credentialApi.unassign(credentialId, body);
+              });
               return json(200, { removed }, headers);
             }
             if (operation === "test") return json(200, { results: await credentialApi.test(credentialId, body) }, headers);
