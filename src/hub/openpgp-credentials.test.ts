@@ -243,9 +243,46 @@ describe("OpenPgpCredentialManager lifecycle and capability", () => {
     expect(store.snapshot()).toEqual({ version: 1, credentials: [], assignments: [] });
     expect(fake.isDeleted()).toBe(true);
 
+    // Two kills: disable falls back to stopping the agent (no
+    // gpg-connect-agent beside the fake gpgconf path for targeted
+    // eviction), and the explicit shutdown.
     const lifecycle = fake.commands.filter(command => command.executable.endsWith("gpgconf"));
-    expect(lifecycle).toHaveLength(1);
-    expect(lifecycle[0]?.args).toEqual(["--homedir", gnupgHome, "--kill", "gpg-agent"]);
+    expect(lifecycle).toHaveLength(2);
+    for (const command of lifecycle) {
+      expect(command.args).toEqual(["--homedir", gnupgHome, "--kill", "gpg-agent"]);
+    }
+  });
+
+  test("disable evicts only this key's cached passphrases when gpg-connect-agent is available", async () => {
+    const binDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-gnupg-bin-"));
+    tempDirectories.push(binDirectory);
+    const gpgconfPath = path.join(binDirectory, "gpgconf");
+    const connectAgentPath = path.join(binDirectory, "gpg-connect-agent");
+    await writeFile(gpgconfPath, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    await writeFile(connectAgentPath, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    const fake = fakeGpg();
+    const keygrips = ["A".repeat(40), "B".repeat(40)];
+    const run: OpenPgpCommandRunner = async command => {
+      if (command.args.includes("--with-keygrip")) {
+        const listed = await fake.run(command);
+        return { ...listed, stdout: `${listed.stdout}${keygrips.map(value => `grp:::::::::${value}:`).join("\n")}\n` };
+      }
+      if (command.executable === connectAgentPath) {
+        await fake.run(command);
+        return { exitCode: 0, timedOut: false, outputExceeded: false, stdout: "OK\n" };
+      }
+      return fake.run(command);
+    };
+    const { manager, store } = await fixture(run, { gpgconf: gpgconfPath });
+    await createCredential(store);
+
+    await manager.disable("pgp-1");
+    expect(store.snapshot().credentials[0]?.enabled).toBe(false);
+    const evictions = fake.commands.filter(command => command.executable === connectAgentPath);
+    expect(evictions.map(command => command.args[0])).toEqual(keygrips.map(value => `clear_passphrase ${value}`));
+    // Targeted eviction succeeded: the shared agent was not stopped, so
+    // unrelated cached credentials stay usable.
+    expect(fake.commands.some(command => command.executable === gpgconfPath)).toBe(false);
   });
 
   test("rolls catalog deletion back when private-key deletion fails", async () => {

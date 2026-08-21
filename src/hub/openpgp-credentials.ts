@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { constants as fsConstants, promises as fs } from "node:fs";
 import path from "node:path";
 
 import { CredentialMetadataStore } from "./credential-store";
@@ -305,7 +305,11 @@ export class OpenPgpCredentialManager {
   }
 
   disable(credentialId: string): Promise<void> {
-    return this.enqueue(() => this.setEnabled(credentialId, false));
+    return this.enqueue(async () => {
+      const credential = this.credential(credentialId);
+      await this.setEnabled(credentialId, false);
+      await this.evictAgentCache(credential.metadata.fingerprint);
+    });
   }
 
   enable(credentialId: string): Promise<void> {
@@ -448,6 +452,56 @@ export class OpenPgpCredentialManager {
       fs.rm(files.challenge, { force: true }),
       fs.rm(files.signature, { force: true }),
     ]);
+  }
+
+  // Disabling must also revoke cached signing ability: the dedicated
+  // gpg-agent may hold this key's passphrase, letting an already-running
+  // workspace keep signing after a successful Disable. Prefer per-keygrip
+  // eviction through gpg-connect-agent (a GnuPG core tool shipped beside
+  // gpgconf); the fallback stops the dedicated agent, guaranteeing
+  // revocation at the cost of locking every cached Hub OpenPGP credential.
+  private async evictAgentCache(fingerprint: string): Promise<void> {
+    if (!this.gpgPath) return;
+    const connectAgent = await this.connectAgentPath();
+    if (connectAgent && (await this.evictKeygrips(connectAgent, fingerprint))) return;
+    const stopped = await this.stopAgent();
+    if (stopped.some(result => result.status === "unavailable")) {
+      throw new Error("The disabled credential's cached agent state could not be cleared.");
+    }
+  }
+
+  private async evictKeygrips(connectAgent: string, fingerprint: string): Promise<boolean> {
+    const listed = await this.gpg(["--batch", "--with-colons", "--with-keygrip", "--list-secret-keys", fingerprint]);
+    if (!this.succeeded(listed)) return false;
+    const keygrips = listed.stdout.split(/\r?\n/)
+      .filter(line => line.startsWith("grp:"))
+      .map(line => line.split(":")[9] ?? "")
+      .filter(value => /^[0-9A-Fa-f]{40}$/.test(value));
+    if (keygrips.length === 0) return false;
+    for (const keygrip of keygrips) {
+      const result = await this.runCommand({
+        executable: connectAgent,
+        args: [`clear_passphrase ${keygrip}`, "/bye"],
+        env: this.environment(),
+        timeoutMs: this.timeoutMs,
+      }).catch(() => failedCommand());
+      // gpg-connect-agent exits 0 even when the agent answers ERR.
+      if (!this.succeeded(result) || /^ERR\b/m.test(result.stdout)) return false;
+    }
+    return true;
+  }
+
+  private async connectAgentPath(): Promise<string | null> {
+    if (!this.gpgconfPath) return null;
+    const candidate = path.join(path.dirname(this.gpgconfPath), "gpg-connect-agent");
+    try {
+      const stats = await fs.stat(candidate);
+      if (!stats.isFile()) return null;
+      await fs.access(candidate, fsConstants.X_OK);
+      return candidate;
+    } catch {
+      return null;
+    }
   }
 
   private async stopAgent(): Promise<ReadinessResult[]> {

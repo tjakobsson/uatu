@@ -158,7 +158,7 @@ export async function runHub(options: RunHubOptions): Promise<void> {
   let sshCredentials: SshCredentialService | null = null;
   const sshExplicitLocks = new Set<string>();
   const sshRuntime = createCredentialRuntimeGate(() => sshCredentials);
-  let openPgpCredentials: OpenPgpCredentialManager;
+  let openPgpCredentials!: OpenPgpCredentialManager;
   const openPgpRuntime = createCredentialRuntimeGate(() => openPgpCredentials);
   let activePaths = new Map<string, string | null>();
   const contextTools = { ssh: null, git: null, gpg: null, sshKeygen: null, gh: null, glab: null } as {
@@ -212,6 +212,12 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     activePaths = paths;
   };
   await refreshCredentialRuntime();
+  // A Hub killed without graceful shutdown can leave its dedicated
+  // gpg-agent running with cached passphrases; protected keys must be
+  // locked after a restart, so clear any surviving agent before readiness
+  // is exposed. Startup-only — tool-override refreshes must not relock
+  // credentials.
+  await openPgpCredentials.shutdown();
   const requireSshService = (service: SshCredentialService | null): SshCredentialService => {
     if (!service) throw new Error("OpenSSH credential tooling is unavailable");
     return service;
