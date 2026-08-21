@@ -67,6 +67,7 @@ test("Hub dispatch families are public or explicitly excluded", async () => {
     ["hubStartWorkspace", "const action ="],
     ["hubStopWorkspace", "const action ="],
     ["hubForgetWorkspace", "const forget ="],
+    ["hubAssignWorkspaceCredentials", "workspaceCredentialAssignments"],
     ["hubRevokeDeviceSession", "const revoke ="],
     ["hubListCredentials", "CREDENTIAL_PATH && request.method === \"GET\""],
     ["hubListCredentialTools", "CREDENTIAL_TOOL_PATH && request.method === \"GET\""],

@@ -11,10 +11,14 @@ Compatibility: breaking (Hub)
 - `CredentialToolName` now includes `ssh`; managed workspace and selected-clone SSH commands use its validated absolute path.
 - `UnassignCredentialRequest` gained optional `stop`. `stop: true` stops the workspace session and removes the assignment in one workspace lifecycle operation, so a concurrent start cannot land between the stop and the removal. This is additive for request consumers.
 - Unassigning a credential from a workspace whose session is running now returns `409` unless the request carries `stop: true`: the running child retains its projected credential configuration and the Hub-side helper serves tokens by id, so a catalog-only removal would report a revocation that is not in effect.
+- Added `hubAssignWorkspaceCredentials`, which replaces selected authentication and signing defaults atomically under the workspace lifecycle queue and stable credential-lock ordering. The Hub settings page no longer performs client-side rollback after a partial pair.
+- `CreateCloneJobRequest` and `CloneJobInput` remain closed at runtime as documented. Clone input responses and native login responses, including authentication and CSRF failures before dispatch, carry `Cache-Control: no-store`.
+- SSH unlock accepts an empty passphrase for an unencrypted key. OpenPGP unlock and key-generation passphrases remain nonempty.
+- Credential inventory returns one unavailable readiness result for a credential whose readiness probe fails instead of failing the whole inventory request.
 
 ### Migration
 
-Strict credential-tool consumers must regenerate against Hub revision 4 or accept the new `ssh` enum value. The optional `stop` unassignment field is additive and requires no migration.
+Strict credential-tool consumers must regenerate against Hub revision 4 or accept the new `ssh` enum value. The optional `stop` unassignment field and paired assignment operation are additive and require no migration. Clients may send an empty unlock passphrase only when unlocking an SSH credential.
 
 ## Hub 3 / Workspace 6 - Unreleased
 

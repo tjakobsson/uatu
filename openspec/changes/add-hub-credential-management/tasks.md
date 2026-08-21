@@ -90,3 +90,13 @@
 - [x] 13.2 Show neutral assignment summaries on running and stopped rows and confirm a stopped workspace start only when both assignment arrays are empty.
 - [x] 13.3 Update the required public schema, populated examples and contract tests, Hub revision metadata, changelog migration guidance, and integration coverage.
 - [x] 13.4 Run focused page, Hub, and API tests, typecheck, API validation, strict OpenSpec validation, build, and diff checks.
+
+## 14. Exhaustive Review Sweep
+
+- [x] 14.1 Close revocation and cleanup races: serialize readiness auto-load with explicit SSH lock, revoke identities after failed import, bound runtime FIFO setup, preserve live SSH ownership records, and keep askpass artifacts under runtime state.
+- [x] 14.2 Make clone lifecycle and selection fail closed: refuse Forget while registration is reserved, report unreaped clone shutdown, isolate global/system Git credential and rewrite settings, quote OpenSSH options at both parsing layers, preserve accepted host/port/SCP forms, and redact submitted responses from live and retained output.
+- [x] 14.3 Harden workspace projection: canonicalize equivalent SSH host forms, safely execute generated helpers, route ordinary SSH through assigned configuration, isolate unassigned GnuPG, preserve concurrent session generations, and clean synchronous spawn failures.
+- [x] 14.4 Make persistence and UI transactions atomic: commit permissions before rename, report failed token/OpenPGP compensation, replace browser-side paired assignment rollback with one server transaction, and roll back failed tool-runtime override application.
+- [x] 14.5 Own the full process lifecycle: lease each state root, make stale reclaim race-safe, terminate descendant process groups, bound Git and optional-tool probes, drain tracked tool work, propagate session/backend shutdown failures, and exit nonzero without releasing the lease after unreaped work.
+- [x] 14.6 Align API and page guarantees: reject unknown clone fields, permit empty SSH unlock input in the contract, degrade readiness per credential, apply no-store to every secret-bearing response path, and mask private-key paste controls by default.
+- [x] 14.7 Add colocated adversarial regression coverage for every exhaustive-sweep correction and rerun Hub/API tests, typecheck, and strict OpenSpec validation.

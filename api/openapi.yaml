@@ -49,14 +49,15 @@ paths:
           description: Session issued. The session ID is also set as a cookie.
           headers:
             Set-Cookie: { schema: { type: string } }
+            Cache-Control: { schema: { type: string, const: no-store } }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/NativeLoginResponse' }
               example: { sessionId: token-value, user: alice }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '429': { $ref: '#/components/responses/Error' }
+        '400': { $ref: '#/components/responses/NoStoreError' }
+        '401': { $ref: '#/components/responses/NoStoreError' }
+        '403': { $ref: '#/components/responses/NoStoreError' }
+        '429': { $ref: '#/components/responses/NoStoreError' }
   /logout:
     post:
       operationId: hubLogout
@@ -157,6 +158,22 @@ paths:
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
+  /api/hub/workspaces/{workspaceId}/credential-assignments:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
+    post:
+      operationId: hubAssignWorkspaceCredentials
+      tags: [Hub credentials]
+      summary: Atomically replace selected workspace credential defaults
+      description: Authentication and signing selections commit together in one workspace lifecycle operation and one metadata transaction.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AssignWorkspaceCredentialsRequest' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/CredentialAssignments' }
+        '400': { $ref: '#/components/responses/NoStoreError' }
+        '401': { $ref: '#/components/responses/NoStoreError' }
+        '403': { $ref: '#/components/responses/NoStoreError' }
+        '404': { $ref: '#/components/responses/NoStoreError' }
+        '409': { $ref: '#/components/responses/NoStoreError' }
+        '500': { $ref: '#/components/responses/NoStoreError' }
   /api/hub/sessions:
     get:
       operationId: hubListDeviceSessions
@@ -436,13 +453,13 @@ paths:
         content:
           application/json: { schema: { $ref: '#/components/schemas/CloneJobInput' } }
       responses:
-        '200': { $ref: '#/components/responses/Accepted' }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
-        '409': { $ref: '#/components/responses/Error' }
-        '413': { $ref: '#/components/responses/Error' }
+        '200': { $ref: '#/components/responses/NoStoreAccepted' }
+        '400': { $ref: '#/components/responses/NoStoreError' }
+        '401': { $ref: '#/components/responses/NoStoreError' }
+        '403': { $ref: '#/components/responses/NoStoreError' }
+        '404': { $ref: '#/components/responses/NoStoreError' }
+        '409': { $ref: '#/components/responses/NoStoreError' }
+        '413': { $ref: '#/components/responses/NoStoreError' }
   /api/hub/clone-jobs/{jobId}/cancel:
     parameters: [{ $ref: '#/components/parameters/JobId' }]
     post:
@@ -955,6 +972,14 @@ components:
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Accepted' }
+    NoStoreAccepted:
+      description: Secret input accepted
+      headers: { Cache-Control: { schema: { type: string, const: no-store } } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/Accepted' } } }
+    NoStoreError:
+      description: Request failed; the response must not be stored because the request may contain secret input.
+      headers: { Cache-Control: { schema: { type: string, const: no-store } } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
     Revoked:
       description: Session revoked
       content:
@@ -989,6 +1014,10 @@ components:
       description: Persisted advisory workspace assignment
       headers: { Cache-Control: { schema: { type: string, const: no-store } } }
       content: { application/json: { schema: { $ref: '#/components/schemas/CredentialAssignmentResponse' } } }
+    CredentialAssignments:
+      description: Atomically persisted advisory workspace assignments
+      headers: { Cache-Control: { schema: { type: string, const: no-store } } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/CredentialAssignmentsResponse' } } }
     CredentialUnassigned:
       description: Assignment removal result
       headers: { Cache-Control: { schema: { type: string, const: no-store } } }
@@ -1210,6 +1239,7 @@ components:
     CredentialResponse: { type: object, required: [credential], properties: { credential: { $ref: '#/components/schemas/PublicCredential' } }, additionalProperties: false }
     CredentialToolResponse: { type: object, required: [tool], properties: { tool: { $ref: '#/components/schemas/PublicCredentialTool' } }, additionalProperties: false }
     CredentialAssignmentResponse: { type: object, required: [assignment], properties: { assignment: { $ref: '#/components/schemas/CredentialAssignment' } }, additionalProperties: false }
+    CredentialAssignmentsResponse: { type: object, required: [assignments], properties: { assignments: { type: array, minItems: 1, maxItems: 2, items: { $ref: '#/components/schemas/CredentialAssignment' } } }, additionalProperties: false }
     CredentialUnassignedResponse: { type: object, required: [removed], properties: { removed: { type: boolean } }, additionalProperties: false }
     CredentialTestResponse: { type: object, required: [results], properties: { results: { type: array, items: { $ref: '#/components/schemas/ReadinessResult' } } }, additionalProperties: false }
     CredentialDeletedResponse: { type: object, required: [deleted], properties: { deleted: { type: boolean } }, additionalProperties: false }
@@ -1240,7 +1270,7 @@ components:
       properties: { name: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 256 }, host: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 256 }, username: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 256 }, token: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 65536 }, capabilities: { type: array, minItems: 1, uniqueItems: true, items: { enum: [https-git, github-cli, gitlab-cli] } } }
       additionalProperties: false
     SetCredentialToolRequest: { type: object, required: [path], properties: { path: { type: [string, 'null'], x-uatu-maxUtf8Bytes: 32768 } }, additionalProperties: false }
-    UnlockCredentialRequest: { type: object, required: [passphrase], properties: { passphrase: { $ref: '#/components/schemas/Passphrase' } }, additionalProperties: false }
+    UnlockCredentialRequest: { type: object, required: [passphrase], properties: { passphrase: { type: string, maxLength: 4096, x-uatu-maxUtf8Bytes: 4096, description: "One-operation secret. Empty is valid for an unencrypted SSH key; OpenPGP unlock still requires a nonempty passphrase. Never persisted or returned." } }, additionalProperties: false }
     AuthenticationAssignmentRequest:
       type: object
       required: [workspaceId, role, host]
@@ -1252,6 +1282,13 @@ components:
       properties: { workspaceId: { $ref: '#/components/schemas/WorkspaceId' }, role: { const: signing }, replace: { type: boolean } }
       additionalProperties: false
     AssignCredentialRequest: { oneOf: [{ $ref: '#/components/schemas/AuthenticationAssignmentRequest' }, { $ref: '#/components/schemas/SigningAssignmentRequest' }] }
+    AssignWorkspaceCredentialsRequest:
+      type: object
+      minProperties: 1
+      properties:
+        authentication: { type: object, required: [credentialId, host], properties: { credentialId: { $ref: '#/components/schemas/CredentialId' }, host: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 256 } }, additionalProperties: false }
+        signing: { type: object, required: [credentialId], properties: { credentialId: { $ref: '#/components/schemas/CredentialId' } }, additionalProperties: false }
+      additionalProperties: false
     UnassignCredentialRequest:
       oneOf:
         - { type: object, required: [workspaceId, role, host], properties: { workspaceId: { $ref: '#/components/schemas/WorkspaceId' }, role: { const: authentication }, host: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 256 }, stop: { type: boolean } }, additionalProperties: false }

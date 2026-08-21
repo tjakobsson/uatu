@@ -169,6 +169,18 @@ describe("Hub credential contracts", () => {
     expect(clone({ url: "https://github.com/example/repo.git", dest: "/src", credentialId: "credential-1", retainAssignment: true })).toBe(true);
     expect(clone({ url: "https://github.com/example/repo.git", dest: "/src", retainAssignment: true })).toBe(false);
     expect(clone({ url: "https://github.com/example/repo.git", dest: "/src", credentialId: "credential-1", extra: true })).toBe(false);
+    const paired = compile("AssignWorkspaceCredentialsRequest");
+    expect(paired({ authentication: { credentialId: "credential-1", host: "github.com" }, signing: { credentialId: "credential-2" } })).toBe(true);
+    expect(paired({})).toBe(false);
+    expect(paired({ signing: { credentialId: "credential-2", extra: true } })).toBe(false);
+  });
+
+  test("SSH unlock permits empty input without relaxing generated passphrases", async () => {
+    const openapi = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
+    const compile = (name: string) => createAjv().compile(schemaForAjv(openapi.components.schemas[name], openapi.components.schemas));
+    expect(compile("UnlockCredentialRequest")({ passphrase: "" })).toBe(true);
+    expect(compile("GenerateSshCredentialRequest")({ name: "SSH", capabilities: ["ssh-authentication"], passphrase: "" })).toBe(false);
+    expect(compile("GenerateOpenPgpCredentialRequest")({ name: "PGP", userId: "User <u@example.test>", passphrase: "" })).toBe(false);
   });
 });
 
