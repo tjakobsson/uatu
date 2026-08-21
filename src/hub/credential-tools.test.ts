@@ -139,6 +139,22 @@ describe("credential tool probes", () => {
     });
   });
 
+  test("accepts OpenSSH usage probes that produce no version text", async () => {
+    const { filePath } = await executable("ssh-add");
+    await writeFile(filePath, "#!/bin/sh\nexit 2\n", { mode: 0o700 });
+    expect(await probeCredentialTool({ tool: "ssh-add", path: filePath, source: "override" })).toEqual({
+      tool: "ssh-add",
+      path: filePath,
+      version: null,
+      results: [
+        { layer: "binary", status: "ready", message: "Executable is available." },
+        { layer: "version", status: "ready", message: "Executable responded to the probe." },
+        { layer: "runtime", status: "not-applicable", message: "Runtime readiness is tested when the capability is used." },
+      ],
+      guidance: null,
+    });
+  });
+
   test("enforces provider CLI minimum versions", async () => {
     const gh = await executable("gh");
     await writeFile(gh.filePath, "#!/bin/sh\nprintf 'gh version 1.99.0\\n'\n", { mode: 0o700 });
