@@ -253,6 +253,25 @@ describe("OpenPgpCredentialManager lifecycle and capability", () => {
     }
   });
 
+  test("disable still revokes the agent cache when gpg is unavailable, and fails without any tooling", async () => {
+    // gpg override cleared after unlock: targeted eviction is impossible,
+    // so the dedicated agent is stopped instead of skipping revocation.
+    const fake = fakeGpg();
+    const { manager, store, gnupgHome } = await fixture(fake.run, { gpg: null });
+    await createCredential(store);
+    await manager.disable("pgp-1");
+    expect(store.snapshot().credentials[0]?.enabled).toBe(false);
+    const kills = fake.commands.filter(command => command.executable.endsWith("gpgconf"));
+    expect(kills).toHaveLength(1);
+    expect(kills[0]?.args).toEqual(["--homedir", gnupgHome, "--kill", "gpg-agent"]);
+
+    // Without gpg AND gpgconf nothing can clear the cache: fail loudly
+    // rather than reporting a revocation that did not happen.
+    const bare = await fixture(fakeGpg().run, { gpg: null, gpgconf: null });
+    await createCredential(bare.store);
+    await expect(bare.manager.disable("pgp-1")).rejects.toThrow("could not be cleared");
+  });
+
   test("disable evicts only this key's cached passphrases when gpg-connect-agent is available", async () => {
     const binDirectory = await mkdtemp(path.join(os.tmpdir(), "uatu-gnupg-bin-"));
     tempDirectories.push(binDirectory);

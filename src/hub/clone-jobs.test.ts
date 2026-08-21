@@ -177,7 +177,12 @@ function fixture(overrides: { maxReplayBytes?: number; maxInputBytes?: number; i
     registry,
     sessions,
     credentials: {
-      async resolve() { return undefined; },
+      // Mirrors the stored resolver: an SSH-selected job re-resolves inside
+      // the runtime section and must get a live credential back.
+      async resolve(_remote: string, credentialId?: string) {
+        if (!credentialId) return undefined;
+        return { ...selectedCredential, credentialId };
+      },
       async assign(workspaceId) {
         if (assignError) throw assignError;
         assigned.push(workspaceId);

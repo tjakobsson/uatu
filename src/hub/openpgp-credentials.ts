@@ -461,8 +461,12 @@ export class OpenPgpCredentialManager {
   // gpgconf); the fallback stops the dedicated agent, guaranteeing
   // revocation at the cost of locking every cached Hub OpenPGP credential.
   private async evictAgentCache(fingerprint: string): Promise<void> {
-    if (!this.gpgPath) return;
-    const connectAgent = await this.connectAgentPath();
+    // Even without a usable gpg (an override cleared after unlock), the
+    // agent may still cache this key's passphrase and a running workspace
+    // retains the previous gpg path — revocation must not be skipped:
+    // targeted eviction when gpg can list keygrips, agent stop otherwise,
+    // and a loud failure when neither is possible.
+    const connectAgent = this.gpgPath ? await this.connectAgentPath() : null;
     if (connectAgent && (await this.evictKeygrips(connectAgent, fingerprint))) return;
     const stopped = await this.stopAgent();
     if (stopped.some(result => result.status === "unavailable")) {

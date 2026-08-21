@@ -233,7 +233,16 @@ export class CloneJobManager {
     try {
       let exitCode: number;
       try {
-        exitCode = await this.withCredentialRuntime(job, () => {
+        exitCode = await this.withCredentialRuntime(job, async () => {
+          if (job.credential?.process.type === "ssh") {
+            // Re-resolved inside the gate: a replacement pending at request
+            // time may have retired the socket the request-time resolution
+            // captured, and the nested usability check would then load the
+            // key into the new agent while this context kept the old one.
+            const fresh = await this.credentials.resolve(job.url, job.credential.credentialId);
+            if (!fresh) throw new Error(`selected credential is no longer available: ${job.credential.credentialId}`);
+            job.credential = fresh;
+          }
           job.process = this.processFactory.start({
             url: job.url,
             target: job.target,
