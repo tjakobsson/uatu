@@ -16,6 +16,7 @@ import {
 
 const roots: string[] = [];
 const agents: ManagedSshAgent[] = [];
+const CLI_ARGV = [process.execPath, path.resolve(import.meta.dir, "../cli.ts")];
 
 afterEach(async () => {
   await Promise.all(agents.splice(0).map(agent => agent.shutdown().catch(() => undefined)));
@@ -59,7 +60,7 @@ describe("managed SSH credential lifecycle", () => {
     const wrappedAdd = await wrapper(root, "ssh-add", found.add, audit);
     const metadata = new CredentialMetadataStore(credentialsPath(root));
     await metadata.load();
-    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent });
+    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent, uatuArgv: CLI_ARGV });
     agents.push(agent);
     let id = 0;
     const service = new SshCredentialService({
@@ -147,7 +148,7 @@ describe("managed SSH credential lifecycle", () => {
     expect((await run(found.keygen, ["-q", "-t", "ed25519", "-N", "", "-f", source], cleanEnv())).code).toBe(0);
     const metadata = new CredentialMetadataStore(credentialsPath(root));
     await metadata.load();
-    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent });
+    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent, uatuArgv: CLI_ARGV });
     agents.push(agent);
     const explicitLocks = new Set<string>();
     const service = new SshCredentialService({
@@ -206,7 +207,7 @@ describe("managed SSH credential lifecycle", () => {
     await writeFile(slowAdd, `#!/bin/sh\nsleep 0.2\nexec '${found.add}' "$@"\n`, { mode: 0o700 });
     const metadata = new CredentialMetadataStore(credentialsPath(root));
     await metadata.load();
-    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent });
+    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent, uatuArgv: CLI_ARGV });
     agents.push(agent);
     const service = new SshCredentialService({
       secretsDirectory: credentialSecretsPath(root),
@@ -249,7 +250,7 @@ describe("managed SSH credential lifecycle", () => {
     ].join("\n"), { mode: 0o700 });
     const metadata = new CredentialMetadataStore(credentialsPath(root));
     await metadata.load();
-    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent });
+    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent, uatuArgv: CLI_ARGV });
     agents.push(agent);
     const service = new SshCredentialService({
       secretsDirectory: credentialSecretsPath(root),
@@ -295,7 +296,7 @@ describe("managed SSH credential lifecycle", () => {
     ].join("\n"), { mode: 0o700 });
     const metadata = new CredentialMetadataStore(credentialsPath(root));
     await metadata.load();
-    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent });
+    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent, uatuArgv: CLI_ARGV });
     agents.push(agent);
     const service = new SshCredentialService({
       secretsDirectory: credentialSecretsPath(root),
@@ -332,7 +333,7 @@ describe("managed SSH credential lifecycle", () => {
     ].join("\n"), { mode: 0o700 });
     const metadata = new CredentialMetadataStore(credentialsPath(root));
     await metadata.load();
-    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent });
+    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent, uatuArgv: CLI_ARGV });
     agents.push(agent);
     const shutdown = agent.shutdown.bind(agent);
     agent.shutdown = async () => { throw new Error("simulated agent cleanup failure"); };
@@ -362,7 +363,7 @@ describe("managed SSH credential lifecycle", () => {
     const root = await stateRoot("uatu-ssh-mkfifo-timeout-");
     const metadata = new CredentialMetadataStore(credentialsPath(root));
     await metadata.load();
-    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent });
+    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent, uatuArgv: CLI_ARGV });
     agents.push(agent);
     const generatingService = new SshCredentialService({
       secretsDirectory: credentialSecretsPath(root),
@@ -410,7 +411,7 @@ describe("managed SSH credential lifecycle", () => {
     const root = await stateRoot("uatu-ssh-descendant-timeout-");
     const metadata = new CredentialMetadataStore(credentialsPath(root));
     await metadata.load();
-    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent });
+    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent, uatuArgv: CLI_ARGV });
     agents.push(agent);
     const script = async (name: string, marker: string): Promise<string> => {
       const executable = path.join(root, name);
@@ -500,7 +501,7 @@ describe("managed SSH credential lifecycle", () => {
     const root = await stateRoot("uatu-ssh-delete-locked-");
     const metadata = new CredentialMetadataStore(credentialsPath(root));
     await metadata.load();
-    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent });
+    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent, uatuArgv: CLI_ARGV });
     agents.push(agent);
     let id = 0;
     const service = new SshCredentialService({
@@ -535,7 +536,7 @@ describe("managed SSH credential lifecycle", () => {
     expect((await run(found.keygen, ["-q", "-t", "ed25519", "-N", "", "-f", source], cleanEnv())).code).toBe(0);
     const metadata = new CredentialMetadataStore(credentialsPath(root));
     await metadata.load();
-    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent });
+    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent, uatuArgv: CLI_ARGV });
     agents.push(agent);
     let id = 0;
     const service = new SshCredentialService({
@@ -567,7 +568,7 @@ describe("managed SSH credential lifecycle", () => {
     const found = await tools();
     const ambientRoot = await stateRoot("uatu-ambient-agent-");
     const hubRoot = await stateRoot("uatu-hub-agent-");
-    const ambient = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(ambientRoot), sshAgentPath: found.agent });
+    const ambient = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(ambientRoot), sshAgentPath: found.agent, uatuArgv: CLI_ARGV });
     agents.push(ambient);
     const ambientSocket = await ambient.start();
     const ambientKey = path.join(credentialSecretsPath(ambientRoot), "ambient");
@@ -581,6 +582,7 @@ describe("managed SSH credential lifecycle", () => {
     const hubAgent = new ManagedSshAgent({
       runtimeDirectory: credentialRuntimePath(hubRoot),
       sshAgentPath: found.agent,
+      uatuArgv: CLI_ARGV,
       servicePath: process.env.PATH,
     });
     agents.push(hubAgent);

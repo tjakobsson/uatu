@@ -20,6 +20,7 @@ import { LazyOpenCodeChatService } from "./chat/service";
 import { selectCanonicalChatRoot } from "./chat/workspace";
 import { runHashPassword, runHub } from "./hub/main";
 import { runStoredGitCredentialHelper } from "./hub/git-credential-helper";
+import { runSshAgentSupervisor } from "./hub/credential-ssh-supervisor";
 import {
   formatSessionUrl,
   printIndexingStatus,
@@ -57,6 +58,13 @@ async function main() {
   // (chokidar, server, terminal stack) should run. parseWatchdogArgs throws
   // on malformed input, which we surface to stderr.
   const argv = Bun.argv.slice(2);
+  if (argv[0] === "--ssh-agent-supervisor") {
+    if (argv.length !== 1) {
+      process.exitCode = 2;
+      return;
+    }
+    process.exit(await runSshAgentSupervisor());
+  }
   if (argv[0] === "--git-credential-helper") {
     if (argv.length !== 2) {
       process.exitCode = 1;

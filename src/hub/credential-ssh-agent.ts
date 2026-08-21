@@ -1,32 +1,32 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+
+import { resolveUatuArgv } from "./backend";
+import {
+  guardianMac,
+  parseOwnership,
+  sameSocketIdentity,
+  socketIdentity,
+  type SshAgentOwnership,
+  type GuardianCommand,
+} from "./credential-ssh-supervisor";
 
 const START_TIMEOUT_MS = 5_000;
 const STOP_TIMEOUT_MS = 2_000;
 const POLL_MS = 20;
+const MAX_MESSAGE_BYTES = 4_096;
 
-type AgentProcess = {
-  readonly pid: number;
-  readonly exited: Promise<number | null>;
-  kill(signal?: number | NodeJS.Signals): void;
-};
-
-type AgentOwnership = {
-  version: 1;
-  nonce: string;
-  pid: number;
-  socketDevice: number;
-  socketInode: number;
-};
+type SupervisorProcess = ReturnType<typeof Bun.spawn<"pipe", "pipe", "ignore">>;
 
 export type ManagedSshAgentOptions = {
   runtimeDirectory: string;
-  sshAgentPath: string;
+  sshAgentPath?: string;
+  uatuArgv?: string[];
   servicePath?: string;
   startTimeoutMs?: number;
   stopTimeoutMs?: number;
-  spawn?: (argv: string[], options: Parameters<typeof Bun.spawn>[1]) => AgentProcess;
+  spawnSupervisor?: (argv: string[], options: Parameters<typeof Bun.spawn>[1]) => SupervisorProcess;
 };
 
 function isMissing(error: unknown): boolean {
@@ -36,313 +36,321 @@ function isMissing(error: unknown): boolean {
 async function privateDirectory(directory: string): Promise<void> {
   const stats = await fs.lstat(directory);
   if (stats.isSymbolicLink() || !stats.isDirectory()) throw new Error("SSH agent runtime must be a directory");
-  if ((stats.mode & 0o077) !== 0) throw new Error("SSH agent runtime has unsafe permissions");
+  if ((stats.mode & 0o777) !== 0o700) throw new Error("SSH agent runtime has unsafe permissions");
   if (typeof process.getuid === "function" && stats.uid !== process.getuid()) {
     throw new Error("SSH agent runtime is not owned by the current user");
   }
 }
 
-async function readOwnership(filePath: string): Promise<AgentOwnership | undefined> {
+async function readOwnership(filePath: string): Promise<SshAgentOwnership | undefined> {
   let stats;
-  try {
-    stats = await fs.lstat(filePath);
-  } catch (error) {
-    if (isMissing(error)) return undefined;
-    throw error;
-  }
-  if (stats.isSymbolicLink() || !stats.isFile() || (stats.mode & 0o077) !== 0) {
+  try { stats = await fs.lstat(filePath); } catch (error) { if (isMissing(error)) return undefined; throw error; }
+  if (stats.isSymbolicLink() || !stats.isFile() || stats.size > MAX_MESSAGE_BYTES || (stats.mode & 0o777) !== 0o600) {
     throw new Error("SSH agent ownership record is unsafe");
   }
   if (typeof process.getuid === "function" && stats.uid !== process.getuid()) {
     throw new Error("SSH agent ownership record has the wrong owner");
   }
   try {
-    const value = JSON.parse(await fs.readFile(filePath, "utf8")) as Record<string, unknown>;
-    if (
-      value.version !== 1
-      || typeof value.nonce !== "string"
-      || typeof value.pid !== "number"
-      || typeof value.socketDevice !== "number"
-      || typeof value.socketInode !== "number"
-    ) throw new Error("invalid record");
-    return value as AgentOwnership;
+    return parseOwnership(JSON.parse(await fs.readFile(filePath, "utf8")));
   } catch (error) {
-    throw new Error("SSH agent ownership record is corrupt", { cause: error });
+    throw new Error("SSH agent ownership record is corrupt or has an unsupported version", { cause: error });
   }
+}
+
+async function readLine(
+  stream: ReadableStream<Uint8Array>,
+  timeoutMs: number,
+  child?: { exited: Promise<number | null> },
+): Promise<string> {
+  const reader = stream.getReader();
+  let bytes = Buffer.alloc(0);
+  let timer: Timer | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("SSH supervisor handshake timed out")), timeoutMs);
+  });
+  const exited = child?.exited.then(code => { throw new Error(`SSH supervisor exited during startup (${code})`); });
+  try {
+    for (;;) {
+      const next = await Promise.race([reader.read(), timeout, ...(exited ? [exited] : [])]);
+      if (next.done) throw new Error("SSH supervisor closed its handshake pipe");
+      bytes = Buffer.concat([bytes, Buffer.from(next.value)]);
+      if (bytes.length > MAX_MESSAGE_BYTES) throw new Error("SSH supervisor handshake is too large");
+      const newline = bytes.indexOf(10);
+      if (newline >= 0) return bytes.subarray(0, newline).toString("utf8");
+    }
+  } finally {
+    if (timer) clearTimeout(timer);
+    reader.releaseLock();
+  }
+}
+
+async function assertSocket(socketPath: string, expected: SshAgentOwnership["agentSocket"]): Promise<void> {
+  const actual = await socketIdentity(socketPath);
+  if (!sameSocketIdentity(actual, expected)) throw new Error("SSH guardian socket does not match its ownership record");
 }
 
 export class ManagedSshAgent {
   readonly socketPath: string;
+  readonly controlSocketPath: string;
   private readonly ownershipPath: string;
-  private readonly spawn: NonNullable<ManagedSshAgentOptions["spawn"]>;
   private readonly startTimeoutMs: number;
   private readonly stopTimeoutMs: number;
-  private readonly servicePath: string;
-  private process?: AgentProcess;
-  private ownership?: AgentOwnership;
-  private starting?: Promise<string>;
-  private stopping?: Promise<void>;
-  private artifactCleanup?: Promise<void>;
+  private ownership?: SshAgentOwnership;
+  private lifecycle: Promise<void> = Promise.resolve();
 
   constructor(private readonly options: ManagedSshAgentOptions) {
     this.socketPath = path.join(options.runtimeDirectory, "ssh-agent.sock");
+    this.controlSocketPath = path.join(options.runtimeDirectory, "ssh-agent-control.sock");
     this.ownershipPath = path.join(options.runtimeDirectory, "ssh-agent.json");
-    this.spawn = options.spawn ?? ((argv, spawnOptions) => Bun.spawn(argv, spawnOptions) as AgentProcess);
     this.startTimeoutMs = options.startTimeoutMs ?? START_TIMEOUT_MS;
     this.stopTimeoutMs = options.stopTimeoutMs ?? STOP_TIMEOUT_MS;
-    this.servicePath = options.servicePath ?? process.env.PATH ?? "";
   }
 
-  isRunning(): boolean {
-    return this.process !== undefined && this.ownership !== undefined;
-  }
-
-  currentSocket(): string | undefined {
-    return this.isRunning() ? this.socketPath : undefined;
-  }
+  isRunning(): boolean { return this.ownership !== undefined; }
+  currentSocket(): string | undefined { return this.isRunning() ? this.socketPath : undefined; }
 
   start(): Promise<string> {
-    if (this.isRunning()) return Promise.resolve(this.socketPath);
-    this.starting ??= this.startOnce().finally(() => {
-      this.starting = undefined;
+    return this.enqueue(() => this.startSerialized());
+  }
+
+  recover(): Promise<void> {
+    return this.enqueue(async () => {
+      await privateDirectory(this.options.runtimeDirectory);
+      await this.recoverRecordedAgent();
+      this.ownership = undefined;
     });
-    return this.starting;
+  }
+
+  private async startSerialized(): Promise<string> {
+    if (this.ownership) {
+      try {
+        await this.validateRunning(this.ownership);
+        return this.socketPath;
+      } catch (error) {
+        if (!await this.waitForAllArtifactsToDisappear(this.ownership, false)) throw error;
+        this.ownership = undefined;
+      }
+    }
+    return this.startOnce();
   }
 
   private async startOnce(): Promise<string> {
-    if (this.artifactCleanup) await this.artifactCleanup;
     await privateDirectory(this.options.runtimeDirectory);
     await this.recoverRecordedAgent();
-    try {
-      await fs.lstat(this.socketPath);
-      throw new Error("SSH agent socket already exists and is not owned by this Hub process");
-    } catch (error) {
-      if (!isMissing(error)) throw error;
+    const sshAgentPath = this.options.sshAgentPath;
+    if (!sshAgentPath) throw new Error("OpenSSH ssh-agent is unavailable");
+    for (const artifact of [this.socketPath, this.controlSocketPath, this.ownershipPath]) {
+      try { await fs.lstat(artifact); throw new Error("unowned SSH guardian artifact already exists"); }
+      catch (error) { if (!isMissing(error)) throw error; }
     }
 
-    const nonce = randomUUID();
-    const child = this.spawn([this.options.sshAgentPath, "-D", "-a", this.socketPath], {
-      stdin: "ignore",
-      stdout: "ignore",
+    const nonce = randomBytes(32).toString("hex");
+    const uatuArgv = this.options.uatuArgv ?? resolveUatuArgv();
+    const spawn = this.options.spawnSupervisor ?? ((argv, spawnOptions) => Bun.spawn(argv, spawnOptions) as SupervisorProcess);
+    const child = spawn([...uatuArgv, "--ssh-agent-supervisor"], {
+      detached: true,
+      stdin: "pipe",
+      stdout: "pipe",
       stderr: "ignore",
-      env: { PATH: this.servicePath, LANG: "C", LC_ALL: "C" },
+      env: { PATH: this.options.servicePath ?? process.env.PATH ?? "", LANG: "C", LC_ALL: "C" },
     });
-    let exited = false;
-    void child.exited.then(() => {
-      exited = true;
-      if (this.process === child) {
-        const expected = this.ownership;
-        this.process = undefined;
-        this.ownership = undefined;
-        if (!this.stopping) {
-          const cleanup = this.removeOwnedArtifacts(expected);
-          this.artifactCleanup = cleanup;
-          void cleanup.finally(() => {
-            if (this.artifactCleanup === cleanup) this.artifactCleanup = undefined;
-          }).catch(() => undefined);
-        }
-      }
-    });
-
+    const input = child.stdin;
+    let ownership: SshAgentOwnership | undefined;
     try {
-      const socket = await this.waitForSocket(child, () => exited);
-      const ownership: AgentOwnership = {
+      input.write(`${JSON.stringify({
         version: 1,
         nonce,
-        pid: child.pid,
-        socketDevice: Number(socket.dev),
-        socketInode: Number(socket.ino),
-      };
-      await fs.writeFile(this.ownershipPath, `${JSON.stringify(ownership)}\n`, { flag: "wx", mode: 0o600 });
-      if (exited) {
-        await this.removeOwnedArtifacts(ownership);
-        throw new Error("managed SSH agent exited before startup completed");
+        runtimeDirectory: this.options.runtimeDirectory,
+        sshAgentPath,
+        agentSocketPath: this.socketPath,
+        controlSocketPath: this.controlSocketPath,
+        ownershipPath: this.ownershipPath,
+        servicePath: this.options.servicePath ?? process.env.PATH ?? "",
+      })}\n`);
+      const ready = JSON.parse(await readLine(child.stdout, this.startTimeoutMs, child)) as { ready?: unknown };
+      ownership = parseOwnership(ready.ready);
+      if (ownership.nonce !== nonce) throw new Error("SSH supervisor returned the wrong nonce");
+      await assertSocket(this.socketPath, ownership.agentSocket);
+      await assertSocket(this.controlSocketPath, ownership.controlSocket);
+
+      const record = await fs.open(this.ownershipPath, "wx", 0o600);
+      try {
+        await record.chmod(0o600);
+        await record.writeFile(`${JSON.stringify(ownership)}\n`);
+        await record.sync();
+      } finally {
+        await record.close();
       }
-      this.process = child;
+      const runtimeDirectory = await fs.open(this.options.runtimeDirectory, "r");
+      try {
+        await runtimeDirectory.sync();
+      } finally {
+        await runtimeDirectory.close();
+      }
+      input.write(`${JSON.stringify({ commit: nonce })}\n`);
+      input.end();
+      const ack = JSON.parse(await readLine(child.stdout, this.startTimeoutMs, child)) as { ack?: unknown };
+      if (ack.ack !== nonce) throw new Error("SSH supervisor did not acknowledge ownership commit");
+      await child.stdout.cancel().catch(() => undefined);
+      child.unref();
       this.ownership = ownership;
       return this.socketPath;
     } catch (error) {
-      await this.terminateStartedChild(child);
-      const record = await readOwnership(this.ownershipPath).catch(() => undefined);
-      if (record?.nonce === nonce && record.pid === child.pid) await fs.rm(this.ownershipPath, { force: true });
+      input.end();
+      await Promise.race([child.exited, Bun.sleep(this.stopTimeoutMs * 3)]).catch(() => undefined);
       throw error;
     }
   }
 
   private async recoverRecordedAgent(): Promise<void> {
     const record = await readOwnership(this.ownershipPath);
-    if (!record) return;
-    let socket;
-    try {
-      socket = await fs.lstat(this.socketPath);
-    } catch (error) {
-      if (!isMissing(error)) throw error;
-    }
-
-    if (!socket) {
-      if (!this.processIsAlive(record.pid)) {
-        await fs.rm(this.ownershipPath);
-        return;
-      }
-      throw new Error(
-        `SSH agent ownership record names live process ${record.pid}, but its socket is missing; stop that process or remove the record after verifying it is stale`,
-      );
-    }
-
-    if (
-      !socket.isSocket()
-      || (socket.mode & 0o077) !== 0
-      || (typeof process.getuid === "function" && socket.uid !== process.getuid())
-      || Number(socket.dev) !== record.socketDevice
-      || Number(socket.ino) !== record.socketInode
-    ) {
-      throw new Error("stale SSH agent socket does not match its private ownership record");
-    }
-
-    if (this.processIsAlive(record.pid)) {
-      await this.signalRecordedProcess(record.pid, "SIGTERM");
-      if (!(await this.waitForPidExit(record.pid, this.stopTimeoutMs))) {
-        await this.signalRecordedProcess(record.pid, "SIGKILL");
-        if (!(await this.waitForPidExit(record.pid, this.stopTimeoutMs))) {
-          throw new Error("recorded SSH agent did not exit after SIGKILL");
+    if (!record) {
+      for (const artifact of [this.socketPath, this.controlSocketPath]) {
+        try {
+          await fs.lstat(artifact);
+          throw new Error("unowned SSH guardian artifact already exists");
+        } catch (error) {
+          if (!isMissing(error)) throw error;
         }
       }
+      await this.assertNoGuardianQuarantines();
+      return;
     }
-    await this.removeOwnedArtifacts(record);
-  }
-
-  private processIsAlive(pid: number): boolean {
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch (error) {
-      return (error as NodeJS.ErrnoException).code === "EPERM";
-    }
-  }
-
-  private async signalRecordedProcess(pid: number, signal: NodeJS.Signals): Promise<void> {
-    try {
-      process.kill(pid, signal);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-    }
-  }
-
-  private async waitForPidExit(pid: number, timeoutMs: number): Promise<boolean> {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      if (!this.processIsAlive(pid)) return true;
-      await Bun.sleep(POLL_MS);
-    }
-    return !this.processIsAlive(pid);
-  }
-
-  private async waitForSocket(child: AgentProcess, exited: () => boolean): Promise<Awaited<ReturnType<typeof fs.lstat>>> {
-    const deadline = Date.now() + this.startTimeoutMs;
-    while (Date.now() < deadline) {
-      if (exited()) throw new Error("managed SSH agent exited before its socket became ready");
-      try {
-        const stats = await fs.lstat(this.socketPath);
-        if (stats.isSymbolicLink() || !stats.isSocket()) throw new Error("managed SSH agent created an unsafe socket path");
-        if (typeof process.getuid === "function" && stats.uid !== process.getuid()) {
-          throw new Error("managed SSH agent socket has the wrong owner");
-        }
-        if ((stats.mode & 0o077) !== 0) throw new Error("managed SSH agent socket has unsafe permissions");
-        return stats;
-      } catch (error) {
-        if (!isMissing(error)) throw error;
-      }
-      await Bun.sleep(POLL_MS);
-    }
-    try {
-      child.kill("SIGTERM");
-    } catch {
-      // The child may have exited at the timeout boundary.
-    }
-    throw new Error("managed SSH agent did not become ready before the timeout");
+    await assertSocket(this.socketPath, record.agentSocket);
+    await assertSocket(this.controlSocketPath, record.controlSocket);
+    await this.request(record, "stop");
+    await this.waitForAllArtifactsToDisappear(record);
+    await this.assertNoGuardianQuarantines();
   }
 
   shutdown(): Promise<void> {
-    this.stopping ??= this.stopOnce().finally(() => {
-      this.stopping = undefined;
-    });
-    return this.stopping;
+    return this.enqueue(() => this.stopOnce());
   }
 
   private async stopOnce(): Promise<void> {
-    if (this.starting) await this.starting.catch(() => undefined);
-    if (this.artifactCleanup) await this.artifactCleanup;
-    const child = this.process;
     const expected = this.ownership;
-    if (!child || !expected) return;
-
+    if (!expected) return;
     const record = await readOwnership(this.ownershipPath);
-    const socket = await fs.lstat(this.socketPath).catch(error => isMissing(error) ? undefined : Promise.reject(error));
-    if (
-      !record
-      || record.nonce !== expected.nonce
-      || record.pid !== child.pid
-      || !socket?.isSocket()
-      || Number(socket.dev) !== expected.socketDevice
-      || Number(socket.ino) !== expected.socketInode
-    ) {
-      throw new Error("refusing to signal an SSH agent whose ownership cannot be proven");
-    }
-
-    try {
-      child.kill("SIGTERM");
-    } catch {
-      // An owned child can exit between ownership validation and signaling.
-    }
-    if (!(await this.waitForExit(child, this.stopTimeoutMs))) {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        // The child may have exited at the grace-period boundary.
+    if (!record) {
+      if (await this.waitForAllArtifactsToDisappear(expected, false)) {
+        this.ownership = undefined;
+        return;
       }
-      if (!(await this.waitForExit(child, this.stopTimeoutMs))) {
-        throw new Error("managed SSH agent did not exit after SIGKILL");
-      }
+      throw new Error("refusing to stop an SSH agent whose ownership cannot be proven");
     }
-    this.process = undefined;
+    if (JSON.stringify(record) !== JSON.stringify(expected)) {
+      throw new Error("refusing to stop an SSH agent whose ownership cannot be proven");
+    }
+    await assertSocket(this.socketPath, record.agentSocket);
+    await assertSocket(this.controlSocketPath, record.controlSocket);
+    await this.request(record, "stop");
+    await this.waitForAllArtifactsToDisappear(record);
     this.ownership = undefined;
-    await this.removeOwnedArtifacts(expected);
   }
 
-  private async waitForExit(child: AgentProcess, timeoutMs: number): Promise<boolean> {
-    return Promise.race([
-      child.exited.then(() => true),
-      Bun.sleep(timeoutMs).then(() => false),
-    ]);
-  }
-
-  private async terminateStartedChild(child: AgentProcess): Promise<void> {
-    try {
-      child.kill("SIGTERM");
-    } catch {
-      return;
+  private async validateRunning(expected: SshAgentOwnership): Promise<void> {
+    const record = await readOwnership(this.ownershipPath);
+    if (!record || JSON.stringify(record) !== JSON.stringify(expected)) {
+      throw new Error("SSH guardian ownership cannot be proven");
     }
-    if (await this.waitForExit(child, this.stopTimeoutMs)) return;
-    try {
-      child.kill("SIGKILL");
-    } catch {
-      return;
+    await assertSocket(this.socketPath, expected.agentSocket);
+    await assertSocket(this.controlSocketPath, expected.controlSocket);
+    await this.request(expected, "status");
+    const current = await readOwnership(this.ownershipPath);
+    if (!current || JSON.stringify(current) !== JSON.stringify(expected)) {
+      throw new Error("SSH guardian ownership changed during status check");
     }
-    await this.waitForExit(child, this.stopTimeoutMs);
+    await assertSocket(this.socketPath, expected.agentSocket);
+    await assertSocket(this.controlSocketPath, expected.controlSocket);
   }
 
-  private async removeOwnedArtifacts(expected: AgentOwnership | undefined): Promise<void> {
-    if (expected) {
-      const record = await readOwnership(this.ownershipPath);
-      if (record && (record.nonce !== expected.nonce || record.pid !== expected.pid)) {
-        throw new Error("refusing to remove a replaced SSH agent ownership record");
+  private async request(record: SshAgentOwnership, command: GuardianCommand): Promise<void> {
+    const challenge = randomBytes(32).toString("hex");
+    await new Promise<void>(async (resolve, reject) => {
+      let settled = false;
+      let client: Bun.Socket<{ input: string; bytes: number }> | undefined;
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try { client?.terminate(); } catch { /* The socket may already be closed. */ }
+        error ? reject(error) : resolve();
+      };
+      const failed = () => finish(new Error("SSH guardian request failed"));
+      const timer = setTimeout(failed, this.stopTimeoutMs);
+      try {
+        client = await Bun.connect<{ input: string; bytes: number }>({
+          unix: this.controlSocketPath,
+          data: { input: "", bytes: 0 },
+          socket: {
+            open(socket) {
+              client = socket;
+              if (settled) { socket.terminate(); return; }
+              socket.write(`${JSON.stringify({ version: 1, command, challenge })}\n`);
+            },
+            data(socket, data) {
+              socket.data.bytes += data.byteLength;
+              if (socket.data.bytes > MAX_MESSAGE_BYTES) { failed(); return; }
+              socket.data.input += data.toString("utf8");
+              const newline = socket.data.input.indexOf("\n");
+              if (newline < 0) return;
+              try {
+                const response = JSON.parse(socket.data.input.slice(0, newline)) as Record<string, unknown>;
+                if (Object.keys(response).sort().join("\0") !== ["version", "command", "challenge", "mac"].sort().join("\0")
+                  || response.version !== 1 || response.command !== command || response.challenge !== challenge
+                  || typeof response.mac !== "string" || !/^[a-f0-9]{64}$/.test(response.mac)) { failed(); return; }
+                const supplied = Buffer.from(response.mac, "hex");
+                const expected = Buffer.from(guardianMac(record.nonce, command, challenge), "hex");
+                supplied.length === expected.length && timingSafeEqual(supplied, expected) ? finish() : failed();
+              } catch { failed(); }
+            },
+            close() { if (!settled) failed(); },
+            connectError() { failed(); },
+            error() { failed(); },
+          },
+        });
+        if (settled) client.terminate();
+      } catch {
+        failed();
       }
-      const socket = await fs.lstat(this.socketPath).catch(error => isMissing(error) ? undefined : Promise.reject(error));
-      if (socket && (Number(socket.dev) !== expected.socketDevice || Number(socket.ino) !== expected.socketInode)) {
-        throw new Error("refusing to remove a replaced SSH agent socket");
-      }
+    });
+  }
+
+  private quarantinePaths(record: SshAgentOwnership): string[] {
+    return [this.socketPath, this.controlSocketPath, this.ownershipPath]
+      .map(artifact => `${artifact}.${record.nonce}.quarantine`);
+  }
+
+  private async waitForAllArtifactsToDisappear(
+    record: SshAgentOwnership,
+    throwOnTimeout = true,
+  ): Promise<boolean> {
+    const deadline = Date.now() + this.stopTimeoutMs * 3;
+    let remaining: string[] = [];
+    const artifacts = [this.socketPath, this.controlSocketPath, this.ownershipPath, ...this.quarantinePaths(record)];
+    while (Date.now() < deadline) {
+      remaining = (await Promise.all(artifacts.map(async artifact => {
+        try { await fs.lstat(artifact); return artifact; } catch (error) { if (isMissing(error)) return undefined; throw error; }
+      }))).filter((artifact): artifact is string => artifact !== undefined);
+      if (remaining.length === 0) return true;
+      await Bun.sleep(POLL_MS);
     }
-    await fs.rm(this.socketPath, { force: true });
-    await fs.rm(this.ownershipPath, { force: true });
+    if (!throwOnTimeout) return false;
+    throw new Error(`SSH guardian artifacts did not disappear before the timeout: ${remaining.map(item => path.basename(item)).join(", ")}`);
+  }
+
+  private async assertNoGuardianQuarantines(): Promise<void> {
+    const entries = await fs.readdir(this.options.runtimeDirectory);
+    const quarantine = /^(?:ssh-agent\.sock|ssh-agent-control\.sock|ssh-agent\.json)\.[a-f0-9]{64}\.quarantine$/;
+    if (entries.some(entry => quarantine.test(entry))) {
+      throw new Error("SSH guardian quarantine artifacts require manual recovery");
+    }
+  }
+
+  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.lifecycle.then(operation, operation);
+    this.lifecycle = result.then(() => undefined, () => undefined);
+    return result;
   }
 }

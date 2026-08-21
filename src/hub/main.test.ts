@@ -4,6 +4,8 @@ import {
   applyCredentialRuntimeAtomically,
   createCredentialRuntimeGate,
   passwordFromPipedInput,
+  reconcileManagedSshAgent,
+  recoverPersistedSshGuardian,
   shutdownHub,
   stopHubRuntime,
 } from "./main";
@@ -174,6 +176,47 @@ describe("applyCredentialRuntimeAtomically", () => {
     ]);
     expect(activePaths).toBe("old");
     expect(manager).toBe("old");
+  });
+
+  test("forced restoration does not restart SSH for unrelated or key-tool failures when the agent path is unchanged", async () => {
+    for (const changedTool of ["gpg", "git", "ssh-keygen", "ssh-add"]) {
+      let shutdowns = 0;
+      const agent = { async shutdown() { shutdowns += 1; } };
+      let currentAgent: typeof agent | null = agent;
+      let currentAgentPath: string | null = "/usr/bin/ssh-agent";
+      const oldPaths: Record<string, string> = { agent: "/usr/bin/ssh-agent", [changedTool]: "old" };
+      const newPaths: Record<string, string> = { agent: "/usr/bin/ssh-agent", [changedTool]: "new" };
+      const apply = async (paths: Record<string, string>, force: boolean) => {
+        const reconciled = await reconcileManagedSshAgent({
+          agent: currentAgent,
+          agentPath: currentAgentPath,
+          nextAgentPath: paths.agent!,
+          create: () => agent,
+        });
+        currentAgent = reconciled.agent;
+        currentAgentPath = reconciled.agentPath;
+        if (!force) throw new Error(`${changedTool} runtime application failed`);
+      };
+
+      await expect(applyCredentialRuntimeAtomically(oldPaths, newPaths, apply))
+        .rejects.toThrow(`${changedTool} runtime application failed`);
+      expect(shutdowns).toBe(0);
+      expect(currentAgent).toBe(agent);
+    }
+  });
+});
+
+describe("SSH guardian runtime initialization", () => {
+  test("proactively recovers persisted guardian state without requiring an ssh-agent executable", async () => {
+    const calls: string[] = [];
+    await recoverPersistedSshGuardian(
+      { runtimeDirectory: "/private/runtime", uatuArgv: ["uatu"] },
+      options => {
+        expect(options).toEqual({ runtimeDirectory: "/private/runtime", uatuArgv: ["uatu"] });
+        return { async recover() { calls.push("recover"); } };
+      },
+    );
+    expect(calls).toEqual(["recover"]);
   });
 });
 

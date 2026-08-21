@@ -200,6 +200,30 @@ export async function applyCredentialRuntimeAtomically<State>(
   }
 }
 
+export async function reconcileManagedSshAgent<Agent extends { shutdown(): Promise<void> }>(options: {
+  agent: Agent | null;
+  agentPath: string | null;
+  nextAgentPath: string | null;
+  create(path: string): Agent;
+}): Promise<{ agent: Agent | null; agentPath: string | null }> {
+  if (options.agentPath === options.nextAgentPath) {
+    return { agent: options.agent, agentPath: options.agentPath };
+  }
+  await options.agent?.shutdown();
+  return {
+    agent: options.nextAgentPath ? options.create(options.nextAgentPath) : null,
+    agentPath: options.nextAgentPath,
+  };
+}
+
+export async function recoverPersistedSshGuardian(
+  options: { runtimeDirectory: string; uatuArgv: string[] },
+  create: (options: { runtimeDirectory: string; uatuArgv: string[] }) => { recover(): Promise<void> }
+    = recoveryOptions => new ManagedSshAgent(recoveryOptions),
+): Promise<void> {
+  await create(options).recover();
+}
+
 export async function runHub(options: RunHubOptions): Promise<void> {
   const config = await loadHubConfig(options.configPath);
   if (options.port !== undefined) {
@@ -207,10 +231,15 @@ export async function runHub(options: RunHubOptions): Promise<void> {
   }
 
   const stateRoot = config.stateDir ?? resolveHubStateRoot();
+  const uatuArgv = resolveUatuArgv();
   await ensureStateDir(stateRoot);
   const stateLease = await acquireHubStateLease(stateRoot);
   try {
     await ensureCredentialStateDirs(stateRoot);
+  await recoverPersistedSshGuardian({
+    runtimeDirectory: credentialRuntimePath(stateRoot),
+    uatuArgv,
+  });
   const sessionStore = new HubSessionStore(sessionsPath(stateRoot));
   await sessionStore.load();
 
@@ -234,6 +263,7 @@ export async function runHub(options: RunHubOptions): Promise<void> {
   );
   await Promise.all([credentialTokens.load(), credentialTools.load()]);
   let sshAgent: ManagedSshAgent | null = null;
+  let sshAgentExecutable: string | null = null;
   let sshCredentials: SshCredentialService | null = null;
   const sshExplicitLocks = new Set<string>();
   const sshRuntime = createCredentialRuntimeGate(() => sshCredentials);
@@ -254,17 +284,25 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     const sshChanged = force || (["ssh-agent", "ssh-keygen", "ssh-add"] as const).some(tool => paths.get(tool) !== activePaths.get(tool));
     if (sshChanged) {
       await sshRuntime.replace(async () => {
-        const agentPath = paths.get("ssh-agent");
+        const agentPath = paths.get("ssh-agent") ?? null;
         const keygenPath = paths.get("ssh-keygen");
         const addPath = paths.get("ssh-add");
         // Only an ssh-agent change restarts the agent. A key-tool override
         // rebuilds the service around the running agent: restarting would
         // drop every loaded identity, and encrypted keys cannot be restored
         // without their discarded passphrases.
-        if (force || agentPath !== activePaths.get("ssh-agent")) {
-          await sshAgent?.shutdown();
-          sshAgent = agentPath ? new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(stateRoot), sshAgentPath: agentPath }) : null;
-        }
+        const reconciled = await reconcileManagedSshAgent({
+          agent: sshAgent,
+          agentPath: sshAgentExecutable,
+          nextAgentPath: agentPath,
+          create: sshAgentPath => new ManagedSshAgent({
+            runtimeDirectory: credentialRuntimePath(stateRoot),
+            sshAgentPath,
+            uatuArgv,
+          }),
+        });
+        sshAgent = reconciled.agent;
+        sshAgentExecutable = reconciled.agentPath;
         sshCredentials = sshAgent && keygenPath && addPath ? new SshCredentialService({
           secretsDirectory: credentialSecretsPath(stateRoot),
           runtimeDirectory: credentialRuntimePath(stateRoot),
@@ -381,7 +419,7 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     sshPath: () => activePaths.get("ssh") ?? undefined,
     sshPublicKeyPath: credentialId => path.join(credentialSecretsPath(stateRoot), `${credentialId}.key.pub`),
     sshCredentialUsable: sshUsable,
-    uatuArgv: resolveUatuArgv(),
+    uatuArgv,
     runExclusive: operation => sshRuntime.run(() => operation()),
   });
   const server = startHubServer({
