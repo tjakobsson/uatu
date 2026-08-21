@@ -220,7 +220,9 @@ export class CredentialApi {
   async unlock(credentialId: string, body: JsonObject) {
     fields(body, ["passphrase"]);
     const credential = this.credential(credentialId);
-    const passphrase = secret(body.passphrase, "passphrase");
+    // An explicitly locked unencrypted SSH key unlocks with the empty
+    // passphrase; OpenPGP unlock keeps requiring a nonempty secret.
+    const passphrase = secret(body.passphrase, "passphrase", credential.type === "ssh");
     if (credential.type === "ssh") await this.requireSsh().unlock(credentialId, passphrase);
     else if (credential.type === "openpgp") {
       const failure = (await this.services.openpgp.unlock(credentialId, passphrase)).find(result => result.status === "unavailable");

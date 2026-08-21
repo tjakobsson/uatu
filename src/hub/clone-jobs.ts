@@ -222,26 +222,35 @@ export class CloneJobManager {
     return job?.owner === owner ? job : undefined;
   }
 
+  // A selected SSH clone uses the managed agent's socket and loaded
+  // identity for its whole process lifetime; holding the credential runtime
+  // section that long defers an ssh-agent override until the clone exits.
+  private withCredentialRuntime<T>(job: Job, operation: () => Promise<T>): Promise<T> {
+    return job.credential?.process.type === "ssh" ? this.credentials.runExclusive(operation) : operation();
+  }
+
   private async run(job: Job): Promise<void> {
     try {
+      let exitCode: number;
       try {
-        job.process = this.processFactory.start({
-          url: job.url,
-          target: job.target,
-          credential: job.credential?.process,
-          onOutput: output => {
-            if (!job.result) {
-              this.emit(job, "output", { output });
-              this.resetInactivity(job);
-            }
-          },
+        exitCode = await this.withCredentialRuntime(job, () => {
+          job.process = this.processFactory.start({
+            url: job.url,
+            target: job.target,
+            credential: job.credential?.process,
+            onOutput: output => {
+              if (!job.result) {
+                this.emit(job, "output", { output });
+                this.resetInactivity(job);
+              }
+            },
+          });
+          return job.process.exited;
         });
       } catch (error) {
         await this.finish(job, { status: "clone-failed", target: job.target, error: errorText(error) });
         return;
       }
-
-      const exitCode = await job.process.exited;
       this.clearTimer(job.inactivityTimer);
       job.inactivityTimer = undefined;
       if (job.stop) {

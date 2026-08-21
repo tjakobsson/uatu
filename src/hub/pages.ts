@@ -1151,7 +1151,7 @@ function unlockForWorkspace(workspace, credentials) {
       const input = document.createElement("input");
       input.type = "password";
       input.autocomplete = "off";
-      input.required = true;
+      input.required = credential.type !== "ssh";
       label.appendChild(input);
       form.appendChild(label);
       return { credential, input };
@@ -1651,9 +1651,10 @@ cloneForm.onsubmit = async event => {
   setClonePhase("cloning", "Starting clone…");
   try {
     if (selectedCredential && isCredentialLocked(selectedCredential)) {
+      // Empty is a valid unlock for an unencrypted SSH key; the server
+      // rejects an empty passphrase whenever the key actually needs one.
       const passphrase = cloneUnlockPassphrase.value;
       cloneUnlockPassphrase.value = "";
-      if (!passphrase) throw new Error("Unlock the selected credential before cloning.");
       await api(credentialPath + "/" + encodeURIComponent(selectedCredential.id) + "/unlock", { passphrase });
       await loadCloneCredentials();
     }

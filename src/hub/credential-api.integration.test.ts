@@ -576,6 +576,36 @@ describe("credential API integration", () => {
     expect(f.metadata.snapshot().assignments).toEqual([]);
   });
 
+  test("permits an empty unlock passphrase for SSH credentials only", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));
+    roots.push(root);
+    const f = await fixture(root);
+    const origin = `http://127.0.0.1:${f.server.port}`;
+    const cookie = await login(origin, "alice", "alice password");
+    await f.metadata.create({
+      name: "Unencrypted key",
+      type: "ssh",
+      enabled: true,
+      capabilities: ["ssh-authentication"],
+      metadata: { publicKey: "ssh-ed25519 AAAA uatu", fingerprint: "SHA256:empty" },
+    }, () => "ssh-empty");
+    await f.metadata.create({
+      name: "Signing key",
+      type: "openpgp",
+      enabled: true,
+      capabilities: ["openpgp-signing"],
+      metadata: { publicKey: "public", fingerprint: "B".repeat(40) },
+    }, () => "pgp-empty");
+
+    // Empty is a valid SSH unlock (an explicitly locked unencrypted key);
+    // validation passes and the request reaches the absent SSH service.
+    const ssh = await post(origin, cookie, "/api/hub/credentials/ssh-empty/unlock", { passphrase: "" });
+    expect(ssh.status).toBe(503);
+    // OpenPGP unlock keeps requiring a nonempty passphrase.
+    const openpgp = await post(origin, cookie, "/api/hub/credentials/pgp-empty/unlock", { passphrase: "" });
+    expect(openpgp.status).toBe(400);
+  });
+
   test("returns an error when OpenPGP unlock does not make the key ready", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));
     roots.push(root);

@@ -66,6 +66,11 @@ export interface CloneCredentialResolver {
   resolve(remote: string, credentialId?: string): Promise<ResolvedCloneCredential | undefined>;
   assign(workspaceId: string, credential: ResolvedCloneCredential): Promise<void>;
   unassign(workspaceId: string, credential: ResolvedCloneCredential): Promise<void>;
+  // Holds the credential runtime steady for the duration of the operation —
+  // a selected SSH clone depends on the managed agent's socket and loaded
+  // identity for its whole process lifetime, so an ssh-agent override
+  // defers until active selected clones exit.
+  runExclusive<T>(operation: () => Promise<T>): Promise<T>;
 }
 
 export const EMPTY_CLONE_CREDENTIAL_RESOLVER: CloneCredentialResolver = {
@@ -75,6 +80,7 @@ export const EMPTY_CLONE_CREDENTIAL_RESOLVER: CloneCredentialResolver = {
   },
   async assign() {},
   async unassign() {},
+  runExclusive: operation => operation(),
 };
 
 type CloneRemote = { transport: "ssh" | "https" | "other"; host?: string };
@@ -125,6 +131,7 @@ export function createStoredCloneCredentialResolver(options: {
   sshPublicKeyPath: (credentialId: string) => string;
   sshCredentialUsable: (credentialId: string) => Promise<boolean>;
   uatuArgv: string[];
+  runExclusive?: <T>(operation: () => Promise<T>) => Promise<T>;
 }): CloneCredentialResolver {
   const credential = (credentialId: string): CredentialRecord => {
     const found = options.metadata.snapshot().credentials.find(item => item.id === credentialId);
@@ -133,6 +140,7 @@ export function createStoredCloneCredentialResolver(options: {
     return found;
   };
   return {
+    runExclusive: options.runExclusive ?? (operation => operation()),
     async resolve(remote, credentialId) {
       const parsed = parseCloneRemote(remote);
       if (!credentialId) return undefined;

@@ -170,6 +170,7 @@ beforeAll(async () => {
         const index = managedCloneAssignments.indexOf(workspaceId);
         if (index >= 0) managedCloneAssignments.splice(index, 1);
       },
+      runExclusive: operation => operation(),
     },
   });
   server = startHubServer({ config, registry, sessions, sessionStore, personalState, cloneJobs });

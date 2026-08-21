@@ -110,6 +110,7 @@ function fixture(overrides: { maxReplayBytes?: number; maxInputBytes?: number; i
   const stopped: string[] = [];
   const assigned: string[] = [];
   const unassigned: string[] = [];
+  const runtimeSections: string[] = [];
   let registerError: Error | undefined;
   let removeError: Error | undefined;
   let startError: Error | undefined;
@@ -185,6 +186,14 @@ function fixture(overrides: { maxReplayBytes?: number; maxInputBytes?: number; i
         if (unassignError) throw unassignError;
         unassigned.push(workspaceId);
       },
+      async runExclusive<T>(operation: () => Promise<T>) {
+        runtimeSections.push("enter");
+        try {
+          return await operation();
+        } finally {
+          runtimeSections.push("exit");
+        }
+      },
     },
     timer,
     id: () => `job-${++id}`,
@@ -195,7 +204,7 @@ function fixture(overrides: { maxReplayBytes?: number; maxInputBytes?: number; i
     maxInputBytes: overrides.maxInputBytes ?? 20,
   });
   return {
-    manager, timer, processes, starts, registered, removed, started, stopped, assigned, unassigned, sessions,
+    manager, timer, processes, starts, registered, removed, started, stopped, assigned, unassigned, sessions, runtimeSections,
     failRegister(error: Error) { registerError = error; },
     failRemove(error: Error) { removeError = error; },
     failStart(error: Error) { startError = error; },
@@ -338,6 +347,31 @@ describe("CloneJobManager state machine", () => {
     expect(f.removed).toEqual(["repo"]);
     expect(f.registered.size).toBe(0);
     expect(capture(f.manager, "alice", jobId).at(-1)?.data).toMatchObject({ status: "start-failed" });
+  });
+
+  test("a selected SSH clone holds the credential runtime section for its whole process lifetime", async () => {
+    const f = fixture();
+    const { jobId } = f.manager.create("alice", "git@github.com:acme/repo.git", "/tmp/gated", {
+      credential: selectedCredential,
+    });
+    await tick();
+    // The section opened before the spawn and stays held while the clone
+    // runs, so an ssh-agent override defers instead of retiring the socket
+    // mid-clone.
+    expect(f.runtimeSections).toEqual(["enter"]);
+    expect(f.starts).toHaveLength(1);
+    f.processes[0].exit(0);
+    await tick();
+    expect(f.runtimeSections).toEqual(["enter", "exit"]);
+    expect(capture(f.manager, "alice", jobId).at(-1)?.data).toMatchObject({ status: "succeeded" });
+
+    // Unselected clones never enter the section.
+    const plain = fixture();
+    plain.manager.create("alice", "remote", "/tmp/ungated");
+    await tick();
+    plain.processes[0].exit(0);
+    await tick();
+    expect(plain.runtimeSections).toEqual([]);
   });
 
   test("a queued assignment observes failed-start rollback, not the doomed registration", async () => {

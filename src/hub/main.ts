@@ -271,6 +271,7 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     sshPublicKeyPath: credentialId => path.join(credentialSecretsPath(stateRoot), `${credentialId}.key.pub`),
     sshCredentialUsable: sshUsable,
     uatuArgv: resolveUatuArgv(),
+    runExclusive: operation => sshRuntime.run(() => operation()),
   });
   const server = startHubServer({
     config,
