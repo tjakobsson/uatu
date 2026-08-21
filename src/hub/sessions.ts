@@ -113,9 +113,15 @@ export class SessionManager {
         workspace = found;
         const backend = this.backends[workspace.backend];
         if (!backend) throw new Error(`no backend registered for '${workspace.backend}'`);
-        const credentialContext = await this.credentials.resolve(workspace);
-        session = await backend.start(workspace, sessionBasePath(workspace.id), credentialContext);
-        this.runningCredentialRevisions.set(workspace.id, credentialContext.revision);
+        // One credential-runtime section spans resolution AND spawn, so a
+        // tool-override replacement cannot retire the agent between the
+        // gated usability check and the child capturing its socket.
+        session = await this.credentials.runExclusive(async () => {
+          const credentialContext = await this.credentials.resolve(workspace);
+          const started = await backend.start(workspace, sessionBasePath(workspace.id), credentialContext);
+          this.runningCredentialRevisions.set(workspace.id, credentialContext.revision);
+          return started;
+        });
       } catch (error) {
         const callbacks = this.startFailureCallbacks.get(workspaceId) ?? [];
         for (let index = 0; index < callbacks.length; index += 1) {

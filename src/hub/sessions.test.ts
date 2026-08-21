@@ -75,6 +75,7 @@ describe("SessionManager credential contexts", () => {
     let revision = "before";
     const resolver: CredentialContextResolver = {
       revision: () => revision,
+      runExclusive: operation => operation(),
       resolve: async (): Promise<ResolvedCredentialContext> => ({
         ...structuredClone(EMPTY_RESOLVED_CREDENTIAL_CONTEXT),
         revision,
@@ -96,6 +97,44 @@ describe("SessionManager credential contexts", () => {
     expect(sessions.credentialRestartRequired("project")).toBe(true);
     await sessions.stop("project");
     expect(sessions.credentialRestartRequired("project")).toBe(false);
+  });
+});
+
+describe("SessionManager credential runtime section", () => {
+  test("holds one runtime section across context resolution and the spawn", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-runtime-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    await registry.register("/srv/workspaces/sectioned");
+    const events: string[] = [];
+    const resolver: CredentialContextResolver = {
+      revision: () => "steady",
+      runExclusive: async operation => {
+        events.push("enter");
+        try {
+          return await operation();
+        } finally {
+          events.push("exit");
+        }
+      },
+      resolve: async () => {
+        events.push("resolve");
+        return structuredClone(EMPTY_RESOLVED_CREDENTIAL_CONTEXT);
+      },
+    };
+    const backend: SessionBackend = {
+      start: async workspace => {
+        events.push("spawn");
+        return fakeSession(workspace.id);
+      },
+    };
+    const sessions = new SessionManager(registry, { local: backend }, resolver);
+
+    await sessions.start("sectioned");
+    // An agent replacement drains gate sections, so spawning inside the
+    // section means the child captures a socket no replacement has retired.
+    expect(events).toEqual(["enter", "resolve", "spawn", "exit"]);
   });
 });
 

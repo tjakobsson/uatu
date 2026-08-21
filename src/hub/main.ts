@@ -3,6 +3,7 @@
 // terminates every child before the hub exits. cli.ts dispatches here for
 // `uatu hub` and `uatu hub hash-password`.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import path from "node:path";
 
 import { LocalProcessBackend, resolveUatuArgv } from "./backend";
@@ -86,21 +87,34 @@ export function createCredentialRuntimeGate<Service>(current: () => Service): {
   let pendingReplacements = 0;
   let replacements: Promise<void> = Promise.resolve();
   const operations = new Set<Promise<unknown>>();
+  // Reentrancy: an operation running inside the gate (a workspace start
+  // section) may issue further gated calls (usability checks); those must
+  // piggyback on the enclosing operation rather than wait on a pending
+  // replacement that is itself draining the encloser — a deadlock.
+  const withinGate = new AsyncLocalStorage<true>();
   const replaceNow = async (swap: () => Promise<void>): Promise<void> => {
     while (operations.size > 0) await Promise.all([...operations]);
     await swap();
   };
   return {
-    async run(operation) {
-      while (pendingReplacements > 0) await replacements;
-      const running = operation(current());
-      const settled = running.catch(() => undefined);
-      operations.add(settled);
-      try {
-        return await running;
-      } finally {
-        operations.delete(settled);
-      }
+    run(operation) {
+      if (withinGate.getStore()) return operation(current());
+      return withinGate.run(true, async () => {
+        while (pendingReplacements > 0) await replacements;
+        // Registered before the operation's synchronous prefix runs, so a
+        // replacement arriving at any point sees this section and drains it.
+        let release!: () => void;
+        const active = new Promise<void>(resolve => {
+          release = resolve;
+        });
+        operations.add(active);
+        try {
+          return await operation(current());
+        } finally {
+          operations.delete(active);
+          release();
+        }
+      });
     },
     replace(swap) {
       pendingReplacements += 1;
@@ -239,6 +253,7 @@ export async function runHub(options: RunHubOptions): Promise<void> {
       return readiness.every(result => result.status !== "unavailable");
     },
     tools: contextTools,
+    runExclusive: operation => sshRuntime.run(() => operation()),
   });
   const sessions = new SessionManager(registry, { local: new LocalProcessBackend() }, credentialContexts);
   const cloneCredentials = createStoredCloneCredentialResolver({

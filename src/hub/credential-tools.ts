@@ -29,6 +29,20 @@ const VERSION_ARGUMENTS: Record<CredentialTool, string[]> = {
 
 const USAGE_VERSION_TOOLS = new Set<CredentialTool>(["ssh-agent", "ssh-add", "ssh-keygen"]);
 
+// Exit status alone accepts unrelated executables (/bin/false exits 1, which
+// the usage probes tolerate). The probe output must also identify the tool.
+const TOOL_BANNERS: Record<CredentialTool, RegExp> = {
+  ssh: /OpenSSH/i,
+  "ssh-agent": /ssh-agent/i,
+  "ssh-add": /ssh-add/i,
+  "ssh-keygen": /ssh-keygen/i,
+  gpg: /GnuPG/i,
+  gpgconf: /GnuPG/i,
+  git: /git version/i,
+  gh: /gh version/i,
+  glab: /glab/i,
+};
+
 export type ToolDiscovery = {
   tool: CredentialTool;
   path: string | null;
@@ -216,6 +230,8 @@ export async function probeCredentialTool(
     results.push({ layer: "version", status: "unavailable", message: "Version probe exceeded the output limit." });
   } else if (!acceptedExit || (!version && !USAGE_VERSION_TOOLS.has(discovery.tool))) {
     results.push({ layer: "version", status: "unavailable", message: "Executable did not report a compatible version." });
+  } else if (!TOOL_BANNERS[discovery.tool].test(probe.output)) {
+    results.push({ layer: "version", status: "unavailable", message: "Executable did not identify as the configured tool." });
   } else if (discovery.tool === "gh" && !providerCliVersionSupported("github", version)) {
     results.push({ layer: "version", status: "unavailable", message: "GitHub CLI 2.0 or newer is required." });
   } else if (discovery.tool === "glab" && !providerCliVersionSupported("gitlab", version)) {

@@ -89,6 +89,22 @@ describe("createCredentialRuntimeGate", () => {
     expect(order).toEqual(["refresh", "shutdown", "late:none"]);
   });
 
+  test("a nested run inside a gate section piggybacks instead of deadlocking on a pending replacement", async () => {
+    let service = "old";
+    const gate = createCredentialRuntimeGate(() => service);
+    const outer = gate.run(async () => {
+      // Pending replacement drains this very section; a nested gated call
+      // (a usability check inside a workspace start) must piggyback on it.
+      const replacement = gate.replace(async () => { service = "new"; });
+      const nested = await gate.run(async captured => captured);
+      return { nested, replacement };
+    });
+    const { nested, replacement } = await outer;
+    await replacement;
+    expect(nested).toBe("old");
+    expect(await gate.run(async captured => captured)).toBe("new");
+  });
+
   test("a rejected operation neither wedges the gate nor blocks replacement", async () => {
     let service = "one";
     const gate = createCredentialRuntimeGate(() => service);

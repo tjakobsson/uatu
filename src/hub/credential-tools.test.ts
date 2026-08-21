@@ -139,9 +139,9 @@ describe("credential tool probes", () => {
     });
   });
 
-  test("accepts OpenSSH usage probes that produce no version text", async () => {
+  test("accepts OpenSSH usage probes that produce a usage banner but no version text", async () => {
     const { filePath } = await executable("ssh-add");
-    await writeFile(filePath, "#!/bin/sh\nexit 2\n", { mode: 0o700 });
+    await writeFile(filePath, "#!/bin/sh\nprintf 'usage: ssh-add [-cDdKkLlqvXx]\\n' >&2\nexit 2\n", { mode: 0o700 });
     expect(await probeCredentialTool({ tool: "ssh-add", path: filePath, source: "override" })).toEqual({
       tool: "ssh-add",
       path: filePath,
@@ -152,6 +152,25 @@ describe("credential tool probes", () => {
         { layer: "runtime", status: "not-applicable", message: "Runtime readiness is tested when the capability is used." },
       ],
       guidance: null,
+    });
+  });
+
+  test("rejects executables that do not identify as the configured tool", async () => {
+    // /bin/false-alike: tolerated exit status, no banner.
+    const silent = await executable("ssh-agent");
+    await writeFile(silent.filePath, "#!/bin/sh\nexit 1\n", { mode: 0o700 });
+    expect((await probeCredentialTool({ tool: "ssh-agent", path: silent.filePath, source: "override" })).results).toContainEqual({
+      layer: "version",
+      status: "unavailable",
+      message: "Executable did not identify as the configured tool.",
+    });
+    // Unrelated exit-zero executable with unrelated output.
+    const unrelated = await executable("git");
+    await writeFile(unrelated.filePath, "#!/bin/sh\nprintf 'something else 1.0\\n'\n", { mode: 0o700 });
+    expect((await probeCredentialTool({ tool: "git", path: unrelated.filePath, source: "override" })).results).toContainEqual({
+      layer: "version",
+      status: "unavailable",
+      message: "Executable did not identify as the configured tool.",
     });
   });
 

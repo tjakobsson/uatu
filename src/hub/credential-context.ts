@@ -45,6 +45,11 @@ export type ResolvedCredentialContext = {
 export interface CredentialContextResolver {
   resolve(workspace: WorkspaceEntry): Promise<ResolvedCredentialContext>;
   revision(workspaceId: string): string;
+  // Holds the credential runtime steady for the duration of the operation —
+  // the session manager wraps resolve-plus-spawn in one section so an
+  // ssh-agent override cannot retire the socket and identities between the
+  // usability check and the child capturing them.
+  runExclusive<T>(operation: () => Promise<T>): Promise<T>;
 }
 
 export type CloneCredentialProcessContext =
@@ -209,6 +214,7 @@ export const EMPTY_RESOLVED_CREDENTIAL_CONTEXT: ResolvedCredentialContext = {
 export const EMPTY_CREDENTIAL_CONTEXT_RESOLVER: CredentialContextResolver = {
   resolve: async () => structuredClone(EMPTY_RESOLVED_CREDENTIAL_CONTEXT),
   revision: () => "none",
+  runExclusive: operation => operation(),
 };
 
 export type StoredCredentialContextResolverOptions = {
@@ -221,6 +227,7 @@ export type StoredCredentialContextResolverOptions = {
   sshCredentialUsable: (credentialId: string) => Promise<boolean>;
   openPgpCredentialUsable: (credentialId: string) => Promise<boolean>;
   tools: ResolvedCredentialContext["tools"];
+  runExclusive?: <T>(operation: () => Promise<T>) => Promise<T>;
 };
 
 function workspaceState(options: StoredCredentialContextResolverOptions, workspaceId: string): {
@@ -249,6 +256,7 @@ export function createStoredCredentialContextResolver(
 ): CredentialContextResolver {
   return {
     revision: workspaceId => contextRevision(options, workspaceId),
+    runExclusive: options.runExclusive ?? (operation => operation()),
     async resolve(workspace) {
       const { assignments, credentials } = workspaceState(options, workspace.id);
       const byId = new Map(credentials.map(credential => [credential.id, credential]));
