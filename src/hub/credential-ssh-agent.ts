@@ -112,7 +112,7 @@ export class ManagedSshAgent {
   private async startOnce(): Promise<string> {
     if (this.artifactCleanup) await this.artifactCleanup;
     await privateDirectory(this.options.runtimeDirectory);
-    await this.recoverRecordWithoutSocket();
+    await this.recoverRecordedAgent();
     try {
       await fs.lstat(this.socketPath);
       throw new Error("SSH agent socket already exists and is not owned by this Hub process");
@@ -169,28 +169,72 @@ export class ManagedSshAgent {
     }
   }
 
-  private async recoverRecordWithoutSocket(): Promise<void> {
+  private async recoverRecordedAgent(): Promise<void> {
     const record = await readOwnership(this.ownershipPath);
     if (!record) return;
+    let socket;
     try {
-      await fs.lstat(this.socketPath);
-      throw new Error("stale SSH agent state includes an unverified socket; remove it only after verifying its owner");
+      socket = await fs.lstat(this.socketPath);
     } catch (error) {
       if (!isMissing(error)) throw error;
     }
-    let live = false;
-    try {
-      process.kill(record.pid, 0);
-      live = true;
-    } catch (error) {
-      live = (error as NodeJS.ErrnoException).code === "EPERM";
-    }
-    if (live) {
+
+    if (!socket) {
+      if (!this.processIsAlive(record.pid)) {
+        await fs.rm(this.ownershipPath);
+        return;
+      }
       throw new Error(
         `SSH agent ownership record names live process ${record.pid}, but its socket is missing; stop that process or remove the record after verifying it is stale`,
       );
     }
-    await fs.rm(this.ownershipPath);
+
+    if (
+      !socket.isSocket()
+      || (socket.mode & 0o077) !== 0
+      || (typeof process.getuid === "function" && socket.uid !== process.getuid())
+      || Number(socket.dev) !== record.socketDevice
+      || Number(socket.ino) !== record.socketInode
+    ) {
+      throw new Error("stale SSH agent socket does not match its private ownership record");
+    }
+
+    if (this.processIsAlive(record.pid)) {
+      await this.signalRecordedProcess(record.pid, "SIGTERM");
+      if (!(await this.waitForPidExit(record.pid, this.stopTimeoutMs))) {
+        await this.signalRecordedProcess(record.pid, "SIGKILL");
+        if (!(await this.waitForPidExit(record.pid, this.stopTimeoutMs))) {
+          throw new Error("recorded SSH agent did not exit after SIGKILL");
+        }
+      }
+    }
+    await this.removeOwnedArtifacts(record);
+  }
+
+  private processIsAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "EPERM";
+    }
+  }
+
+  private async signalRecordedProcess(pid: number, signal: NodeJS.Signals): Promise<void> {
+    try {
+      process.kill(pid, signal);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    }
+  }
+
+  private async waitForPidExit(pid: number, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (!this.processIsAlive(pid)) return true;
+      await Bun.sleep(POLL_MS);
+    }
+    return !this.processIsAlive(pid);
   }
 
   private async waitForSocket(child: AgentProcess, exited: () => boolean): Promise<Awaited<ReturnType<typeof fs.lstat>>> {

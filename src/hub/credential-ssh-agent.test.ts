@@ -107,6 +107,46 @@ describe("ManagedSshAgent", () => {
     expect(JSON.parse(await readFile(ownershipPath, "utf8"))).toEqual(record);
   });
 
+  test("retires a surviving recorded agent before starting after a Hub restart", async () => {
+    const { runtime, executable } = await fixture();
+    const socketPath = path.join(runtime, "ssh-agent.sock");
+    const ownershipPath = path.join(runtime, "ssh-agent.json");
+    const survivor = Bun.spawn([executable, "-D", "-a", socketPath], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      env: { PATH: process.env.PATH ?? "", LANG: "C", LC_ALL: "C" },
+    });
+    try {
+      let socket;
+      for (let attempt = 0; attempt < 250; attempt += 1) {
+        socket = await lstat(socketPath).catch(() => undefined);
+        if (socket?.isSocket()) break;
+        await Bun.sleep(20);
+      }
+      if (!socket?.isSocket()) throw new Error("fixture SSH agent did not create its socket");
+      await writeFile(ownershipPath, JSON.stringify({
+        version: 1,
+        nonce: "previous-hub",
+        pid: survivor.pid,
+        socketDevice: Number(socket.dev),
+        socketInode: Number(socket.ino),
+      }), { mode: 0o600 });
+
+      const replacement = new ManagedSshAgent({ runtimeDirectory: runtime, sshAgentPath: executable });
+      agents.push(replacement);
+      await replacement.start();
+
+      expect(processExists(survivor.pid)).toBe(false);
+      const replacementOwnership = JSON.parse(await readFile(ownershipPath, "utf8"));
+      expect(replacementOwnership.pid).not.toBe(survivor.pid);
+      expect(replacementOwnership.nonce).not.toBe("previous-hub");
+    } finally {
+      if (processExists(survivor.pid)) survivor.kill("SIGKILL");
+      await survivor.exited;
+    }
+  });
+
   test("removes owned artifacts after an unexpected agent exit and restarts", async () => {
     const { runtime, executable } = await fixture();
     const agent = new ManagedSshAgent({ runtimeDirectory: runtime, sshAgentPath: executable });
