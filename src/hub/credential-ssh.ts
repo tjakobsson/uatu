@@ -198,12 +198,17 @@ async function runSecretAskpass(options: {
   let secretPipe: Awaited<ReturnType<typeof fs.open>> | undefined;
   try {
     await fs.writeFile(askpassPath, "#!/bin/sh\nIFS= read -r secret < \"$UATU_SSH_ASKPASS_PIPE\"\nprintf '%s\\n' \"$secret\"\n", { mode: 0o700 });
-    const mkfifo = Bun.spawn(["/usr/bin/mkfifo", "-m", "600", secretPipePath], {
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "ignore",
-      env: options.env,
-    });
+    let mkfifo;
+    try {
+      mkfifo = Bun.spawn(["mkfifo", "-m", "600", secretPipePath], {
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+        env: options.env,
+      });
+    } catch {
+      throw new Error("SSH passphrase channel could not be created");
+    }
     if (await mkfifo.exited !== 0) throw new Error("SSH passphrase channel could not be created");
     secretPipe = await fs.open(secretPipePath, constants.O_RDWR);
     const child = Bun.spawn([options.executable, ...options.args], {

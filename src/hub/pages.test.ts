@@ -48,9 +48,9 @@ describe("authenticated Hub pages", () => {
 
   test("shows neutral credential summaries and confirms only an unassigned resume", () => {
     const html = htmlFor.dashboard();
-    expect(html).toContain('return parts.join(" · ") || "No credentials assigned"');
-    expect(html).toContain('parts.push("Auth: " + authentication.join(", "))');
-    expect(html).toContain('parts.push("Signing: " + signing.join(", "))');
+    expect(html).toContain('return parts.join(" · ") || "⊘ No credentials assigned"');
+    expect(html).toContain('parts.push("🔑 Auth: " + authentication.join(", "))');
+    expect(html).toContain('parts.push("✎ Signing: " + signing.join(", "))');
     expect(html).toContain("if (!hasCredentialAssignments(w.credentialAssignments) && !confirm(");
     expect(html).toContain("Git authentication and commit signing may be unavailable, but the workspace can still start. Continue?");
     expect(html.indexOf("if (!hasCredentialAssignments(w.credentialAssignments)")).toBeLessThan(html.indexOf("uiBusy += 1", html.indexOf('label: "Resume"')));
@@ -129,6 +129,7 @@ describe("settings page", () => {
     expect([...document.querySelectorAll("textarea")].every(input => input.textContent === "")).toBe(true);
     expect(document.querySelector('#ssh-import-form input[type="file"][name="privateKeyFile"]')).not.toBeNull();
     expect(document.querySelector("#ssh-import-form .paste-option textarea[name=privateKey]")).not.toBeNull();
+    expect(document.getElementById("workspace-credential-assignments")).not.toBeNull();
     expect(document.querySelectorAll("[data-form-error][role=alert]").length).toBe(5);
     expect(html).toContain("Copy public key");
     expect(html).toContain("credentialRestartRequired");
@@ -146,8 +147,9 @@ describe("settings page", () => {
     expect(html).toContain('toolPath + "/" + encodeURIComponent(tool.tool) + "/test"');
     expect(html).toContain('const card = el("details", "credential-card")');
     expect(html).toContain("openCredentialIds.has(credential.id)");
-    expect(html).toContain("Assign as default");
-    expect(html).toContain("Replaces the current default for this workspace");
+    expect(html).toContain("Assign selected");
+    expect(html).toContain("Selected credentials replace the current defaults");
+    expect(html).toContain("workspaceAssignmentEntries");
     expect(html).not.toContain("Continue with this assignment?");
     expect(html).toContain("Choose exactly one private key source");
     expect(html).toContain("file.size > 1024 * 1024");

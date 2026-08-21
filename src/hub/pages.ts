@@ -266,6 +266,14 @@ const SHARED_STYLE = `
   .assignment-add h4 { grid-column: 1 / -1; margin: 0; font-size: 0.72rem; color: var(--text-subtle); }
   .assignment-add .assignment-help { grid-column: 1 / -1; margin: 0; color: var(--text-subtle); font-size: 0.7rem; }
   .assignment-add > button { justify-self: start; }
+  .workspace-credential-section { padding: 0.75rem 1rem; border-top: 1px solid var(--border-soft); background: var(--surface-subtle); }
+  .workspace-credential-section h3 { margin: 0; color: var(--text-strong); font-size: 0.78rem; }
+  .workspace-assignment-list { margin-top: 0.6rem; border: 1px solid var(--border-soft); border-radius: 0.375rem; background: var(--surface); }
+  .workspace-assignment-list .assignment-row { padding: 0.55rem 0.65rem; }
+  .assignment-pills { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.2rem; }
+  .assignment-pill { display: inline-flex; align-items: center; gap: 0.25rem; padding: 0.1rem 0.4rem; border: 1px solid var(--border-medium); border-radius: 999px; color: var(--text-subtle); font-size: 0.68rem; }
+  .assignment-pill button { border: 0; padding: 0 0.1rem; color: var(--danger); background: transparent; line-height: 1; }
+  .workspace-assignment-form { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .advisory { display: flex; align-items: flex-start; gap: 0.75rem; margin: 0; padding: 0.75rem 1rem; border-bottom: 1px solid var(--border-soft); background: light-dark(#fff8c5, #2d2405); color: var(--text-strong); font-size: 0.76rem; }
   .advisory span { flex: 1; }
   .advisory button { background: transparent; }
@@ -309,6 +317,7 @@ const SHARED_STYLE = `
     .credential-actions button { flex: 1 1 auto; }
     .inline-form > button { flex: 1 1 auto; }
     .assignment-add { grid-template-columns: 1fr; }
+    .workspace-assignment-form { grid-template-columns: 1fr; }
     .assignment-add > button { width: 100%; }
   }
   .empty { padding: 0.75rem 1rem; color: var(--text-subtle); font-size: 0.8rem; }
@@ -474,6 +483,11 @@ function authenticatedPage(pageName: AuthenticatedPage, authenticatedUser: strin
   <div class="pane-header"><h2>Credentials</h2><span id="credentials-meta" class="pane-meta">Loading…</span></div>
   ${sharedUidAdvisory}
   <div id="credentials"><p class="empty">Loading…</p></div>
+  <section class="workspace-credential-section">
+    <h3>Workspace assignments</h3>
+    <p class="credential-summary">Assign authentication and signing credentials together.</p>
+    <div id="workspace-credential-assignments"><p class="empty">Loading…</p></div>
+  </section>
   <details class="credential-create">
     <summary>Generate SSH key</summary>
     <form id="ssh-generate-form" class="form-stack">
@@ -613,9 +627,9 @@ function credentialAssignmentSummary(assignments) {
   const authentication = assignments?.authentication || [];
   const signing = assignments?.signing || [];
   const parts = [];
-  if (authentication.length) parts.push("Auth: " + authentication.join(", "));
-  if (signing.length) parts.push("Signing: " + signing.join(", "));
-  return parts.join(" · ") || "No credentials assigned";
+  if (authentication.length) parts.push("🔑 Auth: " + authentication.join(", "));
+  if (signing.length) parts.push("✎ Signing: " + signing.join(", "));
+  return parts.join(" · ") || "⊘ No credentials assigned";
 }
 function hasCredentialAssignments(assignments) {
   return (assignments?.authentication?.length || 0) + (assignments?.signing?.length || 0) > 0;
@@ -864,59 +878,120 @@ function credentialCard(credential) {
   actions.appendChild(deleteButton);
   actionSection.append(actions, actionError);
   body.appendChild(actionSection);
-  const assignmentSection = el("section", "credential-section");
-  assignmentSection.appendChild(el("h3", null, "Workspace assignments"));
-  const assignmentError = el("p", "local-error");
-  assignmentError.setAttribute("role", "alert");
-  assignmentError.hidden = true;
-  for (const assignment of assignments) {
-    const assignmentRow = el("div", "assignment-row");
-    const assignmentMain = el("div", "row-main");
-    assignmentMain.appendChild(el("strong", null, workspaceName(assignment.workspaceId)));
-    assignmentMain.appendChild(el("div", "row-detail", (assignment.role === "authentication" ? "Authentication" : "Commit signing") + (assignment.host ? " · " + assignment.host : "")));
-    const remove = el("button", "danger", "Remove");
-    remove.onclick = () => credentialAction(credential.id, "unassign", { workspaceId: assignment.workspaceId, role: assignment.role }, remove, "Removing…", assignmentError);
-    assignmentRow.append(assignmentMain, remove);
-    assignmentSection.appendChild(assignmentRow);
-  }
-  if (!assignments.length) assignmentSection.appendChild(el("p", "credential-summary", "No current assignments."));
-  if (dashboardWorkspaces.length > 0) assignmentSection.appendChild(assignmentForm(credential, assignmentError));
-  assignmentSection.appendChild(assignmentError);
-  body.appendChild(assignmentSection);
   card.appendChild(body);
   return card;
 }
-function assignmentForm(credential, actionError) {
-  const form = el("form", "inline-form assignment-add");
-  form.dataset.assignmentForm = credential.id;
-  form.appendChild(el("h4", null, "Add assignment"));
+function workspaceAssignmentEntries(workspaceId) {
+  const entries = [];
+  for (const credential of credentialCatalog) {
+    for (const assignment of credential.assignments || []) {
+      if (assignment.workspaceId === workspaceId) entries.push({ credential, assignment });
+    }
+  }
+  return entries;
+}
+function workspaceAssignmentForm(actionError) {
+  const form = el("form", "inline-form assignment-add workspace-assignment-form");
+  form.appendChild(el("h4", null, "Assign workspace credentials"));
   const workspaceLabel = el("label", null, "Workspace");
   const workspace = document.createElement("select");
-  for (const item of dashboardWorkspaces) workspace.appendChild(new Option(item.id, item.id));
+  for (const item of dashboardWorkspaces) workspace.appendChild(new Option(item.name || item.id, item.id));
   workspaceLabel.appendChild(workspace);
-  const roleLabel = el("label", null, "Use as");
-  const role = document.createElement("select");
-  if (credentialSupportsRole(credential, "authentication")) role.appendChild(new Option("Authentication", "authentication"));
-  if (credentialSupportsRole(credential, "signing")) role.appendChild(new Option("Commit signing", "signing"));
-  roleLabel.appendChild(role);
+  const authenticationLabel = el("label", null, "🔑 Authentication");
+  const authentication = document.createElement("select");
+  authentication.appendChild(new Option("Do not change", ""));
+  for (const credential of credentialCatalog.filter(item => item.enabled && credentialSupportsRole(item, "authentication"))) {
+    authentication.appendChild(new Option(credential.name, credential.id));
+  }
+  authenticationLabel.appendChild(authentication);
+  const signingLabel = el("label", null, "✎ Signing");
+  const signing = document.createElement("select");
+  signing.appendChild(new Option("Do not change", ""));
+  for (const credential of credentialCatalog.filter(item => item.enabled && credentialSupportsRole(item, "signing"))) {
+    signing.appendChild(new Option(credential.name, credential.id));
+  }
+  signingLabel.appendChild(signing);
   const hostLabel = el("label", null, "Provider host");
   const host = document.createElement("input");
   host.type = "text";
-  host.value = credentialHost(credential);
+  host.value = "github.com";
   hostLabel.appendChild(host);
-  const help = el("p", "assignment-help", "Replaces the current default for this workspace, use, and provider host.");
-  const button = el("button", null, "Assign as default");
-  form.append(workspaceLabel, roleLabel, hostLabel, help, button);
-  const updateHost = () => { hostLabel.hidden = role.value !== "authentication"; };
-  role.onchange = updateHost;
+  const help = el("p", "assignment-help", "Selected credentials replace the current defaults. Leave either selection unchanged when assigning only one role.");
+  const button = el("button", null, "Assign selected");
+  form.append(workspaceLabel, authenticationLabel, signingLabel, hostLabel, help, button);
+  const updateHost = () => {
+    hostLabel.hidden = !authentication.value;
+    const selected = credentialCatalog.find(item => item.id === authentication.value);
+    if (selected?.type === "token") host.value = selected.metadata.host;
+  };
+  authentication.onchange = updateHost;
   updateHost();
   form.onsubmit = async event => {
     event.preventDefault();
-    const body = { workspaceId: workspace.value, role: role.value, replace: true };
-    if (role.value === "authentication") body.host = host.value.trim();
-    await credentialAction(credential.id, "assign", body, button, "Assigning…", actionError);
+    setLocalError(actionError, "");
+    if (!authentication.value && !signing.value) {
+      setLocalError(actionError, "Choose an authentication credential, a signing credential, or both.");
+      return;
+    }
+    if (authentication.value && !host.value.trim()) {
+      setLocalError(actionError, "Enter a provider host for authentication.");
+      return;
+    }
+    await withBusy(button, "Assigning…", async () => {
+      try {
+        if (authentication.value) await api(credentialPath + "/" + encodeURIComponent(authentication.value) + "/assign", {
+          workspaceId: workspace.value, role: "authentication", host: host.value.trim(), replace: true,
+        });
+        if (signing.value) await api(credentialPath + "/" + encodeURIComponent(signing.value) + "/assign", {
+          workspaceId: workspace.value, role: "signing", replace: true,
+        });
+        await Promise.all([loadSettingsState(), loadCredentials()]);
+      } catch (error) { setLocalError(actionError, error.message); }
+    });
   };
   return form;
+}
+function renderWorkspaceAssignments() {
+  const container = document.getElementById("workspace-credential-assignments");
+  if (!container) return;
+  container.replaceChildren();
+  const actionError = el("p", "local-error");
+  actionError.setAttribute("role", "alert");
+  actionError.hidden = true;
+  if (!dashboardWorkspaces.length) {
+    container.appendChild(el("p", "empty", "No workspaces available."));
+    return;
+  }
+  const list = el("div", "workspace-assignment-list");
+  for (const workspace of dashboardWorkspaces) {
+    const assignmentRow = el("div", "assignment-row");
+    const assignmentMain = el("div", "row-main");
+    assignmentMain.appendChild(el("strong", null, workspace.name || workspace.id));
+    const entries = workspaceAssignmentEntries(workspace.id);
+    if (!entries.length) {
+      assignmentMain.appendChild(el("div", "row-detail", "⊘ No credentials assigned"));
+    } else {
+      const pills = el("div", "assignment-pills");
+      for (const entry of entries) {
+        const authentication = entry.assignment.role === "authentication";
+        const text = (authentication ? "🔑 Auth · " : "✎ Signing · ") + entry.credential.name + (entry.assignment.host ? " · " + entry.assignment.host : "");
+        const pill = el("span", "assignment-pill", text);
+        const remove = el("button", null, "×");
+        remove.type = "button";
+        remove.title = "Remove " + (authentication ? "authentication" : "signing") + " assignment";
+        remove.setAttribute("aria-label", remove.title + " for " + (workspace.name || workspace.id));
+        remove.onclick = () => credentialAction(entry.credential.id, "unassign", {
+          workspaceId: workspace.id, role: entry.assignment.role,
+        }, remove, "…", actionError);
+        pill.appendChild(remove);
+        pills.appendChild(pill);
+      }
+      assignmentMain.appendChild(pills);
+    }
+    assignmentRow.appendChild(assignmentMain);
+    list.appendChild(assignmentRow);
+  }
+  container.append(list, workspaceAssignmentForm(actionError), actionError);
 }
 async function credentialAction(id, action, body, button, busyLabel, errorTarget) {
   setLocalError(errorTarget, "");
@@ -956,6 +1031,7 @@ function renderCredentialCatalog() {
     container.replaceChildren();
     if (!credentialCatalog.length) container.appendChild(el("p", "empty", "No Hub credentials. Generate or import one below."));
     else for (const credential of credentialCatalog) container.appendChild(credentialCard(credential));
+    renderWorkspaceAssignments();
 }
 async function loadTools() {
   try {

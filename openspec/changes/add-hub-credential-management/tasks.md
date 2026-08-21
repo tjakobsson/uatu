@@ -58,7 +58,7 @@
 ## 9. Authenticated Page Experience
 
 - [x] 9.1 Add the Credentials settings page using existing Hub visual patterns, with credential summaries, readiness layers, public-key copy, and capability-specific forms.
-- [x] 9.2 Add masked generate/import/unlock/token inputs, tool path overrides and Test actions, destructive confirmations, assignment controls, and restart-required status.
+- [x] 9.2 Add masked generate/import/unlock/token inputs, tool path overrides and Test actions, destructive confirmations, workspace-oriented authentication/signing assignment controls, and restart-required status.
 - [x] 9.3 Add the persistent shared-UID warning to local-backend assignment and clone surfaces and ensure no copy describes assignments as isolation or least privilege.
 - [x] 9.4 Extend the dedicated clone page with compatible credential selection, locked-credential unlock flow, retain-assignment choice, and unchanged interactive fallback behavior.
 - [x] 9.5 Add authenticated-page DOM/unit and E2E coverage for missing tools, successful tests, secret non-redisplay, SSH/OpenPGP/token lifecycle, assignments, clone selection, errors, and mobile/desktop layouts.
@@ -82,7 +82,7 @@
 - [x] 12.4 Route credential form, card action, assignment, and tool override failures to contextual alerts; keep the page alert for load failures.
 - [x] 12.5 Make SSH import upload-first with optional paste, exactly-one-source and 1 MiB checks, asynchronous request building, and secret/file cleanup after every attempt.
 - [x] 12.6 Accept executable symlink chains while preserving configured paths, and cover valid, dangling, directory-target, non-executable-target, and conditional Homebrew `gh` discovery cases.
-- [x] 12.7 Normalize inline action and assignment control heights, place unlock on its own row, and use a stable three-column assignment grid with concise default-replacement copy.
+- [x] 12.7 Normalize inline action and assignment control heights, place unlock on its own row, and use a responsive workspace assignment grid with concise default-replacement copy.
 
 ## 13. Workspace Credential Indication Follow-up
 
