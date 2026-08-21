@@ -48,6 +48,7 @@ describe("authenticated Hub pages", () => {
 
   test("shows neutral credential summaries and confirms only an unassigned resume", () => {
     const html = htmlFor.dashboard();
+    const refreshBody = html.slice(html.indexOf("async function refresh(force)"), html.indexOf("async function loadDevices()"));
     expect(html).toContain('return parts.join(" · ") || "⊘ No credentials assigned"');
     expect(html).toContain('parts.push("🔑 Auth: " + authentication.join(", "))');
     expect(html).toContain('parts.push("✎ Signing: " + signing.join(", "))');
@@ -58,6 +59,7 @@ describe("authenticated Hub pages", () => {
     expect(html).toContain("Unlock credentials for ");
     expect(html).toContain("Unlock and resume");
     expect(html).toContain('field.credential.id) + "/unlock"');
+    expect(refreshBody).not.toContain("renderCredentialCatalog()");
   });
 });
 
@@ -158,6 +160,12 @@ describe("settings page", () => {
     expect(html).toContain("Authentication host");
     expect(html).toContain("No workspace credentials assigned.");
     expect(html).toContain("workspaceAssignmentEntries");
+    expect(html).toContain("removeWorkspaceAssignment(entry, workspace, remove, actionError)");
+    expect(html).toContain("Stop it and remove its");
+    expect(html).toContain("Its shells will be terminated.");
+    expect(html.indexOf('/sessions/" + encodeURIComponent(workspace.id) + "/stop')).toBeLessThan(
+      html.indexOf('entry.credential.id) + "/unassign"'),
+    );
     expect(html).not.toContain("Continue with this assignment?");
     expect(html).toContain("Choose exactly one private key source");
     expect(html).toContain("file.size > 1024 * 1024");

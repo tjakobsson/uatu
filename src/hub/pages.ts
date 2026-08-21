@@ -966,6 +966,26 @@ function workspaceAssignmentForm(actionError) {
   };
   return form;
 }
+async function removeWorkspaceAssignment(entry, workspace, button, actionError) {
+  if (!workspace.running) {
+    await credentialAction(entry.credential.id, "unassign", {
+      workspaceId: workspace.id, role: entry.assignment.role,
+    }, button, "…", actionError);
+    return;
+  }
+  const role = entry.assignment.role === "authentication" ? "authentication" : "signing";
+  if (!confirm('"' + (workspace.name || workspace.id) + '" is running. Stop it and remove its ' + role + ' credential assignment? Its shells will be terminated.')) return;
+  setLocalError(actionError, "");
+  await withBusy(button, "…", async () => {
+    try {
+      await api("/api/hub/sessions/" + encodeURIComponent(workspace.id) + "/stop");
+      await api(credentialPath + "/" + encodeURIComponent(entry.credential.id) + "/unassign", {
+        workspaceId: workspace.id, role: entry.assignment.role,
+      });
+      await Promise.all([loadSettingsState(), loadCredentials()]);
+    } catch (error) { setLocalError(actionError, error.message); }
+  });
+}
 function renderWorkspaceAssignments() {
   const container = document.getElementById("workspace-credential-assignments");
   if (!container) return;
@@ -994,9 +1014,7 @@ function renderWorkspaceAssignments() {
       remove.type = "button";
       remove.title = "Remove " + (authentication ? "authentication" : "signing") + " assignment";
       remove.setAttribute("aria-label", remove.title + " for " + (workspace.name || workspace.id));
-      remove.onclick = () => credentialAction(entry.credential.id, "unassign", {
-        workspaceId: workspace.id, role: entry.assignment.role,
-      }, remove, "…", actionError);
+      remove.onclick = () => removeWorkspaceAssignment(entry, workspace, remove, actionError);
       pill.appendChild(remove);
       pills.appendChild(pill);
     }
@@ -1267,7 +1285,6 @@ async function refresh(force) {
 
   document.getElementById("hub-version").textContent = state.version || "";
   dashboardWorkspaces = state.workspaces || [];
-  if (credentialsLoaded) renderCredentialCatalog();
 
   const running = state.workspaces.filter(w => w.running);
   renderInto(
