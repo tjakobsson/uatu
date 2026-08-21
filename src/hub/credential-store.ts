@@ -158,6 +158,10 @@ export class CredentialMetadataStore extends SerializedStore {
       if (this.state.credentials.some(item => item.id === nextCredential.id)) {
         throw new Error(`credential id already exists: ${nextCredential.id}`);
       }
+      if (nextCredential.type === "ssh" && this.state.credentials.some(item =>
+        item.type === "ssh" && item.metadata.fingerprint === nextCredential.metadata.fingerprint)) {
+        throw new Error("An SSH credential with this fingerprint already exists.");
+      }
       const next = clone(this.state);
       next.credentials.push(nextCredential);
       const parsed = parseCredentialState(next);

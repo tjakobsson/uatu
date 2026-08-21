@@ -159,6 +159,7 @@ beforeAll(async () => {
           process: {
             type: "ssh",
             host: "github.com",
+            sshPath: "/managed/ssh",
             agentSocket: "/managed/agent.sock",
             publicKeyPath: "/managed/unlocked-ssh.pub",
           },

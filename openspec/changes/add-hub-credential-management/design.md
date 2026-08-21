@@ -47,7 +47,7 @@ Encrypting every secret with a Hub master key stored in the same state directory
 
 ### D3: Use one Hub-owned OpenSSH agent and one dedicated GnuPG home
 
-The Hub lazily starts `ssh-agent` in foreground/supervised mode with a fixed socket below `credential-runtime/`. All unlocked Hub SSH identities may reside in that agent. Workspace assignment selects a public identity through generated SSH/Git configuration (`IdentityFile` referencing public material plus `IdentitiesOnly`, and Git's SSH signing-key configuration); it does not claim that another same-UID process cannot query the shared agent.
+The Hub lazily starts `ssh-agent` in foreground/supervised mode with a fixed socket below `credential-runtime/`. All unlocked Hub SSH identities may reside in that agent. Workspace assignment selects a public identity through generated SSH/Git configuration (`IdentityFile` referencing public material plus `IdentitiesOnly`, and Git's SSH signing-key configuration) and invokes the validated absolute `ssh` client path; it does not claim that another same-UID process cannot query the shared agent.
 
 GnuPG operations set a dedicated `GNUPGHOME`. `gpg-agent` is started and stopped through GnuPG's own scoped management commands, so system GnuPG homes and sockets are untouched. A workspace signing assignment selects one fingerprint and signing format through generated Git configuration.
 
@@ -83,7 +83,7 @@ Embedding tokens in clone URLs, Git configuration values, or process arguments w
 
 ### D7: Clone selection is explicit and separate from interactive fallback
 
-Clone creation accepts an optional credential id and retain-assignment choice. The server validates that the credential type matches the remote transport and host before creating the job. Managed SSH selection configures the public identity and managed socket; managed HTTPS selection configures only the Hub helper. No selection removes inherited agent/helper variables and retains today's PTY response flow.
+Clone creation accepts an optional credential id and retain-assignment choice. The server validates that the credential type matches the remote transport and host before creating the job. Managed SSH selection configures the validated absolute SSH client, public identity, and managed socket; managed HTTPS selection configures only the Hub helper. No selection removes inherited agent/helper variables and retains today's PTY response flow.
 
 After clone success, registration and assignment persistence are coordinated: a requested retained assignment is written only for the successfully registered workspace. API assignment and workspace forget use the existing per-workspace session lifecycle queue, so an assignment cannot commit after forget cleanup. If session startup then fails and registration rolls back under the existing contract, the assignment rolls back too. If registration removal fails, the Hub restores the retained assignment so the still-registered workspace does not silently lose it. Interactive clone responses remain ephemeral and are never offered as a saved credential implicitly.
 

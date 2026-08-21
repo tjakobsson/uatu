@@ -386,16 +386,18 @@ export function createHubFetchHandler(deps: HubDeps) {
       }
     }
 
-    const entry = await registry.register(folder);
+    const { entry, created } = await registry.registerWithStatus(folder);
     if (body.start === false) {
       return json(200, { id: entry.id, running: false });
     }
     try {
-      await sessions.start(entry.id);
+      await sessions.start(entry.id, created ? async () => {
+        if (!(await registry.remove(entry.id))) throw new Error(`workspace registration was not removed: ${entry.id}`);
+        await deps.credentialApi?.metadata.removeWorkspaceAssignments(entry.id);
+      } : undefined);
     } catch (error) {
       // A folder that fails to serve is not left registered — mirroring the
       // launcher rule that a declined/failed folder leaves no trace.
-      await registry.remove(entry.id);
       return json(500, { error: error instanceof Error ? error.message : String(error) });
     }
     return json(200, { id: entry.id });

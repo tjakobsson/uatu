@@ -203,7 +203,7 @@ describe("credential API integration", () => {
     expect(listed.status).toBe(200);
     await assertContract("GET", "/api/hub/credential-tools", listed);
     const tools = (await listed.json()) as { tools: Array<{ tool: string; path: string | null; guidance: string | null }> };
-    expect(tools.tools).toHaveLength(8);
+    expect(tools.tools).toHaveLength(9);
     expect(tools.tools.every(tool => tool.path === null && tool.guidance !== null)).toBe(true);
 
     const tested = await post(origin, cookie, "/api/hub/credential-tools/gpg/test", {});

@@ -130,6 +130,9 @@ origin's browser storage. The login page does not read or render the flag.
 ### Install and check tools
 
 The service account needs `git` and OpenSSH for SSH authentication or signing.
+The Hub detects the `ssh` client separately from `ssh-agent`, `ssh-add`, and
+`ssh-keygen`; workspace and selected-clone SSH commands use the validated
+absolute `ssh` path.
 Install GnuPG only for OpenPGP signing, `gh` only for GitHub CLI access, and
 `glab` only for GitLab CLI access.
 

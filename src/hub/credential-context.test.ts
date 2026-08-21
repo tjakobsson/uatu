@@ -91,7 +91,7 @@ describe("local workspace credential projection", () => {
       sshAgentSocket: () => undefined,
       sshCredentialUsable: async () => false,
       openPgpCredentialUsable: async () => false,
-      tools: { git: null, gpg: null, sshKeygen: null, gh: null, glab: null },
+      tools: { ssh: null, git: null, gpg: null, sshKeygen: null, gh: null, glab: null },
     });
 
     const before = resolver.revision(workspace.id);
@@ -149,7 +149,7 @@ describe("local workspace credential projection", () => {
         return credentialId === firstSsh.id;
       },
       openPgpCredentialUsable: async () => openPgpUsable,
-      tools: { git: null, gpg: "/managed/gpg", sshKeygen: null, gh: null, glab: null },
+      tools: { ssh: "/managed/ssh", git: null, gpg: "/managed/gpg", sshKeygen: null, gh: null, glab: null },
     });
 
     await expect(resolver.resolve(workspace)).rejects.toThrow("assigned SSH credential is locked");
@@ -190,7 +190,7 @@ describe("local workspace credential projection", () => {
       stateRoot: path.join(root, "state with quote '"),
       sshAgentSocket: path.join(root, "managed-agent.sock"),
       gnupgHome: path.join(root, "gnupg"),
-      tools: { git: "/usr/bin/git", gpg: "/usr/bin/gpg", sshKeygen: "/usr/bin/ssh-keygen", gh: managedGh, glab: null },
+      tools: { ssh: "/usr/bin/ssh", git: "/usr/bin/git", gpg: "/usr/bin/gpg", sshKeygen: "/usr/bin/ssh-keygen", gh: managedGh, glab: null },
       authentication: [
         { host: "git.example.com", credential: ssh },
         { host: "github.com", credential: token, token: "provider-secret" },
@@ -213,6 +213,7 @@ describe("local workspace credential projection", () => {
 
     expect(projected.runtimeDirectory.startsWith(workspace.path)).toBe(false);
     expect(projected.env.SSH_AUTH_SOCK).toBe(path.join(root, "managed-agent.sock"));
+    expect(projected.env.GIT_SSH_COMMAND).toStartWith("'/usr/bin/ssh' -F ");
     expect(projected.env.GH_TOKEN).toBe("provider-secret");
     expect(projected.env.PATH?.split(path.delimiter)[0]).toBe(path.join(projected.runtimeDirectory, "tool-bin"));
     expect(await readlink(path.join(projected.runtimeDirectory, "tool-bin", "git"))).toBe("/usr/bin/git");
@@ -253,7 +254,7 @@ describe("local workspace credential projection", () => {
         stateRoot: root,
         sshAgentSocket: agentSocket,
         gnupgHome: path.join(root, "gnupg"),
-        tools: { git: null, gpg: null, sshKeygen: null, gh: null, glab: null },
+        tools: { ssh: "/managed/ssh", git: null, gpg: null, sshKeygen: null, gh: null, glab: null },
         authentication: [{ host: "git.example.com:2222", credential: ssh }],
         signing: null,
       },
@@ -288,7 +289,7 @@ describe("local workspace credential projection", () => {
       stateRoot: root,
       sshAgentSocket: null,
       gnupgHome: path.join(root, "gnupg"),
-      tools: { git: null, gpg: null, sshKeygen: null, gh: null, glab: null },
+      tools: { ssh: null, git: null, gpg: null, sshKeygen: null, gh: null, glab: null },
       authentication: [],
       signing: null,
     };
@@ -323,7 +324,7 @@ describe("local workspace credential projection", () => {
         stateRoot: root,
         sshAgentSocket: null,
         gnupgHome: path.join(root, "gnupg"),
-        tools: { git: null, gpg: null, sshKeygen: null, gh: "/missing/gh", glab: null },
+        tools: { ssh: null, git: null, gpg: null, sshKeygen: null, gh: "/missing/gh", glab: null },
         authentication: [{ host: "github.com", credential: token, token: "secret" }],
         signing: null,
       },
@@ -356,7 +357,7 @@ describe("local workspace credential projection", () => {
         stateRoot: root,
         sshAgentSocket: null,
         gnupgHome: path.join(root, "gnupg"),
-        tools: { git: null, gpg: null, sshKeygen: null, gh: "/managed/gh", glab: null },
+        tools: { ssh: null, git: null, gpg: null, sshKeygen: null, gh: "/managed/gh", glab: null },
         authentication: [
           { host: first.metadata.host, credential: first, token: "one" },
           { host: second.metadata.host, credential: second, token: "two" },
@@ -388,7 +389,7 @@ describe("local workspace credential projection", () => {
         stateRoot: root,
         sshAgentSocket: null,
         gnupgHome: path.join(root, "gnupg"),
-        tools: { git: null, gpg: null, sshKeygen: null, gh: managedGh, glab: null },
+        tools: { ssh: null, git: null, gpg: null, sshKeygen: null, gh: managedGh, glab: null },
         authentication: [{ host: providerOnly.metadata.host, credential: providerOnly, token: "provider-secret" }],
         signing: null,
       },
@@ -420,7 +421,7 @@ describe("local workspace credential projection", () => {
         stateRoot: path.join(root, "state"),
         sshAgentSocket: null,
         gnupgHome,
-        tools: { git: null, gpg: "/managed/gpg", sshKeygen: null, gh: null, glab: null },
+        tools: { ssh: null, git: null, gpg: "/managed/gpg", sshKeygen: null, gh: null, glab: null },
         authentication: [],
         signing,
       },
@@ -454,7 +455,7 @@ describe("local workspace credential projection", () => {
       stateRoot: path.join(root, "state"),
       sshAgentSocket: null,
       gnupgHome: path.join(root, "gnupg"),
-      tools: { git: null, gpg: null, sshKeygen: null, gh: null, glab: null },
+      tools: { ssh: null, git: null, gpg: null, sshKeygen: null, gh: null, glab: null },
       authentication: [],
       signing: null,
     };
@@ -515,6 +516,7 @@ describe("clone credential resolution", () => {
       tokens,
       stateRoot: root,
       sshAgentSocket: () => "/managed/agent.sock",
+      sshPath: () => "/managed/ssh",
       sshPublicKeyPath: id => path.join(root, `${id}.pub`),
       sshCredentialUsable: async () => usable,
       uatuArgv: ["uatu"],
@@ -528,6 +530,7 @@ describe("clone credential resolution", () => {
       process: {
         type: "ssh",
         host: "github.com",
+        sshPath: "/managed/ssh",
         agentSocket: "/managed/agent.sock",
         publicKeyPath: path.join(root, "ssh-1.pub"),
       },
@@ -552,6 +555,7 @@ describe("clone credential resolution", () => {
       tokens,
       stateRoot: root,
       sshAgentSocket: () => undefined,
+      sshPath: () => undefined,
       sshPublicKeyPath: id => path.join(root, `${id}.pub`),
       sshCredentialUsable: async () => false,
       uatuArgv: ["uatu"],

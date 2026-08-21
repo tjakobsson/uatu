@@ -98,7 +98,7 @@ export class CloneProcessAdapter implements CloneProcessFactory {
     if (options.credential?.type === "ssh") {
       env.SSH_AUTH_SOCK = options.credential.agentSocket;
       env.GIT_SSH_COMMAND = [
-        "ssh",
+        shellQuote(options.credential.sshPath),
         `-o IdentityAgent=${shellQuote(options.credential.agentSocket)}`,
         `-o IdentityFile=${shellQuote(options.credential.publicKeyPath)}`,
         "-o IdentitiesOnly=yes",

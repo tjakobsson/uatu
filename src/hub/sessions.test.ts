@@ -320,4 +320,31 @@ describe("SessionManager serialized lifecycle", () => {
     expect(startCalls).toBe(1);
     expect(sessionA).toBe(sessionB);
   });
+
+  test("runs failed-start cleanup before the next workspace mutation", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-cleanup-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    await registry.register("/srv/workspaces/cleanup");
+    const order: string[] = [];
+    let rejectStart!: (error: Error) => void;
+    const backend: SessionBackend = {
+      start: () => new Promise<RunningSession>((_resolve, reject) => {
+        order.push("start");
+        rejectStart = reject;
+      }),
+    };
+    const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
+    const starting = sessions.start("cleanup");
+    const joined = sessions.start("cleanup", async () => { order.push("cleanup"); });
+    const queued = sessions.runExclusive("cleanup", async () => { order.push("queued"); });
+    await tick();
+    rejectStart(new Error("failed"));
+
+    await expect(starting).rejects.toThrow("failed");
+    await expect(joined).rejects.toThrow("failed");
+    await queued;
+    expect(order).toEqual(["start", "cleanup", "queued"]);
+  });
 });

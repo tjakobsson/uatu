@@ -16,6 +16,7 @@ const PROBE_OUTPUT_LIMIT = 8_192;
 const PROBE_TIMEOUT_MS = 5_000;
 
 const VERSION_ARGUMENTS: Record<CredentialTool, string[]> = {
+  ssh: ["-V"],
   "ssh-agent": ["-?"],
   "ssh-add": ["--help"],
   "ssh-keygen": ["-?"],
@@ -168,7 +169,7 @@ function sanitizedVersion(output: string): string | null {
 }
 
 export function toolInstallationGuidance(tool: CredentialTool, platform: NodeJS.Platform = process.platform): string {
-  const family = tool.startsWith("ssh-") ? "OpenSSH" : tool === "gpg" || tool === "gpgconf" ? "GnuPG" : tool;
+  const family = tool === "ssh" || tool.startsWith("ssh-") ? "OpenSSH" : tool === "gpg" || tool === "gpgconf" ? "GnuPG" : tool;
   if (platform === "darwin") return `Install ${family} with a trusted macOS package manager, or configure its absolute executable path.`;
   if (platform === "linux") return `Install ${family} with the system package manager, or configure its absolute executable path.`;
   return `Install ${family} for this platform, or configure its absolute executable path.`;

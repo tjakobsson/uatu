@@ -120,6 +120,7 @@ describe("CloneProcessAdapter", () => {
       credential: {
         type: "ssh",
         host: "example.com",
+        sshPath: "/managed/ssh client",
         agentSocket: "/managed/agent.sock",
         publicKeyPath: "/managed/key.pub",
       },
@@ -129,6 +130,7 @@ describe("CloneProcessAdapter", () => {
 
     const env = spawnOptions.env as Record<string, string>;
     expect(env.SSH_AUTH_SOCK).toBe("/managed/agent.sock");
+    expect(env.GIT_SSH_COMMAND).toStartWith("'/managed/ssh client'");
     expect(env.GIT_SSH_COMMAND).toContain("IdentityFile='/managed/key.pub'");
     expect(env.GIT_SSH_COMMAND).toContain("IdentitiesOnly=yes");
     expect(env.GIT_SSH_COMMAND).not.toContain("ambient");

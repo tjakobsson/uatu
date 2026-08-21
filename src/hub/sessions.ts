@@ -26,6 +26,7 @@ export class SessionManager {
   // the chain — so gates (forget) and joiners see a queued start, not just
   // an executing one. Cleared when the call settles.
   private readonly starting = new Map<string, Promise<RunningSession>>();
+  private readonly startFailureCallbacks = new Map<string, Array<() => Promise<void>>>();
   // Per-workspace operation chain tails.
   private readonly lifecycle = new Map<string, Promise<unknown>>();
   private readonly runningCredentialRevisions = new Map<string, string>();
@@ -87,7 +88,12 @@ export class SessionManager {
 
   // Starts (or joins the pending start of) the session for a registered
   // workspace.
-  start(workspaceId: string): Promise<RunningSession> {
+  start(workspaceId: string, onFailure?: () => Promise<void>): Promise<RunningSession> {
+    if (onFailure) {
+      const callbacks = this.startFailureCallbacks.get(workspaceId) ?? [];
+      callbacks.push(onFailure);
+      this.startFailureCallbacks.set(workspaceId, callbacks);
+    }
     const joined = this.starting.get(workspaceId);
     if (joined) {
       return joined;
@@ -99,19 +105,29 @@ export class SessionManager {
         return existing;
       }
 
-      const workspace = this.registry.byId(workspaceId);
-      if (!workspace) {
-        throw new Error(`unknown workspace: ${workspaceId}`);
+      let workspace: WorkspaceEntry;
+      let session: RunningSession;
+      try {
+        const found = this.registry.byId(workspaceId);
+        if (!found) throw new Error(`unknown workspace: ${workspaceId}`);
+        workspace = found;
+        const backend = this.backends[workspace.backend];
+        if (!backend) throw new Error(`no backend registered for '${workspace.backend}'`);
+        const credentialContext = await this.credentials.resolve(workspace);
+        session = await backend.start(workspace, sessionBasePath(workspace.id), credentialContext);
+        this.runningCredentialRevisions.set(workspace.id, credentialContext.revision);
+      } catch (error) {
+        const callbacks = this.startFailureCallbacks.get(workspaceId) ?? [];
+        for (let index = 0; index < callbacks.length; index += 1) {
+          try {
+            await callbacks[index]!();
+          } catch (cleanupError) {
+            throw new AggregateError([error, cleanupError], `session startup and registration cleanup failed: ${workspaceId}`);
+          }
+        }
+        throw error;
       }
-      const backend = this.backends[workspace.backend];
-      if (!backend) {
-        throw new Error(`no backend registered for '${workspace.backend}'`);
-      }
-
-      const credentialContext = await this.credentials.resolve(workspace);
-      const session = await backend.start(workspace, sessionBasePath(workspace.id), credentialContext);
       this.running.set(workspace.id, session);
-      this.runningCredentialRevisions.set(workspace.id, credentialContext.revision);
       // Reap on child exit so a crashed session shows as stopped rather
       // than proxying into a dead endpoint forever.
       void session.exited.then(() => {
@@ -127,6 +143,7 @@ export class SessionManager {
     published = operation.finally(() => {
       if (this.starting.get(workspaceId) === published) {
         this.starting.delete(workspaceId);
+        this.startFailureCallbacks.delete(workspaceId);
       }
     });
     this.starting.set(workspaceId, published);

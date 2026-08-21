@@ -193,6 +193,7 @@ const selectedCredential: ResolvedCloneCredential = {
   process: {
     type: "ssh",
     host: "github.com",
+    sshPath: "/managed/ssh",
     agentSocket: "/managed/agent.sock",
     publicKeyPath: "/managed/ssh-1.pub",
   },

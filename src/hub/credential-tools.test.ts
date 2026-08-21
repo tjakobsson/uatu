@@ -155,6 +155,15 @@ describe("credential tool probes", () => {
     });
   });
 
+  test("probes the OpenSSH client version", async () => {
+    const { filePath } = await executable("ssh");
+    await writeFile(filePath, "#!/bin/sh\nprintf 'OpenSSH_9.6p1, LibreSSL 3.3.6\\n' >&2\n", { mode: 0o700 });
+    const result = await probeCredentialTool({ tool: "ssh", path: filePath, source: "override" });
+    expect(result.version).toBe("OpenSSH_9.6p1, LibreSSL 3.3.6");
+    expect(result.results).toContainEqual({ layer: "version", status: "ready", message: "Compatible version was reported." });
+    expect(toolInstallationGuidance("ssh", "darwin")).toContain("OpenSSH");
+  });
+
   test("enforces provider CLI minimum versions", async () => {
     const gh = await executable("gh");
     await writeFile(gh.filePath, "#!/bin/sh\nprintf 'gh version 1.99.0\\n'\n", { mode: 0o700 });

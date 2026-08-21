@@ -55,6 +55,22 @@ describe("CredentialMetadataStore", () => {
     expect(store.snapshot().credentials.map(item => item.id)).toEqual(["ssh-1", "ssh-2"]);
   });
 
+  test("atomically rejects concurrent SSH credentials with the same fingerprint", async () => {
+    const filePath = await tempPath("credentials.json");
+    const store = new CredentialMetadataStore(filePath);
+    await store.load();
+    const { id: _id, createdAt: _createdAt, ...newSsh } = SSH_CREDENTIAL;
+    const results = await Promise.allSettled([
+      store.create(newSsh, () => "ssh-1"),
+      store.create({ ...newSsh, name: "Duplicate" }, () => "ssh-2"),
+    ]);
+
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find(result => result.status === "rejected");
+    expect(rejected?.status === "rejected" ? rejected.reason.message : "").toBe("An SSH credential with this fingerprint already exists.");
+    expect(store.snapshot().credentials).toHaveLength(1);
+  });
+
   test("rejects an invalid draft before writing", async () => {
     const filePath = await tempPath("credentials.json");
     const store = new CredentialMetadataStore(filePath);

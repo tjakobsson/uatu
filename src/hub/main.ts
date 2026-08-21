@@ -96,8 +96,8 @@ export async function runHub(options: RunHubOptions): Promise<void> {
   let sshCredentials: SshCredentialService | null = null;
   let openPgpCredentials: OpenPgpCredentialManager;
   let activePaths = new Map<string, string | null>();
-  const contextTools = { git: null, gpg: null, sshKeygen: null, gh: null, glab: null } as {
-    git: string | null; gpg: string | null; sshKeygen: string | null; gh: string | null; glab: string | null;
+  const contextTools = { ssh: null, git: null, gpg: null, sshKeygen: null, gh: null, glab: null } as {
+    ssh: string | null; git: string | null; gpg: string | null; sshKeygen: string | null; gh: string | null; glab: string | null;
   };
   const refreshCredentialRuntime = async () => {
     const paths = new Map(credentialTools.list().map(tool => [tool.tool, readyToolPath(tool)]));
@@ -125,6 +125,7 @@ export async function runHub(options: RunHubOptions): Promise<void> {
       });
     }
     contextTools.git = paths.get("git") ?? null;
+    contextTools.ssh = paths.get("ssh") ?? null;
     contextTools.gpg = paths.get("gpg") ?? null;
     contextTools.sshKeygen = paths.get("ssh-keygen") ?? null;
     contextTools.gh = paths.get("gh") ?? null;
@@ -153,6 +154,7 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     tokens: credentialTokens,
     stateRoot,
     sshAgentSocket: () => sshAgent?.currentSocket(),
+    sshPath: () => activePaths.get("ssh") ?? undefined,
     sshPublicKeyPath: credentialId => path.join(credentialSecretsPath(stateRoot), `${credentialId}.key.pub`),
     sshCredentialUsable: credentialId => sshCredentials?.testUsability(credentialId) ?? Promise.resolve(false),
     uatuArgv: resolveUatuArgv(),

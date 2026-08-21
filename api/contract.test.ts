@@ -112,7 +112,7 @@ describe("Hub credential contracts", () => {
     const validate = createAjv().compile(schemaForAjv(openapi.components.schemas.HubState, openapi.components.schemas));
     expect(validate({
       version: "0.5.1 (abcdef0)",
-      hubApiRevision: 3,
+      hubApiRevision: 4,
       workspaceApiRevision: 6,
       workspaces: [{
         id: "uatu",
@@ -130,7 +130,7 @@ describe("Hub credential contracts", () => {
     })).toBe(true);
     expect(validate({
       version: "0.5.1 (abcdef0)",
-      hubApiRevision: 3,
+      hubApiRevision: 4,
       workspaceApiRevision: 6,
       workspaces: [{ id: "uatu", path: "/src/uatu", backend: "local", running: true, credentialRestartRequired: false, workspaceApiRevision: 6 }],
     })).toBe(false);

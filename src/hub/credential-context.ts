@@ -31,6 +31,7 @@ export type ResolvedCredentialContext = {
   sshAgentSocket: string | null;
   gnupgHome: string;
   tools: {
+    ssh: string | null;
     git: string | null;
     gpg: string | null;
     sshKeygen: string | null;
@@ -47,7 +48,7 @@ export interface CredentialContextResolver {
 }
 
 export type CloneCredentialProcessContext =
-  | { type: "ssh"; host: string; agentSocket: string; publicKeyPath: string }
+  | { type: "ssh"; host: string; sshPath: string; agentSocket: string; publicKeyPath: string }
   | { type: "https"; host: string; credentialId: string; stateRoot: string; uatuArgv: string[] };
 
 export type ResolvedCloneCredential = {
@@ -102,6 +103,7 @@ export function createStoredCloneCredentialResolver(options: {
   tokens: CredentialTokenStore;
   stateRoot: string;
   sshAgentSocket: () => string | undefined;
+  sshPath: () => string | undefined;
   sshPublicKeyPath: (credentialId: string) => string;
   sshCredentialUsable: (credentialId: string) => Promise<boolean>;
   uatuArgv: string[];
@@ -125,6 +127,8 @@ export function createStoredCloneCredentialResolver(options: {
           throw new Error("selected credential is not compatible with SSH clone transport");
         }
         const agentSocket = options.sshAgentSocket();
+        const sshPath = options.sshPath();
+        if (!sshPath) throw new Error("selected SSH credential requires a configured SSH client");
         if (!agentSocket || !(await options.sshCredentialUsable(selected.id))) {
           throw new Error(`selected SSH credential is locked; unlock it before cloning: ${selected.id}`);
         }
@@ -134,6 +138,7 @@ export function createStoredCloneCredentialResolver(options: {
           process: {
             type: "ssh",
             host: parsed.host,
+            sshPath,
             agentSocket,
             publicKeyPath: options.sshPublicKeyPath(selected.id),
           },
@@ -180,7 +185,7 @@ export const EMPTY_RESOLVED_CREDENTIAL_CONTEXT: ResolvedCredentialContext = {
   stateRoot: "",
   sshAgentSocket: null,
   gnupgHome: "",
-  tools: { git: null, gpg: null, sshKeygen: null, gh: null, glab: null },
+  tools: { ssh: null, git: null, gpg: null, sshKeygen: null, gh: null, glab: null },
   authentication: [],
   signing: null,
 };
@@ -259,6 +264,9 @@ export function createStoredCredentialContextResolver(
         .map(item => item.credential.id));
       if (signing?.type === "ssh") sshCredentialIds.add(signing.id);
       const sshAgentSocket = options.sshAgentSocket() ?? null;
+      if (sshCredentialIds.size > 0 && !options.tools.ssh) {
+        throw new Error("an assigned SSH credential requires a configured SSH client");
+      }
       if (sshCredentialIds.size > 0 && (!sshAgentSocket || !(await Promise.all(
         [...sshCredentialIds].map(credentialId => options.sshCredentialUsable(credentialId)),
       )).every(Boolean))) {
@@ -498,7 +506,7 @@ async function projectLocalCredentialEnvironment(
   sshLines.push("Host *", "  IdentityAgent none", "  IdentityFile none", "  IdentitiesOnly yes", "");
   await fs.writeFile(sshConfigPath, sshLines.join("\n"), { mode: 0o600 });
   await fs.chmod(sshConfigPath, 0o600);
-  env.GIT_SSH_COMMAND = `ssh -F ${shellQuote(sshConfigPath)}`;
+  env.GIT_SSH_COMMAND = `${context.tools.ssh ? shellQuote(context.tools.ssh) : "ssh"} -F ${shellQuote(sshConfigPath)}`;
   if (usesSshAgent) env.SSH_AUTH_SOCK = context.sshAgentSocket!;
 
   const emptyGithub = path.join(runtimeDirectory, "github-empty");

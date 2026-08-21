@@ -89,13 +89,15 @@ describe("managed SSH credential lifecycle", () => {
     expect(await service.testUsability(generated.id)).toBe(false);
     await service.setEnabled(generated.id, true);
 
+    const importSource = path.join(root, "import-source");
+    expect((await run(found.keygen, ["-q", "-t", "ed25519", "-N", passphrase, "-f", importSource], cleanEnv())).code).toBe(0);
     const imported = await service.import(
       "Imported",
       ["ssh-signing"],
-      await readFile(generatedPath, "utf8"),
+      await readFile(importSource, "utf8"),
       passphrase,
     );
-    expect(imported.metadata.fingerprint).toBe(generated.metadata.fingerprint);
+    expect(imported.metadata.fingerprint).not.toBe(generated.metadata.fingerprint);
     expect(await service.testUsability(imported.id)).toBe(true);
     expect(await service.delete(imported.id)).toBe(true);
     expect(await Bun.file(path.join(credentialSecretsPath(root), `${imported.id}.key`)).exists()).toBe(false);
@@ -156,6 +158,40 @@ describe("managed SSH credential lifecycle", () => {
     await agent.shutdown();
     await rm(path.join(credentialSecretsPath(root), `${imported.id}.key`));
     expect(await service.testUsability(imported.id)).toBe(false);
+  }, 30_000);
+
+  test("rejects concurrent imports of the same key and removes rejected backing files", async () => {
+    const found = await tools();
+    const root = await stateRoot("uatu-ssh-duplicate-");
+    const source = path.join(root, "source");
+    expect((await run(found.keygen, ["-q", "-t", "ed25519", "-N", "", "-f", source], cleanEnv())).code).toBe(0);
+    const metadata = new CredentialMetadataStore(credentialsPath(root));
+    await metadata.load();
+    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent });
+    agents.push(agent);
+    let id = 0;
+    const service = new SshCredentialService({
+      secretsDirectory: credentialSecretsPath(root),
+      metadataStore: metadata,
+      agent,
+      sshKeygenPath: found.keygen,
+      sshAddPath: found.add,
+      createId: () => `duplicate-${++id}`,
+    });
+    const privateKey = await readFile(source, "utf8");
+
+    const results = await Promise.allSettled([
+      service.import("First", ["ssh-authentication"], privateKey, ""),
+      service.import("Second", ["ssh-signing"], privateKey, ""),
+    ]);
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.find(result => result.status === "rejected")?.reason.message).toBe("An SSH credential with this fingerprint already exists.");
+    const winner = metadata.snapshot().credentials[0]!;
+    for (const candidate of ["duplicate-1", "duplicate-2"]) {
+      const privatePath = path.join(credentialSecretsPath(root), `${candidate}.key`);
+      expect(await Bun.file(privatePath).exists()).toBe(candidate === winner.id);
+      expect(await Bun.file(`${privatePath}.pub`).exists()).toBe(candidate === winner.id);
+    }
   }, 30_000);
 
   test("uses only the Hub socket and leaves an ambient agent and its identities unchanged", async () => {

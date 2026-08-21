@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: UatuCode public API
-  version: 3.6.0-experimental
+  version: 4.6.0-experimental
   license: { name: MIT, identifier: MIT }
-  summary: Hub revision 3 and workspace revision 6
+  summary: Hub revision 4 and workspace revision 6
   description: |
     Canonical HTTP contract for the UatuCode Hub and workspace APIs. Workspace
     operations use their externally visible Hub proxy paths. Streaming message
@@ -14,7 +14,7 @@ info:
     is the authoritative machine-readable pair, and the product version of a
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
-    hubApiRevision: 3
+    hubApiRevision: 4
     workspaceApiRevision: 6
 servers:
   - url: https://{hubHost}
@@ -79,7 +79,7 @@ paths:
               schema: { $ref: '#/components/schemas/HubState' }
               example:
                 version: 0.5.1 (abcdef0)
-                hubApiRevision: 3
+                hubApiRevision: 4
                 workspaceApiRevision: 6
                 workspaces: [{ id: uatu, path: /src/uatu, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [Work signing] }, workspaceApiRevision: 6, shells: [{ attached: false, label: zsh }] }]
         '401': { $ref: '#/components/responses/Error' }
@@ -1018,7 +1018,7 @@ components:
       additionalProperties: false
     WorkspaceId: { type: string, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }
     CredentialId: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9_-]+$' }
-    CredentialToolName: { enum: [ssh-agent, ssh-add, ssh-keygen, gpg, gpgconf, git, gh, glab] }
+    CredentialToolName: { enum: [ssh, ssh-agent, ssh-add, ssh-keygen, gpg, gpgconf, git, gh, glab] }
     NativeLoginRequest:
       type: object
       required: [name, password]

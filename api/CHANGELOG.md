@@ -2,6 +2,18 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required.
 
+## Hub 4 / Workspace 6 - Unreleased
+
+Compatibility: breaking (Hub)
+
+### Changes
+
+- `CredentialToolName` now includes `ssh`; managed workspace and selected-clone SSH commands use its validated absolute path.
+
+### Migration
+
+Strict credential-tool consumers must regenerate against Hub revision 4 or accept the new `ssh` enum value.
+
 ## Hub 3 / Workspace 6 - Unreleased
 
 Compatibility: breaking (Hub)

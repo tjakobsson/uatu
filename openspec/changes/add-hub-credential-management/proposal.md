@@ -28,7 +28,7 @@ Hub sessions currently depend on credentials inherited from the daemon's startup
 ## Impact
 
 - Affects Hub configuration, state-dir persistence, authenticated APIs and pages, clone jobs, session startup, child/PTY environments, shutdown, and the self-hosting runbook.
-- Introduces optional runtime integration with OpenSSH (`ssh-agent`, `ssh-add`, `ssh-keygen`), GnuPG (`gpg`, `gpg-agent`), Git credential helpers, and provider CLIs; missing optional tools degrade by capability and are diagnosed in settings.
+- Introduces optional runtime integration with OpenSSH (`ssh`, `ssh-agent`, `ssh-add`, `ssh-keygen`), GnuPG (`gpg`, `gpg-agent`), Git credential helpers, and provider CLIs; missing optional tools degrade by capability and are diagnosed in settings.
 - Adds secret-bearing state and browser-to-Hub secret submission paths that require owner-only files, atomic writes, strict response redaction, same-origin protections, and focused security tests.
 - Changes Hub clone behavior from automatically retaining an inherited external SSH agent to using an explicitly selected managed credential or the existing interactive no-storage path.
 - Does not add container, VM, UID, filesystem, or process isolation. The current local backend remains one shared trust domain, and no workspace assignment is represented as an enforceable least-privilege boundary.

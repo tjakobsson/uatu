@@ -15,6 +15,7 @@ export const CREDENTIAL_CAPABILITIES = [
 export type CredentialCapability = typeof CREDENTIAL_CAPABILITIES[number];
 
 export const CREDENTIAL_TOOLS = [
+  "ssh",
   "ssh-agent",
   "ssh-add",
   "ssh-keygen",
