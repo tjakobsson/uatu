@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { createSshRuntimeGate, passwordFromPipedInput, stopHubRuntime } from "./main";
+import { createCredentialRuntimeGate, passwordFromPipedInput, stopHubRuntime } from "./main";
 
 describe("passwordFromPipedInput", () => {
   test("strips exactly one trailing line terminator", () => {
@@ -22,10 +22,10 @@ describe("passwordFromPipedInput", () => {
   });
 });
 
-describe("createSshRuntimeGate", () => {
+describe("createCredentialRuntimeGate", () => {
   test("replacement drains in-flight operations and holds new ones until the swap lands", async () => {
     let service = "old-service";
-    const gate = createSshRuntimeGate(() => service);
+    const gate = createCredentialRuntimeGate(() => service);
     const order: string[] = [];
     let releaseFirst!: () => void;
     const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
@@ -56,9 +56,42 @@ describe("createSshRuntimeGate", () => {
     expect(order).toEqual(["first:old-service", "swap", "second:new-service"]);
   });
 
+  test("overlapping replacements queue instead of overwriting the active barrier", async () => {
+    let service = "first";
+    const gate = createCredentialRuntimeGate(() => service);
+    const order: string[] = [];
+    let releaseRefresh!: () => void;
+    const refreshGate = new Promise<void>(resolve => { releaseRefresh = resolve; });
+
+    // The SIGTERM-during-tool-refresh race: the shutdown replacement must
+    // wait for the refresh replacement, or a drained operation would be
+    // released against the service the shutdown is about to retire.
+    const refresh = gate.replace(async () => {
+      await refreshGate;
+      service = "second";
+      order.push("refresh");
+    });
+    const shutdown = gate.replace(async () => {
+      service = "none";
+      order.push("shutdown");
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const late = gate.run(async captured => {
+      order.push(`late:${captured}`);
+      return captured;
+    });
+
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(order).toEqual([]);
+    releaseRefresh();
+    await Promise.all([refresh, shutdown]);
+    expect(await late).toBe("none");
+    expect(order).toEqual(["refresh", "shutdown", "late:none"]);
+  });
+
   test("a rejected operation neither wedges the gate nor blocks replacement", async () => {
     let service = "one";
-    const gate = createSshRuntimeGate(() => service);
+    const gate = createCredentialRuntimeGate(() => service);
     await expect(gate.run(async () => { throw new Error("operation failed"); })).rejects.toThrow("operation failed");
     await gate.replace(async () => { service = "two"; });
     expect(await gate.run(async captured => captured)).toBe("two");

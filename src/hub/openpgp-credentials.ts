@@ -165,6 +165,14 @@ function ready(layer: ReadinessResult["layer"], message: string): ReadinessResul
   return { layer, status: "ready", message };
 }
 
+// The public operation surface consumers hold instead of the class, so the
+// hub can interpose a facade that serializes operations with OpenPGP runtime
+// replacement (a gpg/gpgconf override swapping the manager).
+export type OpenPgpCredentialOperations = Pick<
+  OpenPgpCredentialManager,
+  "generate" | "import" | "unlock" | "enable" | "disable" | "delete" | "test" | "readiness"
+>;
+
 export class OpenPgpCredentialManager {
   private readonly gnupgHome: string;
   private readonly metadataStore: CredentialMetadataStore;

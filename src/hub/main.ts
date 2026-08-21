@@ -10,7 +10,7 @@ import { ManagedSshAgent } from "./credential-ssh-agent";
 import { SshCredentialService, type SshCredentialOperations } from "./credential-ssh";
 import { CredentialMetadataStore, CredentialTokenStore, CredentialToolOverrideStore } from "./credential-store";
 import { CredentialToolManager, readyToolPath } from "./credential-tools";
-import { OpenPgpCredentialManager } from "./openpgp-credentials";
+import { OpenPgpCredentialManager, type OpenPgpCredentialOperations } from "./openpgp-credentials";
 import { TokenCredentialManager } from "./token-credentials";
 import { createStoredCloneCredentialResolver, createStoredCredentialContextResolver } from "./credential-context";
 import { hashPassword, HubSessionStore } from "./auth";
@@ -66,21 +66,33 @@ export async function stopHubRuntime(parts: {
   if (agents[1]?.status === "rejected") report("uatu hub: OpenPGP agent shutdown failed");
 }
 
-// Coordinates SSH credential operations with runtime replacement. An
-// operation runs against the service captured when it starts; replace()
-// waits for in-flight operations to drain and holds new ones until the swap
+// Coordinates credential operations with runtime replacement. An operation
+// runs against the service captured when it starts; replace() waits for
+// in-flight operations to drain and holds new ones until the swap
 // completes, so no operation can restart an agent that shutdown() has
 // already observed stopped (which would orphan the agent on the fixed
-// socket and leave the replacement manager refusing it).
-export function createSshRuntimeGate<Service>(current: () => Service): {
+// socket and leave the replacement manager refusing it). Replacements
+// queue behind each other: an overlapping call must not overwrite the
+// active barrier, or a drained operation could be released against a
+// service the later replacement is about to retire.
+export function createCredentialRuntimeGate<Service>(current: () => Service): {
   run<T>(operation: (service: Service) => Promise<T>): Promise<T>;
   replace(swap: () => Promise<void>): Promise<void>;
 } {
-  let barrier: Promise<void> | null = null;
+  // A pending count instead of a per-replacement barrier: it increments
+  // synchronously in replace(), so a new operation can never slip into the
+  // microtask gap between two queued replacements and capture a service the
+  // next one is about to retire.
+  let pendingReplacements = 0;
+  let replacements: Promise<void> = Promise.resolve();
   const operations = new Set<Promise<unknown>>();
+  const replaceNow = async (swap: () => Promise<void>): Promise<void> => {
+    while (operations.size > 0) await Promise.all([...operations]);
+    await swap();
+  };
   return {
     async run(operation) {
-      while (barrier) await barrier;
+      while (pendingReplacements > 0) await replacements;
       const running = operation(current());
       const settled = running.catch(() => undefined);
       operations.add(settled);
@@ -90,19 +102,14 @@ export function createSshRuntimeGate<Service>(current: () => Service): {
         operations.delete(settled);
       }
     },
-    async replace(swap) {
-      let release!: () => void;
-      const held = new Promise<void>(resolve => {
-        release = resolve;
+    replace(swap) {
+      pendingReplacements += 1;
+      const execute = pendingReplacements === 1 ? replaceNow(swap) : replacements.then(() => replaceNow(swap));
+      const settled = execute.finally(() => {
+        pendingReplacements -= 1;
       });
-      barrier = held;
-      try {
-        while (operations.size > 0) await Promise.all([...operations]);
-        await swap();
-      } finally {
-        if (barrier === held) barrier = null;
-        release();
-      }
+      replacements = settled.then(() => undefined, () => undefined);
+      return settled;
     },
   };
 }
@@ -135,8 +142,9 @@ export async function runHub(options: RunHubOptions): Promise<void> {
   await Promise.all([credentialTokens.load(), credentialTools.load()]);
   let sshAgent: ManagedSshAgent | null = null;
   let sshCredentials: SshCredentialService | null = null;
-  const sshRuntime = createSshRuntimeGate(() => sshCredentials);
+  const sshRuntime = createCredentialRuntimeGate(() => sshCredentials);
   let openPgpCredentials: OpenPgpCredentialManager;
+  const openPgpRuntime = createCredentialRuntimeGate(() => openPgpCredentials);
   let activePaths = new Map<string, string | null>();
   const contextTools = { ssh: null, git: null, gpg: null, sshKeygen: null, gh: null, glab: null } as {
     ssh: string | null; git: string | null; gpg: string | null; sshKeygen: string | null; gh: string | null; glab: string | null;
@@ -161,11 +169,16 @@ export async function runHub(options: RunHubOptions): Promise<void> {
       });
     }
     if (!openPgpCredentials || paths.get("gpg") !== activePaths.get("gpg") || paths.get("gpgconf") !== activePaths.get("gpgconf")) {
-      openPgpCredentials = new OpenPgpCredentialManager({
-        gnupgHome: credentialGnuPgPath(stateRoot),
-        metadataStore: credentialMetadata,
-        gpgPath: paths.get("gpg") ?? null,
-        gpgconfPath: paths.get("gpgconf") ?? null,
+      // Replacement drains the old manager's in-flight operations first: a
+      // detached operation could otherwise restart the shared GnuPG agent
+      // after a later shutdown killed it through the replacement manager.
+      await openPgpRuntime.replace(async () => {
+        openPgpCredentials = new OpenPgpCredentialManager({
+          gnupgHome: credentialGnuPgPath(stateRoot),
+          metadataStore: credentialMetadata,
+          gpgPath: paths.get("gpg") ?? null,
+          gpgconfPath: paths.get("gpgconf") ?? null,
+        });
       });
     }
     contextTools.git = paths.get("git") ?? null;
@@ -193,6 +206,17 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     testUsability: credentialId => sshRuntime.run(service => service?.testUsability(credentialId) ?? Promise.resolve(false)),
   };
   const sshUsable = (credentialId: string) => sshOperations.testUsability(credentialId);
+  // OpenPGP operations go through their gate for the same reason.
+  const openPgpOperations: OpenPgpCredentialOperations = {
+    generate: input => openPgpRuntime.run(manager => manager.generate(input)),
+    import: input => openPgpRuntime.run(manager => manager.import(input)),
+    unlock: (credentialId, passphrase) => openPgpRuntime.run(manager => manager.unlock(credentialId, passphrase)),
+    enable: credentialId => openPgpRuntime.run(manager => manager.enable(credentialId)),
+    disable: credentialId => openPgpRuntime.run(manager => manager.disable(credentialId)),
+    delete: (credentialId, unassign) => openPgpRuntime.run(manager => manager.delete(credentialId, unassign)),
+    test: credentialId => openPgpRuntime.run(manager => manager.test(credentialId)),
+    readiness: credentialId => openPgpRuntime.run(manager => manager.readiness(credentialId)),
+  };
   const tokenCredentials = new TokenCredentialManager(credentialMetadata, credentialTokens);
   const credentialContexts = createStoredCredentialContextResolver({
     metadata: credentialMetadata,
@@ -203,7 +227,7 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     sshAgentSocket: () => sshAgent?.currentSocket(),
     sshCredentialUsable: sshUsable,
     openPgpCredentialUsable: async credentialId => {
-      const readiness = await openPgpCredentials.test(credentialId);
+      const readiness = await openPgpOperations.test(credentialId);
       return readiness.every(result => result.status !== "unavailable");
     },
     tools: contextTools,
@@ -231,7 +255,7 @@ export async function runHub(options: RunHubOptions): Promise<void> {
       metadata: credentialMetadata,
       tools: credentialTools,
       get ssh() { return sshCredentials ? sshOperations : null; },
-      get openpgp() { return openPgpCredentials; },
+      openpgp: openPgpOperations,
       tokens: tokenCredentials,
       workspaceExists: workspaceId => registry.byId(workspaceId) !== undefined,
       toolsChanged: refreshCredentialRuntime,
@@ -272,7 +296,22 @@ export async function runHub(options: RunHubOptions): Promise<void> {
               await agent?.shutdown();
             }),
           },
-          openPgp: openPgpCredentials,
+          openPgp: {
+            // Same shape for OpenPGP: drain gated operations, then swap in a
+            // tooling-unavailable manager before killing the agent, so a
+            // waiting operation cannot restart the shared GnuPG agent after
+            // exit.
+            shutdown: () => openPgpRuntime.replace(async () => {
+              const previous = openPgpCredentials;
+              openPgpCredentials = new OpenPgpCredentialManager({
+                gnupgHome: credentialGnuPgPath(stateRoot),
+                metadataStore: credentialMetadata,
+                gpgPath: null,
+                gpgconfPath: null,
+              });
+              await previous.shutdown();
+            }),
+          },
         });
       } finally {
         process.exit(0);

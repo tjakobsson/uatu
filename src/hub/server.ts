@@ -107,6 +107,21 @@ export function createHubFetchHandler(deps: HubDeps) {
   const limiter = new LoginRateLimiter();
   const credentialLimiter = new CredentialOperationRateLimiter();
   const credentialApi = deps.credentialApi ? new CredentialApi(deps.credentialApi) : null;
+  // Disable and delete are revocations: they run under every assigned
+  // workspace's lifecycle queue (acquired in sorted order, so concurrent
+  // revocations cannot deadlock), or a session start could capture the
+  // credential while the API reports it revoked. Assignment writes take a
+  // single workspace's queue, so nesting cannot cycle.
+  const revokeExclusive = async <T>(credentialId: string, operation: () => Promise<T>): Promise<T> => {
+    const workspaceIds = [...new Set(
+      (deps.credentialApi?.metadata.snapshot().assignments ?? [])
+        .filter(assignment => assignment.credentialId === credentialId)
+        .map(assignment => assignment.workspaceId),
+    )].sort();
+    const acquire = (index: number): Promise<T> =>
+      index >= workspaceIds.length ? operation() : sessions.runExclusive(workspaceIds[index]!, () => acquire(index + 1));
+    return acquire(0);
+  };
 
   // Whether the browser-facing connection is HTTPS: either the hub
   // terminates TLS itself, or a fronting proxy (tailscale serve, Caddy,
@@ -746,7 +761,7 @@ export function createHubFetchHandler(deps: HubDeps) {
             }
             if (operation === "unlock") return json(200, { credential: await credentialApi.unlock(credentialId, body) }, headers);
             if (operation === "lock") return json(200, { credential: await credentialApi.lock(credentialId, body) }, headers);
-            if (operation === "enable" || operation === "disable") return json(200, { credential: await credentialApi.setEnabled(credentialId, body, operation === "enable") }, headers);
+            if (operation === "enable" || operation === "disable") return json(200, { credential: await revokeExclusive(credentialId, () => credentialApi.setEnabled(credentialId, body, operation === "enable")) }, headers);
             if (operation === "assign") {
               const workspaceId = typeof body.workspaceId === "string" ? body.workspaceId : "";
               const assignment = await sessions.runExclusive(workspaceId, () => credentialApi.assign(credentialId, body));
@@ -769,7 +784,7 @@ export function createHubFetchHandler(deps: HubDeps) {
               return json(200, { removed }, headers);
             }
             if (operation === "test") return json(200, { results: await credentialApi.test(credentialId, body) }, headers);
-            return json(200, { deleted: await credentialApi.delete(credentialId, body) }, headers);
+            return json(200, { deleted: await revokeExclusive(credentialId, () => credentialApi.delete(credentialId, body)) }, headers);
           }
         } catch (error) {
           const mapped = credentialApiError(error);

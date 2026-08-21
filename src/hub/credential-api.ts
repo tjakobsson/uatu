@@ -1,7 +1,7 @@
 import type { CredentialMetadataStore } from "./credential-store";
 import type { SshCredentialOperations } from "./credential-ssh";
 import type { CredentialToolManager } from "./credential-tools";
-import type { OpenPgpCredentialManager } from "./openpgp-credentials";
+import type { OpenPgpCredentialOperations } from "./openpgp-credentials";
 import type { TokenCredentialManager } from "./token-credentials";
 import {
   CREDENTIAL_TOOLS,
@@ -26,7 +26,7 @@ export type CredentialApiServices = {
   metadata: CredentialMetadataStore;
   tools: CredentialToolManager;
   ssh: SshCredentialOperations | null;
-  openpgp: OpenPgpCredentialManager;
+  openpgp: OpenPgpCredentialOperations;
   tokens: TokenCredentialManager;
   workspaceExists(workspaceId: string): boolean;
   toolsChanged?(): Promise<void>;

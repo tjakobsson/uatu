@@ -89,7 +89,7 @@ async function fixture(root: string) {
     },
   });
   servers.push(server);
-  return { server, metadata, tokenStore, workspace, state, openpgp, registry, personalState };
+  return { server, metadata, tokenStore, workspace, state, openpgp, registry, personalState, sessions };
 }
 
 async function login(origin: string, name: string, password: string): Promise<string> {
@@ -463,6 +463,45 @@ describe("credential API integration", () => {
       host: "two.example.com",
     });
     expect(f.metadata.snapshot().assignments.some(assignment => assignment.credentialId === ssh.id && assignment.role === "authentication" && assignment.host === "one.example.com")).toBe(false);
+  });
+
+  test("disable and delete wait for the assigned workspace's lifecycle queue", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));
+    roots.push(root);
+    const f = await fixture(root);
+    const origin = `http://127.0.0.1:${f.server.port}`;
+    const cookie = await login(origin, "alice", "alice password");
+    const created = await post(origin, cookie, "/api/hub/credentials/token", {
+      name: "Revocable token",
+      host: "github.com",
+      token: "revocable-secret",
+      capabilities: ["https-git"],
+    });
+    const credentialId = ((await created.json()) as { credential: { id: string } }).credential.id;
+    expect((await post(origin, cookie, `/api/hub/credentials/${credentialId}/assign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+    })).status).toBe(200);
+
+    // Simulate a session start holding the workspace's lifecycle queue: the
+    // revocation must queue behind it, not commit while the start could
+    // still capture the credential.
+    let releaseStart!: () => void;
+    const startHeld = new Promise<void>(resolve => { releaseStart = resolve; });
+    const start = f.sessions.runExclusive(f.workspace.id, () => startHeld);
+    const disable = post(origin, cookie, `/api/hub/credentials/${credentialId}/disable`, {});
+    await new Promise(resolve => setTimeout(resolve, 25));
+    expect(f.metadata.snapshot().credentials.find(item => item.id === credentialId)?.enabled).toBe(true);
+
+    releaseStart();
+    await start;
+    expect((await disable).status).toBe(200);
+    expect(f.metadata.snapshot().credentials.find(item => item.id === credentialId)?.enabled).toBe(false);
+
+    const deletion = await post(origin, cookie, `/api/hub/credentials/${credentialId}/delete`, { confirm: true, unassign: true });
+    expect(deletion.status).toBe(200);
+    expect(f.metadata.snapshot().credentials).toEqual([]);
   });
 
   test("unassigns inside the stop lifecycle when stop is requested", async () => {

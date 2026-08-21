@@ -10,7 +10,7 @@
 - [x] 2.1 Implement bounded executable discovery and absolute-path validation for the OpenSSH client and key/agent tools, GnuPG, Git, `gh`, and `glab` without shell interpolation.
 - [x] 2.2 Implement layered version/runtime/readiness probes with timeouts, output caps, sanitized structured results, and independent degradation per capability.
 - [x] 2.3 Add platform-specific installation/path guidance and tests proving diagnostics do not include environment values, command input, private material, or unbounded stderr.
-- [x] 2.4 Persist validated tool overrides, serialize mutation with re-probing and SSH runtime replacement with in-flight credential operations, degrade stale persisted overrides without blocking startup, re-probe after mutation, and keep a failed override from replacing the last usable configuration.
+- [x] 2.4 Persist validated tool overrides, serialize mutation with re-probing and SSH/OpenPGP runtime replacement with in-flight credential operations and with each other, degrade stale persisted overrides without blocking startup, re-probe after mutation, and keep a failed override from replacing the last usable configuration.
 
 ## 3. Managed SSH Credentials
 
