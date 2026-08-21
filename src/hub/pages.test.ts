@@ -111,6 +111,8 @@ describe("clone page", () => {
     expect(html).toContain("request.retainAssignment = cloneRetainAssignment.checked");
     expect(html).toContain('(?:[^@/:\\s]+@)?');
     expect(html).toContain('value.startsWith("git+ssh://")');
+    // HTTPS hosts are normalized like the backend before token matching.
+    expect(html).toContain('parsed.hostname.endsWith(".")');
     expect(html).not.toContain("at > 0");
   });
 });

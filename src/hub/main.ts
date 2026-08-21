@@ -142,6 +142,7 @@ export async function runHub(options: RunHubOptions): Promise<void> {
   await Promise.all([credentialTokens.load(), credentialTools.load()]);
   let sshAgent: ManagedSshAgent | null = null;
   let sshCredentials: SshCredentialService | null = null;
+  const sshExplicitLocks = new Set<string>();
   const sshRuntime = createCredentialRuntimeGate(() => sshCredentials);
   let openPgpCredentials: OpenPgpCredentialManager;
   const openPgpRuntime = createCredentialRuntimeGate(() => openPgpCredentials);
@@ -154,17 +155,24 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     const sshChanged = (["ssh-agent", "ssh-keygen", "ssh-add"] as const).some(tool => paths.get(tool) !== activePaths.get(tool));
     if (sshChanged) {
       await sshRuntime.replace(async () => {
-        await sshAgent?.shutdown();
         const agentPath = paths.get("ssh-agent");
         const keygenPath = paths.get("ssh-keygen");
         const addPath = paths.get("ssh-add");
-        sshAgent = agentPath ? new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(stateRoot), sshAgentPath: agentPath }) : null;
+        // Only an ssh-agent change restarts the agent. A key-tool override
+        // rebuilds the service around the running agent: restarting would
+        // drop every loaded identity, and encrypted keys cannot be restored
+        // without their discarded passphrases.
+        if (agentPath !== activePaths.get("ssh-agent")) {
+          await sshAgent?.shutdown();
+          sshAgent = agentPath ? new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(stateRoot), sshAgentPath: agentPath }) : null;
+        }
         sshCredentials = sshAgent && keygenPath && addPath ? new SshCredentialService({
           secretsDirectory: credentialSecretsPath(stateRoot),
           metadataStore: credentialMetadata,
           agent: sshAgent,
           sshKeygenPath: keygenPath,
           sshAddPath: addPath,
+          explicitLocks: sshExplicitLocks,
         }) : null;
       });
     }

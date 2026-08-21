@@ -1465,7 +1465,14 @@ function cloneCompatible(credential, kind, url) {
   if (!credential.enabled || !kind) return false;
   if (kind === "ssh") return credential.type === "ssh" && credential.capabilities.includes("ssh-authentication");
   if (credential.type !== "token" || !credential.capabilities.includes("https-git")) return false;
-  try { return new URL(url).host.toLowerCase() === credential.metadata.host.toLowerCase(); }
+  // Mirror the server's provider-host normalization (trailing dot, case)
+  // so every URL the backend accepts for a stored token is selectable here.
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.endsWith(".") ? parsed.hostname.slice(0, -1) : parsed.hostname;
+    const host = hostname.toLowerCase() + (parsed.port ? ":" + parsed.port : "");
+    return host === credential.metadata.host.toLowerCase();
+  }
   catch { return false; }
 }
 function updateCloneCredentials() {

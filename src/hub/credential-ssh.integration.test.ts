@@ -142,6 +142,7 @@ describe("managed SSH credential lifecycle", () => {
     await metadata.load();
     const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent });
     agents.push(agent);
+    const explicitLocks = new Set<string>();
     const service = new SshCredentialService({
       secretsDirectory: credentialSecretsPath(root),
       metadataStore: metadata,
@@ -149,6 +150,7 @@ describe("managed SSH credential lifecycle", () => {
       sshKeygenPath: found.keygen,
       sshAddPath: found.add,
       createId: () => "unencrypted",
+      explicitLocks,
     });
 
     const imported = await service.import("Unencrypted", ["ssh-authentication"], await readFile(source, "utf8"), "");
@@ -161,6 +163,17 @@ describe("managed SSH credential lifecycle", () => {
     await service.lock(imported.id);
     expect(await service.testUsability(imported.id)).toBe(false);
     expect(await service.testUsability(imported.id)).toBe(false);
+    // A key-tool override rebuilds the service around the same agent; the
+    // shared lock set keeps the explicit lock in force.
+    const rebuilt = new SshCredentialService({
+      secretsDirectory: credentialSecretsPath(root),
+      metadataStore: metadata,
+      agent,
+      sshKeygenPath: found.keygen,
+      sshAddPath: found.add,
+      explicitLocks,
+    });
+    expect(await rebuilt.testUsability(imported.id)).toBe(false);
     await service.unlock(imported.id, "");
     expect(await service.testUsability(imported.id)).toBe(true);
     // Disable locks; re-enable restores auto-load, as after a Hub restart.

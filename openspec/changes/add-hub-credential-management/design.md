@@ -47,7 +47,7 @@ Encrypting every secret with a Hub master key stored in the same state directory
 
 ### D3: Use one Hub-owned OpenSSH agent and one dedicated GnuPG home
 
-The Hub lazily starts `ssh-agent` in foreground/supervised mode with a fixed socket below `credential-runtime/`. All unlocked Hub SSH identities may reside in that agent. Workspace assignment selects a public identity through generated SSH/Git configuration (`IdentityFile` referencing public material plus `IdentitiesOnly`, and Git's SSH signing-key configuration) and invokes the validated absolute `ssh` client path; it does not claim that another same-UID process cannot query the shared agent.
+The Hub lazily starts `ssh-agent` in foreground/supervised mode with a fixed socket below `credential-runtime/`. All unlocked Hub SSH identities may reside in that agent; only an `ssh-agent` override change restarts it — key-tool override changes rebuild the credential service around the running agent so loaded identities and explicit locks survive. Workspace assignment selects a public identity through generated SSH/Git configuration (`IdentityFile` referencing public material plus `IdentitiesOnly`, and Git's SSH signing-key configuration) and invokes the validated absolute `ssh` client path; it does not claim that another same-UID process cannot query the shared agent.
 
 GnuPG operations set a dedicated `GNUPGHOME`. `gpg-agent` is started and stopped through GnuPG's own scoped management commands, so system GnuPG homes and sockets are untouched. A workspace signing assignment selects one fingerprint and signing format through generated Git configuration.
 

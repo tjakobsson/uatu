@@ -24,6 +24,9 @@ export type SshCredentialServiceOptions = {
   operationTimeoutMs?: number;
   createId?: () => string;
   removeFile?: (filePath: string) => Promise<void>;
+  // Shared across service rebuilds that keep the same agent (a key-tool
+  // override change), so an explicit lock survives the rebuild.
+  explicitLocks?: Set<string>;
 };
 
 type PtyResult = { exitCode: number; publicOutput: string };
@@ -264,7 +267,7 @@ export class SshCredentialService {
   // remembered or the next readiness check would silently re-add the key.
   // Runtime state by design: the agent's contents do not survive a Hub
   // restart either.
-  private readonly explicitlyLocked = new Set<string>();
+  private readonly explicitlyLocked: Set<string>;
   // Agent-mutating operations serialize per credential: a pending ssh-add
   // must not land its identity after a concurrent disable/delete finished
   // revoking the credential, which would leave the deleted key usable
@@ -276,6 +279,7 @@ export class SshCredentialService {
     this.timeoutMs = options.operationTimeoutMs ?? OPERATION_TIMEOUT_MS;
     this.createId = options.createId ?? randomUUID;
     this.removeFile = options.removeFile ?? (filePath => fs.rm(filePath, { force: true }));
+    this.explicitlyLocked = options.explicitLocks ?? new Set();
   }
 
   async generate(name: string, capabilities: SshCapability[], passphrase: string): Promise<SshCredentialRecord> {
