@@ -29,6 +29,7 @@ import type { HubConfig } from "./config";
 import { CloneJobManager, type CloneJobEvent } from "./clone-jobs";
 import { CloneProcessAdapter } from "./clone-process";
 import type { CloneCredentialResolver } from "./credential-context";
+import { normalizeProviderHost } from "./credential-types";
 import {
   CredentialApi,
   CredentialOperationRateLimiter,
@@ -468,6 +469,17 @@ export function createHubFetchHandler(deps: HubDeps) {
     }
     try {
       const credential = await cloneJobs.resolveCredential(url, credentialId);
+      // A clone-only host (a valid OpenSSH alias, say) can never back an
+      // assignment; rejecting retention here beats cloning fully and then
+      // rolling the registration back over an assign the metadata parser
+      // was always going to refuse.
+      if (body.retainAssignment === true && credential) {
+        try {
+          normalizeProviderHost(credential.host);
+        } catch {
+          throw new Error(`selected credential cannot retain an assignment for this clone host: ${credential.host}`);
+        }
+      }
       const resolvedDest = path.resolve(dest);
       await fs.mkdir(resolvedDest, { recursive: true });
       const target = path.join(await fs.realpath(resolvedDest), requestedFolderName || cloneTargetName(url)!);

@@ -22,7 +22,7 @@
 ## 4. Managed OpenPGP Credentials
 
 - [x] 4.1 Implement dedicated-`GNUPGHOME` generation and import of OpenPGP signing keys, returning only public key and fingerprint metadata and degrading cleanly when GnuPG is unavailable.
-- [x] 4.2 Implement explicit OpenPGP unlock through a bounded loopback signing probe, agent-cache readiness detection, metadata-scoped disable/delete behavior with cleanup rollback under the metadata lock and per-key agent-cache eviction on disable, startup recovery that clears a surviving dedicated agent, and otherwise Hub-shutdown-only `gpg-agent` termination.
+- [x] 4.2 Implement explicit OpenPGP unlock through a bounded loopback signing probe, agent-cache readiness detection, metadata-scoped disable/delete behavior with cleanup rollback under the metadata lock and per-key agent-cache eviction on disable, startup recovery that clears a surviving dedicated agent and fails closed until it succeeds, and otherwise Hub-shutdown-only `gpg-agent` termination.
 - [x] 4.3 Add local sign-and-verify capability tests using a fixed challenge and tests proving passphrases, pinentry responses, and private exports never enter retained output or API DTOs.
 - [x] 4.4 Add integration coverage proving the Hub GnuPG home and lifecycle remain separate from an existing system GnuPG home and agent.
 
@@ -43,7 +43,7 @@
 
 ## 7. Clone Credential Selection
 
-- [x] 7.1 Extend clone creation with optional credential id and retain-assignment fields, validating remote transport/provider compatibility before a process starts.
+- [x] 7.1 Extend clone creation with optional credential id and retain-assignment fields, validating remote transport/provider compatibility and retained-assignment host normalizability before a process starts.
 - [x] 7.2 Build each clone's explicit managed SSH or HTTPS selection context, remove inherited agent/helper variables, and preserve the existing no-selection interactive PTY fallback.
 - [x] 7.3 Coordinate clone success, workspace registration, retained assignment, and session-start rollback so failures leave neither phantom registrations nor dangling assignments.
 - [x] 7.4 Extend clone unit and integration tests for selected unlocked/locked credentials, unselected-credential non-fallback, interactive one-operation secrets, cancellation, timeout, and secret redaction.

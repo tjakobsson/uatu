@@ -151,11 +151,11 @@ beforeAll(async () => {
       async resolve(remote, credentialId): Promise<ResolvedCloneCredential | undefined> {
         if (!credentialId) return undefined;
         if (credentialId === "locked-ssh") throw new Error("selected SSH credential is locked; unlock it before cloning: locked-ssh");
-        if (credentialId !== "unlocked-ssh") throw new Error(`unknown credential: ${credentialId}`);
+        if (credentialId !== "unlocked-ssh" && credentialId !== "alias-ssh") throw new Error(`unknown credential: ${credentialId}`);
         if (!remote.startsWith("managed:")) throw new Error("selected credential is not compatible with clone transport");
         return {
           credentialId,
-          host: "github.com",
+          host: credentialId === "alias-ssh" ? "work_alias" : "github.com",
           process: {
             type: "ssh",
             host: "github.com",
@@ -990,6 +990,18 @@ describe("hub end to end", () => {
       body: JSON.stringify({ url: "managed:no-selection.git", dest, retainAssignment: true }),
     });
     expect(invalidRetain.status).toBe(400);
+    expect(managedCloneStarts).toHaveLength(startsBefore);
+
+    // A clone-only host (an OpenSSH alias) can never back an assignment;
+    // retention is rejected before any clone process starts, instead of a
+    // full clone followed by registration rollback over a doomed assign.
+    const aliasRetain = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ url: "managed:alias.git", dest, credentialId: "alias-ssh", retainAssignment: true }),
+    });
+    expect(aliasRetain.status).toBe(400);
+    expect(((await aliasRetain.json()) as { error: string }).error).toContain("clone host");
     expect(managedCloneStarts).toHaveLength(startsBefore);
 
     const selected = await fetch(`${origin}/api/hub/clone-jobs`, {

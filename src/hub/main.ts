@@ -160,6 +160,13 @@ export async function runHub(options: RunHubOptions): Promise<void> {
   const sshRuntime = createCredentialRuntimeGate(() => sshCredentials);
   let openPgpCredentials!: OpenPgpCredentialManager;
   const openPgpRuntime = createCredentialRuntimeGate(() => openPgpCredentials);
+  // A Hub killed without graceful shutdown can leave its dedicated
+  // gpg-agent running with cached passphrases; protected keys must be
+  // locked after a restart. Recovery (a scoped agent kill) runs on the
+  // first runtime build and retries on every re-probe until it succeeds —
+  // failing closed with an unavailable manager in between. Ordinary tool
+  // refreshes after a successful recovery never kill the agent.
+  let openPgpRecoveryPending = true;
   let activePaths = new Map<string, string | null>();
   const contextTools = { ssh: null, git: null, gpg: null, sshKeygen: null, gh: null, glab: null } as {
     ssh: string | null; git: string | null; gpg: string | null; sshKeygen: string | null; gh: string | null; glab: string | null;
@@ -190,17 +197,36 @@ export async function runHub(options: RunHubOptions): Promise<void> {
         }) : null;
       });
     }
-    if (!openPgpCredentials || paths.get("gpg") !== activePaths.get("gpg") || paths.get("gpgconf") !== activePaths.get("gpgconf")) {
+    if (!openPgpCredentials || paths.get("gpg") !== activePaths.get("gpg") || paths.get("gpgconf") !== activePaths.get("gpgconf") || openPgpRecoveryPending) {
       // Replacement drains the old manager's in-flight operations first: a
       // detached operation could otherwise restart the shared GnuPG agent
       // after a later shutdown killed it through the replacement manager.
       await openPgpRuntime.replace(async () => {
-        openPgpCredentials = new OpenPgpCredentialManager({
+        const replacement = new OpenPgpCredentialManager({
           gnupgHome: credentialGnuPgPath(stateRoot),
           metadataStore: credentialMetadata,
           gpgPath: paths.get("gpg") ?? null,
           gpgconfPath: paths.get("gpgconf") ?? null,
         });
+        if (openPgpRecoveryPending) {
+          const gpgConfigured = (paths.get("gpg") ?? paths.get("gpgconf") ?? null) !== null;
+          const recovery = await replacement.shutdown();
+          openPgpRecoveryPending = gpgConfigured && recovery.some(result => result.status === "unavailable");
+          if (openPgpRecoveryPending) {
+            // Fail closed: gpg could reconnect to the surviving agent and
+            // sign with its cached passphrase, so OpenPGP stays unavailable
+            // until a re-probe clears the agent.
+            console.error("uatu hub: could not clear a possibly surviving OpenPGP agent; OpenPGP credentials stay unavailable until a tool re-probe succeeds");
+            openPgpCredentials = new OpenPgpCredentialManager({
+              gnupgHome: credentialGnuPgPath(stateRoot),
+              metadataStore: credentialMetadata,
+              gpgPath: null,
+              gpgconfPath: null,
+            });
+            return;
+          }
+        }
+        openPgpCredentials = replacement;
       });
     }
     contextTools.git = paths.get("git") ?? null;
@@ -212,12 +238,6 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     activePaths = paths;
   };
   await refreshCredentialRuntime();
-  // A Hub killed without graceful shutdown can leave its dedicated
-  // gpg-agent running with cached passphrases; protected keys must be
-  // locked after a restart, so clear any surviving agent before readiness
-  // is exposed. Startup-only — tool-override refreshes must not relock
-  // credentials.
-  await openPgpCredentials.shutdown();
   const requireSshService = (service: SshCredentialService | null): SshCredentialService => {
     if (!service) throw new Error("OpenSSH credential tooling is unavailable");
     return service;
