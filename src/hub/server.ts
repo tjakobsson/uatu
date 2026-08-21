@@ -754,6 +754,17 @@ export function createHubFetchHandler(deps: HubDeps) {
             }
             if (operation === "unassign") {
               const workspaceId = typeof body.workspaceId === "string" ? body.workspaceId : "";
+              // stop: true makes stop-and-remove one lifecycle operation: the
+              // unassignment runs inside the stop, so a concurrent start
+              // cannot slip between them and keep the removed credential
+              // projected into a live session.
+              if (body.stop === true) {
+                let removed = false;
+                await sessions.stop(workspaceId, async () => {
+                  removed = await credentialApi.unassign(credentialId, body);
+                });
+                return json(200, { removed }, headers);
+              }
               const removed = await sessions.runExclusive(workspaceId, () => credentialApi.unassign(credentialId, body));
               return json(200, { removed }, headers);
             }

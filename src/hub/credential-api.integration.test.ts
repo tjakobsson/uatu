@@ -465,6 +465,45 @@ describe("credential API integration", () => {
     expect(f.metadata.snapshot().assignments.some(assignment => assignment.credentialId === ssh.id && assignment.role === "authentication" && assignment.host === "one.example.com")).toBe(false);
   });
 
+  test("unassigns inside the stop lifecycle when stop is requested", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));
+    roots.push(root);
+    const f = await fixture(root);
+    const origin = `http://127.0.0.1:${f.server.port}`;
+    const cookie = await login(origin, "alice", "alice password");
+    const created = await post(origin, cookie, "/api/hub/credentials/token", {
+      name: "Stop token",
+      host: "github.com",
+      token: "stop-unassign-secret",
+      capabilities: ["https-git"],
+    });
+    const credentialId = ((await created.json()) as { credential: { id: string } }).credential.id;
+    expect((await post(origin, cookie, `/api/hub/credentials/${credentialId}/assign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+    })).status).toBe(200);
+
+    const invalid = await post(origin, cookie, `/api/hub/credentials/${credentialId}/unassign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+      stop: "yes",
+    });
+    expect(invalid.status).toBe(400);
+
+    const removed = await post(origin, cookie, `/api/hub/credentials/${credentialId}/unassign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+      stop: true,
+    });
+    expect(removed.status).toBe(200);
+    await assertContract("POST", "/api/hub/credentials/{credentialId}/unassign", removed);
+    expect(await removed.json()).toEqual({ removed: true });
+    expect(f.metadata.snapshot().assignments).toEqual([]);
+  });
+
   test("returns an error when OpenPGP unlock does not make the key ready", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));
     roots.push(root);

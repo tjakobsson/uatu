@@ -16,7 +16,7 @@
 
 - [x] 3.1 Implement a supervised Hub-owned `ssh-agent` using a fixed owner-only runtime socket, lazy startup, ownership tracking, owned-artifact cleanup after unexpected exit, stale-state recovery, and bounded shutdown.
 - [x] 3.2 Implement passphrase-protected SSH key generation and duplicate-safe private-key import that preserves existing key protection, using a private no-echo PTY for encrypted keys and automatic loading for unencrypted keys while storing native key files owner-only and deriving public metadata without exposing secrets.
-- [x] 3.3 Implement SSH unlock, lock, disable, delete, and per-assigned-key usability tests through the managed agent, with backing-file failures isolated to the affected credential and all passphrases excluded from argv, environment, logs, captured output, and persistence.
+- [x] 3.3 Implement SSH unlock, lock, disable, delete, and per-assigned-key usability tests through the managed agent, with backing-file failures isolated to the affected credential, locked-key deletion leaving other loaded identities available, and all passphrases excluded from argv, environment, logs, captured output, and persistence.
 - [x] 3.4 Add integration tests with an ambient fake/system agent proving Hub startup, key operations, and shutdown use only the Hub socket and never signal or mutate the ambient agent.
 
 ## 4. Managed OpenPGP Credentials
@@ -60,7 +60,7 @@
 - [x] 9.1 Add the Credentials settings page using existing Hub visual patterns, with credential summaries, readiness layers, public-key copy, and capability-specific forms.
 - [x] 9.2 Add masked generate/import/unlock/token inputs, tool path overrides and Test actions, destructive confirmations, workspace-oriented authentication/signing assignment controls, and restart-required status.
 - [x] 9.3 Add the persistent shared-UID warning to local-backend assignment and clone surfaces and ensure no copy describes assignments as isolation or least privilege.
-- [x] 9.4 Extend the dedicated clone page with compatible credential selection, locked-credential unlock flow, retain-assignment choice, and unchanged interactive fallback behavior.
+- [x] 9.4 Extend the dedicated clone page with compatible credential selection matching every server-accepted SSH remote form, locked-credential unlock flow, retain-assignment choice, and unchanged interactive fallback behavior.
 - [x] 9.5 Add authenticated-page DOM/unit and E2E coverage for missing tools, successful tests, secret non-redisplay, SSH/OpenPGP/token lifecycle, assignments, clone selection, errors, and mobile/desktop layouts.
 
 ## 10. Contracts, Migration, And Validation

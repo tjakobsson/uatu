@@ -262,8 +262,12 @@ export class CredentialApi {
     return this.services.metadata.assign(assignment, body.replace === true);
   }
 
+  // `stop` is consumed by the route, which runs this unassignment inside the
+  // workspace's stop lifecycle operation; it is validated here so the field
+  // list stays authoritative.
   async unassign(credentialId: string, body: JsonObject): Promise<boolean> {
-    fields(body, ["workspaceId", "role", "host"]);
+    fields(body, ["workspaceId", "role", "host", "stop"]);
+    if (body.stop !== undefined) bool(body.stop, "stop");
     const workspaceId = id(body.workspaceId, "workspace id");
     if (body.role !== undefined && body.role !== "authentication" && body.role !== "signing") throw new Error("assignment role is invalid");
     if (body.role === "authentication" && body.host === undefined) throw new Error("authentication assignment host is required");

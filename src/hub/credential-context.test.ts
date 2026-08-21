@@ -7,11 +7,12 @@ import {
   buildLocalCredentialEnvironment,
   createStoredCloneCredentialResolver,
   createStoredCredentialContextResolver,
+  parseCloneRemote,
   LOCAL_CREDENTIAL_ASSIGNMENT_WARNING,
   type ResolvedCredentialContext,
 } from "./credential-context";
 import { CredentialMetadataStore, CredentialTokenStore } from "./credential-store";
-import type { OpenPgpCredentialRecord, SshCredentialRecord, TokenCredentialRecord } from "./credential-types";
+import { normalizeProviderHost, type OpenPgpCredentialRecord, type SshCredentialRecord, type TokenCredentialRecord } from "./credential-types";
 
 const tempDirectories: string[] = [];
 const createdAt = "2026-08-20T00:00:00.000Z";
@@ -532,6 +533,16 @@ describe("local workspace credential projection", () => {
 });
 
 describe("clone credential resolution", () => {
+  test("parses SCP remotes into assignment-normalized hosts, keeping IPv6 brackets", () => {
+    expect(parseCloneRemote("git@github.com:org/repo.git")).toEqual({ transport: "ssh", host: "github.com" });
+    expect(parseCloneRemote("github.com:org/repo.git")).toEqual({ transport: "ssh", host: "github.com" });
+    expect(parseCloneRemote("[github.com]:org/repo.git")).toEqual({ transport: "ssh", host: "github.com" });
+    expect(parseCloneRemote("git@[2001:db8::1]:org/repo.git")).toEqual({ transport: "ssh", host: "[2001:db8::1]" });
+    // The retained-assignment path feeds this host to metadata.assign, whose
+    // parser accepts only the normalized representation.
+    expect(normalizeProviderHost("[2001:db8::1]")).toBe("[2001:db8::1]");
+  });
+
   test("resolves only an unlocked compatible SSH credential", async () => {
     const { root } = await fixture();
     const metadata = new CredentialMetadataStore(path.join(root, "credentials.json"));

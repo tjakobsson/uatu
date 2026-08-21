@@ -110,6 +110,7 @@ describe("clone page", () => {
     expect(html).toContain("request.credentialId = selectedCredential.id");
     expect(html).toContain("request.retainAssignment = cloneRetainAssignment.checked");
     expect(html).toContain('(?:[^@/:\\s]+@)?');
+    expect(html).toContain('value.startsWith("git+ssh://")');
     expect(html).not.toContain("at > 0");
   });
 });
@@ -168,9 +169,10 @@ describe("settings page", () => {
     expect(html).toContain('{ host: entry.assignment.host }');
     expect(html).toContain("Stop it and remove its");
     expect(html).toContain("Its shells will be terminated.");
-    expect(html.indexOf('/sessions/" + encodeURIComponent(workspace.id) + "/stop')).toBeLessThan(
-      html.indexOf('entry.credential.id) + "/unassign"'),
-    );
+    // Stop-and-remove is one request: the server runs the unassignment
+    // inside the stop lifecycle instead of the page issuing two racy POSTs.
+    expect(html).toContain('role: entry.assignment.role, stop: true');
+    expect(html).not.toContain('/sessions/" + encodeURIComponent(workspace.id) + "/stop');
     expect(html).not.toContain("Continue with this assignment?");
     expect(html).toContain("Choose exactly one private key source");
     expect(html).toContain("file.size > 1024 * 1024");

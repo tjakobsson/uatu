@@ -1253,9 +1253,9 @@ components:
     AssignCredentialRequest: { oneOf: [{ $ref: '#/components/schemas/AuthenticationAssignmentRequest' }, { $ref: '#/components/schemas/SigningAssignmentRequest' }] }
     UnassignCredentialRequest:
       oneOf:
-        - { type: object, required: [workspaceId, role, host], properties: { workspaceId: { $ref: '#/components/schemas/WorkspaceId' }, role: { const: authentication }, host: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 256 } }, additionalProperties: false }
-        - { type: object, required: [workspaceId, role], properties: { workspaceId: { $ref: '#/components/schemas/WorkspaceId' }, role: { const: signing } }, additionalProperties: false }
-        - { type: object, required: [workspaceId], properties: { workspaceId: { $ref: '#/components/schemas/WorkspaceId' } }, additionalProperties: false }
+        - { type: object, required: [workspaceId, role, host], properties: { workspaceId: { $ref: '#/components/schemas/WorkspaceId' }, role: { const: authentication }, host: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 256 }, stop: { type: boolean } }, additionalProperties: false }
+        - { type: object, required: [workspaceId, role], properties: { workspaceId: { $ref: '#/components/schemas/WorkspaceId' }, role: { const: signing }, stop: { type: boolean } }, additionalProperties: false }
+        - { type: object, required: [workspaceId], properties: { workspaceId: { $ref: '#/components/schemas/WorkspaceId' }, stop: { type: boolean } }, additionalProperties: false }
     DeleteCredentialRequest: { type: object, required: [confirm], properties: { confirm: { type: boolean, const: true }, unassign: { type: boolean } }, additionalProperties: false }
     CreateCloneJobRequest:
       type: object

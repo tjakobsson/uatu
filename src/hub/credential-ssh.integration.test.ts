@@ -160,6 +160,38 @@ describe("managed SSH credential lifecycle", () => {
     expect(await service.testUsability(imported.id)).toBe(false);
   }, 30_000);
 
+  test("deleting a locked key keeps other loaded identities available", async () => {
+    const found = await tools();
+    const root = await stateRoot("uatu-ssh-delete-locked-");
+    const metadata = new CredentialMetadataStore(credentialsPath(root));
+    await metadata.load();
+    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent });
+    agents.push(agent);
+    let id = 0;
+    const service = new SshCredentialService({
+      secretsDirectory: credentialSecretsPath(root),
+      metadataStore: metadata,
+      agent,
+      sshKeygenPath: found.keygen,
+      sshAddPath: found.add,
+      createId: () => `locked-${++id}`,
+    });
+    const passphrase = "uatu-delete-locked-passphrase";
+    const retained = await service.generate("Retained", ["ssh-authentication"], passphrase);
+    const doomed = await service.generate("Doomed", ["ssh-authentication"], passphrase);
+    await service.unlock(retained.id, passphrase);
+    await service.unlock(doomed.id, passphrase);
+    await service.lock(doomed.id);
+    expect(await service.testUsability(doomed.id)).toBe(false);
+
+    // ssh-add -d for the already-absent identity fails, but whole-agent
+    // shutdown must not be the fallback: the retained credential stays
+    // loaded in the shared agent.
+    expect(await service.delete(doomed.id)).toBe(true);
+    expect(agent.isRunning()).toBe(true);
+    expect(await service.testUsability(retained.id)).toBe(true);
+  }, 30_000);
+
   test("rejects concurrent imports of the same key and removes rejected backing files", async () => {
     const found = await tools();
     const root = await stateRoot("uatu-ssh-duplicate-");

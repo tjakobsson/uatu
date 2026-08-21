@@ -980,9 +980,8 @@ async function removeWorkspaceAssignment(entry, workspace, button, actionError) 
   setLocalError(actionError, "");
   await withBusy(button, "…", async () => {
     try {
-      await api("/api/hub/sessions/" + encodeURIComponent(workspace.id) + "/stop");
       await api(credentialPath + "/" + encodeURIComponent(entry.credential.id) + "/unassign", {
-        workspaceId: workspace.id, role: entry.assignment.role,
+        workspaceId: workspace.id, role: entry.assignment.role, stop: true,
         ...(entry.assignment.role === "authentication" ? { host: entry.assignment.host } : {}),
       });
       await Promise.all([loadSettingsState(), loadCredentials()]);
@@ -1458,7 +1457,7 @@ async function loadCloneCredentials() {
 function remoteKind(url) {
   const value = url.trim().toLowerCase();
   if (value.startsWith("https://")) return "https";
-  if (value.startsWith("ssh://")) return "ssh";
+  if (value.startsWith("ssh://") || value.startsWith("git+ssh://")) return "ssh";
   if (/^(?:[^@/:\\s]+@)?(?:\\[[^\\]]+\\]|[^/:\\s]+):[^/].*$/.test(value) && !/^[a-z]:[\\\\/]/.test(value)) return "ssh";
   return null;
 }

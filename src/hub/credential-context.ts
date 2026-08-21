@@ -77,7 +77,11 @@ type CloneRemote = { transport: "ssh" | "https" | "other"; host?: string };
 export function parseCloneRemote(remote: string): CloneRemote {
   const scp = /^(?:[^@/:\s]+@)?(\[[^\]]+\]|[^/:\s]+):[^/].*$/.exec(remote);
   if (scp && !/^[A-Za-z]:[\\/]/.test(remote)) {
-    const host = scp[1]!.replace(/^\[|\]$/g, "").toLowerCase();
+    // An IPv6 literal keeps its brackets — that is the normalized host form
+    // assignments store and validate; only decorative brackets around a
+    // plain host are stripped.
+    const literal = scp[1]!.toLowerCase();
+    const host = literal.startsWith("[") && !literal.includes(":") ? literal.replace(/^\[|\]$/g, "") : literal;
     return { transport: "ssh", host };
   }
   let parsed: URL;

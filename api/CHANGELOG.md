@@ -9,10 +9,11 @@ Compatibility: breaking (Hub)
 ### Changes
 
 - `CredentialToolName` now includes `ssh`; managed workspace and selected-clone SSH commands use its validated absolute path.
+- `UnassignCredentialRequest` gained optional `stop`. `stop: true` stops the workspace session and removes the assignment in one workspace lifecycle operation, so a concurrent start cannot land between the stop and the removal. This is additive for request consumers.
 
 ### Migration
 
-Strict credential-tool consumers must regenerate against Hub revision 4 or accept the new `ssh` enum value.
+Strict credential-tool consumers must regenerate against Hub revision 4 or accept the new `ssh` enum value. The optional `stop` unassignment field is additive and requires no migration.
 
 ## Hub 3 / Workspace 6 - Unreleased
 

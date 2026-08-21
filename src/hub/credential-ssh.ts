@@ -451,7 +451,10 @@ export class SshCredentialService {
     if (!socket) return;
     const publicPath = `${credentialFile(this.options.secretsDirectory, credentialId)}.pub`;
     const exitCode = await runQuiet(this.options.sshAddPath, ["-d", publicPath], this.agentEnvironment(socket), this.timeoutMs);
-    if (exitCode !== 0) await this.options.agent.shutdown();
+    // ssh-add -d fails for an already-absent identity too; whole-agent
+    // shutdown is the fallback only while this key is provably still loaded,
+    // so deleting a locked key cannot lock every other credential.
+    if (exitCode !== 0 && await this.agentHasKey(credentialId)) await this.options.agent.shutdown();
   }
 
   private credential(credentialId: string): SshCredentialRecord {
