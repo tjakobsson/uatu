@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, readFile, readlink, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, readlink, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -225,7 +225,7 @@ describe("local workspace credential projection", () => {
 
     const sshConfig = await readFile(path.join(projected.runtimeDirectory, "ssh_config"), "utf8");
     expect(sshConfig).toContain("Host git.example.com");
-    expect(sshConfig).toContain(`IdentityAgent ${context.sshAgentSocket}`);
+    expect(sshConfig).toContain(`IdentityAgent "${context.sshAgentSocket}"`);
     expect(sshConfig).toContain("IdentityFile none");
     expect(sshConfig).not.toContain("/ambient-agent.sock");
     const helper = await readFile(path.join(projected.runtimeDirectory, "git-credential-token-1"), "utf8");
@@ -234,6 +234,8 @@ describe("local workspace credential projection", () => {
 
   test("matches an SSH assignment by hostname and nonstandard port", async () => {
     const { root, workspace } = await fixture();
+    const runtimeRoot = path.join(root, "runtime %h with spaces");
+    const agentSocket = path.join(root, "managed %h agent.sock");
     const ssh: SshCredentialRecord = {
       id: "ssh-port",
       name: "port key",
@@ -247,9 +249,9 @@ describe("local workspace credential projection", () => {
       workspace,
       context: {
         revision: "port",
-        runtimeRoot: path.join(root, "runtime"),
+        runtimeRoot,
         stateRoot: root,
-        sshAgentSocket: "/managed/agent.sock",
+        sshAgentSocket: agentSocket,
         gnupgHome: path.join(root, "gnupg"),
         tools: { git: null, gpg: null, sshKeygen: null, gh: null, glab: null },
         authentication: [{ host: "git.example.com:2222", credential: ssh }],
@@ -260,6 +262,8 @@ describe("local workspace credential projection", () => {
 
     const sshConfig = await readFile(path.join(projected.runtimeDirectory, "ssh_config"), "utf8");
     expect(sshConfig).toContain('Match host git.example.com exec "test %p = 2222"');
+    expect(sshConfig).toContain(`IdentityAgent "${agentSocket.replaceAll("%", "%%")}"`);
+    expect(sshConfig).toContain(`IdentityFile "${path.join(projected.runtimeDirectory, "ssh-port.pub").replaceAll("%", "%%")}"`);
     expect(sshConfig).not.toContain("Host git.example.com:2222");
     const matching = Bun.spawnSync(["ssh", "-G", "-F", path.join(projected.runtimeDirectory, "ssh_config"), "-p", "2222", "git.example.com"], {
       stdout: "pipe",
@@ -270,9 +274,64 @@ describe("local workspace credential projection", () => {
       stderr: "pipe",
     });
     expect(matching.exitCode).toBe(0);
-    expect(matching.stdout.toString()).toContain(`identityfile ${path.join(projected.runtimeDirectory, "ssh-port.pub")}`);
+    expect(matching.stdout.toString()).toContain(`identityfile ${path.join(projected.runtimeDirectory, "ssh-port.pub").replaceAll("%", "%%")}`);
+    expect(matching.stdout.toString()).toContain(`identityagent ${agentSocket}`);
     expect(otherPort.exitCode).toBe(0);
     expect(otherPort.stdout.toString()).toContain("identityfile none");
+  });
+
+  test("uses a distinct runtime directory for each session generation", async () => {
+    const { root, workspace } = await fixture();
+    const context: ResolvedCredentialContext = {
+      revision: "none",
+      runtimeRoot: path.join(root, "runtime"),
+      stateRoot: root,
+      sshAgentSocket: null,
+      gnupgHome: path.join(root, "gnupg"),
+      tools: { git: null, gpg: null, sshKeygen: null, gh: null, glab: null },
+      authentication: [],
+      signing: null,
+    };
+    const first = await buildLocalCredentialEnvironment({ workspace, context, uatuArgv: ["uatu"] });
+    const second = await buildLocalCredentialEnvironment({ workspace, context, uatuArgv: ["uatu"] });
+    const marker = path.join(second.runtimeDirectory, "replacement-marker");
+    await writeFile(marker, "replacement");
+
+    expect(first.runtimeDirectory).not.toBe(second.runtimeDirectory);
+    expect(await Bun.file(first.runtimeDirectory).exists()).toBe(false);
+    await rm(first.runtimeDirectory, { recursive: true, force: true });
+    expect(await Bun.file(marker).exists()).toBe(true);
+  });
+
+  test("removes a session generation when credential projection fails", async () => {
+    const { root, workspace } = await fixture();
+    const runtimeRoot = path.join(workspace.path, ".runtime");
+    const token: TokenCredentialRecord = {
+      id: "provider-failure",
+      name: "provider failure",
+      type: "token",
+      capabilities: ["github-cli"],
+      enabled: true,
+      createdAt,
+      metadata: { host: "github.com" },
+    };
+    await expect(buildLocalCredentialEnvironment({
+      workspace,
+      context: {
+        revision: "broken-tool",
+        runtimeRoot,
+        stateRoot: root,
+        sshAgentSocket: null,
+        gnupgHome: path.join(root, "gnupg"),
+        tools: { git: null, gpg: null, sshKeygen: null, gh: "/missing/gh", glab: null },
+        authentication: [{ host: "github.com", credential: token, token: "secret" }],
+        signing: null,
+      },
+      uatuArgv: ["uatu"],
+    })).rejects.toThrow("outside the repository");
+
+    const workspaceRuntimeDirectory = path.join(runtimeRoot, "sessions", workspace.id);
+    expect(await readdir(workspaceRuntimeDirectory)).toEqual([]);
   });
 
   test("rejects multiple provider CLI credentials in one workspace", async () => {

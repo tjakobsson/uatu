@@ -73,7 +73,7 @@ At session start the Hub resolves assignments into a credential context passed t
 - HTTPS Git gets a Git credential-helper command scoped to the assigned credential and provider host. Provider-only tokens omit this helper and configure only their declared CLI.
 - `gh`/`glab` get provider-specific runtime configuration rooted outside the workspace; raw tokens are not placed in repository remotes or command arguments.
 
-The generated Git command-scope configuration takes precedence over repository/global defaults for managed fields while leaving unrelated user Git configuration available. The exact environment/config representation stays internal to the backend. A local process can unset it, inspect same-UID runtime files, or reach the shared agent; the UI and API warning describe that limitation.
+The generated Git command-scope configuration takes precedence over repository/global defaults for managed fields while leaving unrelated user Git configuration available. Generated SSH configuration quotes filesystem paths and escapes OpenSSH tokens. Each session generation uses a distinct runtime directory, so stale cleanup cannot remove a replacement session's files. The exact environment/config representation stays internal to the backend. A local process can unset it, inspect same-UID runtime files, or reach the shared agent; the UI and API warning describe that limitation.
 
 ### D6: Implement the HTTPS bridge as a narrow Git credential helper
 

@@ -35,7 +35,7 @@
 
 ## 6. Workspace Credential Contexts
 
-- [x] 6.1 Extend the session-backend contract with a resolved credential context and update all local, fake, integration, and test backends to consume it explicitly.
+- [x] 6.1 Extend the session-backend contract with a resolved credential context, quote generated SSH paths, isolate each session generation's runtime cleanup, and update all local, fake, integration, and test backends to consume it explicitly.
 - [x] 6.2 Generate runtime-only SSH and Git configuration for assigned authentication and SSH/OpenPGP signing defaults while preserving unrelated user Git configuration.
 - [x] 6.3 Generate HTTPS helper and provider-CLI runtime context for assignments, strip ambient credential variables, and ensure a workspace with no assignments receives no Hub or ambient credential integration.
 - [x] 6.4 Wire the generated context through `uatu serve` into newly created embedded PTYs and report when assignment changes require a running workspace restart.

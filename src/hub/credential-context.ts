@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -359,6 +359,10 @@ function sshAssignmentMatch(host: string): string {
     : `Host ${hostname}`;
 }
 
+function sshConfigQuote(value: string): string {
+  return `"${value.replaceAll("%", "%%").replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+}
+
 async function writeCredentialHelper(
   directory: string,
   credentialId: string,
@@ -388,11 +392,29 @@ export async function buildLocalCredentialEnvironment(options: {
   const { workspace, context } = options;
   assertUnambiguousProviderCliAssignments(context.authentication);
   const runtimeRoot = context.runtimeRoot || path.join(os.tmpdir(), `uatu-empty-credential-runtime-${process.pid}`);
-  const runtimeDirectory = path.join(runtimeRoot, "sessions", safeWorkspaceId(workspace.id));
-  await fs.rm(runtimeDirectory, { recursive: true, force: true });
-  await fs.mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
-  await fs.chmod(runtimeDirectory, 0o700);
+  const workspaceRuntimeDirectory = path.join(runtimeRoot, "sessions", safeWorkspaceId(workspace.id));
+  await fs.rm(workspaceRuntimeDirectory, { recursive: true, force: true });
+  const runtimeDirectory = path.join(workspaceRuntimeDirectory, randomUUID());
+  try {
+    await fs.mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
+    await fs.chmod(runtimeDirectory, 0o700);
+    return await projectLocalCredentialEnvironment(options, runtimeDirectory);
+  } catch (error) {
+    await fs.rm(runtimeDirectory, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  }
+}
 
+async function projectLocalCredentialEnvironment(
+  options: {
+    workspace: WorkspaceEntry;
+    context: ResolvedCredentialContext;
+    uatuArgv: string[];
+    sourceEnv?: NodeJS.ProcessEnv;
+  },
+  runtimeDirectory: string,
+): Promise<{ env: Record<string, string>; runtimeDirectory: string }> {
+  const { workspace, context } = options;
   const env = stripAmbientCredentialEnvironment(options.sourceEnv);
   const sshConfigPath = path.join(runtimeDirectory, "ssh_config");
   const sshLines: string[] = [];
@@ -426,8 +448,8 @@ export async function buildLocalCredentialEnvironment(options: {
       await fs.writeFile(publicKeyPath, `${assignment.credential.metadata.publicKey}\n`, { mode: 0o600 });
       sshLines.push(
         sshAssignmentMatch(assignment.host),
-        `  IdentityAgent ${context.sshAgentSocket}`,
-        `  IdentityFile ${publicKeyPath}`,
+        `  IdentityAgent ${sshConfigQuote(context.sshAgentSocket!)}`,
+        `  IdentityFile ${sshConfigQuote(publicKeyPath)}`,
         "  IdentitiesOnly yes",
       );
       usesSshAgent = true;
