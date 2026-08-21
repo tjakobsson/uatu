@@ -88,7 +88,7 @@ async function fixture(root: string) {
     },
   });
   servers.push(server);
-  return { server, metadata, tokenStore, workspace, state, openpgp };
+  return { server, metadata, tokenStore, workspace, state, openpgp, registry, personalState };
 }
 
 async function login(origin: string, name: string, password: string): Promise<string> {
@@ -301,6 +301,30 @@ describe("credential API integration", () => {
     const response = await post(origin, cookie, `/api/hub/workspaces/${f.workspace.id}/forget`, {});
     expect(response.status).toBe(200);
     expect(f.metadata.snapshot().assignments).toEqual([]);
+  });
+
+  test("keeps credential assignments when registry removal fails", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));
+    roots.push(root);
+    const f = await fixture(root);
+    const credential = await f.metadata.create({
+      name: "Retained token",
+      type: "token",
+      enabled: true,
+      capabilities: ["https-git"],
+      metadata: { host: "github.com" },
+    });
+    await f.metadata.assign({ workspaceId: f.workspace.id, credentialId: credential.id, role: "authentication", host: "github.com" });
+    await f.personalState.patch("alice", f.workspace.id, { follow: false });
+    f.registry.remove = async () => { throw new Error("registry disk full"); };
+    const origin = `http://127.0.0.1:${f.server.port}`;
+    const cookie = await login(origin, "alice", "alice password");
+
+    const response = await post(origin, cookie, `/api/hub/workspaces/${f.workspace.id}/forget`, {});
+    expect(response.status).toBe(500);
+    expect(f.registry.byId(f.workspace.id)).not.toBeUndefined();
+    expect(f.personalState.get("alice", f.workspace.id)).toEqual({ version: 1, follow: false });
+    expect(f.metadata.snapshot().assignments).toHaveLength(1);
   });
 
   test("returns an error when OpenPGP unlock does not make the key ready", async () => {

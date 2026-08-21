@@ -31,6 +31,7 @@ export type ResolvedCredentialContext = {
   sshAgentSocket: string | null;
   gnupgHome: string;
   tools: {
+    git: string | null;
     gpg: string | null;
     sshKeygen: string | null;
     gh: string | null;
@@ -179,7 +180,7 @@ export const EMPTY_RESOLVED_CREDENTIAL_CONTEXT: ResolvedCredentialContext = {
   stateRoot: "",
   sshAgentSocket: null,
   gnupgHome: "",
-  tools: { gpg: null, sshKeygen: null, gh: null, glab: null },
+  tools: { git: null, gpg: null, sshKeygen: null, gh: null, glab: null },
   authentication: [],
   signing: null,
 };
@@ -372,20 +373,22 @@ export async function buildLocalCredentialEnvironment(options: {
     ["tag.gpgsign", "false"],
   ];
   let usesSshAgent = false;
-  let providerBinCreated = false;
-  const exposedProviderClis = new Set<"gh" | "glab">();
+  let toolBinCreated = false;
+  const exposedTools = new Set<"git" | "gh" | "glab">();
 
-  const exposeProviderCli = async (name: "gh" | "glab", executable: string): Promise<void> => {
-    if (exposedProviderClis.has(name)) return;
-    const providerBin = path.join(runtimeDirectory, "provider-bin");
-    if (!providerBinCreated) {
+  const exposeTool = async (name: "git" | "gh" | "glab", executable: string): Promise<void> => {
+    if (exposedTools.has(name)) return;
+    const providerBin = path.join(runtimeDirectory, "tool-bin");
+    if (!toolBinCreated) {
       await fs.mkdir(providerBin, { mode: 0o700 });
-      providerBinCreated = true;
+      toolBinCreated = true;
       env.PATH = env.PATH ? `${providerBin}${path.delimiter}${env.PATH}` : providerBin;
     }
     await fs.symlink(executable, path.join(providerBin, name));
-    exposedProviderClis.add(name);
+    exposedTools.add(name);
   };
+
+  if (context.tools.git) await exposeTool("git", context.tools.git);
 
   for (const assignment of context.authentication) {
     const hostUrl = `https://${assignment.host}`;
@@ -409,13 +412,13 @@ export async function buildLocalCredentialEnvironment(options: {
       );
       gitEntries.push([`credential.${hostUrl}.helper`, helper]);
       if (assignment.credential.capabilities.includes("github-cli") && context.tools.gh) {
-        await exposeProviderCli("gh", context.tools.gh);
+        await exposeTool("gh", context.tools.gh);
         Object.assign(env, (await createProviderRuntime(
           "github", runtimeDirectory, workspace.path, tokenAssignment.credential, tokenAssignment.token,
         )).env);
       }
       if (assignment.credential.capabilities.includes("gitlab-cli") && context.tools.glab) {
-        await exposeProviderCli("glab", context.tools.glab);
+        await exposeTool("glab", context.tools.glab);
         Object.assign(env, (await createProviderRuntime(
           "gitlab", runtimeDirectory, workspace.path, tokenAssignment.credential, tokenAssignment.token,
         )).env);

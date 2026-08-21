@@ -187,8 +187,9 @@ The Hub owns a dedicated SSH agent socket under `credential-runtime/` and a
 dedicated GnuPG home under `credential-gnupg/`. It never loads keys into,
 locks, reconfigures, or stops the service account's system agents. On graceful
 shutdown it stops clone jobs and workspaces before stopping only the agents it
-can prove it owns. Runtime files are recreated on startup and are not backup
-material.
+can prove it owns. Existing runtime files are preserved on startup so another
+live Hub's sockets and generated session configuration are never removed before
+ownership can be checked. Runtime files are not backup material.
 
 Assignments configure normal Git, SSH, GnuPG, `gh`, and `glab` selection. They
 are not an access-control boundary in the local backend. Every workspace and

@@ -267,13 +267,20 @@ const SHARED_STYLE = `
   .assignment-add .assignment-help { grid-column: 1 / -1; margin: 0; color: var(--text-subtle); font-size: 0.7rem; }
   .assignment-add > button { justify-self: start; }
   .workspace-credential-section { padding: 0.75rem 1rem; border-top: 1px solid var(--border-soft); background: var(--surface-subtle); }
-  .workspace-credential-section h3 { margin: 0; color: var(--text-strong); font-size: 0.78rem; }
+  .workspace-credential-section > summary { cursor: pointer; color: var(--text-strong); font-size: 0.78rem; font-weight: 700; }
+  .workspace-credential-section > .credential-summary { margin-left: 1.1rem; }
   .workspace-assignment-list { margin-top: 0.6rem; border: 1px solid var(--border-soft); border-radius: 0.375rem; background: var(--surface); }
   .workspace-assignment-list .assignment-row { padding: 0.55rem 0.65rem; }
   .assignment-pills { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.2rem; }
   .assignment-pill { display: inline-flex; align-items: center; gap: 0.25rem; padding: 0.1rem 0.4rem; border: 1px solid var(--border-medium); border-radius: 999px; color: var(--text-subtle); font-size: 0.68rem; }
   .assignment-pill button { border: 0; padding: 0 0.1rem; color: var(--danger); background: transparent; line-height: 1; }
   .workspace-assignment-form { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .workspace-assignment-form input:disabled { color: var(--text-subtle); background: var(--surface-muted); }
+  .credential-dialog { width: min(30rem, calc(100vw - 2rem)); padding: 0; color: var(--text-strong); background: var(--surface-raised); border: 1px solid var(--border-medium); border-radius: 0.5rem; box-shadow: 0 1rem 3rem rgba(0, 0, 0, 0.3); }
+  .credential-dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
+  .credential-dialog h2 { margin: 0; font-size: 0.9rem; }
+  .credential-dialog .form-stack { padding: 1rem; }
+  .credential-dialog-actions { display: flex; justify-content: flex-end; gap: 0.5rem; }
   .advisory { display: flex; align-items: flex-start; gap: 0.75rem; margin: 0; padding: 0.75rem 1rem; border-bottom: 1px solid var(--border-soft); background: light-dark(#fff8c5, #2d2405); color: var(--text-strong); font-size: 0.76rem; }
   .advisory span { flex: 1; }
   .advisory button { background: transparent; }
@@ -483,11 +490,11 @@ function authenticatedPage(pageName: AuthenticatedPage, authenticatedUser: strin
   <div class="pane-header"><h2>Credentials</h2><span id="credentials-meta" class="pane-meta">Loading…</span></div>
   ${sharedUidAdvisory}
   <div id="credentials"><p class="empty">Loading…</p></div>
-  <section class="workspace-credential-section">
-    <h3>Workspace assignments</h3>
+  <details class="workspace-credential-section">
+    <summary>Workspace assignments</summary>
     <p class="credential-summary">Assign authentication and signing credentials together.</p>
     <div id="workspace-credential-assignments"><p class="empty">Loading…</p></div>
-  </section>
+  </details>
   <details class="credential-create">
     <summary>Generate SSH key</summary>
     <form id="ssh-generate-form" class="form-stack">
@@ -720,6 +727,12 @@ function isCredentialLocked(credential) {
   return credential.type !== "token" && (credential.readiness || []).some(result =>
     result.status === "unavailable" && /unlock|locked/i.test(result.message));
 }
+function assignedCredentials(workspaceId) {
+  return credentialCatalog.filter(credential => (credential.assignments || []).some(assignment => assignment.workspaceId === workspaceId));
+}
+function lockedWorkspaceCredentials(workspaceId) {
+  return assignedCredentials(workspaceId).filter(isCredentialLocked);
+}
 function aggregateReadiness(credential) {
   return (credential.readiness || []).some(result => result.status === "unavailable") ? "Unavailable" : "Ready";
 }
@@ -911,18 +924,20 @@ function workspaceAssignmentForm(actionError) {
     signing.appendChild(new Option(credential.name, credential.id));
   }
   signingLabel.appendChild(signing);
-  const hostLabel = el("label", null, "Provider host");
+  const hostLabel = el("label", null, "Authentication host");
   const host = document.createElement("input");
   host.type = "text";
   host.value = "github.com";
   hostLabel.appendChild(host);
-  const help = el("p", "assignment-help", "Selected credentials replace the current defaults. Leave either selection unchanged when assigning only one role.");
+  const help = el("p", "assignment-help", "Selected credentials replace the current defaults. The host scopes an authentication assignment; token credentials use their configured host.");
   const button = el("button", null, "Assign selected");
   form.append(workspaceLabel, authenticationLabel, signingLabel, hostLabel, help, button);
   const updateHost = () => {
-    hostLabel.hidden = !authentication.value;
     const selected = credentialCatalog.find(item => item.id === authentication.value);
+    host.disabled = !selected;
+    host.readOnly = selected?.type === "token";
     if (selected?.type === "token") host.value = selected.metadata.host;
+    else if (selected && !host.value.trim()) host.value = "github.com";
   };
   authentication.onchange = updateHost;
   updateHost();
@@ -962,32 +977,30 @@ function renderWorkspaceAssignments() {
     container.appendChild(el("p", "empty", "No workspaces available."));
     return;
   }
-  const list = el("div", "workspace-assignment-list");
-  for (const workspace of dashboardWorkspaces) {
+  const assignedWorkspaces = dashboardWorkspaces.filter(workspace => workspaceAssignmentEntries(workspace.id).length > 0);
+  let list;
+  if (assignedWorkspaces.length) list = el("div", "workspace-assignment-list");
+  else list = el("p", "empty", "No workspace credentials assigned.");
+  for (const workspace of assignedWorkspaces) {
     const assignmentRow = el("div", "assignment-row");
     const assignmentMain = el("div", "row-main");
     assignmentMain.appendChild(el("strong", null, workspace.name || workspace.id));
-    const entries = workspaceAssignmentEntries(workspace.id);
-    if (!entries.length) {
-      assignmentMain.appendChild(el("div", "row-detail", "⊘ No credentials assigned"));
-    } else {
-      const pills = el("div", "assignment-pills");
-      for (const entry of entries) {
-        const authentication = entry.assignment.role === "authentication";
-        const text = (authentication ? "🔑 Auth · " : "✎ Signing · ") + entry.credential.name + (entry.assignment.host ? " · " + entry.assignment.host : "");
-        const pill = el("span", "assignment-pill", text);
-        const remove = el("button", null, "×");
-        remove.type = "button";
-        remove.title = "Remove " + (authentication ? "authentication" : "signing") + " assignment";
-        remove.setAttribute("aria-label", remove.title + " for " + (workspace.name || workspace.id));
-        remove.onclick = () => credentialAction(entry.credential.id, "unassign", {
-          workspaceId: workspace.id, role: entry.assignment.role,
-        }, remove, "…", actionError);
-        pill.appendChild(remove);
-        pills.appendChild(pill);
-      }
-      assignmentMain.appendChild(pills);
+    const pills = el("div", "assignment-pills");
+    for (const entry of workspaceAssignmentEntries(workspace.id)) {
+      const authentication = entry.assignment.role === "authentication";
+      const text = (authentication ? "🔑 Auth · " : "✎ Signing · ") + entry.credential.name + (entry.assignment.host ? " · " + entry.assignment.host : "");
+      const pill = el("span", "assignment-pill", text);
+      const remove = el("button", null, "×");
+      remove.type = "button";
+      remove.title = "Remove " + (authentication ? "authentication" : "signing") + " assignment";
+      remove.setAttribute("aria-label", remove.title + " for " + (workspace.name || workspace.id));
+      remove.onclick = () => credentialAction(entry.credential.id, "unassign", {
+        workspaceId: workspace.id, role: entry.assignment.role,
+      }, remove, "…", actionError);
+      pill.appendChild(remove);
+      pills.appendChild(pill);
     }
+    assignmentMain.appendChild(pills);
     assignmentRow.appendChild(assignmentMain);
     list.appendChild(assignmentRow);
   }
@@ -1020,6 +1033,13 @@ async function loadCredentials() {
     credentialsLoaded = true;
     renderCredentialCatalog();
   } catch (error) { showError(error.message); }
+}
+async function loadDashboardCredentials() {
+  const response = await fetch(credentialPath);
+  if (!response.ok) throw new Error("Credentials could not be loaded.");
+  const payload = await response.json();
+  credentialCatalog = payload.credentials || [];
+  credentialsLoaded = true;
 }
 function renderCredentialCatalog() {
     document.getElementById("credentials-meta").textContent = credentialCatalog.length + (credentialCatalog.length === 1 ? " credential" : " credentials");
@@ -1097,6 +1117,71 @@ function openSession(id) {
   overlay.appendChild(el("div", "nav-overlay-label", "Opening " + id + "…"));
   document.body.appendChild(overlay);
   location.href = sessionUrl(id);
+}
+function unlockForWorkspace(workspace, credentials) {
+  return new Promise(resolve => {
+    const dialog = el("dialog", "credential-dialog");
+    const header = el("div", "pane-header");
+    header.appendChild(el("h2", null, "Unlock credentials for " + workspace.id));
+    const form = el("form", "form-stack");
+    form.method = "dialog";
+    form.appendChild(el("p", "credential-summary", "Unlock the assigned credentials, then the workspace will resume."));
+    const fields = credentials.map(credential => {
+      const label = el("label", null, credential.name + " passphrase");
+      const input = document.createElement("input");
+      input.type = "password";
+      input.autocomplete = "off";
+      input.required = true;
+      label.appendChild(input);
+      form.appendChild(label);
+      return { credential, input };
+    });
+    const errorTarget = el("p", "local-error");
+    errorTarget.setAttribute("role", "alert");
+    errorTarget.hidden = true;
+    const actions = el("div", "credential-dialog-actions");
+    const cancel = el("button", null, "Cancel");
+    cancel.type = "button";
+    const unlock = el("button", "primary", "Unlock and resume");
+    actions.append(cancel, unlock);
+    form.append(errorTarget, actions);
+    dialog.append(header, form);
+    document.body.appendChild(dialog);
+    const finish = value => {
+      dialog.close();
+      dialog.remove();
+      resolve(value);
+    };
+    cancel.onclick = () => finish(false);
+    dialog.oncancel = event => { event.preventDefault(); finish(false); };
+    form.onsubmit = async event => {
+      event.preventDefault();
+      setLocalError(errorTarget, "");
+      await withBusy(unlock, "Unlocking…", async () => {
+        try {
+          for (const field of fields) {
+            const passphrase = field.input.value;
+            field.input.value = "";
+            await api(credentialPath + "/" + encodeURIComponent(field.credential.id) + "/unlock", { passphrase });
+          }
+          await loadDashboardCredentials();
+          finish(true);
+        } catch (error) { setLocalError(errorTarget, error.message); }
+      });
+    };
+    dialog.showModal();
+    fields[0].input.focus();
+  });
+}
+async function prepareWorkspaceResume(workspace, errorTarget) {
+  try {
+    await loadDashboardCredentials();
+  } catch (error) {
+    setLocalError(errorTarget, error.message);
+    return false;
+  }
+  const locked = lockedWorkspaceCredentials(workspace.id);
+  return !locked.length || await unlockForWorkspace(workspace, locked);
 }
 // Returns true when it navigated into a session (the caller's button then
 // stays in its busy state — the overlay owns the screen until the session
@@ -1229,6 +1314,7 @@ async function refresh(force) {
             )) return;
             const errorTarget = actionErrorFor(button);
             setLocalError(errorTarget, "");
+            if (!(await prepareWorkspaceResume(w, errorTarget))) return;
             uiBusy += 1;
             const original = button.textContent;
             button.disabled = true;
@@ -1687,6 +1773,7 @@ if (pageMode === "dashboard") {
     uiBusy = 0;
     refresh(true);
   });
+  loadDashboardCredentials().catch(() => {});
   refresh();
   setInterval(refresh, 5000);
 } else if (pageMode === "settings") {

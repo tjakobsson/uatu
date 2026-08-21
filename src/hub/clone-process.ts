@@ -37,7 +37,7 @@ type SpawnedClone = {
 
 export type CloneProcessAdapterOptions = {
   env?: NodeJS.ProcessEnv;
-  gitCommand?: string;
+  gitCommand?: string | (() => string);
   spawn?: (argv: string[], options: Parameters<typeof Bun.spawn>[1]) => SpawnedClone;
   killGroup?: (pid: number, signal: NodeJS.Signals | 0) => void;
   sleep?: (milliseconds: number) => Promise<void>;
@@ -76,7 +76,7 @@ export function buildCloneArguments(url: string, target: string, credential?: Cl
 
 export class CloneProcessAdapter implements CloneProcessFactory {
   private readonly env: Record<string, string>;
-  private readonly gitCommand: string;
+  private readonly gitCommand: string | (() => string);
   private readonly spawn: NonNullable<CloneProcessAdapterOptions["spawn"]>;
   private readonly killGroup: NonNullable<CloneProcessAdapterOptions["killGroup"]>;
   private readonly sleep: NonNullable<CloneProcessAdapterOptions["sleep"]>;
@@ -104,7 +104,8 @@ export class CloneProcessAdapter implements CloneProcessFactory {
         "-o IdentitiesOnly=yes",
       ].join(" ");
     }
-    const proc = this.spawn([this.gitCommand, ...buildCloneArguments(options.url, options.target, options.credential)], {
+    const gitCommand = typeof this.gitCommand === "function" ? this.gitCommand() : this.gitCommand;
+    const proc = this.spawn([gitCommand, ...buildCloneArguments(options.url, options.target, options.credential)], {
       cwd: path.dirname(options.target),
       env,
       detached: true,

@@ -85,13 +85,5 @@ export async function ensureCredentialStateDirs(stateRoot: string): Promise<void
   await assertPrivateDirectory(stateRoot);
   await ensurePrivateDirectory(credentialSecretsPath(stateRoot));
   await ensurePrivateDirectory(credentialGnuPgPath(stateRoot));
-
-  const runtime = credentialRuntimePath(stateRoot);
-  try {
-    await assertPrivateDirectory(runtime);
-    await fs.rm(runtime, { recursive: true });
-  } catch (error) {
-    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
-  }
-  await ensurePrivateDirectory(runtime);
+  await ensurePrivateDirectory(credentialRuntimePath(stateRoot));
 }

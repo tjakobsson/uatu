@@ -41,7 +41,7 @@ The state root gains four independently permission-checked areas:
 - `credential-gnupg/`: a dedicated mode-0700 GnuPG home containing OpenPGP key material and configuration.
 - `credential-tools.json`: validated absolute path overrides and last-known non-secret readiness metadata.
 
-Runtime sockets, generated Git/SSH configuration, provider CLI views, and process ownership records live under a recreated mode-0700 `credential-runtime/` directory and are never treated as durable state. Read APIs build explicit public DTOs rather than serializing persisted records. Secret mutation handlers use dedicated request shapes and must never include request bodies in errors or logs.
+Runtime sockets, generated Git/SSH configuration, provider CLI views, and process ownership records live under a mode-0700 `credential-runtime/` directory and are never treated as durable state. Startup preserves existing runtime files until their ownership can be checked; it never removes another live Hub's sockets or session configuration. Read APIs build explicit public DTOs rather than serializing persisted records. Secret mutation handlers use dedicated request shapes and must never include request bodies in errors or logs.
 
 Encrypting every secret with a Hub master key stored in the same state directory was rejected: it complicates recovery while adding little protection against compromise of the daemon account. Native passphrases, owner-only storage, host disk encryption, and optional future external secret backends are more honest boundaries.
 

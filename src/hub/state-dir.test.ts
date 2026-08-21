@@ -75,7 +75,7 @@ describe("ensureStateDir", () => {
 });
 
 describe("ensureCredentialStateDirs", () => {
-  test("creates owner-only durable directories and recreates runtime state", async () => {
+  test("creates owner-only directories without destroying existing runtime state", async () => {
     const stateRoot = await tempStateRoot();
     await ensureStateDir(stateRoot);
     await ensureCredentialStateDirs(stateRoot);
@@ -87,7 +87,7 @@ describe("ensureCredentialStateDirs", () => {
     await writeFile(marker, "stale");
     await ensureCredentialStateDirs(stateRoot);
     expect(await lstat(credentialRuntimePath(stateRoot))).toBeTruthy();
-    expect(await Bun.file(marker).exists()).toBe(false);
+    expect(await Bun.file(marker).text()).toBe("stale");
   });
 
   test.each(["credential-secrets", "credential-gnupg", "credential-runtime"])(

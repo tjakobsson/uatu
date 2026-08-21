@@ -120,6 +120,29 @@ describe("OpenPgpCredentialManager generation and import", () => {
     expect(fake.commands.flatMap(command => command.args)).not.toContain(privateKey);
   });
 
+  test("rejects an existing imported fingerprint without touching its backing key", async () => {
+    const fake = fakeGpg();
+    const { manager, store } = await fixture(fake.run);
+    await createCredential(store);
+
+    await expect(manager.import({ name: "Duplicate", privateKey: "private-key-input" })).rejects.toThrow(/already exists/);
+    expect(store.snapshot().credentials.map(credential => credential.id)).toEqual(["pgp-1"]);
+    expect(fake.commands.filter(command => command.args.includes("--import") && !command.args.includes("show-only"))).toHaveLength(0);
+    expect(fake.commands.some(command => command.args.includes("--delete-secret-and-public-key"))).toBe(false);
+    expect(fake.isDeleted()).toBe(false);
+  });
+
+  test("rejects a generated fingerprint already in the catalog without deleting it", async () => {
+    const fake = fakeGpg();
+    const { manager, store } = await fixture(fake.run);
+    await createCredential(store);
+
+    await expect(manager.generate({ name: "Duplicate", userId: "Duplicate <duplicate@example.test>", passphrase: "secret" })).rejects.toThrow(/already exists/);
+    expect(store.snapshot().credentials.map(credential => credential.id)).toEqual(["pgp-1"]);
+    expect(fake.commands.some(command => command.args.includes("--delete-secret-and-public-key"))).toBe(false);
+    expect(fake.isDeleted()).toBe(false);
+  });
+
   test("degrades without GnuPG instead of failing manager startup", async () => {
     let invoked = false;
     const { manager } = await fixture(async () => {
@@ -218,6 +241,28 @@ describe("OpenPgpCredentialManager lifecycle and capability", () => {
     await createCredential(store);
     await expect(manager.delete("pgp-1")).rejects.toThrow("OpenPGP credential deletion failed.");
     expect(store.snapshot().credentials.map(credential => credential.id)).toEqual(["pgp-1"]);
+  });
+
+  test("keeps a shared key when deleting a legacy duplicate record", async () => {
+    const fake = fakeGpg();
+    const { manager, store } = await fixture(fake.run);
+    await createCredential(store);
+    await store.create({
+      name: "Legacy duplicate",
+      type: "openpgp",
+      capabilities: ["openpgp-signing"],
+      enabled: true,
+      metadata: { fingerprint: FINGERPRINT, publicKey: PUBLIC_KEY },
+    }, () => "pgp-2");
+
+    expect(await manager.delete("pgp-1")).toBe(true);
+    expect(store.snapshot().credentials.map(credential => credential.id)).toEqual(["pgp-2"]);
+    expect(fake.commands.some(command => command.args.includes("--delete-secret-and-public-key"))).toBe(false);
+    expect(await manager.readiness("pgp-2")).toContainEqual({
+      layer: "credential",
+      status: "ready",
+      message: "The OpenPGP secret key is available.",
+    });
   });
 });
 

@@ -219,16 +219,17 @@ export class OpenPgpCredentialManager {
       ], privateKey);
       const fingerprint = this.succeeded(inspected) ? fingerprintFromColonOutput(inspected.stdout) : null;
       if (!fingerprint) throw new Error("OpenPGP private key import failed.");
+      this.assertFingerprintAvailable(fingerprint);
       const imported = await this.gpg(["--import"], privateKey);
       if (!this.succeeded(imported)) {
-        await this.gpg(["--yes", "--delete-secret-and-public-key", fingerprint]);
+        await this.deleteUnreferencedKey(fingerprint);
         throw new Error("OpenPGP private key import failed.");
       }
       const secret = await this.gpg(["--with-colons", "--list-secret-keys", fingerprint]);
       if (!this.succeeded(secret)
         || fingerprintFromColonOutput(secret.stdout) !== fingerprint
         || !hasSigningSecret(secret.stdout)) {
-        await this.gpg(["--yes", "--delete-secret-and-public-key", fingerprint]);
+        await this.deleteUnreferencedKey(fingerprint);
         throw new Error("Imported OpenPGP material does not contain a signing secret key.");
       }
       return this.persistCredential(name, fingerprint);
@@ -301,6 +302,7 @@ export class OpenPgpCredentialManager {
       if (credential.type !== "openpgp") throw new Error(`credential is not OpenPGP: ${credentialId}`);
       const removed = await this.metadataStore.deleteCredential(credentialId, unassign);
       if (!removed) return false;
+      if (this.hasFingerprint(credential.metadata.fingerprint)) return true;
       const deleted = await this.gpg(["--yes", "--delete-secret-and-public-key", credential.metadata.fingerprint]);
       if (this.succeeded(deleted)) return true;
       await this.metadataStore.transaction(state => {
@@ -369,6 +371,7 @@ export class OpenPgpCredentialManager {
   }
 
   private async persistCredential(name: string, fingerprint: string): Promise<OpenPgpCredentialRecord> {
+    this.assertFingerprintAvailable(fingerprint);
     try {
       const metadata = await this.publicMetadata(fingerprint);
       const credential = await this.metadataStore.create({
@@ -380,9 +383,25 @@ export class OpenPgpCredentialManager {
       });
       return credential as OpenPgpCredentialRecord;
     } catch (error) {
-      await this.gpg(["--yes", "--delete-secret-and-public-key", fingerprint]).catch(() => undefined);
+      await this.deleteUnreferencedKey(fingerprint);
       throw error;
     }
+  }
+
+  private hasFingerprint(fingerprint: string): boolean {
+    return this.metadataStore.snapshot().credentials.some(credential =>
+      credential.type === "openpgp" && credential.metadata.fingerprint === fingerprint);
+  }
+
+  private assertFingerprintAvailable(fingerprint: string): void {
+    if (this.hasFingerprint(fingerprint)) {
+      throw new Error("An OpenPGP credential with this fingerprint already exists.");
+    }
+  }
+
+  private async deleteUnreferencedKey(fingerprint: string): Promise<void> {
+    if (this.hasFingerprint(fingerprint)) return;
+    await this.gpg(["--yes", "--delete-secret-and-public-key", fingerprint]).catch(() => undefined);
   }
 
   private challengeFiles(): { challenge: string; signature: string } {

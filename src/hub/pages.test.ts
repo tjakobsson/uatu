@@ -54,6 +54,10 @@ describe("authenticated Hub pages", () => {
     expect(html).toContain("if (!hasCredentialAssignments(w.credentialAssignments) && !confirm(");
     expect(html).toContain("Git authentication and commit signing may be unavailable, but the workspace can still start. Continue?");
     expect(html.indexOf("if (!hasCredentialAssignments(w.credentialAssignments)")).toBeLessThan(html.indexOf("uiBusy += 1", html.indexOf('label: "Resume"')));
+    expect(html).toContain("prepareWorkspaceResume(w, errorTarget)");
+    expect(html).toContain("Unlock credentials for ");
+    expect(html).toContain("Unlock and resume");
+    expect(html).toContain('field.credential.id) + "/unlock"');
   });
 });
 
@@ -130,6 +134,7 @@ describe("settings page", () => {
     expect(document.querySelector('#ssh-import-form input[type="file"][name="privateKeyFile"]')).not.toBeNull();
     expect(document.querySelector("#ssh-import-form .paste-option textarea[name=privateKey]")).not.toBeNull();
     expect(document.getElementById("workspace-credential-assignments")).not.toBeNull();
+    expect(document.querySelector("details.workspace-credential-section")?.hasAttribute("open")).toBe(false);
     expect(document.querySelectorAll("[data-form-error][role=alert]").length).toBe(5);
     expect(html).toContain("Copy public key");
     expect(html).toContain("credentialRestartRequired");
@@ -149,6 +154,9 @@ describe("settings page", () => {
     expect(html).toContain("openCredentialIds.has(credential.id)");
     expect(html).toContain("Assign selected");
     expect(html).toContain("Selected credentials replace the current defaults");
+    expect(html).toContain('host.disabled = !selected');
+    expect(html).toContain("Authentication host");
+    expect(html).toContain("No workspace credentials assigned.");
     expect(html).toContain("workspaceAssignmentEntries");
     expect(html).not.toContain("Continue with this assignment?");
     expect(html).toContain("Choose exactly one private key source");

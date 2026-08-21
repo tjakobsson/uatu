@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readlink, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -89,7 +89,7 @@ describe("local workspace credential projection", () => {
       runtimeRoot: path.join(root, "runtime"),
       gnupgHome: path.join(root, "gnupg"),
       sshAgentSocket: () => undefined,
-      tools: { gpg: null, sshKeygen: null, gh: null, glab: null },
+      tools: { git: null, gpg: null, sshKeygen: null, gh: null, glab: null },
     });
 
     const before = resolver.revision(workspace.id);
@@ -133,7 +133,7 @@ describe("local workspace credential projection", () => {
       stateRoot: path.join(root, "state with quote '"),
       sshAgentSocket: path.join(root, "managed-agent.sock"),
       gnupgHome: path.join(root, "gnupg"),
-      tools: { gpg: "/usr/bin/gpg", sshKeygen: "/usr/bin/ssh-keygen", gh: managedGh, glab: null },
+      tools: { git: "/usr/bin/git", gpg: "/usr/bin/gpg", sshKeygen: "/usr/bin/ssh-keygen", gh: managedGh, glab: null },
       authentication: [
         { host: "git.example.com", credential: ssh },
         { host: "github.com", credential: token, token: "provider-secret" },
@@ -157,7 +157,8 @@ describe("local workspace credential projection", () => {
     expect(projected.runtimeDirectory.startsWith(workspace.path)).toBe(false);
     expect(projected.env.SSH_AUTH_SOCK).toBe(path.join(root, "managed-agent.sock"));
     expect(projected.env.GH_TOKEN).toBe("provider-secret");
-    expect(projected.env.PATH?.split(path.delimiter)[0]).toBe(path.join(projected.runtimeDirectory, "provider-bin"));
+    expect(projected.env.PATH?.split(path.delimiter)[0]).toBe(path.join(projected.runtimeDirectory, "tool-bin"));
+    expect(await readlink(path.join(projected.runtimeDirectory, "tool-bin", "git"))).toBe("/usr/bin/git");
     expect(Bun.spawnSync(["gh"], { env: projected.env, stdout: "pipe" }).stdout.toString()).toBe("managed-gh\n");
     expect(projected.env.GIT_ASKPASS).toBeUndefined();
     expect(gitConfig(workspace.path, projected.env, "user.name")).toBe("Ambient User");
@@ -194,7 +195,7 @@ describe("local workspace credential projection", () => {
         stateRoot: path.join(root, "state"),
         sshAgentSocket: null,
         gnupgHome,
-        tools: { gpg: "/managed/gpg", sshKeygen: null, gh: null, glab: null },
+        tools: { git: null, gpg: "/managed/gpg", sshKeygen: null, gh: null, glab: null },
         authentication: [],
         signing,
       },
@@ -228,7 +229,7 @@ describe("local workspace credential projection", () => {
       stateRoot: path.join(root, "state"),
       sshAgentSocket: null,
       gnupgHome: path.join(root, "gnupg"),
-      tools: { gpg: null, sshKeygen: null, gh: null, glab: null },
+      tools: { git: null, gpg: null, sshKeygen: null, gh: null, glab: null },
       authentication: [],
       signing: null,
     };

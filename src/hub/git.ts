@@ -13,10 +13,10 @@ export type GitProbeResult =
   // preflight report.
   | { kind: "indeterminate"; detail: string };
 
-async function runGit(args: string[], cwd?: string): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+async function runGit(args: string[], cwd?: string, executable = "git"): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   let child: ReturnType<typeof Bun.spawn>;
   try {
-    child = Bun.spawn(["git", ...args], {
+    child = Bun.spawn([executable, ...args], {
       cwd,
       stdin: "ignore",
       stdout: "pipe",
@@ -33,8 +33,8 @@ async function runGit(args: string[], cwd?: string): Promise<{ exitCode: number;
   return { exitCode, stdout, stderr };
 }
 
-export async function probeGitRepository(folder: string): Promise<GitProbeResult> {
-  const result = await runGit(["rev-parse", "--show-toplevel"], folder);
+export async function probeGitRepository(folder: string, executable = "git"): Promise<GitProbeResult> {
+  const result = await runGit(["rev-parse", "--show-toplevel"], folder, executable);
   if (result.exitCode === 0) {
     return { kind: "repository", toplevel: result.stdout.trim() };
   }
@@ -44,8 +44,8 @@ export async function probeGitRepository(folder: string): Promise<GitProbeResult
   return { kind: "indeterminate", detail: result.stderr.trim() };
 }
 
-export async function gitInit(folder: string): Promise<{ ok: true } | { ok: false; error: string }> {
-  const result = await runGit(["init"], folder);
+export async function gitInit(folder: string, executable = "git"): Promise<{ ok: true } | { ok: false; error: string }> {
+  const result = await runGit(["init"], folder, executable);
   if (result.exitCode === 0) {
     return { ok: true };
   }

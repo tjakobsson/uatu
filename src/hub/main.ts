@@ -81,20 +81,23 @@ export async function runHub(options: RunHubOptions): Promise<void> {
   const registry = new WorkspaceRegistry(registryPath(stateRoot));
   await registry.load();
   const personalState = new PersonalWorkspaceStateStore(personalWorkspaceStatePath(stateRoot));
-  await personalState.load();
-  await personalState.recoverPendingForgets(workspaceId => registry.byId(workspaceId) !== undefined);
-
   const credentialMetadata = new CredentialMetadataStore(credentialsPath(stateRoot));
+  await Promise.all([personalState.load(), credentialMetadata.load()]);
+  await personalState.recoverPendingForgets(
+    workspaceId => registry.byId(workspaceId) !== undefined,
+    async workspaceId => { await credentialMetadata.removeWorkspaceAssignments(workspaceId); },
+  );
+
   const credentialTokens = new CredentialTokenStore(credentialTokenStorePath(stateRoot));
   const credentialToolStore = new CredentialToolOverrideStore(credentialToolsPath(stateRoot));
   const credentialTools = new CredentialToolManager(credentialToolStore);
-  await Promise.all([credentialMetadata.load(), credentialTokens.load(), credentialTools.load()]);
+  await Promise.all([credentialTokens.load(), credentialTools.load()]);
   let sshAgent: ManagedSshAgent | null = null;
   let sshCredentials: SshCredentialService | null = null;
   let openPgpCredentials: OpenPgpCredentialManager;
   let activePaths = new Map<string, string | null>();
-  const contextTools = { gpg: null, sshKeygen: null, gh: null, glab: null } as {
-    gpg: string | null; sshKeygen: string | null; gh: string | null; glab: string | null;
+  const contextTools = { git: null, gpg: null, sshKeygen: null, gh: null, glab: null } as {
+    git: string | null; gpg: string | null; sshKeygen: string | null; gh: string | null; glab: string | null;
   };
   const refreshCredentialRuntime = async () => {
     const paths = new Map(credentialTools.list().map(tool => [tool.tool, readyToolPath(tool)]));
@@ -121,6 +124,7 @@ export async function runHub(options: RunHubOptions): Promise<void> {
         gpgconfPath: paths.get("gpgconf") ?? null,
       });
     }
+    contextTools.git = paths.get("git") ?? null;
     contextTools.gpg = paths.get("gpg") ?? null;
     contextTools.sshKeygen = paths.get("ssh-keygen") ?? null;
     contextTools.gh = paths.get("gh") ?? null;
@@ -154,6 +158,7 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     sessions,
     sessionStore,
     personalState,
+    gitCommand: () => activePaths.get("git") ?? "git",
     cloneCredentials,
     credentialApi: {
       metadata: credentialMetadata,

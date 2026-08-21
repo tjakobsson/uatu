@@ -343,7 +343,7 @@ export class CredentialApi {
 
 export function credentialApiError(error: unknown): { status: number; message: string } {
   const message = error instanceof Error ? error.message : "credential operation failed";
-  if (/assigned to|conflicts|disabled|locked|requires unlock/.test(message)) return { status: 409, message };
+  if (/assigned to|conflicts|already exists|disabled|locked|requires unlock/.test(message)) return { status: 409, message };
   if (/unknown credential|unknown workspace/.test(message)) return { status: 404, message };
   if (/unavailable|did not cache/.test(message)) return { status: 503, message };
   if (/unlock failed/.test(message)) return { status: 400, message };

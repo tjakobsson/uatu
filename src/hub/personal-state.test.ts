@@ -153,6 +153,40 @@ describe("PersonalWorkspaceStateStore", () => {
     expect(store.get("tobias", "uatu")).toEqual({ version: 1, documentPath: "README.md" });
   });
 
+  test("does not finalize a forget when registry removal fails", async () => {
+    const { store } = await tempStore();
+    await store.patch("tobias", "uatu", { follow: false });
+    let finalized = false;
+    await expect(store.forgetWorkspace(
+      "uatu",
+      async () => { throw new Error("registry disk full"); },
+      async () => { finalized = true; },
+    )).rejects.toThrow(/registry disk full/);
+    expect(finalized).toBe(false);
+    expect(store.get("tobias", "uatu")).toEqual({ version: 1, follow: false });
+  });
+
+  test("retries committed forget cleanup from the durable journal", async () => {
+    const { store, filePath } = await tempStore();
+    await store.patch("tobias", "uatu", { follow: false });
+    await expect(store.forgetWorkspace(
+      "uatu",
+      async () => true,
+      async () => { throw new Error("credential disk full"); },
+    )).rejects.toThrow(/credential disk full/);
+    expect(store.get("tobias", "uatu")).toEqual({ version: 1 });
+
+    const reloaded = new PersonalWorkspaceStateStore(filePath);
+    await reloaded.load();
+    const finalized: string[] = [];
+    await reloaded.recoverPendingForgets(
+      () => false,
+      async workspaceId => { finalized.push(workspaceId); },
+    );
+    expect(finalized).toEqual(["uatu"]);
+    expect(reloaded.get("tobias", "uatu")).toEqual({ version: 1 });
+  });
+
   test("failed journal cleanup does not restore state after registry removal", async () => {
     const { store, filePath } = await tempStore();
     await store.patch("tobias", "uatu", { documentPath: "README.md" });

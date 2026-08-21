@@ -134,6 +134,24 @@ describe("CloneProcessAdapter", () => {
     expect(env.GIT_SSH_COMMAND).not.toContain("ambient");
   });
 
+  test("resolves the configured Git command for each clone", async () => {
+    const commands: string[] = [];
+    const terminal = { localFlags: 0xff, write() {}, close() {} };
+    let gitCommand = "/managed/git-one";
+    const adapter = new CloneProcessAdapter({
+      gitCommand: () => gitCommand,
+      spawn(argv) {
+        commands.push(argv[0]!);
+        return { pid: 42, exited: Promise.resolve(0), terminal };
+      },
+    });
+
+    await adapter.start({ url: "one", target: "/tmp/one", onOutput() {} }).exited;
+    gitCommand = "/managed/git-two";
+    await adapter.start({ url: "two", target: "/tmp/two", onOutput() {} }).exited;
+    expect(commands).toEqual(["/managed/git-one", "/managed/git-two"]);
+  });
+
   test("does not echo a submitted response through a real PTY", async () => {
     if (process.platform === "win32") return;
     const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-clone-secret-"));

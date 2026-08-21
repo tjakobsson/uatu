@@ -67,6 +67,7 @@ export type HubDeps = {
   cloneJobs?: CloneJobManager;
   cloneCredentials?: CloneCredentialResolver;
   credentialApi?: CredentialApiServices;
+  gitCommand?: () => string;
 };
 
 type HubServer = UpgradableServer & {
@@ -98,7 +99,7 @@ function formTarget(target: string): string | undefined {
 export function createHubFetchHandler(deps: HubDeps) {
   const { config, registry, sessions, sessionStore, personalState } = deps;
   const cloneJobs = deps.cloneJobs ?? new CloneJobManager({
-    processFactory: new CloneProcessAdapter(),
+    processFactory: new CloneProcessAdapter({ gitCommand: deps.gitCommand }),
     registry,
     sessions,
     credentials: deps.cloneCredentials,
@@ -373,12 +374,13 @@ export function createHubFetchHandler(deps: HubDeps) {
       return json(409, { error: `folder is currently being cloned: ${folder}` });
     }
 
-    const probe = await probeGitRepository(folder);
+    const gitCommand = deps.gitCommand?.() ?? "git";
+    const probe = await probeGitRepository(folder, gitCommand);
     if (probe.kind === "not-a-repository") {
       if (body.init !== true) {
         return json(409, { needsInit: true, error: `${folder} is not a git repository` });
       }
-      const initialized = await gitInit(folder);
+      const initialized = await gitInit(folder, gitCommand);
       if (!initialized.ok) {
         return json(500, { error: `git init failed: ${initialized.error}` });
       }
@@ -828,10 +830,11 @@ export function createHubFetchHandler(deps: HubDeps) {
         }
         try {
           await sessions.runWhileStopped(workspaceId, () =>
-            personalState.forgetWorkspace(workspaceId, async () => {
-              await deps.credentialApi?.metadata.removeWorkspaceAssignments(workspaceId);
-              return registry.remove(workspaceId);
-            })
+            personalState.forgetWorkspace(
+              workspaceId,
+              () => registry.remove(workspaceId),
+              async () => { await deps.credentialApi?.metadata.removeWorkspaceAssignments(workspaceId); },
+            )
           );
           return json(200, { id: workspaceId, forgotten: true });
         } catch (error) {
@@ -851,7 +854,7 @@ export function createHubFetchHandler(deps: HubDeps) {
 // bridge handlers wired.
 export function startHubServer(deps: HubDeps) {
   const cloneJobs = deps.cloneJobs ?? new CloneJobManager({
-    processFactory: new CloneProcessAdapter(),
+    processFactory: new CloneProcessAdapter({ gitCommand: deps.gitCommand }),
     registry: deps.registry,
     sessions: deps.sessions,
     credentials: deps.cloneCredentials,

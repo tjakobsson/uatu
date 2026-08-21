@@ -1,7 +1,7 @@
 ## 1. Credential State Foundation
 
 - [x] 1.1 Add credential, capability, assignment, tool-override, readiness, and public-DTO types with strict parsers that reject unknown or secret-bearing public fields.
-- [x] 1.2 Add state-dir path helpers and bootstrap owner-only `credential-secrets`, `credential-gnupg`, and recreated `credential-runtime` directories, including symlink and unsafe-permission rejection tests.
+- [x] 1.2 Add state-dir path helpers and bootstrap owner-only `credential-secrets`, `credential-gnupg`, and ownership-preserving `credential-runtime` directories, including symlink and unsafe-permission rejection tests.
 - [x] 1.3 Implement the serialized atomic credential metadata store, token secret store, and tool-override store with rollback-on-write-failure and restart persistence tests.
 - [x] 1.4 Implement assignment mutation rules, including stable credential ids, no assignments by default, one authentication default per provider host, one signing default per workspace, forget cleanup, and transactional delete-and-unassign.
 
