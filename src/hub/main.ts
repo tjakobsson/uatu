@@ -20,7 +20,7 @@ import { WorkspaceRegistry } from "./registry";
 import { PersonalWorkspaceStateStore } from "./personal-state";
 import {
   ensureCredentialStateDirs,
-  ensureStateDir,
+  ensureCanonicalStateDir,
   acquireHubStateLease,
   credentialGnuPgPath,
   credentialRuntimePath,
@@ -48,6 +48,11 @@ export type RunHubOptions = {
 export type HubRuntimeShutdownResult = {
   ok: boolean;
   stateLeaseSafeToRelease: boolean;
+};
+
+export type HubShutdownResult = {
+  exitCode: number;
+  stateLeaseHeld: boolean;
 };
 
 export async function stopHubRuntime(parts: {
@@ -98,7 +103,7 @@ export async function shutdownHub(parts: {
   sshAgent?: { shutdown(): Promise<void> } | null;
   openPgp?: { shutdown(): Promise<unknown> } | null;
   reportError?: (message: string) => void;
-}): Promise<number> {
+}): Promise<HubShutdownResult> {
   const report = parts.reportError ?? (message => console.error(message));
   let serverStopped = true;
   try {
@@ -119,7 +124,37 @@ export async function shutdownHub(parts: {
   } else {
     report("uatu hub: retaining state-root lease after incomplete shutdown");
   }
-  return serverStopped && runtime.ok && leaseReleased ? 0 : 1;
+  return {
+    exitCode: serverStopped && runtime.ok && leaseReleased ? 0 : 1,
+    stateLeaseHeld: !leaseReleased,
+  };
+}
+
+export function createHubSignalShutdown(options: {
+  shutdown(): Promise<HubShutdownResult>;
+  forceExit?: (code: number) => void;
+  reportRetained?: () => void;
+}): () => void {
+  const forceExit = options.forceExit ?? (code => process.exit(code));
+  let state: "running" | "shutting-down" | "lease-retained" = "running";
+  return () => {
+    if (state !== "running") {
+      forceExit(1);
+      return;
+    }
+    state = "shutting-down";
+    void Promise.resolve().then(() => options.shutdown()).then(result => {
+      if (result.stateLeaseHeld) {
+        state = "lease-retained";
+        options.reportRetained?.();
+        return;
+      }
+      forceExit(result.exitCode);
+    }, () => {
+      state = "lease-retained";
+      options.reportRetained?.();
+    });
+  };
 }
 
 // Coordinates credential operations with runtime replacement. An operation
@@ -230,9 +265,9 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     config.port = options.port;
   }
 
-  const stateRoot = config.stateDir ?? resolveHubStateRoot();
+  const configuredStateRoot = config.stateDir ?? resolveHubStateRoot();
   const uatuArgv = resolveUatuArgv();
-  await ensureStateDir(stateRoot);
+  const stateRoot = await ensureCanonicalStateDir(configuredStateRoot);
   const stateLease = await acquireHubStateLease(stateRoot);
   try {
     await ensureCredentialStateDirs(stateRoot);
@@ -446,18 +481,13 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     `uatu hub: state in ${stateRoot}; ${registry.list().length} registered workspace(s)`,
   );
 
-  let shuttingDown = false;
-  const shutdown = () => {
-    if (shuttingDown) {
-      process.exit(1);
-    }
-    shuttingDown = true;
-    console.error("uatu hub: shutting down");
-    void (async () => {
+  const shutdown = createHubSignalShutdown({
+    shutdown: async () => {
+      console.error("uatu hub: shutting down");
       // Stop accepting requests before teardown: an already-accepted
       // credential operation could otherwise restart the SSH agent after
       // shutdown observed it stopped, orphaning its socket past exit.
-      const exitCode = await shutdownHub({
+      return await shutdownHub({
         stopServer: () => server.stop(true),
         stateLease,
         cloneJobs: server.cloneJobs,
@@ -500,9 +530,11 @@ export async function runHub(options: RunHubOptions): Promise<void> {
           }),
         },
       });
-      process.exit(exitCode);
-    })();
-  };
+    },
+    reportRetained: () => {
+      console.error("uatu hub: shutdown incomplete; state-root lease remains held (send another signal to force exit)");
+    },
+  });
 
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);

@@ -8,14 +8,14 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { constants as sqlite, Database } from "bun:sqlite";
 
-const LEASE_DIRECTORY = ".hub-lease";
-const LEASE_OWNER = "owner.json";
-const LEASE_RECLAIM = ".reclaim";
-const RELEASE_TIMEOUT_MS = 2_000;
-
-type LeaseOwner = { version: 1; pid: number; nonce: string };
+const LEASE_FILE = ".hub-lease";
+const LEASE_OPEN_FLAGS = sqlite.SQLITE_OPEN_READWRITE
+  | sqlite.SQLITE_OPEN_CREATE
+  | sqlite.SQLITE_OPEN_PRIVATECACHE
+  | sqlite.SQLITE_OPEN_NOFOLLOW
+  | sqlite.SQLITE_OPEN_EXRESCODE;
 
 export type HubStateLease = {
   release(): Promise<void>;
@@ -93,116 +93,104 @@ export async function ensureStateDir(stateRoot: string): Promise<void> {
   await assertPrivateDirectory(stateRoot);
 }
 
-function processIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
+export async function ensureCanonicalStateDir(stateRoot: string): Promise<string> {
+  await ensureStateDir(stateRoot);
+  return await fs.realpath(stateRoot);
 }
 
-async function readLeaseOwner(leasePath: string): Promise<LeaseOwner> {
-  const leaseStats = await fs.lstat(leasePath);
-  if (leaseStats.isSymbolicLink() || !leaseStats.isDirectory() || (leaseStats.mode & 0o077) !== 0) {
-    throw new Error("Hub state-root lease directory is unsafe");
+type LeaseFileIdentity = { dev: bigint; ino: bigint };
+
+async function inspectLeaseFile(leasePath: string): Promise<LeaseFileIdentity> {
+  const stats = await fs.lstat(leasePath, { bigint: true });
+  if (stats.isDirectory()) {
+    throw new Error(`legacy Hub state-root lease directory found at ${leasePath}; stop every old Hub using this state root, then remove that directory manually`);
   }
-  const ownerPath = path.join(leasePath, LEASE_OWNER);
-  const ownerStats = await fs.lstat(ownerPath);
-  if (ownerStats.isSymbolicLink() || !ownerStats.isFile() || (ownerStats.mode & 0o077) !== 0) {
-    throw new Error("Hub state-root lease owner record is unsafe");
+  if (stats.isSymbolicLink() || !stats.isFile()) {
+    throw new Error(`Hub state-root lease must be a non-symlink regular file: ${leasePath}`);
   }
-  if (typeof process.getuid === "function" && (leaseStats.uid !== process.getuid() || ownerStats.uid !== process.getuid())) {
-    throw new Error("Hub state-root lease is not owned by the current user");
+  if (stats.nlink !== 1n) throw new Error(`Hub state-root lease must have exactly one hard link: ${leasePath}`);
+  if (typeof process.getuid !== "function" || stats.uid !== BigInt(process.getuid())) {
+    throw new Error(`Hub state-root lease is not owned by the current user: ${leasePath}`);
   }
-  const value = JSON.parse(await fs.readFile(ownerPath, "utf8")) as Partial<LeaseOwner>;
-  if (value.version !== 1 || !Number.isSafeInteger(value.pid) || (value.pid ?? 0) <= 0 || typeof value.nonce !== "string") {
-    throw new Error("Hub state-root lease owner record is corrupt");
+  if ((stats.mode & 0o7777n) !== 0o600n) {
+    throw new Error(`unsafe Hub state-root lease permissions (must be exactly mode 0600): ${leasePath}`);
   }
-  return value as LeaseOwner;
+  return { dev: stats.dev, ino: stats.ino };
 }
 
-export async function acquireHubStateLease(
-  stateRoot: string,
-  testHooks: { staleOwnerObserved?: () => Promise<void> } = {},
-): Promise<HubStateLease> {
+function sqliteValue(row: unknown, key: string): unknown {
+  return row && typeof row === "object" ? (row as Record<string, unknown>)[key] : undefined;
+}
+
+function isSqliteBusy(error: unknown): boolean {
+  const errno = error && typeof error === "object" && "errno" in error
+    ? (error as { errno?: unknown }).errno
+    : undefined;
+  return typeof errno === "number" && (errno & 0xff) === 5;
+}
+
+export async function acquireHubStateLease(stateRoot: string): Promise<HubStateLease> {
   await assertPrivateDirectory(stateRoot);
-  const leasePath = path.join(stateRoot, LEASE_DIRECTORY);
-  const nonce = randomUUID();
-  const owner: LeaseOwner = { version: 1, pid: process.pid, nonce };
+  const canonicalStateRoot = await fs.realpath(stateRoot);
+  const leasePath = path.join(canonicalStateRoot, LEASE_FILE);
 
-  for (;;) {
-    const candidate = path.join(stateRoot, `.hub-lease-candidate-${nonce}`);
-    await fs.mkdir(candidate, { mode: 0o700 });
-    await fs.writeFile(path.join(candidate, LEASE_OWNER), `${JSON.stringify(owner)}\n`, { mode: 0o600 });
+  try {
+    const created = await fs.open(leasePath, "wx", 0o600);
     try {
-      await fs.rename(candidate, leasePath);
-      break;
-    } catch (error) {
-      await fs.rm(candidate, { recursive: true, force: true });
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "EEXIST" && code !== "ENOTEMPTY") throw error;
-    }
-
-    let existing: LeaseOwner;
-    try {
-      existing = await readLeaseOwner(leasePath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-      throw new Error(`cannot verify the existing Hub state-root lease at ${leasePath}`, { cause: error });
-    }
-    if (processIsAlive(existing.pid)) {
-      throw new Error(`Hub state root is already in use by process ${existing.pid}: ${stateRoot}`);
-    }
-    await testHooks.staleOwnerObserved?.();
-
-    const reclaimPath = path.join(leasePath, LEASE_RECLAIM);
-    try {
-      await fs.mkdir(reclaimPath, { mode: 0o700 });
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT" || code === "EEXIST") {
-        await new Promise(resolve => setTimeout(resolve, 5));
-        continue;
-      }
-      throw error;
-    }
-
-    try {
-      const claimed = await readLeaseOwner(leasePath);
-      if (claimed.pid !== existing.pid || claimed.nonce !== existing.nonce) continue;
-      if (processIsAlive(claimed.pid)) continue;
-      await fs.rm(leasePath, { recursive: true, force: true });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      await created.chmod(0o600);
+      await created.sync();
     } finally {
-      await fs.rm(reclaimPath, { recursive: true, force: true }).catch(() => undefined);
+      await created.close();
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+      throw new Error(`cannot create Hub state-root lease at ${leasePath}`, { cause: error });
     }
   }
 
-  let released = false;
+  const identity = await inspectLeaseFile(leasePath);
+  let database: Database | undefined;
+  try {
+    database = new Database(leasePath, LEASE_OPEN_FLAGS);
+    database.exec("PRAGMA busy_timeout=0");
+    if (sqliteValue(database.query("PRAGMA busy_timeout").get(), "timeout") !== 0) {
+      throw new Error("SQLite did not apply busy_timeout=0 to the Hub state-root lease");
+    }
+    if (sqliteValue(database.query("PRAGMA journal_mode").get(), "journal_mode") !== "delete") {
+      throw new Error("Hub state-root lease requires journal_mode=DELETE");
+    }
+    database.exec("CREATE TABLE IF NOT EXISTS lease (id INTEGER PRIMARY KEY CHECK (id = 1)) WITHOUT ROWID");
+    if (sqliteValue(database.query("PRAGMA locking_mode=EXCLUSIVE").get(), "locking_mode") !== "exclusive") {
+      throw new Error("SQLite does not support locking_mode=EXCLUSIVE for the Hub state-root lease");
+    }
+    database.exec("BEGIN EXCLUSIVE");
+
+    const lockedIdentity = await inspectLeaseFile(leasePath);
+    if (lockedIdentity.dev !== identity.dev || lockedIdentity.ino !== identity.ino) {
+      throw new Error(`Hub state-root lease was replaced while being acquired: ${leasePath}`);
+    }
+  } catch (error) {
+    try {
+      database?.close(true);
+    } catch {
+      // Preserve the acquisition error.
+    }
+    if (isSqliteBusy(error)) throw new Error(`Hub state root is already in use: ${stateRoot}`, { cause: error });
+    const detail = error instanceof Error ? `: ${error.message}` : "";
+    throw new Error(`cannot safely acquire Hub state-root lease at ${leasePath}${detail}`, { cause: error });
+  }
+
+  const retainedDatabase = database;
+  let releasePromise: Promise<void> | undefined;
   return {
-    async release() {
-      if (released) return;
-      released = true;
-      const current = await readLeaseOwner(leasePath).catch(() => undefined);
-      if (!current || current.nonce !== nonce || current.pid !== process.pid) {
-        throw new Error("refusing to release a Hub state-root lease owned by another process");
-      }
-      const releasedPath = path.join(stateRoot, `.hub-lease-released-${nonce}`);
-      await fs.rename(leasePath, releasedPath);
-      const cleanup = fs.rm(releasedPath, { recursive: true, force: true });
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        await Promise.race([
-          cleanup,
-          new Promise<void>((_, reject) => {
-            timer = setTimeout(() => reject(new Error("Hub state-root lease cleanup timed out")), RELEASE_TIMEOUT_MS);
-          }),
-        ]);
-      } finally {
-        clearTimeout(timer);
-      }
+    release() {
+      return releasePromise ??= Promise.resolve().then(() => {
+        try {
+          retainedDatabase.exec("ROLLBACK");
+        } finally {
+          retainedDatabase.close(true);
+        }
+      });
     },
   };
 }

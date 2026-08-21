@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { spawn } from "node:child_process";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 import {
   applyCredentialRuntimeAtomically,
+  createHubSignalShutdown,
   createCredentialRuntimeGate,
   passwordFromPipedInput,
   reconcileManagedSshAgent,
@@ -9,6 +14,7 @@ import {
   shutdownHub,
   stopHubRuntime,
 } from "./main";
+import { acquireHubStateLease, ensureStateDir } from "./state-dir";
 
 describe("passwordFromPipedInput", () => {
   test("strips exactly one trailing line terminator", () => {
@@ -266,7 +272,7 @@ describe("Hub runtime shutdown", () => {
   test("signal shutdown exits nonzero and retains the lease when clones or sessions remain unreaped", async () => {
     const calls: string[] = [];
     const errors: string[] = [];
-    const exitCode = await shutdownHub({
+    const result = await shutdownHub({
       stopServer() { calls.push("server"); },
       stateLease: {
         async release() { calls.push("lease"); },
@@ -295,7 +301,7 @@ describe("Hub runtime shutdown", () => {
       reportError(message) { errors.push(message); },
     });
 
-    expect(exitCode).toBe(1);
+    expect(result).toEqual({ exitCode: 1, stateLeaseHeld: true });
     expect(calls).toContain("tools");
     expect(calls).toContain("ssh");
     expect(calls).toContain("openpgp");
@@ -305,14 +311,99 @@ describe("Hub runtime shutdown", () => {
 
   test("clean signal shutdown releases the lease and exits zero", async () => {
     let releases = 0;
-    const exitCode = await shutdownHub({
+    const result = await shutdownHub({
       stopServer() {},
       stateLease: { async release() { releases += 1; } },
       cloneJobs: { async close() {} },
       sessions: { async stopAll() {} },
     });
 
-    expect(exitCode).toBe(0);
+    expect(result).toEqual({ exitCode: 0, stateLeaseHeld: false });
     expect(releases).toBe(1);
+  });
+
+  test("a non-runtime failure exits nonzero after safely releasing the lease", async () => {
+    let releases = 0;
+    const result = await shutdownHub({
+      stopServer() {},
+      stateLease: { async release() { releases += 1; } },
+      cloneJobs: { async close() {} },
+      sessions: { async stopAll() {} },
+      sshAgent: { async shutdown() { throw new Error("agent stop failed"); } },
+      reportError() {},
+    });
+
+    expect(result).toEqual({ exitCode: 1, stateLeaseHeld: false });
+    expect(releases).toBe(1);
+  });
+
+  test("lease release failure reports that the process must retain the lease", async () => {
+    const errors: string[] = [];
+    const result = await shutdownHub({
+      stopServer() {},
+      stateLease: { async release() { throw new Error("rollback failed"); } },
+      cloneJobs: { async close() {} },
+      sessions: { async stopAll() {} },
+      reportError: message => { errors.push(message); },
+    });
+
+    expect(result).toEqual({ exitCode: 1, stateLeaseHeld: true });
+    expect(errors).toContain("uatu hub: state-root lease release failed: rollback failed");
+  });
+
+  test("signal shutdown waits after retaining the lease and force-exits on the next signal", async () => {
+    let finishShutdown!: (result: { exitCode: number; stateLeaseHeld: boolean }) => void;
+    const shutdownResult = new Promise<{ exitCode: number; stateLeaseHeld: boolean }>(resolve => {
+      finishShutdown = resolve;
+    });
+    const exits: number[] = [];
+    let retained = 0;
+    const signal = createHubSignalShutdown({
+      shutdown: () => shutdownResult,
+      forceExit: code => { exits.push(code); },
+      reportRetained: () => { retained += 1; },
+    });
+
+    signal();
+    finishShutdown({ exitCode: 1, stateLeaseHeld: true });
+    await Bun.sleep(0);
+    expect(exits).toEqual([]);
+    expect(retained).toBe(1);
+    signal();
+    expect(exits).toEqual([1]);
+  });
+
+  test("a contender stays blocked after failed shutdown until forced owner exit", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "uatu-hub-failed-shutdown-"));
+    const stateRoot = path.join(directory, "state");
+    await mkdir(stateRoot, { mode: 0o700 });
+    const fixture = path.resolve(import.meta.dir, "../../tests/fixtures/hub-failed-shutdown-helper.ts");
+    const child = spawn(process.execPath, [fixture, stateRoot], { stdio: ["ignore", "pipe", "pipe"] });
+    let output = "";
+    child.stdout.on("data", chunk => { output += chunk.toString(); });
+    const waitForOutput = async (text: string) => {
+      const deadline = Date.now() + 5_000;
+      while (!output.includes(text) && Date.now() < deadline) await Bun.sleep(10);
+      if (!output.includes(text)) throw new Error(`fixture did not print ${text}: ${output}`);
+    };
+    const waitForExit = () => new Promise<number | null>(resolve => child.once("exit", code => resolve(code)));
+
+    try {
+      await waitForOutput("locked\n");
+      child.kill("SIGTERM");
+      await waitForOutput("retained\n");
+      await expect(acquireHubStateLease(stateRoot)).rejects.toThrow(/already in use/);
+
+      child.kill("SIGTERM");
+      expect(await waitForExit()).toBe(1);
+      const successor = await acquireHubStateLease(stateRoot);
+      await successor.release();
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+        await new Promise(resolve => child.once("exit", resolve));
+      }
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });
