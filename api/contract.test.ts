@@ -106,6 +106,72 @@ describe("conversation configuration and rename", () => {
   });
 });
 
+describe("Hub credential contracts", () => {
+  test("a populated Hub state includes workspace credential status and assignment names", async () => {
+    const openapi = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
+    const validate = createAjv().compile(schemaForAjv(openapi.components.schemas.HubState, openapi.components.schemas));
+    expect(validate({
+      version: "0.5.1 (abcdef0)",
+      hubApiRevision: 3,
+      workspaceApiRevision: 6,
+      workspaces: [{
+        id: "uatu",
+        path: "/src/uatu",
+        backend: "local",
+        running: true,
+        credentialRestartRequired: true,
+        credentialAssignments: {
+          authentication: ["Work GitHub"],
+          signing: ["Work signing"],
+        },
+        workspaceApiRevision: 6,
+        shells: [{ attached: false, label: "zsh" }],
+      }],
+    })).toBe(true);
+    expect(validate({
+      version: "0.5.1 (abcdef0)",
+      hubApiRevision: 3,
+      workspaceApiRevision: 6,
+      workspaces: [{ id: "uatu", path: "/src/uatu", backend: "local", running: true, credentialRestartRequired: false, workspaceApiRevision: 6 }],
+    })).toBe(false);
+  });
+
+  test("public DTO fixtures are closed and reject secret-bearing fields", async () => {
+    const openapi = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
+    const validate = createAjv().compile(schemaForAjv(openapi.components.schemas.PublicCredential, openapi.components.schemas));
+    const base = {
+      id: "credential-1",
+      name: "Work credential",
+      enabled: true,
+      createdAt: "2026-08-20T12:00:00.000Z",
+      assignments: [],
+      readiness: [{ layer: "credential", status: "ready", message: "Credential is available." }],
+    };
+    const fixtures = [
+      { ...base, type: "ssh", capabilities: ["ssh-authentication"], metadata: { publicKey: "ssh-ed25519 AAAA", fingerprint: "SHA256:public" } },
+      { ...base, type: "openpgp", capabilities: ["openpgp-signing"], metadata: { publicKey: "-----BEGIN PGP PUBLIC KEY BLOCK-----", fingerprint: "0123456789ABCDEF" } },
+      { ...base, type: "token", capabilities: ["https-git"], metadata: { host: "github.com", username: "git" } },
+    ];
+    for (const fixture of fixtures) expect(validate(fixture)).toBe(true);
+    for (const field of ["privateKey", "passphrase", "token", "secret", "agentSocket"]) {
+      expect(validate({ ...fixtures[0], [field]: "must-not-ship" })).toBe(false);
+      expect(validate({ ...fixtures[0], metadata: { ...fixtures[0]!.metadata, [field]: "must-not-ship" } })).toBe(false);
+    }
+  });
+
+  test("assignment, tool, and clone-selection fixtures match their closed schemas", async () => {
+    const openapi = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
+    const compile = (name: string) => createAjv().compile(schemaForAjv(openapi.components.schemas[name], openapi.components.schemas));
+    expect(compile("CredentialAssignment")({ workspaceId: "uatu", credentialId: "credential-1", role: "authentication", host: "github.com" })).toBe(true);
+    expect(compile("PublicCredentialTool")({ tool: "git", path: "/usr/bin/git", version: "git version 2.50.0", results: [], guidance: null })).toBe(true);
+    const clone = compile("CreateCloneJobRequest");
+    expect(clone({ url: "https://github.com/example/repo.git", dest: "/src" })).toBe(true);
+    expect(clone({ url: "https://github.com/example/repo.git", dest: "/src", credentialId: "credential-1", retainAssignment: true })).toBe(true);
+    expect(clone({ url: "https://github.com/example/repo.git", dest: "/src", retainAssignment: true })).toBe(false);
+    expect(clone({ url: "https://github.com/example/repo.git", dest: "/src", credentialId: "credential-1", extra: true })).toBe(false);
+  });
+});
+
 describe("structured question answers", () => {
   test("requires ordered non-empty answer arrays and documents custom strings", async () => {
     const openapi = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");

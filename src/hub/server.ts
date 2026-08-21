@@ -28,8 +28,16 @@ import {
 import type { HubConfig } from "./config";
 import { CloneJobManager, type CloneJobEvent } from "./clone-jobs";
 import { CloneProcessAdapter } from "./clone-process";
+import type { CloneCredentialResolver } from "./credential-context";
+import {
+  CredentialApi,
+  CredentialOperationRateLimiter,
+  credentialApiError,
+  readCredentialJson,
+  type CredentialApiServices,
+} from "./credential-api";
 import { cloneTargetName, gitInit, probeGitRepository, validCloneFolderName } from "./git";
-import { dashboardPage, loginPage, stoppedSessionPage } from "./pages";
+import { clonePage, dashboardPage, loginPage, settingsPage, stoppedSessionPage } from "./pages";
 import {
   bridgeWebSocketHandlers,
   childUrlFor,
@@ -57,6 +65,8 @@ export type HubDeps = {
   sessionStore: HubSessionStore;
   personalState: PersonalWorkspaceStateStore;
   cloneJobs?: CloneJobManager;
+  cloneCredentials?: CloneCredentialResolver;
+  credentialApi?: CredentialApiServices;
 };
 
 type HubServer = UpgradableServer & {
@@ -64,6 +74,8 @@ type HubServer = UpgradableServer & {
 };
 
 const SESSION_PATH = /^\/s\/([^/]+)(\/|$)/;
+const CREDENTIAL_PATH = "/api/hub/credentials";
+const CREDENTIAL_TOOL_PATH = "/api/hub/credential-tools";
 
 function json(status: number, body: unknown, headers?: Record<string, string>): Response {
   return Response.json(body, { status, headers });
@@ -89,8 +101,11 @@ export function createHubFetchHandler(deps: HubDeps) {
     processFactory: new CloneProcessAdapter(),
     registry,
     sessions,
+    credentials: deps.cloneCredentials,
   });
   const limiter = new LoginRateLimiter();
+  const credentialLimiter = new CredentialOperationRateLimiter();
+  const credentialApi = deps.credentialApi ? new CredentialApi(deps.credentialApi) : null;
 
   // Whether the browser-facing connection is HTTPS: either the hub
   // terminates TLS itself, or a fronting proxy (tailscale serve, Caddy,
@@ -232,6 +247,8 @@ export function createHubFetchHandler(deps: HubDeps) {
   };
 
   const hubState = async (): Promise<Response> => {
+    const credentialState = deps.credentialApi?.metadata.snapshot();
+    const credentialNames = new Map(credentialState?.credentials.map(credential => [credential.id, credential.name]));
     const workspaces = await Promise.all(
       registry.list().map(async entry => {
         const running = sessions.get(entry.id);
@@ -251,11 +268,23 @@ export function createHubFetchHandler(deps: HubDeps) {
             // Shell summary is best-effort decoration.
           }
         }
+        const authentication = new Set<string>();
+        const signing = new Set<string>();
+        for (const assignment of credentialState?.assignments ?? []) {
+          if (assignment.workspaceId !== entry.id) continue;
+          const name = credentialNames.get(assignment.credentialId);
+          if (name) (assignment.role === "authentication" ? authentication : signing).add(name);
+        }
         return {
           id: entry.id,
           path: entry.path,
           backend: entry.backend,
           running: running !== undefined,
+          credentialRestartRequired: sessions.credentialRestartRequired(entry.id),
+          credentialAssignments: {
+            authentication: [...authentication],
+            signing: [...signing],
+          },
           // The local-process backend always spawns this build's binary, so
           // every child speaks this constant. A backend that runs children
           // of other builds (the deferred container backend) must report
@@ -373,7 +402,7 @@ export function createHubFetchHandler(deps: HubDeps) {
   // A clone is a user-owned, addressable job: creation returns immediately;
   // output is replayable SSE; input and cancellation are POST mutations.
   const createCloneJob = async (request: Request, owner: string): Promise<Response> => {
-    let body: { url?: unknown; dest?: unknown; folderName?: unknown };
+    let body: { url?: unknown; dest?: unknown; folderName?: unknown; credentialId?: unknown; retainAssignment?: unknown };
     try {
       body = (await request.json()) as typeof body;
     } catch {
@@ -391,7 +420,18 @@ export function createHubFetchHandler(deps: HubDeps) {
     if (requestedFolderName !== "" && !validCloneFolderName(requestedFolderName)) {
       return json(400, { error: "checkout folder name must be a single folder name" });
     }
+    if (body.credentialId !== undefined && (typeof body.credentialId !== "string" || body.credentialId.trim() === "")) {
+      return json(400, { error: "credentialId must be a non-empty string" });
+    }
+    if (body.retainAssignment !== undefined && typeof body.retainAssignment !== "boolean") {
+      return json(400, { error: "retainAssignment must be a boolean" });
+    }
+    const credentialId = typeof body.credentialId === "string" ? body.credentialId : undefined;
+    if (body.retainAssignment === true && !credentialId) {
+      return json(400, { error: "retainAssignment requires credentialId" });
+    }
     try {
+      const credential = await cloneJobs.resolveCredential(url, credentialId);
       const resolvedDest = path.resolve(dest);
       await fs.mkdir(resolvedDest, { recursive: true });
       const target = path.join(await fs.realpath(resolvedDest), requestedFolderName || cloneTargetName(url)!);
@@ -401,10 +441,15 @@ export function createHubFetchHandler(deps: HubDeps) {
       if (await fs.stat(target).then(() => true).catch(() => false)) {
         return json(409, { error: `target already exists: ${target}` });
       }
-      return json(202, cloneJobs.create(owner, url, target));
+      return json(202, cloneJobs.create(owner, url, target, {
+        credential,
+        retainAssignment: body.retainAssignment === true,
+      }));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      return json(message.includes("already reserved") ? 409 : 500, { error: message });
+      const requestError = /credential|clone URL|SSH or HTTPS/.test(message);
+      const conflict = /already reserved|locked|disabled|unavailable/.test(message);
+      return json(conflict ? 409 : requestError ? 400 : 500, { error: message });
     }
   };
 
@@ -604,13 +649,34 @@ export function createHubFetchHandler(deps: HubDeps) {
 
     // Dashboard + its APIs.
     if (pathname === "/" && request.method === "GET") {
-      return htmlResponse(dashboardPage());
+      return htmlResponse(dashboardPage(session.user));
+    }
+    if (pathname === "/clone" && request.method === "GET") {
+      return htmlResponse(clonePage(session.user));
+    }
+    if (pathname === "/settings" && request.method === "GET") {
+      return htmlResponse(settingsPage(session.user));
     }
     if (pathname === "/api/hub/state" && request.method === "GET") {
       return hubState();
     }
     if (pathname === "/api/hub/browse" && request.method === "GET") {
       return browse(url);
+    }
+    if (pathname === CREDENTIAL_PATH && request.method === "GET" && credentialApi) {
+      return json(200, { credentials: await credentialApi.listCredentials() }, { "cache-control": "no-store" });
+    }
+    if (pathname === CREDENTIAL_TOOL_PATH && request.method === "GET" && credentialApi) {
+      return json(200, { tools: credentialApi.listTools() }, { "cache-control": "no-store" });
+    }
+    const publicKey = new RegExp(`^${CREDENTIAL_PATH}/([^/]+)/public-key$`).exec(pathname);
+    if (publicKey && request.method === "GET" && credentialApi) {
+      try {
+        return json(200, credentialApi.publicKey(decodeURIComponent(publicKey[1]!)), { "cache-control": "no-store" });
+      } catch (error) {
+        const mapped = credentialApiError(error);
+        return json(mapped.status, { error: mapped.message }, { "cache-control": "no-store" });
+      }
     }
     const cloneJobEvents = /^\/api\/hub\/clone-jobs\/([^/]+)\/events$/.exec(pathname);
     if (cloneJobEvents && (request.method === "GET" || request.method === "HEAD")) {
@@ -645,6 +711,47 @@ export function createHubFetchHandler(deps: HubDeps) {
       }
       if (!csrfOk(request, session.transport)) {
         return json(403, { error: "cross-origin request rejected" });
+      }
+      if (credentialApi && (pathname.startsWith(`${CREDENTIAL_PATH}/`) || pathname.startsWith(`${CREDENTIAL_TOOL_PATH}/`))) {
+        const headers = { "cache-control": "no-store" };
+        try {
+          const body = await readCredentialJson(request);
+          const generation = new RegExp(`^${CREDENTIAL_PATH}/(ssh|openpgp)/(generate|import)$`).exec(pathname);
+          if (generation) {
+            const client = clientKeyForRateLimit(server.requestIP?.(request)?.address ?? null, request.headers.get("x-forwarded-for"));
+            if (!credentialLimiter.allow(`${session.user}:${client}:generate`, 5)) return json(429, { error: "too many credential operations; wait a minute and try again" }, headers);
+            const result = generation[1] === "ssh"
+              ? generation[2] === "generate" ? await credentialApi.generateSsh(body) : await credentialApi.importSsh(body)
+              : generation[2] === "generate" ? await credentialApi.generateOpenPgp(body) : await credentialApi.importOpenPgp(body);
+            return json(200, { credential: result }, headers);
+          }
+          if (pathname === `${CREDENTIAL_PATH}/token`) {
+            return json(200, { credential: await credentialApi.createToken(body) }, headers);
+          }
+          const toolTest = new RegExp(`^${CREDENTIAL_TOOL_PATH}/([^/]+)/test$`).exec(pathname);
+          if (toolTest) return json(200, { tool: await credentialApi.testTool(decodeURIComponent(toolTest[1]!), body) }, headers);
+          const tool = new RegExp(`^${CREDENTIAL_TOOL_PATH}/([^/]+)$`).exec(pathname);
+          if (tool) return json(200, { tool: await credentialApi.setTool(decodeURIComponent(tool[1]!), body) }, headers);
+          const action = new RegExp(`^${CREDENTIAL_PATH}/([^/]+)/(unlock|lock|enable|disable|assign|unassign|test|delete)$`).exec(pathname);
+          if (action) {
+            const credentialId = decodeURIComponent(action[1]!);
+            const operation = action[2]!;
+            if (operation === "unlock" || operation === "test") {
+              const client = clientKeyForRateLimit(server.requestIP?.(request)?.address ?? null, request.headers.get("x-forwarded-for"));
+              if (!credentialLimiter.allow(`${session.user}:${client}:passphrase`, 10)) return json(429, { error: "too many credential operations; wait a minute and try again" }, headers);
+            }
+            if (operation === "unlock") return json(200, { credential: await credentialApi.unlock(credentialId, body) }, headers);
+            if (operation === "lock") return json(200, { credential: await credentialApi.lock(credentialId, body) }, headers);
+            if (operation === "enable" || operation === "disable") return json(200, { credential: await credentialApi.setEnabled(credentialId, body, operation === "enable") }, headers);
+            if (operation === "assign") return json(200, { assignment: await credentialApi.assign(credentialId, body) }, headers);
+            if (operation === "unassign") return json(200, { removed: await credentialApi.unassign(credentialId, body) }, headers);
+            if (operation === "test") return json(200, { results: await credentialApi.test(credentialId, body) }, headers);
+            return json(200, { deleted: await credentialApi.delete(credentialId, body) }, headers);
+          }
+        } catch (error) {
+          const mapped = credentialApiError(error);
+          return json(mapped.status, { error: mapped.message }, headers);
+        }
       }
       // Revoke one of the current user's sessions by handle. Revoking the
       // session serving this request behaves as sign-out: the response
@@ -744,6 +851,7 @@ export function startHubServer(deps: HubDeps) {
     processFactory: new CloneProcessAdapter(),
     registry: deps.registry,
     sessions: deps.sessions,
+    credentials: deps.cloneCredentials,
   });
   const handler = createHubFetchHandler({ ...deps, cloneJobs });
   const server = Bun.serve<BridgeData>({

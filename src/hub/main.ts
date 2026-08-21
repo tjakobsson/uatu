@@ -3,13 +3,29 @@
 // terminates every child before the hub exits. cli.ts dispatches here for
 // `uatu hub` and `uatu hub hash-password`.
 
-import { LocalProcessBackend } from "./backend";
+import path from "node:path";
+
+import { LocalProcessBackend, resolveUatuArgv } from "./backend";
+import { ManagedSshAgent } from "./credential-ssh-agent";
+import { SshCredentialService } from "./credential-ssh";
+import { CredentialMetadataStore, CredentialTokenStore, CredentialToolOverrideStore } from "./credential-store";
+import { CredentialToolManager } from "./credential-tools";
+import { OpenPgpCredentialManager } from "./openpgp-credentials";
+import { TokenCredentialManager } from "./token-credentials";
+import { createStoredCloneCredentialResolver, createStoredCredentialContextResolver } from "./credential-context";
 import { hashPassword, HubSessionStore } from "./auth";
 import { loadHubConfig } from "./config";
 import { WorkspaceRegistry } from "./registry";
 import { PersonalWorkspaceStateStore } from "./personal-state";
 import {
+  ensureCredentialStateDirs,
   ensureStateDir,
+  credentialGnuPgPath,
+  credentialRuntimePath,
+  credentialSecretsPath,
+  credentialsPath,
+  credentialTokenStorePath,
+  credentialToolsPath,
   personalWorkspaceStatePath,
   registryPath,
   resolveHubStateRoot,
@@ -27,6 +43,29 @@ export type RunHubOptions = {
   exitOnStdinClose?: boolean;
 };
 
+export async function stopHubRuntime(parts: {
+  cloneJobs: { close(): Promise<void> };
+  sessions: { stopAll(): Promise<void> };
+  sshAgent?: { shutdown(): Promise<void> } | null;
+  openPgp?: { shutdown(): Promise<unknown> } | null;
+  reportError?: (message: string) => void;
+}): Promise<void> {
+  const report = parts.reportError ?? (message => console.error(message));
+  const settle = async (label: string, operation: () => Promise<unknown>) => {
+    const [result] = await Promise.allSettled([Promise.resolve().then(operation)]);
+    if (result?.status === "rejected") report(`uatu hub: ${label} shutdown failed`);
+    return result;
+  };
+  await settle("clone job", () => parts.cloneJobs.close());
+  await settle("workspace session", () => parts.sessions.stopAll());
+  const agents = await Promise.allSettled([
+    Promise.resolve().then(() => parts.sshAgent?.shutdown()),
+    Promise.resolve().then(() => parts.openPgp?.shutdown()),
+  ]);
+  if (agents[0]?.status === "rejected") report("uatu hub: SSH agent shutdown failed");
+  if (agents[1]?.status === "rejected") report("uatu hub: OpenPGP agent shutdown failed");
+}
+
 export async function runHub(options: RunHubOptions): Promise<void> {
   const config = await loadHubConfig(options.configPath);
   if (options.port !== undefined) {
@@ -35,6 +74,7 @@ export async function runHub(options: RunHubOptions): Promise<void> {
 
   const stateRoot = config.stateDir ?? resolveHubStateRoot();
   await ensureStateDir(stateRoot);
+  await ensureCredentialStateDirs(stateRoot);
   const sessionStore = new HubSessionStore(sessionsPath(stateRoot));
   await sessionStore.load();
 
@@ -44,8 +84,73 @@ export async function runHub(options: RunHubOptions): Promise<void> {
   await personalState.load();
   await personalState.recoverPendingForgets(workspaceId => registry.byId(workspaceId) !== undefined);
 
-  const sessions = new SessionManager(registry, { local: new LocalProcessBackend() });
-  const server = startHubServer({ config, registry, sessions, sessionStore, personalState });
+  const credentialMetadata = new CredentialMetadataStore(credentialsPath(stateRoot));
+  const credentialTokens = new CredentialTokenStore(credentialTokenStorePath(stateRoot));
+  const credentialToolStore = new CredentialToolOverrideStore(credentialToolsPath(stateRoot));
+  const credentialTools = new CredentialToolManager(credentialToolStore);
+  await Promise.all([credentialMetadata.load(), credentialTokens.load(), credentialTools.load()]);
+  const tools = new Map(credentialTools.list().map(tool => [tool.tool, tool.path]));
+  const sshAgentPath = tools.get("ssh-agent");
+  const sshAgent = sshAgentPath
+    ? new ManagedSshAgent({
+        runtimeDirectory: credentialRuntimePath(stateRoot),
+        sshAgentPath,
+      })
+    : null;
+  const sshCredentials = sshAgent && tools.get("ssh-keygen") && tools.get("ssh-add")
+    ? new SshCredentialService({
+        secretsDirectory: credentialSecretsPath(stateRoot),
+        metadataStore: credentialMetadata,
+        agent: sshAgent,
+        sshKeygenPath: tools.get("ssh-keygen")!,
+        sshAddPath: tools.get("ssh-add")!,
+      })
+    : null;
+  const openPgpCredentials = new OpenPgpCredentialManager({
+    gnupgHome: credentialGnuPgPath(stateRoot),
+    metadataStore: credentialMetadata,
+    gpgPath: tools.get("gpg") ?? null,
+    gpgconfPath: tools.get("gpgconf") ?? null,
+  });
+  const tokenCredentials = new TokenCredentialManager(credentialMetadata, credentialTokens);
+  const credentialContexts = createStoredCredentialContextResolver({
+    metadata: credentialMetadata,
+    tokens: credentialTokens,
+    stateRoot,
+    runtimeRoot: credentialRuntimePath(stateRoot),
+    gnupgHome: credentialGnuPgPath(stateRoot),
+    sshAgentSocket: () => sshAgent?.currentSocket(),
+    tools: {
+      gpg: tools.get("gpg") ?? null,
+      sshKeygen: tools.get("ssh-keygen") ?? null,
+    },
+  });
+  const sessions = new SessionManager(registry, { local: new LocalProcessBackend() }, credentialContexts);
+  const cloneCredentials = createStoredCloneCredentialResolver({
+    metadata: credentialMetadata,
+    tokens: credentialTokens,
+    stateRoot,
+    sshAgentSocket: () => sshAgent?.currentSocket(),
+    sshPublicKeyPath: credentialId => path.join(credentialSecretsPath(stateRoot), `${credentialId}.key.pub`),
+    sshCredentialUsable: credentialId => sshCredentials?.testUsability(credentialId) ?? Promise.resolve(false),
+    uatuArgv: resolveUatuArgv(),
+  });
+  const server = startHubServer({
+    config,
+    registry,
+    sessions,
+    sessionStore,
+    personalState,
+    cloneCredentials,
+    credentialApi: {
+      metadata: credentialMetadata,
+      tools: credentialTools,
+      ssh: sshCredentials,
+      openpgp: openPgpCredentials,
+      tokens: tokenCredentials,
+      workspaceExists: workspaceId => registry.byId(workspaceId) !== undefined,
+    },
+  });
 
   const scheme = config.tls ? "https" : "http";
   console.log(`${scheme}://${config.host}:${server.port}/`);
@@ -62,8 +167,12 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     console.error("uatu hub: shutting down");
     void (async () => {
       try {
-        await server.cloneJobs.close();
-        await sessions.stopAll();
+        await stopHubRuntime({
+          cloneJobs: server.cloneJobs,
+          sessions,
+          sshAgent,
+          openPgp: openPgpCredentials,
+        });
       } finally {
         server.stop(true);
         process.exit(0);

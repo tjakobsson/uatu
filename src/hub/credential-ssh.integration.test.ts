@@ -1,0 +1,183 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { chmod, lstat, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import path from "node:path";
+
+import { CredentialMetadataStore } from "./credential-store";
+import { ManagedSshAgent } from "./credential-ssh-agent";
+import { SshCredentialService } from "./credential-ssh";
+import { discoverExecutable } from "./credential-tools";
+import {
+  credentialRuntimePath,
+  credentialSecretsPath,
+  credentialsPath,
+  ensureCredentialStateDirs,
+  ensureStateDir,
+} from "./state-dir";
+
+const roots: string[] = [];
+const agents: ManagedSshAgent[] = [];
+
+afterEach(async () => {
+  await Promise.all(agents.splice(0).map(agent => agent.shutdown().catch(() => undefined)));
+  await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
+});
+
+async function tools(): Promise<{ agent: string; add: string; keygen: string }> {
+  const [agent, add, keygen] = await Promise.all([
+    discoverExecutable("ssh-agent"),
+    discoverExecutable("ssh-add"),
+    discoverExecutable("ssh-keygen"),
+  ]);
+  if (!agent.path || !add.path || !keygen.path) throw new Error("OpenSSH tools are required for this test");
+  return { agent: agent.path, add: add.path, keygen: keygen.path };
+}
+
+async function stateRoot(name: string): Promise<string> {
+  const root = await mkdtemp(path.join("/tmp", name));
+  roots.push(root);
+  await ensureStateDir(root);
+  await ensureCredentialStateDirs(root);
+  return root;
+}
+
+async function run(executable: string, args: string[], env: Record<string, string>): Promise<{ code: number; output: string }> {
+  const child = Bun.spawn([executable, ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env });
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  return { code: code ?? 1, output: `${stdout}${stderr}` };
+}
+
+describe("managed SSH credential lifecycle", () => {
+  test("generates, imports, unlocks, locks, disables, enables, tests, and deletes without retaining its passphrase", async () => {
+    const found = await tools();
+    const root = await stateRoot("uatu-ssh-credential-");
+    const audit = path.join(root, "tool-argv.log");
+    const wrappedKeygen = await wrapper(root, "ssh-keygen", found.keygen, audit);
+    const wrappedAdd = await wrapper(root, "ssh-add", found.add, audit);
+    const metadata = new CredentialMetadataStore(credentialsPath(root));
+    await metadata.load();
+    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent });
+    agents.push(agent);
+    let id = 0;
+    const service = new SshCredentialService({
+      secretsDirectory: credentialSecretsPath(root),
+      metadataStore: metadata,
+      agent,
+      sshKeygenPath: wrappedKeygen,
+      sshAddPath: wrappedAdd,
+      createId: () => `ssh-${++id}`,
+    });
+    const passphrase = "uatu-sentinel-passphrase-3.2";
+
+    const generated = await service.generate("Generated", ["ssh-authentication", "ssh-signing"], passphrase);
+    expect(generated.metadata.publicKey).toStartWith("ssh-ed25519 ");
+    expect(generated.metadata.fingerprint).toStartWith("SHA256:");
+    const generatedPath = path.join(credentialSecretsPath(root), `${generated.id}.key`);
+    expect((await stat(generatedPath)).mode & 0o077).toBe(0);
+    expect((await stat(`${generatedPath}.pub`)).mode & 0o077).toBe(0);
+    expect(await readFile(generatedPath, "utf8")).not.toContain(passphrase);
+
+    await service.unlock(generated.id, passphrase);
+    expect(await service.testUsability(generated.id)).toBe(true);
+    await service.lock(generated.id);
+    expect(await service.testUsability(generated.id)).toBe(false);
+    await service.unlock(generated.id, passphrase);
+    await service.setEnabled(generated.id, false);
+    expect(await service.testUsability(generated.id)).toBe(false);
+    await service.setEnabled(generated.id, true);
+
+    const imported = await service.import(
+      "Imported",
+      ["ssh-signing"],
+      await readFile(generatedPath, "utf8"),
+      passphrase,
+    );
+    expect(imported.metadata.fingerprint).toBe(generated.metadata.fingerprint);
+    await service.unlock(imported.id, passphrase);
+    expect(await service.testUsability(imported.id)).toBe(true);
+    expect(await service.delete(imported.id)).toBe(true);
+    expect(await Bun.file(path.join(credentialSecretsPath(root), `${imported.id}.key`)).exists()).toBe(false);
+
+    const collisionPath = path.join(credentialSecretsPath(root), "ssh-3.key");
+    await writeFile(collisionPath, "preserve-existing-backing", { mode: 0o600 });
+    await expect(service.import(
+      "Collision",
+      ["ssh-authentication"],
+      await readFile(generatedPath, "utf8"),
+      passphrase,
+    )).rejects.toThrow("backing path already exists");
+    expect(await readFile(collisionPath, "utf8")).toBe("preserve-existing-backing");
+
+    expect(await readFile(credentialsPath(root), "utf8")).not.toContain(passphrase);
+    expect(await readFile(audit, "utf8")).not.toContain(passphrase);
+  }, 30_000);
+
+  test("uses only the Hub socket and leaves an ambient agent and its identities unchanged", async () => {
+    const found = await tools();
+    const ambientRoot = await stateRoot("uatu-ambient-agent-");
+    const hubRoot = await stateRoot("uatu-hub-agent-");
+    const ambient = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(ambientRoot), sshAgentPath: found.agent });
+    agents.push(ambient);
+    const ambientSocket = await ambient.start();
+    const ambientKey = path.join(credentialSecretsPath(ambientRoot), "ambient");
+    expect((await run(found.keygen, ["-q", "-t", "ed25519", "-N", "", "-f", ambientKey], cleanEnv())).code).toBe(0);
+    expect((await run(found.add, [ambientKey], { ...cleanEnv(), SSH_AUTH_SOCK: ambientSocket })).code).toBe(0);
+    const ambientBefore = await run(found.add, ["-l"], { ...cleanEnv(), SSH_AUTH_SOCK: ambientSocket });
+    expect(ambientBefore.code).toBe(0);
+
+    const metadata = new CredentialMetadataStore(credentialsPath(hubRoot));
+    await metadata.load();
+    const hubAgent = new ManagedSshAgent({
+      runtimeDirectory: credentialRuntimePath(hubRoot),
+      sshAgentPath: found.agent,
+      servicePath: process.env.PATH,
+    });
+    agents.push(hubAgent);
+    const service = new SshCredentialService({
+      secretsDirectory: credentialSecretsPath(hubRoot),
+      metadataStore: metadata,
+      agent: hubAgent,
+      sshKeygenPath: found.keygen,
+      sshAddPath: found.add,
+      createId: () => "managed",
+    });
+    const previousAmbient = process.env.SSH_AUTH_SOCK;
+    process.env.SSH_AUTH_SOCK = ambientSocket;
+    try {
+      expect(hubAgent.currentSocket()).toBeUndefined();
+      const credential = await service.generate("Managed", ["ssh-authentication"], "managed-agent-secret");
+      expect(hubAgent.currentSocket()).toBeUndefined();
+      await service.unlock(credential.id, "managed-agent-secret");
+      expect(hubAgent.currentSocket()).toBe(path.join(credentialRuntimePath(hubRoot), "ssh-agent.sock"));
+      expect(hubAgent.currentSocket()).not.toBe(ambientSocket);
+      await service.lock(credential.id);
+      await hubAgent.shutdown();
+    } finally {
+      if (previousAmbient === undefined) delete process.env.SSH_AUTH_SOCK;
+      else process.env.SSH_AUTH_SOCK = previousAmbient;
+    }
+
+    const ambientAfter = await run(found.add, ["-l"], { ...cleanEnv(), SSH_AUTH_SOCK: ambientSocket });
+    expect(ambientAfter.code).toBe(0);
+    expect(ambientAfter.output).toBe(ambientBefore.output);
+    expect((await lstat(ambientSocket)).isSocket()).toBe(true);
+  }, 30_000);
+});
+
+async function wrapper(root: string, name: string, executable: string, audit: string): Promise<string> {
+  const filePath = path.join(root, `${name}-wrapper.sh`);
+  await writeFile(filePath, [
+    "#!/bin/sh",
+    `printf '%s\\n' \"$0 $* SSH_AUTH_SOCK=\${SSH_AUTH_SOCK-}\" >> '${audit}'`,
+    `exec '${executable}' \"$@\"`,
+  ].join("\n"), { mode: 0o700 });
+  await chmod(filePath, 0o700);
+  return filePath;
+}
+
+function cleanEnv(): Record<string, string> {
+  return { PATH: process.env.PATH ?? "", LANG: "C", LC_ALL: "C" };
+}

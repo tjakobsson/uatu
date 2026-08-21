@@ -1,5 +1,7 @@
 import path from "node:path";
 
+import { stripAmbientCredentialEnvironment, type CloneCredentialProcessContext } from "./credential-context";
+
 const TERM_GRACE_MS = 3_000;
 const TERMINAL_ECHO_FLAG = 0x00000008;
 
@@ -13,6 +15,7 @@ export type CloneProcess = {
 export type CloneProcessStart = {
   url: string;
   target: string;
+  credential?: CloneCredentialProcessContext;
   onOutput(output: string): void;
 };
 
@@ -42,23 +45,33 @@ export type CloneProcessAdapterOptions = {
 };
 
 export function buildCloneEnvironment(source: NodeJS.ProcessEnv = process.env): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [name, value] of Object.entries(source)) {
-    if (value !== undefined && name !== "GIT_ASKPASS" && name !== "SSH_ASKPASS") {
-      env[name] = value;
-    }
-  }
+  const env = stripAmbientCredentialEnvironment(source);
   env.GIT_TERMINAL_PROMPT = "1";
   env.SSH_ASKPASS_REQUIRE = "never";
   return env;
 }
 
-export function buildCloneArguments(url: string, target: string): string[] {
-  return [
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+export function buildCloneArguments(url: string, target: string, credential?: CloneCredentialProcessContext): string[] {
+  const args = [
     "-c", "core.askPass=",
     "-c", "credential.helper=",
-    "clone", "--", url, target,
   ];
+  if (credential?.type === "https") {
+    const helper = [
+      "!env",
+      `UATU_HUB_STATE_ROOT=${shellQuote(credential.stateRoot)}`,
+      `UATU_CREDENTIAL_ID=${shellQuote(credential.credentialId)}`,
+      ...credential.uatuArgv.map(shellQuote),
+      "--git-credential-helper",
+    ].join(" ");
+    args.push("-c", `credential.https://${credential.host}.helper=${helper}`);
+  }
+  args.push("clone", "--", url, target);
+  return args;
 }
 
 export class CloneProcessAdapter implements CloneProcessFactory {
@@ -81,9 +94,19 @@ export class CloneProcessAdapter implements CloneProcessFactory {
   start(options: CloneProcessStart): CloneProcess {
     const normalizer = new TerminalTextNormalizer(options.onOutput);
     let terminal: BunTerminal | undefined;
-    const proc = this.spawn([this.gitCommand, ...buildCloneArguments(options.url, options.target)], {
+    const env = { ...this.env };
+    if (options.credential?.type === "ssh") {
+      env.SSH_AUTH_SOCK = options.credential.agentSocket;
+      env.GIT_SSH_COMMAND = [
+        "ssh",
+        `-o IdentityAgent=${shellQuote(options.credential.agentSocket)}`,
+        `-o IdentityFile=${shellQuote(options.credential.publicKeyPath)}`,
+        "-o IdentitiesOnly=yes",
+      ].join(" ");
+    }
+    const proc = this.spawn([this.gitCommand, ...buildCloneArguments(options.url, options.target, options.credential)], {
       cwd: path.dirname(options.target),
-      env: this.env,
+      env,
       detached: true,
       terminal: {
         cols: 100,

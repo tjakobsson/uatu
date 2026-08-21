@@ -4,6 +4,12 @@ import os from "node:os";
 import path from "node:path";
 
 import type { RunningSession, SessionBackend } from "./backend";
+import {
+  EMPTY_CREDENTIAL_CONTEXT_RESOLVER,
+  EMPTY_RESOLVED_CREDENTIAL_CONTEXT,
+  type CredentialContextResolver,
+  type ResolvedCredentialContext,
+} from "./credential-context";
 import { WorkspaceRegistry } from "./registry";
 import { SessionManager } from "./sessions";
 
@@ -38,12 +44,12 @@ describe("SessionManager.isStarting", () => {
 
     let releaseStart!: (session: RunningSession) => void;
     const backend: SessionBackend = {
-      start: () =>
+      start: (_workspace, _basePath, _credentials) =>
         new Promise<RunningSession>(resolve => {
           releaseStart = resolve;
         }),
     };
-    const sessions = new SessionManager(registry, { local: backend });
+    const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
 
     expect(sessions.isStarting("slow")).toBe(false);
     const startPromise = sessions.start("slow");
@@ -59,6 +65,40 @@ describe("SessionManager.isStarting", () => {
   });
 });
 
+describe("SessionManager credential contexts", () => {
+  test("passes the resolved context explicitly and reports assignment changes as restart-required", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-session-credentials-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    await registry.register("/srv/workspaces/project");
+    let revision = "before";
+    const resolver: CredentialContextResolver = {
+      revision: () => revision,
+      resolve: async (): Promise<ResolvedCredentialContext> => ({
+        ...structuredClone(EMPTY_RESOLVED_CREDENTIAL_CONTEXT),
+        revision,
+      }),
+    };
+    let received: ResolvedCredentialContext | undefined;
+    const backend: SessionBackend = {
+      start: async (workspace, _basePath, credentials) => {
+        received = credentials;
+        return fakeSession(workspace.id);
+      },
+    };
+    const sessions = new SessionManager(registry, { local: backend }, resolver);
+
+    await sessions.start("project");
+    expect(received?.revision).toBe("before");
+    expect(sessions.credentialRestartRequired("project")).toBe(false);
+    revision = "after";
+    expect(sessions.credentialRestartRequired("project")).toBe(true);
+    await sessions.stop("project");
+    expect(sessions.credentialRestartRequired("project")).toBe(false);
+  });
+});
+
 describe("SessionManager.stop during an in-flight start", () => {
   test("awaits the start and terminates the child instead of reporting not-running", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-stop-"));
@@ -69,12 +109,12 @@ describe("SessionManager.stop during an in-flight start", () => {
 
     let releaseStart!: (session: RunningSession) => void;
     const backend: SessionBackend = {
-      start: () =>
+      start: (_workspace, _basePath, _credentials) =>
         new Promise<RunningSession>(resolve => {
           releaseStart = resolve;
         }),
     };
-    const sessions = new SessionManager(registry, { local: backend });
+    const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
 
     let stopped = false;
     void sessions.start("slow");
@@ -100,12 +140,12 @@ describe("SessionManager.stop during an in-flight start", () => {
 
     let releaseStart!: (session: RunningSession) => void;
     const backend: SessionBackend = {
-      start: () =>
+      start: (_workspace, _basePath, _credentials) =>
         new Promise<RunningSession>(resolve => {
           releaseStart = resolve;
         }),
     };
-    const sessions = new SessionManager(registry, { local: backend });
+    const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
 
     let stopped = false;
     void sessions.start("slow");
@@ -130,7 +170,7 @@ describe("SessionManager start during an in-flight stop", () => {
 
     let stopCalls = 0;
     const backend: SessionBackend = {
-      start: async () => ({
+      start: async (_workspace, _basePath, _credentials) => ({
         ...fakeSession("stop-fail"),
         stop: async () => {
           stopCalls += 1;
@@ -138,7 +178,7 @@ describe("SessionManager start during an in-flight stop", () => {
         },
       }),
     };
-    const sessions = new SessionManager(registry, { local: backend });
+    const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
     await sessions.start("stop-fail");
 
     await expect(sessions.stop("stop-fail")).rejects.toThrow("backend refused stop");
@@ -157,7 +197,7 @@ describe("SessionManager start during an in-flight stop", () => {
     let startCalls = 0;
     let releaseStop!: () => void;
     const backend: SessionBackend = {
-      start: async () => {
+      start: async (_workspace, _basePath, _credentials) => {
         startCalls += 1;
         const id = startCalls;
         return {
@@ -175,7 +215,7 @@ describe("SessionManager start during an in-flight stop", () => {
         };
       },
     };
-    const sessions = new SessionManager(registry, { local: backend });
+    const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
 
     await sessions.start("contended");
     expect(startCalls).toBe(1);
@@ -211,7 +251,7 @@ describe("SessionManager serialized lifecycle", () => {
     const stops: number[] = [];
     let releaseFirstStop!: () => void;
     const backend: SessionBackend = {
-      start: async () => {
+      start: async (_workspace, _basePath, _credentials) => {
         startCalls += 1;
         const id = startCalls;
         return {
@@ -231,7 +271,7 @@ describe("SessionManager serialized lifecycle", () => {
         };
       },
     };
-    const sessions = new SessionManager(registry, { local: backend });
+    const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
 
     await sessions.start("chained");
     const firstStop = sessions.stop("chained");
@@ -263,14 +303,14 @@ describe("SessionManager serialized lifecycle", () => {
     let startCalls = 0;
     let releaseStart!: (session: RunningSession) => void;
     const backend: SessionBackend = {
-      start: () => {
+      start: (_workspace, _basePath, _credentials) => {
         startCalls += 1;
         return new Promise<RunningSession>(resolve => {
           releaseStart = resolve;
         });
       },
     };
-    const sessions = new SessionManager(registry, { local: backend });
+    const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
 
     const a = sessions.start("joined");
     const b = sessions.start("joined");

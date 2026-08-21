@@ -13,6 +13,7 @@
 // settled state left by its predecessor.
 
 import type { RunningSession, SessionBackend } from "./backend";
+import type { CredentialContextResolver } from "./credential-context";
 import type { WorkspaceEntry, WorkspaceRegistry } from "./registry";
 
 export function sessionBasePath(workspaceId: string): string {
@@ -27,10 +28,12 @@ export class SessionManager {
   private readonly starting = new Map<string, Promise<RunningSession>>();
   // Per-workspace operation chain tails.
   private readonly lifecycle = new Map<string, Promise<unknown>>();
+  private readonly runningCredentialRevisions = new Map<string, string>();
 
   constructor(
     private readonly registry: WorkspaceRegistry,
     private readonly backends: Record<WorkspaceEntry["backend"], SessionBackend>,
+    private readonly credentials: CredentialContextResolver,
   ) {}
 
   get(workspaceId: string): RunningSession | undefined {
@@ -50,6 +53,11 @@ export class SessionManager {
 
   runningIds(): string[] {
     return [...this.running.keys()];
+  }
+
+  credentialRestartRequired(workspaceId: string): boolean {
+    const startedRevision = this.runningCredentialRevisions.get(workspaceId);
+    return startedRevision !== undefined && startedRevision !== this.credentials.revision(workspaceId);
   }
 
   // Enqueues one lifecycle operation behind every earlier one for the same
@@ -100,13 +108,16 @@ export class SessionManager {
         throw new Error(`no backend registered for '${workspace.backend}'`);
       }
 
-      const session = await backend.start(workspace, sessionBasePath(workspace.id));
+      const credentialContext = await this.credentials.resolve(workspace);
+      const session = await backend.start(workspace, sessionBasePath(workspace.id), credentialContext);
       this.running.set(workspace.id, session);
+      this.runningCredentialRevisions.set(workspace.id, credentialContext.revision);
       // Reap on child exit so a crashed session shows as stopped rather
       // than proxying into a dead endpoint forever.
       void session.exited.then(() => {
         if (this.running.get(workspace.id) === session) {
           this.running.delete(workspace.id);
+          this.runningCredentialRevisions.delete(workspace.id);
         }
       });
       return session;
@@ -130,6 +141,7 @@ export class SessionManager {
       }
       await session.stop();
       this.running.delete(workspaceId);
+      this.runningCredentialRevisions.delete(workspaceId);
       return true;
     });
   }

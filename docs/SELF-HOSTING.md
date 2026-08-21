@@ -40,9 +40,12 @@ service definitions for systemd and launchd.
   browsers gate service workers (the PWA install) and the clipboard API
   behind secure contexts. Plain HTTP is only permitted on loopback — the
   hub refuses to bind a non-loopback address without TLS.
-- **The hub stores no Git credentials.** Clone jobs retain the daemon user's
-  SSH agent but disable credential helpers and route interactive Git/OpenSSH
-  prompts through the dashboard.
+- **Local credential assignments are tool configuration, not isolation.**
+  Every workspace runs under the Hub daemon's OS UID. Normal Git, SSH, GnuPG,
+  `gh`, and `glab` use only the credentials assigned when the workspace starts,
+  but another same-UID process can inspect runtime files, reach shared Hub
+  agents, unset that configuration, and use a credential assigned elsewhere.
+  Restart a running workspace after changing its assignments.
 - **Signed-in users can browse the daemon user's filesystem.** The
   dashboard's Add Folder browser lists directories so users can pick any
   folder to serve. This adds nothing to the threat model — the embedded
@@ -77,23 +80,6 @@ to `$XDG_CONFIG_HOME/uatu/hub.json` (usually `~/.config/uatu/hub.json`):
 | `users` | — | Required, non-empty. Password hashes only — generate with `uatu hub hash-password`. |
 | `stateDir` | `~/.local/state/uatu-hub` | Workspace registry, personal workspace state, and the session store (secret-bearing files are created owner-only) |
 
-**Workspaces are folders you add**, anywhere on the machine: the dashboard's
-Add Folder pane is a directory browser (starting at the daemon user's home)
-— drill to a folder and add it, and `git clone` checks out into whichever
-directory you have browsed to. There is no configured workspaces root; a
-`workspacesDir` key in the config is rejected at startup (it existed only in
-pre-release edge builds — delete the key).
-
-Clone credentials are entered in the dashboard's clone panel. The Hub runs
-Git in a dedicated pseudo-terminal and disables Git/SSH askpass programs and
-Git credential helpers for that clone, so prompts controlled by Git or
-OpenSSH appear in the browser rather than in the daemon's terminal or an OS
-credential dialog. An existing `SSH_AUTH_SOCK` is retained so already-loaded
-keys continue to work. That agent is a separate process and can still apply
-its own confirmation, hardware-token, or GUI policy; the Hub cannot suppress
-UI independently initiated by the agent. Responses entered in the clone panel
-are sent only to the clone terminal and are not stored or echoed in its log.
-
 Generate a password hash (read from stdin so it never lands in shell
 history):
 
@@ -103,17 +89,155 @@ printf '%s' 'your-password-here' | uatu hub hash-password
 
 Paste the printed `$argon2id$…` string into `users[].passwordHash`.
 
-State that persists across restarts: the workspace registry (ids are stable —
-`/s/uatu/` today is `/s/uatu/` after any number of restarts), the session
-store (logins survive restarts; delete
-`~/.local/state/uatu-hub/sessions.json` to force everyone to sign in again,
-or revoke individual devices from the dashboard), and
-`personal-workspace-state.json`. Personal state is isolated by signed-in user
-and workspace and contains semantic resume choices such as document, Follow,
-preview/filter/compare modes, and the last-active PTY reference. Browser layout,
-dock, split, and dimensions remain client-local and are not stored by the Hub.
-Forgetting a stopped workspace removes every user's personal record for it as
-part of the same coordinated operation.
+**Workspaces are folders you add**, anywhere on the machine: the dashboard's
+Add Folder pane is a directory browser (starting at the daemon user's home)
+— drill to a folder and add it, and `git clone` checks out into whichever
+directory you have browsed to. There is no configured workspaces root; a
+`workspacesDir` key in the config is rejected at startup (it existed only in
+pre-release edge builds — delete the key).
+
+Clone credentials are selected in the dashboard's clone panel. The Hub runs
+Git in a dedicated pseudo-terminal and disables ambient Git/SSH askpass
+programs, credential helpers, and agent sockets for that clone. Select a
+compatible Hub credential or answer Git and OpenSSH prompts in the browser.
+Interactive responses go only to that clone terminal; the Hub does not store
+them or echo them in its log.
+
+State that persists across restarts includes the workspace registry, Hub
+credentials and assignments, tool overrides, the session store, and
+`personal-workspace-state.json`. Workspace ids are stable. Delete
+`sessions.json` in the state directory to force everyone to sign in again, or
+revoke individual devices from the dashboard. Personal state is isolated by
+signed-in user and workspace and contains resume choices such as document,
+Follow, preview/filter/compare modes, and the last-active PTY reference.
+Browser layout, dock, split, and dimensions remain client-local. Forgetting a
+stopped workspace removes every user's personal record and its credential
+assignments as part of the same coordinated operation.
+
+## Credential setup and migration
+
+The Hub no longer inherits `SSH_AUTH_SOCK`, system GnuPG homes, provider CLI
+sessions, or ambient Git credential helpers for clone jobs and workspaces.
+This is an intentional breaking change. Existing installations must create or
+import Hub credentials and assign them before unattended `fetch`, `pull`,
+`push`, provider CLI, or signed-commit jobs resume. Interactive clone prompts
+remain available when no stored credential is selected.
+
+The dashboard shows this migration warning once per signed-in user and browser
+profile. Dismissing it stores only a versioned, user-scoped flag in that Hub
+origin's browser storage. The login page does not read or render the flag.
+
+### Install and check tools
+
+The service account needs `git` and OpenSSH for SSH authentication or signing.
+Install GnuPG only for OpenPGP signing, `gh` only for GitHub CLI access, and
+`glab` only for GitLab CLI access.
+
+```sh
+# macOS with Homebrew
+brew install git openssh gnupg gh glab
+
+# Debian or Ubuntu
+sudo apt-get update
+sudo apt-get install git openssh-client gnupg gh
+# Install glab from GitLab's supported package repository if needed.
+```
+
+Run the Hub under the same service account it will use in production, open
+**Credentials > Credential tools**, and use **Test** for each required tool.
+Service managers often provide a shorter `PATH` than an interactive shell. If
+discovery misses an installed executable, save its absolute path in that pane
+and test again. A bad override does not replace the last usable path. Missing
+GnuPG, `gh`, or `glab` disables only the capability that needs it.
+
+### Create credentials
+
+1. Open the authenticated dashboard's **Credentials** pane.
+2. Generate a passphrase-protected SSH key, import an existing SSH private
+   key, generate or import an OpenPGP signing key, or add an HTTPS/provider
+   token. Select only the capabilities the credential needs.
+3. For SSH and OpenPGP credentials, use **Copy public key** and register the
+   public material with the provider or Git server. The Hub does not register
+   keys remotely.
+4. Unlock SSH and OpenPGP credentials, then run **Test**. Passphrases are used
+   for that operation and discarded. SSH and OpenPGP credentials return to a
+   locked state after a Hub restart; tokens remain usable until disabled or
+   deleted.
+5. Assign an authentication default for each required provider host and, when
+   needed, one commit-signing default per workspace. Restart any running
+   workspace marked **Restart required**.
+
+For GitHub, add an SSH authentication key under **Settings > SSH and GPG
+keys > New SSH key**. Add SSH signing keys as a signing key in the same area,
+or add an OpenPGP public key under **New GPG key**. For GitLab, use
+**Preferences > SSH Keys** or **GPG Keys**. Other providers use their own key
+registration pages. Provider access controls still decide what the key or
+token may do.
+
+New credentials have no assignments. A clone can use a credential once and
+optionally retain it as the new workspace's authentication assignment. With no
+selection, Git prompts in the clone panel and the supplied values are not
+promoted to stored credentials.
+
+### Managed agents and the shared UID
+
+The Hub owns a dedicated SSH agent socket under `credential-runtime/` and a
+dedicated GnuPG home under `credential-gnupg/`. It never loads keys into,
+locks, reconfigures, or stops the service account's system agents. On graceful
+shutdown it stops clone jobs and workspaces before stopping only the agents it
+can prove it owns. Runtime files are recreated on startup and are not backup
+material.
+
+Assignments configure normal Git, SSH, GnuPG, `gh`, and `glab` selection. They
+are not an access-control boundary in the local backend. Every workspace and
+Hub user runs as the daemon's OS UID. A same-UID process can inspect generated
+runtime files, reach a shared managed agent, remove the generated settings, or
+use a credential assigned to another workspace. Use a separate machine, VM,
+container, or OS account when credentials must be isolated from one another.
+
+### Back up and restore credentials
+
+The state directory contains workspace and login state plus these credential
+files:
+
+- `credentials.json` stores public metadata and assignments.
+- `credential-tools.json` stores validated executable overrides.
+- `credential-secrets/` stores passphrase-encrypted SSH private keys and the
+  owner-only token store.
+- `credential-gnupg/` stores the Hub's private OpenPGP home.
+- `credential-runtime/` is temporary and must not be backed up or restored.
+
+Stop the Hub before taking a consistent backup. Copy the config and state
+directory to encrypted storage while preserving ownership and mode bits. The
+token store relies on filesystem permissions, so anyone who can read the
+backup can use its tokens. Keep SSH/OpenPGP passphrases separately. On restore,
+leave the Hub stopped, restore the files to the configured `stateDir`, set the
+tree to the service account, and ensure private directories are mode `0700`
+and private files are mode `0600`. Do not restore `credential-runtime/`.
+Start the Hub, test tools and credentials, unlock keys, and restart workspaces.
+
+### Revoke and remove access
+
+Use **Lock** to remove an SSH or OpenPGP identity from the Hub-managed agent.
+Use **Disable** or **Unassign** to prevent new Hub-selected use, and **Delete**
+to remove local backing after confirming assignment removal. These actions do
+not terminate an existing SSH multiplexed connection or revoke provider-side
+tokens and sessions. For a lost or compromised credential, also delete the
+public key or revoke the token at every provider, close persistent remote
+connections, rotate the credential, update assignments, and restart affected
+workspaces. Device revocation in the dashboard revokes Hub login only; it does
+not revoke Git credentials.
+
+### Roll back the migration
+
+To return temporarily to a pre-managed-credential release, stop the Hub, back
+up its state directory, install the previous binary, and start the service with
+the old environment and agent sockets configured as that release expected.
+Restart all workspaces so they inherit the old process environment. The old
+binary ignores the new credential files; it does not convert Hub-managed keys
+into system-agent identities. Do not delete the new state until the rollback
+has been verified. Restoring the current binary restores managed behavior, but
+SSH and OpenPGP keys must be unlocked again.
 
 ## Certificates — three worked paths
 

@@ -31,6 +31,65 @@ export function sessionsPath(stateRoot: string): string {
   return path.join(stateRoot, "sessions.json");
 }
 
+export function credentialsPath(stateRoot: string): string {
+  return path.join(stateRoot, "credentials.json");
+}
+
+export function credentialToolsPath(stateRoot: string): string {
+  return path.join(stateRoot, "credential-tools.json");
+}
+
+export function credentialSecretsPath(stateRoot: string): string {
+  return path.join(stateRoot, "credential-secrets");
+}
+
+export function credentialTokenStorePath(stateRoot: string): string {
+  return path.join(credentialSecretsPath(stateRoot), "tokens.json");
+}
+
+export function credentialGnuPgPath(stateRoot: string): string {
+  return path.join(stateRoot, "credential-gnupg");
+}
+
+export function credentialRuntimePath(stateRoot: string): string {
+  return path.join(stateRoot, "credential-runtime");
+}
+
+async function assertPrivateDirectory(directory: string): Promise<void> {
+  const stats = await fs.lstat(directory);
+  if (stats.isSymbolicLink()) throw new Error(`refusing symlink for Hub private directory: ${directory}`);
+  if (!stats.isDirectory()) throw new Error(`Hub private path is not a directory: ${directory}`);
+  if ((stats.mode & 0o077) !== 0) throw new Error(`unsafe permissions on Hub private directory: ${directory}`);
+  if (typeof process.getuid === "function" && stats.uid !== process.getuid()) {
+    throw new Error(`Hub private directory is not owned by the current user: ${directory}`);
+  }
+}
+
+async function ensurePrivateDirectory(directory: string): Promise<void> {
+  try {
+    await fs.mkdir(directory, { mode: 0o700 });
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
+  }
+  await assertPrivateDirectory(directory);
+}
+
 export async function ensureStateDir(stateRoot: string): Promise<void> {
   await fs.mkdir(stateRoot, { recursive: true, mode: 0o700 });
+  await assertPrivateDirectory(stateRoot);
+}
+
+export async function ensureCredentialStateDirs(stateRoot: string): Promise<void> {
+  await assertPrivateDirectory(stateRoot);
+  await ensurePrivateDirectory(credentialSecretsPath(stateRoot));
+  await ensurePrivateDirectory(credentialGnuPgPath(stateRoot));
+
+  const runtime = credentialRuntimePath(stateRoot);
+  try {
+    await assertPrivateDirectory(runtime);
+    await fs.rm(runtime, { recursive: true });
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+  }
+  await ensurePrivateDirectory(runtime);
 }

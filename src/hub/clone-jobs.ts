@@ -1,6 +1,11 @@
 import path from "node:path";
 
 import type { CloneProcess, CloneProcessFactory } from "./clone-process";
+import {
+  EMPTY_CLONE_CREDENTIAL_RESOLVER,
+  type CloneCredentialResolver,
+  type ResolvedCloneCredential,
+} from "./credential-context";
 import type { WorkspaceEntry } from "./registry";
 
 export type CloneJobPhase = "cloning" | "registering" | "starting";
@@ -34,6 +39,7 @@ export type CloneJobManagerOptions = {
   processFactory: CloneProcessFactory;
   registry: Registry;
   sessions: Sessions;
+  credentials?: CloneCredentialResolver;
   id?: () => string;
   timer?: CloneJobTimer;
   maxReplayBytes?: number;
@@ -60,6 +66,9 @@ type Job = {
   lifetimeTimer?: unknown;
   expiryTimer?: unknown;
   registered?: WorkspaceEntry;
+  credential?: ResolvedCloneCredential;
+  retainAssignment: boolean;
+  assigned: boolean;
   done: Promise<void>;
   resolveDone(): void;
 };
@@ -76,6 +85,7 @@ export class CloneJobManager {
   private readonly processFactory: CloneProcessFactory;
   private readonly registry: Registry;
   private readonly sessions: Sessions;
+  private readonly credentials: CloneCredentialResolver;
   private readonly makeId: () => string;
   private readonly timer: CloneJobTimer;
   private readonly maxReplayBytes: number;
@@ -89,6 +99,7 @@ export class CloneJobManager {
     this.processFactory = options.processFactory;
     this.registry = options.registry;
     this.sessions = options.sessions;
+    this.credentials = options.credentials ?? EMPTY_CLONE_CREDENTIAL_RESOLVER;
     this.makeId = options.id ?? (() => crypto.randomUUID());
     this.timer = options.timer ?? defaultTimer;
     this.maxReplayBytes = options.maxReplayBytes ?? 64 * 1024;
@@ -98,7 +109,16 @@ export class CloneJobManager {
     this.retentionMs = options.retentionMs ?? 5 * 60_000;
   }
 
-  create(owner: string, url: string, target: string): { jobId: string } {
+  resolveCredential(url: string, credentialId?: string): Promise<ResolvedCloneCredential | undefined> {
+    return this.credentials.resolve(url, credentialId);
+  }
+
+  create(
+    owner: string,
+    url: string,
+    target: string,
+    options: { credential?: ResolvedCloneCredential; retainAssignment?: boolean } = {},
+  ): { jobId: string } {
     if (this.closed) throw new Error("clone job manager is closed");
     const normalizedTarget = path.normalize(path.resolve(target));
     if (this.reservations.has(normalizedTarget)) throw new Error(`clone target is already reserved: ${normalizedTarget}`);
@@ -112,6 +132,9 @@ export class CloneJobManager {
       url,
       target: normalizedTarget,
       phase: "cloning",
+      credential: options.credential,
+      retainAssignment: options.retainAssignment === true,
+      assigned: false,
       events: [],
       replayBytes: 0,
       nextEventId: 1,
@@ -200,6 +223,7 @@ export class CloneJobManager {
         job.process = this.processFactory.start({
           url: job.url,
           target: job.target,
+          credential: job.credential?.process,
           onOutput: output => {
             if (!job.result) {
               this.emit(job, "output", { output });
@@ -249,11 +273,29 @@ export class CloneJobManager {
         return;
       }
 
+      if (job.credential && job.retainAssignment) {
+        try {
+          await this.credentials.assign(job.registered.id, job.credential);
+          job.assigned = true;
+        } catch (error) {
+          const rollbackError = await this.rollback(job, job.registered);
+          const detail = rollbackError ? `${errorText(error)}; registration rollback failed: ${rollbackError}` : errorText(error);
+          await this.finish(job, rollbackError
+            ? { status: "cleanup-failed", target: job.target, error: detail }
+            : { status: "register-failed", target: job.target, error: detail });
+          return;
+        }
+      }
+      if (job.stop) {
+        await this.finishAfterRollback(job, job.registered);
+        return;
+      }
+
       this.setPhase(job, "starting");
       try {
         await this.sessions.start(job.registered.id);
       } catch (error) {
-        const rollbackError = await this.rollback(job.registered);
+        const rollbackError = await this.rollback(job, job.registered);
         if (job.stop) {
           await this.finish(job, rollbackError ? this.rollbackFailure(job, rollbackError) : job.stop);
           return;
@@ -327,6 +369,7 @@ export class CloneJobManager {
     this.emit(job, "result", result);
     job.subscribers.clear();
     job.url = "";
+    job.credential = undefined;
     job.resolveDone();
     job.expiryTimer = this.timer.set(() => {
       if (job.process) return;
@@ -347,8 +390,12 @@ export class CloneJobManager {
     this.emit(job, "phase", { phase });
   }
 
-  private async rollback(entry: WorkspaceEntry): Promise<string | null> {
+  private async rollback(job: Job, entry: WorkspaceEntry): Promise<string | null> {
     try {
+      if (job.assigned && job.credential) {
+        await this.credentials.unassign(entry.id, job.credential);
+        job.assigned = false;
+      }
       await this.registry.remove(entry.id);
       return null;
     } catch (error) {
@@ -357,7 +404,7 @@ export class CloneJobManager {
   }
 
   private async finishAfterRollback(job: Job, entry: WorkspaceEntry): Promise<void> {
-    const rollbackError = await this.rollback(entry);
+    const rollbackError = await this.rollback(job, entry);
     await this.finish(job, rollbackError ? this.rollbackFailure(job, rollbackError) : job.stop!);
   }
 

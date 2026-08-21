@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { LocalProcessBackend } from "./backend";
+import { EMPTY_CREDENTIAL_CONTEXT_RESOLVER } from "./credential-context";
 import { hashPassword, HubSessionStore } from "./auth";
 import type { HubConfig } from "./config";
 import { PersonalWorkspaceStateStore } from "./personal-state";
@@ -42,7 +43,7 @@ beforeAll(async () => {
   await personalState.load();
   const sessionStore = new HubSessionStore(path.join(tempRoot, "sessions.json"));
   await sessionStore.load();
-  sessions = new SessionManager(registry, { local: new LocalProcessBackend() });
+  sessions = new SessionManager(registry, { local: new LocalProcessBackend() }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
   server = startHubServer({ config, registry, sessions, sessionStore, personalState });
 }, 30_000);
 

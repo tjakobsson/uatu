@@ -12,12 +12,17 @@ afterEach(async () => {
 });
 
 describe("clone invocation policy", () => {
-  test("disables askpass and credential helpers while preserving unrelated values and SSH_AUTH_SOCK", () => {
+  test("strips ambient agent, askpass, helper, and provider variables while preserving unrelated values", () => {
     const env = buildCloneEnvironment({
       PATH: "/bin",
       SSH_AUTH_SOCK: "/secret/agent.sock",
+      SSH_AGENT_PID: "42",
       GIT_ASKPASS: "/secret/git-askpass",
       SSH_ASKPASS: "/secret/ssh-askpass",
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "credential.helper",
+      GIT_CONFIG_VALUE_0: "ambient-helper",
+      GH_TOKEN: "ambient-provider-token",
       PRIVATE_TOKEN: "not-inspected",
     });
 
@@ -26,13 +31,14 @@ describe("clone invocation policy", () => {
       "PATH",
       "PRIVATE_TOKEN",
       "SSH_ASKPASS_REQUIRE",
-      "SSH_AUTH_SOCK",
     ]);
     expect(env.GIT_TERMINAL_PROMPT).toBe("1");
     expect(env.SSH_ASKPASS_REQUIRE).toBe("never");
     expect("GIT_ASKPASS" in env).toBe(false);
     expect("SSH_ASKPASS" in env).toBe(false);
-    expect(env.SSH_AUTH_SOCK).toBeDefined();
+    expect(env.SSH_AUTH_SOCK).toBeUndefined();
+    expect(env.GIT_CONFIG_COUNT).toBeUndefined();
+    expect(env.GH_TOKEN).toBeUndefined();
   });
 
   test("uses per-command empty core askpass and credential helper lists", () => {
@@ -41,6 +47,20 @@ describe("clone invocation policy", () => {
       "-c", "credential.helper=",
       "clone", "--", "ssh://host/repo.git", "/work/repo",
     ]);
+  });
+
+  test("scopes an HTTPS helper without putting its token in arguments", () => {
+    const args = buildCloneArguments("https://github.com/acme/repo.git", "/work/repo", {
+      type: "https",
+      host: "github.com",
+      credentialId: "token-1",
+      stateRoot: "/private/hub state",
+      uatuArgv: ["/opt/uatu"],
+    });
+
+    expect(args.join(" ")).toContain("credential.https://github.com.helper=");
+    expect(args.join(" ")).toContain("UATU_CREDENTIAL_ID='token-1'");
+    expect(args.join(" ")).not.toContain("provider-secret");
   });
 });
 
@@ -81,6 +101,37 @@ describe("CloneProcessAdapter", () => {
     expect(writes).toEqual(["response\n"]);
     expect(terminal.localFlags & 0x08).toBe(0);
     expect(closed).toBe(true);
+  });
+
+  test("selects only the managed SSH identity and socket", async () => {
+    let spawnOptions: Record<string, unknown> = {};
+    const terminal = { localFlags: 0xff, write() {}, close() {} };
+    const adapter = new CloneProcessAdapter({
+      env: { PATH: "/bin", SSH_AUTH_SOCK: "/ambient.sock", GIT_SSH_COMMAND: "ambient ssh" },
+      spawn(_argv, options) {
+        spawnOptions = options as Record<string, unknown>;
+        return { pid: 42, exited: Promise.resolve(0), terminal };
+      },
+    });
+
+    const proc = adapter.start({
+      url: "git@example.com:acme/repo.git",
+      target: "/tmp/repo",
+      credential: {
+        type: "ssh",
+        host: "example.com",
+        agentSocket: "/managed/agent.sock",
+        publicKeyPath: "/managed/key.pub",
+      },
+      onOutput() {},
+    });
+    await proc.exited;
+
+    const env = spawnOptions.env as Record<string, string>;
+    expect(env.SSH_AUTH_SOCK).toBe("/managed/agent.sock");
+    expect(env.GIT_SSH_COMMAND).toContain("IdentityFile='/managed/key.pub'");
+    expect(env.GIT_SSH_COMMAND).toContain("IdentitiesOnly=yes");
+    expect(env.GIT_SSH_COMMAND).not.toContain("ambient");
   });
 
   test("does not echo a submitted response through a real PTY", async () => {

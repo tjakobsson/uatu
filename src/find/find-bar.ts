@@ -92,6 +92,7 @@ let currentIndex = -1;
 let truncated = false;
 let patternError: string | null = null;
 let debounceHandle: number | null = null;
+let lastRunQuery = "";
 
 export function isFindBarOpen(): boolean {
   return open;
@@ -136,6 +137,7 @@ function receiveOutcome(outcome: {
 }
 
 function run(reveal: boolean): void {
+  lastRunQuery = queryInput.value;
   engine?.run(queryInput.value, options, { reveal });
 }
 
@@ -143,6 +145,8 @@ function scheduleRun(): void {
   if (debounceHandle !== null) {
     window.clearTimeout(debounceHandle);
   }
+  statusElement.textContent = "Searching...";
+  statusElement.dataset.state = "idle";
   debounceHandle = window.setTimeout(() => {
     debounceHandle = null;
     run(true);
@@ -167,8 +171,10 @@ export function step(delta: number): void {
   if (debounceHandle !== null) {
     window.clearTimeout(debounceHandle);
     debounceHandle = null;
-    run(true);
-    return;
+    if (lastRunQuery !== queryInput.value) {
+      run(true);
+      return;
+    }
   }
   engine?.step(delta, queryInput.value, options);
 }

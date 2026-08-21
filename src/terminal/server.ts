@@ -159,7 +159,7 @@ export function createTerminalServer(options: TerminalServerOptions): TerminalSe
     const shell = options.shell ?? (shellIsUnset(env) ? DEFAULT_SHELL : env.SHELL!);
     const shellFellBack = !options.shell && shellIsUnset(env);
     const ptyEnv: Record<string, string> = {
-      ...(process.env as Record<string, string>),
+      ...(env as Record<string, string>),
       COLORTERM: "truecolor",
       TERM: "xterm-256color",
     };

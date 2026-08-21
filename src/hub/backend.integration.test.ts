@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { LocalProcessBackend, type RunningSession } from "./backend";
+import { EMPTY_RESOLVED_CREDENTIAL_CONTEXT } from "./credential-context";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "..", "..");
 const CLI_PATH = path.join(REPO_ROOT, "src", "cli.ts");
@@ -39,7 +40,7 @@ describe("LocalProcessBackend", () => {
       const workspace = await makeWorkspace();
       const backend = new LocalProcessBackend({ uatuArgv: ["bun", "run", CLI_PATH] });
 
-      running = await backend.start({ id: "backend-test", path: workspace, backend: "local" }, "/s/backend-test/");
+      running = await backend.start({ id: "backend-test", path: workspace, backend: "local" }, "/s/backend-test/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT);
 
       expect(running.endpoint.hostname).toBe("127.0.0.1");
       expect(running.endpoint.port).toBeGreaterThan(0);
@@ -76,7 +77,7 @@ describe("LocalProcessBackend", () => {
       // Non-git folder without --force → the CLI's git preflight fails fast.
       const backend = new LocalProcessBackend({ uatuArgv: ["bun", "run", CLI_PATH] });
       await expect(
-        backend.start({ id: "nope", path: dir, backend: "local" }, "/s/nope/"),
+        backend.start({ id: "nope", path: dir, backend: "local" }, "/s/nope/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT),
       ).rejects.toThrow(/failed to start/);
     },
     60_000,
@@ -94,7 +95,7 @@ describe("LocalProcessBackend stdout parsing", () => {
       const script = 'printf "http://127"; sleep 0.3; printf ".0.0.1:43210/s/split/?t=abc\n"; sleep 30';
       const backend = new LocalProcessBackend({ uatuArgv: ["bash", "-c", script] });
 
-      running = await backend.start({ id: "split", path: "/tmp", backend: "local" }, "/s/split/");
+      running = await backend.start({ id: "split", path: "/tmp", backend: "local" }, "/s/split/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT);
       expect(running.endpoint.hostname).toBe("127.0.0.1");
       expect(running.endpoint.port).toBe(43210);
       expect(running.token).toBe("abc");
@@ -119,7 +120,7 @@ describe("LocalProcessBackend stdout parsing", () => {
         const script = 'printf "http://127.0.0.1:43211/s/envcheck/?t=$UATU_OPENCODE_STARTUP_TIMEOUT_MS\n"; sleep 30';
         const backend = new LocalProcessBackend({ uatuArgv: ["bash", "-c", script] });
 
-        running = await backend.start({ id: "envcheck", path: "/tmp", backend: "local" }, "/s/envcheck/");
+        running = await backend.start({ id: "envcheck", path: "/tmp", backend: "local" }, "/s/envcheck/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT);
         expect(running.token).toBe("45123");
 
         const session = running;

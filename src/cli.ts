@@ -19,6 +19,7 @@ import { parseCommand, usageText, versionText, type WatchOptions } from "./cli/p
 import { LazyOpenCodeChatService } from "./chat/service";
 import { selectCanonicalChatRoot } from "./chat/workspace";
 import { runHashPassword, runHub } from "./hub/main";
+import { runStoredGitCredentialHelper } from "./hub/git-credential-helper";
 import {
   formatSessionUrl,
   printIndexingStatus,
@@ -56,6 +57,18 @@ async function main() {
   // (chokidar, server, terminal stack) should run. parseWatchdogArgs throws
   // on malformed input, which we surface to stderr.
   const argv = Bun.argv.slice(2);
+  if (argv[0] === "--git-credential-helper") {
+    if (argv.length !== 2) {
+      process.exitCode = 1;
+      return;
+    }
+    try {
+      process.stdout.write(await runStoredGitCredentialHelper(argv[1], process.stdin, process.env));
+    } catch {
+      process.exitCode = 1;
+    }
+    return;
+  }
   if (argv[0] === "--watchdog") {
     try {
       const args = parseWatchdogArgs(argv.slice(1), process.env);
