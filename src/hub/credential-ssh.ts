@@ -104,6 +104,7 @@ async function runSecretPty(options: {
     },
   });
   const child = Bun.spawn([options.executable, ...options.args], {
+    detached: true,
     terminal,
     env: options.env,
   });
@@ -206,6 +207,7 @@ async function runSecretAskpass(options: {
     if (await mkfifo.exited !== 0) throw new Error("SSH passphrase channel could not be created");
     secretPipe = await fs.open(secretPipePath, constants.O_RDWR);
     const child = Bun.spawn([options.executable, ...options.args], {
+      detached: true,
       stdin: "ignore",
       stdout: "ignore",
       stderr: "ignore",
