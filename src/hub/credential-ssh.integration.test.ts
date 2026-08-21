@@ -99,6 +99,7 @@ describe("managed SSH credential lifecycle", () => {
     expect(await service.testUsability(imported.id)).toBe(true);
     expect(await service.delete(imported.id)).toBe(true);
     expect(await Bun.file(path.join(credentialSecretsPath(root), `${imported.id}.key`)).exists()).toBe(false);
+    expect(await Bun.file(path.join(credentialSecretsPath(root), `${imported.id}.key.pub`)).exists()).toBe(false);
 
     const collisionPath = path.join(credentialSecretsPath(root), "ssh-3.key");
     await writeFile(collisionPath, "preserve-existing-backing", { mode: 0o600 });
@@ -109,6 +110,22 @@ describe("managed SSH credential lifecycle", () => {
       passphrase,
     )).rejects.toThrow("backing path already exists");
     expect(await readFile(collisionPath, "utf8")).toBe("preserve-existing-backing");
+
+    await metadata.assign({ workspaceId: "uatu", credentialId: generated.id, role: "signing" });
+    const failingDelete = new SshCredentialService({
+      secretsDirectory: credentialSecretsPath(root),
+      metadataStore: metadata,
+      agent,
+      sshKeygenPath: wrappedKeygen,
+      sshAddPath: wrappedAdd,
+      removeFile: async () => { throw new Error("backing cleanup failed"); },
+    });
+    await expect(failingDelete.delete(generated.id, true)).rejects.toThrow("backing cleanup failed");
+    expect(metadata.snapshot().credentials.some(item => item.id === generated.id)).toBe(true);
+    expect(metadata.snapshot().assignments).toContainEqual({ workspaceId: "uatu", credentialId: generated.id, role: "signing" });
+    expect(await Bun.file(generatedPath).exists()).toBe(true);
+    expect(await Bun.file(`${generatedPath}.pub`).exists()).toBe(true);
+    expect(await service.delete(generated.id, true)).toBe(true);
 
     expect(await readFile(credentialsPath(root), "utf8")).not.toContain(passphrase);
     expect(await readFile(audit, "utf8")).not.toContain(passphrase);

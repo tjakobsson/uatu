@@ -124,6 +124,23 @@ function fingerprintFromColonOutput(output: string): string | null {
   return null;
 }
 
+function primaryFingerprintsFromColonOutput(output: string): string[] {
+  const fingerprints: string[] = [];
+  let awaitingPrimaryFingerprint = false;
+  for (const line of output.split(/\r?\n/)) {
+    const fields = line.split(":");
+    if (fields[0] === "sec") {
+      awaitingPrimaryFingerprint = true;
+    } else if (fields[0] === "ssb") {
+      awaitingPrimaryFingerprint = false;
+    } else if (awaitingPrimaryFingerprint && fields[0] === "fpr" && /^[A-F0-9]{40,64}$/.test(fields[9] ?? "")) {
+      fingerprints.push(fields[9]!);
+      awaitingPrimaryFingerprint = false;
+    }
+  }
+  return fingerprints;
+}
+
 function fingerprintFromStatusOutput(output: string): string | null {
   const match = output.match(/^\[GNUPG:\] KEY_CREATED [A-Z] ([A-F0-9]{40,64})$/m);
   return match?.[1] ?? null;
@@ -217,8 +234,9 @@ export class OpenPgpCredentialManager {
       const inspected = await this.gpg([
         "--with-colons", "--import-options", "show-only", "--dry-run", "--import",
       ], privateKey);
-      const fingerprint = this.succeeded(inspected) ? fingerprintFromColonOutput(inspected.stdout) : null;
-      if (!fingerprint) throw new Error("OpenPGP private key import failed.");
+      const fingerprints = this.succeeded(inspected) ? primaryFingerprintsFromColonOutput(inspected.stdout) : [];
+      if (fingerprints.length !== 1) throw new Error("OpenPGP import must contain exactly one primary private key.");
+      const fingerprint = fingerprints[0]!;
       this.assertFingerprintAvailable(fingerprint);
       const imported = await this.gpg(["--import"], privateKey);
       if (!this.succeeded(imported)) {
@@ -274,19 +292,12 @@ export class OpenPgpCredentialManager {
     });
   }
 
-  lock(): Promise<ReadinessResult[]> {
+  shutdown(): Promise<ReadinessResult[]> {
     return this.enqueue(() => this.stopAgent());
   }
 
-  shutdown(): Promise<ReadinessResult[]> {
-    return this.lock();
-  }
-
-  disable(credentialId: string): Promise<ReadinessResult[]> {
-    return this.enqueue(async () => {
-      await this.setEnabled(credentialId, false);
-      return this.stopAgent();
-    });
+  disable(credentialId: string): Promise<void> {
+    return this.enqueue(() => this.setEnabled(credentialId, false));
   }
 
   enable(credentialId: string): Promise<void> {

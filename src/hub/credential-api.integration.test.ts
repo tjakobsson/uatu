@@ -9,6 +9,7 @@ import type { HubConfig } from "./config";
 import { EMPTY_CREDENTIAL_CONTEXT_RESOLVER } from "./credential-context";
 import { CredentialMetadataStore, CredentialTokenStore, CredentialToolOverrideStore } from "./credential-store";
 import { CredentialToolManager } from "./credential-tools";
+import { credentialApiError } from "./credential-api";
 import { OpenPgpCredentialManager } from "./openpgp-credentials";
 import { PersonalWorkspaceStateStore } from "./personal-state";
 import { WorkspaceRegistry } from "./registry";
@@ -111,6 +112,12 @@ function post(origin: string, cookie: string, endpoint: string, body: unknown, r
 }
 
 describe("credential API integration", () => {
+  test("maps an incorrect SSH passphrase to an actionable client error", () => {
+    expect(credentialApiError(new Error("SSH credential could not be unlocked"))).toEqual({
+      status: 400,
+      message: "SSH credential could not be unlocked",
+    });
+  });
   test("reports deduplicated assigned credential names in populated Hub state", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));
     roots.push(root);

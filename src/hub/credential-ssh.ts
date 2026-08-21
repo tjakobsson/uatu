@@ -23,6 +23,7 @@ export type SshCredentialServiceOptions = {
   servicePath?: string;
   operationTimeoutMs?: number;
   createId?: () => string;
+  removeFile?: (filePath: string) => Promise<void>;
 };
 
 type PtyResult = { exitCode: number; publicOutput: string };
@@ -250,11 +251,13 @@ export class SshCredentialService {
   private readonly servicePath: string;
   private readonly timeoutMs: number;
   private readonly createId: () => string;
+  private readonly removeFile: (filePath: string) => Promise<void>;
 
   constructor(private readonly options: SshCredentialServiceOptions) {
     this.servicePath = options.servicePath ?? process.env.PATH ?? "";
     this.timeoutMs = options.operationTimeoutMs ?? OPERATION_TIMEOUT_MS;
     this.createId = options.createId ?? randomUUID;
+    this.removeFile = options.removeFile ?? (filePath => fs.rm(filePath, { force: true }));
   }
 
   async generate(name: string, capabilities: SshCapability[], passphrase: string): Promise<SshCredentialRecord> {
@@ -391,12 +394,23 @@ export class SshCredentialService {
 
   async delete(credentialId: string, unassign = false): Promise<boolean> {
     this.credential(credentialId);
-    const removed = await this.options.metadataStore.deleteCredential(credentialId, unassign);
-    if (!removed) return false;
-    await this.lockBacking(credentialId);
     const privatePath = credentialFile(this.options.secretsDirectory, credentialId);
-    await Promise.all([privatePath, `${privatePath}.pub`].map(file => fs.rm(file, { force: true })));
-    return true;
+    const publicPath = `${privatePath}.pub`;
+    return this.options.metadataStore.deleteCredentialWithCleanup(credentialId, unassign, async credential => {
+      await this.lockBacking(credentialId);
+      await this.removeFile(publicPath);
+      try {
+        await this.removeFile(privatePath);
+      } catch (error) {
+        try {
+          const sshCredential = credential as SshCredentialRecord;
+          await fs.writeFile(publicPath, `${sshCredential.metadata.publicKey}\n`, { flag: "wx", mode: 0o600 });
+        } catch (restoreError) {
+          throw new AggregateError([error, restoreError], "SSH private-key deletion and public-key restoration failed");
+        }
+        throw error;
+      }
+    });
   }
 
   async testUsability(credentialId: string): Promise<boolean> {

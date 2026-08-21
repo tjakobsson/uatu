@@ -60,6 +60,18 @@ describe("provider CLI runtime adapters", () => {
     expect((await stat(path.join(runtime.configDir, "config.yml"))).mode & 0o777).toBe(0o600);
   });
 
+  test("uses the enterprise token variable for custom GitHub hosts", async () => {
+    const parent = await mkdtemp(path.join(os.tmpdir(), "uatu-provider-runtime-"));
+    tempDirectories.push(parent);
+    const repository = path.join(parent, "repository");
+    await mkdir(repository);
+    const enterprise = { ...GITHUB, metadata: { ...GITHUB.metadata, host: "github.example.com" } };
+
+    const runtime = await createProviderRuntime("github", path.join(parent, "runtime"), repository, enterprise, TOKEN);
+    expect(runtime.env.GH_ENTERPRISE_TOKEN).toBe(TOKEN);
+    expect(runtime.env.GH_TOKEN).toBeUndefined();
+  });
+
   test("refuses provider config below a repository or for the wrong declared capability", async () => {
     const parent = await mkdtemp(path.join(os.tmpdir(), "uatu-provider-runtime-"));
     tempDirectories.push(parent);

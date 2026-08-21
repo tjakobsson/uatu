@@ -180,6 +180,47 @@ describe("CredentialMetadataStore", () => {
     const persisted = JSON.parse(await readFile(filePath, "utf8"));
     expect(persisted).toEqual({ version: 1, credentials: [], assignments: [] });
   });
+
+  test("rolls metadata and assignments back when credential cleanup fails", async () => {
+    const filePath = await tempPath("credentials.json");
+    const store = new CredentialMetadataStore(filePath);
+    await store.load();
+    await store.transaction(state => state.credentials.push(SSH_CREDENTIAL));
+    await store.assign({ workspaceId: "uatu", credentialId: "ssh-1", role: "signing" });
+    const before = store.snapshot();
+
+    await expect(store.deleteCredentialWithCleanup("ssh-1", true, async () => {
+      throw new Error("backing cleanup failed");
+    })).rejects.toThrow("backing cleanup failed");
+    expect(store.snapshot()).toEqual(before);
+    const reloaded = new CredentialMetadataStore(filePath);
+    await reloaded.load();
+    expect(reloaded.snapshot()).toEqual(before);
+  });
+
+  test("holds later metadata mutations until cleanup rollback completes", async () => {
+    const filePath = await tempPath("credentials.json");
+    const store = new CredentialMetadataStore(filePath);
+    await store.load();
+    await store.transaction(state => state.credentials.push(
+      SSH_CREDENTIAL,
+      { ...SSH_CREDENTIAL, id: "ssh-2", name: "Second key" },
+    ));
+    let rejectCleanup!: (error: Error) => void;
+    const blocked = store.deleteCredentialWithCleanup("ssh-1", true, () => new Promise((_, reject) => {
+      rejectCleanup = reject;
+    }));
+    const later = store.setEnabled("ssh-2", false);
+    await Bun.sleep(1);
+    rejectCleanup(new Error("cleanup failed"));
+
+    await expect(blocked).rejects.toThrow("cleanup failed");
+    await later;
+    expect(store.snapshot().credentials).toEqual([
+      SSH_CREDENTIAL,
+      { ...SSH_CREDENTIAL, id: "ssh-2", name: "Second key", enabled: false },
+    ]);
+  });
 });
 
 describe("CredentialTokenStore", () => {

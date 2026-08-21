@@ -71,7 +71,13 @@ export async function createProviderRuntime(
     ? {
         provider,
         configDir,
-        env: { GH_CONFIG_DIR: configDir, GH_HOST: credential.metadata.host, GH_TOKEN: token },
+        env: {
+          GH_CONFIG_DIR: configDir,
+          GH_HOST: credential.metadata.host,
+          ...(credential.metadata.host === "github.com" || credential.metadata.host === "ghe.com" || credential.metadata.host.endsWith(".ghe.com")
+            ? { GH_TOKEN: token }
+            : { GH_ENTERPRISE_TOKEN: token }),
+        },
       }
     : {
         provider,

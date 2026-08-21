@@ -132,6 +132,24 @@ describe("OpenPgpCredentialManager generation and import", () => {
     expect(fake.isDeleted()).toBe(false);
   });
 
+  test("rejects a bundle containing multiple primary private keys before import", async () => {
+    const fake = fakeGpg();
+    const secondFingerprint = "89ABCDEF0123456789ABCDEF0123456789ABCDEF";
+    const run: OpenPgpCommandRunner = async command => {
+      const result = await fake.run(command);
+      if (!command.args.includes("show-only")) return result;
+      return {
+        ...result,
+        stdout: result.stdout + `sec:-:255:22:EFGH:0:0:::::s:::\nfpr:::::::::${secondFingerprint}:\n`,
+      };
+    };
+    const { manager, store } = await fixture(run);
+
+    await expect(manager.import({ name: "Bundle", privateKey: "two-private-keys" })).rejects.toThrow(/exactly one primary private key/);
+    expect(store.snapshot().credentials).toEqual([]);
+    expect(fake.commands.filter(command => command.args.includes("--import") && !command.args.includes("show-only"))).toHaveLength(0);
+  });
+
   test("rejects a generated fingerprint already in the catalog without deleting it", async () => {
     const fake = fakeGpg();
     const { manager, store } = await fixture(fake.run);
@@ -209,24 +227,24 @@ describe("OpenPgpCredentialManager lifecycle and capability", () => {
     expect((await readdir(gnupgHome)).filter(name => name.startsWith(".uatu-"))).toEqual([]);
   });
 
-  test("locks, disables, enables, and transactionally deletes", async () => {
+  test("disables, enables, shuts down the shared agent, and transactionally deletes", async () => {
     const fake = fakeGpg();
     const { manager, store, gnupgHome } = await fixture(fake.run);
     await createCredential(store);
     await store.assign({ workspaceId: "uatu", credentialId: "pgp-1", role: "signing" });
 
-    expect(await manager.lock()).toEqual([{ layer: "runtime", status: "ready", message: "The Hub OpenPGP agent was stopped." }]);
-    expect(await manager.disable("pgp-1")).toEqual([{ layer: "runtime", status: "ready", message: "The Hub OpenPGP agent was stopped." }]);
+    expect(await manager.disable("pgp-1")).toBeUndefined();
     expect(store.snapshot().credentials[0]?.enabled).toBe(false);
     await manager.enable("pgp-1");
     expect(store.snapshot().credentials[0]?.enabled).toBe(true);
+    expect(await manager.shutdown()).toEqual([{ layer: "runtime", status: "ready", message: "The Hub OpenPGP agent was stopped." }]);
     await expect(manager.delete("pgp-1")).rejects.toThrow(/assigned/);
     expect(await manager.delete("pgp-1", true)).toBe(true);
     expect(store.snapshot()).toEqual({ version: 1, credentials: [], assignments: [] });
     expect(fake.isDeleted()).toBe(true);
 
     const lifecycle = fake.commands.filter(command => command.executable.endsWith("gpgconf"));
-    expect(lifecycle).toHaveLength(2);
+    expect(lifecycle).toHaveLength(1);
     expect(lifecycle[0]?.args).toEqual(["--homedir", gnupgHome, "--kill", "gpg-agent"]);
   });
 

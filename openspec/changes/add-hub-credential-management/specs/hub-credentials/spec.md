@@ -68,6 +68,8 @@ The Hub SHALL generate passphrase-protected SSH keys and import supported existi
 ### Requirement: Hub supports OpenPGP commit-signing credentials
 When compatible GnuPG tooling is available, the Hub SHALL generate or import OpenPGP signing keys in a dedicated Hub GnuPG home, expose the public key and fingerprint, and make unlocked signing available through the Hub-owned OpenPGP agent. Private-key passphrases and pinentry responses submitted through the Hub MUST be handled as secrets and MUST NOT be persisted or replayed. OpenPGP unavailability MUST produce an actionable capability error rather than preventing Hub startup.
 
+An OpenPGP import MUST contain exactly one primary private key. Because OpenPGP credentials share the Hub GnuPG agent, the Hub MUST NOT expose credential-specific locking that terminates that shared agent. Disabling one OpenPGP credential SHALL block its new use without clearing cached passphrases for unrelated credentials; Hub shutdown MAY terminate the shared agent.
+
 #### Scenario: OpenPGP signing key is ready
 - **WHEN** a compatible OpenPGP key is imported, unlocked, and its signing capability test succeeds
 - **THEN** settings reports its fingerprint and signing readiness

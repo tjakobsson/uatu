@@ -139,6 +139,7 @@ describe("settings page", () => {
     expect(document.querySelector("details.workspace-credential-section")?.hasAttribute("open")).toBe(false);
     expect(document.querySelectorAll("[data-form-error][role=alert]").length).toBe(5);
     expect(html).toContain("Copy public key");
+    expect(html).toContain('else if (credential.type === "ssh")');
     expect(html).toContain("credentialRestartRequired");
     expect(html).toContain("Restart required: assignment changes apply fully");
     expect(document.querySelector("[data-shared-uid-warning] span")?.textContent).toBe(LOCAL_CREDENTIAL_ASSIGNMENT_WARNING);

@@ -232,7 +232,16 @@ export class CredentialMetadataStore extends SerializedStore {
   }
 
   deleteCredential(credentialId: string, unassign = false): Promise<boolean> {
+    return this.deleteCredentialWithCleanup(credentialId, unassign, async () => {});
+  }
+
+  deleteCredentialWithCleanup(
+    credentialId: string,
+    unassign: boolean,
+    cleanup: (credential: CredentialRecord) => Promise<void>,
+  ): Promise<boolean> {
     return this.enqueue(async () => {
+      const previous = clone(this.state);
       const next = clone(this.state);
       const credentialIndex = next.credentials.findIndex(item => item.id === credentialId);
       if (credentialIndex === -1) return false;
@@ -245,6 +254,17 @@ export class CredentialMetadataStore extends SerializedStore {
       const parsed = parseCredentialState(next);
       await this.writer.write(parsed);
       this.state = parsed;
+      try {
+        await cleanup(clone(previous.credentials[credentialIndex]!));
+      } catch (cleanupError) {
+        try {
+          await this.writer.write(previous);
+          this.state = previous;
+        } catch (rollbackError) {
+          throw new AggregateError([cleanupError, rollbackError], `credential cleanup and metadata rollback failed: ${credentialId}`);
+        }
+        throw cleanupError;
+      }
       return true;
     });
   }

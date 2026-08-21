@@ -221,8 +221,10 @@ Start the Hub, test tools and credentials, unlock keys, and restart workspaces.
 
 ### Revoke and remove access
 
-Use **Lock** to remove an SSH or OpenPGP identity from the Hub-managed agent.
-Use **Disable** or **Unassign** to prevent new Hub-selected use, and **Delete**
+Use **Lock** to remove an SSH identity from the Hub-managed agent. OpenPGP
+credentials share one Hub-managed GnuPG agent, so disabling one blocks its new
+use without locking unrelated OpenPGP credentials; the agent stops on Hub
+shutdown. Use **Disable** or **Unassign** to prevent new Hub-selected use, and **Delete**
 to remove local backing after confirming assignment removal. These actions do
 not terminate an existing SSH multiplexed connection or revoke provider-side
 tokens and sessions. For a lost or compromised credential, also delete the

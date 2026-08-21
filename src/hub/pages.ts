@@ -860,7 +860,7 @@ function credentialCard(credential) {
         await credentialAction(credential.id, "unlock", { passphrase: value }, button, "Unlocking…", actionError);
       };
       actions.appendChild(unlock);
-    } else {
+    } else if (credential.type === "ssh") {
       const lock = el("button", null, "Lock");
       lock.onclick = () => credentialAction(credential.id, "lock", {}, lock, "Locking…", actionError);
       actions.appendChild(lock);

@@ -22,7 +22,7 @@
 ## 4. Managed OpenPGP Credentials
 
 - [x] 4.1 Implement dedicated-`GNUPGHOME` generation and import of OpenPGP signing keys, returning only public key and fingerprint metadata and degrading cleanly when GnuPG is unavailable.
-- [x] 4.2 Implement explicit OpenPGP unlock through a bounded loopback signing probe, agent-cache readiness detection, lock/disable/delete behavior, and scoped `gpg-agent` shutdown.
+- [x] 4.2 Implement explicit OpenPGP unlock through a bounded loopback signing probe, agent-cache readiness detection, metadata-scoped disable/delete behavior, and Hub-shutdown-only `gpg-agent` termination.
 - [x] 4.3 Add local sign-and-verify capability tests using a fixed challenge and tests proving passphrases, pinentry responses, and private exports never enter retained output or API DTOs.
 - [x] 4.4 Add integration coverage proving the Hub GnuPG home and lifecycle remain separate from an existing system GnuPG home and agent.
 

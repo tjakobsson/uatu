@@ -231,7 +231,7 @@ export class CredentialApi {
     fields(body, []);
     const credential = this.credential(credentialId);
     if (credential.type === "ssh") await this.requireSsh().lock(credentialId);
-    else if (credential.type === "openpgp") await this.services.openpgp.lock();
+    else if (credential.type === "openpgp") throw new Error("OpenPGP credentials do not support individual lock; disable the credential instead");
     else throw new Error("token credentials do not support lock");
     return this.dto(credentialId);
   }
@@ -343,10 +343,10 @@ export class CredentialApi {
 
 export function credentialApiError(error: unknown): { status: number; message: string } {
   const message = error instanceof Error ? error.message : "credential operation failed";
-  if (/assigned to|conflicts|already exists|disabled|locked|requires unlock/.test(message)) return { status: 409, message };
+  if (/unlock failed|could not be unlocked/.test(message)) return { status: 400, message };
+  if (/assigned to|conflicts|already exists|disabled|\blocked\b|requires unlock/.test(message)) return { status: 409, message };
   if (/unknown credential|unknown workspace/.test(message)) return { status: 404, message };
   if (/unavailable|did not cache/.test(message)) return { status: 503, message };
-  if (/unlock failed/.test(message)) return { status: 400, message };
   if (/must|invalid|unknown field|does not|cannot|exceeds|requires confirmation|not support|not have|failed validation|host/.test(message)) {
     return { status: 400, message };
   }
