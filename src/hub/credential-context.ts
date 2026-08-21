@@ -372,12 +372,20 @@ function assertUnambiguousProviderCliAssignments(authentication: ResolvedAuthent
   }
 }
 
-function sshAssignmentMatch(host: string): string {
+function sshAssignmentHost(host: string): { hostname: string; port: string } {
   const parsed = new URL(`https://${host}`);
-  const hostname = parsed.hostname.replace(/^\[|\]$/g, "");
-  return parsed.port
-    ? `Match host ${hostname} exec "test %p = ${parsed.port}"`
-    : `Host ${hostname}`;
+  return { hostname: parsed.hostname.replace(/^\[|\]$/g, ""), port: parsed.port };
+}
+
+// IdentityFile is additive across matching blocks, so a broad host block must
+// exclude every port that another assignment claims for the same hostname —
+// otherwise a connection to that port would offer both credentials' keys.
+function sshAssignmentMatch(host: string, portsByHostname: Map<string, Set<string>>): string {
+  const { hostname, port } = sshAssignmentHost(host);
+  if (port) return `Match host ${hostname} exec "test %p = ${port}"`;
+  const excluded = [...(portsByHostname.get(hostname) ?? [])].sort();
+  if (excluded.length === 0) return `Host ${hostname}`;
+  return `Match host ${hostname} exec "test ${excluded.map(value => `%p != ${value}`).join(" -a ")}"`;
 }
 
 function sshConfigQuote(value: string): string {
@@ -462,13 +470,23 @@ async function projectLocalCredentialEnvironment(
 
   if (context.tools.git) await exposeTool("git", context.tools.git);
 
+  const sshPortsByHostname = new Map<string, Set<string>>();
+  for (const assignment of context.authentication) {
+    if (assignment.credential.type !== "ssh") continue;
+    const { hostname, port } = sshAssignmentHost(assignment.host);
+    if (!port) continue;
+    const ports = sshPortsByHostname.get(hostname) ?? new Set<string>();
+    ports.add(port);
+    sshPortsByHostname.set(hostname, ports);
+  }
+
   for (const assignment of context.authentication) {
     const hostUrl = `https://${assignment.host}`;
     if (assignment.credential.type === "ssh") {
       const publicKeyPath = path.join(runtimeDirectory, `${assignment.credential.id}.pub`);
       await fs.writeFile(publicKeyPath, `${assignment.credential.metadata.publicKey}\n`, { mode: 0o600 });
       sshLines.push(
-        sshAssignmentMatch(assignment.host),
+        sshAssignmentMatch(assignment.host, sshPortsByHostname),
         `  IdentityAgent ${sshConfigQuote(context.sshAgentSocket!)}`,
         `  IdentityFile ${sshConfigQuote(publicKeyPath)}`,
         "  IdentitiesOnly yes",

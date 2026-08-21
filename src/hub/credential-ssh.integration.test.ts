@@ -173,6 +173,42 @@ describe("managed SSH credential lifecycle", () => {
     expect(await service.testUsability(imported.id)).toBe(false);
   }, 30_000);
 
+  test("a delete queued behind an in-flight unlock cannot leave the identity in the agent", async () => {
+    const found = await tools();
+    const root = await stateRoot("uatu-ssh-unlock-race-");
+    const source = path.join(root, "source");
+    expect((await run(found.keygen, ["-q", "-t", "ed25519", "-N", "", "-f", source], cleanEnv())).code).toBe(0);
+    // ssh-add slowed enough that the delete arrives while the unlock's add
+    // is still pending.
+    const slowAdd = path.join(root, "slow-ssh-add");
+    await writeFile(slowAdd, `#!/bin/sh\nsleep 0.2\nexec '${found.add}' "$@"\n`, { mode: 0o700 });
+    const metadata = new CredentialMetadataStore(credentialsPath(root));
+    await metadata.load();
+    const agent = new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(root), sshAgentPath: found.agent });
+    agents.push(agent);
+    const service = new SshCredentialService({
+      secretsDirectory: credentialSecretsPath(root),
+      metadataStore: metadata,
+      agent,
+      sshKeygenPath: found.keygen,
+      sshAddPath: slowAdd,
+      createId: () => "race",
+    });
+    const imported = await service.import("Race", ["ssh-authentication"], await readFile(source, "utf8"), "");
+    await service.lock(imported.id);
+
+    const unlocking = service.unlock(imported.id, "");
+    const deleting = service.delete(imported.id, true);
+    // Serialized per credential: the unlock completes first with its
+    // identity loaded, then the delete removes both the identity and the
+    // credential — never the interleaving that strands a loaded identity
+    // for a deleted credential.
+    await expect(unlocking).resolves.toBeUndefined();
+    expect(await deleting).toBe(true);
+    const remaining = await run(found.add, ["-l"], { ...cleanEnv(), SSH_AUTH_SOCK: agent.socketPath });
+    expect(remaining.output).toContain("no identities");
+  }, 30_000);
+
   test("deleting a locked key keeps other loaded identities available", async () => {
     const found = await tools();
     const root = await stateRoot("uatu-ssh-delete-locked-");

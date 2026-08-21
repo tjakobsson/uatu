@@ -265,6 +265,11 @@ export class SshCredentialService {
   // Runtime state by design: the agent's contents do not survive a Hub
   // restart either.
   private readonly explicitlyLocked = new Set<string>();
+  // Agent-mutating operations serialize per credential: a pending ssh-add
+  // must not land its identity after a concurrent disable/delete finished
+  // revoking the credential, which would leave the deleted key usable
+  // through the shared agent.
+  private readonly credentialChains = new Map<string, Promise<unknown>>();
 
   constructor(private readonly options: SshCredentialServiceOptions) {
     this.servicePath = options.servicePath ?? process.env.PATH ?? "";
@@ -357,7 +362,11 @@ export class SshCredentialService {
     }
   }
 
-  async unlock(credentialId: string, passphrase: string): Promise<void> {
+  unlock(credentialId: string, passphrase: string): Promise<void> {
+    return this.enqueueCredential(credentialId, () => this.unlockNow(credentialId, passphrase));
+  }
+
+  private async unlockNow(credentialId: string, passphrase: string): Promise<void> {
     if (/[\x00-\x1f\x7f]/.test(passphrase)) throw new Error("SSH passphrase contains invalid characters");
     const credential = this.credential(credentialId);
     if (!credential.enabled) throw new Error("SSH credential is disabled");
@@ -374,13 +383,17 @@ export class SshCredentialService {
       runtimeDirectory: this.options.secretsDirectory,
       timeoutMs: this.timeoutMs,
     });
-    if (exitCode !== 0 || !(await this.testUsability(credentialId))) {
+    if (exitCode !== 0 || !(await this.usable(credentialId, id => this.unlockNow(id, "")))) {
       throw new Error("SSH credential could not be unlocked");
     }
     this.explicitlyLocked.delete(credentialId);
   }
 
-  async lock(credentialId: string): Promise<void> {
+  lock(credentialId: string): Promise<void> {
+    return this.enqueueCredential(credentialId, () => this.lockNow(credentialId));
+  }
+
+  private async lockNow(credentialId: string): Promise<void> {
     this.credential(credentialId);
     // Set before removal so a concurrent readiness check cannot auto-load
     // the key back between the agent removal and the lock response.
@@ -399,20 +412,26 @@ export class SshCredentialService {
     }
   }
 
-  async setEnabled(credentialId: string, enabled: boolean): Promise<void> {
-    this.credential(credentialId);
-    await this.options.metadataStore.transaction(state => {
-      const credential = state.credentials.find(item => item.id === credentialId);
-      if (!credential || credential.type !== "ssh") throw new Error("unknown SSH credential");
-      credential.enabled = enabled;
+  setEnabled(credentialId: string, enabled: boolean): Promise<void> {
+    return this.enqueueCredential(credentialId, async () => {
+      this.credential(credentialId);
+      await this.options.metadataStore.transaction(state => {
+        const credential = state.credentials.find(item => item.id === credentialId);
+        if (!credential || credential.type !== "ssh") throw new Error("unknown SSH credential");
+        credential.enabled = enabled;
+      });
+      if (!enabled) await this.lockNow(credentialId);
+      // Re-enabling restores the credential's normal readiness behavior; an
+      // unencrypted key becomes auto-loadable again, as after a Hub restart.
+      else this.explicitlyLocked.delete(credentialId);
     });
-    if (!enabled) await this.lock(credentialId);
-    // Re-enabling restores the credential's normal readiness behavior; an
-    // unencrypted key becomes auto-loadable again, as after a Hub restart.
-    else this.explicitlyLocked.delete(credentialId);
   }
 
-  async delete(credentialId: string, unassign = false): Promise<boolean> {
+  delete(credentialId: string, unassign = false): Promise<boolean> {
+    return this.enqueueCredential(credentialId, () => this.deleteNow(credentialId, unassign));
+  }
+
+  private async deleteNow(credentialId: string, unassign: boolean): Promise<boolean> {
     this.credential(credentialId);
     const privatePath = credentialFile(this.options.secretsDirectory, credentialId);
     const publicPath = `${privatePath}.pub`;
@@ -435,7 +454,15 @@ export class SshCredentialService {
     return deleted;
   }
 
-  async testUsability(credentialId: string): Promise<boolean> {
+  // The auto-load goes through the public queued unlock so it cannot land an
+  // identity a concurrent revocation is removing. The queued flavor is safe
+  // here because readiness checks never run inside a credential chain; the
+  // in-chain caller (unlockNow) passes its unqueued self instead.
+  testUsability(credentialId: string): Promise<boolean> {
+    return this.usable(credentialId, id => this.unlock(id, ""));
+  }
+
+  private async usable(credentialId: string, load: (credentialId: string) => Promise<void>): Promise<boolean> {
     const credential = this.credential(credentialId);
     if (!credential.enabled) return false;
     try {
@@ -443,11 +470,18 @@ export class SshCredentialService {
       if (this.explicitlyLocked.has(credentialId)) return false;
       const privateKey = await fs.readFile(credentialFile(this.options.secretsDirectory, credentialId), "utf8");
       if (encryptedPrivateKey(privateKey)) return false;
-      await this.unlock(credentialId, "");
+      await load(credentialId);
       return true;
     } catch {
       return false;
     }
+  }
+
+  private enqueueCredential<T>(credentialId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.credentialChains.get(credentialId) ?? Promise.resolve();
+    const next = previous.then(operation, operation);
+    this.credentialChains.set(credentialId, next.then(() => undefined, () => undefined));
+    return next;
   }
 
   private async agentHasKey(credentialId: string): Promise<boolean> {

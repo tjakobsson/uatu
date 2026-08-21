@@ -316,6 +316,50 @@ describe("local workspace credential projection", () => {
     expect(otherPort.stdout.toString()).toContain("identityfile none");
   });
 
+  test("keeps broad and port-specific SSH assignments for one hostname mutually exclusive", async () => {
+    const { root, workspace } = await fixture();
+    const ssh = (id: string): SshCredentialRecord => ({
+      id,
+      name: id,
+      type: "ssh",
+      capabilities: ["ssh-authentication"],
+      enabled: true,
+      createdAt,
+      metadata: { publicKey: `ssh-ed25519 AAAA${id.toUpperCase()} uatu`, fingerprint: `SHA256:${id}` },
+    });
+    const projected = await buildLocalCredentialEnvironment({
+      workspace,
+      context: {
+        revision: "overlap",
+        runtimeRoot: path.join(root, "runtime"),
+        stateRoot: root,
+        sshAgentSocket: path.join(root, "agent.sock"),
+        gnupgHome: path.join(root, "gnupg"),
+        tools: { ssh: "/managed/ssh", git: null, gpg: null, sshKeygen: null, gh: null, glab: null },
+        authentication: [
+          { host: "git.example.com", credential: ssh("broad") },
+          { host: "git.example.com:2222", credential: ssh("ported") },
+        ],
+        signing: null,
+      },
+      uatuArgv: ["uatu"],
+    });
+
+    const configPath = path.join(projected.runtimeDirectory, "ssh_config");
+    const sshConfig = await readFile(configPath, "utf8");
+    // IdentityFile is additive across matching blocks, so the broad block
+    // must exclude the port another assignment claims.
+    expect(sshConfig).toContain('Match host git.example.com exec "test %p != 2222"');
+    const onPort = Bun.spawnSync(["ssh", "-G", "-F", configPath, "-p", "2222", "git.example.com"], { stdout: "pipe", stderr: "pipe" });
+    const onDefault = Bun.spawnSync(["ssh", "-G", "-F", configPath, "git.example.com"], { stdout: "pipe", stderr: "pipe" });
+    expect(onPort.exitCode).toBe(0);
+    expect(onPort.stdout.toString()).toContain("ported.pub");
+    expect(onPort.stdout.toString()).not.toContain("broad.pub");
+    expect(onDefault.exitCode).toBe(0);
+    expect(onDefault.stdout.toString()).toContain("broad.pub");
+    expect(onDefault.stdout.toString()).not.toContain("ported.pub");
+  });
+
   test("uses a distinct runtime directory for each session generation", async () => {
     const { root, workspace } = await fixture();
     const context: ResolvedCredentialContext = {
