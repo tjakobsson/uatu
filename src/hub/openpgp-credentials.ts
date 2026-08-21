@@ -188,9 +188,12 @@ function primaryFingerprintsFromColonOutput(output: string): string[] {
   return fingerprints;
 }
 
-function fingerprintFromStatusOutput(output: string): string | null {
-  const match = output.match(/^\[GNUPG:\] KEY_CREATED [A-Z] ([A-F0-9]{40,64})$/m);
-  return match?.[1] ?? null;
+function fingerprintsFromStatusOutput(output: string): string[] {
+  const fingerprints = output.split(/\r?\n/).flatMap(line => {
+    const match = /^\[GNUPG:\] KEY_CREATED [A-Z] ([A-F0-9]{40,64})$/.exec(line);
+    return match?.[1] ? [match[1]] : [];
+  });
+  return [...new Set(fingerprints)];
 }
 
 function hasSigningSecret(output: string): boolean {
@@ -268,15 +271,47 @@ export class OpenPgpCredentialManager {
       const name = nonEmpty(input.name, "credential name");
       const userId = nonEmpty(input.userId, "OpenPGP user id");
       const passphrase = nonEmpty(input.passphrase, "OpenPGP passphrase");
+      const before = await this.secretKeyInventory();
+      if (!before) throw new Error("OpenPGP key generation failed before the secret-key inventory could be read.");
       const generated = await this.gpg([
         "--status-fd", "1",
         "--pinentry-mode", "loopback",
         "--passphrase-fd", "0",
         "--quick-generate-key", userId, "ed25519", "sign", "0",
       ], `${passphrase}\n`);
-      const fingerprint = this.succeeded(generated) ? fingerprintFromStatusOutput(generated.stdout) : null;
-      if (!fingerprint) throw new Error("OpenPGP key generation failed.");
-      return this.persistCredential(name, fingerprint);
+      const after = await this.secretKeyInventory();
+      const statusFingerprints = fingerprintsFromStatusOutput(generated.stdout);
+      const added = after
+        ? [...after].filter(fingerprint => !before.has(fingerprint))
+        : statusFingerprints.filter(fingerprint => !before.has(fingerprint));
+      const cleanupUncertain = after === null;
+
+      let fingerprint: string | null = null;
+      if (this.succeeded(generated)) {
+        if (after) {
+          if (statusFingerprints.length === 0 && added.length === 1) {
+            fingerprint = added[0]!;
+          } else if (statusFingerprints.length === 1
+            && added.length === 1
+            && statusFingerprints[0] === added[0]) {
+            fingerprint = added[0]!;
+          }
+        } else if (statusFingerprints.length === 1 && !before.has(statusFingerprints[0]!)) {
+          fingerprint = statusFingerprints[0]!;
+        }
+      }
+
+      const operationError = this.succeeded(generated)
+        ? new Error("OpenPGP generated key could not be identified safely.")
+        : new Error("OpenPGP key generation failed.");
+      if (!fingerprint) {
+        return this.rollbackGeneratedKeys(added, operationError, cleanupUncertain);
+      }
+      try {
+        return await this.createCredential(name, fingerprint);
+      } catch (error) {
+        return this.rollbackGeneratedKeys(added, error, cleanupUncertain);
+      }
     });
   }
 
@@ -436,21 +471,30 @@ export class OpenPgpCredentialManager {
     return { fingerprint, publicKey: exported.stdout.trim() };
   }
 
+  private async secretKeyInventory(): Promise<Set<string> | null> {
+    const listed = await this.gpg(["--with-colons", "--list-secret-keys"]);
+    return this.succeeded(listed) ? new Set(primaryFingerprintsFromColonOutput(listed.stdout)) : null;
+  }
+
   private async persistCredential(name: string, fingerprint: string): Promise<OpenPgpCredentialRecord> {
-    this.assertFingerprintAvailable(fingerprint);
     try {
-      const metadata = await this.publicMetadata(fingerprint);
-      const credential = await this.metadataStore.create({
-        name,
-        type: "openpgp",
-        capabilities: ["openpgp-signing"],
-        enabled: true,
-        metadata,
-      });
-      return credential as OpenPgpCredentialRecord;
+      return await this.createCredential(name, fingerprint);
     } catch (error) {
       return this.rollbackUnreferencedKey(fingerprint, error);
     }
+  }
+
+  private async createCredential(name: string, fingerprint: string): Promise<OpenPgpCredentialRecord> {
+    this.assertFingerprintAvailable(fingerprint);
+    const metadata = await this.publicMetadata(fingerprint);
+    const credential = await this.metadataStore.create({
+      name,
+      type: "openpgp",
+      capabilities: ["openpgp-signing"],
+      enabled: true,
+      metadata,
+    });
+    return credential as OpenPgpCredentialRecord;
   }
 
   private hasFingerprint(fingerprint: string): boolean {
@@ -477,6 +521,31 @@ export class OpenPgpCredentialManager {
       throw new AggregateError(
         [operationError, cleanupError],
         `OpenPGP operation and key cleanup failed: ${fingerprint}`,
+      );
+    }
+    throw operationError;
+  }
+
+  private async rollbackGeneratedKeys(
+    fingerprints: string[],
+    operationError: unknown,
+    cleanupUncertain: boolean,
+  ): Promise<never> {
+    const cleanupErrors: unknown[] = [];
+    for (const fingerprint of new Set(fingerprints)) {
+      try {
+        await this.deleteUnreferencedKey(fingerprint);
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+    if (cleanupUncertain) {
+      cleanupErrors.push(new Error("OpenPGP key cleanup is uncertain because the post-generation secret-key inventory could not be read."));
+    }
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(
+        [operationError, ...cleanupErrors],
+        "OpenPGP generation and key cleanup failed.",
       );
     }
     throw operationError;

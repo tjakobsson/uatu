@@ -14,6 +14,8 @@ import {
 import { toPublicCredentialDto } from "./credential-types";
 
 const FINGERPRINT = "0123456789ABCDEF0123456789ABCDEF01234567";
+const SECOND_FINGERPRINT = "89ABCDEF0123456789ABCDEF0123456789ABCDEF";
+const THIRD_FINGERPRINT = "FEDCBA9876543210FEDCBA9876543210FEDCBA98";
 const PUBLIC_KEY = "-----BEGIN PGP PUBLIC KEY BLOCK-----\npublic-only\n-----END PGP PUBLIC KEY BLOCK-----";
 const tempDirectories: string[] = [];
 
@@ -43,6 +45,7 @@ function fakeGpg() {
   const commands: Array<Omit<OpenPgpCommand, "input">> = [];
   let cached = false;
   let deleted = false;
+  let generated = false;
   const run: OpenPgpCommandRunner = async command => {
     const { input: _, ...publicCommand } = command;
     commands.push(structuredClone(publicCommand));
@@ -50,12 +53,15 @@ function fakeGpg() {
     let stdout = "";
     let exitCode = 0;
     if (args.includes("--quick-generate-key")) {
+      generated = true;
       stdout = `[GNUPG:] KEY_CREATED B ${FINGERPRINT}\n`;
     } else if (args.includes("show-only")) {
       stdout = `sec:-:255:22:ABCD:0:0:::::s:::\nfpr:::::::::${FINGERPRINT}:\n`;
     } else if (args.includes("--list-secret-keys")) {
-      exitCode = deleted ? 2 : 0;
-      stdout = deleted ? "" : `sec:-:255:22:ABCD:0:0:::::s:::\nfpr:::::::::${FINGERPRINT}:\n`;
+      const inventory = args.at(-1) === "--list-secret-keys";
+      const present = !deleted && (!inventory || generated);
+      exitCode = present ? 0 : inventory ? 0 : 2;
+      stdout = present ? `sec:-:255:22:ABCD:0:0:::::s:::\nfpr:::::::::${FINGERPRINT}:\n` : "";
     } else if (args.includes("--export")) {
       stdout = `${PUBLIC_KEY}\n`;
     } else if (args.includes("--detach-sign")) {
@@ -71,6 +77,11 @@ function fakeGpg() {
     return { exitCode, timedOut: false, outputExceeded: false, stdout };
   };
   return { run, commands, isDeleted: () => deleted };
+}
+
+function secretKeyInventory(fingerprints: string[]): string {
+  return fingerprints.map(fingerprint =>
+    `sec:-:255:22:ABCD:0:0:::::s:::\nfpr:::::::::${fingerprint}:`).join("\n");
 }
 
 async function createCredential(
@@ -161,6 +172,285 @@ describe("OpenPgpCredentialManager generation and import", () => {
     expect(fake.commands.some(command => command.args.includes("--delete-secret-and-public-key"))).toBe(false);
     expect(fake.isDeleted()).toBe(false);
   });
+
+  for (const [label, generationFailure] of [
+    ["nonzero", { exitCode: 2 }],
+    ["timed out", { timedOut: true }],
+    ["output capped", { outputExceeded: true }],
+  ] as const) {
+    test(`removes an uncataloged key reported after generation is ${label}`, async () => {
+      const fake = fakeGpg();
+      const run: OpenPgpCommandRunner = async command => {
+        const result = await fake.run(command);
+        if (command.args.includes("--quick-generate-key")) return { ...result, ...generationFailure };
+        return result;
+      };
+      const { manager, store } = await fixture(run);
+
+      await expect(manager.generate({ name: "Failed generation", userId: "Test <test@example.test>", passphrase: "secret" }))
+        .rejects.toThrow("OpenPGP key generation failed.");
+      expect(store.snapshot().credentials).toEqual([]);
+      expect(fake.isDeleted()).toBe(true);
+      expect(fake.commands.filter(command => command.args.includes("--delete-secret-and-public-key"))).toHaveLength(1);
+    });
+  }
+
+  test("uses the secret-key inventory delta when failed generation omits KEY_CREATED", async () => {
+    const fake = fakeGpg();
+    const run: OpenPgpCommandRunner = async command => {
+      const result = await fake.run(command);
+      if (command.args.includes("--quick-generate-key")) return { ...result, exitCode: 2, stdout: "" };
+      return result;
+    };
+    const { manager } = await fixture(run);
+
+    await expect(manager.generate({ name: "Missing status", userId: "Test <test@example.test>", passphrase: "secret" }))
+      .rejects.toThrow("OpenPGP key generation failed.");
+    expect(fake.isDeleted()).toBe(true);
+    expect(fake.commands.filter(command => command.args.at(-1) === "--list-secret-keys")).toHaveLength(2);
+  });
+
+  test("aggregates failed generation with failed cleanup", async () => {
+    const fake = fakeGpg();
+    const run: OpenPgpCommandRunner = async command => {
+      const result = await fake.run(command);
+      if (command.args.includes("--quick-generate-key")) return { ...result, timedOut: true };
+      if (command.args.includes("--delete-secret-and-public-key")) return { ...result, exitCode: 2 };
+      return result;
+    };
+    const { manager, store } = await fixture(run);
+
+    let failure: unknown;
+    try {
+      await manager.generate({ name: "Failed cleanup", userId: "Test <test@example.test>", passphrase: "secret" });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).errors.map(error => (error as Error).message)).toEqual([
+      "OpenPGP key generation failed.",
+      "OpenPGP key cleanup failed.",
+    ]);
+    expect(store.snapshot().credentials).toEqual([]);
+  });
+
+  test("does not delete a pre-existing key when failed generation reports its fingerprint", async () => {
+    const fake = fakeGpg();
+    let inventoryReads = 0;
+    const run: OpenPgpCommandRunner = async command => {
+      const result = await fake.run(command);
+      if (command.args.at(-1) === "--list-secret-keys" && inventoryReads++ === 0) {
+        return { ...result, stdout: `sec:-:255:22:ABCD:0:0:::::s:::\nfpr:::::::::${FINGERPRINT}:\n` };
+      }
+      if (command.args.includes("--quick-generate-key")) return { ...result, exitCode: 2 };
+      return result;
+    };
+    const { manager } = await fixture(run);
+
+    await expect(manager.generate({ name: "Existing", userId: "Test <test@example.test>", passphrase: "secret" }))
+      .rejects.toThrow("OpenPGP key generation failed.");
+    expect(fake.commands.some(command => command.args.includes("--delete-secret-and-public-key"))).toBe(false);
+    expect(fake.isDeleted()).toBe(false);
+  });
+
+  test("does not delete a cataloged key after failed generation", async () => {
+    const fake = fakeGpg();
+    const run: OpenPgpCommandRunner = async command => {
+      const result = await fake.run(command);
+      if (command.args.includes("--quick-generate-key")) return { ...result, exitCode: 2 };
+      return result;
+    };
+    const { manager, store } = await fixture(run);
+    await createCredential(store);
+
+    await expect(manager.generate({ name: "Cataloged", userId: "Test <test@example.test>", passphrase: "secret" }))
+      .rejects.toThrow("OpenPGP key generation failed.");
+    expect(fake.commands.some(command => command.args.includes("--delete-secret-and-public-key"))).toBe(false);
+    expect(fake.isDeleted()).toBe(false);
+    expect(store.snapshot().credentials.map(credential => credential.id)).toEqual(["pgp-1"]);
+  });
+
+  for (const scenario of [
+    {
+      label: "nonzero result with status",
+      before: [],
+      after: [FINGERPRINT],
+      status: [FINGERPRINT],
+      generation: { exitCode: 2 },
+      deleted: [FINGERPRINT],
+      error: "OpenPGP key generation failed.",
+    },
+    {
+      label: "timeout without status",
+      before: [],
+      after: [FINGERPRINT],
+      status: [],
+      generation: { timedOut: true },
+      deleted: [FINGERPRINT],
+      error: "OpenPGP key generation failed.",
+    },
+    {
+      label: "output cap with ambiguous status and multiple additions",
+      before: [],
+      after: [FINGERPRINT, SECOND_FINGERPRINT],
+      status: [FINGERPRINT, SECOND_FINGERPRINT],
+      generation: { outputExceeded: true },
+      deleted: [FINGERPRINT, SECOND_FINGERPRINT],
+      error: "OpenPGP key generation failed.",
+    },
+    {
+      label: "successful result with misleading preexisting status and another addition",
+      before: [FINGERPRINT],
+      after: [FINGERPRINT, SECOND_FINGERPRINT],
+      status: [FINGERPRINT],
+      generation: {},
+      deleted: [SECOND_FINGERPRINT],
+      error: "OpenPGP generated key could not be identified safely.",
+    },
+    {
+      label: "successful result with one status fingerprint but multiple additions",
+      before: [],
+      after: [FINGERPRINT, SECOND_FINGERPRINT, THIRD_FINGERPRINT],
+      status: [FINGERPRINT],
+      generation: {},
+      deleted: [FINGERPRINT, SECOND_FINGERPRINT, THIRD_FINGERPRINT],
+      error: "OpenPGP generated key could not be identified safely.",
+    },
+  ] as const) {
+    test(`reconciles generation cleanup for ${scenario.label}`, async () => {
+      let inventoryRead = 0;
+      const deleted: string[] = [];
+      const run: OpenPgpCommandRunner = async command => {
+        if (command.args.at(-1) === "--list-secret-keys") {
+          const fingerprints = inventoryRead++ === 0 ? scenario.before : scenario.after;
+          return { exitCode: 0, timedOut: false, outputExceeded: false, stdout: secretKeyInventory([...fingerprints]) };
+        }
+        if (command.args.includes("--quick-generate-key")) {
+          return {
+            exitCode: 0,
+            timedOut: false,
+            outputExceeded: false,
+            stdout: scenario.status.map(fingerprint => `[GNUPG:] KEY_CREATED B ${fingerprint}`).join("\n"),
+            ...scenario.generation,
+          };
+        }
+        if (command.args.includes("--delete-secret-and-public-key")) {
+          deleted.push(command.args.at(-1)!);
+        }
+        return { exitCode: 0, timedOut: false, outputExceeded: false, stdout: "" };
+      };
+      const { manager } = await fixture(run);
+
+      await expect(manager.generate({ name: "Reconcile", userId: "Test <test@example.test>", passphrase: "secret" }))
+        .rejects.toThrow(scenario.error);
+      expect(deleted).toEqual([...scenario.deleted]);
+    });
+  }
+
+  test("never deletes a cataloged fingerprint while cleaning every other added key", async () => {
+    let inventoryRead = 0;
+    const deleted: string[] = [];
+    const run: OpenPgpCommandRunner = async command => {
+      if (command.args.at(-1) === "--list-secret-keys") {
+        const fingerprints = inventoryRead++ === 0 ? [] : [FINGERPRINT, SECOND_FINGERPRINT];
+        return { exitCode: 0, timedOut: false, outputExceeded: false, stdout: secretKeyInventory(fingerprints) };
+      }
+      if (command.args.includes("--quick-generate-key")) {
+        return { exitCode: 2, timedOut: false, outputExceeded: false, stdout: "" };
+      }
+      if (command.args.includes("--delete-secret-and-public-key")) deleted.push(command.args.at(-1)!);
+      return { exitCode: 0, timedOut: false, outputExceeded: false, stdout: "" };
+    };
+    const { manager, store } = await fixture(run);
+    await createCredential(store);
+
+    await expect(manager.generate({ name: "Catalog guard", userId: "Test <test@example.test>", passphrase: "secret" }))
+      .rejects.toThrow("OpenPGP key generation failed.");
+    expect(deleted).toEqual([SECOND_FINGERPRINT]);
+  });
+
+  test("aggregates every generation cleanup deletion failure", async () => {
+    let inventoryRead = 0;
+    const run: OpenPgpCommandRunner = async command => {
+      if (command.args.at(-1) === "--list-secret-keys") {
+        const fingerprints = inventoryRead++ === 0 ? [] : [FINGERPRINT, SECOND_FINGERPRINT];
+        return { exitCode: 0, timedOut: false, outputExceeded: false, stdout: secretKeyInventory(fingerprints) };
+      }
+      if (command.args.includes("--quick-generate-key") || command.args.includes("--delete-secret-and-public-key")) {
+        return { exitCode: 2, timedOut: false, outputExceeded: false, stdout: "" };
+      }
+      return { exitCode: 0, timedOut: false, outputExceeded: false, stdout: "" };
+    };
+    const { manager } = await fixture(run);
+
+    let failure: unknown;
+    try {
+      await manager.generate({ name: "Cleanup failures", userId: "Test <test@example.test>", passphrase: "secret" });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).errors.map(error => (error as Error).message)).toEqual([
+      "OpenPGP key generation failed.",
+      "OpenPGP key cleanup failed.",
+      "OpenPGP key cleanup failed.",
+    ]);
+  });
+
+  for (const scenario of [
+    {
+      label: "new status fingerprint",
+      before: [] as string[],
+      status: [FINGERPRINT],
+      deleted: [FINGERPRINT],
+    },
+    {
+      label: "misleading preexisting status plus new status fingerprints",
+      before: [FINGERPRINT],
+      status: [FINGERPRINT, SECOND_FINGERPRINT, THIRD_FINGERPRINT],
+      deleted: [SECOND_FINGERPRINT, THIRD_FINGERPRINT],
+    },
+  ]) {
+    test(`reports unavailable post-generation inventory honestly for ${scenario.label}`, async () => {
+      let inventoryRead = 0;
+      const deleted: string[] = [];
+      const run: OpenPgpCommandRunner = async command => {
+        if (command.args.at(-1) === "--list-secret-keys") {
+          if (inventoryRead++ === 0) {
+            return { exitCode: 0, timedOut: false, outputExceeded: false, stdout: secretKeyInventory(scenario.before) };
+          }
+          return { exitCode: 2, timedOut: false, outputExceeded: false, stdout: "" };
+        }
+        if (command.args.includes("--quick-generate-key")) {
+          return {
+            exitCode: 2,
+            timedOut: false,
+            outputExceeded: false,
+            stdout: scenario.status.map(fingerprint => `[GNUPG:] KEY_CREATED B ${fingerprint}`).join("\n"),
+          };
+        }
+        if (command.args.includes("--delete-secret-and-public-key")) deleted.push(command.args.at(-1)!);
+        return { exitCode: 0, timedOut: false, outputExceeded: false, stdout: "" };
+      };
+      const { manager } = await fixture(run);
+
+      let failure: unknown;
+      try {
+        await manager.generate({ name: "Uncertain", userId: "Test <test@example.test>", passphrase: "secret" });
+      } catch (error) {
+        failure = error;
+      }
+
+      expect(deleted).toEqual(scenario.deleted);
+      expect(failure).toBeInstanceOf(AggregateError);
+      expect((failure as AggregateError).errors.map(error => (error as Error).message)).toEqual([
+        "OpenPGP key generation failed.",
+        "OpenPGP key cleanup is uncertain because the post-generation secret-key inventory could not be read.",
+      ]);
+    });
+  }
 
   test("degrades without GnuPG instead of failing manager startup", async () => {
     let invoked = false;
