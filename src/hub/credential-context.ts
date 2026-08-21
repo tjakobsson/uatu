@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -363,7 +364,15 @@ const AMBIENT_CREDENTIAL_VARIABLES = [
   "GIT_SSH_COMMAND",
   "GIT_CONFIG",
   "GIT_CONFIG_COUNT",
+  "GIT_CONFIG_GLOBAL",
+  "GIT_CONFIG_NOSYSTEM",
   "GIT_CONFIG_PARAMETERS",
+  "GIT_CONFIG_SYSTEM",
+  "GIT_PROXY_COMMAND",
+  "GIT_SSL_CERT",
+  "GIT_SSL_CERT_PASSWORD_PROTECTED",
+  "GIT_SSL_KEY",
+  "NETRC",
   "GNUPGHOME",
   "GPG_AGENT_INFO",
   "GH_CONFIG_DIR",
@@ -407,6 +416,220 @@ function gitConfigEnvironment(entries: Array<[string, string]>): Record<string, 
     env[`GIT_CONFIG_VALUE_${index}`] = value;
   });
   return env;
+}
+
+function isCredentialBearingGitConfig(key: string): boolean {
+  const normalized = key.toLowerCase();
+  if (normalized.startsWith("include.") || normalized.startsWith("includeif.")) return true;
+  if (/^(?:credential|http|imap|remote|sendemail|submodule|svn-remote|url)\./.test(normalized)) return true;
+  if (/(?:^|\.)(?:askpass|cookiefile|extraheader|password|passwd|proxy|pushurl|secret|sslcert|sslkey|token|url)$/.test(normalized)) return true;
+  if (["core.askpass", "core.gitproxy", "core.sshcommand"].includes(normalized)) return true;
+  return false;
+}
+
+type GitConfigEntry = { scope: string; origin: string; key: string; value: string };
+
+function parseGitConfigList(output: string): GitConfigEntry[] {
+  const fields = output.split("\0");
+  if (fields.at(-1) === "") fields.pop();
+  if (fields.length % 3 !== 0) throw new Error("malformed git config output");
+  const entries: GitConfigEntry[] = [];
+  for (let index = 0; index < fields.length; index += 3) {
+    const keyValue = fields[index + 2]!;
+    const separator = keyValue.indexOf("\n");
+    if (separator < 0) throw new Error("malformed git config entry");
+    entries.push({
+      scope: fields[index]!,
+      origin: fields[index + 1]!,
+      key: keyValue.slice(0, separator),
+      value: keyValue.slice(separator + 1),
+    });
+  }
+  return entries;
+}
+
+const GIT_CONFIG_QUERY_TIMEOUT_MS = 2_000;
+const GIT_CONFIG_OUTPUT_LIMIT = 256 * 1024;
+
+async function collectBoundedGitOutput(
+  stream: ReadableStream<Uint8Array>,
+  signal: AbortSignal,
+  stop: () => void,
+): Promise<{ text: string; exceeded: boolean }> {
+  const reader = stream.getReader();
+  const cancel = () => { void reader.cancel().catch(() => undefined); };
+  signal.addEventListener("abort", cancel, { once: true });
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  let exceeded = false;
+  try {
+    for (;;) {
+      if (signal.aborted) break;
+      const next = await reader.read();
+      if (next.done) break;
+      const remaining = GIT_CONFIG_OUTPUT_LIMIT - size;
+      if (remaining > 0) {
+        chunks.push(next.value.slice(0, remaining));
+        size += Math.min(remaining, next.value.length);
+      }
+      if (next.value.length > remaining) {
+        exceeded = true;
+        stop();
+        break;
+      }
+    }
+  } catch (error) {
+    if (!signal.aborted) throw error;
+  } finally {
+    signal.removeEventListener("abort", cancel);
+    if (signal.aborted) await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return { text: new TextDecoder().decode(bytes), exceeded };
+}
+
+async function gitOutput(
+  executable: string,
+  args: string[],
+  cwd: string,
+  env: Record<string, string>,
+): Promise<string> {
+  const child = Bun.spawn([executable, ...args], {
+    cwd,
+    env,
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+    detached: process.platform !== "win32",
+  });
+  const streams = new AbortController();
+  const stop = () => {
+    streams.abort();
+    if (process.platform === "win32" && child.pid > 0) {
+      spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+        stdio: "ignore",
+        timeout: 1_000,
+        windowsHide: true,
+      });
+    } else if (child.pid > 0) {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+        return;
+      } catch {
+        // The process group may already have exited.
+      }
+    }
+    try { child.kill("SIGKILL"); } catch { /* The child already exited. */ }
+  };
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    stop();
+  }, GIT_CONFIG_QUERY_TIMEOUT_MS);
+  try {
+    const stdoutPromise = collectBoundedGitOutput(child.stdout, streams.signal, stop);
+    const stderrPromise = collectBoundedGitOutput(child.stderr, streams.signal, stop);
+    const exitCode = await child.exited;
+    const drains = Promise.all([stdoutPromise, stderrPromise]);
+    let drainTimer: ReturnType<typeof setTimeout> | undefined;
+    const drainTimeout = new Promise<[Awaited<typeof stdoutPromise>, Awaited<typeof stderrPromise>]>(resolve => {
+      drainTimer = setTimeout(() => {
+        stop();
+        void drains.then(resolve);
+      }, 100);
+    });
+    const [stdout, stderr] = await Promise.race([drains, drainTimeout]).finally(() => clearTimeout(drainTimer));
+    if (timedOut) throw new Error("git config query timed out");
+    if (stdout.exceeded || stderr.exceeded) throw new Error("git config query output exceeded limit");
+    if (exitCode !== 0) throw new Error(stderr.text.trim() || `git exited with status ${exitCode}`);
+    return stdout.text;
+  } finally {
+    clearTimeout(timer);
+    streams.abort();
+  }
+}
+
+const ORIGIN_RELATIVE_GIT_PATHS = new Set([
+  "commit.template",
+  "core.attributesfile",
+  "core.excludesfile",
+  "diff.orderfile",
+  "format.signaturefile",
+  "gpg.ssh.allowedsignersfile",
+  "gpg.ssh.revocationfile",
+  "mailmap.file",
+]);
+
+function projectGitConfigValue(entry: GitConfigEntry, home: string | undefined, cwd: string): string {
+  if (!ORIGIN_RELATIVE_GIT_PATHS.has(entry.key.toLowerCase())) return entry.value;
+  if (entry.value.startsWith("~/") && home) return path.join(home, entry.value.slice(2));
+  if (path.isAbsolute(entry.value) || entry.value.startsWith("~") || entry.value.startsWith("%(prefix)")) {
+    return entry.value;
+  }
+  if (!entry.origin.startsWith("file:")) return entry.value;
+  const originPath = entry.origin.slice("file:".length);
+  return path.resolve(path.dirname(path.resolve(cwd, originPath)), entry.value);
+}
+
+function quoteGitConfig(value: string): string {
+  if (value.includes("\0") || value.includes("\r")) throw new Error("unsupported control character in git config");
+  return `"${value
+    .replaceAll("\\", "\\\\")
+    .replaceAll('"', '\\"')
+    .replaceAll("\n", "\\n")
+    .replaceAll("\t", "\\t")
+    .replaceAll("\b", "\\b")}"`;
+}
+
+function serializeGitConfig(entries: GitConfigEntry[]): string {
+  return entries.map(entry => {
+    const firstDot = entry.key.indexOf(".");
+    const lastDot = entry.key.lastIndexOf(".");
+    const section = entry.key.slice(0, firstDot);
+    const name = entry.key.slice(lastDot + 1);
+    if (!/^[A-Za-z][A-Za-z0-9-]*$/.test(section) || !/^[A-Za-z][A-Za-z0-9-]*$/.test(name)) {
+      throw new Error("unsupported git config key");
+    }
+    const subsection = firstDot === lastDot ? "" : ` ${quoteGitConfig(entry.key.slice(firstDot + 1, lastDot))}`;
+    return `[${section}${subsection}]\n\t${name} = ${quoteGitConfig(entry.value)}\n`;
+  }).join("");
+}
+
+async function writeSanitizedGitConfig(options: {
+  executable: string;
+  cwd: string;
+  path: string;
+  sourceEnv?: NodeJS.ProcessEnv;
+}): Promise<void> {
+  const queryEnv = stripAmbientCredentialEnvironment(options.sourceEnv);
+  const source = options.sourceEnv ?? process.env;
+  for (const key of ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_SYSTEM"] as const) {
+    if (source[key] !== undefined) queryEnv[key] = source[key]!;
+  }
+  try {
+    const entries = parseGitConfigList(await gitOutput(
+      options.executable,
+      ["config", "--includes", "--show-scope", "--show-origin", "--null", "--list"],
+      options.cwd,
+      queryEnv,
+    )).filter(entry =>
+      !["local", "worktree", "command"].includes(entry.scope) && !isCredentialBearingGitConfig(entry.key));
+    const projected = entries.map(entry => ({
+      ...entry,
+      value: projectGitConfigValue(entry, source.HOME, options.cwd),
+    }));
+    await fs.writeFile(options.path, serializeGitConfig(projected), { mode: 0o600 });
+  } catch {
+    // Any query, parse, or serialization failure leaves a valid empty config.
+    await fs.writeFile(options.path, "", { mode: 0o600 });
+  }
+  await fs.chmod(options.path, 0o600);
 }
 
 function assertUnambiguousProviderCliAssignments(authentication: ResolvedAuthenticationCredential[]): void {
@@ -715,6 +938,9 @@ async function projectLocalCredentialEnvironment(
   const env = stripAmbientCredentialEnvironment(options.sourceEnv);
   const sshConfigPath = path.join(runtimeDirectory, "ssh_config");
   const sshMatcherPath = path.join(runtimeDirectory, "ssh-host-match");
+  const gitConfigPath = path.join(runtimeDirectory, "gitconfig");
+  const gitHome = path.join(runtimeDirectory, "git-home");
+  const emptyNetrc = path.join(gitHome, ".netrc");
   const sshLines: string[] = [];
   const sshPublicKeys = new Map<string, string>();
   const gitEntries: Array<[string, string]> = [
@@ -742,7 +968,49 @@ async function projectLocalCredentialEnvironment(
     exposedTools.add(name);
   };
 
-  if (context.tools.git) await exposeTool("git", context.tools.git);
+  await Promise.all([
+    fs.writeFile(gitConfigPath, "", { mode: 0o600 }),
+    fs.mkdir(gitHome, { mode: 0o700 }),
+  ]);
+  await fs.writeFile(emptyNetrc, "", { mode: 0o600 });
+  // The explicit empty context is used when credential services are absent
+  // (including alternate/test backends), so it retains the historical PATH
+  // discovery. A real Hub context has a state root; null there means a
+  // configured/default Git probe is unavailable and must not fall back.
+  const gitExecutable = context.tools.git ?? (context.stateRoot === ""
+    ? Bun.which("git", { PATH: options.sourceEnv?.PATH, cwd: workspace.path })
+    : null);
+  if (gitExecutable) {
+    await writeSanitizedGitConfig({
+      executable: gitExecutable,
+      cwd: workspace.path,
+      path: gitConfigPath,
+      sourceEnv: options.sourceEnv,
+    });
+    const gitShim = path.join(await toolBin(), "git");
+    await fs.writeFile(gitShim, [
+      "#!/bin/sh",
+      `export HOME=${shellQuote(gitHome)}`,
+      `export NETRC=${shellQuote(emptyNetrc)}`,
+      `exec ${shellQuote(gitExecutable)} "$@"`,
+      "",
+    ].join("\n"), { mode: 0o700 });
+    await fs.chmod(gitShim, 0o700);
+    exposedTools.add("git");
+  } else {
+    const gitShim = path.join(await toolBin(), "git");
+    await fs.writeFile(gitShim, [
+      "#!/bin/sh",
+      `export HOME=${shellQuote(gitHome)}`,
+      "exit 127",
+      "",
+    ].join("\n"), { mode: 0o700 });
+    await fs.chmod(gitShim, 0o700);
+    exposedTools.add("git");
+  }
+  env.GIT_CONFIG_NOSYSTEM = "1";
+  env.GIT_CONFIG_GLOBAL = gitConfigPath;
+  env.NETRC = emptyNetrc;
 
   const sshPortsByHostname = new Map<string, Set<string>>();
   for (const assignment of context.authentication) {

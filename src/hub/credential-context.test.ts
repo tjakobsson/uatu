@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, readFile, readdir, readlink, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -265,7 +265,7 @@ describe("local workspace credential projection", () => {
     expect(projected.env.GIT_SSH_COMMAND).toStartWith(`'${sshPath}' -F `);
     expect(projected.env.GH_TOKEN).toBe("provider-secret");
     expect(projected.env.PATH?.split(path.delimiter)[0]).toBe(path.join(projected.runtimeDirectory, "tool-bin"));
-    expect(await readlink(path.join(projected.runtimeDirectory, "tool-bin", "git"))).toBe(gitPath);
+    expect(await readFile(path.join(projected.runtimeDirectory, "tool-bin", "git"), "utf8")).toContain(`exec '${gitPath}' "$@"`);
     expect(Bun.spawnSync(["gh"], { env: projected.env, stdout: "pipe" }).stdout.toString()).toBe("managed-gh\n");
     expect(projected.env.GIT_ASKPASS).toBeUndefined();
     expect(gitConfig(workspace.path, projected.env, "user.name")).toBe("Ambient User");
@@ -716,6 +716,7 @@ describe("local workspace credential projection", () => {
 
   test("projects an OpenPGP signing assignment through the dedicated GnuPG home", async () => {
     const { root, home, workspace } = await fixture();
+    const gitPath = requiredTool("git");
     const signing: OpenPgpCredentialRecord = {
       id: "pgp-1",
       name: "signing key",
@@ -734,7 +735,7 @@ describe("local workspace credential projection", () => {
         stateRoot: path.join(root, "state"),
         sshAgentSocket: null,
         gnupgHome,
-        tools: { ssh: null, git: null, gpg: "/managed/gpg", sshKeygen: null, gh: null, glab: null },
+        tools: { ssh: null, git: gitPath, gpg: "/managed/gpg", sshKeygen: null, gh: null, glab: null },
         authentication: [],
         signing,
       },
@@ -773,6 +774,7 @@ describe("local workspace credential projection", () => {
 
   test("removes ambient credentials when there are no assignments and documents the same-UID bypass", async () => {
     const { root, home, workspace } = await fixture();
+    const gitPath = requiredTool("git");
     const marker = path.join(root, "ambient-helper-used");
     const ambientHelper = path.join(root, "ambient-helper");
     await writeFile(ambientHelper, `#!/bin/sh\ntouch '${marker}'\nprintf 'username=ambient\\npassword=ambient\\n'\n`, { mode: 0o700 });
@@ -791,7 +793,7 @@ describe("local workspace credential projection", () => {
       stateRoot: path.join(root, "state"),
       sshAgentSocket: null,
       gnupgHome: path.join(root, "gnupg"),
-      tools: { ssh: null, git: null, gpg: null, sshKeygen: null, gh: null, glab: null },
+      tools: { ssh: null, git: gitPath, gpg: null, sshKeygen: null, gh: null, glab: null },
       authentication: [],
       signing: null,
     };
@@ -826,10 +828,301 @@ describe("local workspace credential projection", () => {
     for (const key of Object.keys(bypass)) {
       if (key === "GIT_SSH_COMMAND" || key.startsWith("GIT_CONFIG_")) delete bypass[key];
     }
+    bypass.HOME = home;
+    bypass.PATH = process.env.PATH ?? "";
     expect(await gitCredentialFill(workspace.path, bypass)).toBe(0);
     expect(await Bun.file(marker).exists()).toBe(true);
     expect(LOCAL_CREDENTIAL_ASSIGNMENT_WARNING).toContain("same-UID processes");
     expect(LOCAL_CREDENTIAL_ASSIGNMENT_WARNING).toContain("unset the configuration");
+  });
+
+  test.skipIf(!Bun.which("git"))("isolates ambient HTTP credentials while preserving unrelated effective Git config", async () => {
+    const { root, home, workspace } = await fixture();
+    const gitPath = requiredTool("git");
+    const configDirectory = path.join(root, "ambient config with spaces");
+    const includedConfig = path.join(configDirectory, "included config");
+    const systemConfig = path.join(configDirectory, "system config");
+    const cookieFile = path.join(configDirectory, "cookies");
+    const netrc = path.join(home, ".netrc");
+    const helperCommand = path.join(root, "managed helper with spaces");
+    await mkdir(configDirectory);
+
+    const requests: Array<{ authorization: string | null; cookie: string | null }> = [];
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        requests.push({
+          authorization: request.headers.get("authorization"),
+          cookie: request.headers.get("cookie"),
+        });
+        return new Response("authentication required\n", {
+          status: 401,
+          headers: { "WWW-Authenticate": 'Basic realm="uatu-test"' },
+        });
+      },
+    });
+    const host = `127.0.0.1:${server.port}`;
+    const remote = `http://${host}/repo.git`;
+
+    try {
+      await writeFile(cookieFile, "127.0.0.1\tFALSE\t/\tFALSE\t2147483647\tambient\tambient-cookie\n");
+      await writeFile(netrc, "machine 127.0.0.1 login ambient-netrc password ambient-netrc-secret\n", { mode: 0o600 });
+      await chmod(netrc, 0o600);
+      await writeFile(includedConfig, [
+        "[diff]",
+        "  renames = copies",
+        `[http "http://${host}/"]`,
+        "  extraHeader = Authorization: Bearer ambient-include",
+        `  cookieFile = ${cookieFile}`,
+        `[credential "http://${host}/"]`,
+        "  helper = !printf 'username=ambient-helper\\npassword=ambient-helper-secret\\n'",
+        `[url "http://ambient-rewrite:ambient-rewrite-secret@${host}/"]`,
+        `  insteadOf = http://${host}/`,
+        "",
+      ].join("\n"));
+      await writeFile(systemConfig, [
+        `[http "http://${host}/"]`,
+        "  extraHeader = Authorization: Bearer ambient-system",
+        "[diff]",
+        "  algorithm = histogram",
+        "[imap]",
+        "  host = imaps://mail.example.com",
+        "  user = ambient-imap-user",
+        "  pass = ambient-imap-password",
+        "[sendemail]",
+        "  smtpPass = ambient-smtp-password",
+        `[svn-remote "legacy"]`,
+        "  url = https://ambient:secret@example.com/svn",
+        "[custom]",
+        "  url = https://ambient:secret@example.com/custom",
+        "  password = ambient-custom-password",
+        "  ordinary = retained",
+        "",
+      ].join("\n"));
+      await writeFile(path.join(home, ".gitconfig"), [
+        "[user]",
+        "  name = Ambient User",
+        "  email = ambient@example.com",
+        `[includeIf "onbranch:credential-context"]`,
+        `  path = ${includedConfig}`,
+        "",
+      ].join("\n"));
+      Bun.spawnSync([gitPath, "symbolic-ref", "HEAD", "refs/heads/credential-context"], {
+        cwd: workspace.path,
+        env: { HOME: home, PATH: process.env.PATH },
+      });
+      Bun.spawnSync([gitPath, "config", "--local", "user.name", "Repository User"], {
+        cwd: workspace.path,
+        env: { HOME: home, PATH: process.env.PATH },
+      });
+      await writeFile(helperCommand, "#!/bin/sh\nprintf 'username=managed\\npassword=managed-secret\\n'\n", { mode: 0o700 });
+
+      const sourceEnv = {
+        HOME: home,
+        PATH: process.env.PATH,
+        GIT_CONFIG_SYSTEM: systemConfig,
+      };
+      const baseContext: ResolvedCredentialContext = {
+        revision: "http-isolation",
+        runtimeRoot: path.join(root, "runtime with spaces"),
+        stateRoot: root,
+        sshAgentSocket: null,
+        gnupgHome: path.join(root, "gnupg"),
+        tools: { ssh: null, git: gitPath, gpg: null, sshKeygen: null, gh: null, glab: null },
+        authentication: [],
+        signing: null,
+      };
+      const run = async (context: ResolvedCredentialContext) => {
+        const projected = await buildLocalCredentialEnvironment({
+          workspace,
+          context,
+          uatuArgv: [helperCommand],
+          sourceEnv,
+        });
+        const child = Bun.spawn(["git", "ls-remote", remote], {
+          cwd: workspace.path,
+          env: { ...projected.env, GIT_TERMINAL_PROMPT: "0" },
+          stdout: "ignore",
+          stderr: "ignore",
+        });
+        await child.exited;
+        return projected;
+      };
+
+      const ambient = Bun.spawn([gitPath, "ls-remote", remote], {
+        cwd: workspace.path,
+        env: { ...sourceEnv, GIT_TERMINAL_PROMPT: "0" },
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      await ambient.exited;
+      expect(requests.some(request => request.authorization !== null || request.cookie !== null)).toBe(true);
+      requests.length = 0;
+
+      const unassigned = await run(baseContext);
+      expect(requests.length).toBeGreaterThan(0);
+      expect(requests.every(request => request.authorization === null && request.cookie === null)).toBe(true);
+      expect(gitConfig(workspace.path, unassigned.env, "user.name")).toBe("Repository User");
+      expect(gitConfig(workspace.path, unassigned.env, "user.email")).toBe("ambient@example.com");
+      expect(gitConfig(workspace.path, unassigned.env, "diff.algorithm")).toBe("histogram");
+      expect(gitConfig(workspace.path, unassigned.env, "diff.renames")).toBe("copies");
+      expect(gitConfig(workspace.path, unassigned.env, "custom.ordinary")).toBe("retained");
+      expect(gitConfig(workspace.path, unassigned.env, "imap.pass")).toBe("");
+      expect(gitConfig(workspace.path, unassigned.env, "sendemail.smtppass")).toBe("");
+      expect(gitConfig(workspace.path, unassigned.env, "svn-remote.legacy.url")).toBe("");
+      expect(gitConfig(workspace.path, unassigned.env, "custom.url")).toBe("");
+      expect(gitConfig(workspace.path, unassigned.env, "custom.password")).toBe("");
+      expect(gitConfig(workspace.path, unassigned.env, `http.http://${host}/.extraHeader`, true)).toBe("");
+      expect(gitConfig(workspace.path, unassigned.env, `url.http://ambient-rewrite:ambient-rewrite-secret@${host}/.insteadOf`, true)).toBe("");
+      expect((await stat(unassigned.env.GIT_CONFIG_GLOBAL!)).mode & 0o777).toBe(0o600);
+      expect((await stat(path.dirname(unassigned.env.NETRC!))).mode & 0o777).toBe(0o700);
+      expect((await stat(unassigned.env.NETRC!)).mode & 0o777).toBe(0o600);
+      expect(unassigned.env.HOME).toBe(home);
+      expect(unassigned.env.GIT_CONFIG_NOSYSTEM).toBe("1");
+
+      requests.length = 0;
+      const token: TokenCredentialRecord = {
+        id: "managed-http",
+        name: "managed HTTP",
+        type: "token",
+        capabilities: ["https-git"],
+        enabled: true,
+        createdAt,
+        metadata: { host },
+      };
+      const assigned = await run({
+        ...baseContext,
+        authentication: [{ host, credential: token, token: "managed-secret" }],
+      });
+      expect(requests.length).toBeGreaterThan(0);
+      expect(requests.every(request => request.authorization === null && request.cookie === null)).toBe(true);
+      expect(requests.some(request => `${request.authorization} ${request.cookie}`.includes("ambient"))).toBe(false);
+      expect(gitConfig(workspace.path, assigned.env, "user.email")).toBe("ambient@example.com");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("does not rediscover ambient Git when the resolved tool is unavailable", async () => {
+    const { root, home, workspace } = await fixture();
+    const projected = await buildLocalCredentialEnvironment({
+      workspace,
+      context: {
+        revision: "missing-git",
+        runtimeRoot: path.join(root, "runtime"),
+        stateRoot: root,
+        sshAgentSocket: null,
+        gnupgHome: path.join(root, "gnupg"),
+        tools: { ssh: null, git: null, gpg: null, sshKeygen: null, gh: null, glab: null },
+        authentication: [],
+        signing: null,
+      },
+      uatuArgv: ["uatu"],
+      sourceEnv: { HOME: home, PATH: process.env.PATH },
+    });
+
+    expect(await readFile(projected.env.GIT_CONFIG_GLOBAL!, "utf8")).toBe("");
+    expect(projected.env.GIT_CONFIG_NOSYSTEM).toBe("1");
+    expect(projected.env.HOME).toBe(home);
+    expect(projected.env.NETRC).toBe(path.join(projected.runtimeDirectory, "git-home", ".netrc"));
+    const gitShim = path.join(projected.runtimeDirectory, "tool-bin", "git");
+    expect(await Bun.file(gitShim).exists()).toBe(true);
+    expect(Bun.spawnSync(["git", "--version"], { env: projected.env }).exitCode).toBe(127);
+  });
+
+  test.skipIf(!Bun.which("git"))("resolves retained relative path settings against their config origin", async () => {
+    const { root, home, workspace } = await fixture();
+    const gitPath = requiredTool("git");
+    const configDirectory = path.join(home, "included-config");
+    const includedConfig = path.join(configDirectory, "settings");
+    const excludesFile = path.join(configDirectory, "ignore-patterns");
+    await mkdir(configDirectory);
+    await writeFile(path.join(home, ".gitconfig"), "[include]\n  path = included-config/settings\n");
+    await writeFile(includedConfig, "[core]\n  excludesFile = ignore-patterns\n");
+    await writeFile(excludesFile, "from-origin.txt\n");
+    await writeFile(path.join(workspace.path, "from-origin.txt"), "ignored\n");
+
+    const projected = await buildLocalCredentialEnvironment({
+      workspace,
+      context: {
+        revision: "relative-path",
+        runtimeRoot: path.join(root, "runtime"),
+        stateRoot: root,
+        sshAgentSocket: null,
+        gnupgHome: path.join(root, "gnupg"),
+        tools: { ssh: null, git: gitPath, gpg: null, sshKeygen: null, gh: null, glab: null },
+        authentication: [],
+        signing: null,
+      },
+      uatuArgv: ["uatu"],
+      sourceEnv: { HOME: home, PATH: process.env.PATH },
+    });
+
+    expect(gitConfig(workspace.path, projected.env, "core.excludesfile")).toBe(excludesFile);
+    expect(Bun.spawnSync(["git", "check-ignore", "from-origin.txt"], {
+      cwd: workspace.path,
+      env: projected.env,
+      stdout: "pipe",
+      stderr: "pipe",
+    }).exitCode).toBe(0);
+  });
+
+  test.skipIf(process.platform === "win32")("bounds a config query and kills its hanging descendant process group", async () => {
+    const { root, home, workspace } = await fixture();
+    const fakeGit = path.join(root, "hanging-git");
+    const descendantPidPath = path.join(root, "descendant.pid");
+    await writeFile(fakeGit, [
+      "#!/bin/sh",
+      "sh -c 'trap \"\" TERM; printf \"%s\" \"$$\" > \"$HANG_DESCENDANT_PID\"; while :; do sleep 1; done' &",
+      "wait",
+      "",
+    ].join("\n"), { mode: 0o700 });
+    const startedAt = Date.now();
+
+    const projected = await buildLocalCredentialEnvironment({
+      workspace,
+      context: {
+        revision: "hanging-git",
+        runtimeRoot: path.join(root, "runtime"),
+        stateRoot: root,
+        sshAgentSocket: null,
+        gnupgHome: path.join(root, "gnupg"),
+        tools: { ssh: null, git: fakeGit, gpg: null, sshKeygen: null, gh: null, glab: null },
+        authentication: [],
+        signing: null,
+      },
+      uatuArgv: ["uatu"],
+      sourceEnv: { HOME: home, PATH: process.env.PATH, HANG_DESCENDANT_PID: descendantPidPath },
+    });
+
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect(await readFile(projected.env.GIT_CONFIG_GLOBAL!, "utf8")).toBe("");
+    const descendantPid = Number(await readFile(descendantPidPath, "utf8"));
+    expect(() => process.kill(descendantPid, 0)).toThrow();
+  }, 7_000);
+
+  test("fails to an empty config when the effective query exceeds its output cap", async () => {
+    const { root, home, workspace } = await fixture();
+    const fakeGit = path.join(root, "oversized-git");
+    await writeFile(fakeGit, "#!/bin/sh\ndd if=/dev/zero bs=262144 count=2 2>/dev/null\n", { mode: 0o700 });
+
+    const projected = await buildLocalCredentialEnvironment({
+      workspace,
+      context: {
+        revision: "oversized-git",
+        runtimeRoot: path.join(root, "runtime"),
+        stateRoot: root,
+        sshAgentSocket: null,
+        gnupgHome: path.join(root, "gnupg"),
+        tools: { ssh: null, git: fakeGit, gpg: null, sshKeygen: null, gh: null, glab: null },
+        authentication: [],
+        signing: null,
+      },
+      uatuArgv: ["uatu"],
+      sourceEnv: { HOME: home, PATH: process.env.PATH },
+    });
+
+    expect(await readFile(projected.env.GIT_CONFIG_GLOBAL!, "utf8")).toBe("");
   });
 });
 
