@@ -579,6 +579,7 @@ describe("local workspace credential projection", () => {
 describe("clone credential resolution", () => {
   test("parses SCP remotes into assignment-normalized hosts, keeping IPv6 brackets", () => {
     expect(parseCloneRemote("git@github.com:org/repo.git")).toEqual({ transport: "ssh", host: "github.com" });
+    expect(parseCloneRemote("git@GitHub.COM.:org/repo.git")).toEqual({ transport: "ssh", host: "github.com" });
     expect(parseCloneRemote("github.com:org/repo.git")).toEqual({ transport: "ssh", host: "github.com" });
     expect(parseCloneRemote("[github.com]:org/repo.git")).toEqual({ transport: "ssh", host: "github.com" });
     expect(parseCloneRemote("git@[2001:db8::1]:org/repo.git")).toEqual({ transport: "ssh", host: "[2001:db8::1]" });

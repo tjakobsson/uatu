@@ -125,6 +125,12 @@ abstract class SerializedStore {
 export class CredentialMetadataStore extends SerializedStore {
   private state: CredentialState = { version: CREDENTIAL_STATE_VERSION, credentials: [], assignments: [] };
   private readonly writer: AtomicStateWriter;
+  // Per-credential coordination between assignment writes and revocations:
+  // an assignment commits only while holding its credential's lock, so a
+  // revocation holding it can trust a fresh assignment snapshot. Always the
+  // innermost lock — taken inside workspace lifecycle queues, never around
+  // them.
+  private readonly credentialLocks = new Map<string, Promise<unknown>>();
 
   constructor(private readonly filePath: string) {
     super();
@@ -142,6 +148,13 @@ export class CredentialMetadataStore extends SerializedStore {
 
   snapshot(): CredentialState {
     return clone(this.state);
+  }
+
+  runExclusiveCredential<T>(credentialId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.credentialLocks.get(credentialId) ?? Promise.resolve();
+    const next = previous.then(operation, operation);
+    this.credentialLocks.set(credentialId, next.then(() => undefined, () => undefined));
+    return next;
   }
 
   create(

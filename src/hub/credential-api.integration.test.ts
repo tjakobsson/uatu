@@ -504,6 +504,39 @@ describe("credential API integration", () => {
     expect(f.metadata.snapshot().credentials).toEqual([]);
   });
 
+  test("assignments commit under the credential lock revocations hold", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));
+    roots.push(root);
+    const f = await fixture(root);
+    const origin = `http://127.0.0.1:${f.server.port}`;
+    const cookie = await login(origin, "alice", "alice password");
+    const created = await post(origin, cookie, "/api/hub/credentials/token", {
+      name: "Locked-out token",
+      host: "github.com",
+      token: "assignment-lock-secret",
+      capabilities: ["https-git"],
+    });
+    const credentialId = ((await created.json()) as { credential: { id: string } }).credential.id;
+
+    // A revocation holding the credential lock keeps a concurrent
+    // assignment from committing until the lock is released.
+    let releaseRevocation!: () => void;
+    const revocationHeld = new Promise<void>(resolve => { releaseRevocation = resolve; });
+    const revocation = f.metadata.runExclusiveCredential(credentialId, () => revocationHeld);
+    const assignment = post(origin, cookie, `/api/hub/credentials/${credentialId}/assign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+    });
+    await new Promise(resolve => setTimeout(resolve, 25));
+    expect(f.metadata.snapshot().assignments).toEqual([]);
+
+    releaseRevocation();
+    await revocation;
+    expect((await assignment).status).toBe(200);
+    expect(f.metadata.snapshot().assignments).toHaveLength(1);
+  });
+
   test("unassigns inside the stop lifecycle when stop is requested", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));
     roots.push(root);

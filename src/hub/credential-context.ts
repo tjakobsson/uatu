@@ -79,9 +79,18 @@ export function parseCloneRemote(remote: string): CloneRemote {
   if (scp && !/^[A-Za-z]:[\\/]/.test(remote)) {
     // An IPv6 literal keeps its brackets — that is the normalized host form
     // assignments store and validate; only decorative brackets around a
-    // plain host are stripped.
+    // plain host are stripped. The result goes through the same host
+    // canonicalizer assignments use (trailing dots, case), falling back to
+    // the raw literal for hosts that cannot back an assignment anyway.
     const literal = scp[1]!.toLowerCase();
-    const host = literal.startsWith("[") && !literal.includes(":") ? literal.replace(/^\[|\]$/g, "") : literal;
+    const bare = literal.startsWith("[") && !literal.includes(":") ? literal.replace(/^\[|\]$/g, "") : literal;
+    let host = bare;
+    try {
+      host = normalizeProviderHost(bare);
+    } catch {
+      // Clone-only host: SSH can reach it, but no stored assignment can
+      // reference it.
+    }
     return { transport: "ssh", host };
   }
   let parsed: URL;
@@ -170,12 +179,15 @@ export function createStoredCloneCredentialResolver(options: {
       };
     },
     async assign(workspaceId, selected) {
-      await options.metadata.assign({
+      // Called inside the workspace's lifecycle queue; the credential lock
+      // is the innermost, matching the API assignment route, so credential
+      // revocations can trust their assignment snapshot.
+      await options.metadata.runExclusiveCredential(selected.credentialId, () => options.metadata.assign({
         workspaceId,
         credentialId: selected.credentialId,
         role: "authentication",
         host: selected.host,
-      });
+      }));
     },
     async unassign(workspaceId, selected) {
       await options.metadata.unassign(workspaceId, selected.credentialId, "authentication", selected.host);

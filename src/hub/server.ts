@@ -110,17 +110,34 @@ export function createHubFetchHandler(deps: HubDeps) {
   // Disable, lock, and delete are revocations: they run under every
   // assigned workspace's lifecycle queue (acquired in sorted order, so
   // concurrent revocations cannot deadlock), or a session start could
-  // capture the credential while the API reports it revoked. Assignment
-  // writes take a single workspace's queue, so nesting cannot cycle.
+  // capture the credential while the API reports it revoked. Assignments
+  // commit while holding the credential's lock (inside their single
+  // workspace queue — workspace queues always outermost, credential lock
+  // always innermost), so once the revocation holds that lock a fresh
+  // snapshot is authoritative; if it names a workspace we have not locked,
+  // an assignment slipped in first and the attempt retries with the wider
+  // set.
+  const REVOKE_RETRY = Symbol("revoke-retry");
   const revokeExclusive = async <T>(credentialId: string, operation: () => Promise<T>): Promise<T> => {
-    const workspaceIds = [...new Set(
+    const assignedWorkspaces = () => [...new Set(
       (deps.credentialApi?.metadata.snapshot().assignments ?? [])
         .filter(assignment => assignment.credentialId === credentialId)
         .map(assignment => assignment.workspaceId),
     )].sort();
-    const acquire = (index: number): Promise<T> =>
-      index >= workspaceIds.length ? operation() : sessions.runExclusive(workspaceIds[index]!, () => acquire(index + 1));
-    return acquire(0);
+    const attempt = (workspaceIds: string[]): Promise<T | typeof REVOKE_RETRY> => {
+      const acquire = (index: number): Promise<T | typeof REVOKE_RETRY> =>
+        index < workspaceIds.length
+          ? sessions.runExclusive(workspaceIds[index]!, () => acquire(index + 1))
+          : deps.credentialApi!.metadata.runExclusiveCredential(credentialId, async () =>
+              assignedWorkspaces().every(id => workspaceIds.includes(id)) ? operation() : REVOKE_RETRY);
+      return acquire(0);
+    };
+    let workspaceIds = assignedWorkspaces();
+    for (;;) {
+      const result = await attempt(workspaceIds);
+      if (result !== REVOKE_RETRY) return result;
+      workspaceIds = [...new Set([...workspaceIds, ...assignedWorkspaces()])].sort();
+    }
   };
 
   // Whether the browser-facing connection is HTTPS: either the hub
@@ -764,7 +781,8 @@ export function createHubFetchHandler(deps: HubDeps) {
             if (operation === "enable" || operation === "disable") return json(200, { credential: await revokeExclusive(credentialId, () => credentialApi.setEnabled(credentialId, body, operation === "enable")) }, headers);
             if (operation === "assign") {
               const workspaceId = typeof body.workspaceId === "string" ? body.workspaceId : "";
-              const assignment = await sessions.runExclusive(workspaceId, () => credentialApi.assign(credentialId, body));
+              const assignment = await sessions.runExclusive(workspaceId, () =>
+                deps.credentialApi!.metadata.runExclusiveCredential(credentialId, () => credentialApi.assign(credentialId, body)));
               return json(200, { assignment }, headers);
             }
             if (operation === "unassign") {
