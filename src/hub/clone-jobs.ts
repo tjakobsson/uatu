@@ -25,9 +25,14 @@ type Registry = {
   remove(workspaceId: string): Promise<boolean>;
 };
 
+// The lifecycle hooks mirror SessionManager: registration and assignment
+// rollback must run inside the per-workspace lifecycle queue, or an
+// assignment queued during a failing start could commit against a
+// registration this job is about to remove.
 type Sessions = {
-  start(workspaceId: string): Promise<unknown>;
-  stop(workspaceId: string): Promise<boolean>;
+  start(workspaceId: string, onFailure?: () => Promise<void>): Promise<unknown>;
+  stop(workspaceId: string, onStopped?: () => Promise<void>): Promise<boolean>;
+  runExclusive<T>(workspaceId: string, operation: () => Promise<T>): Promise<T>;
 };
 
 export type CloneJobTimer = {
@@ -275,7 +280,8 @@ export class CloneJobManager {
 
       if (job.credential && job.retainAssignment) {
         try {
-          await this.credentials.assign(job.registered.id, job.credential);
+          await this.sessions.runExclusive(job.registered.id, () =>
+            this.credentials.assign(job.registered!.id, job.credential!));
           job.assigned = true;
         } catch (error) {
           const rollbackError = await this.rollback(job, job.registered);
@@ -292,10 +298,16 @@ export class CloneJobManager {
       }
 
       this.setPhase(job, "starting");
+      // undefined = the lifecycle hook never ran and the rollback still must.
+      let hookRollbackError: string | null | undefined;
       try {
-        await this.sessions.start(job.registered.id);
+        await this.sessions.start(job.registered.id, async () => {
+          hookRollbackError = await this.rollbackWithinLifecycle(job, job.registered!);
+        });
       } catch (error) {
-        const rollbackError = await this.rollback(job, job.registered);
+        const rollbackError = hookRollbackError === undefined
+          ? await this.rollback(job, job.registered)
+          : hookRollbackError;
         if (job.stop) {
           await this.finish(job, rollbackError ? this.rollbackFailure(job, rollbackError) : job.stop);
           return;
@@ -306,7 +318,9 @@ export class CloneJobManager {
       }
       if (job.stop) {
         try {
-          await this.sessions.stop(job.registered.id);
+          await this.sessions.stop(job.registered.id, async () => {
+            hookRollbackError = await this.rollbackWithinLifecycle(job, job.registered!);
+          });
         } catch (error) {
           await this.finish(job, {
             status: "cleanup-failed",
@@ -315,7 +329,10 @@ export class CloneJobManager {
           });
           return;
         }
-        await this.finishAfterRollback(job, job.registered);
+        const rollbackError = hookRollbackError === undefined
+          ? await this.rollback(job, job.registered)
+          : hookRollbackError;
+        await this.finish(job, rollbackError ? this.rollbackFailure(job, rollbackError) : job.stop);
         return;
       }
       await this.finish(job, { status: "succeeded", workspaceId: job.registered.id, target: job.target });
@@ -390,7 +407,14 @@ export class CloneJobManager {
     this.emit(job, "phase", { phase });
   }
 
-  private async rollback(job: Job, entry: WorkspaceEntry): Promise<string | null> {
+  // Queues the rollback as its own lifecycle operation. Callers already
+  // inside a lifecycle hook use rollbackWithinLifecycle directly — queueing
+  // from there would deadlock behind the operation they are part of.
+  private rollback(job: Job, entry: WorkspaceEntry): Promise<string | null> {
+    return this.sessions.runExclusive(entry.id, () => this.rollbackWithinLifecycle(job, entry));
+  }
+
+  private async rollbackWithinLifecycle(job: Job, entry: WorkspaceEntry): Promise<string | null> {
     let unassigned = false;
     try {
       if (job.assigned && job.credential) {

@@ -118,6 +118,8 @@ function fixture(overrides: { maxReplayBytes?: number; maxInputBytes?: number; i
   let unassignError: Error | undefined;
   let startBarrier: Promise<void> | undefined;
   let releaseStart: (() => void) | undefined;
+  let stopBarrier: Promise<void> | undefined;
+  let releaseStop: (() => void) | undefined;
   const registry = {
     byPath(target: string) {
       return [...registered.values()].find(entry => entry.path === target);
@@ -134,16 +136,38 @@ function fixture(overrides: { maxReplayBytes?: number; maxInputBytes?: number; i
       return registered.delete(id);
     },
   };
+  // Mirrors SessionManager's per-workspace lifecycle queue: operations for
+  // one workspace serialize, and the failure/stop hooks run inside their
+  // owning operation, before the queue is released.
+  const lifecycle = new Map<string, Promise<unknown>>();
+  const enqueue = <T,>(id: string, operation: () => Promise<T>): Promise<T> => {
+    const previous = lifecycle.get(id) ?? Promise.resolve();
+    const next = previous.then(operation, operation);
+    lifecycle.set(id, next.then(() => undefined, () => undefined));
+    return next;
+  };
   const sessions = {
-    async start(id: string) {
-      started.push(id);
-      await startBarrier;
-      if (startError) throw startError;
+    start(id: string, onFailure?: () => Promise<void>) {
+      return enqueue(id, async () => {
+        started.push(id);
+        await startBarrier;
+        if (startError) {
+          await onFailure?.();
+          throw startError;
+        }
+      });
     },
-    async stop(id: string) {
-      stopped.push(id);
-      if (stopError) throw stopError;
-      return true;
+    stop(id: string, onStopped?: () => Promise<void>) {
+      return enqueue(id, async () => {
+        stopped.push(id);
+        await stopBarrier;
+        if (stopError) throw stopError;
+        await onStopped?.();
+        return true;
+      });
+    },
+    runExclusive<T>(id: string, operation: () => Promise<T>) {
+      return enqueue(id, operation);
     },
   };
   let id = 0;
@@ -171,7 +195,7 @@ function fixture(overrides: { maxReplayBytes?: number; maxInputBytes?: number; i
     maxInputBytes: overrides.maxInputBytes ?? 20,
   });
   return {
-    manager, timer, processes, starts, registered, removed, started, stopped, assigned, unassigned,
+    manager, timer, processes, starts, registered, removed, started, stopped, assigned, unassigned, sessions,
     failRegister(error: Error) { registerError = error; },
     failRemove(error: Error) { removeError = error; },
     failStart(error: Error) { startError = error; },
@@ -184,6 +208,12 @@ function fixture(overrides: { maxReplayBytes?: number; maxInputBytes?: number; i
       });
     },
     releaseHeldStart() { releaseStart?.(); },
+    holdStop() {
+      stopBarrier = new Promise(resolve => {
+        releaseStop = resolve;
+      });
+    },
+    releaseHeldStop() { releaseStop?.(); },
   };
 }
 
@@ -308,6 +338,65 @@ describe("CloneJobManager state machine", () => {
     expect(f.removed).toEqual(["repo"]);
     expect(f.registered.size).toBe(0);
     expect(capture(f.manager, "alice", jobId).at(-1)?.data).toMatchObject({ status: "start-failed" });
+  });
+
+  test("a queued assignment observes failed-start rollback, not the doomed registration", async () => {
+    const f = fixture();
+    f.failStart(new Error("backend unavailable"));
+    f.holdStart();
+    const { jobId } = f.manager.create("alice", "git@github.com:acme/repo.git", "/tmp/assign-race", {
+      credential: selectedCredential,
+      retainAssignment: true,
+    });
+    await tick();
+    f.processes[0].exit(0);
+    await tick();
+    expect(f.started).toEqual(["repo"]);
+
+    // A credential assignment request queued while the start is failing must
+    // run after the in-lifecycle rollback — never against the registration
+    // the rollback is about to remove.
+    let sawRegistration: boolean | undefined;
+    const queued = f.sessions.runExclusive("repo", async () => {
+      sawRegistration = f.registered.has("repo");
+    });
+    f.releaseHeldStart();
+    await queued;
+    await tick();
+
+    expect(sawRegistration).toBe(false);
+    expect(f.removed).toEqual(["repo"]);
+    expect(capture(f.manager, "alice", jobId).at(-1)?.data).toMatchObject({ status: "start-failed" });
+  });
+
+  test("cancellation rollback runs inside the stop lifecycle, ahead of queued assignments", async () => {
+    const f = fixture();
+    f.holdStart();
+    const { jobId } = f.manager.create("alice", "git@github.com:acme/repo.git", "/tmp/cancel-race", {
+      credential: selectedCredential,
+      retainAssignment: true,
+    });
+    await tick();
+    f.processes[0].exit(0);
+    await tick();
+
+    const cancelling = f.manager.cancel("alice", jobId);
+    f.holdStop();
+    f.releaseHeldStart();
+    await tick();
+    expect(f.stopped).toEqual(["repo"]);
+
+    let sawRegistration: boolean | undefined;
+    const queued = f.sessions.runExclusive("repo", async () => {
+      sawRegistration = f.registered.has("repo");
+    });
+    f.releaseHeldStop();
+    await queued;
+
+    expect(sawRegistration).toBe(false);
+    expect(await cancelling).toBe("cancelled");
+    expect(f.unassigned).toEqual(["repo"]);
+    expect(f.removed).toEqual(["repo"]);
   });
 
   test("restores a retained assignment when registration rollback fails", async () => {

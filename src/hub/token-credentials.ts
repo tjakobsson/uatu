@@ -73,25 +73,13 @@ export class TokenCredentialManager {
 
   delete(credentialId: string, unassign = false): Promise<boolean> {
     return this.enqueue(async () => {
-      const credential = this.requireToken(credentialId);
-      const assignments = this.metadata.snapshot().assignments.filter(item => item.credentialId === credentialId);
-      const deleted = await this.metadata.deleteCredential(credentialId, unassign);
-      if (deleted) {
-        try {
-          await this.secrets.delete(credentialId);
-        } catch (error) {
-          await this.metadata.transaction(state => {
-            if (!state.credentials.some(item => item.id === credentialId)) state.credentials.push(credential);
-            state.assignments.push(...assignments.filter(assignment => !state.assignments.some(existing => (
-              existing.workspaceId === assignment.workspaceId
-              && existing.credentialId === assignment.credentialId
-              && existing.role === assignment.role
-            ))));
-          });
-          throw error;
-        }
-      }
-      return deleted;
+      this.requireToken(credentialId);
+      // The cleanup transaction holds the metadata mutation queue through
+      // secret deletion and any rollback, so a concurrent assignment cannot
+      // install a replacement default that the rollback would then duplicate.
+      return this.metadata.deleteCredentialWithCleanup(credentialId, unassign, async () => {
+        await this.secrets.delete(credentialId);
+      });
     });
   }
 

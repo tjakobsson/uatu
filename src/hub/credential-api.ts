@@ -1,5 +1,5 @@
 import type { CredentialMetadataStore } from "./credential-store";
-import type { SshCredentialService } from "./credential-ssh";
+import type { SshCredentialOperations } from "./credential-ssh";
 import type { CredentialToolManager } from "./credential-tools";
 import type { OpenPgpCredentialManager } from "./openpgp-credentials";
 import type { TokenCredentialManager } from "./token-credentials";
@@ -25,7 +25,7 @@ type JsonObject = Record<string, unknown>;
 export type CredentialApiServices = {
   metadata: CredentialMetadataStore;
   tools: CredentialToolManager;
-  ssh: SshCredentialService | null;
+  ssh: SshCredentialOperations | null;
   openpgp: OpenPgpCredentialManager;
   tokens: TokenCredentialManager;
   workspaceExists(workspaceId: string): boolean;
@@ -358,7 +358,7 @@ export class CredentialApi {
     return [{ layer: "credential", status: this.services.tokens.resolve(credentialId) ? "ready" : "unavailable", message: this.services.tokens.resolve(credentialId) ? "The token credential is available." : "The token credential is unavailable." }];
   }
 
-  private requireSsh(): SshCredentialService {
+  private requireSsh(): SshCredentialOperations {
     if (!this.services.ssh) throw new Error("OpenSSH credential tooling is unavailable");
     return this.services.ssh;
   }

@@ -10,7 +10,7 @@
 - [x] 2.1 Implement bounded executable discovery and absolute-path validation for the OpenSSH client and key/agent tools, GnuPG, Git, `gh`, and `glab` without shell interpolation.
 - [x] 2.2 Implement layered version/runtime/readiness probes with timeouts, output caps, sanitized structured results, and independent degradation per capability.
 - [x] 2.3 Add platform-specific installation/path guidance and tests proving diagnostics do not include environment values, command input, private material, or unbounded stderr.
-- [x] 2.4 Persist validated tool overrides, serialize mutation with re-probing, degrade stale persisted overrides without blocking startup, re-probe after mutation, and keep a failed override from replacing the last usable configuration.
+- [x] 2.4 Persist validated tool overrides, serialize mutation with re-probing and SSH runtime replacement with in-flight credential operations, degrade stale persisted overrides without blocking startup, re-probe after mutation, and keep a failed override from replacing the last usable configuration.
 
 ## 3. Managed SSH Credentials
 
@@ -28,7 +28,7 @@
 
 ## 5. HTTPS And Provider Credentials
 
-- [x] 5.1 Add HTTPS/provider token creation, host normalization, assignable Git/provider-CLI capabilities including provider-only tokens, enable/disable/delete behavior, and owner-only persistence.
+- [x] 5.1 Add HTTPS/provider token creation, host normalization, assignable Git/provider-CLI capabilities including provider-only tokens, enable/disable behavior, deletion with secret cleanup and rollback under one metadata transaction, and owner-only persistence.
 - [x] 5.2 Add the compiled binary's internal Git credential-helper mode using the standard stdin/stdout protocol, exact protocol/host matching, bounded input, and no logging.
 - [x] 5.3 Add `gh` and `glab` runtime adapters that create provider-specific configuration outside repositories, reject ambiguous multi-host projection, and report unsupported or missing CLI versions independently.
 - [x] 5.4 Add tests proving tokens never appear in remote URLs, process arguments, repository files, API responses, clone output, or mismatched-host credential-helper responses.
@@ -37,7 +37,7 @@
 
 - [x] 6.1 Extend the session-backend contract with a resolved credential context, quote generated SSH paths, isolate each session generation's runtime cleanup, and update all local, fake, integration, and test backends to consume it explicitly.
 - [x] 6.2 Generate runtime-only SSH and Git configuration for assigned authentication and SSH/OpenPGP signing defaults while preserving unrelated user Git configuration.
-- [x] 6.3 Generate HTTPS helper and provider-CLI runtime context for assignments, strip ambient credential variables, and ensure a workspace with no assignments receives no Hub or ambient credential integration.
+- [x] 6.3 Generate HTTPS helper and provider-CLI runtime context for assignments, reject provider-CLI assignments while their CLI is unavailable, strip ambient credential variables, and ensure a workspace with no assignments receives no Hub or ambient credential integration.
 - [x] 6.4 Wire the generated context through `uatu serve` into newly created embedded PTYs and report when assignment changes require a running workspace restart.
 - [x] 6.5 Add adversarial local-backend tests showing normal Git configuration selects assignments while the product warning and docs explicitly acknowledge that same-UID processes can bypass them.
 

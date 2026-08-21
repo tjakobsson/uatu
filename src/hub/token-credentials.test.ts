@@ -74,6 +74,52 @@ describe("TokenCredentialManager", () => {
     expect(await readFile(fixture.tokenPath, "utf8")).not.toContain("sentinel-provider-token");
   });
 
+  test("holds the metadata lock through failed secret deletion so a replacement default cannot be duplicated by rollback", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "uatu-token-credentials-"));
+    tempDirectories.push(directory);
+    const metadata = new CredentialMetadataStore(path.join(directory, "credentials.json"));
+    let reachedDelete!: () => void;
+    const deleteReached = new Promise<void>(resolve => { reachedDelete = resolve; });
+    let releaseDelete!: () => void;
+    const deleteGate = new Promise<void>(resolve => { releaseDelete = resolve; });
+    class BlockedFailingTokenStore extends CredentialTokenStore {
+      override async delete(): Promise<boolean> {
+        reachedDelete();
+        await deleteGate;
+        throw new Error("secret deletion failed");
+      }
+    }
+    const manager = new TokenCredentialManager(metadata, new BlockedFailingTokenStore(path.join(directory, "tokens.json")));
+    await manager.load();
+    for (const id of ["token-1", "token-2"]) {
+      await metadata.create({
+        name: id,
+        type: "token",
+        capabilities: ["https-git"],
+        enabled: true,
+        metadata: { host: "gitlab.com" },
+      }, () => id);
+    }
+    await metadata.assign({ workspaceId: "w1", credentialId: "token-1", role: "authentication", host: "gitlab.com" });
+
+    const deletion = manager.delete("token-1", true);
+    await deleteReached;
+    // The metadata deletion has committed and its cleanup is failing. A
+    // replacement default assigned now must wait for the rollback — landing
+    // in the gap would leave the workspace with two authentication defaults.
+    const replacement = metadata.assign(
+      { workspaceId: "w1", credentialId: "token-2", role: "authentication", host: "gitlab.com" },
+      true,
+    );
+    releaseDelete();
+    await expect(deletion).rejects.toThrow("secret deletion failed");
+    await replacement;
+
+    const defaults = metadata.snapshot().assignments.filter(assignment =>
+      assignment.workspaceId === "w1" && assignment.role === "authentication");
+    expect(defaults).toEqual([{ workspaceId: "w1", credentialId: "token-2", role: "authentication", host: "gitlab.com" }]);
+  });
+
   test("rejects ambiguous provider capabilities and host paths", async () => {
     const fixture = await manager();
     await expect(fixture.manager.create({

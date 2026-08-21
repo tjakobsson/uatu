@@ -28,6 +28,14 @@ export type SshCredentialServiceOptions = {
 
 type PtyResult = { exitCode: number; publicOutput: string };
 
+// The public operation surface consumers hold instead of the class, so the
+// hub can interpose a facade that serializes operations with SSH runtime
+// replacement (a tool-override refresh swapping the agent/service pair).
+export type SshCredentialOperations = Pick<
+  SshCredentialService,
+  "generate" | "import" | "unlock" | "lock" | "setEnabled" | "delete" | "testUsability"
+>;
+
 function credentialFile(directory: string, credentialId: string): string {
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(credentialId)) throw new Error("invalid SSH credential id");
   return path.join(directory, `${credentialId}.key`);

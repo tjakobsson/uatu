@@ -272,6 +272,15 @@ export function createStoredCredentialContextResolver(
       )).every(Boolean))) {
         throw new Error("an assigned SSH credential is locked; unlock it before starting the workspace");
       }
+      for (const item of authentication) {
+        if (item.credential.type !== "token") continue;
+        if (item.credential.capabilities.includes("github-cli") && !options.tools.gh) {
+          throw new Error("an assigned GitHub CLI credential requires a configured GitHub CLI");
+        }
+        if (item.credential.capabilities.includes("gitlab-cli") && !options.tools.glab) {
+          throw new Error("an assigned GitLab CLI credential requires a configured GitLab CLI");
+        }
+      }
       if (signing?.type === "openpgp" && !options.tools.gpg) {
         throw new Error("an assigned OpenPGP credential requires configured GnuPG tooling");
       }

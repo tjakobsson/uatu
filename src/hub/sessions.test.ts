@@ -347,4 +347,50 @@ describe("SessionManager serialized lifecycle", () => {
     await queued;
     expect(order).toEqual(["start", "cleanup", "queued"]);
   });
+
+  test("runs stop cleanup before the next workspace mutation", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-stop-cleanup-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    await registry.register("/srv/workspaces/stop-cleanup");
+    const order: string[] = [];
+    const backend: SessionBackend = {
+      start: async workspace => fakeSession(workspace.id, () => order.push("stop")),
+    };
+    const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
+    await sessions.start("stop-cleanup");
+
+    const stopping = sessions.stop("stop-cleanup", async () => { order.push("cleanup"); });
+    const queued = sessions.runExclusive("stop-cleanup", async () => { order.push("queued"); });
+    expect(await stopping).toBe(true);
+    await queued;
+    expect(order).toEqual(["stop", "cleanup", "queued"]);
+
+    // Without a live child (it may have crashed and been reaped) the cleanup
+    // still runs — the caller's rollback must not depend on the child.
+    expect(await sessions.stop("stop-cleanup", async () => { order.push("reaped-cleanup"); })).toBe(false);
+    expect(order).toEqual(["stop", "cleanup", "queued", "reaped-cleanup"]);
+  });
+
+  test("skips stop cleanup when the child refuses to stop", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-stop-refused-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    await registry.register("/srv/workspaces/stop-refused");
+    const backend: SessionBackend = {
+      start: async workspace => ({
+        ...fakeSession(workspace.id),
+        stop: async () => { throw new Error("backend refused stop"); },
+      }),
+    };
+    const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
+    await sessions.start("stop-refused");
+
+    let cleaned = false;
+    await expect(sessions.stop("stop-refused", async () => { cleaned = true; })).rejects.toThrow("backend refused stop");
+    expect(cleaned).toBe(false);
+    expect(sessions.isRunning("stop-refused")).toBe(true);
+  });
 });

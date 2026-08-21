@@ -162,6 +162,40 @@ describe("local workspace credential projection", () => {
     expect((await resolver.resolve(workspace)).signing?.id).toBe(openpgp.id);
   });
 
+  test("rejects provider CLI assignments while their CLI is unavailable", async () => {
+    const { root, workspace } = await fixture();
+    const metadata = new CredentialMetadataStore(path.join(root, "credentials.json"));
+    const tokens = new CredentialTokenStore(path.join(root, "tokens.json"));
+    await Promise.all([metadata.load(), tokens.load()]);
+    const credential = await metadata.create({
+      name: "GitHub CLI token",
+      type: "token",
+      capabilities: ["github-cli"],
+      enabled: true,
+      metadata: { host: "github.com" },
+    }, () => "provider-token", () => new Date(createdAt));
+    await tokens.set(credential.id, "provider-secret");
+    await metadata.assign({ workspaceId: workspace.id, credentialId: credential.id, role: "authentication", host: "github.com" });
+    const tools = { ssh: null, git: null, gpg: null, sshKeygen: null, gh: null as string | null, glab: null };
+    const resolver = createStoredCredentialContextResolver({
+      metadata,
+      tokens,
+      stateRoot: root,
+      runtimeRoot: path.join(root, "runtime"),
+      gnupgHome: path.join(root, "gnupg"),
+      sshAgentSocket: () => undefined,
+      sshCredentialUsable: async () => false,
+      openPgpCredentialUsable: async () => false,
+      tools,
+    });
+
+    // A provider-only token with no usable CLI must fail resolution instead
+    // of starting the workspace with a declared-but-unusable assignment.
+    await expect(resolver.resolve(workspace)).rejects.toThrow("assigned GitHub CLI credential requires a configured GitHub CLI");
+    tools.gh = "/managed/gh";
+    expect((await resolver.resolve(workspace)).authentication).toHaveLength(1);
+  });
+
   test("selects assigned SSH, HTTPS, provider, and signing credentials without replacing unrelated Git config", async () => {
     const { root, home, workspace } = await fixture();
     const managedGh = path.join(root, "custom-provider-cli");

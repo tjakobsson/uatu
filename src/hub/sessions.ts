@@ -150,16 +150,21 @@ export class SessionManager {
     return published;
   }
 
-  stop(workspaceId: string): Promise<boolean> {
+  // onStopped runs inside the same lifecycle operation, after the child is
+  // down — cleanup that must not interleave with queued operations on this
+  // workspace (clone rollback removing the registration) goes there. It runs
+  // even when no child was alive (it may have crashed and been reaped), but
+  // not when stopping the child fails.
+  stop(workspaceId: string, onStopped?: () => Promise<void>): Promise<boolean> {
     return this.enqueue(workspaceId, async () => {
       const session = this.running.get(workspaceId);
-      if (!session) {
-        return false;
+      if (session) {
+        await session.stop();
+        this.running.delete(workspaceId);
+        this.runningCredentialRevisions.delete(workspaceId);
       }
-      await session.stop();
-      this.running.delete(workspaceId);
-      this.runningCredentialRevisions.delete(workspaceId);
-      return true;
+      await onStopped?.();
+      return session !== undefined;
     });
   }
 

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { passwordFromPipedInput, stopHubRuntime } from "./main";
+import { createSshRuntimeGate, passwordFromPipedInput, stopHubRuntime } from "./main";
 
 describe("passwordFromPipedInput", () => {
   test("strips exactly one trailing line terminator", () => {
@@ -19,6 +19,49 @@ describe("passwordFromPipedInput", () => {
   test("empty input stays empty (caller rejects it)", () => {
     expect(passwordFromPipedInput("")).toBe("");
     expect(passwordFromPipedInput("\n")).toBe("");
+  });
+});
+
+describe("createSshRuntimeGate", () => {
+  test("replacement drains in-flight operations and holds new ones until the swap lands", async () => {
+    let service = "old-service";
+    const gate = createSshRuntimeGate(() => service);
+    const order: string[] = [];
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+
+    const first = gate.run(async captured => {
+      await firstGate;
+      order.push(`first:${captured}`);
+      return captured;
+    });
+    // The unlock-vs-override race: replacement must not swap while `first`
+    // still holds the old service, and `second` must not capture a service
+    // mid-swap.
+    const replacement = gate.replace(async () => {
+      order.push("swap");
+      service = "new-service";
+    });
+    const second = gate.run(async captured => {
+      order.push(`second:${captured}`);
+      return captured;
+    });
+
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(order).toEqual([]);
+    releaseFirst();
+    expect(await first).toBe("old-service");
+    await replacement;
+    expect(await second).toBe("new-service");
+    expect(order).toEqual(["first:old-service", "swap", "second:new-service"]);
+  });
+
+  test("a rejected operation neither wedges the gate nor blocks replacement", async () => {
+    let service = "one";
+    const gate = createSshRuntimeGate(() => service);
+    await expect(gate.run(async () => { throw new Error("operation failed"); })).rejects.toThrow("operation failed");
+    await gate.replace(async () => { service = "two"; });
+    expect(await gate.run(async captured => captured)).toBe("two");
   });
 });
 

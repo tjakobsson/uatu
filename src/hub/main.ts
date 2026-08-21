@@ -7,7 +7,7 @@ import path from "node:path";
 
 import { LocalProcessBackend, resolveUatuArgv } from "./backend";
 import { ManagedSshAgent } from "./credential-ssh-agent";
-import { SshCredentialService } from "./credential-ssh";
+import { SshCredentialService, type SshCredentialOperations } from "./credential-ssh";
 import { CredentialMetadataStore, CredentialTokenStore, CredentialToolOverrideStore } from "./credential-store";
 import { CredentialToolManager, readyToolPath } from "./credential-tools";
 import { OpenPgpCredentialManager } from "./openpgp-credentials";
@@ -66,6 +66,47 @@ export async function stopHubRuntime(parts: {
   if (agents[1]?.status === "rejected") report("uatu hub: OpenPGP agent shutdown failed");
 }
 
+// Coordinates SSH credential operations with runtime replacement. An
+// operation runs against the service captured when it starts; replace()
+// waits for in-flight operations to drain and holds new ones until the swap
+// completes, so no operation can restart an agent that shutdown() has
+// already observed stopped (which would orphan the agent on the fixed
+// socket and leave the replacement manager refusing it).
+export function createSshRuntimeGate<Service>(current: () => Service): {
+  run<T>(operation: (service: Service) => Promise<T>): Promise<T>;
+  replace(swap: () => Promise<void>): Promise<void>;
+} {
+  let barrier: Promise<void> | null = null;
+  const operations = new Set<Promise<unknown>>();
+  return {
+    async run(operation) {
+      while (barrier) await barrier;
+      const running = operation(current());
+      const settled = running.catch(() => undefined);
+      operations.add(settled);
+      try {
+        return await running;
+      } finally {
+        operations.delete(settled);
+      }
+    },
+    async replace(swap) {
+      let release!: () => void;
+      const held = new Promise<void>(resolve => {
+        release = resolve;
+      });
+      barrier = held;
+      try {
+        while (operations.size > 0) await Promise.all([...operations]);
+        await swap();
+      } finally {
+        if (barrier === held) barrier = null;
+        release();
+      }
+    },
+  };
+}
+
 export async function runHub(options: RunHubOptions): Promise<void> {
   const config = await loadHubConfig(options.configPath);
   if (options.port !== undefined) {
@@ -94,6 +135,7 @@ export async function runHub(options: RunHubOptions): Promise<void> {
   await Promise.all([credentialTokens.load(), credentialTools.load()]);
   let sshAgent: ManagedSshAgent | null = null;
   let sshCredentials: SshCredentialService | null = null;
+  const sshRuntime = createSshRuntimeGate(() => sshCredentials);
   let openPgpCredentials: OpenPgpCredentialManager;
   let activePaths = new Map<string, string | null>();
   const contextTools = { ssh: null, git: null, gpg: null, sshKeygen: null, gh: null, glab: null } as {
@@ -103,18 +145,20 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     const paths = new Map(credentialTools.list().map(tool => [tool.tool, readyToolPath(tool)]));
     const sshChanged = (["ssh-agent", "ssh-keygen", "ssh-add"] as const).some(tool => paths.get(tool) !== activePaths.get(tool));
     if (sshChanged) {
-      await sshAgent?.shutdown();
-      const agentPath = paths.get("ssh-agent");
-      const keygenPath = paths.get("ssh-keygen");
-      const addPath = paths.get("ssh-add");
-      sshAgent = agentPath ? new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(stateRoot), sshAgentPath: agentPath }) : null;
-      sshCredentials = sshAgent && keygenPath && addPath ? new SshCredentialService({
-        secretsDirectory: credentialSecretsPath(stateRoot),
-        metadataStore: credentialMetadata,
-        agent: sshAgent,
-        sshKeygenPath: keygenPath,
-        sshAddPath: addPath,
-      }) : null;
+      await sshRuntime.replace(async () => {
+        await sshAgent?.shutdown();
+        const agentPath = paths.get("ssh-agent");
+        const keygenPath = paths.get("ssh-keygen");
+        const addPath = paths.get("ssh-add");
+        sshAgent = agentPath ? new ManagedSshAgent({ runtimeDirectory: credentialRuntimePath(stateRoot), sshAgentPath: agentPath }) : null;
+        sshCredentials = sshAgent && keygenPath && addPath ? new SshCredentialService({
+          secretsDirectory: credentialSecretsPath(stateRoot),
+          metadataStore: credentialMetadata,
+          agent: sshAgent,
+          sshKeygenPath: keygenPath,
+          sshAddPath: addPath,
+        }) : null;
+      });
     }
     if (!openPgpCredentials || paths.get("gpg") !== activePaths.get("gpg") || paths.get("gpgconf") !== activePaths.get("gpgconf")) {
       openPgpCredentials = new OpenPgpCredentialManager({
@@ -133,6 +177,22 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     activePaths = paths;
   };
   await refreshCredentialRuntime();
+  const requireSshService = (service: SshCredentialService | null): SshCredentialService => {
+    if (!service) throw new Error("OpenSSH credential tooling is unavailable");
+    return service;
+  };
+  // Every SSH credential operation goes through the gate so a tool-override
+  // refresh cannot swap the agent/service pair out from under it.
+  const sshOperations: SshCredentialOperations = {
+    generate: (name, capabilities, passphrase) => sshRuntime.run(service => requireSshService(service).generate(name, capabilities, passphrase)),
+    import: (name, capabilities, privateKey, passphrase) => sshRuntime.run(service => requireSshService(service).import(name, capabilities, privateKey, passphrase)),
+    unlock: (credentialId, passphrase) => sshRuntime.run(service => requireSshService(service).unlock(credentialId, passphrase)),
+    lock: credentialId => sshRuntime.run(service => requireSshService(service).lock(credentialId)),
+    setEnabled: (credentialId, enabled) => sshRuntime.run(service => requireSshService(service).setEnabled(credentialId, enabled)),
+    delete: (credentialId, unassign) => sshRuntime.run(service => requireSshService(service).delete(credentialId, unassign)),
+    testUsability: credentialId => sshRuntime.run(service => service?.testUsability(credentialId) ?? Promise.resolve(false)),
+  };
+  const sshUsable = (credentialId: string) => sshOperations.testUsability(credentialId);
   const tokenCredentials = new TokenCredentialManager(credentialMetadata, credentialTokens);
   const credentialContexts = createStoredCredentialContextResolver({
     metadata: credentialMetadata,
@@ -141,7 +201,7 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     runtimeRoot: credentialRuntimePath(stateRoot),
     gnupgHome: credentialGnuPgPath(stateRoot),
     sshAgentSocket: () => sshAgent?.currentSocket(),
-    sshCredentialUsable: credentialId => sshCredentials?.testUsability(credentialId) ?? Promise.resolve(false),
+    sshCredentialUsable: sshUsable,
     openPgpCredentialUsable: async credentialId => {
       const readiness = await openPgpCredentials.test(credentialId);
       return readiness.every(result => result.status !== "unavailable");
@@ -156,7 +216,7 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     sshAgentSocket: () => sshAgent?.currentSocket(),
     sshPath: () => activePaths.get("ssh") ?? undefined,
     sshPublicKeyPath: credentialId => path.join(credentialSecretsPath(stateRoot), `${credentialId}.key.pub`),
-    sshCredentialUsable: credentialId => sshCredentials?.testUsability(credentialId) ?? Promise.resolve(false),
+    sshCredentialUsable: sshUsable,
     uatuArgv: resolveUatuArgv(),
   });
   const server = startHubServer({
@@ -170,7 +230,7 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     credentialApi: {
       metadata: credentialMetadata,
       tools: credentialTools,
-      get ssh() { return sshCredentials; },
+      get ssh() { return sshCredentials ? sshOperations : null; },
       get openpgp() { return openPgpCredentials; },
       tokens: tokenCredentials,
       workspaceExists: workspaceId => registry.byId(workspaceId) !== undefined,
