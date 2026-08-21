@@ -162,6 +162,8 @@ describe("settings page", () => {
     expect(html).toContain("openCredentialIds.has(credential.id)");
     expect(html).toContain("Assign selected");
     expect(html).toContain("Selected credentials replace the current defaults");
+    // A failed signing half rolls the committed authentication half back.
+    expect(html).toContain("authenticationAssigned && signing.value");
     expect(html).toContain('host.disabled = !selected');
     expect(html).toContain('value === "github-cli" || value === "gitlab-cli"');
     expect(html).toContain("Authentication host");

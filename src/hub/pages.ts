@@ -954,15 +954,33 @@ function workspaceAssignmentForm(actionError) {
       return;
     }
     await withBusy(button, "Assigning…", async () => {
+      let authenticationAssigned = false;
       try {
-        if (authentication.value) await api(credentialPath + "/" + encodeURIComponent(authentication.value) + "/assign", {
-          workspaceId: workspace.value, role: "authentication", host: host.value.trim(), replace: true,
-        });
+        if (authentication.value) {
+          await api(credentialPath + "/" + encodeURIComponent(authentication.value) + "/assign", {
+            workspaceId: workspace.value, role: "authentication", host: host.value.trim(), replace: true,
+          });
+          authenticationAssigned = true;
+        }
         if (signing.value) await api(credentialPath + "/" + encodeURIComponent(signing.value) + "/assign", {
           workspaceId: workspace.value, role: "signing", replace: true,
         });
         await Promise.all([loadSettingsState(), loadCredentials()]);
-      } catch (error) { setLocalError(actionError, error.message); }
+      } catch (error) {
+        // A failed second half must not leave the paired form half-applied:
+        // undo the committed authentication default (best effort — a
+        // replaced previous default is not restored) and refresh so the UI
+        // shows what actually persisted.
+        if (authenticationAssigned && signing.value) {
+          try {
+            await api(credentialPath + "/" + encodeURIComponent(authentication.value) + "/unassign", {
+              workspaceId: workspace.value, role: "authentication", host: host.value.trim(),
+            });
+          } catch {}
+        }
+        try { await Promise.all([loadSettingsState(), loadCredentials()]); } catch {}
+        setLocalError(actionError, error.message);
+      }
     });
   };
   return form;

@@ -209,13 +209,17 @@ export async function runHub(options: RunHubOptions): Promise<void> {
           gpgconfPath: paths.get("gpgconf") ?? null,
         });
         if (openPgpRecoveryPending) {
-          const gpgConfigured = (paths.get("gpg") ?? paths.get("gpgconf") ?? null) !== null;
           const recovery = await replacement.shutdown();
-          openPgpRecoveryPending = gpgConfigured && recovery.some(result => result.status === "unavailable");
-          if (openPgpRecoveryPending) {
+          // Pending until a scoped agent kill has actually SUCCEEDED — a
+          // start without GnuPG tooling must not clear it, or configuring
+          // the tools later would skip recovery and reconnect gpg to the
+          // survivor's cached passphrases.
+          openPgpRecoveryPending = recovery.some(result => result.status === "unavailable");
+          if (openPgpRecoveryPending && (paths.get("gpg") ?? paths.get("gpgconf") ?? null) !== null) {
             // Fail closed: gpg could reconnect to the surviving agent and
             // sign with its cached passphrase, so OpenPGP stays unavailable
-            // until a re-probe clears the agent.
+            // until a re-probe clears the agent. (Without any configured
+            // tooling the replacement already reports unavailable.)
             console.error("uatu hub: could not clear a possibly surviving OpenPGP agent; OpenPGP credentials stay unavailable until a tool re-probe succeeds");
             openPgpCredentials = new OpenPgpCredentialManager({
               gnupgHome: credentialGnuPgPath(stateRoot),
