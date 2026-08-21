@@ -32,6 +32,7 @@ export type ToolDiscovery = {
   tool: CredentialTool;
   path: string | null;
   source: "override" | "path" | "missing";
+  invalid?: boolean;
 };
 
 function pathEntries(value: string | undefined): string[] {
@@ -81,10 +82,15 @@ export async function discoverCredentialTools(
   overrides: Partial<Record<CredentialTool, string>> = {},
   servicePath: string | undefined = process.env.PATH,
 ): Promise<ToolDiscovery[]> {
-  return Promise.all(CREDENTIAL_TOOLS.map(tool => discoverExecutable(tool, {
-    override: overrides[tool],
-    path: servicePath,
-  })));
+  return Promise.all(CREDENTIAL_TOOLS.map(async tool => {
+    try {
+      return await discoverExecutable(tool, { override: overrides[tool], path: servicePath });
+    } catch {
+      const override = overrides[tool];
+      if (override === undefined) throw new Error(`credential tool discovery failed: ${tool}`);
+      return { tool, path: override, source: "override", invalid: true };
+    }
+  }));
 }
 
 type ProcessProbeResult = {
@@ -173,6 +179,16 @@ export async function probeCredentialTool(
   timeoutMs = PROBE_TIMEOUT_MS,
 ): Promise<PublicToolReadinessDto> {
   const results: ReadinessResult[] = [];
+  if (discovery.invalid) {
+    results.push({ layer: "binary", status: "unavailable", message: "The configured executable is missing, unsafe, or not executable." });
+    return {
+      tool: discovery.tool,
+      path: discovery.path,
+      version: null,
+      results,
+      guidance: toolInstallationGuidance(discovery.tool),
+    };
+  }
   if (!discovery.path) {
     results.push({ layer: "binary", status: "unavailable", message: "Executable was not found." });
     return {
@@ -253,8 +269,24 @@ export class CredentialToolManager {
       if (result.results.some(layer => layer.layer === "version" && layer.status !== "ready")) {
         throw new Error(`tool override failed validation: ${tool}`);
       }
+      const previous = this.store.get(tool);
       await this.store.set({ tool, path: executablePath });
-      await this.probeAll();
+      try {
+        await this.probeAll();
+        const persisted = this.readiness.get(tool)!;
+        if (persisted.results.some(layer => layer.status === "unavailable")) {
+          throw new Error(`tool override failed validation: ${tool}`);
+        }
+      } catch (error) {
+        try {
+          if (previous) await this.store.set(previous);
+          else await this.store.delete(tool);
+          await this.probeAll();
+        } catch (rollbackError) {
+          throw new AggregateError([error, rollbackError], `tool override failed validation and rollback: ${tool}`);
+        }
+        throw error;
+      }
       return structuredClone(this.readiness.get(tool)!);
     });
   }

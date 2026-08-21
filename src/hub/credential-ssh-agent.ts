@@ -82,6 +82,7 @@ export class ManagedSshAgent {
   private ownership?: AgentOwnership;
   private starting?: Promise<string>;
   private stopping?: Promise<void>;
+  private artifactCleanup?: Promise<void>;
 
   constructor(private readonly options: ManagedSshAgentOptions) {
     this.socketPath = path.join(options.runtimeDirectory, "ssh-agent.sock");
@@ -109,6 +110,7 @@ export class ManagedSshAgent {
   }
 
   private async startOnce(): Promise<string> {
+    if (this.artifactCleanup) await this.artifactCleanup;
     await privateDirectory(this.options.runtimeDirectory);
     await this.recoverRecordWithoutSocket();
     try {
@@ -129,8 +131,16 @@ export class ManagedSshAgent {
     void child.exited.then(() => {
       exited = true;
       if (this.process === child) {
+        const expected = this.ownership;
         this.process = undefined;
         this.ownership = undefined;
+        if (!this.stopping) {
+          const cleanup = this.removeOwnedArtifacts(expected);
+          this.artifactCleanup = cleanup;
+          void cleanup.finally(() => {
+            if (this.artifactCleanup === cleanup) this.artifactCleanup = undefined;
+          }).catch(() => undefined);
+        }
       }
     });
 
@@ -144,6 +154,10 @@ export class ManagedSshAgent {
         socketInode: Number(socket.ino),
       };
       await fs.writeFile(this.ownershipPath, `${JSON.stringify(ownership)}\n`, { flag: "wx", mode: 0o600 });
+      if (exited) {
+        await this.removeOwnedArtifacts(ownership);
+        throw new Error("managed SSH agent exited before startup completed");
+      }
       this.process = child;
       this.ownership = ownership;
       return this.socketPath;
@@ -201,6 +215,7 @@ export class ManagedSshAgent {
 
   private async stopOnce(): Promise<void> {
     if (this.starting) await this.starting.catch(() => undefined);
+    if (this.artifactCleanup) await this.artifactCleanup;
     const child = this.process;
     const expected = this.ownership;
     if (!child || !expected) return;
@@ -262,6 +277,10 @@ export class ManagedSshAgent {
 
   private async removeOwnedArtifacts(expected: AgentOwnership | undefined): Promise<void> {
     if (expected) {
+      const record = await readOwnership(this.ownershipPath);
+      if (record && (record.nonce !== expected.nonce || record.pid !== expected.pid)) {
+        throw new Error("refusing to remove a replaced SSH agent ownership record");
+      }
       const socket = await fs.lstat(this.socketPath).catch(error => isMissing(error) ? undefined : Promise.reject(error));
       if (socket && (Number(socket.dev) !== expected.socketDevice || Number(socket.ino) !== expected.socketInode)) {
         throw new Error("refusing to remove a replaced SSH agent socket");

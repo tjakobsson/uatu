@@ -199,6 +199,26 @@ describe("credential tool probes", () => {
 });
 
 describe("CredentialToolManager", () => {
+  test("reports a stale persisted override without failing startup", async () => {
+    const storePath = await tempPathForStore();
+    const configured = await executable("configured-git");
+    const store = new CredentialToolOverrideStore(storePath);
+    await store.load();
+    await store.set({ tool: "git", path: configured.filePath });
+    await rm(configured.filePath);
+
+    const restartedStore = new CredentialToolOverrideStore(storePath);
+    const manager = new CredentialToolManager(restartedStore, "");
+    await manager.load();
+
+    expect(restartedStore.get("git")?.path).toBe(configured.filePath);
+    expect(manager.list().find(item => item.tool === "git")).toMatchObject({
+      path: configured.filePath,
+      version: null,
+      results: [{ layer: "binary", status: "unavailable" }],
+    });
+  });
+
   test("re-probes startup and mutation while preserving the last override after failure", async () => {
     const storePath = await tempPathForStore();
     const good = await executable("good-git");
@@ -226,6 +246,22 @@ describe("CredentialToolManager", () => {
     await restarted.load();
     expect(restartedStore.get("git")?.path).toBe(good.filePath);
     expect(restarted.list().find(item => item.tool === "git")?.version).toBe("test 1.0");
+  });
+
+  test("rolls back a new override that becomes invalid before the final probe", async () => {
+    const storePath = await tempPathForStore();
+    const good = await executable("good-git");
+    const vanishing = await executable("vanishing-git");
+    await writeFile(good.filePath, "#!/bin/sh\nprintf 'git version 2.51.0\\n'\n", { mode: 0o700 });
+    await writeFile(vanishing.filePath, "#!/bin/sh\nrm \"$0\"\nprintf 'git version 2.51.0\\n'\n", { mode: 0o700 });
+    const store = new CredentialToolOverrideStore(storePath);
+    const manager = new CredentialToolManager(store, "");
+    await manager.load();
+    await manager.setOverride("git", good.filePath);
+
+    await expect(manager.setOverride("git", vanishing.filePath)).rejects.toThrow("failed validation");
+    expect(store.get("git")?.path).toBe(good.filePath);
+    expect(manager.list().find(item => item.tool === "git")?.path).toBe(good.filePath);
   });
 
   test("serializes overlapping override mutations through their reprobes", async () => {

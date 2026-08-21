@@ -89,7 +89,7 @@ After clone success, registration and assignment persistence are coordinated: a 
 
 ### D8: Tool configuration is persisted state with layered probes
 
-Each tool has a default executable name searched through the Hub service's `PATH` and an optional dashboard-managed absolute override. Overrides are accepted only for executable regular files and are stored after validation. Every subprocess probe has fixed argv, timeout, output cap, and sanitized error mapping.
+Each tool has a default executable name searched through the Hub service's `PATH` and an optional dashboard-managed absolute override. Overrides are accepted only for executable regular files and are stored after validation. A persisted override that later becomes invalid degrades to unavailable readiness so Settings remains reachable for repair. Every subprocess probe has fixed argv, timeout, output cap, and sanitized error mapping.
 
 Tests report separate layers: binary found, compatible version, agent/runtime operational, credential loaded, and end-to-end sign/auth capability where applicable. An end-to-end signing test signs a fixed Hub challenge and verifies locally; it never creates a Git commit or contacts a provider. Authentication tests stop at local key usability unless the user explicitly initiates a real clone. Platform installation hints are static product copy, not shell commands executed by the Hub.
 

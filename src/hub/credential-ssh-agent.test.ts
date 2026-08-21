@@ -81,6 +81,25 @@ describe("ManagedSshAgent", () => {
     expect(JSON.parse(await readFile(path.join(runtime, "ssh-agent.json"), "utf8")).pid).not.toBe(impossiblePid);
   });
 
+  test("removes owned artifacts after an unexpected agent exit and restarts", async () => {
+    const { runtime, executable } = await fixture();
+    const agent = new ManagedSshAgent({ runtimeDirectory: runtime, sshAgentPath: executable });
+    agents.push(agent);
+    await agent.start();
+    const ownership = JSON.parse(await readFile(path.join(runtime, "ssh-agent.json"), "utf8"));
+
+    process.kill(ownership.pid, "SIGKILL");
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (agent.currentSocket() === undefined && !await Bun.file(agent.socketPath).exists()) break;
+      await Bun.sleep(10);
+    }
+    expect(agent.currentSocket()).toBeUndefined();
+    expect(await Bun.file(agent.socketPath).exists()).toBe(false);
+    expect(await Bun.file(path.join(runtime, "ssh-agent.json")).exists()).toBe(false);
+
+    expect(await agent.start()).toBe(agent.socketPath);
+  });
+
   test("refuses an unverified socket without spawning or removing it", async () => {
     const { runtime, executable } = await fixture();
     const socketPath = path.join(runtime, "ssh-agent.sock");
