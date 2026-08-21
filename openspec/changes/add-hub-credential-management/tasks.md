@@ -16,7 +16,7 @@
 
 - [x] 3.1 Implement a supervised Hub-owned `ssh-agent` using a fixed owner-only runtime socket, lazy startup, ownership tracking, stale-state recovery, and bounded shutdown.
 - [x] 3.2 Implement passphrase-protected SSH key generation and private-key import that preserves existing key protection, using a private no-echo PTY for encrypted keys and automatic loading for unencrypted keys while storing native key files owner-only and deriving public metadata without exposing secrets.
-- [x] 3.3 Implement SSH unlock, lock, disable, delete, and usability tests through the managed agent, with all passphrases excluded from argv, environment, logs, captured output, and persistence.
+- [x] 3.3 Implement SSH unlock, lock, disable, delete, and per-assigned-key usability tests through the managed agent, with backing-file failures isolated to the affected credential and all passphrases excluded from argv, environment, logs, captured output, and persistence.
 - [x] 3.4 Add integration tests with an ambient fake/system agent proving Hub startup, key operations, and shutdown use only the Hub socket and never signal or mutate the ambient agent.
 
 ## 4. Managed OpenPGP Credentials
@@ -30,7 +30,7 @@
 
 - [x] 5.1 Add HTTPS/provider token creation, host normalization, declared Git/provider-CLI capabilities, enable/disable/delete behavior, and owner-only persistence.
 - [x] 5.2 Add the compiled binary's internal Git credential-helper mode using the standard stdin/stdout protocol, exact protocol/host matching, bounded input, and no logging.
-- [x] 5.3 Add `gh` and `glab` runtime adapters that create provider-specific configuration outside repositories and report unsupported or missing CLI versions independently.
+- [x] 5.3 Add `gh` and `glab` runtime adapters that create provider-specific configuration outside repositories, reject ambiguous multi-host projection, and report unsupported or missing CLI versions independently.
 - [x] 5.4 Add tests proving tokens never appear in remote URLs, process arguments, repository files, API responses, clone output, or mismatched-host credential-helper responses.
 
 ## 6. Workspace Credential Contexts

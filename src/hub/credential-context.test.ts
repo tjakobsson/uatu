@@ -89,6 +89,8 @@ describe("local workspace credential projection", () => {
       runtimeRoot: path.join(root, "runtime"),
       gnupgHome: path.join(root, "gnupg"),
       sshAgentSocket: () => undefined,
+      sshCredentialUsable: async () => false,
+      openPgpCredentialUsable: async () => false,
       tools: { git: null, gpg: null, sshKeygen: null, gh: null, glab: null },
     });
 
@@ -103,6 +105,61 @@ describe("local workspace credential projection", () => {
     const resolved = await resolver.resolve(workspace);
     expect(resolved.authentication).toEqual([{ host: "github.com", credential, token: "secret" }]);
     expect(resolved.revision).not.toBe(before);
+  });
+
+  test("checks each assigned SSH and OpenPGP key before starting a workspace", async () => {
+    const { root, workspace } = await fixture();
+    const metadata = new CredentialMetadataStore(path.join(root, "credentials.json"));
+    const tokens = new CredentialTokenStore(path.join(root, "tokens.json"));
+    await Promise.all([metadata.load(), tokens.load()]);
+    const firstSsh = await metadata.create({
+      name: "loaded key",
+      type: "ssh",
+      capabilities: ["ssh-authentication"],
+      enabled: true,
+      metadata: { publicKey: "ssh-ed25519 AAAAFIRST uatu", fingerprint: "SHA256:first" },
+    }, () => "ssh-first", () => new Date(createdAt));
+    const secondSsh = await metadata.create({
+      name: "locked key",
+      type: "ssh",
+      capabilities: ["ssh-authentication"],
+      enabled: true,
+      metadata: { publicKey: "ssh-ed25519 AAAASECOND uatu", fingerprint: "SHA256:second" },
+    }, () => "ssh-second", () => new Date(createdAt));
+    const openpgp = await metadata.create({
+      name: "locked signing key",
+      type: "openpgp",
+      capabilities: ["openpgp-signing"],
+      enabled: true,
+      metadata: { publicKey: "public", fingerprint: "A".repeat(40) },
+    }, () => "pgp-locked", () => new Date(createdAt));
+    await metadata.assign({ workspaceId: workspace.id, credentialId: firstSsh.id, role: "authentication", host: "one.example.com" });
+    await metadata.assign({ workspaceId: workspace.id, credentialId: secondSsh.id, role: "authentication", host: "two.example.com" });
+    const checkedSsh: string[] = [];
+    let openPgpUsable = false;
+    const resolver = createStoredCredentialContextResolver({
+      metadata,
+      tokens,
+      stateRoot: root,
+      runtimeRoot: path.join(root, "runtime"),
+      gnupgHome: path.join(root, "gnupg"),
+      sshAgentSocket: () => "/managed/agent.sock",
+      sshCredentialUsable: async credentialId => {
+        checkedSsh.push(credentialId);
+        return credentialId === firstSsh.id;
+      },
+      openPgpCredentialUsable: async () => openPgpUsable,
+      tools: { git: null, gpg: "/managed/gpg", sshKeygen: null, gh: null, glab: null },
+    });
+
+    await expect(resolver.resolve(workspace)).rejects.toThrow("assigned SSH credential is locked");
+    expect(checkedSsh.sort()).toEqual([firstSsh.id, secondSsh.id].sort());
+
+    await metadata.unassign(workspace.id, secondSsh.id);
+    await metadata.assign({ workspaceId: workspace.id, credentialId: openpgp.id, role: "signing" });
+    await expect(resolver.resolve(workspace)).rejects.toThrow("assigned OpenPGP credential is locked");
+    openPgpUsable = true;
+    expect((await resolver.resolve(workspace)).signing?.id).toBe(openpgp.id);
   });
 
   test("selects assigned SSH, HTTPS, provider, and signing credentials without replacing unrelated Git config", async () => {
@@ -173,6 +230,82 @@ describe("local workspace credential projection", () => {
     expect(sshConfig).not.toContain("/ambient-agent.sock");
     const helper = await readFile(path.join(projected.runtimeDirectory, "git-credential-token-1"), "utf8");
     expect(helper).not.toContain("provider-secret");
+  });
+
+  test("matches an SSH assignment by hostname and nonstandard port", async () => {
+    const { root, workspace } = await fixture();
+    const ssh: SshCredentialRecord = {
+      id: "ssh-port",
+      name: "port key",
+      type: "ssh",
+      capabilities: ["ssh-authentication"],
+      enabled: true,
+      createdAt,
+      metadata: { publicKey: "ssh-ed25519 AAAATEST uatu", fingerprint: "SHA256:port" },
+    };
+    const projected = await buildLocalCredentialEnvironment({
+      workspace,
+      context: {
+        revision: "port",
+        runtimeRoot: path.join(root, "runtime"),
+        stateRoot: root,
+        sshAgentSocket: "/managed/agent.sock",
+        gnupgHome: path.join(root, "gnupg"),
+        tools: { git: null, gpg: null, sshKeygen: null, gh: null, glab: null },
+        authentication: [{ host: "git.example.com:2222", credential: ssh }],
+        signing: null,
+      },
+      uatuArgv: ["uatu"],
+    });
+
+    const sshConfig = await readFile(path.join(projected.runtimeDirectory, "ssh_config"), "utf8");
+    expect(sshConfig).toContain('Match host git.example.com exec "test %p = 2222"');
+    expect(sshConfig).not.toContain("Host git.example.com:2222");
+    const matching = Bun.spawnSync(["ssh", "-G", "-F", path.join(projected.runtimeDirectory, "ssh_config"), "-p", "2222", "git.example.com"], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const otherPort = Bun.spawnSync(["ssh", "-G", "-F", path.join(projected.runtimeDirectory, "ssh_config"), "-p", "22", "git.example.com"], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(matching.exitCode).toBe(0);
+    expect(matching.stdout.toString()).toContain(`identityfile ${path.join(projected.runtimeDirectory, "ssh-port.pub")}`);
+    expect(otherPort.exitCode).toBe(0);
+    expect(otherPort.stdout.toString()).toContain("identityfile none");
+  });
+
+  test("rejects multiple provider CLI credentials in one workspace", async () => {
+    const { root, workspace } = await fixture();
+    const token = (id: string, host: string): TokenCredentialRecord => ({
+      id,
+      name: host,
+      type: "token",
+      capabilities: ["https-git", "github-cli"],
+      enabled: true,
+      createdAt,
+      metadata: { host },
+    });
+    const first = token("token-one", "one.example.com");
+    const second = token("token-two", "two.example.com");
+
+    await expect(buildLocalCredentialEnvironment({
+      workspace,
+      context: {
+        revision: "providers",
+        runtimeRoot: path.join(root, "runtime"),
+        stateRoot: root,
+        sshAgentSocket: null,
+        gnupgHome: path.join(root, "gnupg"),
+        tools: { git: null, gpg: null, sshKeygen: null, gh: "/managed/gh", glab: null },
+        authentication: [
+          { host: first.metadata.host, credential: first, token: "one" },
+          { host: second.metadata.host, credential: second, token: "two" },
+        ],
+        signing: null,
+      },
+      uatuArgv: ["uatu"],
+    })).rejects.toThrow("only one provider host");
   });
 
   test("projects an OpenPGP signing assignment through the dedicated GnuPG home", async () => {

@@ -140,6 +140,11 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     runtimeRoot: credentialRuntimePath(stateRoot),
     gnupgHome: credentialGnuPgPath(stateRoot),
     sshAgentSocket: () => sshAgent?.currentSocket(),
+    sshCredentialUsable: credentialId => sshCredentials?.testUsability(credentialId) ?? Promise.resolve(false),
+    openPgpCredentialUsable: async credentialId => {
+      const readiness = await openPgpCredentials.test(credentialId);
+      return readiness.every(result => result.status !== "unavailable");
+    },
     tools: contextTools,
   });
   const sessions = new SessionManager(registry, { local: new LocalProcessBackend() }, credentialContexts);

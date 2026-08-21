@@ -391,14 +391,24 @@ export class CloneJobManager {
   }
 
   private async rollback(job: Job, entry: WorkspaceEntry): Promise<string | null> {
+    let unassigned = false;
     try {
       if (job.assigned && job.credential) {
         await this.credentials.unassign(entry.id, job.credential);
         job.assigned = false;
+        unassigned = true;
       }
-      await this.registry.remove(entry.id);
+      if (!(await this.registry.remove(entry.id))) throw new Error("workspace registration was not removed");
       return null;
     } catch (error) {
+      if (unassigned && job.credential) {
+        try {
+          await this.credentials.assign(entry.id, job.credential);
+          job.assigned = true;
+        } catch (restoreError) {
+          return `${errorText(error)}; credential assignment restoration failed: ${errorText(restoreError)}`;
+        }
+      }
       return errorText(error);
     }
   }

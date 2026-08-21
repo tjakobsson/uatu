@@ -197,6 +197,8 @@ export type StoredCredentialContextResolverOptions = {
   runtimeRoot: string;
   gnupgHome: string;
   sshAgentSocket: () => string | undefined;
+  sshCredentialUsable: (credentialId: string) => Promise<boolean>;
+  openPgpCredentialUsable: (credentialId: string) => Promise<boolean>;
   tools: ResolvedCredentialContext["tools"];
 };
 
@@ -252,13 +254,21 @@ export function createStoredCredentialContextResolver(
         }
       }
 
-      const needsSshAgent = authentication.some(item => item.credential.type === "ssh") || signing?.type === "ssh";
+      const sshCredentialIds = new Set(authentication
+        .filter((item): item is Extract<ResolvedAuthenticationCredential, { credential: SshCredentialRecord }> => item.credential.type === "ssh")
+        .map(item => item.credential.id));
+      if (signing?.type === "ssh") sshCredentialIds.add(signing.id);
       const sshAgentSocket = options.sshAgentSocket() ?? null;
-      if (needsSshAgent && !sshAgentSocket) {
+      if (sshCredentialIds.size > 0 && (!sshAgentSocket || !(await Promise.all(
+        [...sshCredentialIds].map(credentialId => options.sshCredentialUsable(credentialId)),
+      )).every(Boolean))) {
         throw new Error("an assigned SSH credential is locked; unlock it before starting the workspace");
       }
       if (signing?.type === "openpgp" && !options.tools.gpg) {
         throw new Error("an assigned OpenPGP credential requires configured GnuPG tooling");
+      }
+      if (signing?.type === "openpgp" && !(await options.openPgpCredentialUsable(signing.id))) {
+        throw new Error("the assigned OpenPGP credential is locked; unlock it before starting the workspace");
       }
 
       return {
@@ -331,6 +341,24 @@ function gitConfigEnvironment(entries: Array<[string, string]>): Record<string, 
   return env;
 }
 
+function assertUnambiguousProviderCliAssignments(authentication: ResolvedAuthenticationCredential[]): void {
+  for (const [capability, label] of [["github-cli", "GitHub"], ["gitlab-cli", "GitLab"]] as const) {
+    const assigned = authentication.filter(item =>
+      item.credential.type === "token" && item.credential.capabilities.includes(capability));
+    if (assigned.length > 1) {
+      throw new Error(`a workspace can use the ${label} CLI credential for only one provider host`);
+    }
+  }
+}
+
+function sshAssignmentMatch(host: string): string {
+  const parsed = new URL(`https://${host}`);
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, "");
+  return parsed.port
+    ? `Match host ${hostname} exec "test %p = ${parsed.port}"`
+    : `Host ${hostname}`;
+}
+
 async function writeCredentialHelper(
   directory: string,
   credentialId: string,
@@ -358,6 +386,7 @@ export async function buildLocalCredentialEnvironment(options: {
   sourceEnv?: NodeJS.ProcessEnv;
 }): Promise<{ env: Record<string, string>; runtimeDirectory: string }> {
   const { workspace, context } = options;
+  assertUnambiguousProviderCliAssignments(context.authentication);
   const runtimeRoot = context.runtimeRoot || path.join(os.tmpdir(), `uatu-empty-credential-runtime-${process.pid}`);
   const runtimeDirectory = path.join(runtimeRoot, "sessions", safeWorkspaceId(workspace.id));
   await fs.rm(runtimeDirectory, { recursive: true, force: true });
@@ -396,7 +425,7 @@ export async function buildLocalCredentialEnvironment(options: {
       const publicKeyPath = path.join(runtimeDirectory, `${assignment.credential.id}.pub`);
       await fs.writeFile(publicKeyPath, `${assignment.credential.metadata.publicKey}\n`, { mode: 0o600 });
       sshLines.push(
-        `Host ${assignment.host}`,
+        sshAssignmentMatch(assignment.host),
         `  IdentityAgent ${context.sshAgentSocket}`,
         `  IdentityFile ${publicKeyPath}`,
         "  IdentitiesOnly yes",

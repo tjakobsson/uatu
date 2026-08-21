@@ -309,6 +309,27 @@ describe("CloneJobManager state machine", () => {
     expect(capture(f.manager, "alice", jobId).at(-1)?.data).toMatchObject({ status: "start-failed" });
   });
 
+  test("restores a retained assignment when registration rollback fails", async () => {
+    const f = fixture();
+    f.failStart(new Error("backend unavailable"));
+    f.failRemove(new Error("registry is read-only"));
+    const { jobId } = f.manager.create("alice", "git@github.com:acme/repo.git", "/tmp/selected-rollback-fail", {
+      credential: selectedCredential,
+      retainAssignment: true,
+    });
+    await tick();
+    f.processes[0].exit(0);
+    await tick();
+
+    expect(f.assigned).toEqual(["repo", "repo"]);
+    expect(f.unassigned).toEqual(["repo"]);
+    expect(f.registered.has("repo")).toBe(true);
+    expect(capture(f.manager, "alice", jobId).at(-1)?.data).toMatchObject({
+      status: "start-failed",
+      error: expect.stringContaining("registry is read-only"),
+    });
+  });
+
   test("rolls registration back when retained assignment persistence fails", async () => {
     const f = fixture();
     f.failAssign(new Error("credential state is read-only"));

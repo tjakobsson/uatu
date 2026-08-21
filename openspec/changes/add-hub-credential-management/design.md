@@ -63,11 +63,11 @@ Provider tokens remain usable after restart unless disabled because they are per
 
 ### D5: Workspace assignment compiles to generated runtime configuration
 
-Assignments are policy records keyed by workspace id and credential id with a role. The Hub enforces at most one default SSH/HTTPS authentication credential per provider host and one default signing credential per workspace. SSH authentication and SSH signing may use distinct keys even though both are held by the managed agent.
+Assignments are policy records keyed by workspace id and credential id with a role. The Hub enforces at most one default SSH/HTTPS authentication credential per provider host and one default signing credential per workspace. SSH authentication and SSH signing may use distinct keys even though both are held by the managed agent. Session startup verifies each assigned SSH or OpenPGP key, not just the presence of its shared agent. A workspace may project only one provider host into each of the `gh` and `glab` process environments because their token variables are not host-indexed.
 
 At session start the Hub resolves assignments into a credential context passed through `SessionBackend.start`. The local backend generates runtime-only configuration outside the repository and passes explicit environment references to the `uatu serve` child, which embedded PTYs already inherit:
 
-- SSH Git transport gets a generated SSH configuration selecting the assigned public key and managed agent socket.
+- SSH Git transport gets a generated SSH configuration selecting the assigned public key and managed agent socket, including hostname-and-port matching for nonstandard ports.
 - SSH signing gets `gpg.format=ssh`, the assigned public-key path, and the managed agent socket.
 - OpenPGP signing gets `gpg.format=openpgp`, the assigned fingerprint, configured `gpg` path, and dedicated GnuPG home.
 - HTTPS Git gets a Git credential-helper command scoped to the assigned credential and provider host.
@@ -85,7 +85,7 @@ Embedding tokens in clone URLs, Git configuration values, or process arguments w
 
 Clone creation accepts an optional credential id and retain-assignment choice. The server validates that the credential type matches the remote transport and host before creating the job. Managed SSH selection configures the public identity and managed socket; managed HTTPS selection configures only the Hub helper. No selection removes inherited agent/helper variables and retains today's PTY response flow.
 
-After clone success, registration and assignment persistence are coordinated: a requested retained assignment is written only for the successfully registered workspace. If session startup then fails and registration rolls back under the existing contract, the assignment rolls back too. Interactive clone responses remain ephemeral and are never offered as a saved credential implicitly.
+After clone success, registration and assignment persistence are coordinated: a requested retained assignment is written only for the successfully registered workspace. If session startup then fails and registration rolls back under the existing contract, the assignment rolls back too. If registration removal fails, the Hub restores the retained assignment so the still-registered workspace does not silently lose it. Interactive clone responses remain ephemeral and are never offered as a saved credential implicitly.
 
 ### D8: Tool configuration is persisted state with layered probes
 

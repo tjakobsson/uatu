@@ -153,6 +153,9 @@ describe("managed SSH credential lifecycle", () => {
     expect(await service.testUsability(imported.id)).toBe(true);
     await agent.shutdown();
     expect(await service.testUsability(imported.id)).toBe(true);
+    await agent.shutdown();
+    await rm(path.join(credentialSecretsPath(root), `${imported.id}.key`));
+    expect(await service.testUsability(imported.id)).toBe(false);
   }, 30_000);
 
   test("uses only the Hub socket and leaves an ambient agent and its identities unchanged", async () => {

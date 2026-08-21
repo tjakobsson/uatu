@@ -416,10 +416,10 @@ export class SshCredentialService {
   async testUsability(credentialId: string): Promise<boolean> {
     const credential = this.credential(credentialId);
     if (!credential.enabled) return false;
-    if (await this.agentHasKey(credentialId)) return true;
-    const privateKey = await fs.readFile(credentialFile(this.options.secretsDirectory, credentialId), "utf8");
-    if (encryptedPrivateKey(privateKey)) return false;
     try {
+      if (await this.agentHasKey(credentialId)) return true;
+      const privateKey = await fs.readFile(credentialFile(this.options.secretsDirectory, credentialId), "utf8");
+      if (encryptedPrivateKey(privateKey)) return false;
       await this.unlock(credentialId, "");
       return true;
     } catch {

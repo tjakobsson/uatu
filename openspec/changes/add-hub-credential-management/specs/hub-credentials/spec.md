@@ -81,7 +81,7 @@ An OpenPGP import MUST contain exactly one primary private key. Because OpenPGP 
 - **AND** the response is sent only to that operation and never appears in retained output
 
 ### Requirement: Hub supports HTTPS Git and provider credentials
-The Hub SHALL store HTTPS/provider credentials with an explicit provider host and declared Git and provider-CLI capabilities. Git operations SHALL obtain assigned HTTPS credentials through a Hub-controlled credential helper rather than embedding tokens in repository remotes or command arguments. Provider CLI integration SHALL expose a credential only to the selected Hub-started workspace process environment and MUST NOT write it into the workspace repository. The Hub SHALL make the broader visibility of process environment credentials under the local backend part of the shared-UID warning.
+The Hub SHALL store HTTPS/provider credentials with an explicit provider host and declared Git and provider-CLI capabilities. Git operations SHALL obtain assigned HTTPS credentials through a Hub-controlled credential helper rather than embedding tokens in repository remotes or command arguments. Provider CLI integration SHALL expose a credential only to the selected Hub-started workspace process environment and MUST NOT write it into the workspace repository. Because each provider CLI uses one non-host-indexed token environment variable, the Hub SHALL reject a workspace context that assigns provider-CLI credentials for multiple hosts of the same provider rather than allowing one token to replace another. The Hub SHALL make the broader visibility of process environment credentials under the local backend part of the shared-UID warning.
 
 #### Scenario: HTTPS clone uses a stored token
 - **WHEN** a clone for the credential's configured host selects an unlocked HTTPS Git credential
@@ -90,6 +90,10 @@ The Hub SHALL store HTTPS/provider credentials with an explicit provider host an
 #### Scenario: Credential host does not match
 - **WHEN** Git requests a stored HTTPS credential for a host other than the credential's configured provider host
 - **THEN** the Hub-controlled helper declines to return the credential
+
+#### Scenario: Provider CLI assignments span multiple hosts
+- **WHEN** one workspace assigns provider-CLI credentials for two hosts of the same provider
+- **THEN** workspace startup rejects the ambiguous provider CLI context instead of exposing either host's token as the other's
 
 ### Requirement: Hub assigns credentials to workspaces without overstating isolation
 New credentials SHALL have no workspace assignments by default. An authenticated user SHALL be able to grant and revoke credentials for selected registered workspaces, and the Hub SHALL configure normal Git, signing, and provider-tool selection from those assignments when it starts a clone job or workspace session. Assignments SHALL permit at most one default authentication credential per provider host and one default commit-signing credential per workspace so normal tool selection is deterministic. For the local backend, every assignment surface and API SHALL identify the workspace boundary as advisory because all workspaces share the daemon OS UID, and SHALL warn that another local workspace may be able to discover or exercise credentials outside its assignments. The persisted assignment model MUST distinguish individual credentials so a future isolated backend can project and enforce only the selected set.
@@ -107,6 +111,10 @@ New credentials SHALL have no workspace assignments by default. An authenticated
 #### Scenario: Conflicting defaults are rejected
 - **WHEN** a workspace already has a default authentication credential for `github.com` or a default commit-signing credential and a user assigns another conflicting default
 - **THEN** the Hub requires the user to replace the existing default rather than persisting an ambiguous selection
+
+#### Scenario: Assigned key is locked
+- **WHEN** any assigned SSH or OpenPGP key is not usable even though its shared agent is running
+- **THEN** workspace startup identifies the locked assignment instead of starting with unusable Git configuration
 
 ### Requirement: Credential revocation has defined runtime behavior
 Locking, disabling, unassigning, or deleting a credential SHALL prevent the Hub from supplying it to new clone jobs, new workspace sessions, and new helper or agent requests. Deletion SHALL remove its private backing only after it is no longer referenced by an assignment. The Hub SHALL report that an already-authenticated external connection, such as an SSH multiplexed connection, may survive credential revocation until that connection ends; it MUST NOT claim retroactive provider-session revocation it cannot enforce.
