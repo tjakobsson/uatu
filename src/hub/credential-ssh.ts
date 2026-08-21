@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { constants, promises as fs } from "node:fs";
 import path from "node:path";
 
 import { CredentialMetadataStore } from "./credential-store";
@@ -183,6 +183,62 @@ async function readPublicKey(executable: string, args: string[], env: Record<str
   }
 }
 
+async function runSecretAskpass(options: {
+  executable: string;
+  args: string[];
+  env: Record<string, string>;
+  passphrase: string;
+  runtimeDirectory: string;
+  timeoutMs: number;
+}): Promise<number> {
+  const operationId = randomUUID();
+  const askpassPath = path.join(options.runtimeDirectory, `.${operationId}.askpass`);
+  const secretPipePath = path.join(options.runtimeDirectory, `.${operationId}.pipe`);
+  let secretPipe: Awaited<ReturnType<typeof fs.open>> | undefined;
+  try {
+    await fs.writeFile(askpassPath, "#!/bin/sh\nIFS= read -r secret < \"$UATU_SSH_ASKPASS_PIPE\"\nprintf '%s\\n' \"$secret\"\n", { mode: 0o700 });
+    const mkfifo = Bun.spawn(["/usr/bin/mkfifo", "-m", "600", secretPipePath], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      env: options.env,
+    });
+    if (await mkfifo.exited !== 0) throw new Error("SSH passphrase channel could not be created");
+    secretPipe = await fs.open(secretPipePath, constants.O_RDWR);
+    const child = Bun.spawn([options.executable, ...options.args], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      env: {
+        ...options.env,
+        DISPLAY: "uatu",
+        SSH_ASKPASS: askpassPath,
+        SSH_ASKPASS_REQUIRE: "force",
+        UATU_SSH_ASKPASS_PIPE: secretPipePath,
+      },
+    });
+    await secretPipe.writeFile(`${options.passphrase}\n`);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // The process may exit at the timeout boundary.
+      }
+    }, options.timeoutMs);
+    try {
+      const exitCode = (await child.exited) ?? 1;
+      return timedOut ? 124 : exitCode;
+    } finally {
+      clearTimeout(timer);
+    }
+  } finally {
+    await secretPipe?.close().catch(() => undefined);
+    await Promise.all([askpassPath, secretPipePath].map(file => fs.rm(file, { force: true })));
+  }
+}
+
 export class SshCredentialService {
   private readonly servicePath: string;
   private readonly timeoutMs: number;
@@ -287,14 +343,15 @@ export class SshCredentialService {
       throw new Error("SSH private key passphrase is required");
     }
     const socket = await this.options.agent.start();
-    const result = await runSecretPty({
+    const exitCode = await runSecretAskpass({
       executable: this.options.sshAddPath,
       args: [privatePath],
       env: this.agentEnvironment(socket),
-      responses: [passphrase],
+      passphrase,
+      runtimeDirectory: this.options.secretsDirectory,
       timeoutMs: this.timeoutMs,
     });
-    if (result.exitCode !== 0 || !(await this.testUsability(credentialId))) {
+    if (exitCode !== 0 || !(await this.testUsability(credentialId))) {
       throw new Error("SSH credential could not be unlocked");
     }
   }
