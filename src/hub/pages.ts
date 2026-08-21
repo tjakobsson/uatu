@@ -954,6 +954,11 @@ function workspaceAssignmentForm(actionError) {
       return;
     }
     await withBusy(button, "Assigning…", async () => {
+      // Captured before the replacement so a failed signing half can put the
+      // replaced authentication default back.
+      const requestedHost = host.value.trim().toLowerCase().replace(/\.$/, "");
+      const previousAuthentication = workspaceAssignmentEntries(workspace.value).find(entry =>
+        entry.assignment.role === "authentication" && entry.assignment.host === requestedHost);
       let authenticationAssigned = false;
       try {
         if (authentication.value) {
@@ -968,13 +973,15 @@ function workspaceAssignmentForm(actionError) {
         await Promise.all([loadSettingsState(), loadCredentials()]);
       } catch (error) {
         // A failed second half must not leave the paired form half-applied:
-        // undo the committed authentication default (best effort — a
-        // replaced previous default is not restored) and refresh so the UI
-        // shows what actually persisted.
-        if (authenticationAssigned && signing.value) {
+        // undo the committed authentication replacement, restore the default
+        // it displaced, and refresh so the UI shows what actually persisted.
+        if (authenticationAssigned && signing.value && previousAuthentication?.credential.id !== authentication.value) {
           try {
             await api(credentialPath + "/" + encodeURIComponent(authentication.value) + "/unassign", {
               workspaceId: workspace.value, role: "authentication", host: host.value.trim(),
+            });
+            if (previousAuthentication) await api(credentialPath + "/" + encodeURIComponent(previousAuthentication.credential.id) + "/assign", {
+              workspaceId: workspace.value, role: "authentication", host: previousAuthentication.assignment.host, replace: true,
             });
           } catch {}
         }

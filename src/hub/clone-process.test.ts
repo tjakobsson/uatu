@@ -131,11 +131,33 @@ describe("CloneProcessAdapter", () => {
     const env = spawnOptions.env as Record<string, string>;
     expect(env.SSH_AUTH_SOCK).toBe("/managed %h/agent.sock");
     expect(env.GIT_SSH_COMMAND).toStartWith("'/managed/ssh client'");
+    // The Hub user's ~/.ssh/config must not contribute identities.
+    expect(env.GIT_SSH_COMMAND).toContain("-F /dev/null");
     // %-tokens in state paths reach OpenSSH escaped, never expanded.
     expect(env.GIT_SSH_COMMAND).toContain("IdentityAgent='/managed %%h/agent.sock'");
     expect(env.GIT_SSH_COMMAND).toContain("IdentityFile='/managed %%h/key.pub'");
     expect(env.GIT_SSH_COMMAND).toContain("IdentitiesOnly=yes");
     expect(env.GIT_SSH_COMMAND).not.toContain("ambient");
+  });
+
+  test("an unselected clone isolates SSH from user configuration and default identities", async () => {
+    let spawnOptions: Record<string, unknown> = {};
+    const terminal = { localFlags: 0xff, write() {}, close() {} };
+    const adapter = new CloneProcessAdapter({
+      env: { PATH: "/bin", SSH_AUTH_SOCK: "/ambient.sock", GIT_SSH_COMMAND: "ambient ssh" },
+      spawn(_argv, options) {
+        spawnOptions = options as Record<string, unknown>;
+        return { pid: 42, exited: Promise.resolve(0), terminal };
+      },
+    });
+    const proc = adapter.start({ url: "git@example.com:acme/repo.git", target: "/tmp/repo", onOutput() {} });
+    await proc.exited;
+
+    const env = spawnOptions.env as Record<string, string>;
+    // No selection means interactive prompts only: no agent, no user
+    // config, no default ~/.ssh identities.
+    expect(env.SSH_AUTH_SOCK).toBeUndefined();
+    expect(env.GIT_SSH_COMMAND).toBe("ssh -F /dev/null -o IdentityAgent=none -o IdentityFile=none -o IdentitiesOnly=yes");
   });
 
   test("resolves the configured Git command for each clone", async () => {

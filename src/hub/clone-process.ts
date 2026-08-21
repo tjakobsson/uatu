@@ -95,6 +95,13 @@ export class CloneProcessAdapter implements CloneProcessFactory {
     const normalizer = new TerminalTextNormalizer(options.onOutput);
     let terminal: BunTerminal | undefined;
     const env = { ...this.env };
+    // Every clone isolates SSH from the Hub user's configuration: -F
+    // /dev/null drops ~/.ssh/config (whose IdentityFile entries are
+    // additive even under IdentitiesOnly), and IdentityFile=none excludes
+    // the default ~/.ssh/id_* identities — without this, choosing None (or
+    // even a managed credential) could silently authenticate with an
+    // unselected key. Interactive prompts still flow through the PTY.
+    env.GIT_SSH_COMMAND = "ssh -F /dev/null -o IdentityAgent=none -o IdentityFile=none -o IdentitiesOnly=yes";
     if (options.credential?.type === "ssh") {
       env.SSH_AUTH_SOCK = options.credential.agentSocket;
       // OpenSSH expands %-tokens inside IdentityAgent/IdentityFile values
@@ -103,6 +110,7 @@ export class CloneProcessAdapter implements CloneProcessFactory {
       const sshOptionValue = (value: string) => shellQuote(value.replaceAll("%", "%%"));
       env.GIT_SSH_COMMAND = [
         shellQuote(options.credential.sshPath),
+        "-F /dev/null",
         `-o IdentityAgent=${sshOptionValue(options.credential.agentSocket)}`,
         `-o IdentityFile=${sshOptionValue(options.credential.publicKeyPath)}`,
         "-o IdentitiesOnly=yes",

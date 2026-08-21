@@ -363,7 +363,15 @@ export async function runHub(options: RunHubOptions): Promise<void> {
                 gpgPath: null,
                 gpgconfPath: null,
               });
-              await previous.shutdown();
+              const results = await previous.shutdown();
+              // shutdown() reports failure as readiness, not rejection: a
+              // failed kill with tooling configured means the Hub-owned
+              // agent may survive exit with cached passphrases — surface it
+              // through stopHubRuntime instead of exiting silently.
+              const gpgConfigured = (activePaths.get("gpg") ?? activePaths.get("gpgconf") ?? null) !== null;
+              if (gpgConfigured && results.some(result => result.status === "unavailable")) {
+                throw new Error("the Hub OpenPGP agent could not be stopped");
+              }
             }),
           },
         });
