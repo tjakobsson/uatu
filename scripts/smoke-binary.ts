@@ -80,6 +80,17 @@ const proc = spawn(BINARY, ["serve", WORKSPACE, "--port", String(PORT), "--no-op
   stdio: ["ignore", "pipe", "pipe"],
 });
 
+// Capture what the child says. These pipes were opened and never read, so a
+// boot failure in CI surfaced as nothing but "did not start" — no exit code,
+// no stderr, no way to tell a crash from a hang.
+const captured: string[] = [];
+proc.stdout?.on("data", (chunk: Buffer) => captured.push(chunk.toString()));
+proc.stderr?.on("data", (chunk: Buffer) => captured.push(chunk.toString()));
+let exited: { code: number | null; signal: string | null } | undefined;
+proc.on("exit", (code, signal) => {
+  exited = { code, signal };
+});
+
 const cleanup = () => {
   if (!proc.killed) {
     proc.kill("SIGTERM");
@@ -107,7 +118,14 @@ try {
     await new Promise(resolve => setTimeout(resolve, 200));
   }
   if (!ready) {
-    fail("compiled binary did not start within 10s");
+    fail(
+      exited
+        ? `compiled binary exited during boot (code ${exited.code}, signal ${exited.signal ?? "none"})`
+        : "compiled binary did not start within 10s",
+    );
+    console.log(
+      `\n--- ${BINARY} output ---\n${captured.join("").trimEnd() || "(nothing on stdout/stderr)"}\n--- end output ---`,
+    );
     process.exit(1);
   }
   pass("compiled binary boots and serves /api/state");
