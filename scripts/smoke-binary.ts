@@ -23,6 +23,9 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 
 const PORT = 4889;
+// Overridable so a slow or contended runner can be given more headroom
+// without editing the script.
+const BOOT_TIMEOUT_MS = Number(process.env.UATU_SMOKE_BOOT_TIMEOUT_MS ?? 30_000);
 const ROOT = path.resolve(import.meta.dir, "..");
 // UATU_SMOKE_BINARY lets the release workflow smoke the cross-compiled
 // linux-x64 artifact instead of the default host build.
@@ -80,10 +83,39 @@ const proc = spawn(BINARY, ["serve", WORKSPACE, "--port", String(PORT), "--no-op
   stdio: ["ignore", "pipe", "pipe"],
 });
 
+// Drain both pipes. Leaving them unread is not just a lost-diagnostics
+// problem: a child that writes past the OS pipe buffer (~64KB on macOS)
+// blocks forever on write, so the server would never finish booting and the
+// only symptom would be a bare "did not start" timeout.
+const captured: string[] = [];
+const capture = (label: string) => (chunk: Buffer) => {
+  captured.push(`[${label}] ${chunk.toString()}`);
+};
+proc.stdout?.on("data", capture("stdout"));
+proc.stderr?.on("data", capture("stderr"));
+
+let exited: { code: number | null; signal: string | null } | undefined;
+proc.on("exit", (code, signal) => {
+  exited = { code, signal };
+});
+proc.on("error", error => {
+  captured.push(`[spawn error] ${error.message}\n`);
+});
+
+const childOutput = () =>
+  captured.length > 0 ? captured.join("").trimEnd() : "(nothing on stdout/stderr)";
+
 const cleanup = () => {
-  if (!proc.killed) {
-    proc.kill("SIGTERM");
+  if (exited) {
+    return;
   }
+  proc.kill("SIGTERM");
+  // A child wedged mid-boot can ignore SIGTERM. Without this, a failing run
+  // leaves an orphaned server holding the port for later CI steps.
+  const hardKill = setTimeout(() => {
+    if (!exited) proc.kill("SIGKILL");
+  }, 2_000);
+  hardKill.unref?.();
 };
 process.on("SIGINT", cleanup);
 process.on("SIGTERM", cleanup);
@@ -91,23 +123,38 @@ process.on("SIGTERM", cleanup);
 try {
   await checkSshSupervisorDispatch();
 
-  // Wait for the server to accept connections.
+  // Wait for the server to accept connections. CI runners boot markedly
+  // slower than a dev machine — the PTY probe alone budgets 3s — so the
+  // deadline is generous and overridable rather than a tight 10s.
   const BASE = `http://127.0.0.1:${PORT}`;
   let ready = false;
-  for (let i = 0; i < 50; i += 1) {
+  let lastProbe = "";
+  const deadline = Date.now() + BOOT_TIMEOUT_MS;
+  while (Date.now() < deadline && !exited) {
     try {
       const probe = await fetch(`${BASE}/api/state`);
       if (probe.ok) {
         ready = true;
         break;
       }
-    } catch {
-      // Server not up yet — keep waiting.
+      lastProbe = `HTTP ${probe.status}`;
+    } catch (error) {
+      lastProbe = error instanceof Error ? error.message : String(error);
     }
     await new Promise(resolve => setTimeout(resolve, 200));
   }
   if (!ready) {
-    fail("compiled binary did not start within 10s");
+    // Say *why* it never came up. The old message reported only the timeout,
+    // which made a crash, a hang and a bad port indistinguishable in CI.
+    fail(
+      exited
+        ? `compiled binary exited during boot (code ${exited.code}, signal ${exited.signal ?? "none"})`
+        : `compiled binary did not serve /api/state within ${Math.round(BOOT_TIMEOUT_MS / 1000)}s (last probe: ${lastProbe || "none"})`,
+    );
+    console.log(`\n--- ${BINARY} output ---\n${childOutput()}\n--- end output ---`);
+    // process.exit skips the finally block, so kill the child here or CI
+    // inherits an orphan.
+    cleanup();
     process.exit(1);
   }
   pass("compiled binary boots and serves /api/state");
