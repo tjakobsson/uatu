@@ -87,31 +87,6 @@ export function sameSocketIdentity(actual: SocketIdentity, expected: SocketIdent
     && actual.inode === expected.inode;
 }
 
-// The v1 record, written by builds before the workspace-credentials work
-// split the agent into an agent+supervisor pair. It is a recognised format,
-// not corruption, so an upgrade retires the agent it describes rather than
-// refusing to start. Never written any more — only read, once, to migrate.
-export type LegacySshAgentOwnership = {
-  version: 1;
-  nonce: string;
-  pid: number;
-  socketDevice: number;
-  socketInode: number;
-};
-
-export function parseLegacyOwnership(value: unknown): LegacySshAgentOwnership {
-  if (!exactObject(value, ["version", "nonce", "pid", "socketDevice", "socketInode"])) {
-    throw new Error("invalid legacy record");
-  }
-  if (value.version !== 1 || typeof value.nonce !== "string" || !/^[a-f0-9]{64}$/.test(value.nonce)
-    || typeof value.pid !== "number" || !Number.isSafeInteger(value.pid) || value.pid <= 0
-    || ![value.socketDevice, value.socketInode]
-      .every(item => typeof item === "number" && Number.isSafeInteger(item) && item >= 0)) {
-    throw new Error("invalid legacy record");
-  }
-  return value as LegacySshAgentOwnership;
-}
-
 export function parseOwnership(value: unknown): SshAgentOwnership {
   if (!exactObject(value, ["version", "nonce", "agentPid", "supervisorPid", "agentSocket", "controlSocket"])) {
     throw new Error("invalid record");

@@ -5,12 +5,9 @@ import path from "node:path";
 import { resolveUatuArgv } from "./backend";
 import {
   guardianMac,
-  parseLegacyOwnership,
   parseOwnership,
   sameSocketIdentity,
   socketIdentity,
-  type SocketIdentity,
-  type LegacySshAgentOwnership,
   type SshAgentOwnership,
   type GuardianCommand,
 } from "./credential-ssh-supervisor";
@@ -32,93 +29,6 @@ export type ManagedSshAgentOptions = {
   spawnSupervisor?: (argv: string[], options: Parameters<typeof Bun.spawn>[1]) => SupervisorProcess;
 };
 
-// A recorded pid can have been recycled since the record was written — and
-// recycled, in the worst case, by someone else's ssh-agent, which a bare
-// process-name check would happily match. v1-era builds launched the agent
-// as `ssh-agent -D -a <socketPath>`, so the recorded socket path appears in
-// the agent's own argv; requiring it ties the pid to the recorded socket.
-// When that association cannot be established, the pid is not signalled.
-async function isRecordedLegacyAgent(pid: number, socketPath: string): Promise<boolean> {
-  try {
-    const result = Bun.spawnSync({ cmd: ["ps", "-p", String(pid), "-o", "command="], stdout: "pipe", stderr: "ignore" });
-    if (result.exitCode !== 0) return false;
-    const command = result.stdout.toString().trim();
-    const [executable = ""] = command.split(" ");
-    // Anchor the -a value at the end of the command line, where the v1
-    // launch put it: `ssh-agent -D -a <socketPath>`. A substring match
-    // would also accept an agent bound to e.g. `<socketPath>.backup`.
-    return executable.endsWith("ssh-agent") && command.endsWith(` -a ${socketPath}`);
-  } catch {
-    return false;
-  }
-}
-
-// The revalidate-before-unlink halves of legacy retirement. Termination can
-// wait seconds, and another instance could complete its own migration in
-// that window; removing anything the legacy record no longer describes
-// would tear down that instance's fresh agent. (The hub state-root lease
-// already serializes real deployments — this guards the window regardless.)
-export async function removeSocketIfStillRecorded(socketPath: string, legacy: LegacySshAgentOwnership): Promise<void> {
-  let identity: SocketIdentity | undefined;
-  try {
-    identity = await socketIdentity(socketPath);
-  } catch (error) {
-    if (!isMissing(error)) throw error;
-  }
-  if (!identity) return;
-  if (identity.device !== legacy.socketDevice || identity.inode !== legacy.socketInode) {
-    throw new Error("SSH guardian artifact changed during cleanup");
-  }
-  await fs.rm(socketPath, { force: true });
-}
-
-export async function removeRecordIfStillLegacy(recordPath: string, legacy: LegacySshAgentOwnership): Promise<void> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(recordPath, "utf8");
-  } catch (error) {
-    if (isMissing(error)) return;
-    throw error;
-  }
-  let current: LegacySshAgentOwnership;
-  try {
-    current = parseLegacyOwnership(JSON.parse(raw));
-  } catch {
-    throw new Error("SSH agent ownership record changed during cleanup");
-  }
-  if (current.nonce !== legacy.nonce || current.pid !== legacy.pid
-    || current.socketDevice !== legacy.socketDevice || current.socketInode !== legacy.socketInode) {
-    throw new Error("SSH agent ownership record changed during cleanup");
-  }
-  await fs.rm(recordPath, { force: true });
-}
-
-// SIGTERM, wait, escalate to SIGKILL, wait again — and refuse to continue if
-// the process still will not die. Proceeding anyway would delete the socket
-// out from under a live agent and leak it with keys still in memory, which
-// is the exact failure the migration exists to avoid. Mirrors stopChild in
-// credential-ssh-supervisor.ts.
-async function terminateLegacyAgent(pid: number, timeoutMs: number): Promise<void> {
-  for (const signal of ["SIGTERM", "SIGKILL"] as const) {
-    try {
-      process.kill(pid, signal);
-    } catch (error) {
-      if (error instanceof Error && "code" in error && error.code === "ESRCH") return;
-      throw error;
-    }
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      try {
-        process.kill(pid, 0);
-      } catch {
-        return;
-      }
-      await new Promise(resolve => setTimeout(resolve, POLL_MS));
-    }
-  }
-  throw new Error("superseded SSH agent did not exit after SIGKILL");
-}
-
 function isMissing(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
@@ -130,16 +40,6 @@ async function privateDirectory(directory: string): Promise<void> {
   if (typeof process.getuid === "function" && stats.uid !== process.getuid()) {
     throw new Error("SSH agent runtime is not owned by the current user");
   }
-}
-
-// Manual-recovery guidance for a record uatu cannot read. Deleting only the
-// record would be a trap: if it belongs to a live guardian, that orphans the
-// agent, leaves both sockets behind as unowned artifacts the next start
-// fails closed on, and destroys the authenticated record cleanup needed.
-// Everything must be retired together.
-function unreadableRecordAdvice(filePath: string): string {
-  return `Stop uatu, terminate any uatu-managed ssh-agent and its supervisor, `
-    + `then remove ${path.dirname(filePath)} and start again.`;
 }
 
 async function readOwnership(filePath: string): Promise<SshAgentOwnership | undefined> {
@@ -163,14 +63,6 @@ async function readOwnership(filePath: string): Promise<SshAgentOwnership | unde
   try {
     return parseOwnership(parsed);
   } catch (error) {
-    // A v1 record is a recognised older format, not corruption: it predates
-    // the agent/supervisor split. Hand it to the caller to retire rather
-    // than refusing to start, which is what stranded upgraded installs.
-    try {
-      throw new LegacyOwnershipError(parseLegacyOwnership(parsed));
-    } catch (legacyError) {
-      if (legacyError instanceof LegacyOwnershipError) throw legacyError;
-    }
     throw new Error(
       `SSH agent ownership record at ${filePath} is corrupt or has an unsupported version. `
         + unreadableRecordAdvice(filePath),
@@ -179,11 +71,15 @@ async function readOwnership(filePath: string): Promise<SshAgentOwnership | unde
   }
 }
 
-class LegacyOwnershipError extends Error {
-  constructor(readonly legacy: LegacySshAgentOwnership) {
-    super("SSH agent ownership record uses the superseded v1 format");
-    this.name = "LegacyOwnershipError";
-  }
+// Manual-recovery guidance for a record this binary cannot read — written by
+// a different (usually newer) build, or damaged on disk. Deleting only the
+// record would be a trap: if it belongs to a live guardian, that orphans the
+// agent, leaves both sockets behind as unowned artifacts the next start
+// fails closed on, and destroys the authenticated record cleanup needed.
+// Everything must be retired together; the hub recreates the directory.
+function unreadableRecordAdvice(filePath: string): string {
+  return `Stop uatu, terminate any uatu-managed ssh-agent and its supervisor, `
+    + `then remove ${path.dirname(filePath)} and start again.`;
 }
 
 async function readLine(
@@ -331,57 +227,8 @@ export class ManagedSshAgent {
     }
   }
 
-  // Retire an agent recorded in the superseded v1 format. The record names a
-  // pid and the device+inode of the socket it owned; both must still agree
-  // before anything is signalled, because a pid alone can have been reused.
-  // Everything else fails closed, exactly like the unowned-artifact checks
-  // the v2 paths apply: only artifacts this record provably describes are
-  // ever removed.
-  private async retireLegacyAgent(legacy: LegacySshAgentOwnership): Promise<void> {
-    // v1 predates the control socket entirely, so one existing alongside a
-    // v1 record was made by something else — treat it as unowned.
-    try {
-      await fs.lstat(this.controlSocketPath);
-      throw new Error("unowned SSH guardian artifact already exists");
-    } catch (error) {
-      if (!isMissing(error)) throw error;
-    }
-
-    let socket: "missing" | "recorded" | "foreign";
-    try {
-      const actual = await socketIdentity(this.socketPath);
-      socket = actual.device === legacy.socketDevice && actual.inode === legacy.socketInode
-        ? "recorded"
-        : "foreign";
-    } catch (error) {
-      if (!isMissing(error)) throw error;
-      socket = "missing";
-    }
-    // A socket the record does not describe belongs to someone else —
-    // possibly a concurrently starting agent. Unlinking it would disconnect
-    // whatever owns it, so refuse, like every other unowned artifact.
-    if (socket === "foreign") throw new Error("unowned SSH guardian artifact already exists");
-
-    if (socket === "recorded" && await isRecordedLegacyAgent(legacy.pid, this.socketPath)) {
-      await terminateLegacyAgent(legacy.pid, this.stopTimeoutMs);
-    }
-
-    // Termination awaited above, so revalidate immediately before unlinking:
-    // anything the legacy record no longer describes stays untouched.
-    if (socket === "recorded") await removeSocketIfStillRecorded(this.socketPath, legacy);
-    await removeRecordIfStillLegacy(this.ownershipPath, legacy);
-  }
-
   private async recoverRecordedAgent(): Promise<void> {
-    let record: SshAgentOwnership | undefined;
-    try {
-      record = await readOwnership(this.ownershipPath);
-    } catch (error) {
-      if (!(error instanceof LegacyOwnershipError)) throw error;
-      await this.retireLegacyAgent(error.legacy);
-      await this.assertNoGuardianQuarantines();
-      return;
-    }
+    const record = await readOwnership(this.ownershipPath);
     if (!record) {
       for (const artifact of [this.socketPath, this.controlSocketPath]) {
         try {
