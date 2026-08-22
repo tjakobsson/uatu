@@ -11,7 +11,7 @@
 
 import type { Serve } from "bun";
 
-import { ConversationRenameUnsupportedError, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, QueuedMessageNotHeldError } from "../chat/adapter";
+import { ChatQueueFullError, ConversationRenameUnsupportedError, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, QueuedMessageNotHeldError } from "../chat/adapter";
 import { encodeReplayCursor } from "../chat/replay";
 import { ChatUnavailableError, type WorkspaceChatService } from "../chat/service";
 import type { ModelSelection, PermissionOutcome, QuestionOutcome } from "../chat/types";
@@ -721,6 +721,7 @@ function parseNameSelection(value: unknown, noun: "mode" | "variant"): string | 
 function normalizedChatError(error: unknown): Response {
   if (error instanceof ConversationNotFoundError) return chatError(404, "conversation not found");
   if (error instanceof QueuedMessageNotHeldError) return chatError(409, error.message);
+  if (error instanceof ChatQueueFullError) return chatError(429, error.message);
   if (error instanceof InteractionConflictError) return chatError(409, error.message);
   if (error instanceof ConversationRenameUnsupportedError) return chatError(409, error.message);
   if (error instanceof InvalidConversationTitleError) return chatError(400, error.message);

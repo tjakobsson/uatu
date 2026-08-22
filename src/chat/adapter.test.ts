@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, OpenCodeChatAdapter, parseSlashCommand, QueuedMessageNotHeldError } from "./adapter";
+import { ChatQueueFullError, ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, OpenCodeChatAdapter, parseSlashCommand, QueuedMessageNotHeldError } from "./adapter";
 import { normalizeProviderEvent } from "./normalization";
 import type { ChatAgent } from "./types";
 import type {
@@ -918,6 +918,33 @@ describe("prompt, abort, permission, and question mutations", () => {
     await until(() => provider.prompts.length === 4);
     expect(provider.prompts[3]).toEqual(expect.objectContaining({ text: "fourth" }));
     expect((await adapter.history("session")).queued).toEqual([]);
+  });
+
+  test("the held queue is bounded and a full queue refuses the submission without altering it", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    let message = 0;
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
+
+    expect((await adapter.prompt("session", "r0", "start")).held).toBe(false);
+    for (let index = 1; index <= 20; index += 1) {
+      expect((await adapter.prompt("session", `count-${index}`, `held ${index}`)).held).toBe(true);
+    }
+    await expect(adapter.prompt("session", "count-21", "one too many")).rejects.toBeInstanceOf(ChatQueueFullError);
+    expect((await adapter.history("session")).queued).toHaveLength(20);
+
+    // The byte bound trips before the count bound for oversized prompts.
+    const bytes = new OpenCodeChatAdapter({ provider: (() => {
+      const fresh = new FakeProvider();
+      fresh.sessions = [fixtureSession("session")];
+      return fresh;
+    })(), workspacePath: process.cwd(), generation: "g2", id: () => `byte-${++message}` });
+    expect((await bytes.prompt("session", "b0", "start")).held).toBe(false);
+    const large = "x".repeat(60 * 1024);
+    for (let index = 1; index <= 4; index += 1) {
+      expect((await bytes.prompt("session", `bytes-${index}`, large)).held).toBe(true);
+    }
+    await expect(bytes.prompt("session", "bytes-5", large)).rejects.toBeInstanceOf(ChatQueueFullError);
   });
 
   test("a held message does not ride an idle event that outruns the interrupt acknowledgement", async () => {

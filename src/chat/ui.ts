@@ -1682,6 +1682,10 @@ export function initChat(): void {
     const selectedMode = declares("modes") && modes.some(mode => mode.name === configuration.mode) ? configuration.mode : undefined;
     submitting = true;
     setComposerError(null);
+    // Captured before the round trip: a queue event that lands while the
+    // acceptance is in flight makes the stream authoritative, and the local
+    // held echo below must then stand down.
+    const queueRevisionAtSubmit = projection.queueRevision;
     // Optimistic send: the message shows immediately and the input clears;
     // on failure the draft is removed and the text restored.
     projection = addAcceptedDraft(projection, { requestId, messageId: `pending:${requestId}`, text });
@@ -1704,11 +1708,13 @@ export function initChat(): void {
       }
       if (projection?.conversationId === conversationId) {
         projection = { ...projection, configuration: accepted.configuration };
-        // A held acceptance moves the draft into the pinned queue block
-        // immediately; the server's queue event restates the same state and
-        // converges. A dispatched acceptance becomes a timeline item.
+        // A held acceptance moves the draft into the queue dock immediately;
+        // the server's queue event restates the same state and converges. A
+        // dispatched acceptance becomes a timeline item. The echo carries the
+        // pre-flight queue revision so a delivery or removal that outran the
+        // acceptance is not resurrected as a phantom entry.
         projection = accepted.held
-          ? noteQueuedMessage(projection, { id: accepted.messageId, text, queuedAt: Date.now(), requestId })
+          ? noteQueuedMessage(projection, { id: accepted.messageId, text, queuedAt: Date.now(), requestId }, queueRevisionAtSubmit)
           : confirmAcceptedDraft(projection, { requestId, messageId: accepted.messageId, text });
         renderConfiguration();
         scheduleRender(true);

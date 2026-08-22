@@ -20,6 +20,7 @@ function projectionWith(items: ConversationItem[], overrides: Partial<ChatProjec
     status: "running",
     acceptedDrafts: [],
     queued: [],
+    queueRevision: 0,
     ...overrides,
   };
 }

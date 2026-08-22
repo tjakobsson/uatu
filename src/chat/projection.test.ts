@@ -50,6 +50,39 @@ describe("chat projection", () => {
     expect(removed.projection.queued).toEqual([]);
   });
 
+  test("a held echo stands down once the stream has spoken since the submission", () => {
+    const base = projectionFromSnapshot(snapshot());
+    // A delivery event outruns the acceptance: the queue event lands first
+    // (advancing the revision) and the delivered item is already a timeline
+    // entry when the response resolves. The echo must not resurrect it.
+    const withDrafts = addAcceptedDraft(base, { requestId: "r1", messageId: "pending:r1", text: "fast" });
+    const revisionAtSubmit = withDrafts.queueRevision;
+    const heldEvent = applyChatEvent(withDrafts, {
+      generation: "g1", sequence: 5, conversationId: "c1", type: "conversation.queue",
+      queued: [{ id: "held-1", text: "fast", queuedAt: 2, requestId: "r1" }], change: { kind: "held", messageId: "held-1" },
+    });
+    const deliveredItem = applyChatEvent(heldEvent.projection, {
+      generation: "g1", sequence: 6, conversationId: "c1", type: "item.upsert",
+      item: { id: "message:m1", type: "user_message", createdAt: 3, text: "fast", requestId: "r1" },
+    });
+    const deliveredEvent = applyChatEvent(deliveredItem.projection, {
+      generation: "g1", sequence: 7, conversationId: "c1", type: "conversation.queue",
+      queued: [], change: { kind: "delivered", messageId: "held-1" },
+    });
+    expect(deliveredEvent.projection.queueRevision).toBe(revisionAtSubmit + 2);
+    const echoed = noteQueuedMessage(deliveredEvent.projection, { id: "held-1", text: "fast", queuedAt: 2, requestId: "r1" }, revisionAtSubmit);
+    expect(echoed.queued).toEqual([]);
+    expect(echoed.acceptedDrafts).toEqual([]);
+
+    // A retried acceptance answered after delivery (fresh projection, no
+    // queue event seen) is caught by the delivered timeline item instead.
+    const reloaded = projectionFromSnapshot(snapshot([
+      { id: "message:m1", type: "user_message", createdAt: 3, text: "fast", requestId: "r1" },
+    ]));
+    const retried = noteQueuedMessage(reloaded, { id: "held-1", text: "fast", queuedAt: 2, requestId: "r1" });
+    expect(retried.queued).toEqual([]);
+  });
+
   test("a draft the server now holds is represented once, by its queued entry", () => {
     // The held acceptance mirrors locally before any stream event arrives.
     let state = addAcceptedDraft(projectionFromSnapshot(snapshot()), { requestId: "r1", messageId: "pending:r1", text: "hello" });

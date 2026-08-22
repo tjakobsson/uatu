@@ -17,6 +17,11 @@ export type ChatProjection = {
   // the snapshot and restated whole by every queue event, so this is state,
   // not an accumulation.
   queued: QueuedMessage[];
+  // Counts applied queue events. A held acceptance's local echo is valid only
+  // while no queue event has spoken since the submission: once one has, the
+  // stream is the authority and an echo could resurrect an entry the stream
+  // already delivered or removed.
+  queueRevision: number;
 };
 
 export type ProjectionResult = { projection: ChatProjection; outcome: "applied" | "duplicate" | "gap" | "resync" };
@@ -36,6 +41,7 @@ export function projectionFromSnapshot(snapshot: ConversationSnapshot, acceptedD
     olderCursor: snapshot.olderCursor,
     acceptedDrafts: reconcileDrafts(acceptedDrafts, snapshot.items, queued),
     queued,
+    queueRevision: 0,
   };
 }
 
@@ -59,15 +65,32 @@ export function addAcceptedDraft(current: ChatProjection, draft: AcceptedDraft):
  * Locally mirrors a held acceptance so the pinned entry appears the moment
  * the response lands rather than one stream event later. The next queue
  * event restates the authoritative list and converges with this.
+ *
+ * The echo is refused when it can only be stale: once the message has
+ * already been delivered into the timeline (a retried acceptance answered
+ * after delivery), or once any queue event has been applied since the
+ * submission (`sinceRevision`) — the stream restates the whole queue, so an
+ * entry it no longer contains was delivered or removed, and re-adding it
+ * would show a phantom no later event is guaranteed to clear.
  */
-export function noteQueuedMessage(current: ChatProjection, held: QueuedMessage): ChatProjection {
-  const queued = current.queued.some(entry => entry.id === held.id)
+export function noteQueuedMessage(current: ChatProjection, held: QueuedMessage, sinceRevision = current.queueRevision): ChatProjection {
+  const delivered = held.requestId !== undefined
+    && current.items.some(item => item.type === "user_message" && item.requestId === held.requestId);
+  const trustEcho = !delivered && current.queueRevision === sinceRevision;
+  const queued = !trustEcho || current.queued.some(entry => entry.id === held.id)
     ? current.queued
     : [...current.queued, held];
   return {
     ...current,
     queued,
-    acceptedDrafts: reconcileDrafts(current.acceptedDrafts, current.items, queued),
+    acceptedDrafts: reconcileDrafts(
+      // The draft retires either way: the submission was accepted, and its
+      // message is represented by the queued entry, the delivered item, or
+      // the authoritative stream state — never by the draft.
+      current.acceptedDrafts.filter(draft => held.requestId === undefined || draft.requestId !== held.requestId),
+      current.items,
+      queued,
+    ),
   };
 }
 
@@ -98,6 +121,7 @@ export function applyChatEvent(current: ChatProjection, event: ChatEvent, cursor
   let conversation = current.conversation;
   let configuration = current.configuration;
   let queued = current.queued;
+  let queueRevision = current.queueRevision;
   if (event.type === "item.upsert") {
     const index = items.findIndex(item => item.id === event.item.id);
     const existing = index < 0 ? undefined : items[index];
@@ -117,6 +141,7 @@ export function applyChatEvent(current: ChatProjection, event: ChatEvent, cursor
     status = event.conversation.status;
   } else if (event.type === "conversation.queue") {
     queued = event.queued;
+    queueRevision += 1;
   }
   return {
     projection: {
@@ -128,6 +153,7 @@ export function applyChatEvent(current: ChatProjection, event: ChatEvent, cursor
       conversation,
       configuration,
       queued,
+      queueRevision,
       acceptedDrafts: reconcileDrafts(current.acceptedDrafts, items, queued),
     },
     outcome: "applied",

@@ -9,7 +9,7 @@
 ## ADDED Requirements
 
 ### Requirement: Users can prompt, queue, and cancel the active conversation
-The Chat composer SHALL submit non-empty text to the selected conversation and clearly distinguish ready, sending, running, interrupted, and failed states. A prompt submitted while the conversation is running SHALL be held in a workspace-owned queue rather than delivered to the agent mid-turn. Held messages SHALL be presented adjacent to the composer, in submission order, visibly marked as queued, and SHALL NOT appear as part of the running turn's timeline. While the agent continues to stream output, held messages SHALL remain adjacent to the composer rather than drifting into the transcript.
+The Chat composer SHALL submit non-empty text to the selected conversation and clearly distinguish ready, sending, running, interrupted, and failed states. A prompt submitted while the conversation is running SHALL be held in a workspace-owned queue rather than delivered to the agent mid-turn. Held messages SHALL be presented adjacent to the composer, in submission order, visibly marked as queued, and SHALL NOT appear as part of the running turn's timeline. While the agent continues to stream output, held messages SHALL remain adjacent to the composer rather than drifting into the transcript. The queue SHALL be bounded per conversation; a submission that would exceed the bound SHALL be refused without altering the held messages, with the draft preserved.
 
 When the running turn ends on its own, the workspace SHALL deliver held messages to the agent one at a time in submission order; a delivered message SHALL leave the queue presentation and begin its own turn at the end of the timeline. The user SHALL be able to remove any message that is still held; a removed message is never delivered. Removal of a message that has already been delivered SHALL be refused without altering the conversation.
 
@@ -44,6 +44,11 @@ A control the surface offers the user to start an operation — a picker such as
 - **WHEN** the user removes a message that is still held
 - **THEN** it disappears from the queue on every client
 - **AND** it is never delivered to the agent
+
+#### Scenario: A full queue refuses further submissions
+- **WHEN** a conversation's held queue is at its bound and the user submits another prompt while the agent works
+- **THEN** the submission is refused and the draft is preserved
+- **AND** the messages already held are unaffected
 
 #### Scenario: Removing an already-delivered message is refused
 - **WHEN** a removal arrives for a message the workspace has already delivered to the agent

@@ -84,6 +84,20 @@ export class QueuedMessageNotHeldError extends Error {
   }
 }
 
+export class ChatQueueFullError extends Error {
+  constructor() {
+    super("the message queue is full");
+    this.name = "ChatQueueFullError";
+  }
+}
+
+// The queue is a short runway, not storage. Each prompt can carry 64 KiB and
+// every queue change republishes the whole queue to every subscriber, so an
+// unbounded queue lets one client grow both retained memory and per-event
+// SSE payloads without limit.
+const MAX_HELD_MESSAGES = 20;
+const MAX_HELD_TEXT_BYTES = 256 * 1024;
+
 // A held submission carries everything its eventual dispatch needs, resolved
 // at submission time: the configuration the user saw when they sent it, not
 // whatever the conversation drifts to while it waits.
@@ -503,6 +517,10 @@ export class OpenCodeChatAdapter {
       // back of the queue even when the conversation is momentarily idle —
       // dormant after a cancellation, or between deliveries.
       if (busy || queue.length > 0) {
+        if (queue.length >= MAX_HELD_MESSAGES
+          || queue.reduce((total, entry) => total + Buffer.byteLength(entry.text), 0) + Buffer.byteLength(text) > MAX_HELD_TEXT_BYTES) {
+          throw new ChatQueueFullError();
+        }
         const held: HeldMessage = {
           id: this.id(),
           text,
