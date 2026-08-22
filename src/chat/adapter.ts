@@ -738,6 +738,13 @@ export class OpenCodeChatAdapter {
     try {
       session = await this.requireSession(conversationId);
     } catch {
+      // The terminal transition that triggered this delivery is already
+      // consumed — returning silently would strand an accepted message in
+      // the queue with nothing left to release it. Pausing instead makes
+      // the stall visible state with a documented exit: the next
+      // submission resumes delivery from the head. A genuinely deleted
+      // conversation pauses a queue nobody can see, which is harmless.
+      this.dormantQueues.add(conversationId);
       return;
     }
     try {
@@ -1507,7 +1514,17 @@ export class ConversationProjection {
       this.timeline.delete(update.itemId);
       return this.replay.publish({ type: "item.remove", itemId: update.itemId });
     }
-    if (update.kind === "status") return this.statusUpdate(update.status, update.message);
+    if (update.kind === "status") {
+      // A terminal report landing while a locally admitted prompt is still
+      // in flight can only describe the PREVIOUS turn: "sending" exists
+      // purely between our dispatch and the provider's acceptance, so the
+      // turn it announces the end of cannot be the one being started. The
+      // merged native and classic streams can both announce one completion,
+      // and applying the straggler here would flap the status and release
+      // the next held message into a turn that is still starting.
+      if (this.status === "sending" && update.status === "completed") return undefined;
+      return this.statusUpdate(update.status, update.message);
+    }
     const wasNew = update.item !== undefined && !this.timeline.has(update.itemId);
     if (wasNew && update.item) this.timeline.set(update.itemId, update.item);
     const before = this.text.value(update.identity);

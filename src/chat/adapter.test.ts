@@ -962,6 +962,70 @@ describe("prompt, abort, permission, and question mutations", () => {
     expect((await adapter.history("session")).queued).toEqual([expect.objectContaining({ id: third.messageId, text: "third" })]);
   });
 
+  test("a straggling completion of the previous turn does not release a second delivery", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    let message = 0;
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
+
+    expect((await adapter.prompt("session", "r1", "first")).held).toBe(false);
+    await adapter.prompt("session", "r2", "second");
+    const third = await adapter.prompt("session", "r3", "third");
+
+    // Delivery of "second" stalls in dispatch, holding the projection at
+    // "sending" — the window in which the merged provider streams can
+    // restate the PREVIOUS turn's completion.
+    let releaseDelivery!: () => void;
+    const gate = new Promise<void>(resolve => { releaseDelivery = resolve; });
+    let entered!: () => void;
+    const enteredDelivery = new Promise<void>(resolve => { entered = resolve; });
+    const accept = provider.prompt.bind(provider);
+    provider.prompt = async (sessionId, input) => {
+      entered();
+      await gate;
+      return accept(sessionId, input);
+    };
+    adapter.projectionForTests("session").apply({ kind: "status", status: "completed" });
+    await enteredDelivery;
+    // The duplicate terminal report lands mid-admission and must be ignored.
+    expect(adapter.projectionForTests("session").apply({ kind: "status", status: "completed" })).toBeUndefined();
+    expect(adapter.projectionForTests("session").status).toBe("sending");
+    releaseDelivery();
+    await new Promise(resolve => setTimeout(resolve, 20));
+
+    // Only "second" was admitted; "third" is still held and removable.
+    expect(provider.prompts).toHaveLength(2);
+    expect((await adapter.history("session")).queued).toEqual([expect.objectContaining({ id: third.messageId })]);
+  });
+
+  test("a delivery-time session lookup failure pauses the queue instead of stranding it", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    let message = 0;
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
+
+    expect((await adapter.prompt("session", "r1", "first")).held).toBe(false);
+    const held = await adapter.prompt("session", "r2", "second");
+    expect(held.held).toBe(true);
+
+    const lookup = provider.getSession.bind(provider);
+    provider.getSession = async () => { throw new Error("transient lookup failure"); };
+    adapter.projectionForTests("session").statusUpdate("completed");
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(provider.prompts).toHaveLength(1);
+
+    // The queue paused rather than silently stranding the message: a later
+    // idle transition alone delivers nothing...
+    provider.getSession = lookup;
+    adapter.projectionForTests("session").statusUpdate("idle");
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(provider.prompts).toHaveLength(1);
+    // ...and the documented exit — the next submission — resumes delivery.
+    await adapter.prompt("session", "r3", "third");
+    for (let attempt = 0; attempt < 200 && provider.prompts.length < 2; attempt += 1) await new Promise(resolve => setTimeout(resolve, 1));
+    expect(provider.prompts[1]).toEqual(expect.objectContaining({ text: "second", id: held.messageId }));
+  });
+
   test("a held message freezes the configuration it was submitted under", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];

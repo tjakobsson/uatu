@@ -6,9 +6,17 @@ type EventPayload = ChatEvent extends infer Event
 
 export type ReplayCursor = { generation: string; sequence: number };
 
+// A consumer that stops pulling must not hold the workspace hostage: the
+// backlog below this many bytes of undelivered frames ends the stream
+// instead of growing without bound. The client reconnects with its last
+// cursor and either replays from the retained ring or resynchronizes from a
+// fresh snapshot — both already-working paths.
+const MAX_SUBSCRIBER_BACKLOG_BYTES = 1024 * 1024;
+
 export class ReplaySubscription implements AsyncIterable<ChatEvent> {
-  private readonly queued: ChatEvent[] = [];
+  private readonly queued: Array<{ event: ChatEvent; bytes: number }> = [];
   private readonly waiting: Array<(value: IteratorResult<ChatEvent>) => void> = [];
+  private queuedBytes = 0;
   private closed = false;
 
   constructor(private readonly cleanup: () => void) {}
@@ -16,8 +24,20 @@ export class ReplaySubscription implements AsyncIterable<ChatEvent> {
   push(event: ChatEvent): void {
     if (this.closed) return;
     const waiter = this.waiting.shift();
-    if (waiter) waiter({ value: event, done: false });
-    else this.queued.push(event);
+    if (waiter) {
+      waiter({ value: event, done: false });
+      return;
+    }
+    const bytes = Buffer.byteLength(JSON.stringify(event));
+    this.queued.push({ event, bytes });
+    this.queuedBytes += bytes;
+    if (this.queuedBytes > MAX_SUBSCRIBER_BACKLOG_BYTES) {
+      // The backlog is dropped, not drained: a consumer this far behind is
+      // stalled, and the reconnect path recovers everything it missed.
+      this.queued.length = 0;
+      this.queuedBytes = 0;
+      this.cancel();
+    }
   }
 
   cancel(): void {
@@ -30,8 +50,11 @@ export class ReplaySubscription implements AsyncIterable<ChatEvent> {
   [Symbol.asyncIterator](): AsyncIterator<ChatEvent> {
     return {
       next: () => {
-        const event = this.queued.shift();
-        if (event) return Promise.resolve({ value: event, done: false });
+        const entry = this.queued.shift();
+        if (entry) {
+          this.queuedBytes -= entry.bytes;
+          return Promise.resolve({ value: entry.event, done: false });
+        }
         if (this.closed) return Promise.resolve({ value: undefined, done: true });
         return new Promise(resolve => this.waiting.push(resolve));
       },
