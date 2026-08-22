@@ -155,6 +155,25 @@ describe("credential tool probes", () => {
     });
   });
 
+
+  test("accepts agentless ssh-add, which reports the missing agent instead of usage", async () => {
+    // Real ssh-add connects to the agent before parsing argv, so under the
+    // scrubbed probe env (no SSH_AUTH_SOCK) it can never print usage text.
+    // This is the only output the probe will ever see in practice; the old
+    // banner rejected it and disabled SSH credentials on every install.
+    const { filePath } = await executable("ssh-add");
+    await writeFile(filePath, "#!/bin/sh\nprintf 'Could not open a connection to your authentication agent.\\n' >&2\nexit 2\n", { mode: 0o700 });
+    const probe = await probeCredentialTool({ tool: "ssh-add", path: filePath, source: "override" });
+    expect(probe.results.map(result => result.status)).toEqual(["ready", "ready", "not-applicable"]);
+  });
+
+  test("probes the real ssh-add as identified when it is installed", async () => {
+    const discovery = await discoverExecutable("ssh-add");
+    if (!discovery.path) return; // no OpenSSH client on this machine
+    const probe = await probeCredentialTool(discovery);
+    expect(probe.results.map(result => result.status)).toEqual(["ready", "ready", "not-applicable"]);
+  });
+
   test("rejects executables that do not identify as the configured tool", async () => {
     // /bin/false-alike: tolerated exit status, no banner.
     const silent = await executable("ssh-agent");
