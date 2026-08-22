@@ -9,6 +9,16 @@ async function read(relativePath: string): Promise<string> {
   return readFile(path.join(root, relativePath), "utf8");
 }
 
+// `names.indexOf(missing)` is -1, and -1 is less than every real index, so an
+// ordering assertion naming a renamed step keeps passing while verifying
+// nothing. Renaming the release smoke step to darwin-arm64 silently defanged
+// exactly that check. Resolve indices through here so a missing step fails.
+function stepIndex(names: string[], name: string): number {
+  const index = names.indexOf(name);
+  expect(index, `workflow step not found: ${name}`).toBeGreaterThanOrEqual(0);
+  return index;
+}
+
 describe("Release Please configuration", () => {
   test("starts from the published package version and exposes only user-facing sections", async () => {
     const config = JSON.parse(await read("release-please-config.json"));
@@ -99,8 +109,12 @@ describe("artifact publication workflow", () => {
     expect(releaseProbe.run).toContain("gh release view");
     expect(upload.run).toContain("gh release upload");
     expect(upload.run).toContain("--clobber");
-    expect(names.indexOf("Smoke-test the linux-x64 binary")).toBeLessThan(names.indexOf("Upload release assets"));
-    expect(names.indexOf("Attest build provenance")).toBeLessThan(names.indexOf("Upload release assets"));
+    expect(stepIndex(names, "Smoke-test the darwin-arm64 binary")).toBeLessThan(
+      stepIndex(names, "Upload release assets"),
+    );
+    expect(stepIndex(names, "Attest build provenance")).toBeLessThan(
+      stepIndex(names, "Upload release assets"),
+    );
 
     // Publication is its own job downstream of both asset producers, so the
     // draft never goes public before the desktop apps had their chance.
@@ -189,9 +203,11 @@ describe("artifact publication workflow", () => {
     const names = steps.map(step => step.name ?? "");
     const compile = steps.find(step => step.name === "Cross-compile all CLI targets")!;
     expect(compile.run).toContain("--version");
-    expect(names.indexOf("Compute edge version")).toBeLessThan(names.indexOf("Cross-compile all CLI targets"));
-    expect(names.indexOf("Smoke-test the darwin-arm64 binary")).toBeLessThan(
-      names.indexOf("Build UatuCode Desktop for both architectures"),
+    expect(stepIndex(names, "Compute edge version")).toBeLessThan(
+      stepIndex(names, "Cross-compile all CLI targets"),
+    );
+    expect(stepIndex(names, "Smoke-test the darwin-arm64 binary")).toBeLessThan(
+      stepIndex(names, "Build UatuCode Desktop for both architectures"),
     );
 
     // Assets before tag: the skip guard keys on the tag, so a failed

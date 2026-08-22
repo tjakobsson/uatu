@@ -72,5 +72,38 @@ if (result.exitCode !== 0) {
   process.exit(result.exitCode ?? 1);
 }
 
+// Bun 1.4.0 emits macOS binaries whose embedded signature does not match the
+// bytes it wrote — `codesign -v` reports "code or signature have been
+// modified" — and the arm64 kernel SIGKILLs those on exec: exit 137, no
+// output, nothing on stderr. That is what broke the Edge nightly, whose smoke
+// step could only report that the server never came up.
+//
+// Re-signing ad-hoc writes a valid signature over the finished binary.
+//
+// `codesign` is macOS-only, so a darwin target cross-compiled from Linux
+// cannot be repaired here and is warned about loudly instead. Nothing later
+// in the CLI pipeline signs it: release.yml's macOS job signs the UatuCode
+// Desktop .app bundles, not these binaries.
+const targetsDarwin = target ? target.includes("darwin") : process.platform === "darwin";
+if (targetsDarwin) {
+  if (process.platform === "darwin") {
+    const signed = Bun.spawnSync({
+      cmd: ["codesign", "--force", "--sign", "-", outfile],
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+    if (signed.exitCode !== 0) {
+      console.error(`codesign failed for ${path.relative(root, outfile)} — the binary would be killed on launch`);
+      process.exit(signed.exitCode ?? 1);
+    }
+  } else {
+    console.error(
+      `warning: ${path.relative(root, outfile)} targets darwin but was built on ${process.platform}, ` +
+        "where codesign is unavailable. Bun 1.4.0 emits an invalid signature that macOS arm64 " +
+        "SIGKILLs on exec, so this artifact must be signed on a macOS host before it is shipped.",
+    );
+  }
+}
+
 const label = target ? ` [${target}]` : "";
 console.log(`built ${path.relative(root, outfile)}${label} (v${buildInfo.version} · ${buildInfo.commitShort})`);

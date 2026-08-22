@@ -346,6 +346,19 @@ describe("Hub state-root lease", () => {
     ], { stdout: "pipe", stderr: "pipe" });
     expect(build.exitCode, build.stderr.toString()).toBe(0);
 
+    // Bun 1.4.0 emits macOS binaries whose signature does not match the bytes
+    // written, and the arm64 kernel SIGKILLs them on exec (exit 137, no
+    // output). This helper is compiled directly rather than through
+    // scripts/build.ts, so it needs the same ad-hoc re-signing that build.ts
+    // applies to product binaries.
+    if (process.platform === "darwin") {
+      const signed = Bun.spawnSync(
+        ["codesign", "--force", "--sign", "-", compiledHelper],
+        { stdout: "pipe", stderr: "pipe" },
+      );
+      expect(signed.exitCode, signed.stderr.toString()).toBe(0);
+    }
+
     const interpreted = spawnLeaseProcess(stateRoot);
     expect((await firstLeaseProcessOutcome(interpreted)).status).toBe("locked");
     const compiledContender = spawnLeaseProcess(stateRoot, { executable: compiledHelper });
