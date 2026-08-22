@@ -44,7 +44,10 @@ async function isRecordedLegacyAgent(pid: number, socketPath: string): Promise<b
     if (result.exitCode !== 0) return false;
     const command = result.stdout.toString().trim();
     const [executable = ""] = command.split(" ");
-    return executable.endsWith("ssh-agent") && command.includes(`-a ${socketPath}`);
+    // Anchor the -a value at the end of the command line, where the v1
+    // launch put it: `ssh-agent -D -a <socketPath>`. A substring match
+    // would also accept an agent bound to e.g. `<socketPath>.backup`.
+    return executable.endsWith("ssh-agent") && command.endsWith(` -a ${socketPath}`);
   } catch {
     return false;
   }

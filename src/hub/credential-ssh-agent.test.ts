@@ -503,9 +503,10 @@ describe("v1 ownership migration", () => {
   test("never signals an unrelated ssh-agent that recycled the recorded pid", async () => {
     const { runtime, executable } = await fixture();
     const socketPath = path.join(runtime, "ssh-agent.sock");
-    // Someone else's agent: same executable, same pid as the record, but
-    // bound to its own socket — its argv does not reference ours.
-    const foreignSocket = path.join(runtime, "..", "unrelated-agent.sock");
+    // Someone else's agent: same executable, same pid as the record, and —
+    // the nastiest variant — bound to a socket whose path merely extends
+    // ours, so a substring match on `-a <socketPath>` would accept it.
+    const foreignSocket = `${path.join(runtime, "ssh-agent.sock")}.backup`;
     const unrelated = Bun.spawn([executable, "-D", "-a", foreignSocket], { stdout: "ignore", stderr: "ignore" });
     // The recorded socket is a stale leftover: right identity, dead owner.
     const listener = Bun.listen({ unix: socketPath, socket: { data() {} } });
