@@ -32,75 +32,53 @@ async function detectBackend(): Promise<TerminalBackend> {
   if (process.platform === "win32") {
     return { available: false, reason: "Bun PTY API does not yet support Windows" };
   }
-  // The `terminal` option on Bun.spawn is the gate. Older Bun versions
-  // (<1.3.5) silently ignore it; we'd rather fail closed than spawn a
-  // pipe-stdio child and pretend it's a TTY. Cheapest probe: try a short
-  // sentinel and confirm the data callback fires within a tight deadline.
-  return await probeBunTerminal();
+  // The `terminal` option on Bun.spawn is the gate: Bun < 1.3.5 silently
+  // ignores it and hands back pipe stdio, and we would rather fail closed
+  // than pretend that is a TTY.
+  //
+  // This used to be answered by spawning `/bin/echo` in a PTY and waiting
+  // for a byte. That probe deadlocked the Edge nightly: under Bun 1.4.0 on a
+  // macOS CI runner, spawning a child that exits immediately can wedge the
+  // main thread in a synchronous wait4() reaping it. The per-attempt
+  // watchdog could never fire, because the event loop was blocked inside
+  // native code — a bounded-looking guard that was not bounded at all. Boot
+  // hung before Bun.serve ever listened.
+  //
+  // The version is the thing we actually wanted to test, and reading it
+  // spawns nothing. It also removes the boot-time fork storm the retry loop
+  // risked on the unsupported path.
+  return supportsBunTerminal(Bun.version);
 }
 
-// One delivered PTY byte proves Bun's terminal backend works. But Bun
-// occasionally DROPS that byte when many children spawn at once: the child
-// runs to a clean exit yet the `data` callback never fires (observed ~50% of
-// the time when several servers boot together, e.g. the parallel e2e suite).
-// A single probe therefore reports a perfectly good PTY as unavailable. So we
-// retry: any attempt that delivers a byte proves availability; only when
-// *every* attempt within the budget comes up empty do we conclude the runtime
-// ignores the `terminal` option (Bun < 1.3.5) and fail closed.
-//
-// On that unsupported path every probe exits immediately without data, so the
-// fast-exit shortcut below would let the loop respawn `/bin/echo` thousands of
-// times within the budget — a boot-time fork storm. PROBE_RETRY_DELAY_MS paces
-// the loop so the spawn rate stays bounded (~budget/delay attempts) while the
-// happy path still returns on its first successful probe.
-const PROBE_BUDGET_MS = 3000;
-const PROBE_ATTEMPT_MS = 750;
-const PROBE_RETRY_DELAY_MS = 100;
+const MINIMUM_BUN_TERMINAL_VERSION = [1, 3, 5] as const;
 
-const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+export function supportsBunTerminal(version: string): TerminalBackend {
+  // Build metadata (`+...`) does not affect precedence; a prerelease (`-...`)
+  // does, and sorts below its own release.
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(version.trim());
+  if (!match) {
+    return { available: false, reason: `unrecognized Bun version "${version}"` };
+  }
+  const core = [Number(match[1]), Number(match[2]), Number(match[3])];
+  const prerelease = match[4];
 
-async function probeBunTerminal(): Promise<TerminalBackend> {
-  const deadline = performance.now() + PROBE_BUDGET_MS;
-  let attempts = 0;
-  try {
-    do {
-      attempts++;
-      const sawData = await new Promise<boolean>(resolve => {
-        let settled = false;
-        const settle = (value: boolean) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(watchdog);
-          resolve(value);
-        };
-        const watchdog = setTimeout(() => settle(false), PROBE_ATTEMPT_MS);
-        const proc = Bun.spawn(["/bin/echo", "uatu-pty-probe"], {
-          terminal: {
-            cols: 80,
-            rows: 24,
-            data() {
-              settle(true);
-            },
-          },
-        } as Parameters<typeof Bun.spawn>[1]);
-        // If the child exits without delivering a byte, this attempt missed.
-        // Fail it fast — after a turn of the event loop so a trailing `data`
-        // event still counts — so the loop can retry instead of burning the
-        // full per-attempt deadline.
-        void proc.exited.then(() => setTimeout(() => settle(false), 0));
-      });
-      if (sawData) return { available: true, spawn: spawnPty };
-      if (performance.now() + PROBE_RETRY_DELAY_MS >= deadline) break;
-      await delay(PROBE_RETRY_DELAY_MS);
-    } while (performance.now() < deadline);
-  } catch (error) {
+  let comparison = 0;
+  for (let i = 0; i < MINIMUM_BUN_TERMINAL_VERSION.length; i += 1) {
+    const difference = core[i]! - MINIMUM_BUN_TERMINAL_VERSION[i]!;
+    if (difference !== 0) {
+      comparison = difference;
+      break;
+    }
+  }
+
+  // 1.3.5-canary.1 predates 1.3.5 and may ship without the PTY
+  // implementation, so fail closed on a prerelease *of the minimum itself*.
+  // A prerelease of any later version is already past the gate.
+  if (comparison < 0 || (comparison === 0 && prerelease !== undefined)) {
     return {
       available: false,
-      reason: error instanceof Error ? error.message : String(error),
+      reason: `Bun ${version} ignores Bun.spawn { terminal } (needs >= 1.3.5)`,
     };
   }
-  return {
-    available: false,
-    reason: `Bun.spawn { terminal } delivered no data across ${attempts} probe(s)`,
-  };
+  return { available: true, spawn: spawnPty };
 }
