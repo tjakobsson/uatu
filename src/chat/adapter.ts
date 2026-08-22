@@ -22,6 +22,7 @@ import type {
   PermissionOutcome,
   PermissionRequest,
   ModelSelection,
+  QueuedMessage,
   QuestionOutcome,
   QuestionRequest,
   TokenUsage,
@@ -75,6 +76,23 @@ export class ConversationRenameUnsupportedError extends Error {
     this.name = "ConversationRenameUnsupportedError";
   }
 }
+
+export class QueuedMessageNotHeldError extends Error {
+  constructor() {
+    super("message is no longer held");
+    this.name = "QueuedMessageNotHeldError";
+  }
+}
+
+// A held submission carries everything its eventual dispatch needs, resolved
+// at submission time: the configuration the user saw when they sent it, not
+// whatever the conversation drifts to while it waits.
+type HeldMessage = QueuedMessage & {
+  requestId: string;
+  model?: ModelSelection;
+  mode?: string;
+  variant?: string;
+};
 
 // Just the slice of MetricsRegistry the adapter needs, so chat does not depend
 // on the debug module's shape.
@@ -130,6 +148,15 @@ export class OpenCodeChatAdapter {
   private readonly configurations = new Map<string, ConversationConfiguration>();
   private readonly configurationReads = new Map<string, Promise<ConversationConfiguration>>();
   private readonly promptAdmissions = new Map<string, Promise<void>>();
+  // Messages accepted while the conversation was busy, held here until the
+  // turn ends. Adapter-level like liveTurns, not projection state: a held
+  // message must survive projection eviction, or an LRU pass would silently
+  // drop text the user was promised would be delivered.
+  private readonly heldQueues = new Map<string, HeldMessage[]>();
+  // Queues a cancellation paused. A dormant queue keeps its messages visible
+  // and removable but delivers nothing until the user's next submission
+  // reactivates it — cancel means stop, not "start the next thing".
+  private readonly dormantQueues = new Set<string>();
   // Mirrors a running OpenCode TUI: once this adapter accepts a prompt, the
   // next conversation starts from that process-local selection. A fresh
   // adapter falls back to OpenCode's durable config/recent-model policy.
@@ -241,6 +268,7 @@ export class OpenCodeChatAdapter {
       generation: this.generation,
       cursor: projection.replay.latestCursor(),
       items: [],
+      queued: [],
     };
   }
 
@@ -407,6 +435,9 @@ export class OpenCodeChatAdapter {
       generation: this.generation,
       cursor: replayCursor,
       items,
+      // A client joining or reloading mid-run gets the same held queue a
+      // client that watched it build presents.
+      queued: this.queuedMessages(id),
       olderCursor: page.nextCursor ? encodeHistoryCursor({ provider: page.nextCursor }) : undefined,
     };
   }
@@ -424,6 +455,7 @@ export class OpenCodeChatAdapter {
       generation: this.generation,
       cursor,
       items: projection.items(),
+      queued: this.queuedMessages(id),
     }), options.cursor, options.signal);
     return { snapshot: handoff.snapshot, events: handoff.subscription };
   }
@@ -452,124 +484,253 @@ export class OpenCodeChatAdapter {
 
   async prompt(conversationId: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string): Promise<{
     messageId: string;
-    delivery: "steer" | "queue";
+    held: boolean;
     configuration: ConversationConfiguration;
     conversation?: ConversationSummary;
   }> {
     if (!text.trim()) throw new Error("prompt must not be empty");
     return this.receipts.run(`prompt:${conversationId}:${requestId}`, () => this.enqueuePromptAdmission(conversationId, async () => {
-      let session = await this.requireSession(conversationId);
+      const session = await this.requireSession(conversationId);
       const projection = this.projection(conversationId);
       const currentConfiguration = await this.configuration(conversationId);
-      const delivery = projection.status === "running" ? "steer" : "queue";
-      const messageId = this.id();
-      const previousModel = model ? currentConfiguration.model : undefined;
-      const modelChanged = model !== undefined && (!previousModel || !sameSelection(previousModel, model));
-      // One list serves the model check and the variant check below; only a
-      // change pays the round trip.
-      let available: ChatModel[] | undefined;
-      if (model && modelChanged) {
-        available = await this.provider.listModels();
-        if (!available.some(candidate => sameSelection(candidate.selection, model))) throw new InvalidModelSelectionError();
-      }
-      // Same freshness rule as the model: only a change pays the list round
-      // trip, and an unknown name is refused rather than passed through for
-      // OpenCode to interpret.
-      if (mode && currentConfiguration.mode !== mode) {
-        const modes = await this.modes();
-        if (!modes.some(candidate => candidate.name === mode)) throw new InvalidModeSelectionError();
-      }
-      // A variant is refused unless the model it would ride advertises it —
-      // variants are per-model, and an unknown one passed through would
-      // silently do nothing on the wire. A prompt that carries a variant
-      // without restating the model means "this conversation's model, harder":
-      // the last model this adapter applied stands in, for the check here and
-      // for the dispatch below, because on the v2 path the variant rides the
-      // model reference and a variant with nothing to ride is dropped. Same
-      // freshness rule as the model and mode: a variant is re-sent with every
-      // prompt of a conversation, so validating it every time would pay a
-      // provider round trip per message rather than per change.
-      const variantModel = variant ? model ?? currentConfiguration.model : model;
-      if (variant && (modelChanged || currentConfiguration.variant !== variant)) {
-        available ??= await this.provider.listModels();
-        const selected = variantModel && available.find(candidate => sameSelection(candidate.selection, variantModel));
-        if (!selected?.variants?.includes(variant)) throw new InvalidVariantSelectionError();
-      }
-      // Emptiness is checked before dispatch (afterwards the store already
-      // holds this prompt), but the rename itself waits for admission — a
-      // rejected first prompt must not permanently title the conversation
-      // from a message that was never accepted.
-      let renameToFirstPrompt = false;
-      if (this.provider.renameSession && isDefaultConversationTitle(session.title)) {
-        const page = await this.provider.listMessages(conversationId, { limit: 1 });
-        renameToFirstPrompt = page.items.length === 0;
-      }
-      let conversation: ConversationSummary | undefined;
-      // A steer targets a turn that is already running — the projection keeps
-      // saying so. Downgrading it to "sending" (and to "failed" on a rejected
-      // steer) would hide cancellation for a turn that never stopped.
-      const steering = projection.status === "running";
-      if (!steering) projection.statusUpdate("sending");
-      try {
-        // A failed command listing propagates: classifying "/compact" as
-        // plain prose because the list was momentarily unavailable would
-        // send the text as a message and report it accepted.
-        const slash = text.startsWith("/")
-          ? parseSlashCommand(text, await this.provider.listCommands())
-          : undefined;
-        const accepted = slash
-          ? await this.provider.command(conversationId, { id: messageId, name: slash.name, arguments: slash.arguments, model: variantModel, mode, variant })
-          : await this.provider.prompt(conversationId, { id: messageId, text, delivery, model: variantModel, mode, variant });
-        if (renameToFirstPrompt) {
-          try {
-            // A manual rename can finish while prompt validation is still
-            // running, before the projection enters `sending`. Re-read here so
-            // the stale first-prompt decision cannot overwrite that title.
-            session = await this.requireSession(conversationId);
-            if (isDefaultConversationTitle(session.title)) {
-              session = await this.provider.renameSession!(conversationId, deriveConversationTitle(text));
-              if (!await isSessionInWorkspace(session.directory, this.workspacePath)) throw new ConversationNotFoundError();
-              conversation = this.summary(session, projection.status);
-              projection.replay.publish({ type: "conversation.updated", conversation });
-            }
-          } catch { /* cosmetic — listConversations repairs default titles later */ }
-        }
-        projection.upsert({ id: `message:${accepted.messageId}`, type: "user_message", createdAt: Date.now(), text, requestId });
-        // Provider events can update the cache while prompt admission awaits.
-        // Merge onto the latest value synchronously so omitted fields preserve
-        // that newer state rather than restoring the pre-admission snapshot.
-        const latestConfiguration = this.configurations.get(conversationId) ?? currentConfiguration;
-        const configuration: ConversationConfiguration = {
-          ...latestConfiguration,
-          ...(model ? { model } : {}),
+      const variantModel = await this.validateSelections(currentConfiguration, model, mode, variant);
+      // liveTurns as well as projection status: a projection evicted mid-turn
+      // comes back "idle" while the turn is still running, and dispatching
+      // into it would race the very turn the queue exists to wait out.
+      const busy = projection.status === "running" || projection.status === "sending" || this.liveTurns.has(conversationId);
+      const queue = this.heldQueues.get(conversationId) ?? [];
+      // Order is absolute: while anything is held, a new submission joins the
+      // back of the queue even when the conversation is momentarily idle —
+      // dormant after a cancellation, or between deliveries.
+      if (busy || queue.length > 0) {
+        const held: HeldMessage = {
+          id: this.id(),
+          text,
+          queuedAt: Date.now(),
+          requestId,
+          ...(variantModel ? { model: variantModel } : {}),
           ...(mode ? { mode } : {}),
+          ...(variant ? { variant } : {}),
         };
-        if (model) {
-          if (variant) configuration.variant = variant;
-          else delete configuration.variant;
-        } else if (variant) configuration.variant = variant;
-        this.configurations.set(conversationId, configuration);
-        // An entirely unknown resumed conversation does not tell us what
-        // OpenCode actually chose, so it must not erase the durable cold-TUI
-        // fallback. Known accepted models do become this adapter's last-used
-        // selection, matching a running TUI.
-        if (configuration.model) this.newConversationDefaults = configuration;
-        if (!sameConfiguration(latestConfiguration, configuration)) {
-          projection.replay.publish({ type: "conversation.configuration", configuration });
-        }
-        // A fast command can finish its whole turn while the dispatch
-        // resolves; the pump's terminal status then outranks our optimistic
-        // promotion, or the turn sticks at "working" forever.
-        if (projection.status === "sending") projection.statusUpdate("running");
-        return { messageId: accepted.messageId, delivery, configuration, ...(conversation ? { conversation } : {}) };
-      } catch (error) {
-        const mapped = error instanceof UnsupportedVariantSelectionError
-          ? new InvalidVariantSelectionError(error.message)
-          : error;
-        if (!steering && projection.status === "sending") projection.statusUpdate("failed", errorMessage(mapped));
-        throw mapped;
+        queue.push(held);
+        this.heldQueues.set(conversationId, queue);
+        // A submission is what reactivates a queue a cancellation paused.
+        this.dormantQueues.delete(conversationId);
+        // The staged selection commits on submission, exactly as an
+        // immediately dispatched prompt commits it; delivery re-asserts the
+        // same values on the wire.
+        const configuration = this.commitConfiguration(conversationId, projection, currentConfiguration, model, mode, variant);
+        this.publishQueue(conversationId, projection, { kind: "held", messageId: held.id });
+        if (!busy) this.scheduleDelivery(conversationId);
+        return { messageId: held.id, held: true, configuration };
       }
+      const dispatched = await this.dispatchPrompt(conversationId, projection, session, {
+        messageId: this.id(),
+        text,
+        requestId,
+        ...(variantModel ? { model: variantModel } : {}),
+        ...(mode ? { mode } : {}),
+        ...(variant ? { variant } : {}),
+      });
+      return { ...dispatched, held: false };
     }));
+  }
+
+  async removeQueued(conversationId: string, messageId: string, requestId: string): Promise<{ removed: true }> {
+    // Removal runs through the same per-conversation admission lane as
+    // dispatch, so it can never race a delivery: when it runs, the message is
+    // either still held (removed here, never sent) or already delivered
+    // (refused, and the client learns it is no longer held).
+    return this.receipts.run(`unqueue:${conversationId}:${requestId}`, () => this.enqueuePromptAdmission(conversationId, async () => {
+      await this.requireSession(conversationId);
+      const queue = this.heldQueues.get(conversationId) ?? [];
+      const index = queue.findIndex(held => held.id === messageId);
+      if (index < 0) throw new QueuedMessageNotHeldError();
+      queue.splice(index, 1);
+      if (queue.length === 0) this.heldQueues.delete(conversationId);
+      this.publishQueue(conversationId, this.projection(conversationId), { kind: "removed", messageId });
+      return { removed: true as const };
+    }));
+  }
+
+  /**
+   * Refuses a selection the agent does not offer, and resolves which model a
+   * bare variant rides. A variant is refused unless the model it would ride
+   * advertises it — variants are per-model, and an unknown one passed through
+   * would silently do nothing on the wire. A prompt that carries a variant
+   * without restating the model means "this conversation's model, harder".
+   * Only a change pays a provider list round trip.
+   */
+  private async validateSelections(currentConfiguration: ConversationConfiguration, model?: ModelSelection, mode?: string, variant?: string): Promise<ModelSelection | undefined> {
+    const previousModel = model ? currentConfiguration.model : undefined;
+    const modelChanged = model !== undefined && (!previousModel || !sameSelection(previousModel, model));
+    // One list serves the model check and the variant check below; only a
+    // change pays the round trip.
+    let available: ChatModel[] | undefined;
+    if (model && modelChanged) {
+      available = await this.provider.listModels();
+      if (!available.some(candidate => sameSelection(candidate.selection, model))) throw new InvalidModelSelectionError();
+    }
+    // Same freshness rule as the model: only a change pays the list round
+    // trip, and an unknown name is refused rather than passed through for
+    // OpenCode to interpret.
+    if (mode && currentConfiguration.mode !== mode) {
+      const modes = await this.modes();
+      if (!modes.some(candidate => candidate.name === mode)) throw new InvalidModeSelectionError();
+    }
+    const variantModel = variant ? model ?? currentConfiguration.model : model;
+    if (variant && (modelChanged || currentConfiguration.variant !== variant)) {
+      available ??= await this.provider.listModels();
+      const selected = variantModel && available.find(candidate => sameSelection(candidate.selection, variantModel));
+      if (!selected?.variants?.includes(variant)) throw new InvalidVariantSelectionError();
+    }
+    return variantModel;
+  }
+
+  /**
+   * The one place a prompt actually reaches the provider. Every dispatch runs
+   * on an idle conversation — a busy one holds the message instead — inside
+   * the per-conversation admission lane.
+   */
+  private async dispatchPrompt(conversationId: string, projection: ConversationProjection, initialSession: ProviderSession, input: {
+    messageId: string;
+    text: string;
+    requestId: string;
+    model?: ModelSelection;
+    mode?: string;
+    variant?: string;
+  }): Promise<{ messageId: string; configuration: ConversationConfiguration; conversation?: ConversationSummary }> {
+    let session = initialSession;
+    const { text, mode, variant } = input;
+    // Emptiness is checked before dispatch (afterwards the store already
+    // holds this prompt), but the rename itself waits for admission — a
+    // rejected first prompt must not permanently title the conversation
+    // from a message that was never accepted.
+    let renameToFirstPrompt = false;
+    if (this.provider.renameSession && isDefaultConversationTitle(session.title)) {
+      const page = await this.provider.listMessages(conversationId, { limit: 1 });
+      renameToFirstPrompt = page.items.length === 0;
+    }
+    let conversation: ConversationSummary | undefined;
+    projection.statusUpdate("sending");
+    try {
+      // A failed command listing propagates: classifying "/compact" as
+      // plain prose because the list was momentarily unavailable would
+      // send the text as a message and report it accepted.
+      const slash = text.startsWith("/")
+        ? parseSlashCommand(text, await this.provider.listCommands())
+        : undefined;
+      const accepted = slash
+        ? await this.provider.command(conversationId, { id: input.messageId, name: slash.name, arguments: slash.arguments, model: input.model, mode, variant })
+        : await this.provider.prompt(conversationId, { id: input.messageId, text, delivery: "queue", model: input.model, mode, variant });
+      if (renameToFirstPrompt) {
+        try {
+          // A manual rename can finish while prompt validation is still
+          // running, before the projection enters `sending`. Re-read here so
+          // the stale first-prompt decision cannot overwrite that title.
+          session = await this.requireSession(conversationId);
+          if (isDefaultConversationTitle(session.title)) {
+            session = await this.provider.renameSession!(conversationId, deriveConversationTitle(text));
+            if (!await isSessionInWorkspace(session.directory, this.workspacePath)) throw new ConversationNotFoundError();
+            conversation = this.summary(session, projection.status);
+            projection.replay.publish({ type: "conversation.updated", conversation });
+          }
+        } catch { /* cosmetic — listConversations repairs default titles later */ }
+      }
+      projection.upsert({ id: `message:${accepted.messageId}`, type: "user_message", createdAt: Date.now(), text, requestId: input.requestId });
+      const configuration = this.commitConfiguration(conversationId, projection, this.configurations.get(conversationId) ?? {}, input.model, mode, variant);
+      // A fast command can finish its whole turn while the dispatch
+      // resolves; the pump's terminal status then outranks our optimistic
+      // promotion, or the turn sticks at "working" forever.
+      if (projection.status === "sending") projection.statusUpdate("running");
+      return { messageId: accepted.messageId, configuration, ...(conversation ? { conversation } : {}) };
+    } catch (error) {
+      const mapped = error instanceof UnsupportedVariantSelectionError
+        ? new InvalidVariantSelectionError(error.message)
+        : error;
+      if (projection.status === "sending") projection.statusUpdate("failed", errorMessage(mapped));
+      throw mapped;
+    }
+  }
+
+  // Provider events can update the cache while prompt admission awaits.
+  // Merge onto the latest value synchronously so omitted fields preserve
+  // that newer state rather than restoring the pre-admission snapshot.
+  private commitConfiguration(conversationId: string, projection: ConversationProjection, fallback: ConversationConfiguration, model?: ModelSelection, mode?: string, variant?: string): ConversationConfiguration {
+    const latestConfiguration = this.configurations.get(conversationId) ?? fallback;
+    const configuration: ConversationConfiguration = {
+      ...latestConfiguration,
+      ...(model ? { model } : {}),
+      ...(mode ? { mode } : {}),
+    };
+    if (model) {
+      if (variant) configuration.variant = variant;
+      else delete configuration.variant;
+    } else if (variant) configuration.variant = variant;
+    this.configurations.set(conversationId, configuration);
+    // An entirely unknown resumed conversation does not tell us what
+    // OpenCode actually chose, so it must not erase the durable cold-TUI
+    // fallback. Known accepted models do become this adapter's last-used
+    // selection, matching a running TUI.
+    if (configuration.model) this.newConversationDefaults = configuration;
+    if (!sameConfiguration(latestConfiguration, configuration)) {
+      projection.replay.publish({ type: "conversation.configuration", configuration });
+    }
+    return configuration;
+  }
+
+  /** The held queue as it goes on the wire — handles, not dispatch payloads. */
+  private queuedMessages(conversationId: string): QueuedMessage[] {
+    return (this.heldQueues.get(conversationId) ?? []).map(({ id, text, queuedAt, requestId }) => ({ id, text, queuedAt, requestId }));
+  }
+
+  private publishQueue(conversationId: string, projection: ConversationProjection, change: { kind: "held" | "removed" | "delivered"; messageId: string }): void {
+    projection.replay.publish({ type: "conversation.queue", queued: this.queuedMessages(conversationId), change });
+  }
+
+  // Fire-and-forget by design: delivery is triggered by status transitions
+  // and its failures are reported through the conversation itself (a failed
+  // status plus a paused queue), not to whichever caller happened to trip it.
+  private scheduleDelivery(conversationId: string): void {
+    if (this.dormantQueues.has(conversationId)) return;
+    if (!this.heldQueues.get(conversationId)?.length) return;
+    void this.enqueuePromptAdmission(conversationId, () => this.deliverNextHeld(conversationId)).catch(() => undefined);
+  }
+
+  private async deliverNextHeld(conversationId: string): Promise<void> {
+    if (this.dormantQueues.has(conversationId)) return;
+    const queue = this.heldQueues.get(conversationId);
+    const held = queue?.[0];
+    if (!queue || !held) return;
+    const projection = this.projection(conversationId);
+    // Re-held, not lost: a conversation that reports busy again before this
+    // ran keeps the message queued, and the next end-of-turn retries.
+    if (projection.status === "running" || projection.status === "sending" || this.liveTurns.has(conversationId)) return;
+    let session: ProviderSession;
+    try {
+      session = await this.requireSession(conversationId);
+    } catch {
+      return;
+    }
+    try {
+      await this.dispatchPrompt(conversationId, projection, session, {
+        messageId: held.id,
+        text: held.text,
+        requestId: held.requestId,
+        ...(held.model ? { model: held.model } : {}),
+        ...(held.mode ? { mode: held.mode } : {}),
+        ...(held.variant ? { variant: held.variant } : {}),
+      });
+      queue.shift();
+      if (queue.length === 0) this.heldQueues.delete(conversationId);
+      this.publishQueue(conversationId, projection, { kind: "delivered", messageId: held.id });
+    } catch {
+      // The provider refused the delivery. The message stays held and the
+      // queue pauses so a failing conversation is not hammered once per
+      // status flap; the failed turn status is already published, and the
+      // user's next submission or removal decides what happens.
+      this.dormantQueues.add(conversationId);
+    }
   }
 
   // OpenCode applies prompts to one conversation in admission order. Keep the
@@ -608,6 +769,11 @@ export class OpenCodeChatAdapter {
       const projection = this.projection(conversationId);
       try {
         await this.provider.interrupt(conversationId);
+        // Cancel means stop: held messages stay queued and removable, and
+        // none of them rides the idle transition this interrupt causes. The
+        // pause is set before the status can propagate, so the end-of-turn
+        // trigger finds it already dormant.
+        if (this.heldQueues.get(conversationId)?.length) this.dormantQueues.add(conversationId);
         projection.statusUpdate("interrupted");
         return { cancelled: true };
       } catch (error) {
@@ -1196,6 +1362,10 @@ export class OpenCodeChatAdapter {
     const projection = new ConversationProjection(new ConversationReplay(this.generation, id, this.replayBytes), status => {
       if (status === "running" || status === "sending") this.liveTurns.add(id);
       else this.liveTurns.delete(id);
+      // A turn that ended on its own releases the next held message. Only
+      // these two: an interruption leaves the queue dormant by decision, and
+      // a failure must not restart a failing conversation by itself.
+      if (status === "idle" || status === "completed") this.scheduleDelivery(id);
     });
     this.projections.set(id, projection);
     for (const [candidateId, candidate] of this.projections) {

@@ -276,12 +276,28 @@ export type ConversationItem =
 
 export type InteractionRequest = PermissionRequest | QuestionRequest;
 
+// A prompt accepted while the conversation was busy, held by this workspace
+// and not yet delivered to the agent. Not a timeline item: it has no position
+// in the transcript until delivery, which is what lets it stay pinned at the
+// composer and removable. `id` is the handle removal addresses. `requestId`
+// echoes the accepting mutation's client request id so the submitting
+// client's optimistic draft retires the moment the held entry appears.
+export type QueuedMessage = {
+  id: string;
+  text: string;
+  queuedAt: number;
+  requestId?: string;
+};
+
 export type ConversationSnapshot = {
   conversation: ConversationSummary;
   configuration: ConversationConfiguration;
   generation: string;
   cursor: string;
   items: ConversationItem[];
+  // Held messages in submission order. Optional on the wire so a snapshot
+  // producer with no queue concept stays parseable; absent means empty.
+  queued?: QueuedMessage[];
   olderCursor?: string;
 };
 
@@ -298,5 +314,10 @@ export type ChatEvent = ChatEventBase & (
   | { type: "conversation.status"; status: ConversationStatus; message?: string }
   | { type: "conversation.configuration"; configuration: ConversationConfiguration }
   | { type: "conversation.updated"; conversation: ConversationSummary }
+  // Restates the whole held queue rather than shipping a diff: replayed or
+  // duplicated frames converge on the same state, and a client that missed
+  // nothing pays only the few queued entries a conversation can hold. `change`
+  // names what happened for announcements.
+  | { type: "conversation.queue"; queued: QueuedMessage[]; change: { kind: "held" | "removed" | "delivered"; messageId: string } }
   | { type: "resync"; reason: "generation-changed" | "retention-gap" | "invalid-cursor" }
 );

@@ -89,9 +89,12 @@ describe("chat domain validation", () => {
       generation: "generation-1",
       cursor: "generation-1:10",
       items,
+      queued: [{ id: "held-1", text: "queued follow-up", queuedAt: 11, requestId: "request-9" }],
       olderCursor: "before:user-1",
     };
     expect(parseConversationSnapshot(snapshot)).toBeDefined();
+    // Absent means empty; a producer without a queue concept stays parseable.
+    expect(parseConversationSnapshot({ ...snapshot, queued: undefined })).toBeDefined();
   });
 
   test("accepts pending and resolved interaction request fixtures", () => {
@@ -118,7 +121,9 @@ describe("chat domain validation", () => {
       { ...base, sequence: 4, type: "conversation.status", status: "completed" },
       { ...base, sequence: 5, type: "conversation.configuration", configuration: { model: { providerId: "anthropic", modelId: "claude" }, variant: "high" } },
       { ...base, sequence: 6, type: "conversation.updated", conversation: summary },
-      { ...base, sequence: 7, type: "resync", reason: "retention-gap" },
+      { ...base, sequence: 7, type: "conversation.queue", queued: [{ id: "held-1", text: "queued follow-up", queuedAt: 11 }], change: { kind: "held", messageId: "held-1" } },
+      { ...base, sequence: 8, type: "conversation.queue", queued: [], change: { kind: "delivered", messageId: "held-1" } },
+      { ...base, sequence: 9, type: "resync", reason: "retention-gap" },
     ];
     for (const event of events) expect(parseChatEvent(event)).toBeDefined();
   });
@@ -131,6 +136,8 @@ describe("chat domain validation", () => {
       () => parseConversationItem({ ...items[0], type: "provider_message" }),
       () => parseChatEvent({ generation: "g", sequence: -1, conversationId: "c", type: "item.remove", itemId: "i" }),
       () => parseChatEvent({ generation: "g", sequence: 1.5, conversationId: "c", type: "item.remove", itemId: "i" }),
+      () => parseChatEvent({ generation: "g", sequence: 1, conversationId: "c", type: "conversation.queue", queued: [{ id: "held-1", text: "", queuedAt: 1 }], change: { kind: "held", messageId: "held-1" } }),
+      () => parseChatEvent({ generation: "g", sequence: 1, conversationId: "c", type: "conversation.queue", queued: [], change: { kind: "steered", messageId: "held-1" } }),
     ];
     for (const parse of invalid) expect(parse).toThrow();
   });

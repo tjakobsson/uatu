@@ -9,12 +9,13 @@ import { ChatViewportController } from "./viewport";
 import { newRequestId } from "./ids";
 import { insertCommand, matchingCommands } from "./slash-commands";
 import { navigateWorkspaceFileReference, resolveWorkspaceFileReference } from "./file-references";
-import { READER_CLOSED, TimelineRenderer, decorateFileLinks, latestTodoEntries, statusLabel, subagentEntries, type SubagentEntry } from "./timeline-renderer";
+import { READER_CLOSED, QueueDockRenderer, TimelineRenderer, decorateFileLinks, latestTodoEntries, statusLabel, subagentEntries, type SubagentEntry } from "./timeline-renderer";
 import { contextTokens, totalTokens } from "./usage";
 import {
   addAcceptedDraft,
   applyChatEvent,
   confirmAcceptedDraft,
+  noteQueuedMessage,
   prependSnapshot,
   projectionFromSnapshot,
   removeAcceptedDraft,
@@ -55,6 +56,7 @@ export function initChat(): void {
   const renameCancel = document.querySelector<HTMLButtonElement>("#chat-rename-cancel");
   const olderButton = document.querySelector<HTMLButtonElement>("#chat-load-older");
   const latestButton = document.querySelector<HTMLButtonElement>("#chat-latest");
+  const queueDockElement = document.querySelector<HTMLElement>("#chat-queue");
   const form = document.querySelector<HTMLFormElement>("#chat-composer");
   const input = document.querySelector<HTMLTextAreaElement>("#chat-input");
   const commandMenu = document.querySelector<HTMLElement>("#chat-command-menu");
@@ -100,12 +102,13 @@ export function initChat(): void {
   const drilldownState = document.querySelector<HTMLElement>("#chat-drilldown-state");
   const drilldownBack = document.querySelector<HTMLButtonElement>("#chat-drilldown-back");
   const drilldownOlder = document.querySelector<HTMLButtonElement>("#chat-drilldown-older");
-  if (!surface || !timeline || !items || !state || !select || !newButton || !olderButton || !latestButton || !form || !input || !commandMenu || !send || !sendLabel || !configurationTrigger || !configurationSummary || !configurationDetails || !configurationModeSummary || !configurationVariantSummary || !configurationVariantValue || !configurationDialog || !configurationSearch || !configurationModelsSection || !configurationModels || !configurationResultStatus || !configurationEmpty || !configurationDone || !composerStatus || !composerStatusLive || !composerError || !copyStatus) return;
+  if (!surface || !timeline || !items || !state || !select || !newButton || !olderButton || !latestButton || !queueDockElement || !form || !input || !commandMenu || !send || !sendLabel || !configurationTrigger || !configurationSummary || !configurationDetails || !configurationModeSummary || !configurationVariantSummary || !configurationVariantValue || !configurationDialog || !configurationSearch || !configurationModelsSection || !configurationModels || !configurationResultStatus || !configurationEmpty || !configurationDone || !composerStatus || !composerStatusLive || !composerError || !copyStatus) return;
 
   const api = new ChatApiClient();
   const anchor = new TimelineAnchorController();
   const viewport = new ChatViewportController(surface, form, timeline, anchor);
   const renderer = new TimelineRenderer();
+  const queueDock = new QueueDockRenderer();
   let presentation = readPresentation();
   let conversations: ConversationSummary[] = [];
   let models: ChatModel[] = [];
@@ -184,9 +187,6 @@ export function initChat(): void {
   let lastStatus: ChatProjection["status"] | null = null;
   let lastRoutineAnnouncement = "";
   const expanded = new Set(presentation.expanded);
-  // Messages accepted while a turn was already running. They are cleared when
-  // the turn ends, which is the moment the agent has actually taken them.
-  const queued = new Set<string>();
   // The agent Chat is talking to, once it has said so. Every name and every
   // capability-gated control reads this rather than fixed copy, so installing
   // a different agent changes what is shown and not what is written here.
@@ -776,7 +776,8 @@ export function initChat(): void {
 
   const renderNow = (newContent: boolean) => {
     rendering = true;
-    const dirty = renderer.render(items, projection, expanded, queued, declares("subagents"));
+    const dirty = renderer.render(items, projection, expanded, declares("subagents"));
+    queueDock.render(queueDockElement, projection?.queued ?? []);
     rendering = false;
     syncTaskList();
     syncSubagents();
@@ -881,7 +882,6 @@ export function initChat(): void {
     if (status !== lastStatus) {
       composerNote = null;
       lastStatus = status;
-      if (status !== "running" && status !== "sending" && queued.size > 0) queued.clear();
     }
     const running = projection?.status === "running" || projection?.status === "sending";
     if (projection && running && presentation.workingSince[projection.conversationId] === undefined) {
@@ -1156,6 +1156,19 @@ export function initChat(): void {
     }
   });
 
+  queueDockElement.addEventListener("click", event => {
+    const target = (event.target as Element).closest<HTMLButtonElement>("[data-queue-remove]");
+    if (!target || !projection) return;
+    // The server answers with a queue event that drops the entry on every
+    // client; no optimistic removal, so a refusal ("no longer held" — the
+    // message was delivered while the click was in flight) leaves the
+    // truth on screen.
+    target.disabled = true;
+    void api.removeQueued(projection.conversationId, target.dataset.queueRemove!, newRequestId())
+      .catch(error => { announce(messageOf(error), true); })
+      .finally(() => { target.disabled = false; });
+  });
+
   olderButton.addEventListener("click", async () => {
     if (!projection?.olderCursor) return;
     const current = projection;
@@ -1165,7 +1178,7 @@ export function initChat(): void {
       const page = await api.snapshot(current.conversationId, current.olderCursor);
       if (projection?.conversationId !== current.conversationId) return;
       projection = prependSnapshot(projection, page);
-      const dirty = renderer.render(items, projection, expanded, queued, declares("subagents"));
+      const dirty = renderer.render(items, projection, expanded, declares("subagents"));
       timeline.scrollTop = anchor.afterMutation(geometry());
       for (const node of dirty) decorateFileLinks(node);
     } catch (error) { announce(messageOf(error), true); }
@@ -1351,7 +1364,7 @@ export function initChat(): void {
   const renderChild = (newContent: boolean) => {
     if (!drilldownItems || !drilldownTimeline) return;
     if (!childAnchor.isPinned()) childAnchor.beforeMutation(childGeometry());
-    const dirty = childRenderer.render(drilldownItems, child?.projection ?? null, expanded, undefined, declares("subagents"));
+    const dirty = childRenderer.render(drilldownItems, child?.projection ?? null, expanded, declares("subagents"));
     if (drilldownOlder) drilldownOlder.hidden = !child?.projection?.olderCursor;
     drilldownTimeline.scrollTop = childAnchor.afterMutation(childAnchorGeometry(), newContent);
     for (const node of dirty) {
@@ -1400,7 +1413,7 @@ export function initChat(): void {
     open.stream?.close();
     releaseChildBack?.();
     releaseChildBack = null;
-    if (drilldownItems) childRenderer.render(drilldownItems, null, expanded, undefined, declares("subagents"));
+    if (drilldownItems) childRenderer.render(drilldownItems, null, expanded, declares("subagents"));
     if (drilldownOlder) {
       drilldownOlder.hidden = true;
       drilldownOlder.disabled = false;
@@ -1481,7 +1494,7 @@ export function initChat(): void {
     if (drilldownTitle) drilldownTitle.textContent = label;
     drilldown.hidden = false;
     surface.setAttribute("data-chat-drilldown", "open");
-    childRenderer.render(drilldownItems, null, expanded, undefined, declares("subagents"));
+    childRenderer.render(drilldownItems, null, expanded, declares("subagents"));
     // Hidden until this child's own first page says whether more exists —
     // otherwise a previous subagent's cursor would offer paging for a
     // transcript that has none.
@@ -1667,7 +1680,6 @@ export function initChat(): void {
       ? configuration.variant
       : undefined;
     const selectedMode = declares("modes") && modes.some(mode => mode.name === configuration.mode) ? configuration.mode : undefined;
-    const wasRunning = projection.status === "running" || projection.status === "sending";
     submitting = true;
     setComposerError(null);
     // Optimistic send: the message shows immediately and the input clears;
@@ -1677,7 +1689,7 @@ export function initChat(): void {
     presentation.drafts[conversationId] = "";
     save();
     autosize(input);
-    noteComposer(projection.status === "running" ? "Steering..." : "Sending...");
+    noteComposer("Sending...");
     syncControls();
     scheduleRender(true);
     try {
@@ -1692,12 +1704,16 @@ export function initChat(): void {
       }
       if (projection?.conversationId === conversationId) {
         projection = { ...projection, configuration: accepted.configuration };
-        if (wasRunning) queued.add(`message:${accepted.messageId}`);
-        projection = confirmAcceptedDraft(projection, { requestId, messageId: accepted.messageId, text });
+        // A held acceptance moves the draft into the pinned queue block
+        // immediately; the server's queue event restates the same state and
+        // converges. A dispatched acceptance becomes a timeline item.
+        projection = accepted.held
+          ? noteQueuedMessage(projection, { id: accepted.messageId, text, queuedAt: Date.now(), requestId })
+          : confirmAcceptedDraft(projection, { requestId, messageId: accepted.messageId, text });
         renderConfiguration();
         scheduleRender(true);
       }
-      noteComposer(accepted.delivery === "steer" ? "Steer accepted" : "Message accepted");
+      noteComposer(accepted.held ? "Queued — sends when the agent is ready" : "Message accepted");
       setComposerError(null);
     } catch (error) {
       const message = messageOf(error);

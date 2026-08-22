@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ChatEvent, ConversationSnapshot } from "./types";
-import { addAcceptedDraft, applyChatEvent, prependSnapshot, projectionFromSnapshot } from "./projection";
+import { addAcceptedDraft, applyChatEvent, noteQueuedMessage, prependSnapshot, projectionFromSnapshot } from "./projection";
 
 const snapshot = (items: ConversationSnapshot["items"] = []): ConversationSnapshot => ({
   conversation: { id: "c1", title: "Chat", createdAt: 1, updatedAt: 1, status: "running" },
@@ -36,6 +36,55 @@ describe("chat projection", () => {
       { id: "message:msg_provider", type: "user_message", createdAt: 2, text: "hello" },
     ]));
     expect(addAcceptedDraft(state, { requestId: "request", messageId: "msg_provider", text: "hello" }).acceptedDrafts).toEqual([]);
+  });
+
+  test("tracks the held queue from the snapshot and queue events", () => {
+    const initial = projectionFromSnapshot({ ...snapshot(), queued: [{ id: "held-1", text: "waiting", queuedAt: 2 }] });
+    expect(initial.queued).toEqual([{ id: "held-1", text: "waiting", queuedAt: 2 }]);
+    // Every queue event restates the whole queue; a removal converges to it.
+    const removed = applyChatEvent(initial, {
+      generation: "g1", sequence: 5, conversationId: "c1", type: "conversation.queue",
+      queued: [], change: { kind: "removed", messageId: "held-1" },
+    });
+    expect(removed.outcome).toBe("applied");
+    expect(removed.projection.queued).toEqual([]);
+  });
+
+  test("a draft the server now holds is represented once, by its queued entry", () => {
+    // The held acceptance mirrors locally before any stream event arrives.
+    let state = addAcceptedDraft(projectionFromSnapshot(snapshot()), { requestId: "r1", messageId: "pending:r1", text: "hello" });
+    state = noteQueuedMessage(state, { id: "held-1", text: "hello", queuedAt: 2, requestId: "r1" });
+    expect(state.queued.map(held => held.id)).toEqual(["held-1"]);
+    expect(state.acceptedDrafts).toEqual([]);
+
+    // The same handoff works when the queue event beats the acceptance.
+    let raced = addAcceptedDraft(projectionFromSnapshot(snapshot()), { requestId: "r2", messageId: "pending:r2", text: "again" });
+    const applied = applyChatEvent(raced, {
+      generation: "g1", sequence: 5, conversationId: "c1", type: "conversation.queue",
+      queued: [{ id: "held-2", text: "again", queuedAt: 3, requestId: "r2" }], change: { kind: "held", messageId: "held-2" },
+    });
+    expect(applied.projection.queued).toHaveLength(1);
+    expect(applied.projection.acceptedDrafts).toEqual([]);
+  });
+
+  test("a late upsert for an earlier moment takes its snapshot position", () => {
+    const initial = projectionFromSnapshot(snapshot([
+      { id: "message:u1", type: "user_message", createdAt: 10, text: "ask" },
+      { id: "part:a1", type: "assistant_message", createdAt: 20, markdown: "answer" },
+    ]));
+    // A recovered request created between the two items must not render at
+    // the end of the timeline just because it arrived last.
+    const recovered = applyChatEvent(initial, {
+      generation: "g1", sequence: 5, conversationId: "c1", type: "item.upsert",
+      item: { id: "permission:p1", type: "permission", createdAt: 15, requestId: "p1", action: "edit", resources: ["file.ts"], status: "pending" },
+    });
+    expect(recovered.projection.items.map(item => item.id)).toEqual(["message:u1", "permission:p1", "part:a1"]);
+    // Equal timestamps keep arrival order — the provider's own part order.
+    const tied = applyChatEvent(recovered.projection, {
+      generation: "g1", sequence: 6, conversationId: "c1", type: "item.upsert",
+      item: { id: "part:a2", type: "assistant_message", createdAt: 20, markdown: "more" },
+    });
+    expect(tied.projection.items.map(item => item.id)).toEqual(["message:u1", "permission:p1", "part:a1", "part:a2"]);
   });
 
   test("prepends older pages without duplicate identities", () => {

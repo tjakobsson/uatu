@@ -329,7 +329,7 @@ export class SdkV2Provider implements OpenCodeProvider {
     yield* mergeProviderEvents([native.stream, classic.stream], signal);
   }
 
-  async prompt(sessionId: string, input: { id: string; text: string; delivery: "steer" | "queue"; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
+  async prompt(sessionId: string, input: { id: string; text: string; delivery: "queue"; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
     const messageId = stableProviderId("msg", input.id);
     if (this.compatibilitySessions.has(sessionId)) {
       ensureSuccess(await this.client.session.promptAsync({

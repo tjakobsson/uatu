@@ -38,6 +38,7 @@ function renderForm(questions: StructuredQuestion[] = [choice()], owner = "paren
     cursor: "cursor",
     status: "running",
     acceptedDrafts: [],
+    queued: [],
     items: [item],
   };
   new TimelineRenderer().render(host, projection, new Set());

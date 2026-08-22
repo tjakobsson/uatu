@@ -31,10 +31,11 @@ export interface WorkspaceChatService {
   }>;
   prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string): Promise<{
     messageId: string;
-    delivery: "steer" | "queue";
+    held: boolean;
     configuration: ConversationConfiguration;
     conversation?: ConversationSummary;
   }>;
+  removeQueued(id: string, messageId: string, requestId: string): Promise<{ removed: true }>;
   renameConversation(id: string, requestId: string, title: string): Promise<{ conversation: ConversationSummary }>;
   cancel(id: string, requestId: string): Promise<{ cancelled: true }>;
   respondPermission(id: string, interactionId: string, requestId: string, outcome: PermissionOutcome): Promise<{ outcome: PermissionOutcome }>;
@@ -148,6 +149,7 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
   async history(id: string, options?: { cursor?: string; limit?: number }) { return (await this.requireAdapter()).history(id, options); }
   async subscribe(id: string, options?: { cursor?: string; signal?: AbortSignal }) { return (await this.requireAdapter()).subscribe(id, options); }
   async prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string) { return (await this.requireAdapter()).prompt(id, requestId, text, model, mode, variant); }
+  async removeQueued(id: string, messageId: string, requestId: string) { return (await this.requireAdapter()).removeQueued(id, messageId, requestId); }
   async cancel(id: string, requestId: string) { return (await this.requireAdapter()).abort(id, requestId); }
   async renameConversation(id: string, requestId: string, title: string) { return (await this.requireAdapter()).renameConversation(id, requestId, title); }
   async respondPermission(id: string, interactionId: string, requestId: string, outcome: PermissionOutcome) {

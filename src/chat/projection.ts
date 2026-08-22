@@ -1,5 +1,5 @@
 import { mergeAssistantMessage } from "./usage";
-import type { ChatEvent, ConversationConfiguration, ConversationItem, ConversationSnapshot, ConversationStatus, ConversationSummary } from "./types";
+import type { ChatEvent, ConversationConfiguration, ConversationItem, ConversationSnapshot, ConversationStatus, ConversationSummary, QueuedMessage } from "./types";
 
 export type AcceptedDraft = { requestId: string; messageId: string; text: string };
 export type ChatProjection = {
@@ -13,12 +13,17 @@ export type ChatProjection = {
   status: ConversationStatus;
   olderCursor?: string;
   acceptedDrafts: AcceptedDraft[];
+  // Server-held messages awaiting delivery, in submission order. Sourced from
+  // the snapshot and restated whole by every queue event, so this is state,
+  // not an accumulation.
+  queued: QueuedMessage[];
 };
 
 export type ProjectionResult = { projection: ChatProjection; outcome: "applied" | "duplicate" | "gap" | "resync" };
 
 export function projectionFromSnapshot(snapshot: ConversationSnapshot, acceptedDrafts: AcceptedDraft[] = []): ChatProjection {
   const sequence = decodeCursorSequence(snapshot.cursor) ?? 0;
+  const queued = snapshot.queued ?? [];
   return {
     conversationId: snapshot.conversation.id,
     generation: snapshot.generation,
@@ -29,7 +34,8 @@ export function projectionFromSnapshot(snapshot: ConversationSnapshot, acceptedD
     items: deduplicate(snapshot.items),
     status: snapshot.conversation.status,
     olderCursor: snapshot.olderCursor,
-    acceptedDrafts: reconcileDrafts(acceptedDrafts, snapshot.items),
+    acceptedDrafts: reconcileDrafts(acceptedDrafts, snapshot.items, queued),
+    queued,
   };
 }
 
@@ -44,7 +50,24 @@ export function addAcceptedDraft(current: ChatProjection, draft: AcceptedDraft):
     acceptedDrafts: reconcileDrafts(
       [...current.acceptedDrafts.filter(item => item.requestId !== draft.requestId), draft],
       current.items,
+      current.queued,
     ),
+  };
+}
+
+/**
+ * Locally mirrors a held acceptance so the pinned entry appears the moment
+ * the response lands rather than one stream event later. The next queue
+ * event restates the authoritative list and converges with this.
+ */
+export function noteQueuedMessage(current: ChatProjection, held: QueuedMessage): ChatProjection {
+  const queued = current.queued.some(entry => entry.id === held.id)
+    ? current.queued
+    : [...current.queued, held];
+  return {
+    ...current,
+    queued,
+    acceptedDrafts: reconcileDrafts(current.acceptedDrafts, current.items, queued),
   };
 }
 
@@ -74,11 +97,12 @@ export function applyChatEvent(current: ChatProjection, event: ChatEvent, cursor
   let status = current.status;
   let conversation = current.conversation;
   let configuration = current.configuration;
+  let queued = current.queued;
   if (event.type === "item.upsert") {
     const index = items.findIndex(item => item.id === event.item.id);
     const existing = index < 0 ? undefined : items[index];
     const incoming = mergeUpsert(existing, event.item);
-    items = index < 0 ? [...items, incoming] : items.map((item, at) => at === index ? incoming : item);
+    items = index < 0 ? insertInConversationOrder(items, incoming) : items.map((item, at) => at === index ? incoming : item);
   } else if (event.type === "item.remove") {
     items = items.filter(item => item.id !== event.itemId);
   } else if (event.type === "item.text_delta") {
@@ -91,6 +115,8 @@ export function applyChatEvent(current: ChatProjection, event: ChatEvent, cursor
   } else if (event.type === "conversation.updated") {
     conversation = event.conversation;
     status = event.conversation.status;
+  } else if (event.type === "conversation.queue") {
+    queued = event.queued;
   }
   return {
     projection: {
@@ -101,10 +127,27 @@ export function applyChatEvent(current: ChatProjection, event: ChatEvent, cursor
       status,
       conversation,
       configuration,
-      acceptedDrafts: reconcileDrafts(current.acceptedDrafts, items),
+      queued,
+      acceptedDrafts: reconcileDrafts(current.acceptedDrafts, items, queued),
     },
     outcome: "applied",
   };
+}
+
+/**
+ * Places a new item where a fresh snapshot would put it: snapshots sort
+ * stably by `createdAt`, so a live update belonging to an earlier moment —
+ * a recovered request, a replayed frame from before items that arrived out
+ * of band — must not render at the end of the timeline just because it
+ * arrived last. Equal timestamps keep arrival order, which is the provider's
+ * own part order within a message and exactly what the stable snapshot sort
+ * preserves.
+ */
+function insertInConversationOrder(items: ConversationItem[], incoming: ConversationItem): ConversationItem[] {
+  let at = items.length;
+  while (at > 0 && items[at - 1]!.createdAt > incoming.createdAt) at -= 1;
+  if (at === items.length) return [...items, incoming];
+  return [...items.slice(0, at), incoming, ...items.slice(at)];
 }
 
 /**
@@ -141,12 +184,18 @@ function deduplicate(items: ConversationItem[]): ConversationItem[] {
   return [...byId.values()];
 }
 
-function reconcileDrafts(drafts: AcceptedDraft[], items: ConversationItem[]): AcceptedDraft[] {
+function reconcileDrafts(drafts: AcceptedDraft[], items: ConversationItem[], queued: QueuedMessage[] = []): AcceptedDraft[] {
   const accepted = new Set(items.filter(item => item.type === "user_message").flatMap(item => [
     item.id,
     item.id.replace(/^message:/, ""),
     item.requestId ?? "",
   ]));
+  // A draft the server now holds in the queue is represented by its pinned
+  // queued entry; keeping the draft too would show the message twice.
+  for (const held of queued) {
+    accepted.add(held.id);
+    if (held.requestId) accepted.add(held.requestId);
+  }
   return drafts.filter(draft => !accepted.has(draft.messageId) && !accepted.has(draft.requestId));
 }
 

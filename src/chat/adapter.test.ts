@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, OpenCodeChatAdapter, parseSlashCommand } from "./adapter";
+import { ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, OpenCodeChatAdapter, parseSlashCommand, QueuedMessageNotHeldError } from "./adapter";
 import { normalizeProviderEvent } from "./normalization";
 import type { ChatAgent } from "./types";
 import type {
@@ -57,7 +57,7 @@ class FakeProvider implements OpenCodeProvider {
   sessions: ProviderSession[] = [];
   pages = new Map<string, ProviderPage<ProviderMessage>>();
   eventQueue = new EventQueue();
-  prompts: Array<{ sessionId: string; id: string; text: string; delivery: "steer" | "queue"; mode?: string; variant?: string }> = [];
+  prompts: Array<{ sessionId: string; id: string; text: string; delivery: "queue"; mode?: string; variant?: string }> = [];
   commandCalls: Array<{ sessionId: string; id: string; name: string; arguments: string; model?: ModelSelection }> = [];
   permissionReplies: Array<{ sessionId: string; requestId: string; reply: ProviderPermissionReply }> = [];
   questionReplies: Array<{ sessionId: string; requestId: string; answers?: string[][]; rejected?: true }> = [];
@@ -91,7 +91,7 @@ class FakeProvider implements OpenCodeProvider {
     signal.addEventListener("abort", () => this.eventQueue.close(), { once: true });
     return this.eventQueue;
   }
-  async prompt(sessionId: string, input: { id: string; text: string; delivery: "steer" | "queue"; mode?: string; variant?: string }) {
+  async prompt(sessionId: string, input: { id: string; text: string; delivery: "queue"; mode?: string; variant?: string }) {
     this.prompts.push({ sessionId, ...input });
     return { messageId: input.id };
   }
@@ -672,10 +672,19 @@ describe("prompt, abort, permission, and question mutations", () => {
 
     releaseFirst();
     await first;
+    // The second submission was accepted while the turn ran: held by the
+    // workspace with its configuration committed in admission order, and
+    // nothing dispatched to the provider yet.
+    expect((await second).held).toBe(true);
+    expect((await second).configuration).toEqual({ model: anthropic });
+    expect(calls).toBe(1);
+
+    // The turn ending on its own releases the held message to the provider.
+    adapter.projectionForTests("session").statusUpdate("completed");
     await secondEntered;
     releaseSecond();
-    expect((await second).configuration).toEqual({ model: anthropic });
     expect((await adapter.history("session")).configuration).toEqual({ model: anthropic });
+    expect((await adapter.history("session")).queued).toEqual([]);
   });
 
   test("manual rename is confined, idempotent, preserves active turns, and prevents first-prompt overwrite", async () => {
@@ -772,10 +781,11 @@ describe("prompt, abort, permission, and question mutations", () => {
     const model = { providerId: "anthropic", modelId: "claude" };
 
     const accepted = await adapter.prompt("session", "request", "/review   API compatibility", model);
-    expect(accepted).toEqual({ messageId: "message", delivery: "queue", configuration: { model } });
+    expect(accepted).toEqual({ messageId: "message", held: false, configuration: { model } });
     expect(provider.commandCalls).toEqual([{ sessionId: "session", id: "message", name: "review", arguments: "API compatibility", model }]);
     expect(provider.prompts).toEqual([]);
 
+    adapter.projectionForTests("session").statusUpdate("completed");
     await adapter.prompt("session", "ordinary", "/missing stays ordinary");
     expect(provider.prompts[0]).toEqual(expect.objectContaining({ text: "/missing stays ordinary" }));
   });
@@ -834,8 +844,10 @@ describe("prompt, abort, permission, and question mutations", () => {
     // checks — and a variant is re-sent with every prompt, so an unchanged
     // one must not pay a provider round trip per message.
     expect(modelLists).toBe(1);
+    adapter.projectionForTests("session").statusUpdate("completed");
     await adapter.prompt("session", "r2", "keep thinking", model, undefined, "high");
     expect(modelLists).toBe(1);
+    adapter.projectionForTests("session").statusUpdate("completed");
     // Unknown for this model — refused before dispatch.
     await expect(adapter.prompt("session", "r3", "nope", model, undefined, "ultra")).rejects.toBeInstanceOf(InvalidVariantSelectionError);
 
@@ -864,7 +876,89 @@ describe("prompt, abort, permission, and question mutations", () => {
     await expect(error).rejects.toThrow("compatibility compaction");
   });
 
-  test("joins duplicate prompts, steers while running, and preserves content on abort", async () => {
+  test("delivers held messages in order on the turn's own end, and a cancellation pauses the queue until the next submission", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    let message = 0;
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
+    const until = async (predicate: () => boolean) => {
+      for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) await new Promise(resolve => setTimeout(resolve, 1));
+      expect(predicate()).toBe(true);
+    };
+
+    expect((await adapter.prompt("session", "r1", "first")).held).toBe(false);
+    const second = await adapter.prompt("session", "r2", "second");
+    const third = await adapter.prompt("session", "r3", "third");
+    expect([second.held, third.held]).toEqual([true, true]);
+    expect(provider.prompts).toHaveLength(1);
+    expect((await adapter.history("session")).queued).toEqual([
+      expect.objectContaining({ id: second.messageId, text: "second", requestId: "r2" }),
+      expect.objectContaining({ id: third.messageId, text: "third", requestId: "r3" }),
+    ]);
+
+    // The turn ending on its own releases exactly the queue head.
+    adapter.projectionForTests("session").statusUpdate("completed");
+    await until(() => provider.prompts.length === 2);
+    expect(provider.prompts[1]).toEqual(expect.objectContaining({ text: "second", id: second.messageId }));
+
+    // Cancel pauses the queue: the interrupt and its trailing idle deliver
+    // nothing, and "third" stays held.
+    await adapter.abort("session", "cancel-1");
+    adapter.projectionForTests("session").statusUpdate("idle");
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(provider.prompts).toHaveLength(2);
+
+    // The next submission joins the back of the queue and resumes delivery
+    // from its head, preserving submission order.
+    const fourth = await adapter.prompt("session", "r4", "fourth");
+    expect(fourth.held).toBe(true);
+    await until(() => provider.prompts.length === 3);
+    expect(provider.prompts[2]).toEqual(expect.objectContaining({ text: "third" }));
+    adapter.projectionForTests("session").statusUpdate("completed");
+    await until(() => provider.prompts.length === 4);
+    expect(provider.prompts[3]).toEqual(expect.objectContaining({ text: "fourth" }));
+    expect((await adapter.history("session")).queued).toEqual([]);
+  });
+
+  test("a failed delivery pauses the queue instead of hammering a failing conversation", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    let message = 0;
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
+    const until = async (predicate: () => boolean) => {
+      for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) await new Promise(resolve => setTimeout(resolve, 1));
+      expect(predicate()).toBe(true);
+    };
+
+    expect((await adapter.prompt("session", "r1", "first")).held).toBe(false);
+    const held = await adapter.prompt("session", "r2", "second");
+    expect(held.held).toBe(true);
+
+    let attempts = 0;
+    const accept = provider.prompt.bind(provider);
+    provider.prompt = async (sessionId, input) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("provider refused");
+      return accept(sessionId, input);
+    };
+    adapter.projectionForTests("session").statusUpdate("completed");
+    await until(() => attempts === 1);
+    expect(adapter.projectionForTests("session").status).toBe("failed");
+
+    // A later idle transition does not retry on its own...
+    adapter.projectionForTests("session").statusUpdate("idle");
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(attempts).toBe(1);
+    // ...the message is still held and removable, and a new submission
+    // resumes delivery.
+    expect((await adapter.history("session")).queued).toEqual([
+      expect.objectContaining({ id: held.messageId, text: "second" }),
+    ]);
+    await adapter.prompt("session", "r3", "third");
+    await until(() => attempts === 2);
+  });
+
+  test("joins duplicate prompts, holds busy submissions, and preserves content on abort", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
     let nextId = 0;
@@ -878,14 +972,24 @@ describe("prompt, abort, permission, and question mutations", () => {
     ]);
     expect(first).toEqual(duplicate);
     expect(provider.prompts).toHaveLength(1);
-    expect(first.delivery).toBe("queue");
+    expect(first.held).toBe(false);
     expect(projection.status).toBe("running");
 
-    expect((await adapter.prompt("session", "request-2", "steer")).delivery).toBe("steer");
+    // A busy submission is held by the workspace, not delivered mid-turn.
+    const held = await adapter.prompt("session", "request-2", "follow-up");
+    expect(held.held).toBe(true);
+    expect(provider.prompts).toHaveLength(1);
+
     await Promise.all([adapter.abort("session", "cancel-1"), adapter.abort("session", "cancel-1")]);
     expect(provider.interrupts).toEqual(["session"]);
     expect(projection.status).toBe("interrupted");
     expect(projection.items()).toContainEqual(expect.objectContaining({ id: "part:answer", markdown: "Completed content" }));
+
+    // The cancellation left the held message queued and removable, and it
+    // never rode the interrupt's idle transition to the provider.
+    expect(provider.prompts).toHaveLength(1);
+    await expect(adapter.removeQueued("session", held.messageId, "remove-1")).resolves.toEqual({ removed: true });
+    await expect(adapter.removeQueued("session", held.messageId, "remove-2")).rejects.toBeInstanceOf(QueuedMessageNotHeldError);
   });
 
   test("maps completed and failed provider transitions", async () => {

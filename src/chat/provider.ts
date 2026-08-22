@@ -65,7 +65,7 @@ export interface OpenCodeProvider {
   getConversationConfiguration(sessionId: string, completeMessages?: ProviderMessage[]): Promise<ConversationConfiguration>;
   listMessages(sessionId: string, options: { cursor?: string; limit: number }): Promise<ProviderPage<ProviderMessage>>;
   events(signal: AbortSignal): AsyncIterable<ProviderEvent>;
-  prompt(sessionId: string, input: { id: string; text: string; delivery: "steer" | "queue"; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;
+  prompt(sessionId: string, input: { id: string; text: string; delivery: "queue"; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;
   command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;
   interrupt(sessionId: string): Promise<void>;
   replyPermission(sessionId: string, requestId: string, reply: ProviderPermissionReply): Promise<void>;

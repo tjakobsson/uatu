@@ -11,7 +11,7 @@
 
 import type { Serve } from "bun";
 
-import { ConversationRenameUnsupportedError, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError } from "../chat/adapter";
+import { ConversationRenameUnsupportedError, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, QueuedMessageNotHeldError } from "../chat/adapter";
 import { encodeReplayCursor } from "../chat/replay";
 import { ChatUnavailableError, type WorkspaceChatService } from "../chat/service";
 import type { ModelSelection, PermissionOutcome, QuestionOutcome } from "../chat/types";
@@ -589,6 +589,14 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         return requestId instanceof Response ? requestId : run(() => deps.chatService.cancel(id, requestId));
       }),
     },
+    [p("/api/chat/conversations/:conversationId/queue/:messageId")]: {
+      DELETE: async (request: RouteRequest) => chatMutation(request, ["requestId"], async (id, body) => {
+        const messageId = routeIdentity(request, "messageId");
+        if (messageId instanceof Response) return messageId;
+        const requestId = bodyIdentity(body, "requestId");
+        return requestId instanceof Response ? requestId : run(() => deps.chatService.removeQueued(id, messageId, requestId));
+      }),
+    },
     [p("/api/chat/conversations/:conversationId/permissions/:interactionId")]: {
       POST: async (request: RouteRequest) => chatMutation(request, ["requestId", "outcome"], async (id, body) => {
         const interactionId = routeIdentity(request, "interactionId");
@@ -712,6 +720,7 @@ function parseNameSelection(value: unknown, noun: "mode" | "variant"): string | 
 
 function normalizedChatError(error: unknown): Response {
   if (error instanceof ConversationNotFoundError) return chatError(404, "conversation not found");
+  if (error instanceof QueuedMessageNotHeldError) return chatError(409, error.message);
   if (error instanceof InteractionConflictError) return chatError(409, error.message);
   if (error instanceof ConversationRenameUnsupportedError) return chatError(409, error.message);
   if (error instanceof InvalidConversationTitleError) return chatError(400, error.message);

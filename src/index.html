@@ -781,6 +781,11 @@
             <summary><span id="chat-task-list-label"></span></summary>
             <ul id="chat-task-list-items"></ul>
           </details>
+          <!-- Messages the workspace holds while the agent works. Docked to
+               the composer rather than rendered into the timeline: a held
+               message is not part of the transcript yet, so it must not sit
+               wherever the transcript happens to end. -->
+          <div id="chat-queue" class="chat-queue" role="list" aria-label="Queued messages" hidden></div>
           <form id="chat-composer" class="chat-composer" hidden>
             <label class="sr-only" id="chat-input-label" for="chat-input">Send a message</label>
             <div id="chat-command-menu" class="chat-command-menu" role="listbox" aria-label="Slash commands" hidden></div>

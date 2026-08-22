@@ -5,7 +5,7 @@ import { ConversationReplay, encodeReplayCursor } from "../chat/replay";
 import type { WorkspaceChatService } from "../chat/service";
 import type { ChatAvailability, ConversationSnapshot, ConversationSummary, ModelSelection, PermissionOutcome, QuestionOutcome } from "../chat/types";
 import { ConversationNotFoundError } from "../chat/workspace";
-import { ConversationRenameUnsupportedError } from "../chat/adapter";
+import { ConversationRenameUnsupportedError, QueuedMessageNotHeldError } from "../chat/adapter";
 import { buildRoutes } from "./routes";
 
 const TOKEN = "chat-test-token";
@@ -16,10 +16,11 @@ class FakeChatService implements WorkspaceChatService {
   prompts = 0;
   retries = 0;
   renames = 0;
-  private promptResult: { messageId: string; delivery: "steer" | "queue" } | undefined;
+  private promptResult: { messageId: string; held: boolean } | undefined;
   selectedModel: ModelSelection | undefined;
   selectedAgent: string | undefined;
   questionResponses: QuestionOutcome[] = [];
+  removals: string[] = [];
 
   async status(): Promise<ChatAvailability> { return { state: "ready", version: "test" }; }
   async retry(): Promise<ChatAvailability> { this.retries += 1; return this.status(); }
@@ -40,9 +41,15 @@ class FakeChatService implements WorkspaceChatService {
     this.selectedAgent = agent;
     if (!this.promptResult) {
       this.prompts += 1;
-      this.promptResult = { messageId: requestId, delivery: "queue" };
+      this.promptResult = { messageId: requestId, held: false };
     }
     return { ...this.promptResult, configuration: { ...(model ? { model } : {}), ...(agent ? { mode: agent } : {}) } };
+  }
+  async removeQueued(id: string, messageId: string, _requestId: string) {
+    this.require(id);
+    if (messageId === "delivered") throw new QueuedMessageNotHeldError();
+    this.removals.push(messageId);
+    return { removed: true } as const;
   }
   async renameConversation(id: string, _requestId: string, title: string) {
     this.require(id);
@@ -140,6 +147,32 @@ describe("workspace chat routes", () => {
     expect(first.status).toBe(202);
     expect(await duplicate.json()).toEqual(await first.json());
     expect(service.prompts).toBe(1);
+  });
+
+  test("removes a held message, guards the origin, and maps a delivered message to conflict", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/:conversationId/queue/:messageId"] as { DELETE(request: Request & { params: Record<string, string> }): Promise<Response> };
+    const send = (messageId: string, body: unknown = { requestId: "remove-1" }, origin = "http://127.0.0.1:4711") => handler.DELETE(request(`/api/chat/conversations/local/queue/${messageId}`, {
+      method: "DELETE", headers: { origin, "content-type": "application/json" }, body: JSON.stringify(body),
+    }, { conversationId: "local", messageId }) as never);
+
+    expect((await send("held-1", { requestId: "remove-1" }, "https://attacker.example")).status).toBe(403);
+    expect((await send("held-1", { messageId: "held-1" })).status).toBe(400);
+    const removed = await send("held-1");
+    expect(removed.status).toBe(200);
+    expect(await removed.json()).toEqual({ removed: true });
+    expect(service.removals).toEqual(["held-1"]);
+
+    // A message the workspace already delivered is refused, and the client
+    // learns it is no longer held.
+    const conflict = await send("delivered");
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toEqual({ error: "message is no longer held" });
+
+    const foreign = handler.DELETE(request("/api/chat/conversations/other/queue/held-1", {
+      method: "DELETE", headers: { origin: "http://127.0.0.1:4711", "content-type": "application/json" }, body: JSON.stringify({ requestId: "remove-2" }),
+    }, { conversationId: "other", messageId: "held-1" }) as never);
+    expect((await foreign).status).toBe(404);
   });
 
   test("accepts only a strict model selection and forwards it to the service", async () => {

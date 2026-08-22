@@ -2,6 +2,22 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required.
 
+## Hub 4 / Workspace 7 - Unreleased
+
+Compatibility: breaking (workspace)
+
+### Changes
+
+- A prompt submitted while its conversation is running is now held in a workspace-owned queue instead of being delivered to the agent mid-turn as a steer. `ChatPromptAccepted` replaces required `delivery` (`steer` | `queue`) with required boolean `held`: `held: true` identifies a queued message whose `messageId` is the removal handle, `held: false` a dispatched prompt whose `messageId` is the provider message id.
+- Added `workspaceRemoveQueuedChatMessage` (`DELETE .../chat/conversations/{conversationId}/queue/{messageId}`), removing a message the workspace still holds so it is never delivered. Removal of an already-delivered message answers `409`. The mutation is origin-protected and idempotent under the client `requestId`.
+- `ConversationSnapshot` gained optional `queued`: the held messages in submission order, so a client joining or reloading mid-run presents the same queue as one that watched it build.
+- `ChatEvent` gained the `conversation.queue` variant, restating the whole held queue after each change (`held`, `removed`, or `delivered`) on the ordered, replayable event stream.
+- Held messages are delivered one at a time, in submission order, when the running turn ends on its own. Cancelling the active turn leaves the queue paused: nothing is delivered until the next accepted prompt submission, which joins the back of the queue and resumes delivery from its head.
+
+### Migration
+
+Strict workspace chat consumers must regenerate against workspace revision 7: read `held` instead of `delivery` on prompt acceptance, accept the `conversation.queue` event variant, and accept optional `queued` on conversation snapshots. Clients that steered a running turn must queue instead; there is no steer delivery in revision 7.
+
 ## Hub 4 / Workspace 6 - Unreleased
 
 Compatibility: breaking (Hub)

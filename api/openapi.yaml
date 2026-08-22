@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: UatuCode public API
-  version: 4.6.0-experimental
+  version: 4.7.0-experimental
   license: { name: MIT, identifier: MIT }
-  summary: Hub revision 4 and workspace revision 6
+  summary: Hub revision 4 and workspace revision 7
   description: |
     Canonical HTTP contract for the UatuCode Hub and workspace APIs. Workspace
     operations use their externally visible Hub proxy paths. Streaming message
@@ -15,7 +15,7 @@ info:
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
     hubApiRevision: 4
-    workspaceApiRevision: 6
+    workspaceApiRevision: 7
 servers:
   - url: https://{hubHost}
     variables:
@@ -81,8 +81,8 @@ paths:
               example:
                 version: 0.5.1 (abcdef0)
                 hubApiRevision: 4
-                workspaceApiRevision: 6
-                workspaces: [{ id: uatu, path: /src/uatu, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [Work signing] }, workspaceApiRevision: 6, shells: [{ attached: false, label: zsh }] }]
+                workspaceApiRevision: 7
+                workspaces: [{ id: uatu, path: /src/uatu, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [Work signing] }, workspaceApiRevision: 7, shells: [{ attached: false, label: zsh }] }]
         '401': { $ref: '#/components/responses/Error' }
   /api/hub/browse:
     get:
@@ -487,7 +487,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/WorkspaceState' }
-              example: { workspaceApiRevision: 6, roots: [], repositories: [], compareTarget: base, initialFollow: true, defaultDocumentId: null, changedId: null, generatedAt: 0, build: { version: 0.5.1, branch: main, commitSha: abcdef, commitShort: abcdef, release: false, identifier: 0.5.1, bundledWebRevision: 1 }, scope: { kind: folder }, unscopedFingerprint: 3f2a, terminal: enabled }
+              example: { workspaceApiRevision: 7, roots: [], repositories: [], compareTarget: base, initialFollow: true, defaultDocumentId: null, changedId: null, generatedAt: 0, build: { version: 0.5.1, branch: main, commitSha: abcdef, commitShort: abcdef, release: false, identifier: 0.5.1, bundledWebRevision: 1 }, scope: { kind: folder }, unscopedFingerprint: 3f2a, terminal: enabled }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
@@ -728,7 +728,7 @@ paths:
     post:
       operationId: workspacePromptChatConversation
       tags: [Chat]
-      summary: Prompt or steer a conversation idempotently
+      summary: Prompt or queue a conversation idempotently
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ChatPromptRequest' }, example: { requestId: 550e8400-e29b-41d4-a716-446655440000, text: Implement the server routes, model: { providerId: anthropic, modelId: claude-sonnet } } } } }
       responses:
         '202': { description: Prompt accepted, content: { application/json: { schema: { $ref: '#/components/schemas/ChatPromptAccepted' } } } }
@@ -754,6 +754,25 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
+        '415': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
+        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
+  /s/{workspaceId}/api/chat/conversations/{conversationId}/queue/{messageId}:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ConversationId' }, { $ref: '#/components/parameters/QueuedMessageId' }]
+    delete:
+      operationId: workspaceRemoveQueuedChatMessage
+      tags: [Chat]
+      summary: Remove a held message before delivery idempotently
+      description: Removes a message the workspace still holds; it is never delivered. A message already delivered to the agent answers 409, and the client learns it is no longer held.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ChatMutationRequest' } } } }
+      responses:
+        '200': { description: Held message removed, content: { application/json: { schema: { $ref: '#/components/schemas/ChatQueueRemoveResult' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
         '415': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
         '502': { $ref: '#/components/responses/SessionUnreachable' }
@@ -937,6 +956,7 @@ components:
     CompareTarget: { name: compareTarget, in: query, schema: { type: string, enum: [base, last-commit] } }
     ConversationId: { name: conversationId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 512 } }
     InteractionId: { name: interactionId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 512 } }
+    QueuedMessageId: { name: messageId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 512 } }
   responses:
     Error:
       description: JSON error
@@ -1381,7 +1401,7 @@ components:
         variant: { type: string, minLength: 1, maxLength: 512, description: "Reasoning variant of `model`. Invalid without `model` in the same configuration record." }
       dependentRequired: { variant: [model] }
       additionalProperties: false
-    ConversationSnapshot: { type: object, required: [conversation, configuration, generation, cursor, items], properties: { conversation: { $ref: '#/components/schemas/ConversationSummary' }, configuration: { $ref: '#/components/schemas/ConversationConfiguration' }, generation: { type: string }, cursor: { type: string }, items: { type: array, items: { $ref: '#/components/schemas/ConversationItem' } }, olderCursor: { type: string } }, additionalProperties: false }
+    ConversationSnapshot: { type: object, required: [conversation, configuration, generation, cursor, items], properties: { conversation: { $ref: '#/components/schemas/ConversationSummary' }, configuration: { $ref: '#/components/schemas/ConversationConfiguration' }, generation: { type: string }, cursor: { type: string }, items: { type: array, items: { $ref: '#/components/schemas/ConversationItem' } }, queued: { type: array, items: { $ref: '#/components/schemas/QueuedMessage' }, description: "Held messages in submission order, so a client joining mid-run presents the same queue as one that watched it build." }, olderCursor: { type: string } }, additionalProperties: false }
     ChatMutationRequest: { type: object, required: [requestId], properties: { requestId: { type: string, minLength: 1, maxLength: 512 } }, additionalProperties: false }
     ConversationRenameRequest:
       type: object
@@ -1392,7 +1412,9 @@ components:
       additionalProperties: false
     ConversationRenameResult: { type: object, required: [conversation], properties: { conversation: { $ref: '#/components/schemas/ConversationSummary' } }, additionalProperties: false }
     ChatPromptRequest: { type: object, required: [requestId, text], properties: { requestId: { type: string, minLength: 1, maxLength: 512 }, text: { type: string, minLength: 1, maxLength: 65536 }, model: { $ref: '#/components/schemas/ModelSelection' }, mode: { type: string, minLength: 1, maxLength: 512 }, variant: { type: string, minLength: 1, maxLength: 512, description: "How the selected model should reason (a variant it advertises). Requires `model` in the same request: a variant names an effort OF a model, and pairing them keeps validation independent of server-side memory of the conversation's current model." } }, dependentRequired: { variant: [model] }, additionalProperties: false }
-    ChatPromptAccepted: { type: object, required: [messageId, delivery, configuration], properties: { messageId: { type: string }, delivery: { enum: [steer, queue] }, configuration: { $ref: '#/components/schemas/ConversationConfiguration' }, conversation: { $ref: '#/components/schemas/ConversationSummary' } }, additionalProperties: false }
+    ChatPromptAccepted: { type: object, required: [messageId, held, configuration], description: "`held: true` reports a submission accepted while the conversation was busy: the workspace holds it, `messageId` is the queued-message id removal addresses, and delivery happens when the running turn ends. `held: false` reports a dispatched prompt whose `messageId` is the provider message id.", properties: { messageId: { type: string }, held: { type: boolean }, configuration: { $ref: '#/components/schemas/ConversationConfiguration' }, conversation: { $ref: '#/components/schemas/ConversationSummary' } }, additionalProperties: false }
+    QueuedMessage: { type: object, required: [id, text, queuedAt], description: "A submission the workspace holds until the running turn ends. Not a timeline item; it becomes one when delivered. `requestId` echoes the accepting mutation's client request id so the submitting client can reconcile.", properties: { id: { type: string }, text: { type: string, minLength: 1 }, queuedAt: { type: number }, requestId: { type: string } }, additionalProperties: false }
+    ChatQueueRemoveResult: { type: object, required: [removed], properties: { removed: { const: true } }, additionalProperties: false }
     ChatCancelResult: { type: object, required: [cancelled], properties: { cancelled: { const: true } }, additionalProperties: false }
     PermissionResponseRequest: { type: object, required: [requestId, outcome], properties: { requestId: { type: string, minLength: 1, maxLength: 512 }, outcome: { enum: [approved-once, approved-session, rejected] } }, additionalProperties: false }
     PermissionResult: { type: object, required: [outcome], properties: { outcome: { enum: [approved-once, approved-session, rejected] } }, additionalProperties: false }
@@ -1406,6 +1428,7 @@ components:
         - { type: object, required: [generation, sequence, conversationId, type, status], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: conversation.status }, status: { $ref: '#/components/schemas/ConversationStatus' }, message: { type: string } }, additionalProperties: false }
         - { type: object, required: [generation, sequence, conversationId, type, configuration], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: conversation.configuration }, configuration: { $ref: '#/components/schemas/ConversationConfiguration' } }, additionalProperties: false }
         - { type: object, required: [generation, sequence, conversationId, type, conversation], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: conversation.updated }, conversation: { allOf: [{ $ref: '#/components/schemas/ConversationSummary' }], description: "Updated summary for this conversation. Its id is the event conversationId." } }, additionalProperties: false }
+        - { type: object, required: [generation, sequence, conversationId, type, queued, change], description: "Restates the whole held queue after a change, so replayed or duplicated frames converge on the same state.", properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: conversation.queue }, queued: { type: array, items: { $ref: '#/components/schemas/QueuedMessage' } }, change: { type: object, required: [kind, messageId], properties: { kind: { enum: [held, removed, delivered] }, messageId: { type: string } }, additionalProperties: false } }, additionalProperties: false }
         - { $ref: '#/components/schemas/ChatResyncEvent' }
     ChatResyncEvent: { type: object, required: [generation, sequence, conversationId, type, reason], properties: { generation: { type: string }, sequence: { type: integer, minimum: 0 }, conversationId: { type: string }, type: { const: resync }, reason: { enum: [generation-changed, retention-gap, invalid-cursor] } }, additionalProperties: false }
     DocumentMeta:
