@@ -35,7 +35,17 @@ const USAGE_VERSION_TOOLS = new Set<CredentialTool>(["ssh-agent", "ssh-add", "ss
 const TOOL_BANNERS: Record<CredentialTool, RegExp> = {
   ssh: /OpenSSH/i,
   "ssh-agent": /ssh-agent/i,
-  "ssh-add": /ssh-add/i,
+  // ssh-add connects to the agent BEFORE parsing argv (upstream ssh-add.c:
+  // "First, get a connection to the authentication agent."), and the probe
+  // env deliberately carries no SSH_AUTH_SOCK — so the only output an
+  // agentless probe can ever elicit is the connection error, never usage
+  // text naming the tool. Accept that message as the identifying banner —
+  // but only the complete OpenSSH diagnostic as a full output line: a
+  // substring match would let setOverride() accept an unrelated executable
+  // that embeds the phrase in other output, persisting a bad override.
+  // With an agent present (never true under the scrubbed env, but cheap to
+  // allow) the usage banner still matches.
+  "ssh-add": /ssh-add|^Could not open a connection to your authentication agent\.$/im,
   "ssh-keygen": /ssh-keygen/i,
   gpg: /GnuPG/i,
   gpgconf: /GnuPG/i,
