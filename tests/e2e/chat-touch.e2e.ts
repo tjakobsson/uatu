@@ -130,11 +130,13 @@ test("composer stays flush and its trailing action becomes cancel without adding
   await page.locator("#chat-input").fill("First line");
   await page.locator("#chat-input").press("Shift+Enter");
   await expect(page.locator("#chat-input")).toHaveValue("First line\n");
-  await page.locator("#chat-input").fill("Steer from touch");
+  await page.locator("#chat-input").fill("Queued from touch");
   await expect(page.locator("#chat-send")).toHaveAttribute("aria-label", "Cancel response");
-  const steerResponse = page.waitForResponse(response => response.url().endsWith("/prompts"));
+  const queuedResponse = page.waitForResponse(response => response.url().endsWith("/prompts"));
   await page.locator("#chat-input").press("Enter");
-  expect((await steerResponse).request().postDataJSON()).toMatchObject({ text: "Steer from touch" });
+  expect((await queuedResponse).request().postDataJSON()).toMatchObject({ text: "Queued from touch" });
+  // The busy submission pins at the composer, marked queued and removable.
+  await expect(page.locator("#chat-queue .is-held")).toContainText("Queued from touch");
 });
 
 test("a subagent transcript pushes as a screen and the back gesture pops it", async ({ page, request }) => {

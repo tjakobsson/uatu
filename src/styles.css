@@ -5523,7 +5523,7 @@ body.is-resizing-chat .chat-resizer {
 }
 
 /* Icon-only in both chromes: the up arrow IS the action, in the accent blue
-   for send and steer alike — the aria-label and title state which one this
+   for send and queue alike — the aria-label and title state which one this
    press is, and the label span stays in the DOM for assistive tech. */
 #chat-send {
   display: inline-flex;
@@ -6847,17 +6847,79 @@ body.terminal-transcript-open .touch-tab-bar {
   pointer-events: none !important;
 }
 
-/* A message accepted mid-turn: visibly held, not yet acted on. */
-.chat-user-message.is-queued {
-  opacity: 0.82;
+/* Messages the workspace holds until the agent is ready: docked to the
+   composer, outside the timeline scroll, so they sit against the input
+   wherever the transcript ends and however far the reader has scrolled.
+   Visually "not released" — muted fill and a dashed edge, deliberately not
+   the sent-message accent. */
+.chat-queue {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.5rem max(1rem, calc((100% - 52rem) / 2)) 0;
+  border-top: 1px solid var(--border-soft);
+  background: var(--surface-raised);
+  max-height: 30vh;
+  overflow-y: auto;
+}
+
+.chat-queue[hidden] {
+  display: none;
+}
+
+/* Docked next to the composer, the queue owns the seam: the composer's own
+   border-top would double up. */
+.chat-queue:not([hidden]) + .chat-composer {
+  border-top: none;
+}
+
+.chat-queued-message {
   border: 1px dashed var(--border-medium);
+  border-radius: 0.6rem;
+  background: var(--surface-muted);
+  padding: 0.5rem 0.75rem;
+}
+
+.chat-queued-message p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.chat-queued-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-top: 0.3rem;
 }
 
 .chat-queued-tag {
   display: block;
-  margin-top: 0.3rem;
   color: var(--text-subtle);
   font-size: 0.75em;
+}
+
+.chat-queued-remove {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--text-subtle);
+  font: inherit;
+  font-size: 0.75em;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.chat-queued-remove:hover,
+.chat-queued-remove:focus-visible {
+  color: var(--text-strong);
+}
+
+.chat-queued-remove:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 /* Question options are the primary action, so each is a full-width tap target

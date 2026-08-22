@@ -22,7 +22,7 @@ async function control(request: APIRequestContext, body: Record<string, unknown>
 test.describe("desktop OpenCode chat", () => {
   test.beforeEach(async ({ page, request }) => bootChat(page, request));
 
-  test("creates, resumes, steers, cancels, and retains the mounted surface", async ({ page }) => {
+  test("creates, resumes, queues, cancels, and retains the mounted surface", async ({ page }) => {
     await page.getByRole("button", { name: "New conversation" }).click();
     await expect(page.locator("#chat-conversation-select")).not.toHaveValue("");
     const firstId = await page.locator("#chat-conversation-select").inputValue();
@@ -37,7 +37,7 @@ test.describe("desktop OpenCode chat", () => {
     await expect(configurationTrigger).toBeDisabled();
     const response = await firstResponse;
     expect(response.request().postDataJSON()).toMatchObject({ model: { providerId: "openai", modelId: "gpt-5" } });
-    expect(await response.json()).toMatchObject({ delivery: "queue", conversation: { title: "Initial prompt" } });
+    expect(await response.json()).toMatchObject({ held: false, conversation: { title: "Initial prompt" } });
     await expect(page.locator("#chat-title")).toHaveText("Initial prompt");
     await expect(page.locator("#chat-conversation-select option:checked")).toHaveText("Initial prompt");
     await expect(configurationTrigger).toBeEnabled();
@@ -49,10 +49,11 @@ test.describe("desktop OpenCode chat", () => {
     await expect(page.locator("#chat-waiting")).toContainText("Working");
 
     await input.fill("Use the smaller approach");
-    const steerResponse = page.waitForResponse(response => response.url().endsWith("/prompts"));
+    const heldResponse = page.waitForResponse(response => response.url().endsWith("/prompts"));
     await input.press("Enter");
-    expect(await (await steerResponse).json()).toMatchObject({ delivery: "steer" });
-    await expect(page.locator("#chat-items")).toContainText("Use the smaller approach");
+    expect(await (await heldResponse).json()).toMatchObject({ held: true });
+    // The busy submission pins at the composer as a held message.
+    await expect(page.locator("#chat-queue .is-held")).toContainText("Use the smaller approach");
 
     await input.fill("draft retained across surfaces");
     // Collapse to the strip and reopen: the surface stays mounted, so the

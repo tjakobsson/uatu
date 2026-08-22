@@ -1,5 +1,5 @@
 import { ConversationReplay } from "../../src/chat/replay";
-import { deriveConversationTitle } from "../../src/chat/adapter";
+import { deriveConversationTitle, QueuedMessageNotHeldError } from "../../src/chat/adapter";
 import type { WorkspaceChatService } from "../../src/chat/service";
 import { ConversationNotFoundError } from "../../src/chat/workspace";
 import type {
@@ -13,6 +13,7 @@ import type {
   ConversationSummary,
   ModelSelection,
   PermissionOutcome,
+  QueuedMessage,
   QuestionOutcome,
 } from "../../src/chat/types";
 
@@ -25,6 +26,10 @@ export class FakeE2EChatService implements WorkspaceChatService {
   private readonly configurations = new Map<string, ConversationConfiguration>();
   private readonly receipts = new Map<string, unknown>();
   private readonly olderItems = new Map<string, ConversationItem[]>();
+  // Mirrors the real adapter's workspace-held queue: busy submissions wait
+  // here, deliver on the turn's own end, pause on cancellation.
+  private readonly queues = new Map<string, QueuedMessage[]>();
+  private readonly dormant = new Set<string>();
   private nextCreatedConfiguration: ConversationConfiguration = {};
   // Conversations a subagent runs as. The real adapter keeps them out of the
   // picker (a child session has a parentId), and Chat's drill-down navigation
@@ -189,14 +194,14 @@ export class FakeE2EChatService implements WorkspaceChatService {
 
   async prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string): Promise<{
     messageId: string;
-    delivery: "steer" | "queue";
+    held: boolean;
     conversation?: ConversationSummary;
     configuration: ConversationConfiguration;
   }> {
     if (mode) this.promptModes.push(mode);
     if (variant) this.promptVariants.push(variant);
     const key = `prompt:${id}:${requestId}`;
-    const existing = this.receipts.get(key) as { messageId: string; delivery: "steer" | "queue"; configuration: ConversationConfiguration; conversation?: ConversationSummary } | undefined;
+    const existing = this.receipts.get(key) as { messageId: string; held: boolean; configuration: ConversationConfiguration; conversation?: ConversationSummary } | undefined;
     if (existing) return existing;
     const conversation = this.require(id);
     const previousConfiguration = this.configurations.get(id) ?? {};
@@ -222,25 +227,76 @@ export class FakeE2EChatService implements WorkspaceChatService {
       candidate.selection.providerId === model.providerId && candidate.selection.modelId === model.modelId)) {
       throw new Error("selected model is not available");
     }
-    let renamed: ConversationSummary | undefined;
-    if (/^New session - /.test(conversation.title) && this.items.get(id)!.size === 0) {
-      renamed = { ...conversation, title: deriveConversationTitle(text), updatedAt: this.nextId };
-      this.conversations.set(id, renamed);
-    }
-    const messageId = `message-${this.nextId++}`;
-    const delivery: "steer" | "queue" = conversation.status === "running" ? "steer" : "queue";
-    const item: ConversationItem = { id: `message:${messageId}`, type: "user_message", createdAt: Date.now(), text, requestId };
-    this.items.get(id)!.set(item.id, item);
-    this.replay.get(id)!.publish({ type: "item.upsert", item });
-    this.setStatus(id, "running");
     this.configurations.set(id, configuration);
     this.nextCreatedConfiguration = structuredClone(configuration);
     if (JSON.stringify(previousConfiguration) !== JSON.stringify(configuration)) {
       this.replay.get(id)!.publish({ type: "conversation.configuration", configuration });
     }
-    const result = { messageId, delivery, configuration, ...(renamed ? { conversation: renamed } : {}) };
+    // A busy conversation — or one with a backlog, which preserves order —
+    // holds the message instead of delivering it, exactly like the adapter.
+    const queue = this.queues.get(id) ?? [];
+    if (conversation.status === "running" || conversation.status === "sending" || queue.length > 0) {
+      const held: QueuedMessage = { id: `held-${this.nextId++}`, text, queuedAt: Date.now(), requestId };
+      queue.push(held);
+      this.queues.set(id, queue);
+      this.dormant.delete(id);
+      this.publishQueue(id, { kind: "held", messageId: held.id });
+      // A submission onto an idle conversation with a backlog reactivates
+      // the queue, exactly like the adapter's schedule-on-hold.
+      if (conversation.status !== "running" && conversation.status !== "sending") this.deliverNext(id);
+      const result = { messageId: held.id, held: true, configuration };
+      this.receipts.set(key, result);
+      return result;
+    }
+    let renamed: ConversationSummary | undefined;
+    if (/^New session - /.test(conversation.title) && this.items.get(id)!.size === 0) {
+      renamed = { ...conversation, title: deriveConversationTitle(text), updatedAt: this.nextId };
+      this.conversations.set(id, renamed);
+    }
+    const messageId = this.dispatch(id, text, requestId);
+    const result = { messageId, held: false, configuration, ...(renamed ? { conversation: renamed } : {}) };
     this.receipts.set(key, result);
     return result;
+  }
+
+  async removeQueued(id: string, messageId: string, requestId: string): Promise<{ removed: true }> {
+    const key = `unqueue:${id}:${requestId}`;
+    const existing = this.receipts.get(key) as { removed: true } | undefined;
+    if (existing) return existing;
+    this.require(id);
+    const queue = this.queues.get(id) ?? [];
+    const index = queue.findIndex(held => held.id === messageId);
+    if (index < 0) throw new QueuedMessageNotHeldError();
+    queue.splice(index, 1);
+    if (queue.length === 0) this.queues.delete(id);
+    this.publishQueue(id, { kind: "removed", messageId });
+    const result = { removed: true } as const;
+    this.receipts.set(key, result);
+    return result;
+  }
+
+  private dispatch(id: string, text: string, requestId?: string): string {
+    const messageId = `message-${this.nextId++}`;
+    const item: ConversationItem = { id: `message:${messageId}`, type: "user_message", createdAt: Date.now(), text, ...(requestId ? { requestId } : {}) };
+    this.items.get(id)!.set(item.id, item);
+    this.replay.get(id)!.publish({ type: "item.upsert", item });
+    this.setStatus(id, "running");
+    return messageId;
+  }
+
+  private deliverNext(id: string): void {
+    if (this.dormant.has(id)) return;
+    const queue = this.queues.get(id);
+    const held = queue?.[0];
+    if (!queue || !held) return;
+    queue.shift();
+    if (queue.length === 0) this.queues.delete(id);
+    this.dispatch(id, held.text, held.requestId);
+    this.publishQueue(id, { kind: "delivered", messageId: held.id });
+  }
+
+  private publishQueue(id: string, change: { kind: "held" | "removed" | "delivered"; messageId: string }): void {
+    this.replay.get(id)!.publish({ type: "conversation.queue", queued: structuredClone(this.queues.get(id) ?? []), change });
   }
 
   async renameConversation(id: string, requestId: string, rawTitle: string): Promise<{ conversation: ConversationSummary }> {
@@ -261,6 +317,8 @@ export class FakeE2EChatService implements WorkspaceChatService {
     const existing = this.receipts.get(key) as { cancelled: true } | undefined;
     if (existing) return existing;
     this.require(id);
+    // Cancel pauses the queue before the status transition can deliver.
+    if (this.queues.get(id)?.length) this.dormant.add(id);
     this.setStatus(id, "interrupted");
     const result = { cancelled: true } as const;
     this.receipts.set(key, result);
@@ -310,6 +368,8 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.configurations.clear();
     this.receipts.clear();
     this.olderItems.clear();
+    this.queues.clear();
+    this.dormant.clear();
     this.nextCreatedConfiguration = {};
     this.children.clear();
     // A narrowed agent is one test's setup, not the fixture's resting state:
@@ -390,6 +450,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
       generation: this.generation,
       cursor: this.replay.get(id)!.latestCursor(),
       items: [...this.items.get(id)!.values()],
+      queued: structuredClone(this.queues.get(id) ?? []),
     };
   }
 
@@ -397,5 +458,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     const conversation = this.require(id);
     this.conversations.set(id, { ...conversation, status, updatedAt: this.nextId });
     this.replay.get(id)!.publish({ type: "conversation.status", status, ...(message ? { message } : {}) });
+    // A turn that ended on its own releases the next held message.
+    if (status === "completed" || status === "idle") this.deliverNext(id);
   }
 }

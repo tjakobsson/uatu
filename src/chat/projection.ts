@@ -1,5 +1,5 @@
 import { mergeAssistantMessage } from "./usage";
-import type { ChatEvent, ConversationConfiguration, ConversationItem, ConversationSnapshot, ConversationStatus, ConversationSummary } from "./types";
+import type { ChatEvent, ConversationConfiguration, ConversationItem, ConversationSnapshot, ConversationStatus, ConversationSummary, QueuedMessage } from "./types";
 
 export type AcceptedDraft = { requestId: string; messageId: string; text: string };
 export type ChatProjection = {
@@ -13,12 +13,22 @@ export type ChatProjection = {
   status: ConversationStatus;
   olderCursor?: string;
   acceptedDrafts: AcceptedDraft[];
+  // Server-held messages awaiting delivery, in submission order. Sourced from
+  // the snapshot and restated whole by every queue event, so this is state,
+  // not an accumulation.
+  queued: QueuedMessage[];
+  // Counts applied queue events. A held acceptance's local echo is valid only
+  // while no queue event has spoken since the submission: once one has, the
+  // stream is the authority and an echo could resurrect an entry the stream
+  // already delivered or removed.
+  queueRevision: number;
 };
 
 export type ProjectionResult = { projection: ChatProjection; outcome: "applied" | "duplicate" | "gap" | "resync" };
 
 export function projectionFromSnapshot(snapshot: ConversationSnapshot, acceptedDrafts: AcceptedDraft[] = []): ChatProjection {
   const sequence = decodeCursorSequence(snapshot.cursor) ?? 0;
+  const queued = snapshot.queued ?? [];
   return {
     conversationId: snapshot.conversation.id,
     generation: snapshot.generation,
@@ -29,7 +39,9 @@ export function projectionFromSnapshot(snapshot: ConversationSnapshot, acceptedD
     items: deduplicate(snapshot.items),
     status: snapshot.conversation.status,
     olderCursor: snapshot.olderCursor,
-    acceptedDrafts: reconcileDrafts(acceptedDrafts, snapshot.items),
+    acceptedDrafts: reconcileDrafts(acceptedDrafts, snapshot.items, queued),
+    queued,
+    queueRevision: 0,
   };
 }
 
@@ -44,6 +56,40 @@ export function addAcceptedDraft(current: ChatProjection, draft: AcceptedDraft):
     acceptedDrafts: reconcileDrafts(
       [...current.acceptedDrafts.filter(item => item.requestId !== draft.requestId), draft],
       current.items,
+      current.queued,
+    ),
+  };
+}
+
+/**
+ * Locally mirrors a held acceptance so the pinned entry appears the moment
+ * the response lands rather than one stream event later. The next queue
+ * event restates the authoritative list and converges with this.
+ *
+ * The echo is refused when it can only be stale: once the message has
+ * already been delivered into the timeline (a retried acceptance answered
+ * after delivery), or once any queue event has been applied since the
+ * submission (`sinceRevision`) — the stream restates the whole queue, so an
+ * entry it no longer contains was delivered or removed, and re-adding it
+ * would show a phantom no later event is guaranteed to clear.
+ */
+export function noteQueuedMessage(current: ChatProjection, held: QueuedMessage, sinceRevision = current.queueRevision): ChatProjection {
+  const delivered = held.requestId !== undefined
+    && current.items.some(item => item.type === "user_message" && item.requestId === held.requestId);
+  const trustEcho = !delivered && current.queueRevision === sinceRevision;
+  const queued = !trustEcho || current.queued.some(entry => entry.id === held.id)
+    ? current.queued
+    : [...current.queued, held];
+  return {
+    ...current,
+    queued,
+    acceptedDrafts: reconcileDrafts(
+      // The draft retires either way: the submission was accepted, and its
+      // message is represented by the queued entry, the delivered item, or
+      // the authoritative stream state — never by the draft.
+      current.acceptedDrafts.filter(draft => held.requestId === undefined || draft.requestId !== held.requestId),
+      current.items,
+      queued,
     ),
   };
 }
@@ -74,11 +120,13 @@ export function applyChatEvent(current: ChatProjection, event: ChatEvent, cursor
   let status = current.status;
   let conversation = current.conversation;
   let configuration = current.configuration;
+  let queued = current.queued;
+  let queueRevision = current.queueRevision;
   if (event.type === "item.upsert") {
     const index = items.findIndex(item => item.id === event.item.id);
     const existing = index < 0 ? undefined : items[index];
     const incoming = mergeUpsert(existing, event.item);
-    items = index < 0 ? [...items, incoming] : items.map((item, at) => at === index ? incoming : item);
+    items = index < 0 ? insertInConversationOrder(items, incoming) : items.map((item, at) => at === index ? incoming : item);
   } else if (event.type === "item.remove") {
     items = items.filter(item => item.id !== event.itemId);
   } else if (event.type === "item.text_delta") {
@@ -91,6 +139,9 @@ export function applyChatEvent(current: ChatProjection, event: ChatEvent, cursor
   } else if (event.type === "conversation.updated") {
     conversation = event.conversation;
     status = event.conversation.status;
+  } else if (event.type === "conversation.queue") {
+    queued = event.queued;
+    queueRevision += 1;
   }
   return {
     projection: {
@@ -101,10 +152,31 @@ export function applyChatEvent(current: ChatProjection, event: ChatEvent, cursor
       status,
       conversation,
       configuration,
-      acceptedDrafts: reconcileDrafts(current.acceptedDrafts, items),
+      queued,
+      queueRevision,
+      acceptedDrafts: reconcileDrafts(current.acceptedDrafts, items, queued),
     },
     outcome: "applied",
   };
+}
+
+/**
+ * Places a new item where a fresh snapshot would put it: snapshots sort
+ * stably by `createdAt`, so a live update belonging to an earlier moment —
+ * a recovered request, a replayed frame from before items that arrived out
+ * of band — must not render at the end of the timeline just because it
+ * arrived last. Equal timestamps keep arrival order. Within one message —
+ * whose parts all share the message's timestamp — arrival order is the
+ * order the provider delivered the parts; live part events carry no
+ * position index, so parts delivered out of provider order stay in
+ * delivery order until the next snapshot load. Cross-message order is
+ * exact, which is what the requirement guarantees.
+ */
+function insertInConversationOrder(items: ConversationItem[], incoming: ConversationItem): ConversationItem[] {
+  let at = items.length;
+  while (at > 0 && items[at - 1]!.createdAt > incoming.createdAt) at -= 1;
+  if (at === items.length) return [...items, incoming];
+  return [...items.slice(0, at), incoming, ...items.slice(at)];
 }
 
 /**
@@ -141,12 +213,18 @@ function deduplicate(items: ConversationItem[]): ConversationItem[] {
   return [...byId.values()];
 }
 
-function reconcileDrafts(drafts: AcceptedDraft[], items: ConversationItem[]): AcceptedDraft[] {
+function reconcileDrafts(drafts: AcceptedDraft[], items: ConversationItem[], queued: QueuedMessage[] = []): AcceptedDraft[] {
   const accepted = new Set(items.filter(item => item.type === "user_message").flatMap(item => [
     item.id,
     item.id.replace(/^message:/, ""),
     item.requestId ?? "",
   ]));
+  // A draft the server now holds in the queue is represented by its pinned
+  // queued entry; keeping the draft too would show the message twice.
+  for (const held of queued) {
+    accepted.add(held.id);
+    if (held.requestId) accepted.add(held.requestId);
+  }
   return drafts.filter(draft => !accepted.has(draft.messageId) && !accepted.has(draft.requestId));
 }
 

@@ -8,7 +8,7 @@ beforeAll(() => {
   (globalThis as Record<string, unknown>).document = dom.document;
 });
 
-const { TimelineRenderer, subagentEntries } = await import("./timeline-renderer");
+const { QueueDockRenderer, TimelineRenderer, subagentEntries } = await import("./timeline-renderer");
 
 function projectionWith(items: ConversationItem[], overrides: Partial<ChatProjection> = {}): ChatProjection {
   return {
@@ -19,6 +19,8 @@ function projectionWith(items: ConversationItem[], overrides: Partial<ChatProjec
     items,
     status: "running",
     acceptedDrafts: [],
+    queued: [],
+    queueRevision: 0,
     ...overrides,
   };
 }
@@ -374,12 +376,32 @@ describe("presentation details", () => {
     expect(host.textContent).toContain("worked 7s");
   });
 
-  test("a queued message is visibly held", () => {
+  test("held messages render in the queue dock, ordered, removable, and never in the timeline", () => {
     const renderer = new TimelineRenderer();
+    const dock = new QueueDockRenderer();
     const host = target();
-    renderer.render(host, projectionWith([{ id: "message:u1", type: "user_message", createdAt: 1, text: "later" }]), new Set(), new Set(["message:u1"]));
-    expect(host.querySelector(".chat-user-message.is-queued")).not.toBeNull();
-    expect(host.textContent).toContain("Queued");
+    const dockHost = target();
+    const projection = projectionWith(
+      [{ id: "message:u1", type: "user_message", createdAt: 1, text: "earlier" }],
+      { queued: [{ id: "held-1", text: "first held", queuedAt: 2 }, { id: "held-2", text: "second held", queuedAt: 3 }] },
+    );
+    renderer.render(host, projection, new Set());
+    dock.render(dockHost, projection.queued);
+    // The timeline never contains held messages — they are not transcript
+    // entries until delivered.
+    expect(host.querySelector(".is-held")).toBeNull();
+    const held = [...dockHost.querySelectorAll(".chat-queued-message")];
+    expect(held.map(node => node.textContent)).toEqual([
+      expect.stringContaining("first held"),
+      expect.stringContaining("second held"),
+    ]);
+    expect(held[0]!.querySelector("[data-queue-remove='held-1']")).not.toBeNull();
+    expect(dockHost.hidden).toBe(false);
+
+    // Delivery drains the dock and hides it.
+    dock.render(dockHost, []);
+    expect(dockHost.querySelector(".chat-queued-message")).toBeNull();
+    expect(dockHost.hidden).toBe(true);
   });
 
   test("todo updates read as activity, not a reprinted list", () => {
@@ -541,7 +563,7 @@ describe("subagent entries", () => {
   test("a task keeps its report but hides transcript navigation when subagents are unsupported", () => {
     const renderer = new TimelineRenderer();
     const host = target();
-    renderer.render(host, projectionWith([task("legacy", { childConversationId: "child", output: "Report" })]), new Set(["tool:legacy"]), undefined, false);
+    renderer.render(host, projectionWith([task("legacy", { childConversationId: "child", output: "Report" })]), new Set(["tool:legacy"]), false);
     expect(host.textContent).toContain("Report");
     expect(host.querySelector("[data-open-conversation]")).toBeNull();
   });

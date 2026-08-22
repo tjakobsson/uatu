@@ -1445,6 +1445,7 @@ describe("hub end to end", () => {
       ["PATCH", "/s/myproject/api/chat/conversations/local", "/s/{workspaceId}/api/chat/conversations/{conversationId}", { requestId: "stopped-rename", title: "Renamed" }],
       ["GET", "/s/myproject/api/chat/conversations/local/events", "/s/{workspaceId}/api/chat/conversations/{conversationId}/events"],
       ["POST", "/s/myproject/api/chat/conversations/local/cancel", "/s/{workspaceId}/api/chat/conversations/{conversationId}/cancel", { requestId: "stopped" }],
+      ["DELETE", "/s/myproject/api/chat/conversations/local/queue/held-1", "/s/{workspaceId}/api/chat/conversations/{conversationId}/queue/{messageId}", { requestId: "stopped-unqueue" }],
       ["POST", "/s/myproject/api/chat/conversations/local/permissions/request", "/s/{workspaceId}/api/chat/conversations/{conversationId}/permissions/{interactionId}", { requestId: "stopped", outcome: "rejected" }],
       ["POST", "/s/myproject/api/chat/conversations/local/questions/request", "/s/{workspaceId}/api/chat/conversations/{conversationId}/questions/{interactionId}", { requestId: "stopped", outcome: { kind: "rejected" } }],
     ];

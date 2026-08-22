@@ -39,6 +39,24 @@ describe("conversation replay", () => {
     expect((await stale.next()).done).toBe(true);
   });
 
+  test("a stalled subscriber's backlog is bounded and ends the stream instead of growing", async () => {
+    const replay = new ConversationReplay("generation", "session", 10_000);
+    const handoff = replay.handoff(cursor => ({ cursor }));
+    // Nothing pulls: every published frame lands in the backlog. A ~64 KiB
+    // notice needs at most 17 frames to cross the 1 MiB bound.
+    const message = "x".repeat(64 * 1024);
+    for (let index = 0; index < 20; index += 1) {
+      replay.publish({ type: "item.upsert", item: { id: `notice:${index}`, type: "notice", createdAt: index, level: "info", message } });
+    }
+    const iterator = handoff.subscription[Symbol.asyncIterator]();
+    // The backlog was dropped, not drained — the stream reports done and the
+    // client's reconnect path recovers from the ring or a fresh snapshot.
+    expect((await iterator.next()).done).toBe(true);
+    // A cancelled subscriber no longer accumulates.
+    replay.publish({ type: "conversation.status", status: "completed" });
+    expect((await iterator.next()).done).toBe(true);
+  });
+
   test("cancellation closes a pending iterator and cleans up the subscriber", async () => {
     const replay = new ConversationReplay("g", "s", 100);
     const controller = new AbortController();
