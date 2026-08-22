@@ -167,6 +167,16 @@ describe("credential tool probes", () => {
     expect(probe.results.map(result => result.status)).toEqual(["ready", "ready", "not-applicable"]);
   });
 
+  test("rejects an override whose output merely mentions the authentication agent", async () => {
+    // The agentless banner must be the complete OpenSSH diagnostic, not a
+    // phrase match: a broken override printing similar words is not ssh-add
+    // and must not be persisted in place of a usable path.
+    const { filePath } = await executable("ssh-add");
+    await writeFile(filePath, "#!/bin/sh\nprintf 'authentication agent unavailable\\n' >&2\nexit 2\n", { mode: 0o700 });
+    const probe = await probeCredentialTool({ tool: "ssh-add", path: filePath, source: "override" });
+    expect(probe.results.map(result => result.status)).toEqual(["ready", "unavailable", "not-applicable"]);
+  });
+
   test("probes the real ssh-add as identified when it is installed", async () => {
     const discovery = await discoverExecutable("ssh-add");
     if (!discovery.path) return; // no OpenSSH client on this machine
