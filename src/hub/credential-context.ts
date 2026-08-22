@@ -1093,6 +1093,11 @@ async function projectLocalCredentialEnvironment(
     ), { mode: 0o700 });
     await fs.chmod(sshShim, 0o700);
     exposedTools.add("ssh");
+  } else {
+    const sshShim = path.join(await toolBin(), "ssh");
+    await fs.writeFile(sshShim, "#!/bin/sh\nexit 127\n", { mode: 0o700 });
+    await fs.chmod(sshShim, 0o700);
+    exposedTools.add("ssh");
   }
   env.GIT_SSH_COMMAND = `${context.tools.ssh ? shellQuote(context.tools.ssh) : "ssh"} -F ${shellQuote(sshConfigPath)}`;
   if (usesSshAgent) env.SSH_AUTH_SOCK = context.sshAgentSocket!;

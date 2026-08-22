@@ -1030,6 +1030,34 @@ describe("local workspace credential projection", () => {
     expect(Bun.spawnSync(["git", "--version"], { env: projected.env }).exitCode).toBe(127);
   });
 
+  test("does not rediscover ambient SSH when the resolved tool is unavailable", async () => {
+    const { root, home, workspace } = await fixture();
+    const ambientBin = path.join(root, "ambient-bin");
+    const marker = path.join(root, "ambient-ssh-used");
+    await mkdir(ambientBin);
+    await writeFile(path.join(ambientBin, "ssh"), `#!/bin/sh\ntouch '${marker}'\n`, { mode: 0o700 });
+    const projected = await buildLocalCredentialEnvironment({
+      workspace,
+      context: {
+        revision: "missing-ssh",
+        runtimeRoot: path.join(root, "runtime"),
+        stateRoot: root,
+        sshAgentSocket: null,
+        gnupgHome: path.join(root, "gnupg"),
+        tools: { ssh: null, git: null, gpg: null, sshKeygen: null, gh: null, glab: null },
+        authentication: [],
+        signing: null,
+      },
+      uatuArgv: ["uatu"],
+      sourceEnv: { HOME: home, PATH: ambientBin },
+    });
+
+    const sshShim = path.join(projected.runtimeDirectory, "tool-bin", "ssh");
+    expect(await Bun.file(sshShim).exists()).toBe(true);
+    expect(Bun.spawnSync(["ssh", "example.com"], { env: projected.env }).exitCode).toBe(127);
+    expect(await Bun.file(marker).exists()).toBe(false);
+  });
+
   test.skipIf(!Bun.which("git"))("resolves retained relative path settings against their config origin", async () => {
     const { root, home, workspace } = await fixture();
     const gitPath = requiredTool("git");
