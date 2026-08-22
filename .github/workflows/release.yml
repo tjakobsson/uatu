@@ -5,10 +5,13 @@ name: Release
 # to trigger this artifact-publication workflow. A rerun rebuilds and replaces
 # assets safely; the draft is made public only after every release check passes.
 #
-# All four platform binaries are cross-compiled on this one Linux runner
+# All four platform binaries are cross-compiled on this one macOS runner
 # via `bun build --compile --target=...` (uatu has no native modules, so
-# this is safe). Asset names and archive layout are a public contract —
-# the Homebrew formula and any future installers depend on them.
+# this is safe). The runner must be macOS: Bun 1.4.0 emits darwin binaries
+# with an invalid signature that macOS arm64 SIGKILLs on exec, and only a
+# macOS host can codesign them (scripts/build.ts does this after compiling).
+# Asset names and archive layout are a public contract — the Homebrew
+# formula and any future installers depend on them.
 
 on:
   push:
@@ -19,8 +22,8 @@ permissions: {}
 
 jobs:
   release:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    runs-on: macos-26
+    timeout-minutes: 45
     permissions:
       contents: write
       id-token: write
@@ -67,13 +70,15 @@ jobs:
       - name: Install Playwright Chromium
         run: bunx playwright install --with-deps chromium
 
-      - name: Smoke-test the linux-x64 binary
-        # The runner is linux-x64, so this artifact — the exact binary
+      - name: Smoke-test the darwin-arm64 binary
+        # The runner is arm64 macOS, so this artifact — the exact binary
         # being released — can be executed here. A failure stops the
-        # release before anything is published.
+        # release before anything is published. This is also the target
+        # whose signature must be valid, so smoking it proves the codesign
+        # step in scripts/build.ts actually worked.
         run: bun run smoke
         env:
-          UATU_SMOKE_BINARY: dist/linux-x64/uatu
+          UATU_SMOKE_BINARY: dist/darwin-arm64/uatu
 
       - name: Verify the compiled binary reports the released version
         # Belt and braces on top of the tag guard: asserts the version
@@ -81,7 +86,7 @@ jobs:
         # `test do` block later checks) matches the tag being released.
         run: |
           expected="${GITHUB_REF_NAME#v}"
-          reported="$(./dist/linux-x64/uatu --version)"
+          reported="$(./dist/darwin-arm64/uatu --version)"
           echo "binary reports: $reported"
           case "$reported" in
             "v$expected ·"*) ;;
@@ -103,7 +108,7 @@ jobs:
             tar -czf "dist/release/uatu-$target.tar.gz" -C "dist/$target" uatu
           done
           cd dist/release
-          sha256sum uatu-* > SHA256SUMS
+          shasum -a 256 uatu-* > SHA256SUMS
           cat SHA256SUMS
 
       - name: Attest build provenance
