@@ -920,6 +920,41 @@ describe("prompt, abort, permission, and question mutations", () => {
     expect((await adapter.history("session")).queued).toEqual([]);
   });
 
+  test("a held message does not ride an idle event that outruns the interrupt acknowledgement", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    let message = 0;
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
+
+    expect((await adapter.prompt("session", "r1", "first")).held).toBe(false);
+    const held = await adapter.prompt("session", "r2", "second");
+    expect(held.held).toBe(true);
+
+    // The provider publishes the interrupt's idle transition before the
+    // interrupt request itself resolves — the pump is faster than the HTTP
+    // acknowledgement. The queue must already be paused when that happens.
+    provider.interrupt = async sessionId => {
+      provider.interrupts.push(sessionId);
+      adapter.projectionForTests("session").statusUpdate("idle");
+      await new Promise(resolve => setTimeout(resolve, 10));
+    };
+    await adapter.abort("session", "cancel-1");
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(provider.prompts).toHaveLength(1);
+    await expect(adapter.removeQueued("session", held.messageId, "remove-1")).resolves.toEqual({ removed: true });
+
+    // A failed interrupt leaves the turn running and must roll back only the
+    // pause this cancellation added — the next natural end still delivers.
+    expect((await adapter.prompt("session", "r3", "third")).held).toBe(false);
+    const fourth = await adapter.prompt("session", "r4", "fourth");
+    expect(fourth.held).toBe(true);
+    provider.interrupt = async () => { throw new Error("interrupt refused"); };
+    await expect(adapter.abort("session", "cancel-2")).rejects.toThrow("interrupt refused");
+    adapter.projectionForTests("session").statusUpdate("completed");
+    for (let attempt = 0; attempt < 200 && provider.prompts.length < 3; attempt += 1) await new Promise(resolve => setTimeout(resolve, 1));
+    expect(provider.prompts[2]).toEqual(expect.objectContaining({ text: "fourth", id: fourth.messageId }));
+  });
+
   test("a failed delivery pauses the queue instead of hammering a failing conversation", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];

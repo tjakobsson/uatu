@@ -767,16 +767,22 @@ export class OpenCodeChatAdapter {
     return this.receipts.run(`cancel:${conversationId}:${requestId}`, async () => {
       await this.requireSession(conversationId);
       const projection = this.projection(conversationId);
+      // Cancel means stop: held messages stay queued and removable, and none
+      // of them rides the idle transition this interrupt causes. Paused
+      // BEFORE the provider call — the interrupt's own idle event can reach
+      // the pump before the interrupt request resolves, and an un-paused
+      // queue would deliver into exactly the gap the user cancelled.
+      const paused = (this.heldQueues.get(conversationId)?.length ?? 0) > 0 && !this.dormantQueues.has(conversationId);
+      if (paused) this.dormantQueues.add(conversationId);
       try {
         await this.provider.interrupt(conversationId);
-        // Cancel means stop: held messages stay queued and removable, and
-        // none of them rides the idle transition this interrupt causes. The
-        // pause is set before the status can propagate, so the end-of-turn
-        // trigger finds it already dormant.
-        if (this.heldQueues.get(conversationId)?.length) this.dormantQueues.add(conversationId);
         projection.statusUpdate("interrupted");
         return { cancelled: true };
       } catch (error) {
+        // A failed interrupt leaves the turn running, so the pause must not
+        // outlive the cancellation it belonged to — but only the pause this
+        // cancellation itself added.
+        if (paused) this.dormantQueues.delete(conversationId);
         projection.statusUpdate("failed", errorMessage(error));
         throw error;
       }
