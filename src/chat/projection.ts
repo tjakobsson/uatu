@@ -165,9 +165,12 @@ export function applyChatEvent(current: ChatProjection, event: ChatEvent, cursor
  * stably by `createdAt`, so a live update belonging to an earlier moment —
  * a recovered request, a replayed frame from before items that arrived out
  * of band — must not render at the end of the timeline just because it
- * arrived last. Equal timestamps keep arrival order, which is the provider's
- * own part order within a message and exactly what the stable snapshot sort
- * preserves.
+ * arrived last. Equal timestamps keep arrival order. Within one message —
+ * whose parts all share the message's timestamp — arrival order is the
+ * order the provider delivered the parts; live part events carry no
+ * position index, so parts delivered out of provider order stay in
+ * delivery order until the next snapshot load. Cross-message order is
+ * exact, which is what the requirement guarantees.
  */
 function insertInConversationOrder(items: ConversationItem[], incoming: ConversationItem): ConversationItem[] {
   let at = items.length;

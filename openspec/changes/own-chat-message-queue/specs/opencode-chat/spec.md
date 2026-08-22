@@ -86,7 +86,7 @@ A control the surface offers the user to start an operation — a picker such as
 - **AND** the controls for declared capabilities are unaffected
 
 ### Requirement: Timeline order follows the conversation's message order
-The Chat timeline SHALL present items in the conversation's own order — parent messages in their provider-assigned order, each message's parts in provider part order — regardless of the order in which updates arrived. An update belonging to an earlier message MUST NOT render after items of a later message. A client that applied a conversation's events live SHALL present the same order as a client that loaded the same conversation from a fresh snapshot.
+The Chat timeline SHALL present items in the conversation's own order — parent messages in their provider-assigned order, and within a message, parts in the order the provider delivers them — regardless of the order in which updates arrived. An update belonging to an earlier message MUST NOT render after items of a later message. A client that applied a conversation's events live SHALL present the same cross-message order as a client that loaded the same conversation from a fresh snapshot. Within one message, live events carry no provider position, so parts the provider itself delivered out of order remain in delivery order until the next snapshot load.
 
 #### Scenario: A late update for an earlier message keeps its place
 - **WHEN** an update arrives for a message that precedes items already shown
@@ -95,7 +95,7 @@ The Chat timeline SHALL present items in the conversation's own order — parent
 
 #### Scenario: Live and reloaded timelines agree
 - **WHEN** one client watched a conversation stream live and another loads it fresh
-- **THEN** both present the same items in the same order
+- **THEN** both present the same messages and their items in the same cross-message order
 
 ## MODIFIED Requirements
 

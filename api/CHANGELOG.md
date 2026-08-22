@@ -14,6 +14,7 @@ Compatibility: breaking (workspace)
 - `ChatEvent` gained the `conversation.queue` variant, restating the whole held queue after each change (`held`, `removed`, or `delivered`) on the ordered, replayable event stream.
 - Held messages are delivered one at a time, in submission order, when the running turn ends on its own. Cancelling the active turn leaves the queue paused: nothing is delivered until the next accepted prompt submission, which joins the back of the queue and resumes delivery from its head.
 - The held queue is bounded per conversation (20 messages, 256 KiB of held text). A submission that would exceed the bound answers `429` without altering the queue, and the prompt operation documents that status.
+- The queue removal, cancel, and permission operations now document the `413` an oversized request body always produced; the question operation already declared it.
 
 ### Migration
 

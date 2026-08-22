@@ -755,6 +755,7 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
+        '413': { $ref: '#/components/responses/Error' }
         '415': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
         '502': { $ref: '#/components/responses/SessionUnreachable' }
@@ -774,6 +775,7 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
+        '413': { $ref: '#/components/responses/Error' }
         '415': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
         '502': { $ref: '#/components/responses/SessionUnreachable' }
@@ -792,6 +794,7 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
+        '413': { $ref: '#/components/responses/Error' }
         '415': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
         '502': { $ref: '#/components/responses/SessionUnreachable' }
