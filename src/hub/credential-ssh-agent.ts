@@ -132,6 +132,16 @@ async function privateDirectory(directory: string): Promise<void> {
   }
 }
 
+// Manual-recovery guidance for a record uatu cannot read. Deleting only the
+// record would be a trap: if it belongs to a live guardian, that orphans the
+// agent, leaves both sockets behind as unowned artifacts the next start
+// fails closed on, and destroys the authenticated record cleanup needed.
+// Everything must be retired together.
+function unreadableRecordAdvice(filePath: string): string {
+  return `Stop uatu, terminate any uatu-managed ssh-agent and its supervisor, `
+    + `then remove ${path.dirname(filePath)} and start again.`;
+}
+
 async function readOwnership(filePath: string): Promise<SshAgentOwnership | undefined> {
   let stats;
   try { stats = await fs.lstat(filePath); } catch (error) { if (isMissing(error)) return undefined; throw error; }
@@ -146,7 +156,7 @@ async function readOwnership(filePath: string): Promise<SshAgentOwnership | unde
     parsed = JSON.parse(await fs.readFile(filePath, "utf8"));
   } catch (error) {
     throw new Error(
-      `SSH agent ownership record at ${filePath} is not valid JSON. Stop uatu, remove that file, and start again.`,
+      `SSH agent ownership record at ${filePath} is not valid JSON. ${unreadableRecordAdvice(filePath)}`,
       { cause: error },
     );
   }
@@ -163,7 +173,7 @@ async function readOwnership(filePath: string): Promise<SshAgentOwnership | unde
     }
     throw new Error(
       `SSH agent ownership record at ${filePath} is corrupt or has an unsupported version. `
-        + "Stop uatu, remove that file, and start again.",
+        + unreadableRecordAdvice(filePath),
       { cause: error },
     );
   }

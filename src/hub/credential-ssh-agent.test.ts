@@ -438,7 +438,11 @@ describe("v1 ownership migration", () => {
     const recordPath = path.join(runtime, "ssh-agent.json");
     await writeFile(recordPath, JSON.stringify({ version: 99, nonce: "nope" }), { mode: 0o600 });
 
+    // The remedy must retire the whole runtime directory: deleting only the
+    // record would orphan a live guardian and strand its sockets as unowned
+    // artifacts the next start fails closed on.
     await expect(manager(runtime, executable).start()).rejects.toThrow(recordPath);
+    await expect(manager(runtime, executable).start()).rejects.toThrow(`remove ${runtime}`);
   });
 
   test("retires a live legacy agent whose socket identity matches the record", async () => {
