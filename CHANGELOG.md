@@ -4,6 +4,26 @@ Notable user-facing changes to uatu are documented here. Versions follow
 [Semantic Versioning](https://semver.org/) and are generated from Conventional
 Commits by [Release Please](https://github.com/googleapis/release-please).
 
+## [0.6.0](https://github.com/tjakobsson/uatu/compare/v0.5.1...v0.6.0) (2026-08-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* **hub:** Hub workspace sessions and clone jobs no longer inherit ambient SSH agents, Git credential helpers, GnuPG homes, or provider tokens. Operators must configure and assign Hub credentials for unattended authentication and signing. The Hub API revision increases from 1 to 4.
+* **chat:** Strict workspace API consumers must regenerate against revision 6 or widen their schemas for conversation configuration, configuration events, conversation updates, and rename support.
+
+### Features
+
+* **api:** publish the API contract and documentation site ([373c938](https://github.com/tjakobsson/uatu/commit/373c9380d18d58f50a275df428ffd3bffc95ff2a))
+* **chat:** add integrated OpenCode workspace chat ([8410b08](https://github.com/tjakobsson/uatu/commit/8410b0804236802d7c83dc9f235c3f36a5d179b8))
+* **hub:** manage workspace credentials ([047641f](https://github.com/tjakobsson/uatu/commit/047641f9daefa8df56f19bd00df5c84102eb5721))
+
+
+### Bug Fixes
+
+* **terminal:** decide PTY support by version instead of spawning a probe ([c07cbb7](https://github.com/tjakobsson/uatu/commit/c07cbb7eb2efbbf7897c9f30f47f92e0a62e0b55))
+* **watch:** keep active document previews current ([0ddd532](https://github.com/tjakobsson/uatu/commit/0ddd5328446cc87e9201010fd670f1311617dc82))
+
 ## [0.5.1](https://github.com/tjakobsson/uatu/compare/v0.5.0...v0.5.1) (2026-08-13)
 
 
