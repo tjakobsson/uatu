@@ -1,5 +1,7 @@
 import path from "node:path";
 
+import { stripAmbientCredentialEnvironment, type CloneCredentialProcessContext } from "./credential-context";
+
 const TERM_GRACE_MS = 3_000;
 const TERMINAL_ECHO_FLAG = 0x00000008;
 
@@ -13,6 +15,7 @@ export type CloneProcess = {
 export type CloneProcessStart = {
   url: string;
   target: string;
+  credential?: CloneCredentialProcessContext;
   onOutput(output: string): void;
 };
 
@@ -34,7 +37,7 @@ type SpawnedClone = {
 
 export type CloneProcessAdapterOptions = {
   env?: NodeJS.ProcessEnv;
-  gitCommand?: string;
+  gitCommand?: string | (() => string);
   spawn?: (argv: string[], options: Parameters<typeof Bun.spawn>[1]) => SpawnedClone;
   killGroup?: (pid: number, signal: NodeJS.Signals | 0) => void;
   sleep?: (milliseconds: number) => Promise<void>;
@@ -42,28 +45,59 @@ export type CloneProcessAdapterOptions = {
 };
 
 export function buildCloneEnvironment(source: NodeJS.ProcessEnv = process.env): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [name, value] of Object.entries(source)) {
-    if (value !== undefined && name !== "GIT_ASKPASS" && name !== "SSH_ASKPASS") {
-      env[name] = value;
-    }
+  const env = stripAmbientCredentialEnvironment(source);
+  for (const key of ["GIT_SSL_CERT", "GIT_SSL_KEY", "GIT_SSL_CERT_PASSWORD_PROTECTED", "GIT_PROXY_COMMAND"]) {
+    delete env[key];
   }
   env.GIT_TERMINAL_PROMPT = "1";
   env.SSH_ASKPASS_REQUIRE = "never";
+  // Clone has no repository config yet. Excluding the system and global
+  // layers blocks ambient URL rewrites, HTTP headers, TLS client keys, and
+  // credential helpers without trying to enumerate host-scoped keys.
+  env.GIT_CONFIG_NOSYSTEM = "1";
+  env.GIT_CONFIG_GLOBAL = "/dev/null";
+  // libcurl otherwise treats ~/.netrc as an optional ambient credential
+  // source even when Git credential helpers are disabled.
+  env.HOME = "/dev/null";
   return env;
 }
 
-export function buildCloneArguments(url: string, target: string): string[] {
-  return [
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function openSshOption(name: string, value: string): string {
+  const quoted = value
+    .replaceAll("%", "%%")
+    .replaceAll("\\", "\\\\")
+    .replaceAll('"', '\\"');
+  // Keep the double quotes through shell parsing. OpenSSH then treats the
+  // whole path as one option value rather than tokenizing spaces or '#'.
+  return shellQuote(`${name}="${quoted}"`);
+}
+
+export function buildCloneArguments(url: string, target: string, credential?: CloneCredentialProcessContext): string[] {
+  const args = [
     "-c", "core.askPass=",
     "-c", "credential.helper=",
-    "clone", "--", url, target,
   ];
+  if (credential?.type === "https") {
+    const helper = [
+      "!env",
+      `UATU_HUB_STATE_ROOT=${shellQuote(credential.stateRoot)}`,
+      `UATU_CREDENTIAL_ID=${shellQuote(credential.credentialId)}`,
+      ...credential.uatuArgv.map(shellQuote),
+      "--git-credential-helper",
+    ].join(" ");
+    args.push("-c", `credential.https://${credential.host}.helper=${helper}`);
+  }
+  args.push("clone", "--", url, target);
+  return args;
 }
 
 export class CloneProcessAdapter implements CloneProcessFactory {
   private readonly env: Record<string, string>;
-  private readonly gitCommand: string;
+  private readonly gitCommand: string | (() => string);
   private readonly spawn: NonNullable<CloneProcessAdapterOptions["spawn"]>;
   private readonly killGroup: NonNullable<CloneProcessAdapterOptions["killGroup"]>;
   private readonly sleep: NonNullable<CloneProcessAdapterOptions["sleep"]>;
@@ -81,9 +115,28 @@ export class CloneProcessAdapter implements CloneProcessFactory {
   start(options: CloneProcessStart): CloneProcess {
     const normalizer = new TerminalTextNormalizer(options.onOutput);
     let terminal: BunTerminal | undefined;
-    const proc = this.spawn([this.gitCommand, ...buildCloneArguments(options.url, options.target)], {
+    const env = { ...this.env };
+    // Every clone isolates SSH from the Hub user's configuration: -F
+    // /dev/null drops ~/.ssh/config (whose IdentityFile entries are
+    // additive even under IdentitiesOnly), and IdentityFile=none excludes
+    // the default ~/.ssh/id_* identities — without this, choosing None (or
+    // even a managed credential) could silently authenticate with an
+    // unselected key. Interactive prompts still flow through the PTY.
+    env.GIT_SSH_COMMAND = "ssh -F /dev/null -o IdentityAgent=none -o IdentityFile=none -o IdentitiesOnly=yes";
+    if (options.credential?.type === "ssh") {
+      env.SSH_AUTH_SOCK = options.credential.agentSocket;
+      env.GIT_SSH_COMMAND = [
+        shellQuote(options.credential.sshPath),
+        "-F /dev/null",
+        `-o ${openSshOption("IdentityAgent", options.credential.agentSocket)}`,
+        `-o ${openSshOption("IdentityFile", options.credential.publicKeyPath)}`,
+        "-o IdentitiesOnly=yes",
+      ].join(" ");
+    }
+    const gitCommand = typeof this.gitCommand === "function" ? this.gitCommand() : this.gitCommand;
+    const proc = this.spawn([gitCommand, ...buildCloneArguments(options.url, options.target, options.credential)], {
       cwd: path.dirname(options.target),
-      env: this.env,
+      env,
       detached: true,
       terminal: {
         cols: 100,

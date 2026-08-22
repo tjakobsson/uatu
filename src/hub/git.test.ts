@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -57,6 +57,28 @@ describe("probeGitRepository", () => {
     execFileSync("mkdir", ["-p", sub]);
     expect((await probeGitRepository(sub)).kind).toBe("repository");
   });
+
+  test("caps repository probe output", async () => {
+    const dir = await tempDir();
+    const executable = path.join(dir, "managed-git");
+    await writeFile(executable, "#!/bin/sh\ndd if=/dev/zero bs=1024 count=1 2>/dev/null\n", { mode: 0o755 });
+
+    const started = Date.now();
+    const probe = await probeGitRepository(dir, executable, { timeoutMs: 1_000, outputLimit: 128 });
+    expect(probe).toEqual({ kind: "indeterminate", detail: "git repository probe exceeded the output limit" });
+    expect(Date.now() - started).toBeLessThan(3_000);
+  });
+
+  test("times out without waiting for a descendant holding the output pipes", async () => {
+    const dir = await tempDir();
+    const executable = path.join(dir, "managed-git");
+    await writeFile(executable, "#!/bin/sh\n(sleep 30) &\nsleep 30\n", { mode: 0o755 });
+
+    const started = Date.now();
+    const probe = await probeGitRepository(dir, executable, { timeoutMs: 20 });
+    expect(probe).toEqual({ kind: "indeterminate", detail: "git repository probe timed out" });
+    expect(Date.now() - started).toBeLessThan(3_000);
+  });
 });
 
 describe("gitInit", () => {
@@ -68,5 +90,22 @@ describe("gitInit", () => {
 
     const missing = await gitInit(path.join(dir, "no", "such", "depth", "here"));
     expect(missing.ok).toBe(false);
+  });
+
+  test("uses an explicitly configured executable for probes and initialization", async () => {
+    const dir = await tempDir();
+    const executable = path.join(dir, "managed-git");
+    const trace = path.join(dir, "trace");
+    await writeFile(executable, [
+      "#!/bin/sh",
+      `printf '%s\\n' "$1" >> '${trace}'`,
+      "if [ \"$1\" = rev-parse ]; then pwd; exit 0; fi",
+      "if [ \"$1\" = init ]; then mkdir -p .git; exit 0; fi",
+      "exit 2",
+    ].join("\n"), { mode: 0o755 });
+
+    expect((await probeGitRepository(dir, executable)).kind).toBe("repository");
+    expect(await gitInit(dir, executable)).toEqual({ ok: true });
+    expect((await Bun.file(trace).text()).trim().split("\n")).toEqual(["rev-parse", "init"]);
   });
 });

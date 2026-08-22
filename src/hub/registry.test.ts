@@ -39,6 +39,15 @@ describe("WorkspaceRegistry", () => {
     expect(registry.list()).toHaveLength(1);
   });
 
+  test("reports whether registration created the entry", async () => {
+    const registry = await tempRegistry();
+    const first = await registry.registerWithStatus("/srv/workspaces/status");
+    const second = await registry.registerWithStatus("/srv/workspaces/status");
+
+    expect(first.created).toBe(true);
+    expect(second).toEqual({ entry: first.entry, created: false });
+  });
+
   test("collisions get numeric suffixes and existing ids keep theirs", async () => {
     const registry = await tempRegistry();
     const first = await registry.register("/a/docs");

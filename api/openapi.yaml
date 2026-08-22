@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: UatuCode public API
-  version: 1.6.0-experimental
+  version: 4.6.0-experimental
   license: { name: MIT, identifier: MIT }
-  summary: Hub revision 1 and workspace revision 6
+  summary: Hub revision 4 and workspace revision 6
   description: |
     Canonical HTTP contract for the UatuCode Hub and workspace APIs. Workspace
     operations use their externally visible Hub proxy paths. Streaming message
@@ -14,7 +14,7 @@ info:
     is the authoritative machine-readable pair, and the product version of a
     published snapshot is recorded in that snapshot's `contract.json`.
   x-uatu-revisions:
-    hubApiRevision: 1
+    hubApiRevision: 4
     workspaceApiRevision: 6
 servers:
   - url: https://{hubHost}
@@ -23,6 +23,7 @@ servers:
 tags:
   - { name: Hub authentication, description: Native JSON session creation and revocation. }
   - { name: Hub, description: "Workspace registry, lifecycle, browsing, and device sessions." }
+  - { name: Hub credentials, description: "Hub-managed credentials, workspace assignments, and credential-tool readiness." }
   - { name: Clone jobs, description: "Asynchronous clone creation, interaction, cancellation, and events." }
   - { name: Workspace, description: "Proxied document, repository, search, and personal-state APIs." }
   - { name: Terminal, description: "Terminal credentials, session inventory, and WebSocket attachment." }
@@ -48,14 +49,15 @@ paths:
           description: Session issued. The session ID is also set as a cookie.
           headers:
             Set-Cookie: { schema: { type: string } }
+            Cache-Control: { schema: { type: string, const: no-store } }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/NativeLoginResponse' }
               example: { sessionId: token-value, user: alice }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '429': { $ref: '#/components/responses/Error' }
+        '400': { $ref: '#/components/responses/NoStoreError' }
+        '401': { $ref: '#/components/responses/NoStoreError' }
+        '403': { $ref: '#/components/responses/NoStoreError' }
+        '429': { $ref: '#/components/responses/NoStoreError' }
   /logout:
     post:
       operationId: hubLogout
@@ -78,9 +80,9 @@ paths:
               schema: { $ref: '#/components/schemas/HubState' }
               example:
                 version: 0.5.1 (abcdef0)
-                hubApiRevision: 1
+                hubApiRevision: 4
                 workspaceApiRevision: 6
-                workspaces: [{ id: uatu, path: /src/uatu, backend: local, running: true, workspaceApiRevision: 6, shells: [{ attached: false, label: zsh }] }]
+                workspaces: [{ id: uatu, path: /src/uatu, backend: local, running: true, credentialRestartRequired: false, credentialAssignments: { authentication: [Work GitHub], signing: [Work signing] }, workspaceApiRevision: 6, shells: [{ attached: false, label: zsh }] }]
         '401': { $ref: '#/components/responses/Error' }
   /api/hub/browse:
     get:
@@ -156,6 +158,22 @@ paths:
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
+  /api/hub/workspaces/{workspaceId}/credential-assignments:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
+    post:
+      operationId: hubAssignWorkspaceCredentials
+      tags: [Hub credentials]
+      summary: Atomically replace selected workspace credential defaults
+      description: Authentication and signing selections commit together in one workspace lifecycle operation and one metadata transaction.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AssignWorkspaceCredentialsRequest' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/CredentialAssignments' }
+        '400': { $ref: '#/components/responses/NoStoreError' }
+        '401': { $ref: '#/components/responses/NoStoreError' }
+        '403': { $ref: '#/components/responses/NoStoreError' }
+        '404': { $ref: '#/components/responses/NoStoreError' }
+        '409': { $ref: '#/components/responses/NoStoreError' }
+        '500': { $ref: '#/components/responses/NoStoreError' }
   /api/hub/sessions:
     get:
       operationId: hubListDeviceSessions
@@ -179,6 +197,203 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
+  /api/hub/credentials:
+    get:
+      operationId: hubListCredentials
+      tags: [Hub credentials]
+      summary: List public credential metadata and assignments
+      responses:
+        '200': { $ref: '#/components/responses/CredentialList' }
+        '401': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+  /api/hub/credential-tools:
+    get:
+      operationId: hubListCredentialTools
+      tags: [Hub credentials]
+      summary: List credential-tool readiness
+      responses:
+        '200': { $ref: '#/components/responses/CredentialToolList' }
+        '401': { $ref: '#/components/responses/Error' }
+  /api/hub/credentials/{credentialId}/public-key:
+    parameters: [{ $ref: '#/components/parameters/CredentialId' }]
+    get:
+      operationId: hubGetCredentialPublicKey
+      tags: [Hub credentials]
+      summary: Export public key material
+      responses:
+        '200': { $ref: '#/components/responses/CredentialPublicKey' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/hub/credentials/ssh/generate:
+    post:
+      operationId: hubGenerateSshCredential
+      tags: [Hub credentials]
+      summary: Generate a passphrase-protected SSH credential
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/GenerateSshCredentialRequest' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/Credential' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/hub/credentials/ssh/import:
+    post:
+      operationId: hubImportSshCredential
+      tags: [Hub credentials]
+      summary: Import an SSH private key without returning it
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ImportSshCredentialRequest' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/Credential' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/hub/credentials/openpgp/generate:
+    post:
+      operationId: hubGenerateOpenPgpCredential
+      tags: [Hub credentials]
+      summary: Generate a passphrase-protected OpenPGP credential
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/GenerateOpenPgpCredentialRequest' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/Credential' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/hub/credentials/openpgp/import:
+    post:
+      operationId: hubImportOpenPgpCredential
+      tags: [Hub credentials]
+      summary: Import an OpenPGP private key without returning it
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ImportOpenPgpCredentialRequest' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/Credential' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/hub/credentials/token:
+    post:
+      operationId: hubCreateTokenCredential
+      tags: [Hub credentials]
+      summary: Store an HTTPS or provider CLI token without returning it
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateTokenCredentialRequest' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/Credential' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+  /api/hub/credential-tools/{tool}:
+    parameters: [{ $ref: '#/components/parameters/CredentialTool' }]
+    post:
+      operationId: hubSetCredentialTool
+      tags: [Hub credentials]
+      summary: Set or clear an absolute credential-tool override
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/SetCredentialToolRequest' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/CredentialTool' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+  /api/hub/credential-tools/{tool}/test:
+    parameters: [{ $ref: '#/components/parameters/CredentialTool' }]
+    post:
+      operationId: hubTestCredentialTool
+      tags: [Hub credentials]
+      summary: Re-probe one credential tool
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/EmptyObject' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/CredentialTool' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+  /api/hub/credentials/{credentialId}/unlock:
+    parameters: [{ $ref: '#/components/parameters/CredentialId' }]
+    post:
+      operationId: hubUnlockCredential
+      tags: [Hub credentials]
+      summary: Unlock a key credential in its Hub-managed runtime
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UnlockCredentialRequest' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/Credential' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/hub/credentials/{credentialId}/lock:
+    parameters: [{ $ref: '#/components/parameters/CredentialId' }]
+    post:
+      operationId: hubLockCredential
+      tags: [Hub credentials]
+      summary: Remove a key credential from its Hub-managed runtime
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/EmptyObject' } } } }
+      responses: { '200': { $ref: '#/components/responses/Credential' }, '400': { $ref: '#/components/responses/Error' }, '401': { $ref: '#/components/responses/Error' }, '403': { $ref: '#/components/responses/Error' }, '404': { $ref: '#/components/responses/Error' }, '500': { $ref: '#/components/responses/Error' }, '503': { $ref: '#/components/responses/Error' } }
+  /api/hub/credentials/{credentialId}/enable:
+    parameters: [{ $ref: '#/components/parameters/CredentialId' }]
+    post:
+      operationId: hubEnableCredential
+      tags: [Hub credentials]
+      summary: Enable a credential for new operations
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/EmptyObject' } } } }
+      responses: { '200': { $ref: '#/components/responses/Credential' }, '400': { $ref: '#/components/responses/Error' }, '401': { $ref: '#/components/responses/Error' }, '403': { $ref: '#/components/responses/Error' }, '404': { $ref: '#/components/responses/Error' }, '500': { $ref: '#/components/responses/Error' }, '503': { $ref: '#/components/responses/Error' } }
+  /api/hub/credentials/{credentialId}/disable:
+    parameters: [{ $ref: '#/components/parameters/CredentialId' }]
+    post:
+      operationId: hubDisableCredential
+      tags: [Hub credentials]
+      summary: Disable a credential for new operations
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/EmptyObject' } } } }
+      responses: { '200': { $ref: '#/components/responses/Credential' }, '400': { $ref: '#/components/responses/Error' }, '401': { $ref: '#/components/responses/Error' }, '403': { $ref: '#/components/responses/Error' }, '404': { $ref: '#/components/responses/Error' }, '500': { $ref: '#/components/responses/Error' }, '503': { $ref: '#/components/responses/Error' } }
+  /api/hub/credentials/{credentialId}/assign:
+    parameters: [{ $ref: '#/components/parameters/CredentialId' }]
+    post:
+      operationId: hubAssignCredential
+      tags: [Hub credentials]
+      summary: Assign a credential as a workspace default
+      description: Assignments select normal tool configuration but are advisory for the local backend because workspaces share the Hub daemon's OS UID.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AssignCredentialRequest' } } } }
+      responses: { '200': { $ref: '#/components/responses/CredentialAssignment' }, '400': { $ref: '#/components/responses/Error' }, '401': { $ref: '#/components/responses/Error' }, '403': { $ref: '#/components/responses/Error' }, '404': { $ref: '#/components/responses/Error' }, '409': { $ref: '#/components/responses/Error' }, '500': { $ref: '#/components/responses/Error' } }
+  /api/hub/credentials/{credentialId}/unassign:
+    parameters: [{ $ref: '#/components/parameters/CredentialId' }]
+    post:
+      operationId: hubUnassignCredential
+      tags: [Hub credentials]
+      summary: Remove a credential assignment from a workspace
+      description: A running workspace session must be stopped first or the request must carry stop:true; a catalog-only removal would leave the session's projected credential configuration in effect.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UnassignCredentialRequest' } } } }
+      responses: { '200': { $ref: '#/components/responses/CredentialUnassigned' }, '400': { $ref: '#/components/responses/Error' }, '401': { $ref: '#/components/responses/Error' }, '403': { $ref: '#/components/responses/Error' }, '409': { $ref: '#/components/responses/Error' }, '500': { $ref: '#/components/responses/Error' } }
+  /api/hub/credentials/{credentialId}/test:
+    parameters: [{ $ref: '#/components/parameters/CredentialId' }]
+    post:
+      operationId: hubTestCredential
+      tags: [Hub credentials]
+      summary: Test credential readiness with sanitized results
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/EmptyObject' } } } }
+      responses: { '200': { $ref: '#/components/responses/CredentialTest' }, '400': { $ref: '#/components/responses/Error' }, '401': { $ref: '#/components/responses/Error' }, '403': { $ref: '#/components/responses/Error' }, '404': { $ref: '#/components/responses/Error' }, '409': { $ref: '#/components/responses/Error' }, '429': { $ref: '#/components/responses/Error' }, '500': { $ref: '#/components/responses/Error' }, '503': { $ref: '#/components/responses/Error' } }
+  /api/hub/credentials/{credentialId}/delete:
+    parameters: [{ $ref: '#/components/parameters/CredentialId' }]
+    post:
+      operationId: hubDeleteCredential
+      tags: [Hub credentials]
+      summary: Delete a credential after explicit confirmation
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/DeleteCredentialRequest' } } } }
+      responses: { '200': { $ref: '#/components/responses/CredentialDeleted' }, '400': { $ref: '#/components/responses/Error' }, '401': { $ref: '#/components/responses/Error' }, '403': { $ref: '#/components/responses/Error' }, '404': { $ref: '#/components/responses/Error' }, '409': { $ref: '#/components/responses/Error' }, '500': { $ref: '#/components/responses/Error' }, '503': { $ref: '#/components/responses/Error' } }
   /api/hub/clone-jobs:
     post:
       operationId: hubCreateCloneJob
@@ -238,13 +453,13 @@ paths:
         content:
           application/json: { schema: { $ref: '#/components/schemas/CloneJobInput' } }
       responses:
-        '200': { $ref: '#/components/responses/Accepted' }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '404': { $ref: '#/components/responses/Error' }
-        '409': { $ref: '#/components/responses/Error' }
-        '413': { $ref: '#/components/responses/Error' }
+        '200': { $ref: '#/components/responses/NoStoreAccepted' }
+        '400': { $ref: '#/components/responses/NoStoreError' }
+        '401': { $ref: '#/components/responses/NoStoreError' }
+        '403': { $ref: '#/components/responses/NoStoreError' }
+        '404': { $ref: '#/components/responses/NoStoreError' }
+        '409': { $ref: '#/components/responses/NoStoreError' }
+        '413': { $ref: '#/components/responses/NoStoreError' }
   /api/hub/clone-jobs/{jobId}/cancel:
     parameters: [{ $ref: '#/components/parameters/JobId' }]
     post:
@@ -712,6 +927,8 @@ components:
     hubCookie: { type: apiKey, in: cookie, name: uatu_hub }
   parameters:
     WorkspaceId: { name: workspaceId, in: path, required: true, schema: { $ref: '#/components/schemas/WorkspaceId' } }
+    CredentialId: { name: credentialId, in: path, required: true, schema: { $ref: '#/components/schemas/CredentialId' } }
+    CredentialTool: { name: tool, in: path, required: true, schema: { $ref: '#/components/schemas/CredentialToolName' } }
     JobId: { name: jobId, in: path, required: true, schema: { type: string, minLength: 1 } }
     TerminalSessionId: { name: terminalSessionId, in: path, required: true, schema: { type: string, format: uuid } }
     TerminalSessionIdQuery: { name: sessionId, in: query, required: true, schema: { type: string, format: uuid } }
@@ -755,6 +972,14 @@ components:
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Accepted' }
+    NoStoreAccepted:
+      description: Secret input accepted
+      headers: { Cache-Control: { schema: { type: string, const: no-store } } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/Accepted' } } }
+    NoStoreError:
+      description: Request failed; the response must not be stored because the request may contain secret input.
+      headers: { Cache-Control: { schema: { type: string, const: no-store } } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
     Revoked:
       description: Session revoked
       content:
@@ -765,6 +990,46 @@ components:
       content:
         application/json:
           schema: { $ref: '#/components/schemas/WorkspaceAction' }
+    CredentialList:
+      description: Public credential inventory. Stored private keys, passphrases, and token values are never returned.
+      headers: { Cache-Control: { schema: { type: string, const: no-store } } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/CredentialList' } } }
+    CredentialToolList:
+      description: Credential-tool inventory
+      headers: { Cache-Control: { schema: { type: string, const: no-store } } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/CredentialToolList' } } }
+    CredentialPublicKey:
+      description: Public key material. No private key material is returned.
+      headers: { Cache-Control: { schema: { type: string, const: no-store } } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/CredentialPublicKey' } } }
+    Credential:
+      description: Public credential metadata. Submitted and stored secrets are never returned.
+      headers: { Cache-Control: { schema: { type: string, const: no-store } } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/CredentialResponse' } } }
+    CredentialTool:
+      description: Credential-tool readiness
+      headers: { Cache-Control: { schema: { type: string, const: no-store } } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/CredentialToolResponse' } } }
+    CredentialAssignment:
+      description: Persisted advisory workspace assignment
+      headers: { Cache-Control: { schema: { type: string, const: no-store } } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/CredentialAssignmentResponse' } } }
+    CredentialAssignments:
+      description: Atomically persisted advisory workspace assignments
+      headers: { Cache-Control: { schema: { type: string, const: no-store } } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/CredentialAssignmentsResponse' } } }
+    CredentialUnassigned:
+      description: Assignment removal result
+      headers: { Cache-Control: { schema: { type: string, const: no-store } } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/CredentialUnassignedResponse' } } }
+    CredentialTest:
+      description: Bounded, sanitized readiness results
+      headers: { Cache-Control: { schema: { type: string, const: no-store } } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/CredentialTestResponse' } } }
+    CredentialDeleted:
+      description: Credential deletion result
+      headers: { Cache-Control: { schema: { type: string, const: no-store } } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/CredentialDeletedResponse' } } }
   schemas:
     Error:
       type: object
@@ -782,6 +1047,8 @@ components:
       properties: { revoked: { type: boolean }, current: { type: boolean } }
       additionalProperties: false
     WorkspaceId: { type: string, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }
+    CredentialId: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9_-]+$' }
+    CredentialToolName: { enum: [ssh, ssh-agent, ssh-add, ssh-keygen, gpg, gpgconf, git, gh, glab] }
     NativeLoginRequest:
       type: object
       required: [name, password]
@@ -811,14 +1078,23 @@ components:
       additionalProperties: false
     HubWorkspace:
       type: object
-      required: [id, path, backend, running, workspaceApiRevision]
+      required: [id, path, backend, running, credentialRestartRequired, credentialAssignments, workspaceApiRevision]
       properties:
         id: { $ref: '#/components/schemas/WorkspaceId' }
         path: { type: string }
         backend: { type: string, const: local }
         running: { type: boolean }
+        credentialRestartRequired: { type: boolean, description: "Whether changed credential assignments require this running workspace to restart before its generated credential configuration is current." }
+        credentialAssignments: { $ref: '#/components/schemas/WorkspaceCredentialAssignmentSummary' }
         workspaceApiRevision: { type: integer, minimum: 1, description: "Workspace API revision spoken by this workspace's child. Matches the top-level workspaceApiRevision for the local backend; backends running children of other builds report the child's own revision." }
         shells: { type: array, items: { type: object, required: [attached, label], properties: { attached: { type: boolean }, label: { type: string } }, additionalProperties: false } }
+      additionalProperties: false
+    WorkspaceCredentialAssignmentSummary:
+      type: object
+      required: [authentication, signing]
+      properties:
+        authentication: { type: array, uniqueItems: true, items: { type: string, minLength: 1 }, description: "Deduplicated public names of credentials assigned for Git authentication, regardless of current usability." }
+        signing: { type: array, uniqueItems: true, items: { type: string, minLength: 1 }, description: "Deduplicated public names of credentials assigned for commit signing, regardless of current usability." }
       additionalProperties: false
     BrowseResult:
       type: object
@@ -853,10 +1129,180 @@ components:
       required: [handle, deviceLabel, issuedAt, current]
       properties: { handle: { type: string }, deviceLabel: { type: string }, issuedAt: { type: integer }, current: { type: boolean } }
       additionalProperties: false
+    ReadinessResult:
+      type: object
+      required: [layer, status, message]
+      properties:
+        layer: { enum: [binary, version, runtime, credential, capability] }
+        status: { enum: [ready, unavailable, not-applicable] }
+        message: { type: string, minLength: 1 }
+      additionalProperties: false
+    AuthenticationCredentialAssignment:
+      type: object
+      required: [workspaceId, credentialId, role, host]
+      properties:
+        workspaceId: { $ref: '#/components/schemas/WorkspaceId' }
+        credentialId: { $ref: '#/components/schemas/CredentialId' }
+        role: { const: authentication }
+        host: { type: string, minLength: 1, description: "Normalized HTTPS provider host, optionally including a port." }
+      additionalProperties: false
+    SigningCredentialAssignment:
+      type: object
+      required: [workspaceId, credentialId, role]
+      properties:
+        workspaceId: { $ref: '#/components/schemas/WorkspaceId' }
+        credentialId: { $ref: '#/components/schemas/CredentialId' }
+        role: { const: signing }
+      additionalProperties: false
+    CredentialAssignment:
+      oneOf:
+        - { $ref: '#/components/schemas/AuthenticationCredentialAssignment' }
+        - { $ref: '#/components/schemas/SigningCredentialAssignment' }
+      description: Advisory normal-tool selection for the local backend; same-UID processes are not isolated by this assignment.
+    PublicSshCredential:
+      type: object
+      required: [id, name, type, capabilities, enabled, createdAt, metadata, assignments, readiness]
+      properties:
+        id: { $ref: '#/components/schemas/CredentialId' }
+        name: { type: string, minLength: 1 }
+        type: { const: ssh }
+        capabilities: { type: array, minItems: 1, uniqueItems: true, items: { enum: [ssh-authentication, ssh-signing] } }
+        enabled: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        metadata:
+          type: object
+          required: [publicKey, fingerprint]
+          properties: { publicKey: { type: string, minLength: 1 }, fingerprint: { type: string, minLength: 1 } }
+          additionalProperties: false
+        assignments: { type: array, items: { $ref: '#/components/schemas/CredentialAssignment' } }
+        readiness: { type: array, items: { $ref: '#/components/schemas/ReadinessResult' } }
+      additionalProperties: false
+    PublicOpenPgpCredential:
+      type: object
+      required: [id, name, type, capabilities, enabled, createdAt, metadata, assignments, readiness]
+      properties:
+        id: { $ref: '#/components/schemas/CredentialId' }
+        name: { type: string, minLength: 1 }
+        type: { const: openpgp }
+        capabilities: { type: array, minItems: 1, maxItems: 1, uniqueItems: true, items: { const: openpgp-signing } }
+        enabled: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        metadata:
+          type: object
+          required: [publicKey, fingerprint]
+          properties: { publicKey: { type: string, minLength: 1 }, fingerprint: { type: string, minLength: 1 } }
+          additionalProperties: false
+        assignments: { type: array, items: { $ref: '#/components/schemas/CredentialAssignment' } }
+        readiness: { type: array, items: { $ref: '#/components/schemas/ReadinessResult' } }
+      additionalProperties: false
+    PublicTokenCredential:
+      type: object
+      required: [id, name, type, capabilities, enabled, createdAt, metadata, assignments, readiness]
+      properties:
+        id: { $ref: '#/components/schemas/CredentialId' }
+        name: { type: string, minLength: 1 }
+        type: { const: token }
+        capabilities: { type: array, minItems: 1, uniqueItems: true, items: { enum: [https-git, github-cli, gitlab-cli] } }
+        enabled: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        metadata:
+          type: object
+          required: [host]
+          properties: { host: { type: string, minLength: 1 }, username: { type: string, minLength: 1 } }
+          additionalProperties: false
+        assignments: { type: array, items: { $ref: '#/components/schemas/CredentialAssignment' } }
+        readiness: { type: array, items: { $ref: '#/components/schemas/ReadinessResult' } }
+      additionalProperties: false
+    PublicCredential:
+      oneOf:
+        - { $ref: '#/components/schemas/PublicSshCredential' }
+        - { $ref: '#/components/schemas/PublicOpenPgpCredential' }
+        - { $ref: '#/components/schemas/PublicTokenCredential' }
+      description: Explicit public DTO. It never contains a private key, passphrase, token value, secret path, or reusable agent credential.
+    PublicCredentialTool:
+      type: object
+      required: [tool, path, version, results, guidance]
+      properties:
+        tool: { $ref: '#/components/schemas/CredentialToolName' }
+        path: { type: [string, 'null'] }
+        version: { type: [string, 'null'] }
+        results: { type: array, items: { $ref: '#/components/schemas/ReadinessResult' } }
+        guidance: { type: [string, 'null'] }
+      additionalProperties: false
+    CredentialList: { type: object, required: [credentials], properties: { credentials: { type: array, items: { $ref: '#/components/schemas/PublicCredential' } } }, additionalProperties: false }
+    CredentialToolList: { type: object, required: [tools], properties: { tools: { type: array, items: { $ref: '#/components/schemas/PublicCredentialTool' } } }, additionalProperties: false }
+    CredentialPublicKey:
+      type: object
+      required: [id, type, publicKey, fingerprint]
+      properties: { id: { $ref: '#/components/schemas/CredentialId' }, type: { enum: [ssh, openpgp] }, publicKey: { type: string, minLength: 1 }, fingerprint: { type: string, minLength: 1 } }
+      additionalProperties: false
+    CredentialResponse: { type: object, required: [credential], properties: { credential: { $ref: '#/components/schemas/PublicCredential' } }, additionalProperties: false }
+    CredentialToolResponse: { type: object, required: [tool], properties: { tool: { $ref: '#/components/schemas/PublicCredentialTool' } }, additionalProperties: false }
+    CredentialAssignmentResponse: { type: object, required: [assignment], properties: { assignment: { $ref: '#/components/schemas/CredentialAssignment' } }, additionalProperties: false }
+    CredentialAssignmentsResponse: { type: object, required: [assignments], properties: { assignments: { type: array, minItems: 1, maxItems: 2, items: { $ref: '#/components/schemas/CredentialAssignment' } } }, additionalProperties: false }
+    CredentialUnassignedResponse: { type: object, required: [removed], properties: { removed: { type: boolean } }, additionalProperties: false }
+    CredentialTestResponse: { type: object, required: [results], properties: { results: { type: array, items: { $ref: '#/components/schemas/ReadinessResult' } } }, additionalProperties: false }
+    CredentialDeletedResponse: { type: object, required: [deleted], properties: { deleted: { type: boolean } }, additionalProperties: false }
+    Passphrase: { type: string, minLength: 1, maxLength: 4096, x-uatu-maxUtf8Bytes: 4096, description: One-operation secret; never persisted or returned. }
+    GenerateSshCredentialRequest:
+      type: object
+      required: [name, capabilities, passphrase]
+      properties: { name: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 256 }, capabilities: { type: array, minItems: 1, uniqueItems: true, items: { enum: [ssh-authentication, ssh-signing] } }, passphrase: { $ref: '#/components/schemas/Passphrase' } }
+      additionalProperties: false
+    ImportSshCredentialRequest:
+      type: object
+      required: [name, capabilities, privateKey, passphrase]
+      properties: { name: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 256 }, capabilities: { type: array, minItems: 1, uniqueItems: true, items: { enum: [ssh-authentication, ssh-signing] } }, privateKey: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 1048576 }, passphrase: { type: string, maxLength: 4096, x-uatu-maxUtf8Bytes: 4096, description: "Existing key passphrase, or empty when the imported key is not encrypted. Never persisted or returned." } }
+      additionalProperties: false
+    GenerateOpenPgpCredentialRequest:
+      type: object
+      required: [name, userId, passphrase]
+      properties: { name: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 256 }, userId: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 256 }, passphrase: { $ref: '#/components/schemas/Passphrase' } }
+      additionalProperties: false
+    ImportOpenPgpCredentialRequest:
+      type: object
+      required: [name, privateKey]
+      properties: { name: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 256 }, privateKey: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 1048576 } }
+      additionalProperties: false
+    CreateTokenCredentialRequest:
+      type: object
+      required: [name, host, token, capabilities]
+      properties: { name: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 256 }, host: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 256 }, username: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 256 }, token: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 65536 }, capabilities: { type: array, minItems: 1, uniqueItems: true, items: { enum: [https-git, github-cli, gitlab-cli] } } }
+      additionalProperties: false
+    SetCredentialToolRequest: { type: object, required: [path], properties: { path: { type: [string, 'null'], x-uatu-maxUtf8Bytes: 32768 } }, additionalProperties: false }
+    UnlockCredentialRequest: { type: object, required: [passphrase], properties: { passphrase: { type: string, maxLength: 4096, x-uatu-maxUtf8Bytes: 4096, description: "One-operation secret. Empty is valid for an unencrypted SSH key; OpenPGP unlock still requires a nonempty passphrase. Never persisted or returned." } }, additionalProperties: false }
+    AuthenticationAssignmentRequest:
+      type: object
+      required: [workspaceId, role, host]
+      properties: { workspaceId: { $ref: '#/components/schemas/WorkspaceId' }, role: { const: authentication }, host: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 256 }, replace: { type: boolean } }
+      additionalProperties: false
+    SigningAssignmentRequest:
+      type: object
+      required: [workspaceId, role]
+      properties: { workspaceId: { $ref: '#/components/schemas/WorkspaceId' }, role: { const: signing }, replace: { type: boolean } }
+      additionalProperties: false
+    AssignCredentialRequest: { oneOf: [{ $ref: '#/components/schemas/AuthenticationAssignmentRequest' }, { $ref: '#/components/schemas/SigningAssignmentRequest' }] }
+    AssignWorkspaceCredentialsRequest:
+      type: object
+      minProperties: 1
+      properties:
+        authentication: { type: object, required: [credentialId, host], properties: { credentialId: { $ref: '#/components/schemas/CredentialId' }, host: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 256 } }, additionalProperties: false }
+        signing: { type: object, required: [credentialId], properties: { credentialId: { $ref: '#/components/schemas/CredentialId' } }, additionalProperties: false }
+      additionalProperties: false
+    UnassignCredentialRequest:
+      oneOf:
+        - { type: object, required: [workspaceId, role, host], properties: { workspaceId: { $ref: '#/components/schemas/WorkspaceId' }, role: { const: authentication }, host: { type: string, minLength: 1, x-uatu-maxUtf8Bytes: 256 }, stop: { type: boolean } }, additionalProperties: false }
+        - { type: object, required: [workspaceId, role], properties: { workspaceId: { $ref: '#/components/schemas/WorkspaceId' }, role: { const: signing }, stop: { type: boolean } }, additionalProperties: false }
+        - { type: object, required: [workspaceId], properties: { workspaceId: { $ref: '#/components/schemas/WorkspaceId' }, stop: { type: boolean } }, additionalProperties: false }
+    DeleteCredentialRequest: { type: object, required: [confirm], properties: { confirm: { type: boolean, const: true }, unassign: { type: boolean } }, additionalProperties: false }
     CreateCloneJobRequest:
       type: object
       required: [url, dest]
-      properties: { url: { type: string }, dest: { type: string }, folderName: { type: string } }
+      properties: { url: { type: string }, dest: { type: string }, folderName: { type: string }, credentialId: { $ref: '#/components/schemas/CredentialId' }, retainAssignment: { type: boolean, default: false } }
+      dependentSchemas:
+        retainAssignment:
+          if: { properties: { retainAssignment: { const: true } } }
+          then: { properties: { credentialId: { $ref: '#/components/schemas/CredentialId' } }, required: [credentialId] }
       additionalProperties: false
     CloneJob:
       type: object

@@ -306,6 +306,36 @@ describe.skipIf(!backendOk)("terminal-server PTY round-trip", () => {
 // WITHOUT clobbering the inherited `$SHELL`. Self-skips when the host has no
 // distinct ambient SHELL to observe.
 describe.skipIf(!backendOk)("terminal-server shell selection", () => {
+  it("passes the configured server environment to newly created PTYs", async () => {
+    const local = startServer({ shell: "/bin/sh", env: { SHELL: "/bin/sh", UATU_PTY_CONTEXT: "assigned" } });
+    try {
+      const id = await createSession(local.terminal);
+      await new Promise<void>((resolve, reject) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${local.port}/?sessionId=${id}`);
+        ws.binaryType = "arraybuffer";
+        let received = "";
+        const timeout = setTimeout(() => reject(new Error(`timeout, got: ${received}`)), 4000);
+        ws.addEventListener("open", () => ws.send(JSON.stringify({ type: "attach-ready", cols: 80, rows: 24 })));
+        ws.addEventListener("message", event => {
+          received += decode(event.data);
+          if (!received.includes("PTYCONTEXT:")) ws.send(new TextEncoder().encode('echo "PTYCONTEXT:$UATU_PTY_CONTEXT:END"\r\n'));
+          if (received.includes("PTYCONTEXT:assigned:END")) {
+            clearTimeout(timeout);
+            ws.close();
+            resolve();
+          }
+        });
+        ws.addEventListener("error", error => {
+          clearTimeout(timeout);
+          reject(error as unknown as Error);
+        });
+      });
+    } finally {
+      local.terminal.disposeAll();
+      local.server.stop(true);
+    }
+  }, 8000);
+
   it.skipIf(!hostShell || hostShell === "/bin/sh")(
     "runs the configured shell and leaves the inherited $SHELL untouched",
     async () => {

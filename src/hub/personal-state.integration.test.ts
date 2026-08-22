@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type { SessionBackend } from "./backend";
+import { EMPTY_CREDENTIAL_CONTEXT_RESOLVER } from "./credential-context";
 import { HubSessionStore } from "./auth";
 import type { HubConfig } from "./config";
 import { PersonalWorkspaceStateStore } from "./personal-state";
@@ -30,11 +31,11 @@ async function startFixture() {
   const sessionStore = new HubSessionStore(path.join(dir, "sessions.json"));
   await sessionStore.load();
   const backend: SessionBackend = {
-    start: async () => {
+    start: async (_workspace, _basePath, _credentials) => {
       throw new Error("personal-state requests must not start or contact a child");
     },
   };
-  const sessions = new SessionManager(registry, { local: backend });
+  const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
   const config: HubConfig = {
     port: 0,
     host: "127.0.0.1",

@@ -208,6 +208,16 @@ function compareSchemas(label: string, before: unknown, after: unknown, directio
         beforeBranches.forEach((branch, index) => compareSchemas(`${label}.${keyword}[${index}]`, branch, afterBranches[index], direction, failures));
         break;
       }
+      case "dependentSchemas": {
+        const beforeDependencies = object(b.dependentSchemas);
+        const afterDependencies = object(a.dependentSchemas);
+        const beforeProperties = object(b.properties);
+        if (direction === "request" && Object.keys(beforeDependencies).length === 0
+          && Object.keys(afterDependencies).length > 0
+          && Object.keys(afterDependencies).every(name => !(name in beforeProperties))) break;
+        failures.push(`${label}: changed dependentSchemas`);
+        break;
+      }
       default:
         failures.push(`${label}: changed ${keyword}`);
     }

@@ -109,13 +109,17 @@ export class WorkspaceRegistry {
   // whose folder later disappears stays registered (surfacing as a failed
   // start, never a silent forget).
   register(folderPath: string, backend: WorkspaceBackend = "local"): Promise<WorkspaceEntry> {
+    return this.registerWithStatus(folderPath, backend).then(result => result.entry);
+  }
+
+  registerWithStatus(folderPath: string, backend: WorkspaceBackend = "local"): Promise<{ entry: WorkspaceEntry; created: boolean }> {
     return this.enqueueMutation(async () => {
       if (!path.isAbsolute(folderPath)) {
         throw new Error(`workspace path must be absolute: ${folderPath}`);
       }
       const existing = this.byPath(folderPath);
       if (existing) {
-        return existing;
+        return { entry: existing, created: false };
       }
 
       const base = workspaceSlug(folderPath);
@@ -137,7 +141,7 @@ export class WorkspaceRegistry {
         this.workspaces = this.workspaces.filter(candidate => candidate !== entry);
         throw error;
       }
-      return entry;
+      return { entry, created: true };
     });
   }
 

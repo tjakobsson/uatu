@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type { RunningSession, SessionBackend } from "./backend";
+import { EMPTY_CREDENTIAL_CONTEXT_RESOLVER } from "./credential-context";
 import { hashPassword, HubSessionStore } from "./auth";
 import type { HubConfig } from "./config";
 import { PersonalWorkspaceStateStore } from "./personal-state";
@@ -37,7 +38,7 @@ beforeAll(async () => {
   await registry.register(path.join(tempRoot, "workspaces", "wedged"));
 
   const backend: SessionBackend = {
-    start: async (workspace): Promise<RunningSession> => ({
+    start: async (workspace, _basePath, _credentials): Promise<RunningSession> => ({
       workspaceId: workspace.id,
       basePath: `/s/${workspace.id}/`,
       endpoint: { hostname: "127.0.0.1", port: tarpit!.port! },
@@ -46,7 +47,7 @@ beforeAll(async () => {
       stop: async () => undefined,
     }),
   };
-  sessions = new SessionManager(registry, { local: backend });
+  sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
   await sessions.start("wedged");
 
   const config: HubConfig = {

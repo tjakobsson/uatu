@@ -2,12 +2,45 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required.
 
-## Hub 1 / Workspace 6 - Unreleased
+## Hub 4 / Workspace 6 - Unreleased
 
-Compatibility: breaking (workspace)
+Compatibility: breaking (Hub)
 
 ### Changes
 
+- `CredentialToolName` now includes `ssh`; managed workspace and selected-clone SSH commands use its validated absolute path.
+- `UnassignCredentialRequest` gained optional `stop`. `stop: true` stops the workspace session and removes the assignment in one workspace lifecycle operation, so a concurrent start cannot land between the stop and the removal. This is additive for request consumers.
+- Unassigning a credential from a workspace whose session is running now returns `409` unless the request carries `stop: true`: the running child retains its projected credential configuration and the Hub-side helper serves tokens by id, so a catalog-only removal would report a revocation that is not in effect.
+- Added `hubAssignWorkspaceCredentials`, which replaces selected authentication and signing defaults atomically under the workspace lifecycle queue and stable credential-lock ordering. The Hub settings page no longer performs client-side rollback after a partial pair.
+- `CreateCloneJobRequest` and `CloneJobInput` remain closed at runtime as documented. Clone input responses and native login responses, including authentication and CSRF failures before dispatch, carry `Cache-Control: no-store`.
+- SSH unlock accepts an empty passphrase for an unencrypted key. OpenPGP unlock and key-generation passphrases remain nonempty.
+- Credential inventory returns one unavailable readiness result for a credential whose readiness probe fails instead of failing the whole inventory request.
+
+### Migration
+
+Strict credential-tool consumers must regenerate against Hub revision 4 or accept the new `ssh` enum value. The optional `stop` unassignment field and paired assignment operation are additive and require no migration. Clients may send an empty unlock passphrase only when unlocking an SSH credential.
+
+## Hub 3 / Workspace 6 - Unreleased
+
+Compatibility: breaking (Hub)
+
+### Changes
+
+- `HubWorkspace` now requires `credentialAssignments`, containing deduplicated public credential names in separate `authentication` and `signing` arrays. Empty arrays mean the workspace has no assignments. Assignment presence does not imply that a credential is enabled, unlocked, or otherwise usable.
+
+### Migration
+
+Strict Hub state consumers must regenerate against Hub revision 3 or add the required closed `credentialAssignments` object and its two required string arrays. Consumers deciding whether to warn about missing assignments must test both arrays for emptiness and must not treat a non-empty array as proof that startup will succeed.
+
+## Hub 2 / Workspace 6 - Unreleased
+
+Compatibility: breaking (Hub and workspace)
+
+### Changes
+
+- Added authenticated Hub credential management operations for public credential metadata, public-key export, SSH/OpenPGP generation and import, token creation, unlock/lock, enable/disable, advisory workspace assignment, readiness tests, confirmed deletion, and credential-tool configuration and probes. Public DTOs are closed and omit private keys, passphrases, token values, and reusable agent credentials.
+- `CreateCloneJobRequest` gained optional `credentialId` and `retainAssignment` fields. A selected compatible credential controls that clone's normal Git authentication; `retainAssignment: true` requires `credentialId` and records the assignment only after successful workspace registration. This is additive for request consumers.
+- `HubWorkspace` now requires `credentialRestartRequired`, matching the boolean already returned by `GET /api/hub/state`. It reports whether assignment changes need a running workspace restart before its generated credential configuration is current.
 - Added `ConversationConfiguration`, with optional `model`, `mode`, and `variant`; `variant` requires `model`. `ConversationSnapshot` now requires `configuration`, and `ChatPromptAccepted` now returns the accepted effective `configuration`.
 - Added replayable `conversation.configuration` and `conversation.updated` `ChatEvent` variants for effective configuration and conversation-summary changes.
 - Added the capability-gated `workspaceRenameChatConversation` operation: `PATCH /s/{workspaceId}/api/chat/conversations/{conversationId}` accepts an idempotency `requestId` and a title that is trimmed, non-empty, and at most 200 UTF-8 bytes. It returns the updated conversation summary. Unsupported or conflicting renames return `409`; unknown conversations return `404`.
@@ -15,7 +48,7 @@ Compatibility: breaking (workspace)
 
 ### Migration
 
-Strict workspace consumers must regenerate against Workspace revision 6 or widen their closed schemas before connecting. Snapshot decoders must accept and require `configuration`; prompt-acceptance decoders must accept and require `configuration`; stream decoders must accept `conversation.configuration` and `conversation.updated`. Configuration fields are optional, and absence means unknown or agent-controlled: clients must not substitute the first offered model, mode, or variant. A `variant` is only valid together with `model`. Capability-aware clients should expose rename only when `conversation-rename` is declared, send a unique `requestId`, and enforce the 200 UTF-8-byte trimmed-title limit rather than a 200-character limit. Clients that reject unknown event variants or newly required response fields are incompatible with revision 6.
+Strict workspace consumers must regenerate against Workspace revision 6 or widen their closed schemas before connecting. Snapshot decoders must accept and require `configuration`; prompt-acceptance decoders must accept and require `configuration`; stream decoders must accept `conversation.configuration` and `conversation.updated`. Configuration fields are optional, and absence means unknown or agent-controlled: clients must not substitute the first offered model, mode, or variant. A `variant` is only valid together with `model`. Capability-aware clients should expose rename only when `conversation-rename` is declared, send a unique `requestId`, and enforce the 200 UTF-8-byte trimmed-title limit rather than a 200-character limit. Clients that reject unknown event variants or newly required response fields are incompatible with revision 6. Strict Hub state consumers must regenerate against Hub revision 2 or add the required `credentialRestartRequired` boolean to their closed `HubWorkspace` schema. The credential operations and optional clone request fields otherwise remain additive.
 
 ## Hub 1 / Workspace 5 - Unreleased
 

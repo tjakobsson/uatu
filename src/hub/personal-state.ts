@@ -273,6 +273,7 @@ export class PersonalWorkspaceStateStore {
   forgetWorkspace(
     workspaceId: string,
     removeRegistryEntry: () => Promise<boolean>,
+    finalizeCommittedForget: () => Promise<void> = async () => {},
   ): Promise<boolean> {
     return this.enqueueMutation(async () => {
       const removedRecords = this.collectWorkspaceRecords(workspaceId);
@@ -304,6 +305,9 @@ export class PersonalWorkspaceStateStore {
         throw error;
       }
 
+      // The registry is the commit marker. Cleanup that can be retried must
+      // happen after it, while the durable journal still records the forget.
+      await finalizeCommittedForget();
       delete this.pendingForgets[workspaceId];
       try {
         await this.save();
@@ -318,18 +322,23 @@ export class PersonalWorkspaceStateStore {
     });
   }
 
-  recoverPendingForgets(workspaceExists: (workspaceId: string) => boolean): Promise<void> {
+  recoverPendingForgets(
+    workspaceExists: (workspaceId: string) => boolean,
+    finalizeCommittedForget: (workspaceId: string) => Promise<void> = async () => {},
+  ): Promise<void> {
     return this.enqueueMutation(async () => {
       if (Object.keys(this.pendingForgets).length === 0) return;
       const previousRecords = cloneRecords(this.records);
       const previousPending = clonePendingForgets(this.pendingForgets);
-      for (const [workspaceId, removedRecords] of Object.entries(this.pendingForgets)) {
-        if (workspaceExists(workspaceId)) {
-          this.restoreWorkspaceRecords(workspaceId, removedRecords);
-        }
-        delete this.pendingForgets[workspaceId];
-      }
       try {
+        for (const [workspaceId, removedRecords] of Object.entries(this.pendingForgets)) {
+          if (workspaceExists(workspaceId)) {
+            this.restoreWorkspaceRecords(workspaceId, removedRecords);
+          } else {
+            await finalizeCommittedForget(workspaceId);
+          }
+          delete this.pendingForgets[workspaceId];
+        }
         await this.save();
       } catch (error) {
         this.records = previousRecords;

@@ -36,6 +36,40 @@ const fail = (msg: string) => {
   exitCode = 1;
 };
 
+async function checkSshSupervisorDispatch(): Promise<void> {
+  const guardian = spawn(BINARY, ["--ssh-agent-supervisor"], {
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  const result = await new Promise<{ code: number | null; error?: Error; timedOut?: boolean }>(resolve => {
+    let timedOut = false;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      guardian.kill("SIGKILL");
+      killTimer = setTimeout(() => resolve({ code: null, timedOut: true }), 1_000);
+    }, 5_000);
+    guardian.once("error", error => {
+      clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
+      resolve({ code: null, error });
+    });
+    guardian.once("exit", code => {
+      clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
+      resolve({ code, timedOut });
+    });
+  });
+  if (result.timedOut) {
+    fail("compiled SSH guardian mode did not reject EOF within 5s");
+  } else if (result.error) {
+    fail(`compiled SSH guardian mode failed to launch: ${result.error.message}`);
+  } else if (result.code !== 2) {
+    fail(`compiled SSH guardian mode returned ${result.code ?? "no exit code"} for EOF (expected 2)`);
+  } else {
+    pass("compiled SSH guardian mode rejects EOF fail-closed");
+  }
+}
+
 // Start the binary. Use node:child_process rather than Bun.spawn so the
 // CI environment doesn't need to worry about subprocess inheritance
 // quirks; the binary itself is still pure Bun.
@@ -55,6 +89,8 @@ process.on("SIGINT", cleanup);
 process.on("SIGTERM", cleanup);
 
 try {
+  await checkSshSupervisorDispatch();
+
   // Wait for the server to accept connections.
   const BASE = `http://127.0.0.1:${PORT}`;
   let ready = false;

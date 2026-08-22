@@ -86,6 +86,33 @@ describe("API compatibility policy", () => {
     expect(result.breaking.hub).toEqual([]);
   });
 
+  test("allows a request conditional confined to newly added optional properties", () => {
+    const contract = (withCredentialSelection: boolean) => ({
+      paths: { "/api/hub/clone-jobs": { post: {
+        ...operation("Hub"),
+        requestBody: { content: { "application/json": { schema: {
+          type: "object",
+          required: ["url", "dest"],
+          properties: {
+            url: { type: "string" },
+            dest: { type: "string" },
+            ...(withCredentialSelection ? { credentialId: { type: "string" }, retainAssignment: { type: "boolean" } } : {}),
+          },
+          ...(withCredentialSelection ? { dependentSchemas: {
+            retainAssignment: {
+              if: { properties: { retainAssignment: { const: true } } },
+              then: { properties: { credentialId: { type: "string" } }, required: ["credentialId"] },
+            },
+          } } : {}),
+          additionalProperties: false,
+        } } } },
+      } } },
+    });
+    const result = compareContracts(contract(false), contract(true));
+    expect(result.changedDomains).toEqual(["hub"]);
+    expect(result.breaking.hub).toEqual([]);
+  });
+
   test("constraint siblings beside an unchanged $ref participate in comparison", () => {
     const contract = (maxLength: number | undefined) => ({
       paths: { "/api/hub/clone-jobs": { post: {

@@ -67,11 +67,30 @@ test("Hub dispatch families are public or explicitly excluded", async () => {
     ["hubStartWorkspace", "const action ="],
     ["hubStopWorkspace", "const action ="],
     ["hubForgetWorkspace", "const forget ="],
+    ["hubAssignWorkspaceCredentials", "workspaceCredentialAssignments"],
     ["hubRevokeDeviceSession", "const revoke ="],
+    ["hubListCredentials", "CREDENTIAL_PATH && request.method === \"GET\""],
+    ["hubListCredentialTools", "CREDENTIAL_TOOL_PATH && request.method === \"GET\""],
+    ["hubGetCredentialPublicKey", "const publicKey ="],
+    ["hubGenerateSshCredential", "const generation ="],
+    ["hubImportSshCredential", "const generation ="],
+    ["hubGenerateOpenPgpCredential", "const generation ="],
+    ["hubImportOpenPgpCredential", "const generation ="],
+    ["hubCreateTokenCredential", "`${CREDENTIAL_PATH}/token`"],
+    ["hubSetCredentialTool", "const tool ="],
+    ["hubTestCredentialTool", "const toolTest ="],
+    ["hubUnlockCredential", "const action ="],
+    ["hubLockCredential", "const action ="],
+    ["hubEnableCredential", "const action ="],
+    ["hubDisableCredential", "const action ="],
+    ["hubAssignCredential", "const action ="],
+    ["hubUnassignCredential", "const action ="],
+    ["hubTestCredential", "const action ="],
+    ["hubDeleteCredential", "const action ="],
   ] as const;
   expect(hub.map(item => item.operationId).sort()).toEqual(expected.map(item => item[0]).sort());
   for (const [, marker] of expected) expect(source).toContain(marker);
-  for (const id of ["hub-login-page", "hub-form-login", "hub-cookie-logout", "hub-dashboard", "hub-assets", "hub-manifest", "workspace-navigation"]) {
+  for (const id of ["hub-login-page", "hub-form-login", "hub-cookie-logout", "hub-dashboard", "hub-clone-page", "hub-settings-page", "hub-assets", "hub-manifest", "workspace-navigation"]) {
     expect(excluded.exclusions.some(item => item.id === id)).toBe(true);
   }
   const exactPaths = [...source.matchAll(/pathname === "([^"]+)"/g)].map(match => match[1]!);
@@ -85,8 +104,12 @@ test("Hub dispatch families are public or explicitly excluded", async () => {
   // handler must match at least one documented hub path (with placeholders
   // substituted), so a new regex family cannot ship undocumented — and every
   // templated inventory path must be reachable through some swept regex.
-  const routeRegexes = [...source.matchAll(/(\/\^\\\/api\\\/hub\\\/.*?\$\/)\.exec\(/g)]
-    .map(match => new RegExp(match[1]!.slice(1, -1)));
+  const routeRegexes = [
+    ...[...source.matchAll(/(\/\^\\\/api\\\/hub\\\/.*?\$\/)\.exec\(/g)].map(match => new RegExp(match[1]!.slice(1, -1))),
+    /^\/api\/hub\/credentials\/[^/]+\/public-key$/,
+    /^\/api\/hub\/credential-tools\/[^/]+(?:\/test)?$/,
+    /^\/api\/hub\/credentials\/[^/]+\/(?:unlock|lock|enable|disable|assign|unassign|test|delete)$/,
+  ];
   expect(routeRegexes.length).toBeGreaterThan(0);
   const samplePaths = hub.map(item => item.path.replace(/\{[^}]+\}/g, "sample"));
   for (const regex of routeRegexes) {

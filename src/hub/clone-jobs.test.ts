@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import type { CloneProcess, CloneProcessFactory, CloneProcessStart } from "./clone-process";
 import { CloneJobManager, type CloneJobEvent, type CloneJobTimer } from "./clone-jobs";
+import type { ResolvedCloneCredential } from "./credential-context";
 import type { WorkspaceEntry } from "./registry";
 
 class FakeTimer implements CloneJobTimer {
@@ -107,12 +108,19 @@ function fixture(overrides: { maxReplayBytes?: number; maxInputBytes?: number; i
   const removed: string[] = [];
   const started: string[] = [];
   const stopped: string[] = [];
+  const assigned: string[] = [];
+  const unassigned: string[] = [];
+  const runtimeSections: string[] = [];
   let registerError: Error | undefined;
   let removeError: Error | undefined;
   let startError: Error | undefined;
   let stopError: Error | undefined;
+  let assignError: Error | undefined;
+  let unassignError: Error | undefined;
   let startBarrier: Promise<void> | undefined;
   let releaseStart: (() => void) | undefined;
+  let stopBarrier: Promise<void> | undefined;
+  let releaseStop: (() => void) | undefined;
   const registry = {
     byPath(target: string) {
       return [...registered.values()].find(entry => entry.path === target);
@@ -129,16 +137,38 @@ function fixture(overrides: { maxReplayBytes?: number; maxInputBytes?: number; i
       return registered.delete(id);
     },
   };
+  // Mirrors SessionManager's per-workspace lifecycle queue: operations for
+  // one workspace serialize, and the failure/stop hooks run inside their
+  // owning operation, before the queue is released.
+  const lifecycle = new Map<string, Promise<unknown>>();
+  const enqueue = <T,>(id: string, operation: () => Promise<T>): Promise<T> => {
+    const previous = lifecycle.get(id) ?? Promise.resolve();
+    const next = previous.then(operation, operation);
+    lifecycle.set(id, next.then(() => undefined, () => undefined));
+    return next;
+  };
   const sessions = {
-    async start(id: string) {
-      started.push(id);
-      await startBarrier;
-      if (startError) throw startError;
+    start(id: string, onFailure?: () => Promise<void>) {
+      return enqueue(id, async () => {
+        started.push(id);
+        await startBarrier;
+        if (startError) {
+          await onFailure?.();
+          throw startError;
+        }
+      });
     },
-    async stop(id: string) {
-      stopped.push(id);
-      if (stopError) throw stopError;
-      return true;
+    stop(id: string, onStopped?: () => Promise<void>) {
+      return enqueue(id, async () => {
+        stopped.push(id);
+        await stopBarrier;
+        if (stopError) throw stopError;
+        await onStopped?.();
+        return true;
+      });
+    },
+    runExclusive<T>(id: string, operation: () => Promise<T>) {
+      return enqueue(id, operation);
     },
   };
   let id = 0;
@@ -146,6 +176,30 @@ function fixture(overrides: { maxReplayBytes?: number; maxInputBytes?: number; i
     processFactory,
     registry,
     sessions,
+    credentials: {
+      // Mirrors the stored resolver: an SSH-selected job re-resolves inside
+      // the runtime section and must get a live credential back.
+      async resolve(_remote: string, credentialId?: string) {
+        if (!credentialId) return undefined;
+        return { ...selectedCredential, credentialId };
+      },
+      async assign(workspaceId) {
+        if (assignError) throw assignError;
+        assigned.push(workspaceId);
+      },
+      async unassign(workspaceId) {
+        if (unassignError) throw unassignError;
+        unassigned.push(workspaceId);
+      },
+      async runExclusive<T>(operation: () => Promise<T>) {
+        runtimeSections.push("enter");
+        try {
+          return await operation();
+        } finally {
+          runtimeSections.push("exit");
+        }
+      },
+    },
     timer,
     id: () => `job-${++id}`,
     inactivityMs: overrides.inactivityMs ?? 100,
@@ -155,19 +209,39 @@ function fixture(overrides: { maxReplayBytes?: number; maxInputBytes?: number; i
     maxInputBytes: overrides.maxInputBytes ?? 20,
   });
   return {
-    manager, timer, processes, starts, registered, removed, started, stopped,
+    manager, timer, processes, starts, registered, removed, started, stopped, assigned, unassigned, sessions, runtimeSections,
     failRegister(error: Error) { registerError = error; },
     failRemove(error: Error) { removeError = error; },
     failStart(error: Error) { startError = error; },
     failStop(error: Error) { stopError = error; },
+    failAssign(error: Error) { assignError = error; },
+    failUnassign(error: Error) { unassignError = error; },
     holdStart() {
       startBarrier = new Promise(resolve => {
         releaseStart = resolve;
       });
     },
     releaseHeldStart() { releaseStart?.(); },
+    holdStop() {
+      stopBarrier = new Promise(resolve => {
+        releaseStop = resolve;
+      });
+    },
+    releaseHeldStop() { releaseStop?.(); },
   };
 }
+
+const selectedCredential: ResolvedCloneCredential = {
+  credentialId: "ssh-1",
+  host: "github.com",
+  process: {
+    type: "ssh",
+    host: "github.com",
+    sshPath: "/managed/ssh",
+    agentSocket: "/managed/agent.sock",
+    publicKeyPath: "/managed/ssh-1.pub",
+  },
+};
 
 describe("CloneJobManager ownership and replay", () => {
   test("uses owner-scoped ids, replays after an event id, and cleans subscribers", async () => {
@@ -240,6 +314,169 @@ describe("CloneJobManager state machine", () => {
       "cloning", "registering", "starting",
     ]);
     expect(events.at(-1)?.data).toEqual({ status: "succeeded", workspaceId: "repo", target: "/tmp/repo" });
+  });
+
+  test("passes the selected credential to Git and retains its assignment only after registration", async () => {
+    const f = fixture();
+    const { jobId } = f.manager.create("alice", "git@github.com:acme/repo.git", "/tmp/selected", {
+      credential: selectedCredential,
+      retainAssignment: true,
+    });
+    const events: CloneJobEvent[] = [];
+    f.manager.subscribe("alice", jobId, 0, event => events.push(event));
+    await tick();
+    expect(f.starts[0].credential).toEqual(selectedCredential.process);
+    expect(f.assigned).toEqual([]);
+
+    f.processes[0].exit(0);
+    await tick();
+    expect(f.assigned).toEqual(["repo"]);
+    expect(f.started).toEqual(["repo"]);
+    expect(f.unassigned).toEqual([]);
+    expect(events.at(-1)?.data).toMatchObject({ status: "succeeded", workspaceId: "repo" });
+  });
+
+  test("rolls retained assignment and registration back when session startup fails", async () => {
+    const f = fixture();
+    f.failStart(new Error("backend unavailable"));
+    const { jobId } = f.manager.create("alice", "git@github.com:acme/repo.git", "/tmp/selected-fail", {
+      credential: selectedCredential,
+      retainAssignment: true,
+    });
+    await tick();
+    f.processes[0].exit(0);
+    await tick();
+
+    expect(f.assigned).toEqual(["repo"]);
+    expect(f.unassigned).toEqual(["repo"]);
+    expect(f.removed).toEqual(["repo"]);
+    expect(f.registered.size).toBe(0);
+    expect(capture(f.manager, "alice", jobId).at(-1)?.data).toMatchObject({ status: "start-failed" });
+  });
+
+  test("a selected SSH clone holds the credential runtime section for its whole process lifetime", async () => {
+    const f = fixture();
+    const { jobId } = f.manager.create("alice", "git@github.com:acme/repo.git", "/tmp/gated", {
+      credential: selectedCredential,
+    });
+    await tick();
+    // The section opened before the spawn and stays held while the clone
+    // runs, so an ssh-agent override defers instead of retiring the socket
+    // mid-clone.
+    expect(f.runtimeSections).toEqual(["enter"]);
+    expect(f.starts).toHaveLength(1);
+    f.processes[0].exit(0);
+    await tick();
+    expect(f.runtimeSections).toEqual(["enter", "exit"]);
+    expect(capture(f.manager, "alice", jobId).at(-1)?.data).toMatchObject({ status: "succeeded" });
+
+    // Unselected clones never enter the section.
+    const plain = fixture();
+    plain.manager.create("alice", "remote", "/tmp/ungated");
+    await tick();
+    plain.processes[0].exit(0);
+    await tick();
+    expect(plain.runtimeSections).toEqual([]);
+  });
+
+  test("a queued assignment observes failed-start rollback, not the doomed registration", async () => {
+    const f = fixture();
+    f.failStart(new Error("backend unavailable"));
+    f.holdStart();
+    const { jobId } = f.manager.create("alice", "git@github.com:acme/repo.git", "/tmp/assign-race", {
+      credential: selectedCredential,
+      retainAssignment: true,
+    });
+    await tick();
+    f.processes[0].exit(0);
+    await tick();
+    expect(f.started).toEqual(["repo"]);
+
+    // A credential assignment request queued while the start is failing must
+    // run after the in-lifecycle rollback — never against the registration
+    // the rollback is about to remove.
+    let sawRegistration: boolean | undefined;
+    const queued = f.sessions.runExclusive("repo", async () => {
+      sawRegistration = f.registered.has("repo");
+    });
+    f.releaseHeldStart();
+    await queued;
+    await tick();
+
+    expect(sawRegistration).toBe(false);
+    expect(f.removed).toEqual(["repo"]);
+    expect(capture(f.manager, "alice", jobId).at(-1)?.data).toMatchObject({ status: "start-failed" });
+  });
+
+  test("cancellation rollback runs inside the stop lifecycle, ahead of queued assignments", async () => {
+    const f = fixture();
+    f.holdStart();
+    const { jobId } = f.manager.create("alice", "git@github.com:acme/repo.git", "/tmp/cancel-race", {
+      credential: selectedCredential,
+      retainAssignment: true,
+    });
+    await tick();
+    f.processes[0].exit(0);
+    await tick();
+
+    const cancelling = f.manager.cancel("alice", jobId);
+    f.holdStop();
+    f.releaseHeldStart();
+    await tick();
+    expect(f.stopped).toEqual(["repo"]);
+
+    let sawRegistration: boolean | undefined;
+    const queued = f.sessions.runExclusive("repo", async () => {
+      sawRegistration = f.registered.has("repo");
+    });
+    f.releaseHeldStop();
+    await queued;
+
+    expect(sawRegistration).toBe(false);
+    expect(await cancelling).toBe("cancelled");
+    expect(f.unassigned).toEqual(["repo"]);
+    expect(f.removed).toEqual(["repo"]);
+  });
+
+  test("restores a retained assignment when registration rollback fails", async () => {
+    const f = fixture();
+    f.failStart(new Error("backend unavailable"));
+    f.failRemove(new Error("registry is read-only"));
+    const { jobId } = f.manager.create("alice", "git@github.com:acme/repo.git", "/tmp/selected-rollback-fail", {
+      credential: selectedCredential,
+      retainAssignment: true,
+    });
+    await tick();
+    f.processes[0].exit(0);
+    await tick();
+
+    expect(f.assigned).toEqual(["repo", "repo"]);
+    expect(f.unassigned).toEqual(["repo"]);
+    expect(f.registered.has("repo")).toBe(true);
+    expect(capture(f.manager, "alice", jobId).at(-1)?.data).toMatchObject({
+      status: "start-failed",
+      error: expect.stringContaining("registry is read-only"),
+    });
+  });
+
+  test("rolls registration back when retained assignment persistence fails", async () => {
+    const f = fixture();
+    f.failAssign(new Error("credential state is read-only"));
+    const { jobId } = f.manager.create("alice", "git@github.com:acme/repo.git", "/tmp/assign-fail", {
+      credential: selectedCredential,
+      retainAssignment: true,
+    });
+    await tick();
+    f.processes[0].exit(0);
+    await tick();
+
+    expect(f.started).toEqual([]);
+    expect(f.removed).toEqual(["repo"]);
+    expect(f.registered.size).toBe(0);
+    expect(capture(f.manager, "alice", jobId).at(-1)?.data).toMatchObject({
+      status: "register-failed",
+      error: "credential state is read-only",
+    });
   });
 
   test("reports clone and registration failures without starting", async () => {
@@ -360,9 +597,35 @@ describe("CloneJobManager state machine", () => {
     expect(await f.manager.cancel("alice", jobId)).toBe("cleanup-failed");
     const callsAfterFailure = f.processes[0].terminateCalls;
 
-    await f.manager.close();
+    await expect(f.manager.close()).rejects.toThrow("failed to terminate all clone processes");
 
     expect(f.processes[0].terminateCalls).toBe(callsAfterFailure + 2);
+  });
+
+  test("shutdown attempts every process before reporting permanent termination failures", async () => {
+    const f = fixture();
+    const first = f.manager.create("alice", "remote", "/tmp/unreapable-one");
+    const second = f.manager.create("alice", "remote", "/tmp/unreapable-two");
+    await tick();
+    f.processes[0].failTerminate(new Error("first process group survived"));
+    f.processes[1].failTerminate(new Error("second process group survived"));
+    expect(await f.manager.cancel("alice", first.jobId)).toBe("cleanup-failed");
+    expect(await f.manager.cancel("alice", second.jobId)).toBe("cleanup-failed");
+    const callsBeforeClose = f.processes.map(process => process.terminateCalls);
+
+    let failure: unknown;
+    try {
+      await f.manager.close();
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).errors.map(error => String(error))).toEqual([
+      expect.stringContaining("first process group survived"),
+      expect.stringContaining("second process group survived"),
+    ]);
+    expect(f.processes.map(process => process.terminateCalls)).toEqual(callsBeforeClose.map(calls => calls + 2));
   });
 
   test("rolls registration back on start failure without deleting the target", async () => {
@@ -410,6 +673,49 @@ describe("CloneJobManager input, timers, and cleanup", () => {
     f.processes[0].exit(0);
     await tick();
     expect(f.manager.input("alice", jobId, "later")).toBe("inactive");
+  });
+
+  test("removes echoed input from live and replay output across chunk boundaries", async () => {
+    const f = fixture();
+    const { jobId } = f.manager.create("alice", "remote", "/tmp/redacted");
+    await tick();
+    const live: string[] = [];
+    f.manager.subscribe("alice", jobId, 0, event => {
+      if (event.type === "output") live.push(event.data.output);
+    });
+    const secret = "split-response";
+    expect(f.manager.input("alice", jobId, secret)).toBe("accepted");
+    f.starts[0].onOutput("before split-");
+    f.starts[0].onOutput("response after");
+    f.processes[0].exit(1);
+    await tick();
+
+    expect(live.join("")).toContain("before ");
+    expect(live.join("")).toContain(" after");
+    expect(live.join("")).not.toContain(secret);
+    expect(JSON.stringify(capture(f.manager, "alice", jobId))).not.toContain(secret);
+  });
+
+  test.each(["exit", "disconnect"] as const)("drops a possible secret prefix on clone %s", async outcome => {
+    const f = fixture();
+    const { jobId } = f.manager.create("alice", "remote", `/tmp/redacted-${outcome}`);
+    await tick();
+    const live: string[] = [];
+    f.manager.subscribe("alice", jobId, 0, event => {
+      if (event.type === "output") live.push(event.data.output);
+    });
+    expect(f.manager.input("alice", jobId, "submitted-secret")).toBe("accepted");
+    f.starts[0].onOutput("safe output\nsubmitted-sec");
+
+    if (outcome === "exit") {
+      f.processes[0].exit(1);
+      await tick();
+    } else {
+      await f.manager.cancel("alice", jobId);
+    }
+
+    expect(live.join("")).toBe("safe output\n");
+    expect(JSON.stringify(capture(f.manager, "alice", jobId))).not.toContain("submitted-sec");
   });
 
   test("input and output reset inactivity; inactivity and lifetime time out and terminate", async () => {

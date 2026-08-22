@@ -11,6 +11,11 @@ import os from "node:os";
 import path from "node:path";
 
 import { LocalProcessBackend } from "./backend";
+import {
+  EMPTY_CREDENTIAL_CONTEXT_RESOLVER,
+  type CloneCredentialProcessContext,
+  type ResolvedCloneCredential,
+} from "./credential-context";
 import { hashPassword, HubSessionStore, HUB_COOKIE_NAME } from "./auth";
 import { CloneJobManager } from "./clone-jobs";
 import { CloneProcessAdapter, type CloneProcessFactory } from "./clone-process";
@@ -63,6 +68,11 @@ let origin = "";
 let cookie = "";
 let bearerId = "";
 let cloneJobs: CloneJobManager;
+const managedCloneStarts: Array<CloneCredentialProcessContext | undefined> = [];
+const managedCloneAssignments: string[] = [];
+let managedAssignmentBarrier: Promise<void> | undefined;
+let releaseManagedAssignment: (() => void) | undefined;
+let enterManagedAssignment: (() => void) | undefined;
 
 beforeAll(async () => {
   tempRoot = await mkdtemp(path.join(os.tmpdir(), "uatu-hub-int-"));
@@ -91,10 +101,23 @@ beforeAll(async () => {
   await sessionStore.load();
   sessions = new SessionManager(registry, {
     local: new LocalProcessBackend({ uatuArgv: ["bun", "run", CLI_PATH] }),
-  });
+  }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
   const realCloneProcess = new CloneProcessAdapter();
   const processFactory: CloneProcessFactory = {
     start(options) {
+      if (options.url.startsWith("managed:")) {
+        managedCloneStarts.push(options.credential);
+        const exited = mkdir(options.target, { recursive: true }).then(() => {
+          execFileSync("git", ["init"], { cwd: options.target, stdio: "ignore" });
+          return 0;
+        });
+        return {
+          pid: process.pid,
+          exited,
+          writeLine: () => true,
+          async terminate() { await exited; },
+        };
+      }
       if (!options.url.startsWith("interactive:")) return realCloneProcess.start(options);
       let resolveExit!: (code: number) => void;
       const exited = new Promise<number>(resolve => {
@@ -123,7 +146,40 @@ beforeAll(async () => {
       };
     },
   };
-  cloneJobs = new CloneJobManager({ processFactory, registry, sessions });
+  cloneJobs = new CloneJobManager({
+    processFactory,
+    registry,
+    sessions,
+    credentials: {
+      async resolve(remote, credentialId): Promise<ResolvedCloneCredential | undefined> {
+        if (!credentialId) return undefined;
+        if (credentialId === "locked-ssh") throw new Error("selected SSH credential is locked; unlock it before cloning: locked-ssh");
+        if (credentialId !== "unlocked-ssh" && credentialId !== "alias-ssh") throw new Error(`unknown credential: ${credentialId}`);
+        if (!remote.startsWith("managed:")) throw new Error("selected credential is not compatible with clone transport");
+        return {
+          credentialId,
+          host: credentialId === "alias-ssh" ? "work_alias" : "github.com",
+          process: {
+            type: "ssh",
+            host: "github.com",
+            sshPath: "/managed/ssh",
+            agentSocket: "/managed/agent.sock",
+            publicKeyPath: "/managed/unlocked-ssh.pub",
+          },
+        };
+      },
+      async assign(workspaceId) {
+        enterManagedAssignment?.();
+        await managedAssignmentBarrier;
+        managedCloneAssignments.push(workspaceId);
+      },
+      async unassign(workspaceId) {
+        const index = managedCloneAssignments.indexOf(workspaceId);
+        if (index >= 0) managedCloneAssignments.splice(index, 1);
+      },
+      runExclusive: operation => operation(),
+    },
+  });
   server = startHubServer({ config, registry, sessions, sessionStore, personalState, cloneJobs });
   origin = `http://127.0.0.1:${server.port}`;
 }, 30_000);
@@ -141,6 +197,7 @@ describe("hub end to end", () => {
   test("unauthenticated requests are blocked before any child contact", async () => {
     const api = await fetch(`${origin}/api/hub/state`);
     expect(api.status).toBe(401);
+    expect(api.headers.get("cache-control")).toBe("no-store");
     const proxied = await fetch(`${origin}/s/myproject/api/state`);
     expect(proxied.status).toBe(401);
     const navigation = await fetch(`${origin}/`, { headers: { accept: "text/html" }, redirect: "manual" });
@@ -202,6 +259,8 @@ describe("hub end to end", () => {
     });
     expect(wrongPassword.status).toBe(401);
     expect(unknownUser.status).toBe(401);
+    expect(wrongPassword.headers.get("cache-control")).toBe("no-store");
+    expect(unknownUser.headers.get("cache-control")).toBe("no-store");
     await assertContract("POST", "/login", wrongPassword);
     expect(await wrongPassword.text()).toBe(await unknownUser.text());
   });
@@ -213,6 +272,7 @@ describe("hub end to end", () => {
       body: JSON.stringify({ name: "tobias", password: "open sesame", deviceLabel: "integration test" }),
     });
     expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
     await assertContract("POST", "/login", response);
     const payload = (await response.json()) as { sessionId: string; user: string };
     expect(payload.user).toBe("tobias");
@@ -408,13 +468,24 @@ describe("hub end to end", () => {
     expect(((await created.json()) as { id: string }).id).toBe("myproject");
 
     const state = await fetch(`${origin}/api/hub/state`, { headers: { cookie } });
+    await assertContract("GET", "/api/hub/state", state);
     const payload = (await state.json()) as {
       version: string;
       hubApiRevision: number;
       workspaceApiRevision: number;
-      workspaces: { id: string; running: boolean }[];
+      workspaces: {
+        id: string;
+        running: boolean;
+        credentialRestartRequired: boolean;
+        credentialAssignments: { authentication: string[]; signing: string[] };
+      }[];
     };
-    expect(payload.workspaces).toEqual([expect.objectContaining({ id: "myproject", running: true })]);
+    expect(payload.workspaces).toEqual([expect.objectContaining({
+      id: "myproject",
+      running: true,
+      credentialRestartRequired: false,
+      credentialAssignments: { authentication: [], signing: [] },
+    })]);
     // The authenticated state API reports the hub's uatu version.
     expect(typeof payload.version).toBe("string");
     expect(payload.version.length).toBeGreaterThan(0);
@@ -423,18 +494,54 @@ describe("hub end to end", () => {
     expect(payload.workspaceApiRevision).toBe(WORKSPACE_API_REVISION);
   }, 60_000);
 
-  test("the dashboard page ships the version slot and the browser pane", async () => {
+  test("authenticated pages split dashboard, clone, and settings content", async () => {
     const dashboard = await fetch(`${origin}/`, { headers: { cookie, accept: "text/html" } });
     expect(dashboard.status).toBe(200);
     const html = await dashboard.text();
     expect(html).toContain('id="hub-version"');
-    expect(html).toContain('id="browser"');
+    expect(html).toContain('id="sessions"');
+    expect(html).toContain('id="workspaces"');
+    expect(html).not.toContain('id="browser"');
+    expect(html).not.toContain('id="credentials-pane"');
+    expect(html).not.toContain('id="devices"');
     expect(html).toContain("Sign out");
     // The desktop wrapper's covered-chrome contract: pages pad below the
     // native titlebar/tab bar when the wrapper announces its height.
     expect(html).toContain("--titlebar-inset");
     // The started-but-loading gap indicator ships with the page.
     expect(html).toContain("nav-overlay");
+    const clone = await fetch(`${origin}/clone`, { headers: { cookie, accept: "text/html" } });
+    expect(clone.status).toBe(200);
+    const cloneHtml = await clone.text();
+    expect(cloneHtml).toContain('id="browser"');
+    expect(cloneHtml).toContain('id="clone-form"');
+    expect(cloneHtml).not.toContain('id="credentials-pane"');
+
+    const settings = await fetch(`${origin}/settings`, { headers: { cookie, accept: "text/html" } });
+    expect(settings.status).toBe(200);
+    const settingsHtml = await settings.text();
+    expect(settingsHtml).toContain('id="credentials-pane"');
+    expect(settingsHtml).toContain('id="devices"');
+    expect(settingsHtml).toContain("uatu.hub.notice.shared-uid-v1:dG9iaWFz");
+    expect(cloneHtml).toContain("uatu.hub.notice.shared-uid-v1:dG9iaWFz");
+    expect(settingsHtml).not.toContain('id="browser"');
+  });
+
+  test("split pages authenticate and preserve their return target", async () => {
+    for (const path of ["/clone", "/settings"]) {
+      const gated = await fetch(`${origin}${path}`, { headers: { accept: "text/html" }, redirect: "manual" });
+      expect(gated.status).toBe(303);
+      expect(gated.headers.get("location")).toBe(`/login?next=${encodeURIComponent(path)}`);
+
+      const login = await fetch(`${origin}${gated.headers.get("location")}`, {
+        method: "POST",
+        headers: FORM,
+        body: new URLSearchParams({ name: "tobias", password: "open sesame", next: path }),
+        redirect: "manual",
+      });
+      expect(login.status).toBe(303);
+      expect(login.headers.get("location")).toBe(path);
+    }
   });
 
   test("HTTP proxying round-trips /api/state and the shell through the prefix", async () => {
@@ -876,8 +983,124 @@ describe("hub end to end", () => {
     expect(((await nested.json()) as { error: string }).error).toContain("single folder name");
   }, 60_000);
 
+  test("forget cannot pass a clone registration before retained assignment commits", async () => {
+    const dest = path.join(tempRoot, "forget-race-checkouts");
+    managedAssignmentBarrier = new Promise(resolve => {
+      releaseManagedAssignment = resolve;
+    });
+    const assignmentEntered = new Promise<void>(resolve => {
+      enterManagedAssignment = resolve;
+    });
+
+    const created = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({
+        url: "managed:forget-race.git",
+        dest,
+        credentialId: "unlocked-ssh",
+        retainAssignment: true,
+      }),
+    });
+    let jobId = "";
+    try {
+      expect(created.status).toBe(202);
+      jobId = ((await created.json()) as { jobId: string }).jobId;
+      await assignmentEntered;
+      expect(registry.byId("forget-race")).toBeDefined();
+
+      const forgotten = await fetch(`${origin}/api/hub/workspaces/forget-race/forget`, {
+        method: "POST",
+        headers: { cookie, origin },
+      });
+      expect(forgotten.status).toBe(409);
+      expect(((await forgotten.json()) as { error: string }).error).toContain("clone job");
+      expect(registry.byId("forget-race")).toBeDefined();
+      expect(managedCloneAssignments).not.toContain("forget-race");
+    } finally {
+      releaseManagedAssignment?.();
+      managedAssignmentBarrier = undefined;
+      releaseManagedAssignment = undefined;
+      enterManagedAssignment = undefined;
+    }
+    const events = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/events`, { headers: { cookie } });
+    expect(await events.text()).toContain('"status":"succeeded"');
+    expect(managedCloneAssignments).toContain("forget-race");
+    await sessions.stop("forget-race");
+  }, 60_000);
+
+  test("clone creation validates managed selection before starting and retains only the selected credential", async () => {
+    const dest = path.join(tempRoot, "managed-checkouts");
+    const startsBefore = managedCloneStarts.length;
+    const locked = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ url: "managed:locked.git", dest, credentialId: "locked-ssh" }),
+    });
+    expect(locked.status).toBe(409);
+    expect(((await locked.json()) as { error: string }).error).toContain("locked");
+    expect(managedCloneStarts).toHaveLength(startsBefore);
+
+    const invalidRetain = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ url: "managed:no-selection.git", dest, retainAssignment: true }),
+    });
+    expect(invalidRetain.status).toBe(400);
+    expect(managedCloneStarts).toHaveLength(startsBefore);
+
+    // A clone-only host (an OpenSSH alias) can never back an assignment;
+    // retention is rejected before any clone process starts, instead of a
+    // full clone followed by registration rollback over a doomed assign.
+    const aliasRetain = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ url: "managed:alias.git", dest, credentialId: "alias-ssh", retainAssignment: true }),
+    });
+    expect(aliasRetain.status).toBe(400);
+    expect(((await aliasRetain.json()) as { error: string }).error).toContain("clone host");
+    expect(managedCloneStarts).toHaveLength(startsBefore);
+
+    const selected = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({
+        url: "managed:selected.git",
+        dest,
+        credentialId: "unlocked-ssh",
+        retainAssignment: true,
+      }),
+    });
+    expect(selected.status).toBe(202);
+    const selectedId = ((await selected.json()) as { jobId: string }).jobId;
+    const selectedStream = await fetch(`${origin}/api/hub/clone-jobs/${selectedId}/events`, { headers: { cookie } });
+    expect(await selectedStream.text()).toContain('"status":"succeeded"');
+    expect(managedCloneStarts.at(-1)).toMatchObject({ type: "ssh", agentSocket: "/managed/agent.sock" });
+    expect(managedCloneAssignments).toContain("selected");
+    await sessions.stop("selected");
+
+    const unselected = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ url: "managed:unselected.git", dest }),
+    });
+    expect(unselected.status).toBe(202);
+    const unselectedId = ((await unselected.json()) as { jobId: string }).jobId;
+    const unselectedStream = await fetch(`${origin}/api/hub/clone-jobs/${unselectedId}/events`, { headers: { cookie } });
+    expect(await unselectedStream.text()).toContain('"status":"succeeded"');
+    expect(managedCloneStarts.at(-1)).toBeUndefined();
+    expect(managedCloneAssignments).not.toContain("unselected");
+    await sessions.stop("unselected");
+  });
+
   test("clone jobs accept private prompt input and enforce owner and CSRF gates", async () => {
     const dest = path.join(tempRoot, "interactive-checkouts");
+    const unknownCreateField = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ url: "interactive:unknown.git", dest, extra: true }),
+    });
+    expect(unknownCreateField.status).toBe(400);
     const created = await fetch(`${origin}/api/hub/clone-jobs`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie, origin },
@@ -910,6 +1133,7 @@ describe("hub end to end", () => {
       body: JSON.stringify({ input: "stolen" }),
     });
     expect(deniedInput.status).toBe(404);
+    expect(deniedInput.headers.get("cache-control")).toBe("no-store");
     await assertContract("POST", "/api/hub/clone-jobs/{jobId}/input", deniedInput);
     const deniedCancel = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/cancel`, {
       method: "POST",
@@ -918,12 +1142,20 @@ describe("hub end to end", () => {
     expect(deniedCancel.status).toBe(404);
 
     const streamResponse = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/events`, { headers: { cookie } });
+    const csrfInput = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/input`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin: "https://evil.example" },
+      body: JSON.stringify({ input: "must-not-dispatch" }),
+    });
+    expect(csrfInput.status).toBe(403);
+    expect(csrfInput.headers.get("cache-control")).toBe("no-store");
     const firstInput = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/input`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie, origin },
       body: JSON.stringify({ input: "" }),
     });
     expect(firstInput.status).toBe(200);
+    expect(firstInput.headers.get("cache-control")).toBe("no-store");
     await assertContract("POST", "/api/hub/clone-jobs/{jobId}/input", firstInput);
     const secondInput = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/input`, {
       method: "POST",
@@ -931,6 +1163,14 @@ describe("hub end to end", () => {
       body: JSON.stringify({ input: "private-custom-response" }),
     });
     expect(secondInput.status).toBe(200);
+    expect(secondInput.headers.get("cache-control")).toBe("no-store");
+    const unknownInputField = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/input`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ input: "not-sent", extra: true }),
+    });
+    expect(unknownInputField.status).toBe(400);
+    expect(unknownInputField.headers.get("cache-control")).toBe("no-store");
     const stream = await streamResponse.text();
     expect(stream).toContain("Enter passphrase");
     expect(stream).toContain("Custom authentication challenge");
@@ -1273,9 +1513,9 @@ describe("hub end to end", () => {
     // The current session is untouched.
     expect((await fetch(`${origin}/api/hub/state`, { headers: { cookie } })).status).toBe(200);
 
-    // The dashboard page ships the devices pane.
-    const dashboard = await fetch(`${origin}/`, { headers: { cookie, accept: "text/html" } });
-    expect(await dashboard.text()).toContain('id="devices"');
+    // The settings page ships the devices pane.
+    const settings = await fetch(`${origin}/settings`, { headers: { cookie, accept: "text/html" } });
+    expect(await settings.text()).toContain('id="devices"');
   });
 
   test("cookies gain Secure when a fronting proxy reports HTTPS", async () => {
@@ -1382,8 +1622,11 @@ describe("hub end to end", () => {
     const documented = new Set<string>();
     for (const pathItem of Object.values(openApi.paths as Record<string, Record<string, unknown>>)) {
       for (const candidate of Object.values(pathItem)) {
-        const operationId = (candidate as { operationId?: unknown } | null)?.operationId;
-        if (typeof operationId === "string") documented.add(operationId);
+        const operation = candidate as { operationId?: unknown; tags?: unknown } | null;
+        const operationId = operation?.operationId;
+        if (typeof operationId === "string" && !(Array.isArray(operation?.tags) && operation.tags.includes("Hub credentials"))) {
+          documented.add(operationId);
+        }
       }
     }
     expect(documented.size).toBeGreaterThan(20);

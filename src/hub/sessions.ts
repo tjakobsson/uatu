@@ -13,6 +13,7 @@
 // settled state left by its predecessor.
 
 import type { RunningSession, SessionBackend } from "./backend";
+import type { CredentialContextResolver } from "./credential-context";
 import type { WorkspaceEntry, WorkspaceRegistry } from "./registry";
 
 export function sessionBasePath(workspaceId: string): string {
@@ -25,12 +26,16 @@ export class SessionManager {
   // the chain — so gates (forget) and joiners see a queued start, not just
   // an executing one. Cleared when the call settles.
   private readonly starting = new Map<string, Promise<RunningSession>>();
+  private readonly startFailureCallbacks = new Map<string, Array<() => Promise<void>>>();
   // Per-workspace operation chain tails.
   private readonly lifecycle = new Map<string, Promise<unknown>>();
+  private readonly runningCredentialRevisions = new Map<string, string>();
+  private readonly runningCredentialIds = new Map<string, Set<string>>();
 
   constructor(
     private readonly registry: WorkspaceRegistry,
     private readonly backends: Record<WorkspaceEntry["backend"], SessionBackend>,
+    private readonly credentials: CredentialContextResolver,
   ) {}
 
   get(workspaceId: string): RunningSession | undefined {
@@ -50,6 +55,18 @@ export class SessionManager {
 
   runningIds(): string[] {
     return [...this.running.keys()];
+  }
+
+  runningWorkspaceIdsUsingCredential(credentialId: string): string[] {
+    return [...this.runningCredentialIds.entries()]
+      .filter(([, credentialIds]) => credentialIds.has(credentialId))
+      .map(([workspaceId]) => workspaceId)
+      .sort();
+  }
+
+  credentialRestartRequired(workspaceId: string): boolean {
+    const startedRevision = this.runningCredentialRevisions.get(workspaceId);
+    return startedRevision !== undefined && startedRevision !== this.credentials.revision(workspaceId);
   }
 
   // Enqueues one lifecycle operation behind every earlier one for the same
@@ -79,7 +96,12 @@ export class SessionManager {
 
   // Starts (or joins the pending start of) the session for a registered
   // workspace.
-  start(workspaceId: string): Promise<RunningSession> {
+  start(workspaceId: string, onFailure?: () => Promise<void>): Promise<RunningSession> {
+    if (onFailure) {
+      const callbacks = this.startFailureCallbacks.get(workspaceId) ?? [];
+      callbacks.push(onFailure);
+      this.startFailureCallbacks.set(workspaceId, callbacks);
+    }
     const joined = this.starting.get(workspaceId);
     if (joined) {
       return joined;
@@ -91,22 +113,50 @@ export class SessionManager {
         return existing;
       }
 
-      const workspace = this.registry.byId(workspaceId);
-      if (!workspace) {
-        throw new Error(`unknown workspace: ${workspaceId}`);
+      let workspace: WorkspaceEntry;
+      let session: RunningSession;
+      let credentialRevision = "";
+      let credentialIds = new Set<string>();
+      try {
+        const found = this.registry.byId(workspaceId);
+        if (!found) throw new Error(`unknown workspace: ${workspaceId}`);
+        workspace = found;
+        const backend = this.backends[workspace.backend];
+        if (!backend) throw new Error(`no backend registered for '${workspace.backend}'`);
+        // One credential-runtime section spans resolution AND spawn, so a
+        // tool-override replacement cannot retire the agent between the
+        // gated usability check and the child capturing its socket.
+        session = await this.credentials.runExclusive(async () => {
+          const credentialContext = await this.credentials.resolve(workspace);
+          const started = await backend.start(workspace, sessionBasePath(workspace.id), credentialContext);
+          credentialRevision = credentialContext.revision;
+          credentialIds = new Set([
+            ...credentialContext.authentication.map(item => item.credential.id),
+            ...(credentialContext.signing ? [credentialContext.signing.id] : []),
+          ]);
+          return started;
+        });
+      } catch (error) {
+        const callbacks = this.startFailureCallbacks.get(workspaceId) ?? [];
+        for (let index = 0; index < callbacks.length; index += 1) {
+          try {
+            await callbacks[index]!();
+          } catch (cleanupError) {
+            throw new AggregateError([error, cleanupError], `session startup and registration cleanup failed: ${workspaceId}`);
+          }
+        }
+        throw error;
       }
-      const backend = this.backends[workspace.backend];
-      if (!backend) {
-        throw new Error(`no backend registered for '${workspace.backend}'`);
-      }
-
-      const session = await backend.start(workspace, sessionBasePath(workspace.id));
       this.running.set(workspace.id, session);
+      this.runningCredentialRevisions.set(workspace.id, credentialRevision);
+      this.runningCredentialIds.set(workspace.id, credentialIds);
       // Reap on child exit so a crashed session shows as stopped rather
       // than proxying into a dead endpoint forever.
       void session.exited.then(() => {
         if (this.running.get(workspace.id) === session) {
           this.running.delete(workspace.id);
+          this.runningCredentialRevisions.delete(workspace.id);
+          this.runningCredentialIds.delete(workspace.id);
         }
       });
       return session;
@@ -116,28 +166,45 @@ export class SessionManager {
     published = operation.finally(() => {
       if (this.starting.get(workspaceId) === published) {
         this.starting.delete(workspaceId);
+        this.startFailureCallbacks.delete(workspaceId);
       }
     });
     this.starting.set(workspaceId, published);
     return published;
   }
 
-  stop(workspaceId: string): Promise<boolean> {
+  // onStopped runs inside the same lifecycle operation, after the child is
+  // down — cleanup that must not interleave with queued operations on this
+  // workspace (clone rollback removing the registration) goes there. It runs
+  // even when no child was alive (it may have crashed and been reaped), but
+  // not when stopping the child fails.
+  stop(workspaceId: string, onStopped?: () => Promise<void>): Promise<boolean> {
     return this.enqueue(workspaceId, async () => {
-      const session = this.running.get(workspaceId);
-      if (!session) {
-        return false;
-      }
-      await session.stop();
-      this.running.delete(workspaceId);
-      return true;
+      const stopped = await this.stopWhileLifecycleQueueHeld(workspaceId);
+      await onStopped?.();
+      return stopped;
     });
+  }
+
+  // PRECONDITION: the caller already owns this workspace's lifecycle queue.
+  // This does not enqueue or run cleanup callbacks. A failed backend stop
+  // leaves the running session, revision, and credential projection intact.
+  async stopWhileLifecycleQueueHeld(workspaceId: string): Promise<boolean> {
+    const session = this.running.get(workspaceId);
+    if (!session) return false;
+    await session.stop();
+    this.running.delete(workspaceId);
+    this.runningCredentialRevisions.delete(workspaceId);
+    this.runningCredentialIds.delete(workspaceId);
+    return true;
   }
 
   async stopAll(): Promise<void> {
     // Every workspace with a live child OR a pending/queued start gets a
     // stop enqueued behind whatever it is doing.
     const ids = new Set([...this.running.keys(), ...this.starting.keys()]);
-    await Promise.all([...ids].map(id => this.stop(id).catch(() => undefined)));
+    const results = await Promise.allSettled([...ids].map(id => this.stop(id)));
+    const failures = results.flatMap(result => result.status === "rejected" ? [result.reason] : []);
+    if (failures.length > 0) throw new AggregateError(failures, "one or more workspace sessions failed to stop");
   }
 }

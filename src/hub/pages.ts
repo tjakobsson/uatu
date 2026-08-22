@@ -8,7 +8,10 @@
 
 import logoAssetPath from "../assets/uatu-logo.svg" with { type: "file" };
 
+import { Buffer } from "node:buffer";
+
 import { escapeHtml } from "../shared/html";
+import { LOCAL_CREDENTIAL_ASSIGNMENT_WARNING } from "./credential-context";
 
 // Inline the brand SVG (the file ships a fixed navy fill; the dark-scheme
 // retint below only reaches presentation attributes when the markup is
@@ -64,7 +67,11 @@ const SHARED_STYLE = `
      --titlebar-inset on <html>; pad below it so nothing renders under the
      native chrome. Plain browsers see the 0px default. */
   main { position: relative; max-width: 680px; margin: 0 auto; padding: calc(2.5rem + var(--titlebar-inset, 0px)) 1.25rem 4rem; }
-  .sign-out { position: absolute; top: calc(1.25rem + var(--titlebar-inset, 0px)); right: 1.25rem; }
+  .hub-nav { display: flex; align-items: center; justify-content: center; gap: 0.35rem; margin: -1.25rem 0 1.5rem; }
+  .hub-nav a { padding: 0.3rem 0.65rem; border-radius: 0.375rem; color: var(--text-subtle); font-size: 0.78rem; font-weight: 600; }
+  .hub-nav a:hover { background: var(--surface-muted); color: var(--text-strong); text-decoration: none; }
+  .hub-nav a[aria-current="page"] { background: var(--accent-soft); color: var(--accent); }
+  .sign-out { margin: 0; }
   .sign-out button {
     background: transparent;
     border-color: transparent;
@@ -209,7 +216,7 @@ const SHARED_STYLE = `
   button.danger { color: var(--danger); }
   button.danger:hover { border-color: var(--danger); background: var(--surface-muted); }
 
-  input[type="text"], input[type="password"] {
+  input[type="text"], input[type="password"], textarea, select {
     font: inherit;
     font-size: 0.85rem;
     color: var(--text-strong);
@@ -219,12 +226,75 @@ const SHARED_STYLE = `
     padding: 0.35rem 0.6rem;
     width: 100%;
   }
+  textarea { min-height: 6rem; resize: vertical; font-family: var(--mono-font-family); }
+  select { width: 100%; }
   input:focus-visible, button:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 1px;
   }
 
   .form-row { display: flex; gap: 0.5rem; padding: 0.6rem 1rem; }
+  .form-stack { display: grid; gap: 0.55rem; padding: 0.75rem 1rem; }
+  .form-stack label, .field-label { color: var(--text-subtle); font-size: 0.72rem; font-weight: 600; }
+  .form-stack label > input, .form-stack label > textarea, .form-stack label > select { display: block; margin-top: 0.2rem; }
+  .choice-row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; }
+  .choice-row label { display: inline-flex; gap: 0.35rem; align-items: center; color: var(--text-strong); }
+  .credential-create { border-top: 1px solid var(--border-soft); }
+  .credential-create summary { cursor: pointer; padding: 0.6rem 1rem; font-size: 0.78rem; font-weight: 600; }
+  .credential-card { border-bottom: 1px solid var(--border-soft); }
+  .credential-card:last-child { border-bottom: 0; }
+  .credential-card > summary { cursor: pointer; list-style-position: inside; padding: 0.75rem 1rem; }
+  .credential-head { display: inline-flex; width: calc(100% - 1.25rem); gap: 0.5rem; align-items: center; vertical-align: middle; }
+  .credential-head strong { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .credential-state { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.35rem; }
+  .credential-body { padding: 0 1rem 0.85rem; }
+  .credential-section { border-top: 1px solid var(--border-soft); padding-top: 0.65rem; margin-top: 0.65rem; }
+  .credential-section h3 { margin: 0 0 0.45rem; color: var(--text-strong); font-size: 0.76rem; }
+  .credential-summary { margin: 0.25rem 0 0; color: var(--text-subtle); font-size: 0.72rem; overflow-wrap: anywhere; }
+  .readiness { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.5rem; }
+  .chip.is-ready { border-color: var(--success); color: var(--success); }
+  .credential-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-top: 0.65rem; }
+  .credential-actions .credential-unlock { flex: 1 0 100%; margin-top: 0.15rem; }
+  .inline-form { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.55rem; align-items: end; }
+  .inline-form label { flex: 1 1 9rem; color: var(--text-subtle); font-size: 0.72rem; font-weight: 600; }
+  .inline-form input, .inline-form select { display: block; margin-top: 0.2rem; }
+  .inline-form input:not([type="file"]), .inline-form select, .inline-form > button { box-sizing: border-box; height: 2.15rem; }
+  .assignment-row { display: flex; align-items: center; gap: 0.75rem; padding: 0.45rem 0; border-bottom: 1px solid var(--border-soft); }
+  .assignment-row:last-of-type { border-bottom: 0; }
+  .assignment-row .row-main { flex: 1; }
+  .assignment-add { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: end; padding: 0; margin-top: 0.75rem; }
+  .assignment-add h4 { grid-column: 1 / -1; margin: 0; font-size: 0.72rem; color: var(--text-subtle); }
+  .assignment-add .assignment-help { grid-column: 1 / -1; margin: 0; color: var(--text-subtle); font-size: 0.7rem; }
+  .assignment-add > button { justify-self: start; }
+  .workspace-credential-section { padding: 0.75rem 1rem; border-top: 1px solid var(--border-soft); background: var(--surface-subtle); }
+  .workspace-credential-section > summary { cursor: pointer; color: var(--text-strong); font-size: 0.78rem; font-weight: 700; }
+  .workspace-credential-section > .credential-summary { margin-left: 1.1rem; }
+  .workspace-assignment-list { margin-top: 0.6rem; border: 1px solid var(--border-soft); border-radius: 0.375rem; background: var(--surface); }
+  .workspace-assignment-list .assignment-row { padding: 0.55rem 0.65rem; }
+  .assignment-pills { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.2rem; }
+  .assignment-pill { display: inline-flex; align-items: center; gap: 0.25rem; padding: 0.1rem 0.4rem; border: 1px solid var(--border-medium); border-radius: 999px; color: var(--text-subtle); font-size: 0.68rem; }
+  .assignment-pill button { border: 0; padding: 0 0.1rem; color: var(--danger); background: transparent; line-height: 1; }
+  .workspace-assignment-form { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .workspace-assignment-form input:disabled { color: var(--text-subtle); background: var(--surface-muted); }
+  .credential-dialog { width: min(30rem, calc(100vw - 2rem)); padding: 0; color: var(--text-strong); background: var(--surface-raised); border: 1px solid var(--border-medium); border-radius: 0.5rem; box-shadow: 0 1rem 3rem rgba(0, 0, 0, 0.3); }
+  .credential-dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
+  .credential-dialog h2 { margin: 0; font-size: 0.9rem; }
+  .credential-dialog .form-stack { padding: 1rem; }
+  .credential-dialog-actions { display: flex; justify-content: flex-end; gap: 0.5rem; }
+  .advisory { display: flex; align-items: flex-start; gap: 0.75rem; margin: 0; padding: 0.75rem 1rem; border-bottom: 1px solid var(--border-soft); background: light-dark(#fff8c5, #2d2405); color: var(--text-strong); font-size: 0.76rem; }
+  .advisory span { flex: 1; }
+  .advisory button { background: transparent; }
+  .paste-option { border-top: 1px solid var(--border-soft); padding-top: 0.45rem; }
+  .paste-option summary { cursor: pointer; color: var(--text-subtle); font-size: 0.72rem; font-weight: 600; }
+  .paste-option textarea { margin-top: 0.35rem; }
+  .secret-paste-heading { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
+  textarea.secret-paste-masked { -webkit-text-security: disc; }
+  .restart-required { color: var(--attention); font-weight: 600; }
+  .tool-row { align-items: flex-start; }
+  .tool-controls { flex: 1; min-width: 0; }
+  .tool-controls .inline-form { margin-top: 0.35rem; }
+  .tool-results { margin-top: 0.3rem; color: var(--text-subtle); font-size: 0.7rem; }
+  .copy-status { color: var(--success); font-size: 0.72rem; align-self: center; }
   .clone-panel { border-top: 1px solid var(--border-soft); background: var(--surface-subtle); }
   .clone-status { display: flex; align-items: center; gap: 0.5rem; padding: 0.6rem 1rem 0; }
   .clone-status strong { font-size: 0.78rem; color: var(--text-strong); }
@@ -251,9 +321,17 @@ const SHARED_STYLE = `
     .form-row input { flex-basis: 100%; }
     .clone-response label { flex-basis: 100%; }
     .clone-response button { flex: 1; }
+    .credential-head { align-items: flex-start; flex-wrap: wrap; }
+    .credential-head strong { flex-basis: calc(100% - 1.5rem); }
+    .credential-actions button { flex: 1 1 auto; }
+    .inline-form > button { flex: 1 1 auto; }
+    .assignment-add { grid-template-columns: 1fr; }
+    .workspace-assignment-form { grid-template-columns: 1fr; }
+    .assignment-add > button { width: 100%; }
   }
   .empty { padding: 0.75rem 1rem; color: var(--text-subtle); font-size: 0.8rem; }
   .error-text { color: var(--danger); font-size: 0.8rem; margin: 0.75rem 0; }
+  .local-error { color: var(--danger); font-size: 0.76rem; margin: 0.35rem 0 0; }
   .hub-version {
     margin: -1.5rem 0 2rem;
     text-align: center;
@@ -320,6 +398,20 @@ function brandHeader(): string {
 </header>`;
 }
 
+type AuthenticatedPage = "dashboard" | "clone" | "settings";
+
+function authenticatedChrome(current: AuthenticatedPage): string {
+  const link = (pageName: AuthenticatedPage, href: string, label: string) =>
+    `<a href="${href}"${current === pageName ? ' aria-current="page"' : ""}>${label}</a>`;
+  return `${brandHeader()}
+<nav class="hub-nav" aria-label="Hub">
+  ${link("dashboard", "/", "Dashboard")}
+  ${link("clone", "/clone", "Clone")}
+  ${link("settings", "/settings", "Settings")}
+  <form class="sign-out" method="post" action="/logout"><button type="submit">Sign out</button></form>
+</nav>`;
+}
+
 export function loginPage(options: { error?: string; next?: string } = {}): string {
   const error = options.error ? `<p class="error-text">${escapeHtml(options.error)}</p>` : "";
   // Return-to target carried from the gate's redirect; server-validated
@@ -352,18 +444,30 @@ export function loginPage(options: { error?: string; next?: string } = {}): stri
   );
 }
 
-// The dashboard renders client-side from /api/hub/state + /api/hub/browse
-// so live status (shell counts, foreground labels, the hub version, new
-// folders) stays current without a reload.
-export function dashboardPage(): string {
-  const signOut = `<form class="sign-out" method="post" action="/logout"><button type="submit">Sign out</button></form>\n`;
+// Authenticated pages render their live data from the Hub APIs so session,
+// credential, device, and folder state stays current without a reload.
+function authenticatedPage(pageName: AuthenticatedPage, authenticatedUser: string): string {
+  const sharedUidWarning = escapeHtml(LOCAL_CREDENTIAL_ASSIGNMENT_WARNING);
+  const sharedUidDismissalKey = JSON.stringify(`uatu.hub.notice.shared-uid-v1:${Buffer.from(authenticatedUser).toString("base64url")}`);
+  const sharedUidAdvisory = `<p class="advisory" data-shared-uid-warning><span>${sharedUidWarning}</span><button type="button" data-dismiss-shared-uid>Dismiss</button></p>`;
   const addFolder = `<section class="pane">
   <div class="pane-header"><h2>Add folder</h2><span id="browse-path" class="pane-meta"></span></div>
   <div id="browser"><p class="empty">Loading…</p></div>
-  <form class="form-row" id="clone-form" style="border-top: 1px solid var(--border-soft);">
+  ${sharedUidAdvisory}
+  <form class="form-stack" id="clone-form" style="border-top: 1px solid var(--border-soft);">
     <input type="text" id="clone-url" placeholder="Clone a repository into this folder — git URL" aria-label="Git clone URL" />
     <input type="text" id="clone-folder-name" placeholder="Folder name (optional)" aria-label="Checkout folder name" />
-    <button type="submit">Clone</button>
+    <label>Hub credential
+      <select id="clone-credential" aria-describedby="clone-credential-help"><option value="">None — answer prompts interactively</option></select>
+    </label>
+    <p id="clone-credential-help" class="row-detail" style="margin: 0;">Only credentials compatible with the URL are shown. Interactive responses are used once and are not saved.</p>
+    <label class="choice-row"><input type="checkbox" id="clone-retain-assignment" disabled /> Retain this credential assignment after registration</label>
+    <div id="clone-unlock" class="inline-form" hidden>
+      <label>Unlock passphrase<input id="clone-unlock-passphrase" type="password" autocomplete="off" /></label>
+      <span class="row-detail">Unlock the selected Hub credential before Git starts.</span>
+    </div>
+    <p class="local-error" id="clone-form-error" role="alert" hidden></p>
+    <div><button type="submit">Clone</button></div>
   </form>
   <div id="clone-panel" class="clone-panel" hidden>
     <div class="clone-status">
@@ -380,28 +484,131 @@ export function dashboardPage(): string {
       <button id="clone-cancel" type="button" class="danger">Cancel</button>
     </form>
     <p id="clone-response-help" class="empty" style="padding-top: 0;">Available for any Git or SSH prompt. Responses are not shown in this log.</p>
+    <p class="local-error" id="clone-action-error" role="alert" hidden></p>
   </div>
 </section>
 `;
-  return page(
-    "UatuCode Hub",
-    `${signOut}${brandHeader()}
-<p id="hub-version" class="hub-version"></p>
-<p id="action-error" class="error-text" hidden></p>
-<section class="pane">
+  const credentials = `<section class="pane" id="credentials-pane">
+  <div class="pane-header"><h2>Credentials</h2><span id="credentials-meta" class="pane-meta">Loading…</span></div>
+  ${sharedUidAdvisory}
+  <div id="credentials"><p class="empty">Loading…</p></div>
+  <details class="workspace-credential-section">
+    <summary>Workspace assignments</summary>
+    <p class="credential-summary">Assign authentication and signing credentials together.</p>
+    <div id="workspace-credential-assignments"><p class="empty">Loading…</p></div>
+  </details>
+  <details class="credential-create">
+    <summary>Generate SSH key</summary>
+    <form id="ssh-generate-form" class="form-stack">
+      <label>Name<input name="name" type="text" required /></label>
+      <div class="choice-row field-label">Purpose
+        <label><input name="capabilities" type="checkbox" value="ssh-authentication" checked /> Authentication</label>
+        <label><input name="capabilities" type="checkbox" value="ssh-signing" /> Commit signing</label>
+      </div>
+      <label>Passphrase<input name="passphrase" type="password" autocomplete="new-password" required /></label>
+      <p class="local-error" data-form-error role="alert" hidden></p>
+      <div><button class="primary" type="submit">Generate SSH key</button></div>
+    </form>
+  </details>
+  <details class="credential-create">
+    <summary>Import SSH private key</summary>
+    <form id="ssh-import-form" class="form-stack">
+      <label>Name<input name="name" type="text" required /></label>
+      <div class="choice-row field-label">Purpose
+        <label><input name="capabilities" type="checkbox" value="ssh-authentication" checked /> Authentication</label>
+        <label><input name="capabilities" type="checkbox" value="ssh-signing" /> Commit signing</label>
+      </div>
+      <label>Private key file<input name="privateKeyFile" type="file" /></label>
+      <details class="paste-option">
+        <summary>Paste a private key instead</summary>
+        <label><span class="secret-paste-heading">Private key <button type="button" data-reveal-secret="ssh-private-key" aria-controls="ssh-private-key" aria-pressed="false">Reveal</button></span><textarea id="ssh-private-key" class="secret-paste-masked" name="privateKey" autocomplete="off"></textarea></label>
+      </details>
+      <label>Existing passphrase, if any<input name="passphrase" type="password" autocomplete="off" /></label>
+      <p class="empty" style="padding-top: 0;">The key keeps its current passphrase. Keys without one stay available without unlocking.</p>
+      <p class="local-error" data-form-error role="alert" hidden></p>
+      <div><button class="primary" type="submit">Import SSH key</button></div>
+    </form>
+  </details>
+  <details class="credential-create">
+    <summary>Generate OpenPGP key</summary>
+    <form id="openpgp-generate-form" class="form-stack">
+      <label>Name<input name="name" type="text" required /></label>
+      <label>User ID<input name="userId" type="text" placeholder="Name &lt;email@example.com&gt;" required /></label>
+      <label>Passphrase<input name="passphrase" type="password" autocomplete="new-password" required /></label>
+      <p class="local-error" data-form-error role="alert" hidden></p>
+      <div><button class="primary" type="submit">Generate OpenPGP key</button></div>
+    </form>
+  </details>
+  <details class="credential-create">
+    <summary>Import OpenPGP private key</summary>
+    <form id="openpgp-import-form" class="form-stack">
+      <label>Name<input name="name" type="text" required /></label>
+      <label><span class="secret-paste-heading">Private key <button type="button" data-reveal-secret="openpgp-private-key" aria-controls="openpgp-private-key" aria-pressed="false">Reveal</button></span><textarea id="openpgp-private-key" class="secret-paste-masked" name="privateKey" autocomplete="off" required></textarea></label>
+      <p class="local-error" data-form-error role="alert" hidden></p>
+      <div><button class="primary" type="submit">Import OpenPGP key</button></div>
+    </form>
+  </details>
+  <details class="credential-create">
+    <summary>Add HTTPS or provider token</summary>
+    <form id="token-form" class="form-stack">
+      <label>Name<input name="name" type="text" required /></label>
+      <label>Provider host<input name="host" type="text" placeholder="github.com" required /></label>
+      <label>Username<input name="username" type="text" /></label>
+      <label>Token<input name="token" type="password" autocomplete="off" required /></label>
+      <div class="choice-row field-label">Purpose
+        <label><input name="capabilities" type="checkbox" value="https-git" checked /> HTTPS Git</label>
+        <label><input name="capabilities" type="checkbox" value="github-cli" /> GitHub CLI</label>
+        <label><input name="capabilities" type="checkbox" value="gitlab-cli" /> GitLab CLI</label>
+      </div>
+      <p class="local-error" data-form-error role="alert" hidden></p>
+      <div><button class="primary" type="submit">Save token</button></div>
+    </form>
+  </details>
+  <details class="credential-create" id="tools-details">
+    <summary>Credential tools</summary>
+    <div id="credential-tools"><p class="empty">Loading…</p></div>
+  </details>
+</section>
+`;
+  const dashboard = `<section class="pane">
   <div class="pane-header"><h2>Sessions</h2></div>
   <div id="sessions"><p class="empty">Loading…</p></div>
 </section>
 <section class="pane">
   <div class="pane-header"><h2>Workspaces</h2></div>
   <div id="workspaces"><p class="empty">Loading…</p></div>
-</section>
-${addFolder}<section class="pane">
+</section>`;
+  const settings = `${credentials}<section class="pane">
   <div class="pane-header"><h2>Devices</h2></div>
   <div id="devices"><p class="empty">Loading…</p></div>
-</section>
+</section>`;
+  const content = pageName === "dashboard" ? dashboard : pageName === "clone" ? addFolder : settings;
+  return page(
+    pageName === "dashboard" ? "UatuCode Hub" : `UatuCode Hub — ${pageName === "clone" ? "Clone" : "Settings"}`,
+    `${authenticatedChrome(pageName)}
+<div data-hub-page="${pageName}">
+<p id="hub-version" class="hub-version"></p>
+<p id="action-error" class="error-text" hidden></p>
+${content}
+</div>
 <script>
+const pageMode = document.querySelector("[data-hub-page]").dataset.hubPage;
 const errorEl = document.getElementById("action-error");
+const sharedUidDismissalKey = ${sharedUidDismissalKey};
+function initSharedUidAdvisory() {
+  const advisories = [...document.querySelectorAll("[data-shared-uid-warning]")];
+  let dismissed = false;
+  try {
+    dismissed = localStorage.getItem(sharedUidDismissalKey) === "dismissed";
+  } catch {}
+  for (const advisory of advisories) {
+    advisory.hidden = dismissed;
+    advisory.querySelector("[data-dismiss-shared-uid]").onclick = () => {
+      for (const item of advisories) item.hidden = true;
+      try { localStorage.setItem(sharedUidDismissalKey, "dismissed"); } catch {}
+    };
+  }
+}
 function showError(message) {
   errorEl.textContent = message;
   errorEl.hidden = !message;
@@ -424,6 +631,17 @@ function shellSummary(shells) {
   if (!shells || shells.length === 0) return "no shells";
   const labels = shells.map(s => s.label + (s.attached ? "" : " · detached"));
   return labels.join(", ");
+}
+function credentialAssignmentSummary(assignments) {
+  const authentication = assignments?.authentication || [];
+  const signing = assignments?.signing || [];
+  const parts = [];
+  if (authentication.length) parts.push("🔑 Auth: " + authentication.join(", "));
+  if (signing.length) parts.push("✎ Signing: " + signing.join(", "));
+  return parts.join(" · ") || "⊘ No credentials assigned";
+}
+function hasCredentialAssignments(assignments) {
+  return (assignments?.authentication?.length || 0) + (assignments?.signing?.length || 0) > 0;
 }
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -490,6 +708,437 @@ function renderInto(container, rows, emptyText) {
   }
   for (const r of rows) container.appendChild(r);
 }
+let credentialCatalog = [];
+let dashboardWorkspaces = [];
+let credentialsLoaded = false;
+const openCredentialIds = new Set();
+const credentialPath = "/api/hub/credentials";
+const toolPath = "/api/hub/credential-tools";
+const capabilityLabels = {
+  "ssh-authentication": "SSH authentication",
+  "ssh-signing": "SSH signing",
+  "openpgp-signing": "OpenPGP signing",
+  "https-git": "HTTPS Git",
+  "github-cli": "GitHub CLI",
+  "gitlab-cli": "GitLab CLI",
+};
+function readinessSummary(results) {
+  return (results || []).map(result => result.layer + ": " + result.message).join(" · ");
+}
+function isCredentialLocked(credential) {
+  return credential.type !== "token" && (credential.readiness || []).some(result =>
+    result.status === "unavailable" && /unlock|locked/i.test(result.message));
+}
+function assignedCredentials(workspaceId) {
+  return credentialCatalog.filter(credential => (credential.assignments || []).some(assignment => assignment.workspaceId === workspaceId));
+}
+function lockedWorkspaceCredentials(workspaceId) {
+  return assignedCredentials(workspaceId).filter(isCredentialLocked);
+}
+function aggregateReadiness(credential) {
+  return (credential.readiness || []).some(result => result.status === "unavailable") ? "Unavailable" : "Ready";
+}
+function credentialLockState(credential) {
+  if (credential.type === "token") return "Not applicable";
+  if (isCredentialLocked(credential)) return "Locked";
+  return aggregateReadiness(credential) === "Unavailable" ? "Unavailable" : "Unlocked";
+}
+function workspaceName(workspaceId) {
+  const workspace = dashboardWorkspaces.find(item => item.id === workspaceId);
+  return workspace ? (workspace.name || workspace.id) : workspaceId;
+}
+function assignmentSummary(assignments) {
+  const names = [...new Set(assignments.map(item => workspaceName(item.workspaceId)))];
+  if (!names.length) return "No assigned workspaces";
+  return names.join(", ") + " · " + names.length + (names.length === 1 ? " workspace" : " workspaces");
+}
+function setLocalError(target, message) {
+  target.textContent = message || "";
+  target.hidden = !message;
+}
+function actionErrorFor(control) {
+  const rowMain = control.closest(".row")?.querySelector(".row-main");
+  const scope = rowMain || control.closest("form") || control.parentElement;
+  let target = scope.querySelector("[data-action-error]");
+  if (!target) {
+    target = el("p", "local-error");
+    target.dataset.actionError = "";
+    target.setAttribute("role", "alert");
+    target.hidden = true;
+    scope.appendChild(target);
+  }
+  return target;
+}
+function credentialHost(credential) {
+  return credential.type === "token" ? credential.metadata.host : "github.com";
+}
+function credentialSupportsRole(credential, role) {
+  return role === "signing"
+    ? credential.capabilities.some(value => value === "ssh-signing" || value === "openpgp-signing")
+    : credential.capabilities.some(value =>
+      value === "ssh-authentication" || value === "https-git" || value === "github-cli" || value === "gitlab-cli");
+}
+function providerCliCredential(credential) {
+  return credential.type === "token" && credential.capabilities.some(value => value === "github-cli" || value === "gitlab-cli");
+}
+function makeReadiness(results) {
+  const container = el("div", "readiness");
+  for (const result of results || []) {
+    const chip = el("span", "chip" + (result.status === "ready" ? " is-ready" : result.status === "unavailable" ? " is-warn" : ""), result.layer + ": " + result.status);
+    chip.title = result.message;
+    container.appendChild(chip);
+  }
+  return container;
+}
+async function copyPublicKey(credential, status) {
+  const response = await fetch(credentialPath + "/" + encodeURIComponent(credential.id) + "/public-key");
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || "public key could not be loaded");
+  if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error("Clipboard access is unavailable; use a browser that permits clipboard writes.");
+  await navigator.clipboard.writeText(payload.publicKey);
+  status.textContent = "Copied";
+  setTimeout(() => { status.textContent = ""; }, 2000);
+}
+function credentialCard(credential) {
+  const card = el("details", "credential-card");
+  card.dataset.credentialId = credential.id;
+  card.open = openCredentialIds.has(credential.id);
+  card.addEventListener("toggle", () => {
+    if (card.open) openCredentialIds.add(credential.id);
+    else openCredentialIds.delete(credential.id);
+  });
+  const summary = document.createElement("summary");
+  const head = el("div", "credential-head");
+  head.appendChild(el("span", "indicator-dot" + (credential.enabled ? " is-live" : "")));
+  head.appendChild(el("strong", null, credential.name));
+  const state = el("span", "credential-state");
+  state.appendChild(el("span", "chip", credential.type));
+  state.appendChild(el("span", "chip" + (credential.enabled ? "" : " is-warn"), credential.enabled ? "Enabled" : "Disabled"));
+  const lockState = credentialLockState(credential);
+  state.appendChild(el("span", "chip" + (lockState === "Locked" || lockState === "Unavailable" ? " is-warn" : ""), lockState));
+  const readiness = aggregateReadiness(credential);
+  state.appendChild(el("span", "chip" + (readiness === "Ready" ? " is-ready" : " is-warn"), readiness));
+  head.appendChild(state);
+  summary.appendChild(head);
+  summary.appendChild(el("p", "credential-summary", assignmentSummary(credential.assignments || [])));
+  card.appendChild(summary);
+  const body = el("div", "credential-body");
+  const identifier = credential.type === "token" ? credential.metadata.host : credential.metadata.fingerprint;
+  const overview = el("section", "credential-section");
+  overview.appendChild(el("h3", null, "Credential details"));
+  overview.appendChild(el("p", "credential-summary", credential.capabilities.map(value => capabilityLabels[value] || value).join(" · ") + " · " + identifier));
+  overview.appendChild(makeReadiness(credential.readiness));
+  const readinessText = el("p", "credential-summary", readinessSummary(credential.readiness));
+  readinessText.setAttribute("aria-live", "polite");
+  overview.appendChild(readinessText);
+  body.appendChild(overview);
+  const assignments = credential.assignments || [];
+  if (assignments.some(item => dashboardWorkspaces.some(workspace => workspace.id === item.workspaceId && workspace.credentialRestartRequired))) {
+    overview.appendChild(el("p", "credential-summary restart-required", "Restart required: assignment changes apply fully when the running workspace session restarts."));
+  }
+  const actionSection = el("section", "credential-section");
+  actionSection.appendChild(el("h3", null, "Actions"));
+  const actions = el("div", "credential-actions");
+  const actionError = el("p", "local-error");
+  actionError.setAttribute("role", "alert");
+  actionError.hidden = true;
+  if (credential.type !== "token") {
+    const copyStatus = el("span", "copy-status");
+    const copyButton = el("button", null, "Copy public key");
+    copyButton.onclick = async () => {
+      setLocalError(actionError, "");
+      try { await copyPublicKey(credential, copyStatus); } catch (error) { setLocalError(actionError, error.message); }
+    };
+    actions.append(copyButton, copyStatus);
+    if (isCredentialLocked(credential)) {
+      const unlock = el("form", "inline-form credential-unlock");
+      const label = el("label", null, "Unlock passphrase");
+      const passphrase = document.createElement("input");
+      passphrase.type = "password";
+      passphrase.autocomplete = "off";
+      label.appendChild(passphrase);
+      const button = el("button", null, "Unlock");
+      unlock.append(label, button);
+      unlock.onsubmit = async event => {
+        event.preventDefault();
+        const value = passphrase.value;
+        passphrase.value = "";
+        await credentialAction(credential.id, "unlock", { passphrase: value }, button, "Unlocking…", actionError);
+      };
+      actions.appendChild(unlock);
+    } else if (credential.type === "ssh") {
+      const lock = el("button", null, "Lock");
+      lock.onclick = () => credentialAction(credential.id, "lock", {}, lock, "Locking…", actionError);
+      actions.appendChild(lock);
+    }
+  }
+  const testButton = el("button", null, "Test");
+  testButton.onclick = async () => {
+    setLocalError(actionError, "");
+    await withBusy(testButton, "Testing…", async () => {
+      try {
+        const result = await api(credentialPath + "/" + encodeURIComponent(credential.id) + "/test");
+        readinessText.textContent = readinessSummary(result.results);
+        await loadCredentials();
+      } catch (error) { setLocalError(actionError, error.message); }
+    });
+  };
+  actions.appendChild(testButton);
+  const enabledButton = el("button", null, credential.enabled ? "Disable" : "Enable");
+  enabledButton.onclick = () => {
+    if (credential.enabled && providerCliCredential(credential)
+      && !confirm("Disabling this provider CLI token may stop running workspaces that still use it and terminate their shells. Continue?")) return;
+    return credentialAction(credential.id, credential.enabled ? "disable" : "enable", {}, enabledButton, credential.enabled ? "Disabling…" : "Enabling…", actionError);
+  };
+  actions.appendChild(enabledButton);
+  const deleteButton = el("button", "danger", "Delete");
+  deleteButton.onclick = async () => {
+    const assigned = (credential.assignments || []).length > 0;
+    const detail = assigned ? " This will also remove all workspace assignments." : "";
+    const stopDetail = providerCliCredential(credential) ? " This may stop running workspaces that still use the token and terminate their shells." : "";
+    if (!confirm('Delete credential "' + credential.name + '"?' + detail + stopDetail + " Existing external connections may remain authenticated until they end.")) return;
+    await credentialAction(credential.id, "delete", { confirm: true, unassign: assigned }, deleteButton, "Deleting…", actionError);
+  };
+  actions.appendChild(deleteButton);
+  actionSection.append(actions, actionError);
+  body.appendChild(actionSection);
+  card.appendChild(body);
+  return card;
+}
+function workspaceAssignmentEntries(workspaceId) {
+  const entries = [];
+  for (const credential of credentialCatalog) {
+    for (const assignment of credential.assignments || []) {
+      if (assignment.workspaceId === workspaceId) entries.push({ credential, assignment });
+    }
+  }
+  return entries;
+}
+function workspaceAssignmentForm(actionError) {
+  const form = el("form", "inline-form assignment-add workspace-assignment-form");
+  form.appendChild(el("h4", null, "Assign workspace credentials"));
+  const workspaceLabel = el("label", null, "Workspace");
+  const workspace = document.createElement("select");
+  for (const item of dashboardWorkspaces) workspace.appendChild(new Option(item.name || item.id, item.id));
+  workspaceLabel.appendChild(workspace);
+  const authenticationLabel = el("label", null, "🔑 Authentication");
+  const authentication = document.createElement("select");
+  authentication.appendChild(new Option("Do not change", ""));
+  for (const credential of credentialCatalog.filter(item => item.enabled && credentialSupportsRole(item, "authentication"))) {
+    authentication.appendChild(new Option(credential.name, credential.id));
+  }
+  authenticationLabel.appendChild(authentication);
+  const signingLabel = el("label", null, "✎ Signing");
+  const signing = document.createElement("select");
+  signing.appendChild(new Option("Do not change", ""));
+  for (const credential of credentialCatalog.filter(item => item.enabled && credentialSupportsRole(item, "signing"))) {
+    signing.appendChild(new Option(credential.name, credential.id));
+  }
+  signingLabel.appendChild(signing);
+  const hostLabel = el("label", null, "Authentication host");
+  const host = document.createElement("input");
+  host.type = "text";
+  host.value = "github.com";
+  hostLabel.appendChild(host);
+  const help = el("p", "assignment-help", "Selected credentials replace the current defaults. The host scopes an authentication assignment; token credentials use their configured host.");
+  const button = el("button", null, "Assign selected");
+  form.append(workspaceLabel, authenticationLabel, signingLabel, hostLabel, help, button);
+  const updateHost = () => {
+    const selected = credentialCatalog.find(item => item.id === authentication.value);
+    host.disabled = !selected;
+    host.readOnly = selected?.type === "token";
+    if (selected?.type === "token") host.value = selected.metadata.host;
+    else if (selected && !host.value.trim()) host.value = "github.com";
+  };
+  authentication.onchange = updateHost;
+  updateHost();
+  form.onsubmit = async event => {
+    event.preventDefault();
+    setLocalError(actionError, "");
+    if (!authentication.value && !signing.value) {
+      setLocalError(actionError, "Choose an authentication credential, a signing credential, or both.");
+      return;
+    }
+    if (authentication.value && !host.value.trim()) {
+      setLocalError(actionError, "Enter a provider host for authentication.");
+      return;
+    }
+    await withBusy(button, "Assigning…", async () => {
+      try {
+        await api("/api/hub/workspaces/" + encodeURIComponent(workspace.value) + "/credential-assignments", {
+          ...(authentication.value ? { authentication: { credentialId: authentication.value, host: host.value.trim() } } : {}),
+          ...(signing.value ? { signing: { credentialId: signing.value } } : {}),
+        });
+        await Promise.all([loadSettingsState(), loadCredentials()]);
+      } catch (error) {
+        try { await Promise.all([loadSettingsState(), loadCredentials()]); } catch {}
+        setLocalError(actionError, error.message);
+      }
+    });
+  };
+  return form;
+}
+async function removeWorkspaceAssignment(entry, workspace, button, actionError) {
+  if (!workspace.running) {
+    await credentialAction(entry.credential.id, "unassign", {
+      workspaceId: workspace.id, role: entry.assignment.role,
+      ...(entry.assignment.role === "authentication" ? { host: entry.assignment.host } : {}),
+    }, button, "…", actionError);
+    return;
+  }
+  const role = entry.assignment.role === "authentication" ? "authentication" : "signing";
+  if (!confirm('"' + (workspace.name || workspace.id) + '" is running. Stop it and remove its ' + role + ' credential assignment? Its shells will be terminated.')) return;
+  setLocalError(actionError, "");
+  await withBusy(button, "…", async () => {
+    try {
+      await api(credentialPath + "/" + encodeURIComponent(entry.credential.id) + "/unassign", {
+        workspaceId: workspace.id, role: entry.assignment.role, stop: true,
+        ...(entry.assignment.role === "authentication" ? { host: entry.assignment.host } : {}),
+      });
+      await Promise.all([loadSettingsState(), loadCredentials()]);
+    } catch (error) { setLocalError(actionError, error.message); }
+  });
+}
+function renderWorkspaceAssignments() {
+  const container = document.getElementById("workspace-credential-assignments");
+  if (!container) return;
+  container.replaceChildren();
+  const actionError = el("p", "local-error");
+  actionError.setAttribute("role", "alert");
+  actionError.hidden = true;
+  if (!dashboardWorkspaces.length) {
+    container.appendChild(el("p", "empty", "No workspaces available."));
+    return;
+  }
+  const assignedWorkspaces = dashboardWorkspaces.filter(workspace => workspaceAssignmentEntries(workspace.id).length > 0);
+  let list;
+  if (assignedWorkspaces.length) list = el("div", "workspace-assignment-list");
+  else list = el("p", "empty", "No workspace credentials assigned.");
+  for (const workspace of assignedWorkspaces) {
+    const assignmentRow = el("div", "assignment-row");
+    const assignmentMain = el("div", "row-main");
+    assignmentMain.appendChild(el("strong", null, workspace.name || workspace.id));
+    const pills = el("div", "assignment-pills");
+    for (const entry of workspaceAssignmentEntries(workspace.id)) {
+      const authentication = entry.assignment.role === "authentication";
+      const text = (authentication ? "🔑 Auth · " : "✎ Signing · ") + entry.credential.name + (entry.assignment.host ? " · " + entry.assignment.host : "");
+      const pill = el("span", "assignment-pill", text);
+      const remove = el("button", null, "×");
+      remove.type = "button";
+      remove.title = "Remove " + (authentication ? "authentication" : "signing") + " assignment";
+      remove.setAttribute("aria-label", remove.title + " for " + (workspace.name || workspace.id));
+      remove.onclick = () => removeWorkspaceAssignment(entry, workspace, remove, actionError);
+      pill.appendChild(remove);
+      pills.appendChild(pill);
+    }
+    assignmentMain.appendChild(pills);
+    assignmentRow.appendChild(assignmentMain);
+    list.appendChild(assignmentRow);
+  }
+  container.append(list, workspaceAssignmentForm(actionError), actionError);
+}
+async function credentialAction(id, action, body, button, busyLabel, errorTarget) {
+  setLocalError(errorTarget, "");
+  await withBusy(button, busyLabel, async () => {
+    try {
+      await api(credentialPath + "/" + encodeURIComponent(id) + "/" + action, body);
+      await Promise.all([loadSettingsState(), loadCredentials()]);
+    } catch (error) { setLocalError(errorTarget, error.message); }
+  });
+}
+async function loadSettingsState() {
+  try {
+    const response = await fetch("/api/hub/state");
+    if (!response.ok) throw new Error("Hub state could not be loaded.");
+    const state = await response.json();
+    dashboardWorkspaces = state.workspaces || [];
+    if (credentialsLoaded) renderCredentialCatalog();
+  } catch (error) { showError(error.message); }
+}
+async function loadCredentials() {
+  try {
+    const response = await fetch(credentialPath);
+    if (!response.ok) throw new Error("Credentials could not be loaded.");
+    const payload = await response.json();
+    credentialCatalog = payload.credentials || [];
+    credentialsLoaded = true;
+    renderCredentialCatalog();
+  } catch (error) { showError(error.message); }
+}
+async function loadDashboardCredentials() {
+  const response = await fetch(credentialPath);
+  if (!response.ok) throw new Error("Credentials could not be loaded.");
+  const payload = await response.json();
+  credentialCatalog = payload.credentials || [];
+  credentialsLoaded = true;
+}
+function renderCredentialCatalog() {
+    document.getElementById("credentials-meta").textContent = credentialCatalog.length + (credentialCatalog.length === 1 ? " credential" : " credentials");
+    const container = document.getElementById("credentials");
+    for (const card of container.querySelectorAll("details[data-credential-id]")) {
+      if (card.open) openCredentialIds.add(card.dataset.credentialId);
+      else openCredentialIds.delete(card.dataset.credentialId);
+    }
+    container.replaceChildren();
+    if (!credentialCatalog.length) container.appendChild(el("p", "empty", "No Hub credentials. Generate or import one below."));
+    else for (const credential of credentialCatalog) container.appendChild(credentialCard(credential));
+    renderWorkspaceAssignments();
+}
+async function loadTools() {
+  try {
+    const response = await fetch(toolPath);
+    if (!response.ok) throw new Error("Credential tools could not be loaded.");
+    const payload = await response.json();
+    const container = document.getElementById("credential-tools");
+    container.replaceChildren();
+    for (const tool of payload.tools || []) {
+      const item = el("div", "row tool-row");
+      const controls = el("div", "tool-controls");
+      controls.appendChild(el("strong", null, tool.tool));
+      controls.appendChild(el("div", "tool-results", (tool.path || "Not found") + (tool.version ? " · " + tool.version : "") + " · " + readinessSummary(tool.results)));
+      if (tool.guidance) controls.appendChild(el("div", "tool-results", tool.guidance));
+      const form = el("form", "inline-form");
+      const label = el("label", null, "Absolute path override");
+      const input = document.createElement("input");
+      input.type = "text";
+      input.placeholder = tool.path || "/absolute/path/to/" + tool.tool;
+      label.appendChild(input);
+      const save = el("button", null, "Save override");
+      const test = el("button", null, "Test");
+      const clear = el("button", null, "Use detected path");
+      const toolError = el("p", "local-error");
+      toolError.setAttribute("role", "alert");
+      toolError.hidden = true;
+      form.append(label, save, clear, test);
+      form.onsubmit = event => event.preventDefault();
+      save.onclick = async () => {
+        setLocalError(toolError, "");
+        if (!input.value.trim()) { setLocalError(toolError, "Enter an absolute executable path."); return; }
+        await withBusy(save, "Saving…", async () => {
+          try { await api(toolPath + "/" + encodeURIComponent(tool.tool), { path: input.value.trim() }); input.value = ""; await loadTools(); }
+          catch (error) { setLocalError(toolError, error.message); }
+        });
+      };
+      clear.onclick = async () => {
+        setLocalError(toolError, "");
+        await withBusy(clear, "Clearing…", async () => {
+          try { await api(toolPath + "/" + encodeURIComponent(tool.tool), { path: null }); await loadTools(); }
+          catch (error) { setLocalError(toolError, error.message); }
+        });
+      };
+      test.onclick = async () => {
+        setLocalError(toolError, "");
+        await withBusy(test, "Testing…", async () => {
+          try { await api(toolPath + "/" + encodeURIComponent(tool.tool) + "/test"); await loadTools(); }
+          catch (error) { setLocalError(toolError, error.message); }
+        });
+      };
+      controls.append(form, toolError);
+      item.appendChild(controls);
+      container.appendChild(item);
+    }
+  } catch (error) { showError(error.message); }
+}
 function sessionUrl(id) { return "/s/" + encodeURIComponent(id) + "/"; }
 // Navigate into a session behind a full-page opening indicator — the SPA
 // takes a moment to boot even after the start API has answered.
@@ -500,11 +1149,76 @@ function openSession(id) {
   document.body.appendChild(overlay);
   location.href = sessionUrl(id);
 }
+function unlockForWorkspace(workspace, credentials) {
+  return new Promise(resolve => {
+    const dialog = el("dialog", "credential-dialog");
+    const header = el("div", "pane-header");
+    header.appendChild(el("h2", null, "Unlock credentials for " + workspace.id));
+    const form = el("form", "form-stack");
+    form.method = "dialog";
+    form.appendChild(el("p", "credential-summary", "Unlock the assigned credentials, then the workspace will resume."));
+    const fields = credentials.map(credential => {
+      const label = el("label", null, credential.name + " passphrase");
+      const input = document.createElement("input");
+      input.type = "password";
+      input.autocomplete = "off";
+      input.required = credential.type !== "ssh";
+      label.appendChild(input);
+      form.appendChild(label);
+      return { credential, input };
+    });
+    const errorTarget = el("p", "local-error");
+    errorTarget.setAttribute("role", "alert");
+    errorTarget.hidden = true;
+    const actions = el("div", "credential-dialog-actions");
+    const cancel = el("button", null, "Cancel");
+    cancel.type = "button";
+    const unlock = el("button", "primary", "Unlock and resume");
+    actions.append(cancel, unlock);
+    form.append(errorTarget, actions);
+    dialog.append(header, form);
+    document.body.appendChild(dialog);
+    const finish = value => {
+      dialog.close();
+      dialog.remove();
+      resolve(value);
+    };
+    cancel.onclick = () => finish(false);
+    dialog.oncancel = event => { event.preventDefault(); finish(false); };
+    form.onsubmit = async event => {
+      event.preventDefault();
+      setLocalError(errorTarget, "");
+      await withBusy(unlock, "Unlocking…", async () => {
+        try {
+          for (const field of fields) {
+            const passphrase = field.input.value;
+            field.input.value = "";
+            await api(credentialPath + "/" + encodeURIComponent(field.credential.id) + "/unlock", { passphrase });
+          }
+          await loadDashboardCredentials();
+          finish(true);
+        } catch (error) { setLocalError(errorTarget, error.message); }
+      });
+    };
+    dialog.showModal();
+    fields[0].input.focus();
+  });
+}
+async function prepareWorkspaceResume(workspace, errorTarget) {
+  try {
+    await loadDashboardCredentials();
+  } catch (error) {
+    setLocalError(errorTarget, error.message);
+    return false;
+  }
+  const locked = lockedWorkspaceCredentials(workspace.id);
+  return !locked.length || await unlockForWorkspace(workspace, locked);
+}
 // Returns true when it navigated into a session (the caller's button then
 // stays in its busy state — the overlay owns the screen until the session
 // page replaces us), false when the user declined or an error was shown.
-async function addFolder(folder) {
-  showError("");
+async function addFolder(folder, errorTarget) {
+  setLocalError(errorTarget, "");
   try {
     const result = await api("/api/hub/workspaces", { path: folder });
     openSession(result.id);
@@ -516,10 +1230,10 @@ async function addFolder(folder) {
         const result = await api("/api/hub/workspaces", { path: folder, init: true });
         openSession(result.id);
         return true;
-      } catch (inner) { showError(inner.message); }
+      } catch (inner) { setLocalError(errorTarget, inner.message); }
       return false;
     }
-    showError(error.message);
+    setLocalError(errorTarget, error.message);
     return false;
   }
 }
@@ -557,11 +1271,12 @@ async function loadBrowser() {
         : {
             label: "Add",
             onClick: async button => {
+              const errorTarget = actionErrorFor(button);
               uiBusy += 1;
               const original = button.textContent;
               button.disabled = true;
               button.textContent = "Starting…";
-              if (!(await addFolder(listing.path + (listing.path.endsWith("/") ? "" : "/") + dir.name))) {
+              if (!(await addFolder(listing.path + (listing.path.endsWith("/") ? "" : "/") + dir.name, errorTarget))) {
                 uiBusy -= 1;
                 button.disabled = false;
                 button.textContent = original;
@@ -582,6 +1297,7 @@ async function refresh(force) {
   } catch { return; }
 
   document.getElementById("hub-version").textContent = state.version || "";
+  dashboardWorkspaces = state.workspaces || [];
 
   const running = state.workspaces.filter(w => w.running);
   renderInto(
@@ -590,17 +1306,18 @@ async function refresh(force) {
       title: w.id,
       href: sessionUrl(w.id),
       path: w.path,
-      detail: shellSummary(w.shells),
+      detail: credentialAssignmentSummary(w.credentialAssignments) + " · " + shellSummary(w.shells),
       live: true,
       button: {
         label: "Stop",
         className: "danger",
         onClick: async button => {
           if (!confirm('Stop session "' + w.id + '"? Its shells will be terminated.')) return;
-          showError("");
+          const errorTarget = actionErrorFor(button);
+          setLocalError(errorTarget, "");
           await withBusy(button, "Stopping…", async () => {
             try { await api("/api/hub/sessions/" + encodeURIComponent(w.id) + "/stop"); await refresh(true); }
-            catch (error) { showError(error.message); }
+            catch (error) { setLocalError(errorTarget, error.message); }
           });
         },
       },
@@ -613,6 +1330,7 @@ async function refresh(force) {
     ...stopped.map(w => row({
       title: w.id,
       path: w.path,
+      detail: credentialAssignmentSummary(w.credentialAssignments),
       live: false,
       buttons: [
         {
@@ -621,7 +1339,12 @@ async function refresh(force) {
           // the overlay covers the load read as a return to idle. Only an
           // error brings it back.
           onClick: async button => {
-            showError("");
+            if (!hasCredentialAssignments(w.credentialAssignments) && !confirm(
+              'No credentials are assigned to "' + w.id + '". Git authentication and commit signing may be unavailable, but the workspace can still start. Continue?'
+            )) return;
+            const errorTarget = actionErrorFor(button);
+            setLocalError(errorTarget, "");
+            if (!(await prepareWorkspaceResume(w, errorTarget))) return;
             uiBusy += 1;
             const original = button.textContent;
             button.disabled = true;
@@ -632,7 +1355,7 @@ async function refresh(force) {
               // repaint now would flash idle controls under the overlay.
               openSession(w.id);
             } catch (error) {
-              showError(error.message);
+              setLocalError(errorTarget, error.message);
               uiBusy -= 1;
               button.disabled = false;
               button.textContent = original;
@@ -642,12 +1365,13 @@ async function refresh(force) {
         {
           label: "Forget",
           className: "danger",
-          onClick: async () => {
-            showError("");
+          onClick: async button => {
+            const errorTarget = actionErrorFor(button);
+            setLocalError(errorTarget, "");
             try {
               await api("/api/hub/workspaces/" + encodeURIComponent(w.id) + "/forget");
               await refresh();
-            } catch (error) { showError(error.message); }
+            } catch (error) { setLocalError(errorTarget, error.message); }
           },
         },
       ],
@@ -693,18 +1417,21 @@ async function loadDevices() {
           label: "Revoke",
           className: "danger",
           onClick: async button => {
-            showError("");
+            const errorTarget = actionErrorFor(button);
+            setLocalError(errorTarget, "");
             await withBusy(button, "Revoking…", async () => {
               try {
                 await api("/api/hub/sessions/" + encodeURIComponent(s.handle) + "/revoke");
                 await loadDevices();
-              } catch (error) { showError(error.message); }
+              } catch (error) { setLocalError(errorTarget, error.message); }
             });
           },
         },
   }));
   renderInto(document.getElementById("devices"), rows, "No active sessions.");
 }
+function initClonePage() {
+initSharedUidAdvisory();
 const cloneForm = document.getElementById("clone-form");
 const clonePanel = document.getElementById("clone-panel");
 const clonePhase = document.getElementById("clone-phase");
@@ -714,7 +1441,13 @@ const cloneResponseForm = document.getElementById("clone-response-form");
 const cloneResponse = document.getElementById("clone-response");
 const cloneResponseLabel = document.getElementById("clone-response-label");
 const cloneCancel = document.getElementById("clone-cancel");
-const cloneSubmit = cloneForm && cloneForm.querySelector("button");
+const cloneCredential = document.getElementById("clone-credential");
+const cloneRetainAssignment = document.getElementById("clone-retain-assignment");
+const cloneUnlock = document.getElementById("clone-unlock");
+const cloneUnlockPassphrase = document.getElementById("clone-unlock-passphrase");
+const cloneFormError = document.getElementById("clone-form-error");
+const cloneActionError = document.getElementById("clone-action-error");
+const cloneSubmit = cloneForm.querySelector("button");
 const cloneOutputLimit = 64 * 1024;
 const cloneJobStorageKey = "uatu.activeCloneJob";
 let cloneJobId = sessionStorage.getItem(cloneJobStorageKey);
@@ -722,15 +1455,71 @@ let cloneEvents = null;
 let cloneBusy = false;
 let clonePromptText = "";
 
+async function loadCloneCredentials() {
+  try {
+    const response = await fetch(credentialPath);
+    if (!response.ok) return;
+    const payload = await response.json();
+    credentialCatalog = payload.credentials || [];
+    updateCloneCredentials();
+  } catch (error) { showError(error.message); }
+}
+
+function remoteKind(url) {
+  const value = url.trim().toLowerCase();
+  if (value.startsWith("https://")) return "https";
+  if (value.startsWith("ssh://") || value.startsWith("git+ssh://")) return "ssh";
+  if (/^(?:[^@/:\\s]+@)?(?:\\[[^\\]]+\\]|[^/:\\s]+):[^/].*$/.test(value) && !/^[a-z]:[\\\\/]/.test(value)) return "ssh";
+  return null;
+}
+function cloneCompatible(credential, kind, url) {
+  if (!credential.enabled || !kind) return false;
+  if (kind === "ssh") return credential.type === "ssh" && credential.capabilities.includes("ssh-authentication");
+  if (credential.type !== "token" || !credential.capabilities.includes("https-git")) return false;
+  // Mirror the server's provider-host normalization (trailing dot, case)
+  // so every URL the backend accepts for a stored token is selectable here.
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.endsWith(".") ? parsed.hostname.slice(0, -1) : parsed.hostname;
+    const host = hostname.toLowerCase() + (parsed.port ? ":" + parsed.port : "");
+    return host === credential.metadata.host.toLowerCase();
+  }
+  catch { return false; }
+}
+function updateCloneCredentials() {
+  const selected = cloneCredential.value;
+  const url = document.getElementById("clone-url").value;
+  const kind = remoteKind(url);
+  cloneCredential.replaceChildren(new Option("None — answer prompts interactively", ""));
+  for (const credential of credentialCatalog.filter(item => cloneCompatible(item, kind, url))) {
+    const suffix = isCredentialLocked(credential) ? " (unlock required)" : "";
+    cloneCredential.appendChild(new Option(credential.name + " · " + credentialHost(credential) + suffix, credential.id));
+  }
+  if ([...cloneCredential.options].some(option => option.value === selected)) cloneCredential.value = selected;
+  updateCloneCredentialState();
+}
+function updateCloneCredentialState() {
+  const selected = credentialCatalog.find(item => item.id === cloneCredential.value);
+  cloneRetainAssignment.disabled = !selected;
+  if (!selected) cloneRetainAssignment.checked = false;
+  cloneUnlock.hidden = !selected || !isCredentialLocked(selected);
+  if (cloneUnlock.hidden) cloneUnlockPassphrase.value = "";
+}
+document.getElementById("clone-url").addEventListener("input", updateCloneCredentials);
+cloneCredential.addEventListener("change", updateCloneCredentialState);
+
 function setCloneActive(active) {
   cloneResponseForm.hidden = !active;
   cloneResponse.disabled = !active;
   cloneResponseForm.querySelector('button[type="submit"]').disabled = !active;
   cloneCancel.disabled = !active;
   cloneIndicator.classList.toggle("is-live", active);
-  if (cloneSubmit) cloneSubmit.disabled = active;
+  cloneSubmit.disabled = active;
   document.getElementById("clone-url").disabled = active;
   document.getElementById("clone-folder-name").disabled = active;
+  cloneCredential.disabled = active;
+  cloneRetainAssignment.disabled = active || !cloneCredential.value;
+  cloneUnlockPassphrase.disabled = active;
 }
 function setClonePhase(phase, label) {
   const labels = {
@@ -806,12 +1595,12 @@ async function finishClone(result) {
     if (!workspaceId) {
       setClonePhase("start-failed", "Clone completed, but no session was returned.");
     } else {
-      await Promise.all([refresh(true), loadBrowser()]);
+      await loadBrowser();
       openSession(workspaceId);
       return;
     }
   }
-  await Promise.all([refresh(true), loadBrowser()]);
+  await loadBrowser();
 }
 function connectCloneEvents() {
   closeCloneEvents();
@@ -849,13 +1638,14 @@ function connectCloneEvents() {
     } catch {}
   };
 }
-if (cloneForm) cloneForm.onsubmit = async event => {
+cloneForm.onsubmit = async event => {
   event.preventDefault();
-  showError("");
+  setLocalError(cloneFormError, "");
   const input = document.getElementById("clone-url");
   const folderNameInput = document.getElementById("clone-folder-name");
   const url = input.value.trim();
   const folderName = folderNameInput.value.trim();
+  const selectedCredential = credentialCatalog.find(item => item.id === cloneCredential.value);
   if (!url) return;
   const button = event.target.querySelector("button");
   uiBusy += 1;
@@ -871,17 +1661,33 @@ if (cloneForm) cloneForm.onsubmit = async event => {
   cloneResponseLabel.textContent = "Terminal response";
   setClonePhase("cloning", "Starting clone…");
   try {
-    const result = await api("/api/hub/clone-jobs", { url, dest: browsePath, folderName });
+    if (selectedCredential && isCredentialLocked(selectedCredential)) {
+      // Empty is a valid unlock for an unencrypted SSH key; the server
+      // rejects an empty passphrase whenever the key actually needs one.
+      const passphrase = cloneUnlockPassphrase.value;
+      cloneUnlockPassphrase.value = "";
+      await api(credentialPath + "/" + encodeURIComponent(selectedCredential.id) + "/unlock", { passphrase });
+      await loadCloneCredentials();
+    }
+    const request = { url, dest: browsePath, folderName };
+    if (selectedCredential) {
+      request.credentialId = selectedCredential.id;
+      request.retainAssignment = cloneRetainAssignment.checked;
+    }
+    const result = await api("/api/hub/clone-jobs", request);
     cloneJobId = result.jobId;
     if (!cloneJobId) throw new Error("clone job did not return an id");
     sessionStorage.setItem(cloneJobStorageKey, cloneJobId);
     input.value = "";
     folderNameInput.value = "";
+    cloneCredential.value = "";
+    cloneRetainAssignment.checked = false;
+    updateCloneCredentialState();
     button.textContent = "Clone";
     setCloneActive(true);
     connectCloneEvents();
   } catch (error) {
-    showError(error.message);
+    setLocalError(cloneFormError, error.message);
     setClonePhase("clone-failed", "Could not start clone.");
     setCloneActive(false);
     cloneBusy = false;
@@ -889,6 +1695,9 @@ if (cloneForm) cloneForm.onsubmit = async event => {
     button.disabled = false;
     input.disabled = false;
     folderNameInput.disabled = false;
+    cloneCredential.disabled = false;
+    cloneRetainAssignment.disabled = !cloneCredential.value;
+    cloneUnlockPassphrase.disabled = false;
     button.textContent = "Clone";
   }
 };
@@ -897,35 +1706,30 @@ cloneResponseForm.onsubmit = async event => {
   if (!cloneJobId) return;
   const input = cloneResponse.value;
   cloneResponse.value = "";
+  setLocalError(cloneActionError, "");
   try { await api("/api/hub/clone-jobs/" + encodeURIComponent(cloneJobId) + "/input", { input }); }
-  catch (error) { showError(error.message); }
+  catch (error) { setLocalError(cloneActionError, error.message); }
 };
 cloneCancel.onclick = async () => {
   if (!cloneJobId) return;
   cloneCancel.disabled = true;
+  setLocalError(cloneActionError, "");
   setClonePhase(null, "Cancelling…");
   try { await api("/api/hub/clone-jobs/" + encodeURIComponent(cloneJobId) + "/cancel"); }
-  catch (error) { showError(error.message); cloneCancel.disabled = false; }
+  catch (error) { setLocalError(cloneActionError, error.message); cloneCancel.disabled = false; }
 };
-// Back/forward restores this page from WebKit's page cache exactly as we
-// left it — including a stale opening overlay and busy buttons. Clear the
-// overlay and re-render from fresh state.
 window.addEventListener("pageshow", event => {
   if (!event.persisted) return;
   for (const overlay of document.querySelectorAll(".nav-overlay")) overlay.remove();
   closeCloneEvents();
-  // Preserve the active clone's busy hold, but discard a navigation hold
-  // left behind by the page we returned from.
   uiBusy = cloneJobId ? 1 : 0;
   cloneBusy = Boolean(cloneJobId);
   if (cloneJobId) connectCloneEvents();
-  refresh(true);
   loadBrowser();
-  loadDevices();
+  loadCloneCredentials();
 });
-refresh();
 loadBrowser();
-loadDevices();
+loadCloneCredentials();
 if (cloneJobId) {
   clonePanel.hidden = false;
   cloneBusy = true;
@@ -934,9 +1738,109 @@ if (cloneJobId) {
   setClonePhase(null, "Reconnecting…");
   connectCloneEvents();
 }
-setInterval(refresh, 5000);
+}
+function values(form, name) {
+  return [...form.querySelectorAll('[name="' + name + '"]:checked')].map(input => input.value);
+}
+function bindCredentialForm(id, endpoint, buildBody) {
+  const form = document.getElementById(id);
+  const errorTarget = form.querySelector("[data-form-error]");
+  form.onsubmit = async event => {
+    event.preventDefault();
+    setLocalError(errorTarget, "");
+    const button = form.querySelector('button[type="submit"]');
+    await withBusy(button, "Working…", async () => {
+      try {
+        const data = new FormData(form);
+        const body = await buildBody(data, form);
+        await api(endpoint, body);
+        form.reset();
+        await loadCredentials();
+      } catch (error) {
+        setLocalError(errorTarget, error.message);
+      } finally {
+        form.querySelectorAll('input[type="password"], input[type="file"], textarea').forEach(input => { input.value = ""; });
+      }
+    });
+  };
+}
+function initSettingsPage() {
+  initSharedUidAdvisory();
+  for (const reveal of document.querySelectorAll("[data-reveal-secret]")) {
+    const field = document.getElementById(reveal.dataset.revealSecret);
+    reveal.onclick = () => {
+      const masked = field.classList.toggle("secret-paste-masked");
+      reveal.textContent = masked ? "Reveal" : "Hide";
+      reveal.setAttribute("aria-pressed", String(!masked));
+      field.focus();
+    };
+  }
+  bindCredentialForm("ssh-generate-form", credentialPath + "/ssh/generate", (data, form) => ({
+    name: data.get("name"), capabilities: values(form, "capabilities"), passphrase: data.get("passphrase"),
+  }));
+  bindCredentialForm("ssh-import-form", credentialPath + "/ssh/import", async (data, form) => {
+    const file = data.get("privateKeyFile");
+    const pastedKey = String(data.get("privateKey") || "");
+    const hasFile = file instanceof File && file.name !== "";
+    const hasPaste = pastedKey.trim() !== "";
+    if (hasFile === hasPaste) throw new Error("Choose exactly one private key source: upload a file or paste a key.");
+    if (hasFile && file.size > 1024 * 1024) throw new Error("SSH private key exceeds the 1 MiB size limit.");
+    const privateKey = hasFile ? await file.text() : pastedKey;
+    return { name: data.get("name"), capabilities: values(form, "capabilities"), privateKey, passphrase: data.get("passphrase") };
+  });
+  bindCredentialForm("openpgp-generate-form", credentialPath + "/openpgp/generate", data => ({
+    name: data.get("name"), userId: data.get("userId"), passphrase: data.get("passphrase"),
+  }));
+  bindCredentialForm("openpgp-import-form", credentialPath + "/openpgp/import", data => ({
+    name: data.get("name"), privateKey: data.get("privateKey"),
+  }));
+  bindCredentialForm("token-form", credentialPath + "/token", (data, form) => {
+    const username = String(data.get("username") || "").trim();
+    const body = { name: data.get("name"), host: data.get("host"), token: data.get("token"), capabilities: values(form, "capabilities") };
+    if (username) body.username = username;
+    return body;
+  });
+  window.addEventListener("pageshow", event => {
+    if (!event.persisted) return;
+    loadSettingsState();
+    loadDevices();
+    loadCredentials();
+    loadTools();
+  });
+  loadSettingsState();
+  loadDevices();
+  loadCredentials();
+  loadTools();
+}
+if (pageMode === "dashboard") {
+  window.addEventListener("pageshow", event => {
+    if (!event.persisted) return;
+    for (const overlay of document.querySelectorAll(".nav-overlay")) overlay.remove();
+    uiBusy = 0;
+    refresh(true);
+  });
+  loadDashboardCredentials().catch(() => {});
+  refresh();
+  setInterval(refresh, 5000);
+} else if (pageMode === "settings") {
+  initSettingsPage();
+} else if (pageMode === "clone") {
+  initClonePage();
+}
 </script>`,
   );
+}
+
+export function dashboardPage(authenticatedUser: string): string {
+  return authenticatedPage("dashboard", authenticatedUser);
+}
+
+export function clonePage(authenticatedUser: string): string {
+  return authenticatedPage("clone", authenticatedUser);
+}
+
+export function settingsPage(authenticatedUser: string): string {
+  return authenticatedPage("settings", authenticatedUser);
 }
 
 export function stoppedSessionPage(workspaceId: string, registered: boolean): string {
