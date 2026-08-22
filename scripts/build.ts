@@ -72,5 +72,27 @@ if (result.exitCode !== 0) {
   process.exit(result.exitCode ?? 1);
 }
 
+// Bun 1.4.0 emits macOS binaries whose embedded signature does not match the
+// bytes it wrote — `codesign -v` reports "code or signature have been
+// modified" — and the arm64 kernel SIGKILLs those on exec: exit 137, no
+// output, nothing on stderr. That is what broke the Edge nightly, whose smoke
+// step could only report that the server never came up.
+//
+// Re-signing ad-hoc writes a valid signature over the finished binary. The
+// release and edge pipelines replace it with a Developer ID signature later,
+// so this only has to hold until the smoke test can run the artifact.
+const targetsDarwin = target ? target.includes("darwin") : process.platform === "darwin";
+if (targetsDarwin && process.platform === "darwin") {
+  const signed = Bun.spawnSync({
+    cmd: ["codesign", "--force", "--sign", "-", outfile],
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  if (signed.exitCode !== 0) {
+    console.error(`codesign failed for ${path.relative(root, outfile)} — the binary would be killed on launch`);
+    process.exit(signed.exitCode ?? 1);
+  }
+}
+
 const label = target ? ` [${target}]` : "";
 console.log(`built ${path.relative(root, outfile)}${label} (v${buildInfo.version} · ${buildInfo.commitShort})`);
