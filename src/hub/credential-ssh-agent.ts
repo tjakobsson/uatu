@@ -51,11 +51,35 @@ async function readOwnership(filePath: string): Promise<SshAgentOwnership | unde
   if (typeof process.getuid === "function" && stats.uid !== process.getuid()) {
     throw new Error("SSH agent ownership record has the wrong owner");
   }
+  let parsed: unknown;
   try {
-    return parseOwnership(JSON.parse(await fs.readFile(filePath, "utf8")));
+    parsed = JSON.parse(await fs.readFile(filePath, "utf8"));
   } catch (error) {
-    throw new Error("SSH agent ownership record is corrupt or has an unsupported version", { cause: error });
+    throw new Error(
+      `SSH agent ownership record at ${filePath} is not valid JSON. ${unreadableRecordAdvice(filePath)}`,
+      { cause: error },
+    );
   }
+  try {
+    return parseOwnership(parsed);
+  } catch (error) {
+    throw new Error(
+      `SSH agent ownership record at ${filePath} is corrupt or has an unsupported version. `
+        + unreadableRecordAdvice(filePath),
+      { cause: error },
+    );
+  }
+}
+
+// Manual-recovery guidance for a record this binary cannot read — written by
+// a different (usually newer) build, or damaged on disk. Deleting only the
+// record would be a trap: if it belongs to a live guardian, that orphans the
+// agent, leaves both sockets behind as unowned artifacts the next start
+// fails closed on, and destroys the authenticated record cleanup needed.
+// Everything must be retired together; the hub recreates the directory.
+function unreadableRecordAdvice(filePath: string): string {
+  return `Stop uatu, terminate any uatu-managed ssh-agent and its supervisor, `
+    + `then remove ${path.dirname(filePath)} and start again.`;
 }
 
 async function readLine(

@@ -397,3 +397,37 @@ describe("ManagedSshAgent", () => {
     expect(current.nonce).not.toBe(previous.nonce);
   }, 15_000);
 });
+
+describe("unreadable ownership records", () => {
+  // There is deliberately no migration here. The only format that ever
+  // preceded v2 — a v1 record with { pid, socketDevice, socketInode } —
+  // existed solely in pre-merge feature-branch builds and never shipped in
+  // any release, so an unreadable record means a different build's guardian
+  // or disk damage. The error must name the file and give advice that
+  // retires everything together: deleting only the record would orphan a
+  // live guardian and strand its sockets as unowned artifacts.
+  test("names the file and directs recovery at the whole runtime directory", async () => {
+    const { runtime, executable } = await fixture();
+    const recordPath = path.join(runtime, "ssh-agent.json");
+    await writeFile(recordPath, JSON.stringify({ version: 99, nonce: "nope" }), { mode: 0o600 });
+
+    await expect(manager(runtime, executable).start()).rejects.toThrow(recordPath);
+    await expect(manager(runtime, executable).start()).rejects.toThrow(`remove ${runtime}`);
+  });
+
+  test("reports unparseable JSON separately from an unsupported version", async () => {
+    const { runtime, executable } = await fixture();
+    await writeFile(path.join(runtime, "ssh-agent.json"), "{ not json", { mode: 0o600 });
+
+    await expect(manager(runtime, executable).start()).rejects.toThrow(/not valid JSON/);
+  });
+
+  test("treats the never-released v1 format as unsupported, with the same advice", async () => {
+    const { runtime, executable } = await fixture();
+    await writeFile(path.join(runtime, "ssh-agent.json"), JSON.stringify({
+      version: 1, nonce: "a".repeat(64), pid: 1, socketDevice: 1, socketInode: 1,
+    }), { mode: 0o600 });
+
+    await expect(manager(runtime, executable).start()).rejects.toThrow(`remove ${runtime}`);
+  });
+});
