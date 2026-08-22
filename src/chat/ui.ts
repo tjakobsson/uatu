@@ -171,6 +171,11 @@ export function initChat(): void {
   let renderFrame: number | null = null;
   let submitting = false;
   let cancelling = false;
+  // Bumped on every main-projection snapshot install. queueRevision restarts
+  // at zero with each fresh projection, so an in-flight held echo compares
+  // this epoch too — a revision captured before a reload must never pass
+  // against the replacement projection's coincidentally equal revision.
+  let projectionEpoch = 0;
   // A failed send leaves acceptance unknown — the server may already hold a
   // receipt for the request. Resubmitting the same text reuses its id so the
   // receipt dedupes instead of starting a second agent turn. Keyed per
@@ -987,6 +992,11 @@ export function initChat(): void {
       const snapshot = await api.snapshot(id);
       if (token !== selectionGeneration) return;
       projection = projectionFromSnapshot(snapshot, acceptedDrafts);
+      // Every snapshot install invalidates in-flight held echoes: the fresh
+      // projection's queueRevision restarts at zero, so a revision captured
+      // before the reload could coincide with it and let a stale echo
+      // through. The epoch is what cannot be coincided with.
+      projectionEpoch += 1;
       conversations = conversations.map(item => item.id === snapshot.conversation.id ? snapshot.conversation : item);
       renderConfiguration();
       announce(snapshot.items.length ? "" : "Start this conversation by sending a message.");
@@ -1684,8 +1694,10 @@ export function initChat(): void {
     setComposerError(null);
     // Captured before the round trip: a queue event that lands while the
     // acceptance is in flight makes the stream authoritative, and the local
-    // held echo below must then stand down.
+    // held echo below must then stand down. The epoch catches the same
+    // staleness across a projection reload, where the revision restarts.
     const queueRevisionAtSubmit = projection.queueRevision;
+    const projectionEpochAtSubmit = projectionEpoch;
     // Optimistic send: the message shows immediately and the input clears;
     // on failure the draft is removed and the text restored.
     projection = addAcceptedDraft(projection, { requestId, messageId: `pending:${requestId}`, text });
@@ -1712,9 +1724,13 @@ export function initChat(): void {
         // the server's queue event restates the same state and converges. A
         // dispatched acceptance becomes a timeline item. The echo carries the
         // pre-flight queue revision so a delivery or removal that outran the
-        // acceptance is not resurrected as a phantom entry.
+        // acceptance is not resurrected as a phantom entry — and stands down
+        // entirely if the projection was reloaded meanwhile, because the
+        // fresh snapshot already told the truth about the queue.
         projection = accepted.held
-          ? noteQueuedMessage(projection, { id: accepted.messageId, text, queuedAt: Date.now(), requestId }, queueRevisionAtSubmit)
+          ? projectionEpoch === projectionEpochAtSubmit
+            ? noteQueuedMessage(projection, { id: accepted.messageId, text, queuedAt: Date.now(), requestId }, queueRevisionAtSubmit)
+            : removeAcceptedDraft(projection, requestId)
           : confirmAcceptedDraft(projection, { requestId, messageId: accepted.messageId, text });
         renderConfiguration();
         scheduleRender(true);

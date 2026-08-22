@@ -1518,17 +1518,18 @@ export class ConversationProjection {
       this.timeline.delete(update.itemId);
       return this.replay.publish({ type: "item.remove", itemId: update.itemId });
     }
-    if (update.kind === "status") {
-      // A terminal report landing while a locally admitted prompt is still
-      // in flight can only describe the PREVIOUS turn: "sending" exists
-      // purely between our dispatch and the provider's acceptance, so the
-      // turn it announces the end of cannot be the one being started. The
-      // merged native and classic streams can both announce one completion,
-      // and applying the straggler here would flap the status and release
-      // the next held message into a turn that is still starting.
-      if (this.status === "sending" && update.status === "completed") return undefined;
-      return this.statusUpdate(update.status, update.message);
-    }
+    // Status reports apply unconditionally, including a completion that
+    // lands while a dispatch is still awaiting acceptance: the classic
+    // command route resolves only when the whole turn finishes, so that
+    // completion is genuine and dropping it would stick the conversation at
+    // "running" with the queue frozen. The cost is that a straggling
+    // duplicate of the PREVIOUS turn's completion (the merged native and
+    // classic streams can both announce one end) may release the next held
+    // message early — bounded harm, because delivery admits with the
+    // provider's own queue semantics and OpenCode holds it until the active
+    // turn actually ends; only removability is lost early. Without turn
+    // identity on status events the two cases cannot be told apart here.
+    if (update.kind === "status") return this.statusUpdate(update.status, update.message);
     const wasNew = update.item !== undefined && !this.timeline.has(update.itemId);
     if (wasNew && update.item) this.timeline.set(update.itemId, update.item);
     const before = this.text.value(update.identity);

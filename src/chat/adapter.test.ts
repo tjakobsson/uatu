@@ -992,7 +992,35 @@ describe("prompt, abort, permission, and question mutations", () => {
     expect(adapter.projectionForTests("session").status).toBe("completed");
   });
 
-  test("a straggling completion of the previous turn does not release a second delivery", async () => {
+  test("a completion that outruns the acceptance response wins over the optimistic promotion", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    let message = 0;
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
+
+    // The classic command route resolves only when the whole turn finishes,
+    // so the turn's genuine completion can reach the pump before the
+    // acceptance response does. It must apply — dropping it would leave the
+    // conversation "running" forever with the queue frozen.
+    let releaseAcceptance!: () => void;
+    const gate = new Promise<void>(resolve => { releaseAcceptance = resolve; });
+    let entered!: () => void;
+    const enteredDispatch = new Promise<void>(resolve => { entered = resolve; });
+    const accept = provider.prompt.bind(provider);
+    provider.prompt = async (sessionId, input) => {
+      entered();
+      await gate;
+      return accept(sessionId, input);
+    };
+    const pending = adapter.prompt("session", "r1", "finishes before acceptance");
+    await enteredDispatch;
+    adapter.projectionForTests("session").apply({ kind: "status", status: "completed" });
+    releaseAcceptance();
+    await pending;
+    expect(adapter.projectionForTests("session").status).toBe("completed");
+  });
+
+  test("a straggling completion hands the next head to the provider's own queue rather than corrupting it", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
     let message = 0;
@@ -1000,11 +1028,15 @@ describe("prompt, abort, permission, and question mutations", () => {
 
     expect((await adapter.prompt("session", "r1", "first")).held).toBe(false);
     await adapter.prompt("session", "r2", "second");
-    const third = await adapter.prompt("session", "r3", "third");
+    await adapter.prompt("session", "r3", "third");
 
-    // Delivery of "second" stalls in dispatch, holding the projection at
-    // "sending" — the window in which the merged provider streams can
-    // restate the PREVIOUS turn's completion.
+    // Delivery of "second" stalls in dispatch while the merged provider
+    // streams restate the PREVIOUS turn's completion. Without turn identity
+    // on status events this straggler cannot be told apart from a genuine
+    // fast completion, so it applies — the accepted trade-off is that
+    // "third" is admitted early under the provider's own queue delivery
+    // (OpenCode holds it until the active turn ends); it only leaves the
+    // removable workspace queue sooner than ideal.
     let releaseDelivery!: () => void;
     const gate = new Promise<void>(resolve => { releaseDelivery = resolve; });
     let entered!: () => void;
@@ -1017,15 +1049,11 @@ describe("prompt, abort, permission, and question mutations", () => {
     };
     adapter.projectionForTests("session").apply({ kind: "status", status: "completed" });
     await enteredDelivery;
-    // The duplicate terminal report lands mid-admission and must be ignored.
-    expect(adapter.projectionForTests("session").apply({ kind: "status", status: "completed" })).toBeUndefined();
-    expect(adapter.projectionForTests("session").status).toBe("sending");
+    adapter.projectionForTests("session").apply({ kind: "status", status: "completed" });
     releaseDelivery();
-    await new Promise(resolve => setTimeout(resolve, 20));
-
-    // Only "second" was admitted; "third" is still held and removable.
-    expect(provider.prompts).toHaveLength(2);
-    expect((await adapter.history("session")).queued).toEqual([expect.objectContaining({ id: third.messageId })]);
+    for (let attempt = 0; attempt < 200 && provider.prompts.length < 3; attempt += 1) await new Promise(resolve => setTimeout(resolve, 1));
+    expect(provider.prompts[2]).toEqual(expect.objectContaining({ text: "third", delivery: "queue" }));
+    expect((await adapter.history("session")).queued).toEqual([]);
   });
 
   test("a delivery-time session lookup failure pauses the queue instead of stranding it", async () => {
