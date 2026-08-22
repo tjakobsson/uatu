@@ -962,6 +962,36 @@ describe("prompt, abort, permission, and question mutations", () => {
     expect((await adapter.history("session")).queued).toEqual([expect.objectContaining({ id: third.messageId, text: "third" })]);
   });
 
+  test("a fast completion during the first-prompt rename is not swallowed by the straggler guard", async () => {
+    const provider = new FakeProvider();
+    provider.agent.capabilities.push("conversation-rename");
+    provider.sessions = [{ ...fixtureSession("session"), title: "New session - now" }];
+    let releaseRename!: () => void;
+    const gate = new Promise<void>(resolve => { releaseRename = resolve; });
+    let entered!: () => void;
+    const enteredRename = new Promise<void>(resolve => { entered = resolve; });
+    provider.renameSession = async (id, title) => {
+      entered();
+      await gate;
+      const renamed = { ...provider.sessions.find(session => session.id === id)!, title };
+      provider.sessions[0] = renamed;
+      return renamed;
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => "message" });
+
+    const pending = adapter.prompt("session", "r1", "fast turn");
+    await enteredRename;
+    // The just-accepted turn finishes while the rename round trips are still
+    // in flight. "sending" ended at acceptance, so this genuine completion
+    // must apply — swallowing it as a straggler would leave the conversation
+    // "running" forever and the queue never delivering.
+    adapter.projectionForTests("session").apply({ kind: "status", status: "completed" });
+    expect(adapter.projectionForTests("session").status).toBe("completed");
+    releaseRename();
+    await pending;
+    expect(adapter.projectionForTests("session").status).toBe("completed");
+  });
+
   test("a straggling completion of the previous turn does not release a second delivery", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];

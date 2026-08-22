@@ -651,6 +651,14 @@ export class OpenCodeChatAdapter {
       const accepted = slash
         ? await this.provider.command(conversationId, { id: input.messageId, name: slash.name, arguments: slash.arguments, model: input.model, mode, variant })
         : await this.provider.prompt(conversationId, { id: input.messageId, text, delivery: "queue", model: input.model, mode, variant });
+      // "sending" ends at acceptance, BEFORE the rename side-work below: the
+      // straggler guard in ConversationProjection.apply treats a completion
+      // seen during "sending" as belonging to the previous turn, so the
+      // state must not span the rename's provider round trips — a fast
+      // turn's genuine completion arriving there would be swallowed and the
+      // conversation stuck "running". The pump's terminal status outranks
+      // this optimistic promotion for a turn that ends later.
+      if (projection.status === "sending") projection.statusUpdate("running");
       if (renameToFirstPrompt) {
         try {
           // A manual rename can finish while prompt validation is still
@@ -667,10 +675,6 @@ export class OpenCodeChatAdapter {
       }
       projection.upsert({ id: `message:${accepted.messageId}`, type: "user_message", createdAt: Date.now(), text, requestId: input.requestId });
       const configuration = this.commitConfiguration(conversationId, projection, this.configurations.get(conversationId) ?? {}, input.model, mode, variant);
-      // A fast command can finish its whole turn while the dispatch
-      // resolves; the pump's terminal status then outranks our optimistic
-      // promotion, or the turn sticks at "working" forever.
-      if (projection.status === "sending") projection.statusUpdate("running");
       return { messageId: accepted.messageId, configuration, ...(conversation ? { conversation } : {}) };
     } catch (error) {
       const mapped = error instanceof UnsupportedVariantSelectionError
