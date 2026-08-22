@@ -53,20 +53,32 @@ async function detectBackend(): Promise<TerminalBackend> {
 const MINIMUM_BUN_TERMINAL_VERSION = [1, 3, 5] as const;
 
 export function supportsBunTerminal(version: string): TerminalBackend {
-  const parts = version.split(".").map(part => Number.parseInt(part, 10));
-  if (parts.length < 3 || parts.some(Number.isNaN)) {
+  // Build metadata (`+...`) does not affect precedence; a prerelease (`-...`)
+  // does, and sorts below its own release.
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(version.trim());
+  if (!match) {
     return { available: false, reason: `unrecognized Bun version "${version}"` };
   }
+  const core = [Number(match[1]), Number(match[2]), Number(match[3])];
+  const prerelease = match[4];
+
+  let comparison = 0;
   for (let i = 0; i < MINIMUM_BUN_TERMINAL_VERSION.length; i += 1) {
-    const actual = parts[i]!;
-    const required = MINIMUM_BUN_TERMINAL_VERSION[i]!;
-    if (actual > required) break;
-    if (actual < required) {
-      return {
-        available: false,
-        reason: `Bun ${version} ignores Bun.spawn { terminal } (needs >= 1.3.5)`,
-      };
+    const difference = core[i]! - MINIMUM_BUN_TERMINAL_VERSION[i]!;
+    if (difference !== 0) {
+      comparison = difference;
+      break;
     }
+  }
+
+  // 1.3.5-canary.1 predates 1.3.5 and may ship without the PTY
+  // implementation, so fail closed on a prerelease *of the minimum itself*.
+  // A prerelease of any later version is already past the gate.
+  if (comparison < 0 || (comparison === 0 && prerelease !== undefined)) {
+    return {
+      available: false,
+      reason: `Bun ${version} ignores Bun.spawn { terminal } (needs >= 1.3.5)`,
+    };
   }
   return { available: true, spawn: spawnPty };
 }

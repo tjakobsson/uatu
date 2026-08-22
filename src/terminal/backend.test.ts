@@ -47,6 +47,24 @@ describe("supportsBunTerminal", () => {
     expect(supportsBunTerminal(version as string).available).toBe(expected);
   });
 
+  it("rejects a prerelease of the minimum version", () => {
+    // 1.3.5-canary.1 sorts below 1.3.5 and may predate the PTY work, so
+    // parseInt-style truncation to "5" would wrongly advertise the terminal.
+    const result = supportsBunTerminal("1.3.5-canary.1");
+    expect(result.available).toBe(false);
+    if (result.available) return;
+    expect(result.reason).toContain("1.3.5");
+  });
+
+  it.each([
+    ["1.4.0-canary.1", true],
+    ["2.0.0-rc.1", true],
+    ["1.3.4-canary.1", false],
+    ["1.3.5+build.7", true],
+  ])("applies semver precedence to %s", (version, expected) => {
+    expect(supportsBunTerminal(version as string).available).toBe(expected);
+  });
+
   it("fails closed on an unparseable version", () => {
     const result = supportsBunTerminal("not-a-version");
     expect(result.available).toBe(false);
