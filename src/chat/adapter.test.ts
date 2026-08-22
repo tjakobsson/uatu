@@ -920,6 +920,77 @@ describe("prompt, abort, permission, and question mutations", () => {
     expect((await adapter.history("session")).queued).toEqual([]);
   });
 
+  test("cancellation waits for an in-flight delivery and then interrupts the turn it started", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    let message = 0;
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
+
+    expect((await adapter.prompt("session", "r1", "first")).held).toBe(false);
+    await adapter.prompt("session", "r2", "second");
+    const third = await adapter.prompt("session", "r3", "third");
+
+    // Delivery of "second" enters dispatch and stalls at the provider.
+    let releaseDelivery!: () => void;
+    const gate = new Promise<void>(resolve => { releaseDelivery = resolve; });
+    let entered!: () => void;
+    const enteredDelivery = new Promise<void>(resolve => { entered = resolve; });
+    const accept = provider.prompt.bind(provider);
+    provider.prompt = async (sessionId, input) => {
+      entered();
+      await gate;
+      return accept(sessionId, input);
+    };
+    adapter.projectionForTests("session").statusUpdate("completed");
+    await enteredDelivery;
+
+    // Cancellation queues behind the started delivery rather than letting it
+    // slip past the pause and start work after the interrupt.
+    const cancelled = adapter.abort("session", "cancel-1");
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(provider.interrupts).toEqual([]);
+    releaseDelivery();
+    await cancelled;
+    expect(provider.interrupts).toEqual(["session"]);
+    expect(provider.prompts).toHaveLength(2);
+
+    // The delivery that had started was admitted and then interrupted; the
+    // one that had not stays held through the trailing idle.
+    adapter.projectionForTests("session").statusUpdate("idle");
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(provider.prompts).toHaveLength(2);
+    expect((await adapter.history("session")).queued).toEqual([expect.objectContaining({ id: third.messageId, text: "third" })]);
+  });
+
+  test("a held message freezes the configuration it was submitted under", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const modelA = { providerId: "anthropic", modelId: "claude" };
+    const modelB = { providerId: "openai", modelId: "gpt" };
+    provider.configurations.set("session", { model: modelA });
+    provider.models.push({ selection: modelB, provider: "OpenAI", name: "GPT" });
+    let message = 0;
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
+    const until = async (predicate: () => boolean) => {
+      for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) await new Promise(resolve => setTimeout(resolve, 1));
+      expect(predicate()).toBe(true);
+    };
+
+    expect((await adapter.prompt("session", "r1", "first")).held).toBe(false);
+    // Submitted with no explicit model — under the configuration the user
+    // saw at the time (model A)...
+    await adapter.prompt("session", "r2", "second");
+    // ...before a later submission moves the conversation to model B.
+    await adapter.prompt("session", "r3", "third", modelB);
+
+    adapter.projectionForTests("session").statusUpdate("completed");
+    await until(() => provider.prompts.length === 2);
+    expect(provider.prompts[1]).toEqual(expect.objectContaining({ text: "second", model: modelA }));
+    adapter.projectionForTests("session").statusUpdate("completed");
+    await until(() => provider.prompts.length === 3);
+    expect(provider.prompts[2]).toEqual(expect.objectContaining({ text: "third", model: modelB }));
+  });
+
   test("the held queue is bounded and a full queue refuses the submission without altering it", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];

@@ -521,14 +521,24 @@ export class OpenCodeChatAdapter {
           || queue.reduce((total, entry) => total + Buffer.byteLength(entry.text), 0) + Buffer.byteLength(text) > MAX_HELD_TEXT_BYTES) {
           throw new ChatQueueFullError();
         }
+        // The EFFECTIVE selections are resolved and frozen at submission, not
+        // just the explicitly supplied ones: a later submission may move the
+        // conversation's configuration before this delivers, and a held
+        // message that stored nothing would silently inherit that drift while
+        // its delivery reported the drifted configuration as its own. An
+        // explicit model without a variant clears the variant, exactly as an
+        // immediate dispatch commits it.
+        const heldModel = variantModel ?? currentConfiguration.model;
+        const heldMode = mode ?? currentConfiguration.mode;
+        const heldVariant = variant ?? (model === undefined ? currentConfiguration.variant : undefined);
         const held: HeldMessage = {
           id: this.id(),
           text,
           queuedAt: Date.now(),
           requestId,
-          ...(variantModel ? { model: variantModel } : {}),
-          ...(mode ? { mode } : {}),
-          ...(variant ? { variant } : {}),
+          ...(heldModel ? { model: heldModel } : {}),
+          ...(heldMode ? { mode: heldMode } : {}),
+          ...(heldVariant ? { variant: heldVariant } : {}),
         };
         queue.push(held);
         this.heldQueues.set(conversationId, queue);
@@ -782,7 +792,12 @@ export class OpenCodeChatAdapter {
   }
 
   async abort(conversationId: string, requestId: string): Promise<{ cancelled: true }> {
-    return this.receipts.run(`cancel:${conversationId}:${requestId}`, async () => {
+    // Serialized through the admission lane like delivery and removal: a
+    // delivery that has already started dispatching cannot be stopped by the
+    // dormant flag alone, so cancellation waits for it to finish admitting
+    // and then interrupts the turn it just started — while deliveries that
+    // have not started find the queue paused.
+    return this.receipts.run(`cancel:${conversationId}:${requestId}`, () => this.enqueuePromptAdmission(conversationId, async () => {
       await this.requireSession(conversationId);
       const projection = this.projection(conversationId);
       // Cancel means stop: held messages stay queued and removable, and none
@@ -804,7 +819,7 @@ export class OpenCodeChatAdapter {
         projection.statusUpdate("failed", errorMessage(error));
         throw error;
       }
-    });
+    }));
   }
 
   respondPermission(conversationId: string, requestId: string, clientRequestId: string, outcome: PermissionOutcome): Promise<{ outcome: PermissionOutcome }> {
