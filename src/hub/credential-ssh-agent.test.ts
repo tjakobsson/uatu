@@ -397,3 +397,54 @@ describe("ManagedSshAgent", () => {
     expect(current.nonce).not.toBe(previous.nonce);
   }, 15_000);
 });
+
+describe("v1 ownership migration", () => {
+  // Builds before the agent/supervisor split wrote a v1 record. parseOwnership
+  // rejects it, and until this migration existed that error was fatal: `uatu
+  // hub` refused to start on any install upgraded across that change.
+  const legacyRecord = (pid: number, socketDevice = 1, socketInode = 1) => JSON.stringify({
+    version: 1,
+    nonce: "a".repeat(64),
+    pid,
+    socketDevice,
+    socketInode,
+  });
+
+  test("starts after retiring a v1 record instead of failing closed", async () => {
+    const { runtime, executable } = await fixture();
+    await writeFile(path.join(runtime, "ssh-agent.json"), legacyRecord(process.pid), { mode: 0o600 });
+
+    const socketPath = await manager(runtime, executable).start();
+
+    expect(socketPath).toBe(path.join(runtime, "ssh-agent.sock"));
+    const record = await ownership(runtime);
+    expect(record.version).toBe(2);
+  });
+
+  test("removes the superseded record rather than leaving it behind", async () => {
+    const { runtime, executable } = await fixture();
+    const recordPath = path.join(runtime, "ssh-agent.json");
+    await writeFile(recordPath, legacyRecord(process.pid), { mode: 0o600 });
+
+    await manager(runtime, executable).start();
+    await ownership(runtime);
+
+    const rewritten = JSON.parse(await readFile(recordPath, "utf8")) as { version: number };
+    expect(rewritten.version).toBe(2);
+  });
+
+  test("still fails closed on a genuinely corrupt record, and says which file", async () => {
+    const { runtime, executable } = await fixture();
+    const recordPath = path.join(runtime, "ssh-agent.json");
+    await writeFile(recordPath, JSON.stringify({ version: 99, nonce: "nope" }), { mode: 0o600 });
+
+    await expect(manager(runtime, executable).start()).rejects.toThrow(recordPath);
+  });
+
+  test("reports unparseable JSON separately from an unsupported version", async () => {
+    const { runtime, executable } = await fixture();
+    await writeFile(path.join(runtime, "ssh-agent.json"), "{ not json", { mode: 0o600 });
+
+    await expect(manager(runtime, executable).start()).rejects.toThrow(/not valid JSON/);
+  });
+});

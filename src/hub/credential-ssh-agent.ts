@@ -5,9 +5,11 @@ import path from "node:path";
 import { resolveUatuArgv } from "./backend";
 import {
   guardianMac,
+  parseLegacyOwnership,
   parseOwnership,
   sameSocketIdentity,
   socketIdentity,
+  type LegacySshAgentOwnership,
   type SshAgentOwnership,
   type GuardianCommand,
 } from "./credential-ssh-supervisor";
@@ -28,6 +30,19 @@ export type ManagedSshAgentOptions = {
   stopTimeoutMs?: number;
   spawnSupervisor?: (argv: string[], options: Parameters<typeof Bun.spawn>[1]) => SupervisorProcess;
 };
+
+// A recorded pid can have been recycled by an unrelated process since the
+// record was written, so confirm it still looks like the agent we started
+// before sending it a signal.
+async function isLegacyAgentProcess(pid: number): Promise<boolean> {
+  try {
+    const result = Bun.spawnSync({ cmd: ["ps", "-p", String(pid), "-o", "comm="], stdout: "pipe", stderr: "ignore" });
+    if (result.exitCode !== 0) return false;
+    return result.stdout.toString().trim().endsWith("ssh-agent");
+  } catch {
+    return false;
+  }
+}
 
 function isMissing(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
@@ -51,10 +66,38 @@ async function readOwnership(filePath: string): Promise<SshAgentOwnership | unde
   if (typeof process.getuid === "function" && stats.uid !== process.getuid()) {
     throw new Error("SSH agent ownership record has the wrong owner");
   }
+  let parsed: unknown;
   try {
-    return parseOwnership(JSON.parse(await fs.readFile(filePath, "utf8")));
+    parsed = JSON.parse(await fs.readFile(filePath, "utf8"));
   } catch (error) {
-    throw new Error("SSH agent ownership record is corrupt or has an unsupported version", { cause: error });
+    throw new Error(
+      `SSH agent ownership record at ${filePath} is not valid JSON. Stop uatu, remove that file, and start again.`,
+      { cause: error },
+    );
+  }
+  try {
+    return parseOwnership(parsed);
+  } catch (error) {
+    // A v1 record is a recognised older format, not corruption: it predates
+    // the agent/supervisor split. Hand it to the caller to retire rather
+    // than refusing to start, which is what stranded upgraded installs.
+    try {
+      throw new LegacyOwnershipError(parseLegacyOwnership(parsed));
+    } catch (legacyError) {
+      if (legacyError instanceof LegacyOwnershipError) throw legacyError;
+    }
+    throw new Error(
+      `SSH agent ownership record at ${filePath} is corrupt or has an unsupported version. `
+        + "Stop uatu, remove that file, and start again.",
+      { cause: error },
+    );
+  }
+}
+
+class LegacyOwnershipError extends Error {
+  constructor(readonly legacy: LegacySshAgentOwnership) {
+    super("SSH agent ownership record uses the superseded v1 format");
+    this.name = "LegacyOwnershipError";
   }
 }
 
@@ -203,8 +246,50 @@ export class ManagedSshAgent {
     }
   }
 
+  // Retire an agent recorded in the superseded v1 format. The record names a
+  // pid and the device+inode of the socket it owned; both must still agree
+  // before anything is signalled, because a pid alone can have been reused.
+  private async retireLegacyAgent(legacy: LegacySshAgentOwnership): Promise<void> {
+    let socketMatches = false;
+    try {
+      const actual = await socketIdentity(this.socketPath);
+      socketMatches = actual.device === legacy.socketDevice && actual.inode === legacy.socketInode;
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+    }
+
+    if (socketMatches && await isLegacyAgentProcess(legacy.pid)) {
+      try {
+        process.kill(legacy.pid, "SIGTERM");
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error;
+      }
+      const deadline = Date.now() + this.stopTimeoutMs;
+      while (Date.now() < deadline) {
+        try {
+          process.kill(legacy.pid, 0);
+        } catch {
+          break;
+        }
+        await new Promise(resolve => setTimeout(resolve, POLL_MS));
+      }
+    }
+
+    for (const artifact of [this.socketPath, this.controlSocketPath, this.ownershipPath]) {
+      await fs.rm(artifact, { force: true });
+    }
+  }
+
   private async recoverRecordedAgent(): Promise<void> {
-    const record = await readOwnership(this.ownershipPath);
+    let record: SshAgentOwnership | undefined;
+    try {
+      record = await readOwnership(this.ownershipPath);
+    } catch (error) {
+      if (!(error instanceof LegacyOwnershipError)) throw error;
+      await this.retireLegacyAgent(error.legacy);
+      await this.assertNoGuardianQuarantines();
+      return;
+    }
     if (!record) {
       for (const artifact of [this.socketPath, this.controlSocketPath]) {
         try {
