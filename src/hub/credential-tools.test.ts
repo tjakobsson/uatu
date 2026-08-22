@@ -172,7 +172,9 @@ describe("credential tool probes", () => {
     // phrase match: a broken override printing similar words is not ssh-add
     // and must not be persisted in place of a usable path.
     const { filePath } = await executable("ssh-add");
-    await writeFile(filePath, "#!/bin/sh\nprintf 'authentication agent unavailable\\n' >&2\nexit 2\n", { mode: 0o700 });
+    // Embedding the full diagnostic inside other text must fail too — only
+    // the complete message as its own line identifies the real tool.
+    await writeFile(filePath, "#!/bin/sh\nprintf 'Could not open a connection to your authentication agent: unsupported\\n' >&2\nexit 2\n", { mode: 0o700 });
     const probe = await probeCredentialTool({ tool: "ssh-add", path: filePath, source: "override" });
     expect(probe.results.map(result => result.status)).toEqual(["ready", "unavailable", "not-applicable"]);
   });
