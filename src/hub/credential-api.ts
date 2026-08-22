@@ -260,6 +260,18 @@ export class CredentialApi {
     return this.dto(credentialId);
   }
 
+  preflightProviderCliRevocation(credentialId: string, body: JsonObject, operation: "disable" | "delete"): boolean {
+    let credential;
+    if (operation === "disable") {
+      fields(body, []);
+      credential = this.credential(credentialId);
+    } else {
+      credential = this.validateDelete(credentialId, body);
+    }
+    return credential.type === "token"
+      && credential.capabilities.some(capability => capability === "github-cli" || capability === "gitlab-cli");
+  }
+
   async assign(credentialId: string, body: JsonObject): Promise<CredentialAssignment> {
     fields(body, ["workspaceId", "role", "host", "replace"]);
     const workspaceId = id(body.workspaceId, "workspace id");
@@ -335,10 +347,7 @@ export class CredentialApi {
   }
 
   async delete(credentialId: string, body: JsonObject): Promise<boolean> {
-    fields(body, ["confirm", "unassign"]);
-    if (body.confirm !== true) throw new Error("credential deletion requires confirmation");
-    if (body.unassign !== undefined) bool(body.unassign, "unassign");
-    const credential = this.credential(credentialId);
+    const credential = this.validateDelete(credentialId, body);
     if (credential.type === "ssh") return this.requireSsh().delete(credentialId, body.unassign === true);
     if (credential.type === "openpgp") return this.services.openpgp.delete(credentialId, body.unassign === true);
     return this.services.tokens.delete(credentialId, body.unassign === true);
@@ -376,6 +385,18 @@ export class CredentialApi {
     id(credentialId, "credential id");
     const credential = this.services.metadata.snapshot().credentials.find(item => item.id === credentialId);
     if (!credential) throw new Error(`unknown credential: ${credentialId}`);
+    return credential;
+  }
+
+  private validateDelete(credentialId: string, body: JsonObject) {
+    fields(body, ["confirm", "unassign"]);
+    if (body.confirm !== true) throw new Error("credential deletion requires confirmation");
+    if (body.unassign !== undefined) bool(body.unassign, "unassign");
+    const credential = this.credential(credentialId);
+    const references = this.services.metadata.snapshot().assignments.filter(item => item.credentialId === credentialId);
+    if (references.length > 0 && body.unassign !== true) {
+      throw new Error(`credential is assigned to ${references.length} workspace default(s)`);
+    }
     return credential;
   }
 

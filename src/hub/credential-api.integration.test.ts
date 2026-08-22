@@ -6,7 +6,12 @@ import path from "node:path";
 import { assertOpenApiResponse, loadContract } from "../../tests/contracts/contract-harness";
 import { hashPassword, HubSessionStore, HUB_COOKIE_NAME } from "./auth";
 import type { HubConfig } from "./config";
-import { EMPTY_CREDENTIAL_CONTEXT_RESOLVER } from "./credential-context";
+import {
+  EMPTY_RESOLVED_CREDENTIAL_CONTEXT,
+  type ResolvedAuthenticationCredential,
+  type ResolvedCredentialContext,
+  type ResolvedSigningCredential,
+} from "./credential-context";
 import { CredentialMetadataStore, CredentialTokenStore, CredentialToolOverrideStore } from "./credential-store";
 import { CredentialToolManager } from "./credential-tools";
 import { CredentialApi, credentialApiError } from "./credential-api";
@@ -62,19 +67,66 @@ async function fixture(root: string) {
     gpgPath: null,
     gpgconfPath: null,
   });
+  const backendEvents = {
+    starts: [] as string[],
+    stops: [] as string[],
+    stopFailures: new Set<string>(),
+    runningProviderTokens: new Map<string, string[]>(),
+  };
   // A minimal startable backend so tests can exercise running-session
   // gating (revocation vs a live child) without real processes.
   const backend = {
-    start: async (entry: { id: string }) => ({
-      workspaceId: entry.id,
-      basePath: `/s/${entry.id}/`,
-      endpoint: { hostname: "127.0.0.1", port: 1 },
-      token: null,
-      exited: new Promise<number | null>(() => undefined),
-      stop: async () => {},
-    }),
+    start: async (entry: { id: string }, _basePath: string, credentials: ResolvedCredentialContext) => {
+      backendEvents.starts.push(entry.id);
+      const rawTokens = credentials.authentication.flatMap(item =>
+        "token" in item
+        && item.credential.capabilities.some(capability => capability === "github-cli" || capability === "gitlab-cli")
+          ? [item.token]
+          : []);
+      backendEvents.runningProviderTokens.set(entry.id, rawTokens);
+      return {
+        workspaceId: entry.id,
+        basePath: `/s/${entry.id}/`,
+        endpoint: { hostname: "127.0.0.1", port: 1 },
+        token: null,
+        exited: new Promise<number | null>(() => undefined),
+        stop: async () => {
+          backendEvents.stops.push(entry.id);
+          if (backendEvents.stopFailures.has(entry.id)) throw new Error(`${entry.id} refused stop`);
+          backendEvents.runningProviderTokens.delete(entry.id);
+        },
+      };
+    },
   };
-  const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
+  const sessions = new SessionManager(registry, { local: backend }, {
+    revision: workspaceId => JSON.stringify(metadata.snapshot().assignments.filter(item => item.workspaceId === workspaceId)),
+    runExclusive: operation => operation(),
+    resolve: async entry => {
+      const state = metadata.snapshot();
+      const assignments = state.assignments.filter(item => item.workspaceId === entry.id);
+      const authentication: ResolvedAuthenticationCredential[] = [];
+      let signing: ResolvedSigningCredential | null = null;
+      for (const assignment of assignments) {
+        const credential = state.credentials.find(item => item.id === assignment.credentialId);
+        if (!credential?.enabled) throw new Error(`credential is disabled: ${assignment.credentialId}`);
+        if (assignment.role === "signing") {
+          if (credential.type !== "token") signing = credential;
+        } else if (credential.type === "token") {
+          const token = tokenStore.get(credential.id);
+          if (token === undefined) throw new Error(`credential token is unavailable: ${credential.id}`);
+          authentication.push({ host: assignment.host, credential, token });
+        } else if (credential.type === "ssh") {
+          authentication.push({ host: assignment.host, credential });
+        }
+      }
+      return {
+        ...structuredClone(EMPTY_RESOLVED_CREDENTIAL_CONTEXT),
+        revision: JSON.stringify(assignments),
+        authentication,
+        signing,
+      };
+    },
+  });
   const config: HubConfig = {
     host: "127.0.0.1",
     port: 0,
@@ -101,7 +153,7 @@ async function fixture(root: string) {
     },
   });
   servers.push(server);
-  return { server, metadata, tokenStore, workspace, state, openpgp, registry, personalState, sessions };
+  return { server, metadata, tokenStore, tokens, workspace, state, openpgp, registry, personalState, sessions, backendEvents };
 }
 
 async function login(origin: string, name: string, password: string): Promise<string> {
@@ -515,6 +567,404 @@ describe("credential API integration", () => {
     expect(deletion.status).toBe(200);
     expect(f.metadata.snapshot().credentials).toEqual([]);
   });
+
+  test("stops provider-token sessions before disable and confirmed delete without stopping HTTPS-only or unrelated sessions", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-provider-revocation-"));
+    roots.push(root);
+    const f = await fixture(root);
+    const unrelatedPath = path.join(root, "unrelated");
+    await mkdir(unrelatedPath);
+    const unrelated = await f.registry.register(unrelatedPath);
+    const origin = `http://127.0.0.1:${f.server.port}`;
+    const cookie = await login(origin, "alice", "alice password");
+    const providerSecret = "raw-provider-environment-token";
+    const providerResponse = await post(origin, cookie, "/api/hub/credentials/token", {
+      name: "Provider token",
+      host: "github.com",
+      token: providerSecret,
+      capabilities: ["https-git", "github-cli"],
+    });
+    const providerId = ((await providerResponse.json()) as { credential: { id: string } }).credential.id;
+    const httpsResponse = await post(origin, cookie, "/api/hub/credentials/token", {
+      name: "HTTPS token",
+      host: "gitlab.com",
+      token: "live-helper-token",
+      capabilities: ["https-git"],
+    });
+    const httpsId = ((await httpsResponse.json()) as { credential: { id: string } }).credential.id;
+    expect((await post(origin, cookie, `/api/hub/credentials/${providerId}/assign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+    })).status).toBe(200);
+    expect((await post(origin, cookie, `/api/hub/credentials/${httpsId}/assign`, {
+      workspaceId: unrelated.id,
+      role: "authentication",
+      host: "gitlab.com",
+    })).status).toBe(200);
+    await Promise.all([f.sessions.start(f.workspace.id), f.sessions.start(unrelated.id)]);
+    expect(f.backendEvents.runningProviderTokens.get(f.workspace.id)).toEqual([providerSecret]);
+
+    const unconfirmedDelete = await post(origin, cookie, `/api/hub/credentials/${providerId}/delete`, { confirm: false, unassign: true });
+    expect(unconfirmedDelete.status).toBe(400);
+    const rejectedDelete = await post(origin, cookie, `/api/hub/credentials/${providerId}/delete`, { confirm: true });
+    expect(rejectedDelete.status).toBe(409);
+    const enable = await post(origin, cookie, `/api/hub/credentials/${providerId}/enable`, {});
+    expect(enable.status).toBe(200);
+    const httpsDisable = await post(origin, cookie, `/api/hub/credentials/${httpsId}/disable`, {});
+    expect(httpsDisable.status).toBe(200);
+    expect(f.backendEvents.stops).toEqual([]);
+    expect(f.sessions.isRunning(f.workspace.id)).toBe(true);
+    expect(f.sessions.isRunning(unrelated.id)).toBe(true);
+
+    const originalSetEnabled = f.tokens.setEnabled.bind(f.tokens);
+    f.tokens.setEnabled = async (credentialId, enabled) => {
+      if (credentialId === providerId && !enabled) {
+        expect(f.backendEvents.stops).toContain(f.workspace.id);
+        expect(f.sessions.isRunning(f.workspace.id)).toBe(false);
+      }
+      return originalSetEnabled(credentialId, enabled);
+    };
+    const disabled = await post(origin, cookie, `/api/hub/credentials/${providerId}/disable`, {});
+    expect(disabled.status).toBe(200);
+    expect(f.backendEvents.runningProviderTokens.has(f.workspace.id)).toBe(false);
+    expect(f.sessions.isRunning(unrelated.id)).toBe(true);
+
+    expect((await post(origin, cookie, `/api/hub/credentials/${providerId}/enable`, {})).status).toBe(200);
+    await f.sessions.start(f.workspace.id);
+    const originalDelete = f.tokens.delete.bind(f.tokens);
+    f.tokens.delete = async (credentialId, unassign) => {
+      if (credentialId === providerId) {
+        expect(f.sessions.isRunning(f.workspace.id)).toBe(false);
+        expect(f.backendEvents.runningProviderTokens.has(f.workspace.id)).toBe(false);
+      }
+      return originalDelete(credentialId, unassign);
+    };
+    const deleted = await post(origin, cookie, `/api/hub/credentials/${providerId}/delete`, { confirm: true, unassign: true });
+    expect(deleted.status).toBe(200);
+    expect(f.tokenStore.get(providerId)).toBeUndefined();
+    expect(f.metadata.snapshot().assignments.some(item => item.credentialId === providerId)).toBe(false);
+    expect(f.sessions.isRunning(unrelated.id)).toBe(true);
+  }, 30_000);
+
+  test("revokes stale provider projections but does not stop a session that never projected a later assignment", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-stale-provider-projection-"));
+    roots.push(root);
+    const f = await fixture(root);
+    const deletePath = path.join(root, "delete-stale");
+    const addedPath = path.join(root, "assigned-after-start");
+    await Promise.all([mkdir(deletePath), mkdir(addedPath)]);
+    const deleteWorkspace = await f.registry.register(deletePath);
+    const addedWorkspace = await f.registry.register(addedPath);
+    const origin = `http://127.0.0.1:${f.server.port}`;
+    const cookie = await login(origin, "alice", "alice password");
+    const createProvider = async (name: string, token: string): Promise<string> => {
+      const response = await post(origin, cookie, "/api/hub/credentials/token", {
+        name,
+        host: "github.com",
+        token,
+        capabilities: ["github-cli"],
+      });
+      return ((await response.json()) as { credential: { id: string } }).credential.id;
+    };
+    const assign = (credentialId: string, workspaceId: string, replace = false) => post(
+      origin,
+      cookie,
+      `/api/hub/credentials/${credentialId}/assign`,
+      { workspaceId, role: "authentication", host: "github.com", replace },
+    );
+    const disableA = await createProvider("Disable A", "disable-a-secret");
+    const disableB = await createProvider("Disable B", "disable-b-secret");
+    const deleteA = await createProvider("Delete A", "delete-a-secret");
+    const deleteB = await createProvider("Delete B", "delete-b-secret");
+    const addedLater = await createProvider("Added later", "added-later-secret");
+
+    expect((await assign(disableA, f.workspace.id)).status).toBe(200);
+    await f.sessions.start(f.workspace.id);
+    expect((await assign(disableB, f.workspace.id, true)).status).toBe(200);
+    expect(f.sessions.runningWorkspaceIdsUsingCredential(disableA)).toEqual([f.workspace.id]);
+    expect(f.metadata.snapshot().assignments.some(item => item.credentialId === disableA)).toBe(false);
+    expect((await post(origin, cookie, `/api/hub/credentials/${disableA}/disable`, {})).status).toBe(200);
+    expect(f.sessions.isRunning(f.workspace.id)).toBe(false);
+
+    expect((await assign(deleteA, deleteWorkspace.id)).status).toBe(200);
+    await f.sessions.start(deleteWorkspace.id);
+    expect((await assign(deleteB, deleteWorkspace.id, true)).status).toBe(200);
+    expect(f.sessions.runningWorkspaceIdsUsingCredential(deleteA)).toEqual([deleteWorkspace.id]);
+    const deleted = await post(origin, cookie, `/api/hub/credentials/${deleteA}/delete`, { confirm: true });
+    expect(deleted.status).toBe(200);
+    expect(f.sessions.isRunning(deleteWorkspace.id)).toBe(false);
+    expect(f.metadata.snapshot().credentials.some(item => item.id === deleteA)).toBe(false);
+
+    await f.sessions.start(addedWorkspace.id);
+    expect((await assign(addedLater, addedWorkspace.id)).status).toBe(200);
+    expect(f.sessions.runningWorkspaceIdsUsingCredential(addedLater)).toEqual([]);
+    expect((await post(origin, cookie, `/api/hub/credentials/${addedLater}/disable`, {})).status).toBe(200);
+    expect(f.sessions.isRunning(addedWorkspace.id)).toBe(true);
+    expect(f.backendEvents.stops).not.toContain(addedWorkspace.id);
+  }, 30_000);
+
+  test("attempts every provider-token stop and leaves the catalog intact when any stop fails", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-provider-stop-failure-"));
+    roots.push(root);
+    const f = await fixture(root);
+    const secondPath = path.join(root, "second");
+    await mkdir(secondPath);
+    const second = await f.registry.register(secondPath);
+    const origin = `http://127.0.0.1:${f.server.port}`;
+    const cookie = await login(origin, "alice", "alice password");
+    const secret = "provider-stop-failure-secret";
+    const created = await post(origin, cookie, "/api/hub/credentials/token", {
+      name: "Shared provider token",
+      host: "github.com",
+      token: secret,
+      capabilities: ["github-cli"],
+    });
+    const credentialId = ((await created.json()) as { credential: { id: string } }).credential.id;
+    for (const workspaceId of [f.workspace.id, second.id]) {
+      expect((await post(origin, cookie, `/api/hub/credentials/${credentialId}/assign`, {
+        workspaceId,
+        role: "authentication",
+        host: "github.com",
+      })).status).toBe(200);
+      await f.sessions.start(workspaceId);
+    }
+    f.backendEvents.stopFailures.add(f.workspace.id);
+
+    const failed = await post(origin, cookie, `/api/hub/credentials/${credentialId}/disable`, {});
+    expect(failed.status).toBe(500);
+    expect(new Set(f.backendEvents.stops)).toEqual(new Set([f.workspace.id, second.id]));
+    expect(f.sessions.isRunning(f.workspace.id)).toBe(true);
+    expect(f.sessions.isRunning(second.id)).toBe(false);
+    expect(f.metadata.snapshot().credentials.find(item => item.id === credentialId)?.enabled).toBe(true);
+    expect(f.metadata.snapshot().assignments.filter(item => item.credentialId === credentialId)).toHaveLength(2);
+    expect(f.tokenStore.get(credentialId)).toBe(secret);
+
+    f.backendEvents.stopFailures.clear();
+    // A retry must still retire a survivor if the catalog already says the
+    // credential is disabled, as can happen after recovery from older state.
+    await f.metadata.setEnabled(credentialId, false);
+    const retried = await post(origin, cookie, `/api/hub/credentials/${credentialId}/disable`, {});
+    expect(retried.status).toBe(200);
+    expect(f.sessions.isRunning(f.workspace.id)).toBe(false);
+    expect(f.metadata.snapshot().credentials.find(item => item.id === credentialId)?.enabled).toBe(false);
+  }, 30_000);
+
+  test("confirmed provider-token delete preserves catalog and failed running projections when any stop fails", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-provider-delete-stop-failure-"));
+    roots.push(root);
+    const f = await fixture(root);
+    const secondPath = path.join(root, "delete-second");
+    await mkdir(secondPath);
+    const second = await f.registry.register(secondPath);
+    const origin = `http://127.0.0.1:${f.server.port}`;
+    const cookie = await login(origin, "alice", "alice password");
+    const secret = "provider-delete-stop-failure-secret";
+    const created = await post(origin, cookie, "/api/hub/credentials/token", {
+      name: "Delete stop failure",
+      host: "github.com",
+      token: secret,
+      capabilities: ["github-cli"],
+    });
+    const credentialId = ((await created.json()) as { credential: { id: string } }).credential.id;
+    for (const workspaceId of [f.workspace.id, second.id]) {
+      expect((await post(origin, cookie, `/api/hub/credentials/${credentialId}/assign`, {
+        workspaceId,
+        role: "authentication",
+        host: "github.com",
+      })).status).toBe(200);
+      await f.sessions.start(workspaceId);
+    }
+    const assignments = f.metadata.snapshot().assignments;
+    f.backendEvents.stopFailures.add(f.workspace.id);
+
+    const failed = await post(origin, cookie, `/api/hub/credentials/${credentialId}/delete`, {
+      confirm: true,
+      unassign: true,
+    });
+    expect(failed.status).toBe(500);
+    expect(new Set(f.backendEvents.stops)).toEqual(new Set([f.workspace.id, second.id]));
+    expect(f.metadata.snapshot().credentials.find(item => item.id === credentialId)).toMatchObject({ enabled: true });
+    expect(f.metadata.snapshot().assignments).toEqual(assignments);
+    expect(f.tokenStore.get(credentialId)).toBe(secret);
+    expect(f.tokens.resolve(credentialId)).toMatchObject({ token: secret });
+    expect(f.sessions.isRunning(f.workspace.id)).toBe(true);
+    expect(f.sessions.runningWorkspaceIdsUsingCredential(credentialId)).toEqual([f.workspace.id]);
+    expect(f.sessions.isRunning(second.id)).toBe(false);
+  }, 30_000);
+
+  test("keeps provider sessions stopped when catalog mutation fails", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-provider-mutation-failure-"));
+    roots.push(root);
+    const f = await fixture(root);
+    const origin = `http://127.0.0.1:${f.server.port}`;
+    const cookie = await login(origin, "alice", "alice password");
+    const secret = "provider-mutation-failure-secret";
+    const created = await post(origin, cookie, "/api/hub/credentials/token", {
+      name: "Provider mutation failure",
+      host: "gitlab.com",
+      token: secret,
+      capabilities: ["gitlab-cli"],
+    });
+    const credentialId = ((await created.json()) as { credential: { id: string } }).credential.id;
+    expect((await post(origin, cookie, `/api/hub/credentials/${credentialId}/assign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "gitlab.com",
+    })).status).toBe(200);
+    await f.sessions.start(f.workspace.id);
+    f.tokens.setEnabled = async () => { throw new Error("catalog write failed"); };
+
+    const response = await post(origin, cookie, `/api/hub/credentials/${credentialId}/disable`, {});
+    expect(response.status).toBe(500);
+    expect(f.sessions.isRunning(f.workspace.id)).toBe(false);
+    expect(f.backendEvents.runningProviderTokens.has(f.workspace.id)).toBe(false);
+    expect(f.metadata.snapshot().credentials.find(item => item.id === credentialId)?.enabled).toBe(true);
+    expect(f.metadata.snapshot().assignments.filter(item => item.credentialId === credentialId)).toHaveLength(1);
+    expect(f.tokenStore.get(credentialId)).toBe(secret);
+  }, 30_000);
+
+  test("holds provider workspace queues through catalog mutation so a concurrent start cannot capture the token", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-provider-start-race-"));
+    roots.push(root);
+    const f = await fixture(root);
+    const origin = `http://127.0.0.1:${f.server.port}`;
+    const cookie = await login(origin, "alice", "alice password");
+    const created = await post(origin, cookie, "/api/hub/credentials/token", {
+      name: "Racing provider token",
+      host: "github.com",
+      token: "provider-race-secret",
+      capabilities: ["github-cli"],
+    });
+    const credentialId = ((await created.json()) as { credential: { id: string } }).credential.id;
+    expect((await post(origin, cookie, `/api/hub/credentials/${credentialId}/assign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+    })).status).toBe(200);
+    await f.sessions.start(f.workspace.id);
+
+    const originalSetEnabled = f.tokens.setEnabled.bind(f.tokens);
+    let mutationReached!: () => void;
+    let releaseMutation!: () => void;
+    const atMutation = new Promise<void>(resolve => { mutationReached = resolve; });
+    const mutationGate = new Promise<void>(resolve => { releaseMutation = resolve; });
+    f.tokens.setEnabled = async (id, enabled) => {
+      if (id === credentialId && !enabled) {
+        mutationReached();
+        await mutationGate;
+      }
+      return originalSetEnabled(id, enabled);
+    };
+    const disabling = post(origin, cookie, `/api/hub/credentials/${credentialId}/disable`, {});
+    await atMutation;
+    expect(f.sessions.isRunning(f.workspace.id)).toBe(false);
+    const startOutcome = f.sessions.start(f.workspace.id).then(
+      () => null,
+      error => error,
+    );
+    await Bun.sleep(10);
+    expect(f.backendEvents.starts).toEqual([f.workspace.id]);
+
+    releaseMutation();
+    expect((await disabling).status).toBe(200);
+    expect(await startOutcome).toMatchObject({ message: expect.stringContaining("credential is disabled") });
+    expect(f.backendEvents.runningProviderTokens.has(f.workspace.id)).toBe(false);
+  }, 30_000);
+
+  test("widens revocation queues for an assignment that commits after the initial snapshot", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-provider-revocation-widening-"));
+    roots.push(root);
+    const f = await fixture(root);
+    const widenedPath = path.join(root, "z-widened");
+    await mkdir(widenedPath);
+    const widened = await f.registry.register(widenedPath);
+    const origin = `http://127.0.0.1:${f.server.port}`;
+    const cookie = await login(origin, "alice", "alice password");
+    const created = await post(origin, cookie, "/api/hub/credentials/token", {
+      name: "Widened revocation token",
+      host: "github.com",
+      token: "widened-revocation-secret",
+      capabilities: ["github-cli"],
+    });
+    const credentialId = ((await created.json()) as { credential: { id: string } }).credential.id;
+    expect((await post(origin, cookie, `/api/hub/credentials/${credentialId}/assign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+    })).status).toBe(200);
+    await f.sessions.start(f.workspace.id);
+
+    const originalAssign = f.metadata.assign.bind(f.metadata);
+    let markAssignmentEntered!: () => void;
+    let releaseAssignment!: () => void;
+    const assignmentEntered = new Promise<void>(resolve => { markAssignmentEntered = resolve; });
+    const assignmentGate = new Promise<void>(resolve => { releaseAssignment = resolve; });
+    let assignmentCommitted = false;
+    f.metadata.assign = async (...args) => {
+      markAssignmentEntered();
+      await assignmentGate;
+      const result = await originalAssign(...args);
+      assignmentCommitted = true;
+      return result;
+    };
+    const assigning = post(origin, cookie, `/api/hub/credentials/${credentialId}/assign`, {
+      workspaceId: widened.id,
+      role: "authentication",
+      host: "github.com",
+    });
+    await assignmentEntered;
+
+    const originalRunExclusive = f.sessions.runExclusive.bind(f.sessions);
+    let initialQueueObserved = false;
+    let markInitialQueueEntered!: () => void;
+    let markWidenedQueueEntered!: () => void;
+    let releaseWidenedQueue!: () => void;
+    const initialQueueEntered = new Promise<void>(resolve => { markInitialQueueEntered = resolve; });
+    const widenedQueueEntered = new Promise<void>(resolve => { markWidenedQueueEntered = resolve; });
+    const widenedQueueGate = new Promise<void>(resolve => { releaseWidenedQueue = resolve; });
+    f.sessions.runExclusive = <T>(workspaceId: string, operation: () => Promise<T>) =>
+      originalRunExclusive(workspaceId, async () => {
+        if (workspaceId === f.workspace.id && !initialQueueObserved) {
+          initialQueueObserved = true;
+          markInitialQueueEntered();
+        }
+        if (workspaceId === widened.id) {
+          markWidenedQueueEntered();
+          await widenedQueueGate;
+        }
+        return operation();
+      });
+    const originalSetEnabled = f.tokens.setEnabled.bind(f.tokens);
+    f.tokens.setEnabled = async (...args) => {
+      expect(assignmentCommitted).toBe(true);
+      return originalSetEnabled(...args);
+    };
+
+    const disabling = post(origin, cookie, `/api/hub/credentials/${credentialId}/disable`, {});
+    await initialQueueEntered;
+    expect(assignmentCommitted).toBe(false);
+    expect(f.metadata.snapshot().credentials.find(item => item.id === credentialId)?.enabled).toBe(true);
+    releaseAssignment();
+    expect((await assigning).status).toBe(200);
+    await widenedQueueEntered;
+    expect(assignmentCommitted).toBe(true);
+    expect(f.metadata.snapshot().credentials.find(item => item.id === credentialId)?.enabled).toBe(true);
+
+    const startOutcome = f.sessions.start(widened.id).then(
+      () => null,
+      error => error,
+    );
+    expect(f.sessions.isStarting(widened.id)).toBe(true);
+    expect(f.backendEvents.starts).toEqual([f.workspace.id]);
+    releaseWidenedQueue();
+
+    expect((await disabling).status).toBe(200);
+    expect(await startOutcome).toMatchObject({ message: expect.stringContaining("credential is disabled") });
+    expect(f.backendEvents.starts).toEqual([f.workspace.id]);
+    expect(f.metadata.snapshot().assignments.some(item =>
+      item.workspaceId === widened.id && item.credentialId === credentialId)).toBe(true);
+  }, 30_000);
 
   test("assignments commit under the credential lock revocations hold", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));

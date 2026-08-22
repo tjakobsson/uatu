@@ -125,12 +125,18 @@ New credentials SHALL have no workspace assignments by default. An authenticated
 - **THEN** workspace startup identifies the locked assignment instead of starting with unusable Git configuration
 
 ### Requirement: Credential revocation has defined runtime behavior
-Locking, disabling, unassigning, or deleting a credential SHALL prevent the Hub from supplying it to new clone jobs, new workspace sessions, and new helper or agent requests. Deletion SHALL remove its private backing only after it is no longer referenced by an assignment. The Hub SHALL report that an already-authenticated external connection, such as an SSH multiplexed connection, may survive credential revocation until that connection ends; it MUST NOT claim retroactive provider-session revocation it cannot enforce.
+Locking, disabling, unassigning, or deleting a credential SHALL prevent the Hub from supplying it to new clone jobs, new workspace sessions, and new helper or agent requests. The Hub SHALL track the credential ids actually projected into each running session until natural exit or successful stop. Disabling or confirming deletion of a token credential that declares `github-cli` or `gitlab-cli` SHALL first stop every running local workspace whose tracked projection contains it because the raw provider CLI environment is a session-start snapshot. Current assignments and tracked projections SHALL both participate in revocation queue acquisition, but a current assignment added after session start MUST NOT by itself cause that session to stop. Confirmed deletion with no current references SHALL stop a stale projected use even when `unassign` is false; current references without explicit unassignment SHALL remain a conflict and MUST NOT stop a workspace. The Hub SHALL attempt every required stop before catalog mutation and SHALL leave the credential and its assignments and secret unchanged if any stop fails. HTTPS-only token revocation, enable, and rejected deletion MUST NOT stop a workspace. Deletion SHALL remove its private backing only after it is no longer referenced by an assignment. The Hub SHALL report that an already-authenticated external connection, such as an SSH multiplexed connection, may survive credential revocation until that connection ends; it MUST NOT claim retroactive provider-session revocation it cannot enforce.
 
 #### Scenario: Assigned credential is disabled
 - **WHEN** a user disables a credential that is assigned to a running workspace
 - **THEN** subsequent Hub-brokered credential requests are rejected
 - **AND** settings reports the credential disabled without claiming that existing remote connections were terminated
+
+#### Scenario: Projected provider CLI token is disabled
+- **WHEN** a user disables a token with a provider CLI capability that remains projected into running local workspaces after assignment replacement
+- **THEN** the Hub stops every workspace that actually projected the token before disabling the credential
+- **AND** a failed stop leaves the credential enabled and all catalog references and secrets intact
+- **AND** unrelated workspaces remain running
 
 #### Scenario: Referenced credential cannot be deleted silently
 - **WHEN** a user attempts to delete a credential still assigned to one or more workspaces

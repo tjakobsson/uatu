@@ -778,6 +778,9 @@ function credentialSupportsRole(credential, role) {
     : credential.capabilities.some(value =>
       value === "ssh-authentication" || value === "https-git" || value === "github-cli" || value === "gitlab-cli");
 }
+function providerCliCredential(credential) {
+  return credential.type === "token" && credential.capabilities.some(value => value === "github-cli" || value === "gitlab-cli");
+}
 function makeReadiness(results) {
   const container = el("div", "readiness");
   for (const result of results || []) {
@@ -882,13 +885,18 @@ function credentialCard(credential) {
   };
   actions.appendChild(testButton);
   const enabledButton = el("button", null, credential.enabled ? "Disable" : "Enable");
-  enabledButton.onclick = () => credentialAction(credential.id, credential.enabled ? "disable" : "enable", {}, enabledButton, credential.enabled ? "Disabling…" : "Enabling…", actionError);
+  enabledButton.onclick = () => {
+    if (credential.enabled && providerCliCredential(credential)
+      && !confirm("Disabling this provider CLI token may stop running workspaces that still use it and terminate their shells. Continue?")) return;
+    return credentialAction(credential.id, credential.enabled ? "disable" : "enable", {}, enabledButton, credential.enabled ? "Disabling…" : "Enabling…", actionError);
+  };
   actions.appendChild(enabledButton);
   const deleteButton = el("button", "danger", "Delete");
   deleteButton.onclick = async () => {
     const assigned = (credential.assignments || []).length > 0;
     const detail = assigned ? " This will also remove all workspace assignments." : "";
-    if (!confirm('Delete credential "' + credential.name + '"?' + detail + " Existing external connections may remain authenticated until they end.")) return;
+    const stopDetail = providerCliCredential(credential) ? " This may stop running workspaces that still use the token and terminate their shells." : "";
+    if (!confirm('Delete credential "' + credential.name + '"?' + detail + stopDetail + " Existing external connections may remain authenticated until they end.")) return;
     await credentialAction(credential.id, "delete", { confirm: true, unassign: assigned }, deleteButton, "Deleting…", actionError);
   };
   actions.appendChild(deleteButton);

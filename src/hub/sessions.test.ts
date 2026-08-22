@@ -10,6 +10,7 @@ import {
   type CredentialContextResolver,
   type ResolvedCredentialContext,
 } from "./credential-context";
+import type { SshCredentialRecord, TokenCredentialRecord } from "./credential-types";
 import { WorkspaceRegistry } from "./registry";
 import { SessionManager } from "./sessions";
 
@@ -97,6 +98,55 @@ describe("SessionManager credential contexts", () => {
     expect(sessions.credentialRestartRequired("project")).toBe(true);
     await sessions.stop("project");
     expect(sessions.credentialRestartRequired("project")).toBe(false);
+  });
+
+  test("tracks projected credential ids and clears them when the child exits", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-session-projections-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    await registry.register("/srv/workspaces/projected");
+    const token: TokenCredentialRecord = {
+      id: "provider-token",
+      name: "Provider token",
+      type: "token",
+      enabled: true,
+      capabilities: ["github-cli"],
+      metadata: { host: "github.com" },
+      createdAt: "2026-08-22T00:00:00.000Z",
+    };
+    const signing: SshCredentialRecord = {
+      id: "signing-key",
+      name: "Signing key",
+      type: "ssh",
+      enabled: true,
+      capabilities: ["ssh-signing"],
+      metadata: { publicKey: "ssh-ed25519 AAAATEST", fingerprint: "SHA256:test" },
+      createdAt: "2026-08-22T00:00:00.000Z",
+    };
+    let markExited!: (code: number | null) => void;
+    const exited = new Promise<number | null>(resolve => { markExited = resolve; });
+    const resolver: CredentialContextResolver = {
+      revision: () => "projected",
+      runExclusive: operation => operation(),
+      resolve: async () => ({
+        ...structuredClone(EMPTY_RESOLVED_CREDENTIAL_CONTEXT),
+        authentication: [{ host: "github.com", credential: token, token: "secret" }],
+        signing,
+      }),
+    };
+    const backend: SessionBackend = {
+      start: async workspace => ({ ...fakeSession(workspace.id), exited }),
+    };
+    const sessions = new SessionManager(registry, { local: backend }, resolver);
+
+    await sessions.start("projected");
+    expect(sessions.runningWorkspaceIdsUsingCredential(token.id)).toEqual(["projected"]);
+    expect(sessions.runningWorkspaceIdsUsingCredential(signing.id)).toEqual(["projected"]);
+    markExited(1);
+    await tick();
+    expect(sessions.runningWorkspaceIdsUsingCredential(token.id)).toEqual([]);
+    expect(sessions.runningWorkspaceIdsUsingCredential(signing.id)).toEqual([]);
   });
 });
 
@@ -231,6 +281,59 @@ describe("SessionManager.stop during an in-flight start", () => {
 });
 
 describe("SessionManager start during an in-flight stop", () => {
+  test("queue-owned stop preserves running state and credential revision on failure", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-exclusive-stop-fail-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    await registry.register("/srv/workspaces/exclusive-stop-fail");
+    let revision = "started";
+    let failStop = true;
+    const token: TokenCredentialRecord = {
+      id: "stop-token",
+      name: "Stop token",
+      type: "token",
+      enabled: true,
+      capabilities: ["gitlab-cli"],
+      metadata: { host: "gitlab.com" },
+      createdAt: "2026-08-22T00:00:00.000Z",
+    };
+    const resolver: CredentialContextResolver = {
+      revision: () => revision,
+      runExclusive: operation => operation(),
+      resolve: async () => ({
+        ...structuredClone(EMPTY_RESOLVED_CREDENTIAL_CONTEXT),
+        revision,
+        authentication: [{ host: "gitlab.com", credential: token, token: "secret" }],
+      }),
+    };
+    const backend: SessionBackend = {
+      start: async workspace => ({
+        ...fakeSession(workspace.id),
+        stop: async () => {
+          if (failStop) throw new Error("backend refused queue-owned stop");
+        },
+      }),
+    };
+    const sessions = new SessionManager(registry, { local: backend }, resolver);
+    await sessions.start("exclusive-stop-fail");
+    revision = "changed";
+    expect(sessions.runningWorkspaceIdsUsingCredential(token.id)).toEqual(["exclusive-stop-fail"]);
+
+    await expect(sessions.runExclusive("exclusive-stop-fail", () =>
+      sessions.stopWhileLifecycleQueueHeld("exclusive-stop-fail"))).rejects.toThrow("backend refused queue-owned stop");
+    expect(sessions.isRunning("exclusive-stop-fail")).toBe(true);
+    expect(sessions.credentialRestartRequired("exclusive-stop-fail")).toBe(true);
+    expect(sessions.runningWorkspaceIdsUsingCredential(token.id)).toEqual(["exclusive-stop-fail"]);
+
+    failStop = false;
+    expect(await sessions.runExclusive("exclusive-stop-fail", () =>
+      sessions.stopWhileLifecycleQueueHeld("exclusive-stop-fail"))).toBe(true);
+    expect(sessions.isRunning("exclusive-stop-fail")).toBe(false);
+    expect(sessions.credentialRestartRequired("exclusive-stop-fail")).toBe(false);
+    expect(sessions.runningWorkspaceIdsUsingCredential(token.id)).toEqual([]);
+  });
+
   test("a failed backend stop retains the running session for retry", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-stop-fail-"));
     tempDirectories.push(dir);

@@ -30,6 +30,7 @@ export class SessionManager {
   // Per-workspace operation chain tails.
   private readonly lifecycle = new Map<string, Promise<unknown>>();
   private readonly runningCredentialRevisions = new Map<string, string>();
+  private readonly runningCredentialIds = new Map<string, Set<string>>();
 
   constructor(
     private readonly registry: WorkspaceRegistry,
@@ -54,6 +55,13 @@ export class SessionManager {
 
   runningIds(): string[] {
     return [...this.running.keys()];
+  }
+
+  runningWorkspaceIdsUsingCredential(credentialId: string): string[] {
+    return [...this.runningCredentialIds.entries()]
+      .filter(([, credentialIds]) => credentialIds.has(credentialId))
+      .map(([workspaceId]) => workspaceId)
+      .sort();
   }
 
   credentialRestartRequired(workspaceId: string): boolean {
@@ -107,6 +115,8 @@ export class SessionManager {
 
       let workspace: WorkspaceEntry;
       let session: RunningSession;
+      let credentialRevision = "";
+      let credentialIds = new Set<string>();
       try {
         const found = this.registry.byId(workspaceId);
         if (!found) throw new Error(`unknown workspace: ${workspaceId}`);
@@ -119,7 +129,11 @@ export class SessionManager {
         session = await this.credentials.runExclusive(async () => {
           const credentialContext = await this.credentials.resolve(workspace);
           const started = await backend.start(workspace, sessionBasePath(workspace.id), credentialContext);
-          this.runningCredentialRevisions.set(workspace.id, credentialContext.revision);
+          credentialRevision = credentialContext.revision;
+          credentialIds = new Set([
+            ...credentialContext.authentication.map(item => item.credential.id),
+            ...(credentialContext.signing ? [credentialContext.signing.id] : []),
+          ]);
           return started;
         });
       } catch (error) {
@@ -134,12 +148,15 @@ export class SessionManager {
         throw error;
       }
       this.running.set(workspace.id, session);
+      this.runningCredentialRevisions.set(workspace.id, credentialRevision);
+      this.runningCredentialIds.set(workspace.id, credentialIds);
       // Reap on child exit so a crashed session shows as stopped rather
       // than proxying into a dead endpoint forever.
       void session.exited.then(() => {
         if (this.running.get(workspace.id) === session) {
           this.running.delete(workspace.id);
           this.runningCredentialRevisions.delete(workspace.id);
+          this.runningCredentialIds.delete(workspace.id);
         }
       });
       return session;
@@ -163,15 +180,23 @@ export class SessionManager {
   // not when stopping the child fails.
   stop(workspaceId: string, onStopped?: () => Promise<void>): Promise<boolean> {
     return this.enqueue(workspaceId, async () => {
-      const session = this.running.get(workspaceId);
-      if (session) {
-        await session.stop();
-        this.running.delete(workspaceId);
-        this.runningCredentialRevisions.delete(workspaceId);
-      }
+      const stopped = await this.stopWhileLifecycleQueueHeld(workspaceId);
       await onStopped?.();
-      return session !== undefined;
+      return stopped;
     });
+  }
+
+  // PRECONDITION: the caller already owns this workspace's lifecycle queue.
+  // This does not enqueue or run cleanup callbacks. A failed backend stop
+  // leaves the running session, revision, and credential projection intact.
+  async stopWhileLifecycleQueueHeld(workspaceId: string): Promise<boolean> {
+    const session = this.running.get(workspaceId);
+    if (!session) return false;
+    await session.stop();
+    this.running.delete(workspaceId);
+    this.runningCredentialRevisions.delete(workspaceId);
+    this.runningCredentialIds.delete(workspaceId);
+    return true;
   }
 
   async stopAll(): Promise<void> {

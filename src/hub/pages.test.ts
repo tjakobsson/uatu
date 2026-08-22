@@ -164,6 +164,8 @@ describe("settings page", () => {
     }
     expect(html).toContain('confirm(\'Delete credential "\'');
     expect(html).toContain("{ confirm: true, unassign: assigned }");
+    expect(html).toContain("Disabling this provider CLI token may stop running workspaces that still use it and terminate their shells.");
+    expect(html).toContain("This may stop running workspaces that still use the token and terminate their shells.");
     expect(html).toContain('toolPath + "/" + encodeURIComponent(tool.tool) + "/test"');
     expect(html).toContain('const card = el("details", "credential-card")');
     expect(html).toContain("openCredentialIds.has(credential.id)");
