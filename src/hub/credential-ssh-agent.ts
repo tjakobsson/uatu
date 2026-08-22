@@ -44,6 +44,32 @@ async function isLegacyAgentProcess(pid: number): Promise<boolean> {
   }
 }
 
+// SIGTERM, wait, escalate to SIGKILL, wait again — and refuse to continue if
+// the process still will not die. Proceeding anyway would delete the socket
+// out from under a live agent and leak it with keys still in memory, which
+// is the exact failure the migration exists to avoid. Mirrors stopChild in
+// credential-ssh-supervisor.ts.
+async function terminateLegacyAgent(pid: number, timeoutMs: number): Promise<void> {
+  for (const signal of ["SIGTERM", "SIGKILL"] as const) {
+    try {
+      process.kill(pid, signal);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ESRCH") return;
+      throw error;
+    }
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        process.kill(pid, 0);
+      } catch {
+        return;
+      }
+      await new Promise(resolve => setTimeout(resolve, POLL_MS));
+    }
+  }
+  throw new Error("superseded SSH agent did not exit after SIGKILL");
+}
+
 function isMissing(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
@@ -249,35 +275,43 @@ export class ManagedSshAgent {
   // Retire an agent recorded in the superseded v1 format. The record names a
   // pid and the device+inode of the socket it owned; both must still agree
   // before anything is signalled, because a pid alone can have been reused.
+  // Everything else fails closed, exactly like the unowned-artifact checks
+  // the v2 paths apply: only artifacts this record provably describes are
+  // ever removed.
   private async retireLegacyAgent(legacy: LegacySshAgentOwnership): Promise<void> {
-    let socketMatches = false;
+    // v1 predates the control socket entirely, so one existing alongside a
+    // v1 record was made by something else — treat it as unowned.
     try {
-      const actual = await socketIdentity(this.socketPath);
-      socketMatches = actual.device === legacy.socketDevice && actual.inode === legacy.socketInode;
+      await fs.lstat(this.controlSocketPath);
+      throw new Error("unowned SSH guardian artifact already exists");
     } catch (error) {
       if (!isMissing(error)) throw error;
     }
 
-    if (socketMatches && await isLegacyAgentProcess(legacy.pid)) {
-      try {
-        process.kill(legacy.pid, "SIGTERM");
-      } catch (error) {
-        if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error;
-      }
-      const deadline = Date.now() + this.stopTimeoutMs;
-      while (Date.now() < deadline) {
-        try {
-          process.kill(legacy.pid, 0);
-        } catch {
-          break;
-        }
-        await new Promise(resolve => setTimeout(resolve, POLL_MS));
-      }
+    let socket: "missing" | "recorded" | "foreign";
+    try {
+      const actual = await socketIdentity(this.socketPath);
+      socket = actual.device === legacy.socketDevice && actual.inode === legacy.socketInode
+        ? "recorded"
+        : "foreign";
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+      socket = "missing";
+    }
+    // A socket the record does not describe belongs to someone else —
+    // possibly a concurrently starting agent. Unlinking it would disconnect
+    // whatever owns it, so refuse, like every other unowned artifact.
+    if (socket === "foreign") throw new Error("unowned SSH guardian artifact already exists");
+
+    if (socket === "recorded" && await isLegacyAgentProcess(legacy.pid)) {
+      await terminateLegacyAgent(legacy.pid, this.stopTimeoutMs);
     }
 
-    for (const artifact of [this.socketPath, this.controlSocketPath, this.ownershipPath]) {
-      await fs.rm(artifact, { force: true });
-    }
+    // The socket is removed only once its identity matched the record and
+    // the agent is confirmed gone; the record itself is ours by definition
+    // (parseable v1, correct owner and mode) and is always retired.
+    if (socket === "recorded") await fs.rm(this.socketPath, { force: true });
+    await fs.rm(this.ownershipPath, { force: true });
   }
 
   private async recoverRecordedAgent(): Promise<void> {

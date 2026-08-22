@@ -441,6 +441,96 @@ describe("v1 ownership migration", () => {
     await expect(manager(runtime, executable).start()).rejects.toThrow(recordPath);
   });
 
+  test("retires a live legacy agent whose socket identity matches the record", async () => {
+    const { runtime, executable } = await fixture();
+    const socketPath = path.join(runtime, "ssh-agent.sock");
+    // A real ssh-agent from a pre-supervisor build: foreground, socket at
+    // the recorded path. Its socket is created 0600 by ssh-agent itself.
+    const legacyAgent = Bun.spawn([executable, "-D", "-a", socketPath], { stdout: "ignore", stderr: "ignore" });
+    try {
+      const deadline = Date.now() + 5_000;
+      while (!(await pathExists(socketPath))) {
+        if (Date.now() > deadline) throw new Error("legacy ssh-agent never created its socket");
+        await Bun.sleep(20);
+      }
+      const stats = await lstat(socketPath);
+      await writeFile(path.join(runtime, "ssh-agent.json"), JSON.stringify({
+        version: 1,
+        nonce: "a".repeat(64),
+        pid: legacyAgent.pid,
+        socketDevice: Number(stats.dev),
+        socketInode: Number(stats.ino),
+      }), { mode: 0o600 });
+
+      await manager(runtime, executable).start();
+
+      const record = await ownership(runtime);
+      expect(record.version).toBe(2);
+      // The old agent must actually be gone — not orphaned behind a deleted
+      // socket with keys still in memory.
+      expect(processExists(legacyAgent.pid)).toBe(false);
+    } finally {
+      try { legacyAgent.kill("SIGKILL"); } catch { /* already retired */ }
+    }
+  });
+
+  test("reclaims a recorded socket whose pid was recycled by another process", async () => {
+    const { runtime, executable } = await fixture();
+    const socketPath = path.join(runtime, "ssh-agent.sock");
+    // The recorded socket is still on disk, but the pid now belongs to this
+    // test process — not an ssh-agent. The migration must not signal it.
+    const listener = Bun.listen({ unix: socketPath, socket: { data() {} } });
+    try {
+      await chmod(socketPath, 0o600);
+      const stats = await lstat(socketPath);
+      await writeFile(path.join(runtime, "ssh-agent.json"), JSON.stringify({
+        version: 1,
+        nonce: "a".repeat(64),
+        pid: process.pid,
+        socketDevice: Number(stats.dev),
+        socketInode: Number(stats.ino),
+      }), { mode: 0o600 });
+
+      await manager(runtime, executable).start();
+
+      expect(processExists(process.pid)).toBe(true);
+      expect((await ownership(runtime)).version).toBe(2);
+    } finally {
+      listener.stop(true);
+    }
+  });
+
+  test("fails closed when a socket exists that the v1 record does not describe", async () => {
+    const { runtime, executable } = await fixture();
+    const socketPath = path.join(runtime, "ssh-agent.sock");
+    const listener = Bun.listen({ unix: socketPath, socket: { data() {} } });
+    try {
+      await chmod(socketPath, 0o600);
+      // Deliberately wrong device/inode: this socket belongs to someone else.
+      await writeFile(path.join(runtime, "ssh-agent.json"), legacyRecord(process.pid, 0, 0), { mode: 0o600 });
+
+      await expect(manager(runtime, executable).start()).rejects.toThrow("unowned SSH guardian artifact");
+      // The foreign socket must survive untouched.
+      expect(await pathExists(socketPath)).toBe(true);
+    } finally {
+      listener.stop(true);
+    }
+  });
+
+  test("fails closed when a control socket exists alongside a v1 record", async () => {
+    const { runtime, executable } = await fixture();
+    // v1 predates the control socket; its presence means another (newer)
+    // agent is involved, so migration must not proceed.
+    const listener = Bun.listen({ unix: path.join(runtime, "ssh-agent-control.sock"), socket: { data() {} } });
+    try {
+      await writeFile(path.join(runtime, "ssh-agent.json"), legacyRecord(process.pid), { mode: 0o600 });
+
+      await expect(manager(runtime, executable).start()).rejects.toThrow("unowned SSH guardian artifact");
+    } finally {
+      listener.stop(true);
+    }
+  });
+
   test("reports unparseable JSON separately from an unsupported version", async () => {
     const { runtime, executable } = await fixture();
     await writeFile(path.join(runtime, "ssh-agent.json"), "{ not json", { mode: 0o600 });
