@@ -2,7 +2,7 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { ManagedSshAgent } from "./credential-ssh-agent";
+import { ManagedSshAgent, removeRecordIfStillLegacy, removeSocketIfStillRecorded } from "./credential-ssh-agent";
 import { socketIdentity, type SshAgentOwnership } from "./credential-ssh-supervisor";
 import { discoverExecutable } from "./credential-tools";
 
@@ -498,6 +498,74 @@ describe("v1 ownership migration", () => {
     } finally {
       listener.stop(true);
     }
+  });
+
+  test("never signals an unrelated ssh-agent that recycled the recorded pid", async () => {
+    const { runtime, executable } = await fixture();
+    const socketPath = path.join(runtime, "ssh-agent.sock");
+    // Someone else's agent: same executable, same pid as the record, but
+    // bound to its own socket — its argv does not reference ours.
+    const foreignSocket = path.join(runtime, "..", "unrelated-agent.sock");
+    const unrelated = Bun.spawn([executable, "-D", "-a", foreignSocket], { stdout: "ignore", stderr: "ignore" });
+    // The recorded socket is a stale leftover: right identity, dead owner.
+    const listener = Bun.listen({ unix: socketPath, socket: { data() {} } });
+    try {
+      await chmod(socketPath, 0o600);
+      const stats = await lstat(socketPath);
+      await writeFile(path.join(runtime, "ssh-agent.json"), JSON.stringify({
+        version: 1,
+        nonce: "a".repeat(64),
+        pid: unrelated.pid,
+        socketDevice: Number(stats.dev),
+        socketInode: Number(stats.ino),
+      }), { mode: 0o600 });
+
+      await manager(runtime, executable).start();
+
+      expect((await ownership(runtime)).version).toBe(2);
+      // The impostor's argv lacks our socket path, so it must survive.
+      expect(processExists(unrelated.pid)).toBe(true);
+    } finally {
+      listener.stop(true);
+      try { unrelated.kill("SIGKILL"); } catch { /* already gone */ }
+      await rm(foreignSocket, { force: true });
+    }
+  });
+
+  test("refuses to unlink a socket that changed after termination", async () => {
+    const { runtime } = await fixture();
+    const socketPath = path.join(runtime, "ssh-agent.sock");
+    const listener = Bun.listen({ unix: socketPath, socket: { data() {} } });
+    try {
+      await chmod(socketPath, 0o600);
+      // The record describes a different socket than the one now on disk —
+      // the shape of a concurrent migration completing mid-retirement.
+      await expect(removeSocketIfStillRecorded(socketPath, {
+        version: 1, nonce: "a".repeat(64), pid: 1, socketDevice: 0, socketInode: 0,
+      })).rejects.toThrow("changed during cleanup");
+      expect(await pathExists(socketPath)).toBe(true);
+    } finally {
+      listener.stop(true);
+    }
+  });
+
+  test("refuses to unlink an ownership record that changed after termination", async () => {
+    const { runtime } = await fixture();
+    const recordPath = path.join(runtime, "ssh-agent.json");
+    const legacy = {
+      version: 1 as const, nonce: "a".repeat(64), pid: 1, socketDevice: 1, socketInode: 1,
+    };
+    // A v2 record now sits where the v1 record was: another instance
+    // finished migrating. Removing it would tear down its fresh agent.
+    await writeFile(recordPath, JSON.stringify({ version: 2 }), { mode: 0o600 });
+    await expect(removeRecordIfStillLegacy(recordPath, legacy)).rejects.toThrow("changed during cleanup");
+    expect(await pathExists(recordPath)).toBe(true);
+
+    // The unchanged record is still retired, and a vanished one is fine.
+    await writeFile(recordPath, JSON.stringify(legacy), { mode: 0o600 });
+    await removeRecordIfStillLegacy(recordPath, legacy);
+    expect(await pathExists(recordPath)).toBe(false);
+    await removeRecordIfStillLegacy(recordPath, legacy);
   });
 
   test("fails closed when a socket exists that the v1 record does not describe", async () => {

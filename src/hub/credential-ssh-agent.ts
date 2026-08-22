@@ -9,6 +9,7 @@ import {
   parseOwnership,
   sameSocketIdentity,
   socketIdentity,
+  type SocketIdentity,
   type LegacySshAgentOwnership,
   type SshAgentOwnership,
   type GuardianCommand,
@@ -31,17 +32,62 @@ export type ManagedSshAgentOptions = {
   spawnSupervisor?: (argv: string[], options: Parameters<typeof Bun.spawn>[1]) => SupervisorProcess;
 };
 
-// A recorded pid can have been recycled by an unrelated process since the
-// record was written, so confirm it still looks like the agent we started
-// before sending it a signal.
-async function isLegacyAgentProcess(pid: number): Promise<boolean> {
+// A recorded pid can have been recycled since the record was written — and
+// recycled, in the worst case, by someone else's ssh-agent, which a bare
+// process-name check would happily match. v1-era builds launched the agent
+// as `ssh-agent -D -a <socketPath>`, so the recorded socket path appears in
+// the agent's own argv; requiring it ties the pid to the recorded socket.
+// When that association cannot be established, the pid is not signalled.
+async function isRecordedLegacyAgent(pid: number, socketPath: string): Promise<boolean> {
   try {
-    const result = Bun.spawnSync({ cmd: ["ps", "-p", String(pid), "-o", "comm="], stdout: "pipe", stderr: "ignore" });
+    const result = Bun.spawnSync({ cmd: ["ps", "-p", String(pid), "-o", "command="], stdout: "pipe", stderr: "ignore" });
     if (result.exitCode !== 0) return false;
-    return result.stdout.toString().trim().endsWith("ssh-agent");
+    const command = result.stdout.toString().trim();
+    const [executable = ""] = command.split(" ");
+    return executable.endsWith("ssh-agent") && command.includes(`-a ${socketPath}`);
   } catch {
     return false;
   }
+}
+
+// The revalidate-before-unlink halves of legacy retirement. Termination can
+// wait seconds, and another instance could complete its own migration in
+// that window; removing anything the legacy record no longer describes
+// would tear down that instance's fresh agent. (The hub state-root lease
+// already serializes real deployments — this guards the window regardless.)
+export async function removeSocketIfStillRecorded(socketPath: string, legacy: LegacySshAgentOwnership): Promise<void> {
+  let identity: SocketIdentity | undefined;
+  try {
+    identity = await socketIdentity(socketPath);
+  } catch (error) {
+    if (!isMissing(error)) throw error;
+  }
+  if (!identity) return;
+  if (identity.device !== legacy.socketDevice || identity.inode !== legacy.socketInode) {
+    throw new Error("SSH guardian artifact changed during cleanup");
+  }
+  await fs.rm(socketPath, { force: true });
+}
+
+export async function removeRecordIfStillLegacy(recordPath: string, legacy: LegacySshAgentOwnership): Promise<void> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(recordPath, "utf8");
+  } catch (error) {
+    if (isMissing(error)) return;
+    throw error;
+  }
+  let current: LegacySshAgentOwnership;
+  try {
+    current = parseLegacyOwnership(JSON.parse(raw));
+  } catch {
+    throw new Error("SSH agent ownership record changed during cleanup");
+  }
+  if (current.nonce !== legacy.nonce || current.pid !== legacy.pid
+    || current.socketDevice !== legacy.socketDevice || current.socketInode !== legacy.socketInode) {
+    throw new Error("SSH agent ownership record changed during cleanup");
+  }
+  await fs.rm(recordPath, { force: true });
 }
 
 // SIGTERM, wait, escalate to SIGKILL, wait again — and refuse to continue if
@@ -303,15 +349,14 @@ export class ManagedSshAgent {
     // whatever owns it, so refuse, like every other unowned artifact.
     if (socket === "foreign") throw new Error("unowned SSH guardian artifact already exists");
 
-    if (socket === "recorded" && await isLegacyAgentProcess(legacy.pid)) {
+    if (socket === "recorded" && await isRecordedLegacyAgent(legacy.pid, this.socketPath)) {
       await terminateLegacyAgent(legacy.pid, this.stopTimeoutMs);
     }
 
-    // The socket is removed only once its identity matched the record and
-    // the agent is confirmed gone; the record itself is ours by definition
-    // (parseable v1, correct owner and mode) and is always retired.
-    if (socket === "recorded") await fs.rm(this.socketPath, { force: true });
-    await fs.rm(this.ownershipPath, { force: true });
+    // Termination awaited above, so revalidate immediately before unlinking:
+    // anything the legacy record no longer describes stays untouched.
+    if (socket === "recorded") await removeSocketIfStillRecorded(this.socketPath, legacy);
+    await removeRecordIfStillLegacy(this.ownershipPath, legacy);
   }
 
   private async recoverRecordedAgent(): Promise<void> {
