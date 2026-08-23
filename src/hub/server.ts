@@ -38,7 +38,7 @@ import {
   type CredentialApiServices,
 } from "./credential-api";
 import { cloneTargetName, gitInit, probeGitRepository, validCloneFolderName } from "./git";
-import { FolderManagerError, type FolderManager } from "./folder-manager";
+import { FolderManagerError, reconcileRegisteredAliasPaths, type FolderManager } from "./folder-manager";
 import { clonePage, dashboardPage, loginPage, settingsPage, stoppedSessionPage } from "./pages";
 import type { PathReservationCoordinator } from "./path-reservations";
 import {
@@ -453,6 +453,17 @@ export function createHubFetchHandler(deps: HubDeps) {
         }
       }
 
+      // Legacy registrations can persist alias spellings of this folder;
+      // reconciled first, the exact-path lookup inside registerWithStatus
+      // finds them instead of minting a duplicate id for the same repo.
+      try {
+        await reconcileRegisteredAliasPaths(registry);
+      } catch (error) {
+        const status = error instanceof FolderManagerError
+          ? error.code === "permission-denied" ? 403 : error.code === "conflict" ? 409 : 500
+          : 500;
+        return json(status, { error: error instanceof Error ? error.message : String(error) });
+      }
       const { entry, created } = await registry.registerWithStatus(folder);
       if (body.start === false) {
         return json(200, { id: entry.id, running: false });

@@ -405,6 +405,36 @@ describe("FolderManager registered mutations", () => {
     expect(f.registry.byId(entry.id)?.path).toBe(destination);
   });
 
+  test("a removal raced by a concurrent forget degrades to an unregistered removal", async () => {
+    const f = await fixture();
+    const source = path.join(f.folders, "raced");
+    await fs.mkdir(source);
+    const entry = await f.registry.register(source);
+    // The forget wins the lifecycle queue: by the time the removal's
+    // exclusive section runs, the registration is gone. A stale-entry
+    // removal would journal an entry it can no longer remove and strand
+    // every later mutation behind that journal.
+    const racedSessions = {
+      runWithSessionsStopped: async <T,>(ids: string[], stop: boolean, operation: () => Promise<T>) => {
+        await f.registry.remove(entry.id);
+        return f.sessions.runWithSessionsStopped(ids, stop, operation);
+      },
+    };
+    const manager = new FolderManager({
+      journalPath: f.journalPath,
+      registry: f.registry,
+      sessions: racedSessions as never,
+      personalState: f.personalState,
+      credentials: f.credentials,
+      reservations: f.reservations,
+    });
+
+    expect(completed(await manager.remove({ path: source }))).toEqual({ path: source });
+    expect(await exists(source)).toBe(false);
+    expect(await exists(f.journalPath)).toBe(false);
+    await manager.create({ parent: f.folders, name: "not-blocked" });
+  });
+
   test("fails closed when alias reconciliation cannot inspect a registered path", async () => {
     const f = await fixture();
     const project = path.join(f.folders, "project");
