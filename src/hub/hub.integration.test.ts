@@ -1062,6 +1062,50 @@ describe("hub end to end", () => {
     expect(cancelled.status).toBe(200);
   });
 
+  test("clone creation inspects the target under the reservation the job keeps", async () => {
+    const destination = path.join(tempRoot, "clone-check-race");
+    await mkdir(destination);
+    const canonicalDestination = await realpath(destination);
+    const target = path.join(canonicalDestination, "checked-clone");
+    const originalByPath = registry.byPath.bind(registry);
+    let mutationBlocked: boolean | undefined;
+    // A folder mutation racing this clone reserves the target before it
+    // touches disk. Standing in for one at the moment the route decides the
+    // target is free: unreserved checks would let it win the reservation and
+    // land — creating the directory, or renaming a registered workspace onto
+    // it — after the verdict but before the clone started.
+    registry.byPath = (candidate: string) => {
+      if (candidate === target && mutationBlocked === undefined) {
+        const competing = reservations.acquire([target]);
+        mutationBlocked = competing === undefined;
+        competing?.release();
+      }
+      return originalByPath(candidate);
+    };
+    let jobId = "";
+    try {
+      const cloned = await fetch(`${origin}/api/hub/clone-jobs`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie, origin },
+        body: JSON.stringify({ url: "interactive:checked-clone", dest: destination }),
+      });
+      expect(cloned.status).toBe(202);
+      jobId = ((await cloned.json()) as { jobId: string }).jobId;
+      expect(mutationBlocked).toBe(true);
+      // The very reservation the checks ran under is the one the job holds.
+      expect(reservations.isReserved(target)).toBe(true);
+    } finally {
+      registry.byPath = originalByPath;
+      if (jobId !== "") {
+        await fetch(`${origin}/api/hub/clone-jobs/${jobId}/cancel`, {
+          method: "POST",
+          headers: { cookie, origin },
+        });
+      }
+    }
+    expect(reservations.isReserved(target)).toBe(false);
+  });
+
   test("start:false registers without starting a session (recents import)", async () => {
     const imported = path.join(tempRoot, "workspaces", "imported-only");
     execFileSync("mkdir", ["-p", imported]);

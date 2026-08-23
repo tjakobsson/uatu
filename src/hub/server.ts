@@ -578,16 +578,36 @@ export function createHubFetchHandler(deps: HubDeps) {
       const resolvedDest = path.resolve(dest);
       await fs.mkdir(resolvedDest, { recursive: true });
       const target = path.join(await fs.realpath(resolvedDest), requestedFolderName || cloneTargetName(url)!);
-      if (registry.byPath(target)) {
-        return json(409, { error: `workspace is already registered: ${target}` });
+      // Both checks below decide whether this clone may populate the target,
+      // and a folder mutation completing after them would void that verdict:
+      // a create can leave an empty directory here, a rename can move a
+      // registered workspace onto it, and the clone would then fill a folder
+      // it never inspected — reusing that workspace's stable id and
+      // metadata. Folder mutations reserve every path they touch (ancestors
+      // included, since reservations overlap), so the reservation is taken
+      // first and handed to the job: no mutation can slip between the
+      // verdict and the clone.
+      const reservation = cloneJobs.reserveTarget(target);
+      if (!reservation) {
+        return json(409, { error: `clone target is already reserved: ${target}` });
       }
-      if (await fs.stat(target).then(() => true).catch(() => false)) {
-        return json(409, { error: `target already exists: ${target}` });
+      let job: { jobId: string } | undefined;
+      try {
+        if (registry.byPath(target)) {
+          return json(409, { error: `workspace is already registered: ${target}` });
+        }
+        if (await fs.stat(target).then(() => true).catch(() => false)) {
+          return json(409, { error: `target already exists: ${target}` });
+        }
+        job = cloneJobs.create(owner, url, target, {
+          credential,
+          retainAssignment: body.retainAssignment === true,
+          reservation,
+        });
+        return json(202, job);
+      } finally {
+        if (!job) reservation.release();
       }
-      return json(202, cloneJobs.create(owner, url, target, {
-        credential,
-        retainAssignment: body.retainAssignment === true,
-      }));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const requestError = /credential|clone URL|SSH or HTTPS/.test(message);
