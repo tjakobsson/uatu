@@ -253,6 +253,41 @@ class FolderMutationJournal {
   }
 }
 
+// Registries persisted before path canonicalization can hold alias paths
+// (a registration reached through a symlinked ancestor). Canonical-path
+// lookups would treat those entries as unrelated — a folder mutation would
+// skip their session stops and path updates, and workspace registration
+// would mint a duplicate id for the same repository — so both reconcile
+// stored aliases to their canonical form before any exact-path lookup. A
+// path that cannot exist anymore is left alone: the entry stays registered
+// at its recorded path, exactly as a vanished folder does.
+export async function reconcileRegisteredAliasPaths(
+  registry: Pick<WorkspaceRegistry, "list" | "replacePathPrefix">,
+  fileSystem: Pick<FileSystem, "realpath"> = nodeFs,
+): Promise<void> {
+  for (const entry of registry.list()) {
+    const persisted = normalizeAbsolutePath(entry.path);
+    let canonical: string;
+    try {
+      canonical = normalizeAbsolutePath(await fileSystem.realpath(persisted));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      // Only a missing path is the vanished-folder case. Anything else
+      // (EACCES on an alias ancestor) fails the caller closed: skipping
+      // would silently exempt this entry from canonical-path matching
+      // while its directory may still be affected.
+      if (code === "ENOENT" || code === "ENOTDIR") continue;
+      throw safeFsError(error, "registered workspace path reconciliation failed");
+    }
+    if (canonical === persisted) continue;
+    try {
+      await registry.replacePathPrefix(persisted, canonical);
+    } catch (error) {
+      throw safeFsError(error, "registered workspace path reconciliation failed");
+    }
+  }
+}
+
 export class FolderManager {
   private readonly fs: FileSystem;
   private readonly journal: FolderMutationJournal;
@@ -338,7 +373,13 @@ export class FolderManager {
           parsed.stop === true,
           async () => {
             await this.assertDirectory(source);
-            if (!entry) {
+            // Predecessors in the lifecycle queue (a concurrent forget of
+            // this workspace) may have unregistered the folder after the
+            // capture above; the re-read turns an already-forgotten entry
+            // into a plain unregistered removal instead of a registered
+            // removal that would journal an entry it can no longer remove.
+            const current = this.options.registry.byPath(source);
+            if (!current) {
               try {
                 await this.fs.rmdir(source);
               } catch (error) {
@@ -346,7 +387,7 @@ export class FolderManager {
               }
               return { path: source };
             }
-            return await this.removeRegistered(source, entry);
+            return await this.removeRegistered(source, current);
           },
         );
       } finally {
@@ -417,35 +458,8 @@ export class FolderManager {
     }
   }
 
-  // Registries persisted before path canonicalization can hold alias paths
-  // (a registration reached through a symlinked ancestor). Canonical-source
-  // lookups would treat those entries as unrelated and mutate the directory
-  // without stopping their sessions or updating their registered paths, so
-  // mutations first rewrite any stored alias to its canonical form. A path
-  // that cannot exist anymore is left alone — the entry stays registered at
-  // its recorded path, exactly as a vanished folder does.
-  private async reconcileRegisteredAliases(): Promise<void> {
-    for (const entry of this.options.registry.list()) {
-      const persisted = normalizeAbsolutePath(entry.path);
-      let canonical: string;
-      try {
-        canonical = normalizeAbsolutePath(await this.fs.realpath(persisted));
-      } catch (error) {
-        const code = (error as NodeJS.ErrnoException)?.code;
-        // Only a missing path is the vanished-folder case. Anything else
-        // (EACCES on an alias ancestor) fails the mutation closed:
-        // skipping would silently exempt this entry from session stops
-        // and path updates while its directory may still be affected.
-        if (code === "ENOENT" || code === "ENOTDIR") continue;
-        throw safeFsError(error, "registered workspace path reconciliation failed");
-      }
-      if (canonical === persisted) continue;
-      try {
-        await this.options.registry.replacePathPrefix(persisted, canonical);
-      } catch (error) {
-        throw safeFsError(error, "registered workspace path reconciliation failed");
-      }
-    }
+  private reconcileRegisteredAliases(): Promise<void> {
+    return reconcileRegisteredAliasPaths(this.options.registry, this.fs);
   }
 
   // A journal that outlives its mutation is the only recovery record for a
