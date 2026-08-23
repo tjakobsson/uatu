@@ -764,9 +764,19 @@ export class WorkspaceOnboardingCoordinator {
       } catch (error) {
         // The registry rolls its own failed mutation back; only the journal
         // needs clearing. Registry persistence is a Hub-owned state write —
-        // classified internal, like the journal above.
-        await this.journal.clear().catch(() => undefined);
-        throw error instanceof OnboardingError ? error : new OnboardingError("internal", "workspace registration failed", { cause: error });
+        // classified internal, like the journal above. A clear that itself
+        // fails leaves every fenced mutation rejected until recovery, and
+        // the response must say so rather than report only the
+        // registration failure.
+        const original = error instanceof OnboardingError ? error : new OnboardingError("internal", "workspace registration failed", { cause: error });
+        try {
+          await this.journal.clear();
+        } catch (clearError) {
+          throw new OnboardingError("recovery-required", "workspace onboarding failed and its journal could not be cleared; restart the Hub to reconcile", {
+            cause: new AggregateError([original, clearError]),
+          });
+        }
+        throw original;
       }
 
       try {

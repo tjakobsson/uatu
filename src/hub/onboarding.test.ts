@@ -428,6 +428,39 @@ describe("commit-boundary failure injection", () => {
     expect(f.credentials.snapshot().assignments).toEqual([]);
   });
 
+  test("a registration failure whose journal clear also fails reports recovery-required", async () => {
+    // The lingering journal fences every later onboarding, folder, and
+    // assignment mutation; reporting only the registration failure would
+    // hide that a restart is needed.
+    const f = await fixture();
+    const folder = await gitRepository(f.folders, "repo");
+    const failingRegistry = {
+      byId: (id: string) => f.registry.byId(id),
+      byPath: (p: string) => f.registry.byPath(p),
+      list: () => f.registry.list(),
+      registerWithStatus: async () => { throw new Error("injected registration failure"); },
+      remove: (id: string) => f.registry.remove(id),
+      replacePathPrefix: (source: string, destination: string) => f.registry.replacePathPrefix(source, destination),
+      restoreEntries: (entries: never) => f.registry.restoreEntries(entries),
+    };
+    const failingFs = Object.assign(Object.create(fs), fs, {
+      unlink: async () => { throw Object.assign(new Error("injected clear failure"), { code: "EACCES" }); },
+    }) as typeof fs;
+    const coordinator = new WorkspaceOnboardingCoordinator({
+      journalPath: f.journalPath,
+      registry: failingRegistry as never,
+      credentials: f.credentials,
+      sessions: f.sessions,
+      reservations: f.reservations,
+      git: f.git,
+      fs: failingFs,
+    });
+
+    await expect(coordinator.configureExisting({ path: folder, displayName: "Repo" }))
+      .rejects.toMatchObject({ code: "recovery-required" });
+    expect(await journalExists(f.journalPath)).toBe(true);
+  });
+
   test("a forget queued mid-commit cannot slip before a requested first start", async () => {
     const f = await fixture();
     const folder = await gitRepository(f.folders, "racy");

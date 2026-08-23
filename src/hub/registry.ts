@@ -33,7 +33,10 @@ export function validateWorkspaceDisplayName(value: unknown): string {
   if (typeof value !== "string") throw new Error("workspace display name must be a string");
   const trimmed = value.trim();
   if (trimmed === "") throw new Error("workspace display name must not be empty");
-  if (/\p{Cc}/u.test(trimmed)) throw new Error("workspace display name must not contain control characters");
+  // Cf covers invisible formatting: zero-width characters (a name of only
+  // those renders blank yet passes the emptiness check) and bidi overrides
+  // (which can visually spoof other workspace labels).
+  if (/[\p{Cc}\p{Cf}]/u.test(trimmed)) throw new Error("workspace display name must not contain control or formatting characters");
   if ([...trimmed].length > WORKSPACE_DISPLAY_NAME_MAX_LENGTH) {
     throw new Error(`workspace display name must be at most ${WORKSPACE_DISPLAY_NAME_MAX_LENGTH} characters`);
   }

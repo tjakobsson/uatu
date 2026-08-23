@@ -183,6 +183,11 @@ describe("workspace display names", () => {
     expect(() => validateWorkspaceDisplayName("a".repeat(65))).toThrow(/at most 64/);
     expect(() => validateWorkspaceDisplayName("bad\u0000name")).toThrow(/control/);
     expect(() => validateWorkspaceDisplayName("bad\nname")).toThrow(/control/);
+    // Invisible formatting: a name of only zero-width characters renders
+    // blank yet passes the emptiness check, and bidi overrides can
+    // visually spoof other workspace labels.
+    expect(() => validateWorkspaceDisplayName("\u200b\u200b")).toThrow(/formatting/);
+    expect(() => validateWorkspaceDisplayName("evil\u202egnp.repo")).toThrow(/formatting/);
     expect(() => validateWorkspaceDisplayName(42)).toThrow(/string/);
   });
 
