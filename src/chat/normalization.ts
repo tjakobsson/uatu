@@ -1,6 +1,6 @@
 import { boundedSet } from "../shared/bounded-map";
 import { attachmentIdFromFileUri, attachmentIdFromText } from "./attachment-store";
-import { CHAT_ATTACHMENT_MIME_TYPES, type ConversationConfiguration, type ConversationItem, type ConversationStatus, type MessageAttachment, type StructuredQuestion, type TokenUsage } from "./types";
+import { CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, type ConversationConfiguration, type ConversationItem, type ConversationStatus, type MessageAttachment, type StructuredQuestion, type TokenUsage } from "./types";
 
 type RecordValue = Record<string, unknown>;
 
@@ -665,7 +665,7 @@ function normalizeUserAttachments(value: unknown): MessageAttachment[] {
       name: boundReplayedName(optionalString(file.name) ?? "attachment"),
       mimeType,
     }];
-  });
+  }).slice(0, CHAT_ATTACHMENTS_PER_MESSAGE);
 }
 
 // The response contract bounds attachment names to 200 characters; provider
@@ -701,10 +701,17 @@ function normalizeStoredMessage(info: RecordValue, parts: unknown[], mintUsageCa
     // order. Compacting away an unparseable caption would shift a later
     // caption's id onto an earlier file — showing the wrong stored image is
     // strictly worse than the spec'd placeholder.
-    const captionSlots = records
+    const fileParts = records.filter(part => part.type === "file");
+    const parsedCaptions = records
       .filter(part => part.type === "text" && part.synthetic === true)
       .map(part => attachmentIdFromText(text(part.text)));
-    const attachments: MessageAttachment[] = records.filter(part => part.type === "file").flatMap((part, index) => {
+    // Positional pairing is only trustworthy when one caption exists per
+    // file part. Any other cardinality means a caption is missing outright,
+    // and assigning the remainder by position could put a later id on an
+    // earlier file — the wrong stored image, strictly worse than the
+    // placeholder every unproven slot degrades to.
+    const captionSlots = parsedCaptions.length === fileParts.length ? parsedCaptions : [];
+    const attachments: MessageAttachment[] = fileParts.flatMap((part, index) => {
       // The wire contract admits exactly the four image types; a
       // pre-existing conversation's other files (a text attachment from the
       // OpenCode TUI, a mime-less part) stay out of the attachments field
@@ -717,7 +724,10 @@ function normalizeStoredMessage(info: RecordValue, parts: unknown[], mintUsageCa
         name: boundReplayedName(optionalString(part.filename) ?? "attachment"),
         mimeType,
       }];
-    });
+    // The response contract caps attachments at eight per message; provider
+    // history is under no such bound, so the excess is dropped rather than
+    // emitted for strict consumers to reject.
+    }).slice(0, CHAT_ATTACHMENTS_PER_MESSAGE);
     return [{ id: `message:${id}`, type: "user_message", createdAt, text: body, ...(attachments.length ? { attachments } : {}) }];
   }
   if (info.role === "assistant") {

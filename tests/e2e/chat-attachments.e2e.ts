@@ -353,3 +353,53 @@ test.describe("restore stays within the cap", () => {
     await expect(page.locator("#chat-attachments .chat-attachment")).toHaveCount(8);
   });
 });
+
+test.describe("attachment viewer", () => {
+  test.beforeEach(async ({ page, request }) => bootChat(page, request));
+
+  test("thumbnails open full size in place and dismiss on Escape or click", async ({ page }) => {
+    await newConversation(page);
+    await attachViaPicker(page);
+    // Pending-strip thumbnail opens the local preview.
+    await page.locator("#chat-attachments .chat-attachment-view").click();
+    const viewer = page.locator("#chat-image-viewer");
+    await expect(viewer).toBeVisible();
+    await expect(viewer.locator("img")).toHaveAttribute("alt", "shot.png");
+    await page.keyboard.press("Escape");
+    await expect(viewer).toBeHidden();
+
+    await send(page, "see attached");
+    // Timeline thumbnail opens the served image; a click dismisses.
+    await page.locator("#chat-items .chat-attachment-view").first().click();
+    await expect(viewer).toBeVisible();
+    await expect(viewer.locator("img")).toHaveAttribute("src", /\/api\/chat\/attachments\//);
+    await expect.poll(() => viewer.locator("img").evaluate((image: HTMLImageElement) => image.naturalWidth)).toBeGreaterThan(0);
+    await viewer.click();
+    await expect(viewer).toBeHidden();
+    // Still in the conversation — no navigation happened.
+    await expect(page.locator("#chat-items")).toContainText("see attached");
+  });
+});
+
+test.describe("composer edits during the upload drain", () => {
+  test.beforeEach(async ({ page, request }) => bootChat(page, request));
+
+  test("typing while submission waits becomes the next draft, not part of the sent message", async ({ page }) => {
+    await newConversation(page);
+    await page.route("**/attachments", async route => {
+      await new Promise(resolve => setTimeout(resolve, 600));
+      await route.continue();
+    });
+    await page.locator("#chat-attach-input").setInputFiles({ name: "slow.png", mimeType: "image/png", buffer: PNG });
+    await page.locator("#chat-input").fill("the message that sends");
+    const accepted = page.waitForResponse(response => response.url().endsWith("/prompts"));
+    await page.locator("#chat-input").press("Enter");
+    // The submit is draining the upload; the composer is already empty and
+    // editable — this text belongs to the NEXT message.
+    await page.locator("#chat-input").pressSequentially("draft for later");
+    const body = (await accepted).request().postDataJSON() as { text: string };
+    expect(body.text).toBe("the message that sends");
+    await expect(page.locator("#chat-input")).toHaveValue("draft for later");
+    await page.unroute("**/attachments");
+  });
+});

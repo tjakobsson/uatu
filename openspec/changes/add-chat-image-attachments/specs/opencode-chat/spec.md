@@ -136,6 +136,11 @@ labeled placeholder rather than a broken presentation.
 - **WHEN** a message with attachments is accepted
 - **THEN** its timeline item presents the message text and image thumbnails
 
+#### Scenario: A thumbnail opens the image full size in place
+- **WHEN** the user activates an attachment thumbnail, wherever it renders
+- **THEN** the image presents full size within the surface, dismissible by Escape or a click
+- **AND** no navigation leaves the conversation
+
 #### Scenario: Replay restores attachment presentation
 - **WHEN** a client reloads and the conversation replays from stored history
 - **THEN** user messages with attachments present the same thumbnails as before

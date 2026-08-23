@@ -441,7 +441,8 @@ function renderMessageAttachments(attachments: readonly MessageAttachment[] | un
       return `<span class="chat-message-attachment is-missing" role="listitem"><span class="chat-attachment-missing" aria-hidden="true">?</span><span class="chat-attachment-name">${name}</span></span>`;
     }
     const src = escapeHtmlAttribute(appUrl(`/api/chat/attachments/${encodeURIComponent(attachment.id)}`));
-    return `<span class="chat-message-attachment" role="listitem"><img class="chat-message-attachment-thumb" src="${src}" alt="${escapeHtmlAttribute(attachment.name)}" loading="lazy"><span class="chat-attachment-name">${name}</span></span>`;
+    const label = escapeHtmlAttribute(`View ${attachment.name} full size`);
+    return `<span class="chat-message-attachment" role="listitem"><button type="button" class="chat-attachment-view" data-attachment-view="${src}" data-attachment-view-name="${escapeHtmlAttribute(attachment.name)}" aria-label="${label}"><img class="chat-message-attachment-thumb" src="${src}" alt="${escapeHtmlAttribute(attachment.name)}" loading="lazy"></button><span class="chat-attachment-name">${name}</span></span>`;
   });
   return `<div class="chat-message-attachments" role="list" aria-label="Attached images">${entries.join("")}</div>`;
 }
@@ -457,6 +458,12 @@ export function decorateAttachmentImages(root: HTMLElement): void {
       placeholder.setAttribute("aria-hidden", "true");
       placeholder.textContent = "?";
       image.closest(".chat-message-attachment")?.classList.add("is-missing");
+      // Bytes are gone; a viewer opening on this reference has nothing to show.
+      const view = image.closest<HTMLButtonElement>("[data-attachment-view]");
+      if (view) {
+        view.disabled = true;
+        view.removeAttribute("data-attachment-view");
+      }
       image.replaceWith(placeholder);
     }, { once: true });
   }

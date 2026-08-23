@@ -7653,3 +7653,70 @@ html[data-ui-mode="touch"] .chat-surface[data-chat-rail] .chat-timeline {
   font-size: 0.75em;
   color: var(--text-subtle);
 }
+
+/* Thumbnail view buttons: the image IS the button — no chrome of its own. */
+.chat-attachment-view {
+  display: block;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: zoom-in;
+  border-radius: 0.4rem;
+}
+
+.chat-attachment-view:disabled {
+  cursor: default;
+}
+
+/* Full-size attachment viewer. */
+.chat-image-viewer {
+  padding: 0;
+  border: none;
+  background: transparent;
+  max-width: none;
+  max-height: none;
+}
+
+.chat-image-viewer::backdrop {
+  background: rgba(0, 0, 0, 0.72);
+}
+
+.chat-image-viewer-body {
+  margin: 0;
+  display: grid;
+  justify-items: center;
+  gap: 0.5rem;
+  cursor: zoom-out;
+}
+
+.chat-image-viewer-body img {
+  max-width: min(92vw, 1400px);
+  max-height: 85vh;
+  border-radius: 0.5rem;
+  background: var(--surface);
+}
+
+.chat-image-viewer-name {
+  color: #fff;
+  font-size: 0.85em;
+  max-width: 92vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-image-viewer-close {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  display: grid;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+  font-size: 1.4rem;
+  cursor: pointer;
+}

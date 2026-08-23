@@ -88,6 +88,10 @@ export function initChat(): void {
   const attachButton = document.querySelector<HTMLButtonElement>("#chat-attach");
   const attachInput = document.querySelector<HTMLInputElement>("#chat-attach-input");
   const attachmentsStrip = document.querySelector<HTMLElement>("#chat-attachments");
+  const imageViewer = document.querySelector<HTMLDialogElement>("#chat-image-viewer");
+  const imageViewerImage = document.querySelector<HTMLImageElement>("#chat-image-viewer-image");
+  const imageViewerName = document.querySelector<HTMLElement>("#chat-image-viewer-name");
+  const imageViewerClose = document.querySelector<HTMLButtonElement>("#chat-image-viewer-close");
   const copyStatus = document.querySelector<HTMLElement>("#chat-copy-status");
   const waiting = document.querySelector<HTMLElement>("#chat-waiting");
   const waitingLabel = document.querySelector<HTMLElement>("#chat-waiting-label");
@@ -958,10 +962,17 @@ export function initChat(): void {
       const item = document.createElement("span");
       item.className = "chat-attachment";
       item.setAttribute("role", "listitem");
+      const view = document.createElement("button");
+      view.type = "button";
+      view.className = "chat-attachment-view";
+      view.setAttribute("data-attachment-view", entry.previewUrl);
+      view.setAttribute("data-attachment-view-name", entry.name);
+      view.setAttribute("aria-label", `View ${entry.name} full size`);
       const thumb = document.createElement("img");
       thumb.className = "chat-attachment-thumb";
       thumb.src = entry.previewUrl;
       thumb.alt = entry.name;
+      view.append(thumb);
       const name = document.createElement("span");
       name.className = "chat-attachment-name";
       name.textContent = entry.name;
@@ -978,7 +989,7 @@ export function initChat(): void {
         renderAttachments();
         syncControls();
       });
-      item.append(thumb, name, remove);
+      item.append(view, name, remove);
       attachmentsStrip.append(item);
     }
   };
@@ -1036,6 +1047,33 @@ export function initChat(): void {
     renderAttachments();
     syncControls();
   };
+
+  const openAttachmentViewer = (src: string, name: string) => {
+    if (!imageViewer || !imageViewerImage) return;
+    imageViewerImage.src = src;
+    imageViewerImage.alt = name;
+    if (imageViewerName) imageViewerName.textContent = name;
+    imageViewer.showModal();
+  };
+  const closeAttachmentViewer = () => {
+    imageViewer?.close();
+    // Freed eagerly so a revoked object URL or a huge image does not linger.
+    if (imageViewerImage) imageViewerImage.src = "";
+  };
+  // One delegated listener covers every surface a thumbnail renders in —
+  // timeline, queue dock, drill-down, and the composer strip.
+  surface.addEventListener("click", event => {
+    const view = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-attachment-view]") : null;
+    if (!view) return;
+    const src = view.getAttribute("data-attachment-view");
+    if (!src) return;
+    openAttachmentViewer(src, view.getAttribute("data-attachment-view-name") ?? "attachment");
+  });
+  // Escape closes natively; any click dismisses too — the dialog is a
+  // viewer, not a form, so there is nothing a stray click could lose.
+  imageViewer?.addEventListener("click", closeAttachmentViewer);
+  imageViewer?.addEventListener("close", () => { if (imageViewerImage) imageViewerImage.src = ""; });
+  imageViewerClose?.addEventListener("click", closeAttachmentViewer);
 
   attachButton?.addEventListener("click", () => {
     if (attachButton.disabled) return;
@@ -1940,6 +1978,13 @@ export function initChat(): void {
     const text = input.value;
     submitting = true;
     setComposerError(null);
+    // Captured AND cleared before any yield: the textarea stays editable
+    // while the drain below waits, and anything typed then belongs to the
+    // next message — an after-the-wait clear would erase it.
+    input.value = "";
+    presentation.drafts[conversationId] = "";
+    save();
+    autosize(input);
     // An upload attached moments before Enter belongs to THIS message:
     // submission waits for in-flight staging rather than snapshotting a list
     // the upload has not reached yet (and leaking the image into the next
@@ -1963,11 +2008,15 @@ export function initChat(): void {
         syncControls();
         return;
       }
+      // Edits made during the wait are the next draft, not part of this
+      // message; nothing to do — they are already in the input.
     }
     // The drain can end with nothing to send: an image-only submission whose
     // upload was refused has no content left, and the staging path already
     // explained why on the composer error line.
     if (!text.trim() && (pendingAttachments.get(conversationId) ?? []).length === 0) {
+      // Restore the (empty) capture only if the user typed nothing meanwhile.
+      if (!input.value.trim() && text) { input.value = text; autosize(input); }
       submitting = false;
       syncControls();
       return;
@@ -2004,12 +2053,8 @@ export function initChat(): void {
     // Optimistic send: the message shows immediately and the input clears;
     // on failure the draft is removed and the text restored.
     projection = addAcceptedDraft(projection, { requestId, messageId: `pending:${requestId}`, text, ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}) });
-    input.value = "";
-    presentation.drafts[conversationId] = "";
     setPendingAttachments(conversationId, []);
     renderAttachments();
-    save();
-    autosize(input);
     noteComposer("Sending...");
     syncControls();
     scheduleRender(true);

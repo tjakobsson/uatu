@@ -727,3 +727,36 @@ describe("replayed attachment names honor the response contract", () => {
     expect([...storedName].length).toBe(200);
   });
 });
+
+describe("caption cardinality and replay bounds", () => {
+  test("a missing caption part disables positional recovery entirely", () => {
+    // One caption, two files: which file the surviving caption belongs to is
+    // unprovable, so both slots degrade to placeholders.
+    const items = normalizeProviderMessage({
+      info: { id: "msg_40", role: "user", time: { created: 1 } },
+      parts: [
+        { type: "text", text: "two images" },
+        { type: "text", synthetic: true, text: 'Called the Read tool with the following input: {"filePath":"/s/22222222-2222-4333-8444-555555555555.webp"}' },
+        { type: "file", url: "data:image/webp;base64,AAAA", mime: "image/webp", filename: "one.webp" },
+        { type: "file", url: "data:image/webp;base64,AAAA", mime: "image/webp", filename: "two.webp" },
+      ],
+    });
+    expect((items[0] as { attachments?: unknown[] }).attachments).toEqual([
+      { name: "one.webp", mimeType: "image/webp" },
+      { name: "two.webp", mimeType: "image/webp" },
+    ]);
+  });
+
+  test("replayed attachments cap at eight on both paths", () => {
+    const files = Array.from({ length: 10 }, (_, index) => ({
+      uri: `file:///s/${index}1111111-2222-4333-8444-555555555555.png`, mime: "image/png", name: `f${index}.png`,
+    }));
+    const [flat] = normalizeProviderMessage({ id: "msg_41", type: "user", time: { created: 1 }, text: "many", files });
+    expect((flat as { attachments: unknown[] }).attachments).toHaveLength(8);
+    const parts = Array.from({ length: 10 }, (_, index) => ({
+      type: "file", url: "data:image/png;base64,AAAA", mime: "image/png", filename: `f${index}.png`,
+    }));
+    const [stored] = normalizeProviderMessage({ info: { id: "msg_42", role: "user", time: { created: 1 } }, parts: [{ type: "text", text: "many" }, ...parts] });
+    expect((stored as { attachments: unknown[] }).attachments).toHaveLength(8);
+  });
+});

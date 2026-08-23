@@ -838,6 +838,16 @@
             </div>
           </form>
           <span id="chat-copy-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span>
+          <!-- Full-size attachment viewer: any thumbnail opens here in place
+               rather than navigating away (a new tab misbehaves in the
+               Desktop WebView). Escape and any click dismiss. -->
+          <dialog id="chat-image-viewer" class="chat-image-viewer" aria-label="Attachment preview">
+            <figure class="chat-image-viewer-body">
+              <img id="chat-image-viewer-image" alt="">
+              <figcaption id="chat-image-viewer-name" class="chat-image-viewer-name"></figcaption>
+            </figure>
+            <button id="chat-image-viewer-close" class="chat-image-viewer-close" type="button" aria-label="Close preview">&#x00d7;</button>
+          </dialog>
           <dialog id="chat-configuration-dialog" class="chat-configuration-dialog" aria-labelledby="chat-configuration-title">
             <div class="chat-configuration-sheet">
               <header class="chat-configuration-header">
