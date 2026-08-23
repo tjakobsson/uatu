@@ -454,3 +454,21 @@ describe("image-only prompts", () => {
     expect(service.prompts).toBe(1);
   });
 });
+
+describe("upload body streaming limit", () => {
+  test("a chunked oversized body is refused without a content-length header", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/:conversationId/attachments"] as { POST(request: Request & { params?: Record<string, string> }): Promise<Response> };
+    // 11 MiB body, no declared length: the streaming gate must refuse it
+    // before parsing, regardless of what the client claims.
+    const oversized = new Uint8Array(11 * 1024 * 1024);
+    const request_ = Object.assign(new Request(`http://127.0.0.1:4711/api/chat/conversations/local/attachments?t=${TOKEN}`, {
+      method: "POST",
+      headers: { origin: "http://127.0.0.1:4711", "content-type": "multipart/form-data; boundary=x" },
+      body: oversized,
+    }), { params: { conversationId: "local" } });
+    const response = await handler.POST(request_);
+    expect(response.status).toBe(413);
+    expect(service.uploads).toBe(0);
+  });
+});

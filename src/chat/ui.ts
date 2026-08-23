@@ -885,6 +885,11 @@ export function initChat(): void {
   // nothing new was appended while it waited) so an image attached moments
   // before Enter joins the message it was attached for.
   const attachmentStaging = new Map<string, Promise<void>>();
+  // Attachments riding an in-flight submission still count against the
+  // per-message cap: a failure restores them to pending, and an intake that
+  // ignored them could push the restored draft past eight and make every
+  // retry refusable.
+  const submittedAttachmentReserve = new Map<string, number>();
 
   // The prompt route bounds attachment names to 200 UTF-8 bytes; an overlong
   // filename staged verbatim would upload fine and then fail every send.
@@ -895,7 +900,11 @@ export function initChat(): void {
     if (encoder.encode(trimmed).length <= 200) return trimmed;
     let bounded = trimmed;
     while (bounded.length > 1 && encoder.encode(bounded).length > 200) bounded = bounded.slice(0, -1);
-    return bounded;
+    // UTF-16 slicing can leave a lone high surrogate at the cut; it would
+    // encode as U+FFFD garbage in the name.
+    const last = bounded.charCodeAt(bounded.length - 1);
+    if (last >= 0xd800 && last <= 0xdbff) bounded = bounded.slice(0, -1);
+    return bounded || "image";
   };
   const supportedAttachmentTypes = new Set<string>(CHAT_ATTACHMENT_MIME_TYPES);
 
@@ -991,7 +1000,7 @@ export function initChat(): void {
     }
     const task = (attachmentStaging.get(conversationId) ?? Promise.resolve()).then(async () => {
       for (const file of files) {
-        if ((pendingAttachments.get(conversationId) ?? []).length >= CHAT_ATTACHMENTS_PER_MESSAGE) {
+        if ((pendingAttachments.get(conversationId) ?? []).length + (submittedAttachmentReserve.get(conversationId) ?? 0) >= CHAT_ATTACHMENTS_PER_MESSAGE) {
           setComposerError(`A message can carry at most ${CHAT_ATTACHMENTS_PER_MESSAGE} images.`);
           break;
         }
@@ -1966,6 +1975,12 @@ export function initChat(): void {
     // Captured and cleared optimistically like the text; restored on failure.
     const stagedAttachments = [...(pendingAttachments.get(conversationId) ?? [])];
     const attachmentRefs: MessageAttachment[] = stagedAttachments.map(({ id, name, mimeType }) => ({ id, name, mimeType }));
+    submittedAttachmentReserve.set(conversationId, (submittedAttachmentReserve.get(conversationId) ?? 0) + stagedAttachments.length);
+    const releaseAttachmentReserve = () => {
+      const remaining = (submittedAttachmentReserve.get(conversationId) ?? 0) - stagedAttachments.length;
+      if (remaining > 0) submittedAttachmentReserve.set(conversationId, remaining);
+      else submittedAttachmentReserve.delete(conversationId);
+    };
     const attachmentKey = stagedAttachments.map(entry => entry.id).join("\n");
     const retry = retryRequests.get(conversationId);
     const retriedRequest = retry?.text === text && retry.attachments === attachmentKey;
@@ -2042,13 +2057,17 @@ export function initChat(): void {
       setComposerError(null);
       // The message is accepted; the local previews have no further use.
       for (const staged of stagedAttachments) URL.revokeObjectURL(staged.previewUrl);
+      releaseAttachmentReserve();
     } catch (error) {
       const message = messageOf(error);
       announce(message, true);
       retryRequests.set(conversationId, { text, requestId, attachments: attachmentKey });
       // The refused message's attachments go back to pending — uploaded bytes
-      // are still stored, so the references stay valid for the retry.
+      // are still stored, so the references stay valid for the retry. The
+      // reserve releases only now that they are pending again, so intake
+      // during the flight could never overfill the restored draft.
       setPendingAttachments(conversationId, [...stagedAttachments, ...(pendingAttachments.get(conversationId) ?? [])]);
+      releaseAttachmentReserve();
       if (projection?.conversationId === conversationId) {
         projection = removeAcceptedDraft(projection, requestId);
         if (!input.value.trim()) {

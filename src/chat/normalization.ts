@@ -662,10 +662,19 @@ function normalizeUserAttachments(value: unknown): MessageAttachment[] {
     const id = attachmentIdFromFileUri(optionalString(file.uri) ?? "");
     return [{
       ...(id ? { id } : {}),
-      name: optionalString(file.name) ?? "attachment",
+      name: boundReplayedName(optionalString(file.name) ?? "attachment"),
       mimeType,
     }];
   });
+}
+
+// The response contract bounds attachment names to 200 characters; provider
+// history is under no such obligation, so replayed names are truncated (by
+// code point, matching JSON Schema maxLength) rather than emitted verbatim
+// for strict consumers to reject.
+function boundReplayedName(name: string): string {
+  const points = [...name];
+  return points.length <= 200 ? name : points.slice(0, 200).join("");
 }
 
 function contractImageMime(mime: string | undefined): string | null {
@@ -705,7 +714,7 @@ function normalizeStoredMessage(info: RecordValue, parts: unknown[], mintUsageCa
       const recovered = attachmentIdFromFileUri(optionalString(part.url) ?? "") ?? captionSlots[index] ?? undefined;
       return [{
         ...(recovered ? { id: recovered } : {}),
-        name: optionalString(part.filename) ?? "attachment",
+        name: boundReplayedName(optionalString(part.filename) ?? "attachment"),
         mimeType,
       }];
     });

@@ -332,3 +332,24 @@ test.describe("image-only staging wait", () => {
     await page.unroute("**/attachments");
   });
 });
+
+test.describe("restore stays within the cap", () => {
+  test.beforeEach(async ({ page, request }) => bootChat(page, request));
+
+  test("intake during a failing submit cannot overfill the restored draft", async ({ page, request }) => {
+    await newConversation(page);
+    for (let index = 0; index < 8; index += 1) await attachViaPicker(page, `full-${index}.png`);
+    await control(request, { action: "failPrompt" });
+    const failed = page.waitForResponse(response => response.url().endsWith("/prompts"));
+    await page.locator("#chat-input").fill("send all eight");
+    await page.locator("#chat-input").press("Enter");
+    // The submitted batch is in flight (failPrompt stalls 500ms); a ninth
+    // intake now must be refused against the reserved eight, so the failure
+    // restore lands at exactly eight sendable references.
+    await pasteImage(page, { name: "ninth-during-flight.png" });
+    await expect(page.locator("#chat-composer-error")).toContainText("at most 8 images");
+    await failed;
+    await expect(page.locator("#chat-composer-error")).toContainText("Draft restored");
+    await expect(page.locator("#chat-attachments .chat-attachment")).toHaveCount(8);
+  });
+});

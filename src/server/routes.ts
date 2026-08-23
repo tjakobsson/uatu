@@ -606,15 +606,40 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         if (!(request.headers.get("content-type") ?? "").toLowerCase().startsWith("multipart/form-data")) {
           return chatError(415, "content-type must be multipart/form-data");
         }
-        // Declared-length gate so an oversized body is refused before it is
-        // buffered; the store re-checks the decoded bytes authoritatively.
+        // Declared-length gate refuses an honestly oversized body before any
+        // read; the streaming gate below is the enforcement that does not
+        // trust the client — a chunked upload without Content-Length must
+        // not buffer past the cap either. The store re-checks the decoded
+        // bytes authoritatively.
+        const bodyLimit = CHAT_ATTACHMENT_MAX_BYTES + CHAT_ATTACHMENT_FORM_OVERHEAD_BYTES;
         const declared = Number(request.headers.get("content-length"));
-        if (Number.isFinite(declared) && declared > CHAT_ATTACHMENT_MAX_BYTES + CHAT_ATTACHMENT_FORM_OVERHEAD_BYTES) {
+        if (Number.isFinite(declared) && declared > bodyLimit) {
           return chatError(413, "attachment is too large");
         }
+        const reader = request.body?.getReader();
+        if (!reader) return chatError(400, "missing request body");
+        const chunks: Uint8Array[] = [];
+        let received = 0;
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            received += value.byteLength;
+            if (received > bodyLimit) {
+              await reader.cancel().catch(() => undefined);
+              return chatError(413, "attachment is too large");
+            }
+            chunks.push(value);
+          }
+        } catch {
+          return chatError(400, "malformed request body");
+        }
+        const body = new Uint8Array(received);
+        let offset = 0;
+        for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
         let form: FormData;
         try {
-          form = await request.formData();
+          form = await new Response(body, { headers: { "content-type": request.headers.get("content-type") ?? "" } }).formData();
         } catch {
           return chatError(400, "malformed multipart form data");
         }

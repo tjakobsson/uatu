@@ -709,3 +709,21 @@ describe("attachment contract filtering and caption alignment", () => {
     ]);
   });
 });
+
+describe("replayed attachment names honor the response contract", () => {
+  test("an overlong provider filename truncates to 200 code points on both paths", () => {
+    const longName = "n".repeat(250) + ".png";
+    const [flat] = normalizeProviderMessage({
+      id: "msg_30", type: "user", time: { created: 1 }, text: "long",
+      files: [{ uri: "file:///s/11111111-2222-4333-8444-555555555555.png", mime: "image/png", name: longName }],
+    });
+    const flatName = (flat as { attachments: Array<{ name: string }> }).attachments[0]!.name;
+    expect([...flatName].length).toBe(200);
+    const [stored] = normalizeProviderMessage({
+      info: { id: "msg_31", role: "user", time: { created: 1 } },
+      parts: [{ type: "file", url: "data:image/png;base64,AAAA", mime: "image/png", filename: longName }],
+    });
+    const storedName = (stored as { attachments: Array<{ name: string }> }).attachments[0]!.name;
+    expect([...storedName].length).toBe(200);
+  });
+});
