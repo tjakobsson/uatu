@@ -4,6 +4,7 @@ import path from "node:path";
 import type { CredentialMetadataStore } from "./credential-store";
 import type { PersonalWorkspaceStateStore } from "./personal-state";
 import { normalizeAbsolutePath, PathReservationCoordinator } from "./path-reservations";
+import { loadNoReplaceRename, type NoReplaceRename } from "./rename-no-replace";
 import type { WorkspaceEntry, WorkspaceRegistry } from "./registry";
 import type { SessionManager, SessionsStoppedResult } from "./sessions";
 
@@ -38,8 +39,9 @@ export type RemoveFolderResult = { path: string; workspaceId?: string };
 export type CoordinatedFolderResult<T> = SessionsStoppedResult<T>;
 
 // dev+ino as strings (64-bit inode numbers exceed safe JSON integers).
-// Recorded so recovery can tell OUR empty destination claim from a foreign
-// directory or from the successfully renamed folder itself.
+// Recorded so recovery can tell the successfully renamed folder — and, on
+// the claimed-placeholder fallback path, our own empty destination claim —
+// from a foreign directory.
 type DirectoryIdentity = { dev: string; ino: string };
 
 type RenameJournal = {
@@ -49,9 +51,11 @@ type RenameJournal = {
   destination: string;
   before: WorkspaceEntry[];
   after: WorkspaceEntry[];
-  // Absent in journals from builds that predate claim identities; recovery
-  // then treats a both-exist state as ambiguous, exactly as before.
-  identities?: { source: DirectoryIdentity; claim: DirectoryIdentity };
+  // Absent in journals from builds that predate identities; recovery then
+  // treats a both-exist state as ambiguous, exactly as before. claim is
+  // recorded only by the fallback strategy — the no-replace rename path
+  // never creates a placeholder.
+  identities?: { source: DirectoryIdentity; claim?: DirectoryIdentity };
 };
 
 type RemoveJournal = {
@@ -183,9 +187,12 @@ function parseIdentity(value: unknown): DirectoryIdentity {
   return { dev: record.dev, ino: record.ino };
 }
 
-function parseIdentities(value: unknown): { source: DirectoryIdentity; claim: DirectoryIdentity } {
+function parseIdentities(value: unknown): { source: DirectoryIdentity; claim?: DirectoryIdentity } {
   const record = closedJournalObject(value, ["source", "claim"], "rename journal identities");
-  return { source: parseIdentity(record.source), claim: parseIdentity(record.claim) };
+  return {
+    source: parseIdentity(record.source),
+    ...(record.claim === undefined ? {} : { claim: parseIdentity(record.claim) }),
+  };
 }
 
 function directoryIdentity(stats: { dev: number | bigint; ino: number | bigint }): DirectoryIdentity {
@@ -363,11 +370,16 @@ export async function reconcileRegisteredAliasPaths(
 export class FolderManager {
   private readonly fs: FileSystem;
   private readonly journal: FolderMutationJournal;
+  private readonly renameNoReplace: NoReplaceRename | null;
   private operationChain: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly options: FolderManagerOptions) {
     this.fs = options.fs ?? nodeFs;
     this.journal = new FolderMutationJournal(options.journalPath, this.fs);
+    // The kernel-level no-replace rename applies only to the real
+    // filesystem; an injected fs (failure-injection tests) exercises the
+    // claimed-placeholder fallback its hooks can observe.
+    this.renameNoReplace = options.fs ? null : loadNoReplaceRename();
   }
 
   create(input: unknown): Promise<CreateFolderResult> {
@@ -600,10 +612,27 @@ export class FolderManager {
   }
 
   private async renameWithoutReplacement(source: string, destination: string): Promise<void> {
+    if (this.renameNoReplace) {
+      // The kernel refuses an existing destination atomically — no claim,
+      // no placeholder, no ownership question. errno does not cross the
+      // FFI boundary: a failure with a visible destination is the
+      // conflict; otherwise the plain rename call surfaces the real error
+      // faithfully (the destination was just observed absent twice).
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (this.renameNoReplace(source, destination) === 0) return;
+        if (await this.fs.lstat(destination).then(() => true, () => false)) {
+          throw new FolderManagerError("conflict", "destination already exists");
+        }
+      }
+      await this.fs.rename(source, destination);
+      return;
+    }
     let claim: DirectoryIdentity | undefined;
     try {
-      // mkdir atomically claims the absent name. POSIX rename may then replace
-      // only our empty claim; a competing entry makes either step fail.
+      // Fallback: mkdir atomically claims the absent name and POSIX rename
+      // replaces our empty claim. Best-effort only — a claim swapped by a
+      // foreign process between these steps is caught by identity where
+      // inode numbers cooperate.
       await this.fs.mkdir(destination);
       claim = directoryIdentity(await this.fs.lstat(destination));
       await this.fs.rename(source, destination);
@@ -675,31 +704,49 @@ export class FolderManager {
       ...entry,
       path: path.join(destination, path.relative(source, entry.path)),
     }));
-    // The destination is claimed BEFORE the journal so the claim's identity
-    // can be recorded in it — recovery can then tell our empty placeholder
-    // from a foreign directory or the renamed folder itself. A crash before
-    // the journal write leaves only an inert empty directory, which is
-    // ordinary removable clutter, never a recovery state.
     let claim: DirectoryIdentity | undefined;
     try {
-      await this.fs.mkdir(destination);
-      const [sourceStats, claimStats] = await Promise.all([this.fs.lstat(source), this.fs.lstat(destination)]);
-      claim = directoryIdentity(claimStats);
-      const pending: RenameJournal = {
-        version: JOURNAL_VERSION,
-        operation: "rename",
-        source,
-        destination,
-        before,
-        after,
-        identities: { source: directoryIdentity(sourceStats), claim },
-      };
-      await this.journal.write(pending);
-      // The journal write above is real I/O; re-verify the claim is still
-      // ours before the rename that replaces it.
-      await this.assertClaimOwned(destination, claim);
-      await this.fs.rename(source, destination);
-      claim = undefined;
+      if (this.renameNoReplace) {
+        // The journaled source identity lets recovery recognize the moved
+        // folder if a crash lands between the rename and the registry
+        // update while something foreign recreates the source.
+        const sourceStats = await this.fs.lstat(source);
+        const pending: RenameJournal = {
+          version: JOURNAL_VERSION,
+          operation: "rename",
+          source,
+          destination,
+          before,
+          after,
+          identities: { source: directoryIdentity(sourceStats) },
+        };
+        await this.journal.write(pending);
+        await this.renameWithoutReplacement(source, destination);
+      } else {
+        // Fallback strategy: the destination is claimed BEFORE the journal
+        // so the claim's identity can be recorded in it — recovery can then
+        // tell our empty placeholder from a foreign directory or the
+        // renamed folder itself. A crash before the journal write leaves
+        // only an inert empty directory, never a recovery state.
+        await this.fs.mkdir(destination);
+        const [sourceStats, claimStats] = await Promise.all([this.fs.lstat(source), this.fs.lstat(destination)]);
+        claim = directoryIdentity(claimStats);
+        const pending: RenameJournal = {
+          version: JOURNAL_VERSION,
+          operation: "rename",
+          source,
+          destination,
+          before,
+          after,
+          identities: { source: directoryIdentity(sourceStats), claim },
+        };
+        await this.journal.write(pending);
+        // The journal write above is real I/O; re-verify the claim is
+        // still ours before the rename that replaces it.
+        await this.assertClaimOwned(destination, claim);
+        await this.fs.rename(source, destination);
+        claim = undefined;
+      }
     } catch (error) {
       if (claim) await this.removeOwnedClaim(destination, claim);
       await this.journal.clear().catch(() => undefined);

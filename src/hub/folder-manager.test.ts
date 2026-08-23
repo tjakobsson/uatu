@@ -520,18 +520,22 @@ describe("FolderManager registered mutations", () => {
   });
 
   test("a claim swapped from under the rename conflicts instead of replacing", async () => {
-    // A same-user process rmdir+mkdirs the destination while the journal
-    // is being written: the recorded claim identity no longer matches, so
-    // the rename must refuse — and the cleanup must not delete the foreign
-    // directory either.
+    // A same-user process replaces the destination while the journal is
+    // being written: the recorded claim identity no longer matches, so the
+    // rename must refuse — and the cleanup must not delete the foreign
+    // directory either. The replacement is created BEFORE the claim is
+    // removed so its inode is guaranteed distinct on every filesystem
+    // (the claim's inode is still allocated at creation time).
     let swapArmed = false;
     let swapTarget = "";
     const injected = Object.assign({}, fs, {
       rename: async (from: string, to: string) => {
         if (swapArmed && to.endsWith("pending-folder-mutation.json")) {
           swapArmed = false;
+          const replacement = `${swapTarget}.foreign`;
+          await fs.mkdir(replacement);
           await fs.rmdir(swapTarget);
-          await fs.mkdir(swapTarget);
+          await fs.rename(replacement, swapTarget);
         }
         return fs.rename(from, to);
       },
