@@ -666,3 +666,46 @@ describe("durable-store user messages (post-turn classic form)", () => {
     ]);
   });
 });
+
+describe("attachment contract filtering and caption alignment", () => {
+  test("non-image and mime-less provider files stay out of the attachments field", () => {
+    const [flat] = normalizeProviderMessage({
+      id: "msg_20", type: "user", time: { created: 1 }, text: "mixed",
+      files: [
+        { uri: "file:///s/11111111-2222-4333-8444-555555555555.png", mime: "image/png", name: "ok.png" },
+        { uri: "file:///s/notes.txt", mime: "text/plain", name: "notes.txt" },
+        { uri: "file:///s/mystery.bin", name: "mystery.bin" },
+        { uri: "file:///s/vector.svg", mime: "image/svg+xml", name: "vector.svg" },
+      ],
+    });
+    expect((flat as { attachments?: unknown[] }).attachments).toEqual([
+      { id: "11111111-2222-4333-8444-555555555555", name: "ok.png", mimeType: "image/png" },
+    ]);
+    const [stored] = normalizeProviderMessage({
+      info: { id: "msg_21", role: "user", time: { created: 1 } },
+      parts: [
+        { type: "text", text: "mixed" },
+        { type: "file", url: "data:text/plain;base64,AAAA", mime: "text/plain", filename: "notes.txt" },
+      ],
+    });
+    expect(stored).not.toHaveProperty("attachments");
+  });
+
+  test("a drifted caption yields a placeholder for its own slot, never a shifted id", () => {
+    const items = normalizeProviderMessage({
+      info: { id: "msg_22", role: "user", time: { created: 1 } },
+      parts: [
+        { type: "text", text: "two images" },
+        { type: "text", synthetic: true, text: "Called the Read tool with something unrecognizable" },
+        { type: "text", synthetic: true, text: 'Called the Read tool with the following input: {"filePath":"/s/22222222-2222-4333-8444-555555555555.webp"}' },
+        { type: "file", url: "data:image/webp;base64,AAAA", mime: "image/webp", filename: "one.webp" },
+        { type: "file", url: "data:image/webp;base64,AAAA", mime: "image/webp", filename: "two.webp" },
+      ],
+    });
+    expect((items[0] as { attachments?: unknown[] }).attachments).toEqual([
+      // Slot one drifted: placeholder, NOT the second caption's id.
+      { name: "one.webp", mimeType: "image/webp" },
+      { id: "22222222-2222-4333-8444-555555555555", name: "two.webp", mimeType: "image/webp" },
+    ]);
+  });
+});

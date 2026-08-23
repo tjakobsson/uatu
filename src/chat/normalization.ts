@@ -1,6 +1,6 @@
 import { boundedSet } from "../shared/bounded-map";
 import { attachmentIdFromFileUri, attachmentIdFromText } from "./attachment-store";
-import type { ConversationConfiguration, ConversationItem, ConversationStatus, MessageAttachment, StructuredQuestion, TokenUsage } from "./types";
+import { CHAT_ATTACHMENT_MIME_TYPES, type ConversationConfiguration, type ConversationItem, type ConversationStatus, type MessageAttachment, type StructuredQuestion, type TokenUsage } from "./types";
 
 type RecordValue = Record<string, unknown>;
 
@@ -653,15 +653,24 @@ function usageUpsert(itemId: string, createdAt: number, usage: TokenUsage, model
 // an issued-id shape becomes an id-less placeholder reference.
 function normalizeUserAttachments(value: unknown): MessageAttachment[] {
   if (!Array.isArray(value)) return [];
-  return value.map(entry => {
+  return value.flatMap(entry => {
     const file = record(entry);
+    // Same contract rule as the stored path: only the four image types the
+    // wire schema admits become attachment references.
+    const mimeType = contractImageMime(optionalString(file.mime));
+    if (mimeType === null) return [];
     const id = attachmentIdFromFileUri(optionalString(file.uri) ?? "");
-    return {
+    return [{
       ...(id ? { id } : {}),
       name: optionalString(file.name) ?? "attachment",
-      mimeType: optionalString(file.mime) ?? "application/octet-stream",
-    };
+      mimeType,
+    }];
   });
+}
+
+function contractImageMime(mime: string | undefined): string | null {
+  const normalized = mime?.toLowerCase();
+  return normalized !== undefined && (CHAT_ATTACHMENT_MIME_TYPES as readonly string[]).includes(normalized) ? normalized : null;
 }
 
 function normalizeStoredMessage(info: RecordValue, parts: unknown[], mintUsageCarrier: boolean): ConversationItem[] {
@@ -679,18 +688,26 @@ function normalizeStoredMessage(info: RecordValue, parts: unknown[], mintUsageCa
     // store). Captions pair with file parts in order; an unpaired file part
     // stays an id-less placeholder. Bytes are never passed through either
     // way: projections carry references, not image payloads.
-    const captionIds = records
+    // Slots stay aligned, nulls included: one caption per file part, in
+    // order. Compacting away an unparseable caption would shift a later
+    // caption's id onto an earlier file — showing the wrong stored image is
+    // strictly worse than the spec'd placeholder.
+    const captionSlots = records
       .filter(part => part.type === "text" && part.synthetic === true)
-      .map(part => attachmentIdFromText(text(part.text)))
-      .filter((value): value is string => value !== null);
-    let caption = 0;
-    const attachments: MessageAttachment[] = records.filter(part => part.type === "file").map(part => {
-      const recovered = attachmentIdFromFileUri(optionalString(part.url) ?? "") ?? captionIds[caption++];
-      return {
+      .map(part => attachmentIdFromText(text(part.text)));
+    const attachments: MessageAttachment[] = records.filter(part => part.type === "file").flatMap((part, index) => {
+      // The wire contract admits exactly the four image types; a
+      // pre-existing conversation's other files (a text attachment from the
+      // OpenCode TUI, a mime-less part) stay out of the attachments field
+      // rather than violating every strict consumer of revision 8.
+      const mimeType = contractImageMime(optionalString(part.mime));
+      if (mimeType === null) return [];
+      const recovered = attachmentIdFromFileUri(optionalString(part.url) ?? "") ?? captionSlots[index] ?? undefined;
+      return [{
         ...(recovered ? { id: recovered } : {}),
         name: optionalString(part.filename) ?? "attachment",
-        mimeType: optionalString(part.mime) ?? "application/octet-stream",
-      };
+        mimeType,
+      }];
     });
     return [{ id: `message:${id}`, type: "user_message", createdAt, text: body, ...(attachments.length ? { attachments } : {}) }];
   }

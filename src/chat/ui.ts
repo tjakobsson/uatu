@@ -885,6 +885,18 @@ export function initChat(): void {
   // nothing new was appended while it waited) so an image attached moments
   // before Enter joins the message it was attached for.
   const attachmentStaging = new Map<string, Promise<void>>();
+
+  // The prompt route bounds attachment names to 200 UTF-8 bytes; an overlong
+  // filename staged verbatim would upload fine and then fail every send.
+  // Truncated here, on a code-point boundary, so the reference stays sendable.
+  const boundAttachmentName = (name: string): string => {
+    const trimmed = name || "image";
+    const encoder = new TextEncoder();
+    if (encoder.encode(trimmed).length <= 200) return trimmed;
+    let bounded = trimmed;
+    while (bounded.length > 1 && encoder.encode(bounded).length > 200) bounded = bounded.slice(0, -1);
+    return bounded;
+  };
   const supportedAttachmentTypes = new Set<string>(CHAT_ATTACHMENT_MIME_TYPES);
 
   // The conversation attachments belong to. The projection may still be
@@ -996,7 +1008,7 @@ export function initChat(): void {
           // Keyed to the conversation the upload was staged for, which may no
           // longer be the selected one by the time the round trip returns.
           const entries = pendingAttachments.get(conversationId) ?? [];
-          entries.push({ id: stored.id, name: file.name || "image", mimeType: stored.mimeType, previewUrl: URL.createObjectURL(file) });
+          entries.push({ id: stored.id, name: boundAttachmentName(file.name), mimeType: stored.mimeType, previewUrl: URL.createObjectURL(file) });
           setPendingAttachments(conversationId, entries);
         } catch (error) {
           setComposerError(`Could not attach ${file.name || "image"}: ${messageOf(error)}`);
@@ -1004,6 +1016,9 @@ export function initChat(): void {
       }
     });
     attachmentStaging.set(conversationId, task);
+    // The chain existing is what makes an empty draft sendable, so the send
+    // control resyncs now, not only when the upload lands.
+    syncControls();
     try {
       await task;
     } finally {
@@ -1119,8 +1134,11 @@ export function initChat(): void {
     send.type = running ? "button" : "submit";
     send.dataset.action = running ? "cancel" : "send";
     // A message needs content, not necessarily words: pending attachments make
-    // an empty draft sendable (image-only prompts are accepted end to end).
-    const hasContent = Boolean(input.value.trim()) || currentPendingAttachments().length > 0;
+    // an empty draft sendable (image-only prompts are accepted end to end),
+    // and an upload still in flight counts — submission waits for it.
+    const activeId = activeConversationId();
+    const hasContent = Boolean(input.value.trim()) || currentPendingAttachments().length > 0
+      || (activeId !== null && attachmentStaging.has(activeId));
     send.disabled = running ? cancelling || !projection : submitting || !projection || !hasContent;
     const action = running ? "Cancel" : "Send";
     sendLabel.textContent = action;
@@ -1906,7 +1924,9 @@ export function initChat(): void {
   form.addEventListener("submit", async event => {
     event.preventDefault();
     if (!projection || submitting) return;
-    if (!input.value.trim() && currentPendingAttachments().length === 0) return;
+    // In-flight staging is prospective content: an image-only submit during
+    // its own upload waits for the drain below rather than being refused.
+    if (!input.value.trim() && currentPendingAttachments().length === 0 && !attachmentStaging.has(projection.conversationId)) return;
     const conversationId = projection.conversationId;
     const text = input.value;
     submitting = true;
@@ -1934,6 +1954,14 @@ export function initChat(): void {
         syncControls();
         return;
       }
+    }
+    // The drain can end with nothing to send: an image-only submission whose
+    // upload was refused has no content left, and the staging path already
+    // explained why on the composer error line.
+    if (!text.trim() && (pendingAttachments.get(conversationId) ?? []).length === 0) {
+      submitting = false;
+      syncControls();
+      return;
     }
     // Captured and cleared optimistically like the text; restored on failure.
     const stagedAttachments = [...(pendingAttachments.get(conversationId) ?? [])];

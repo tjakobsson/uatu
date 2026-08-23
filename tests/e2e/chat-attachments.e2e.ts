@@ -311,3 +311,24 @@ test.describe("staging chain regressions", () => {
     await expect(page.locator("#chat-attachments .chat-attachment")).toHaveCount(8);
   });
 });
+
+test.describe("image-only staging wait", () => {
+  test.beforeEach(async ({ page, request }) => bootChat(page, request));
+
+  test("an image-only submit during its own upload waits and sends", async ({ page }) => {
+    await newConversation(page);
+    await page.route("**/attachments", async route => {
+      await new Promise(resolve => setTimeout(resolve, 500));
+      await route.continue();
+    });
+    await page.locator("#chat-attach-input").setInputFiles({ name: "only.png", mimeType: "image/png", buffer: PNG });
+    // Send lights up on the in-flight staging, before the chip lands.
+    await expect(page.locator("#chat-send")).toBeEnabled();
+    const accepted = page.waitForResponse(response => response.url().endsWith("/prompts"));
+    await page.locator("#chat-send").click();
+    const body = (await accepted).request().postDataJSON() as { text: string; attachments?: unknown[] };
+    expect(body.text).toBe("");
+    expect(body.attachments).toHaveLength(1);
+    await page.unroute("**/attachments");
+  });
+});
