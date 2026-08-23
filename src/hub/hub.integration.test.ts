@@ -6,7 +6,7 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -553,6 +553,24 @@ describe("hub end to end", () => {
     });
     expect(missingRename.status).toBe(404);
     await assertContract("POST", "/api/hub/workspaces/{workspaceId}/display-name", missingRename);
+
+    // A valid name whose atomic registry save fails is a retryable 500 —
+    // 400 stays reserved for name validation. The state dir is made
+    // read-only so the save's temp-file write fails.
+    await chmod(tempRoot, 0o500);
+    try {
+      const unpersisted = await fetch(`${origin}/api/hub/workspaces/myproject/display-name`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie, origin },
+        body: JSON.stringify({ displayName: "Will Not Persist" }),
+      });
+      expect(unpersisted.status).toBe(500);
+      await assertContract("POST", "/api/hub/workspaces/{workspaceId}/display-name", unpersisted);
+      expect(((await unpersisted.json()) as { error: string }).error).toContain("persisted");
+    } finally {
+      await chmod(tempRoot, 0o700);
+    }
+    expect(registry.byId("myproject")?.displayName).toBe("My Project");
   }, 60_000);
 
   test("configure, create, and workspace-default operations commit stopped configurations", async () => {
@@ -1541,6 +1559,43 @@ describe("hub end to end", () => {
     expect(aliasRetain.status).toBe(400);
     expect(((await aliasRetain.json()) as { error: string }).error).toContain("clone host");
     expect(managedCloneStarts).toHaveLength(startsBefore);
+
+    // The legacy retention flag reconciles against explicit retained
+    // selections by normalized host: the same logical host under another
+    // spelling backing a different credential is a request conflict caught
+    // before any clone starts — not a post-clone assignment failure.
+    const conflictingRetain = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({
+        url: "managed:conflicting.git",
+        dest,
+        credentialId: "unlocked-ssh",
+        retainAssignment: true,
+        retainedAuthentication: [{ credentialId: "some-other-credential", host: "GitHub.COM" }],
+      }),
+    });
+    expect(conflictingRetain.status).toBe(400);
+    expect(((await conflictingRetain.json()) as { error: string }).error).toContain("conflicts");
+    expect(managedCloneStarts).toHaveLength(startsBefore);
+
+    // The identical selection under another spelling dedupes instead.
+    const dedupedRetain = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({
+        url: "managed:deduped.git",
+        dest,
+        credentialId: "unlocked-ssh",
+        retainAssignment: true,
+        retainedAuthentication: [{ credentialId: "unlocked-ssh", host: "GitHub.COM" }],
+      }),
+    });
+    expect(dedupedRetain.status).toBe(202);
+    const dedupedId = ((await dedupedRetain.json()) as { jobId: string }).jobId;
+    const dedupedStream = await fetch(`${origin}/api/hub/clone-jobs/${dedupedId}/events`, { headers: { cookie } });
+    expect(await dedupedStream.text()).toContain('"status":"succeeded"');
+    await sessions.stop("deduped");
 
     const selected = await fetch(`${origin}/api/hub/clone-jobs`, {
       method: "POST",

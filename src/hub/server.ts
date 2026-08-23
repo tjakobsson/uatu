@@ -649,14 +649,19 @@ export function createHubFetchHandler(deps: HubDeps) {
     } catch {
       return json(400, { error: "invalid JSON body or unknown field" }, NO_STORE_HEADERS);
     }
-    if (typeof body.displayName !== "string") {
-      return json(400, { error: "displayName must be a string" }, NO_STORE_HEADERS);
+    // Validation happens here so the update call can only fail on
+    // persistence — a 400 is a request correction, a 500 is retryable.
+    let displayName: string;
+    try {
+      displayName = validateWorkspaceDisplayName(body.displayName);
+    } catch (error) {
+      return json(400, { error: error instanceof Error ? error.message : String(error) }, NO_STORE_HEADERS);
     }
     if (!registry.byId(workspaceId)) {
       return json(404, { error: `unknown workspace: ${workspaceId}` }, NO_STORE_HEADERS);
     }
     try {
-      const updated = await registry.updateDisplayName(workspaceId, body.displayName);
+      const updated = await registry.updateDisplayName(workspaceId, displayName);
       if (!updated) return json(404, { error: `unknown workspace: ${workspaceId}` }, NO_STORE_HEADERS);
       return json(200, {
         workspace: {
@@ -667,8 +672,8 @@ export function createHubFetchHandler(deps: HubDeps) {
           running: sessions.isRunning(updated.id),
         },
       }, NO_STORE_HEADERS);
-    } catch (error) {
-      return json(400, { error: error instanceof Error ? error.message : String(error) }, NO_STORE_HEADERS);
+    } catch {
+      return json(500, { error: "workspace display name could not be persisted" }, NO_STORE_HEADERS);
     }
   };
 
@@ -787,11 +792,25 @@ export function createHubFetchHandler(deps: HubDeps) {
       }
       // Legacy retention flag: retain the clone identity as the workspace
       // authentication default for its host — still an explicit request,
-      // never an implicit consequence of selecting a clone credential.
+      // never an implicit consequence of selecting a clone credential. The
+      // merge compares normalized hosts: the identical selection dedupes,
+      // and a different credential for the same logical host is a request
+      // conflict surfaced now — either variant slipping through would fail
+      // only after the clone completed, leaving the checkout unregistered.
       const retained = [...retainedAuthentication];
       if (body.retainAssignment === true && credential && deps.onboarding) {
         const host = normalizeProviderHost(credential.host);
-        if (!retained.some(selection => selection.host === host)) {
+        const sameHost = retained.find(selection => {
+          try {
+            return normalizeProviderHost(selection.host) === host;
+          } catch {
+            return selection.host === host;
+          }
+        });
+        if (sameHost && sameHost.credentialId !== credential.credentialId) {
+          return json(400, { error: `retainAssignment conflicts with a retainedAuthentication selection for host: ${host}` });
+        }
+        if (!sameHost) {
           retained.push({ credentialId: credential.credentialId, host });
         }
       }

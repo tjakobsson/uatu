@@ -464,6 +464,7 @@ export class WorkspaceOnboardingCoordinator {
     signing: string | null;
   }): Promise<OnboardingResult> {
     return this.enqueue(async () => {
+      await this.assertNoPendingOnboarding();
       const canonical = await this.canonicalDirectory(options.path);
       if (this.options.registry.byPath(canonical)) {
         throw new OnboardingError("conflict", `folder is already registered: ${canonical}`);
@@ -532,6 +533,7 @@ export class WorkspaceOnboardingCoordinator {
   }
 
   private async commitExisting(input: ConfigureExistingInput): Promise<OnboardingResult> {
+    await this.assertNoPendingOnboarding();
     const canonical = await this.canonicalDirectory(input.path);
     const existing = this.options.registry.byPath(canonical);
     if (existing) {
@@ -575,6 +577,7 @@ export class WorkspaceOnboardingCoordinator {
   }
 
   private async commitCreate(input: CreateWorkspaceInput): Promise<OnboardingResult> {
+    await this.assertNoPendingOnboarding();
     const parent = await this.canonicalDirectory(input.parent);
     const destination = path.join(parent, input.folderName);
     const reservation = this.reserve([destination]);
@@ -644,6 +647,21 @@ export class WorkspaceOnboardingCoordinator {
       this.options.credentials.snapshot(),
     );
     return await this.commitPlanned({ ...options, planned, desired });
+  }
+
+  // A surviving journal is the only recovery record of an onboarding that
+  // failed midway (rollback or clear failed). The journal holds one
+  // record, so beginning another onboarding would replace it — and, on
+  // success, clear it — leaving recovery unable to undo the earlier
+  // partial registration. Mirrors FolderManager.assertNoPendingMutation.
+  private async assertNoPendingOnboarding(): Promise<void> {
+    try {
+      await this.fs.lstat(this.options.journalPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw safeFsError(error, "onboarding journal inspection failed");
+    }
+    throw new OnboardingError("recovery-required", "a pending onboarding requires Hub recovery before new workspace changes");
   }
 
   // The journaled two-store commit. Runs only inside the operation chain.

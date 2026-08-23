@@ -600,6 +600,39 @@ describe("commit-boundary failure injection", () => {
     expect(await journalExists(f.journalPath)).toBe(false);
   });
 
+  test("a pending onboarding journal refuses new onboarding operations", async () => {
+    // The single-record journal is the only recovery record of an
+    // onboarding that failed midway; another commit would replace and
+    // then clear it, stranding the earlier partial registration.
+    const f = await fixture();
+    const stranded = {
+      version: 1,
+      operation: "configure-existing",
+      createdFolder: false,
+      entry: { id: "stranded", path: path.join(f.folders, "stranded"), backend: "local", displayName: "Stranded" },
+      previousEntry: null,
+      previousAssignments: [],
+      desiredAssignments: [],
+    };
+    await fs.writeFile(f.journalPath, `${JSON.stringify(stranded)}\n`, { mode: 0o600 });
+    await fs.chmod(f.journalPath, 0o600);
+    const folder = await gitRepository(f.folders, "repo");
+
+    await expect(f.coordinator.configureExisting({ path: folder, displayName: "Repo" }))
+      .rejects.toMatchObject({ code: "recovery-required" });
+    await expect(f.coordinator.createWorkspace({ parent: f.folders, folderName: "fresh", displayName: "Fresh" }))
+      .rejects.toMatchObject({ code: "recovery-required" });
+    expect(JSON.parse(await fs.readFile(f.journalPath, "utf8"))).toMatchObject({ entry: { id: "stranded" } });
+    expect(f.registry.byPath(folder)).toBeUndefined();
+    // The refusal lands before any filesystem mutation.
+    expect(await fs.lstat(path.join(f.folders, "fresh")).then(() => true, () => false)).toBe(false);
+
+    await f.coordinator.recover();
+    expect(await journalExists(f.journalPath)).toBe(false);
+    const result = await f.coordinator.configureExisting({ path: folder, displayName: "Repo" });
+    expect(result.created).toBe(true);
+  });
+
   test("recovery does not resurrect assignments revoked after the commit", async () => {
     // The journal's clear failed after both stores committed and the hub
     // kept serving: a credential deletion then legitimately revoked the

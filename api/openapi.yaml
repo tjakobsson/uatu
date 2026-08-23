@@ -317,6 +317,12 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/NoStoreError' }
+        '500':
+          description: The validated name could not be persisted (a retryable registry save failure, not a request problem).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: workspace display name could not be persisted }
   /api/hub/settings/workspace-defaults:
     get:
       operationId: hubGetWorkspaceDefaults
