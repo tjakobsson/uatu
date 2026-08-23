@@ -9,7 +9,7 @@ import { ChatViewportController } from "./viewport";
 import { newRequestId } from "./ids";
 import { insertCommand, matchingCommands } from "./slash-commands";
 import { navigateWorkspaceFileReference, resolveWorkspaceFileReference } from "./file-references";
-import { READER_CLOSED, QueueDockRenderer, TimelineRenderer, decorateFileLinks, latestTodoEntries, statusLabel, subagentEntries, type SubagentEntry } from "./timeline-renderer";
+import { READER_CLOSED, QueueDockRenderer, TimelineRenderer, decorateAttachmentImages, decorateFileLinks, latestTodoEntries, statusLabel, subagentEntries, type SubagentEntry } from "./timeline-renderer";
 import { contextTokens, totalTokens } from "./usage";
 import {
   addAcceptedDraft,
@@ -22,7 +22,7 @@ import {
   removeAcceptedDraft,
   type ChatProjection,
 } from "./projection";
-import type { ChatAgent, ChatCapability, ChatMode, ChatAvailability, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationSummary, ModelSelection, PermissionOutcome, QuestionOutcome, TokenUsage } from "./types";
+import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, type ChatAgent, type ChatCapability, type ChatMode, type ChatAvailability, type ChatCommand, type ChatModel, type ConversationConfiguration, type ConversationItem, type ConversationSummary, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type TokenUsage } from "./types";
 import { formatDiagnostics } from "./diagnostics";
 import { collectQuestionAnswers, showQuestionPanel, syncQuestionControl, syncQuestionForm } from "./question-form";
 import { configurationOptionLabel, createChatConfigurationPicker, type ChatConfigurationPickerController } from "./configuration-picker";
@@ -83,6 +83,15 @@ export function initChat(): void {
   const composerStatus = document.querySelector<HTMLElement>("#chat-composer-status");
   const composerStatusLive = document.querySelector<HTMLElement>("#chat-composer-status-live");
   const composerError = document.querySelector<HTMLElement>("#chat-composer-error");
+  // Attachment surfaces. Guarded at use rather than joining the required
+  // check below, like the drill-down, so an older shell still runs Chat.
+  const attachButton = document.querySelector<HTMLButtonElement>("#chat-attach");
+  const attachInput = document.querySelector<HTMLInputElement>("#chat-attach-input");
+  const attachmentsStrip = document.querySelector<HTMLElement>("#chat-attachments");
+  const imageViewer = document.querySelector<HTMLDialogElement>("#chat-image-viewer");
+  const imageViewerImage = document.querySelector<HTMLImageElement>("#chat-image-viewer-image");
+  const imageViewerName = document.querySelector<HTMLElement>("#chat-image-viewer-name");
+  const imageViewerClose = document.querySelector<HTMLButtonElement>("#chat-image-viewer-close");
   const copyStatus = document.querySelector<HTMLElement>("#chat-copy-status");
   const waiting = document.querySelector<HTMLElement>("#chat-waiting");
   const waitingLabel = document.querySelector<HTMLElement>("#chat-waiting-label");
@@ -182,7 +191,11 @@ export function initChat(): void {
   // receipt dedupes instead of starting a second agent turn. Keyed per
   // conversation: a success elsewhere must not discard another
   // conversation's unresolved id.
-  const retryRequests = new Map<string, { text: string; requestId: string }>();
+  // `attachments` joins the retry identity: a resubmission with the same text
+  // but a changed attachment set is a different message, and reusing the old
+  // request id would let the server replay the first acceptance receipt for a
+  // payload the provider never saw.
+  const retryRequests = new Map<string, { text: string; requestId: string; attachments: string }>();
   let commandMatch: ReturnType<typeof matchingCommands> = null;
   let commandIndex = 0;
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -239,6 +252,10 @@ export function initChat(): void {
     if (!declares("context")) contextUsage?.remove();
     if (!declares("conversation-rename")) renameButton?.remove();
     else if (renameButton) renameButton.hidden = false;
+    // Removed, not disabled, per the capability rule above. The model-level
+    // gate is different — see syncAttachControl: a model choice flips often,
+    // so there the control stays visible and goes inactive instead.
+    if (!declares("attachments")) attachButton?.remove();
   };
   nameAgent();
 
@@ -795,6 +812,7 @@ export function initChat(): void {
     syncControls();
     for (const node of dirty) {
       decorateFileLinks(node);
+      decorateAttachmentImages(node);
       // A freshly built question form starts with its primary button disabled;
       // this settles the tab strip and button state for its first step.
       node.querySelectorAll<HTMLFormElement>("form[data-question-form]").forEach(syncQuestionForm);
@@ -852,10 +870,356 @@ export function initChat(): void {
     if (show) waitingLabel.textContent = workingText();
   };
 
-  const setComposerError = (message: string | null) => {
+  const showComposerError = (message: string | null) => {
     composerError.textContent = message ?? "";
     composerError.hidden = !message;
   };
+  // Composer errors belong to the conversation they happened in: an upload
+  // that fails after the user switched away must not flash its refusal into
+  // the selected conversation, and the reason must still be waiting when its
+  // own conversation is selected again. Callers with a captured id (the
+  // staging chain) pass it; everything else speaks about the selection.
+  const composerErrors = new Map<string, string>();
+  const setComposerError = (message: string | null, conversationId = activeConversationId()) => {
+    if (conversationId) {
+      if (message) composerErrors.set(conversationId, message);
+      else composerErrors.delete(conversationId);
+    }
+    if (!conversationId || conversationId === activeConversationId()) showComposerError(message);
+  };
+
+  // ------------------------------------------------------------------
+  // Image attachments: staged per conversation, uploaded at attach time,
+  // referenced by id everywhere after (spec: bytes cross each boundary once).
+  // Pending state deliberately does not persist across reloads.
+  // ------------------------------------------------------------------
+  type PendingAttachment = MessageAttachment & { id: string; previewUrl: string };
+  const pendingAttachments = new Map<string, PendingAttachment[]>();
+  // One serialized staging chain per conversation. Serialization makes the
+  // per-message bound check honest — a second paste near the eight-image
+  // limit runs after the first and sees its result instead of racing past
+  // the cap — and submission drains the chain (re-reading the tail until
+  // nothing new was appended while it waited) so an image attached moments
+  // before Enter joins the message it was attached for.
+  const attachmentStaging = new Map<string, Promise<void>>();
+  // Attachments riding an in-flight submission still count against the
+  // per-message cap: a failure restores them to pending, and an intake that
+  // ignored them could push the restored draft past eight and make every
+  // retry refusable.
+  const submittedAttachmentReserve = new Map<string, number>();
+  // Monotonic per-conversation refusal count. Submission compares it across
+  // the staging drain: a refusal that lands while a submit waits is a piece
+  // of THAT message going missing, and the send must stop rather than
+  // deliver a partial prompt. Refusals from before the submit are the
+  // user's informed choice to send without the refused file.
+  const attachmentRefusals = new Map<string, number>();
+  const noteAttachmentRefusal = (conversationId: string, count = 1) => {
+    if (count > 0) attachmentRefusals.set(conversationId, (attachmentRefusals.get(conversationId) ?? 0) + count);
+  };
+
+  // The prompt route bounds attachment names to 200 UTF-8 bytes and refuses
+  // blank ones; a name staged verbatim past either rule would upload fine
+  // and then fail every send. Bounded here — fallback for empty and
+  // whitespace-only, truncation on a code-point boundary — so the reference
+  // stays sendable.
+  const boundAttachmentName = (name: string): string => {
+    const trimmed = name.trim() === "" ? "image" : name;
+    const encoder = new TextEncoder();
+    if (encoder.encode(trimmed).length <= 200) return trimmed;
+    let bounded = trimmed;
+    while (bounded.length > 1 && encoder.encode(bounded).length > 200) bounded = bounded.slice(0, -1);
+    // UTF-16 slicing can leave a lone high surrogate at the cut; it would
+    // encode as U+FFFD garbage in the name.
+    const last = bounded.charCodeAt(bounded.length - 1);
+    if (last >= 0xd800 && last <= 0xdbff) bounded = bounded.slice(0, -1);
+    return bounded || "image";
+  };
+  const supportedAttachmentTypes = new Set<string>(CHAT_ATTACHMENT_MIME_TYPES);
+
+  // The conversation attachments belong to. The projection may still be
+  // loading when the user attaches — the selection is already made, so the
+  // selected id serves until the snapshot installs. Without this, an attach
+  // during the load window silently did nothing.
+  const activeConversationId = (): string | null =>
+    projection?.conversationId ?? presentation.selectedId ?? null;
+
+  const currentPendingAttachments = (): PendingAttachment[] => {
+    const conversationId = activeConversationId();
+    return conversationId ? pendingAttachments.get(conversationId) ?? [] : [];
+  };
+
+  const setPendingAttachments = (conversationId: string, entries: PendingAttachment[]) => {
+    if (entries.length > 0) pendingAttachments.set(conversationId, entries);
+    else pendingAttachments.delete(conversationId);
+  };
+
+  // Whether the displayed model can see images. No selection means the agent
+  // chooses — unknown is not "no", so the intake stays open and the provider
+  // is the judge. A known selection without image support gates the intake,
+  // naming the model (spec: visible but inactive, because the model choice
+  // flips constantly and a vanishing control would be undiscoverable).
+  const attachmentModelSupport = (): { supported: true } | { supported: false; modelName: string } => {
+    if (!declares("models")) return { supported: true };
+    const selection = displayedConfiguration().model;
+    const record = selection ? models.find(model => sameModel(model.selection, selection)) : undefined;
+    if (!record) return { supported: true };
+    return record.imageInput === true
+      ? { supported: true }
+      : { supported: false, modelName: record.name };
+  };
+
+  const syncAttachControl = () => {
+    if (!attachButton?.isConnected) return;
+    const support = attachmentModelSupport();
+    attachButton.disabled = !support.supported;
+    const label = support.supported ? "Attach images" : `${support.modelName} cannot see images`;
+    attachButton.title = label;
+    attachButton.setAttribute("aria-label", label);
+  };
+
+  const renderAttachments = () => {
+    if (!attachmentsStrip) return;
+    const entries = currentPendingAttachments();
+    attachmentsStrip.textContent = "";
+    attachmentsStrip.hidden = entries.length === 0;
+    for (const entry of entries) {
+      const item = document.createElement("span");
+      item.className = "chat-attachment";
+      item.setAttribute("role", "listitem");
+      const view = document.createElement("button");
+      view.type = "button";
+      view.className = "chat-attachment-view";
+      view.setAttribute("data-attachment-view", entry.previewUrl);
+      view.setAttribute("data-attachment-view-name", entry.name);
+      view.setAttribute("aria-label", `View ${entry.name} full size`);
+      const thumb = document.createElement("img");
+      thumb.className = "chat-attachment-thumb";
+      thumb.src = entry.previewUrl;
+      thumb.alt = entry.name;
+      view.append(thumb);
+      const name = document.createElement("span");
+      name.className = "chat-attachment-name";
+      name.textContent = entry.name;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "chat-attachment-remove";
+      remove.setAttribute("aria-label", `Remove ${entry.name}`);
+      remove.textContent = "\u00d7";
+      remove.addEventListener("click", () => {
+        const conversationId = activeConversationId();
+        if (!conversationId) return;
+        URL.revokeObjectURL(entry.previewUrl);
+        setPendingAttachments(conversationId, currentPendingAttachments().filter(candidate => candidate !== entry));
+        renderAttachments();
+        syncControls();
+      });
+      item.append(view, name, remove);
+      attachmentsStrip.append(item);
+    }
+  };
+
+  // A typeless file stays a candidate — the staging gate and the upload
+  // route's byte sniff decide, not the browser's filename-derived claim.
+  const attachableClaim = (file: File) => file.type === "" || file.type.startsWith("image/");
+
+  // A mixed drop or paste stages its images but must not let the rest vanish
+  // silently — a file that disappears without a word reads as attached. An
+  // intake with nothing supported in it is refused by its own branch before
+  // reaching here, so this speaks only for the mix.
+  const warnUnsupportedIntake = (files: File[], images: File[]) => {
+    if (images.length === 0 || images.length === files.length) return;
+    const refused = files.filter(file => !attachableClaim(file));
+    // Counted like any staging refusal: a mix dropped while a submit drains
+    // is content meant for that very message, and the post-drain guard must
+    // see the loss rather than send the supported subset alone.
+    const conversationId = activeConversationId();
+    if (conversationId) noteAttachmentRefusal(conversationId, refused.length);
+    setComposerError(refused.length === 1
+      ? `${refused[0]!.name || "That file"} is not a supported image (PNG, JPEG, GIF, WebP).`
+      : `${refused.length} files are not supported images (PNG, JPEG, GIF, WebP).`);
+  };
+
+  /**
+   * Client-side screening only smooths the path — the upload route re-checks
+   * type and size authoritatively (and by bytes, not by claim). A refusal
+   * explains itself on the composer error line and touches neither the draft
+   * nor the attachments already staged.
+   */
+  const stageAttachmentFiles = async (files: File[]) => {
+    const conversationId = activeConversationId();
+    if (!conversationId || files.length === 0) return;
+    if (agent && !declares("attachments")) return;
+    const support = attachmentModelSupport();
+    if (!support.supported) {
+      setComposerError(`${support.modelName} cannot see images. Pick a model with image support to attach.`);
+      return;
+    }
+    const noteRefusal = () => noteAttachmentRefusal(conversationId);
+    const task = (attachmentStaging.get(conversationId) ?? Promise.resolve()).then(async () => {
+      for (const file of files) {
+        if ((pendingAttachments.get(conversationId) ?? []).length + (submittedAttachmentReserve.get(conversationId) ?? 0) >= CHAT_ATTACHMENTS_PER_MESSAGE) {
+          setComposerError(`A message can carry at most ${CHAT_ATTACHMENTS_PER_MESSAGE} images.`, conversationId);
+          noteRefusal();
+          break;
+        }
+        // An empty type claim is unknown, not unsupported: browsers derive
+        // File.type from the filename and local files carry no guarantee, so
+        // the authoritative magic-byte sniff on the upload route decides.
+        // Only an explicit non-image claim is refused without the round trip.
+        if (file.type !== "" && !supportedAttachmentTypes.has(file.type.toLowerCase())) {
+          setComposerError(`${file.name || "That file"} is not a supported image (PNG, JPEG, GIF, WebP).`, conversationId);
+          noteRefusal();
+          continue;
+        }
+        if (file.size > CHAT_ATTACHMENT_MAX_BYTES) {
+          setComposerError(`${file.name || "That image"} is larger than the ${Math.round(CHAT_ATTACHMENT_MAX_BYTES / (1024 * 1024))} MiB limit.`, conversationId);
+          noteRefusal();
+          continue;
+        }
+        try {
+          const stored = await api.uploadAttachment(conversationId, file);
+          // Keyed to the conversation the upload was staged for, which may no
+          // longer be the selected one by the time the round trip returns.
+          const entries = pendingAttachments.get(conversationId) ?? [];
+          entries.push({ id: stored.id, name: boundAttachmentName(file.name), mimeType: stored.mimeType, previewUrl: URL.createObjectURL(file) });
+          setPendingAttachments(conversationId, entries);
+        } catch (error) {
+          setComposerError(`Could not attach ${file.name || "image"}: ${messageOf(error)}`, conversationId);
+          noteRefusal();
+        }
+      }
+    });
+    attachmentStaging.set(conversationId, task);
+    // The chain existing is what makes an empty draft sendable, so the send
+    // control resyncs now, not only when the upload lands.
+    syncControls();
+    try {
+      await task;
+    } finally {
+      if (attachmentStaging.get(conversationId) === task) attachmentStaging.delete(conversationId);
+    }
+    renderAttachments();
+    syncControls();
+  };
+
+  const openAttachmentViewer = (src: string, name: string) => {
+    if (!imageViewer || !imageViewerImage) return;
+    // The attribute round trip means the value technically arrives from the
+    // DOM, so it is re-validated against the only two shapes this app ever
+    // writes there: a staged blob: preview and the same-origin serve route.
+    let resolved: URL;
+    try { resolved = new URL(src, window.location.href); } catch { return; }
+    if (resolved.protocol !== "blob:" && resolved.origin !== window.location.origin) return;
+    imageViewerImage.src = resolved.href;
+    imageViewerImage.alt = name;
+    if (imageViewerName) imageViewerName.textContent = name;
+    imageViewer.showModal();
+  };
+  const closeAttachmentViewer = () => {
+    imageViewer?.close();
+    // Freed eagerly so a revoked object URL or a huge image does not linger.
+    if (imageViewerImage) imageViewerImage.src = "";
+  };
+  // One delegated listener covers every surface a thumbnail renders in —
+  // timeline, queue dock, drill-down, and the composer strip.
+  surface.addEventListener("click", event => {
+    const view = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-attachment-view]") : null;
+    if (!view) return;
+    const src = view.getAttribute("data-attachment-view");
+    if (!src) return;
+    openAttachmentViewer(src, view.getAttribute("data-attachment-view-name") ?? "attachment");
+  });
+  // Escape closes natively; any click dismisses too — the dialog is a
+  // viewer, not a form, so there is nothing a stray click could lose.
+  imageViewer?.addEventListener("click", closeAttachmentViewer);
+  imageViewer?.addEventListener("close", () => {
+    if (imageViewerImage) imageViewerImage.src = "";
+    // The dialog's focus restoration targets whatever held focus before
+    // showModal(). A pointer flow in Safari focuses the tabindex="0" log,
+    // not the thumbnail button, and the restored focus then paints a ring
+    // around the whole conversation. Blurring only the container is safe:
+    // a keyboard flow restores to the thumbnail button itself, which keeps
+    // its own focus ring untouched.
+    const restored = document.activeElement;
+    if (restored instanceof HTMLElement && restored.classList.contains("chat-timeline")) restored.blur();
+  });
+  imageViewerClose?.addEventListener("click", closeAttachmentViewer);
+
+  attachButton?.addEventListener("click", () => {
+    if (attachButton.disabled) return;
+    attachInput?.click();
+  });
+  attachInput?.addEventListener("change", () => {
+    const files = Array.from(attachInput.files ?? []);
+    attachInput.value = "";
+    void stageAttachmentFiles(files);
+  });
+  input.addEventListener("paste", event => {
+    if (!event.clipboardData) return;
+    const pastedFiles = Array.from(event.clipboardData.files);
+    if (pastedFiles.length === 0) return;
+    // Without the capability there is no image intake at all: default paste
+    // behavior stands untouched, refusals included.
+    if (agent && !declares("attachments")) return;
+    const files = pastedFiles.filter(attachableClaim);
+    if (files.length === 0) {
+      // Counted like every other refusal: files pasted while a submit drains
+      // were meant for that message, and the post-drain guard must see the
+      // loss even when nothing in the paste could stage. Deliberately without
+      // preventDefault — the clipboard may carry text alongside the refused
+      // file, and that text still rides the browser's own paste.
+      const conversationId = activeConversationId();
+      if (conversationId) noteAttachmentRefusal(conversationId, pastedFiles.length);
+      setComposerError("Only PNG, JPEG, GIF, or WebP images can be attached.");
+      return;
+    }
+    event.preventDefault();
+    // A paste that carries both text and images keeps both (spec): the text
+    // enters the draft at the caret exactly as an unintercepted paste would.
+    const text = event.clipboardData.getData("text/plain");
+    if (text) {
+      const start = input.selectionStart ?? input.value.length;
+      const end = input.selectionEnd ?? start;
+      input.value = input.value.slice(0, start) + text + input.value.slice(end);
+      const caret = start + text.length;
+      input.setSelectionRange(caret, caret);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    warnUnsupportedIntake(pastedFiles, files);
+    void stageAttachmentFiles(files);
+  });
+  const dragCarriesFiles = (event: DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes("Files");
+  form.addEventListener("dragover", event => {
+    if (!dragCarriesFiles(event) || (agent && !declares("attachments"))) return;
+    event.preventDefault();
+    form.classList.add("is-drop-target");
+  });
+  form.addEventListener("dragleave", event => {
+    const next = event.relatedTarget;
+    if (next instanceof Node && form.contains(next)) return;
+    form.classList.remove("is-drop-target");
+  });
+  // A cancelled drag (Escape) can end without a dragleave on the hovered
+  // target; dragend on window is the reset of last resort.
+  window.addEventListener("dragend", () => form.classList.remove("is-drop-target"));
+  form.addEventListener("drop", event => {
+    if (!dragCarriesFiles(event) || (agent && !declares("attachments"))) return;
+    event.preventDefault();
+    form.classList.remove("is-drop-target");
+    const dropped = Array.from(event.dataTransfer?.files ?? []);
+    const images = dropped.filter(attachableClaim);
+    if (images.length === 0) {
+      // Counted like every other refusal: files dropped while a submit
+      // drains were meant for that message, and the post-drain guard must
+      // see the loss even when nothing in the drop could stage.
+      const conversationId = activeConversationId();
+      if (conversationId) noteAttachmentRefusal(conversationId, dropped.length);
+      setComposerError("Only PNG, JPEG, GIF, or WebP images can be attached.");
+      return;
+    }
+    warnUnsupportedIntake(dropped, images);
+    void stageAttachmentFiles(images);
+  });
 
   const syncRoutineStatus = () => {
     const conversationStatus = projection?.status;
@@ -906,7 +1270,13 @@ export function initChat(): void {
     }
     send.type = running ? "button" : "submit";
     send.dataset.action = running ? "cancel" : "send";
-    send.disabled = running ? cancelling || !projection : submitting || !projection || !input.value.trim();
+    // A message needs content, not necessarily words: pending attachments make
+    // an empty draft sendable (image-only prompts are accepted end to end),
+    // and an upload still in flight counts — submission waits for it.
+    const activeId = activeConversationId();
+    const hasContent = Boolean(input.value.trim()) || currentPendingAttachments().length > 0
+      || (activeId !== null && attachmentStaging.has(activeId));
+    send.disabled = running ? cancelling || !projection : submitting || !projection || !hasContent;
     const action = running ? "Cancel" : "Send";
     sendLabel.textContent = action;
     send.setAttribute("aria-label", running ? "Cancel response" : "Send message");
@@ -959,6 +1329,7 @@ export function initChat(): void {
     ].filter(Boolean);
     configurationTrigger.setAttribute("aria-label", accessibleValues.length > 0 ? `Chat configuration. ${accessibleValues.join(". ")}` : "Chat settings");
     configurationPicker?.update({ agent, models, modes, configuration });
+    syncAttachControl();
     syncControls();
   };
 
@@ -982,11 +1353,14 @@ export function initChat(): void {
     form.hidden = false;
     save();
     projection = null;
-    setComposerError(null);
+    // Not a clear: the incoming conversation may hold a refusal that landed
+    // while it was deselected, and it surfaces now.
+    showComposerError(composerErrors.get(id) ?? null);
     renderConfiguration();
     syncContextIndicator();
     input.value = presentation.drafts[id] ?? "";
     autosize(input);
+    renderAttachments();
     announce("Loading conversation...");
     syncControls();
     try {
@@ -1000,6 +1374,7 @@ export function initChat(): void {
       projectionEpoch += 1;
       conversations = conversations.map(item => item.id === snapshot.conversation.id ? snapshot.conversation : item);
       renderConfiguration();
+      renderAttachments();
       announce(snapshot.items.length ? "" : "Start this conversation by sending a message.");
       anchor.restore(presentation.anchors[id] ?? null);
       scheduleRender(false, false);
@@ -1200,7 +1575,7 @@ export function initChat(): void {
       projection = prependSnapshot(projection, page);
       const dirty = renderer.render(items, projection, expanded, declares("subagents"));
       timeline.scrollTop = anchor.afterMutation(geometry());
-      for (const node of dirty) decorateFileLinks(node);
+      for (const node of dirty) { decorateFileLinks(node); decorateAttachmentImages(node); }
     } catch (error) { announce(messageOf(error), true); }
     finally { olderButton.disabled = false; syncControls(); }
   });
@@ -1389,6 +1764,7 @@ export function initChat(): void {
     drilldownTimeline.scrollTop = childAnchor.afterMutation(childAnchorGeometry(), newContent);
     for (const node of dirty) {
       decorateFileLinks(node);
+      decorateAttachmentImages(node);
       node.querySelectorAll<HTMLFormElement>("form[data-question-form]").forEach(syncQuestionForm);
     }
   };
@@ -1672,25 +2048,135 @@ export function initChat(): void {
   });
   send.addEventListener("click", async () => {
     if (!projection || (projection.status !== "running" && projection.status !== "sending") || cancelling) return;
+    // Captured for the round trip: a failure landing after a switch belongs
+    // to the conversation whose turn was being cancelled.
+    const conversationId = projection.conversationId;
     cancelling = true;
-    setComposerError(null);
+    setComposerError(null, conversationId);
     noteComposer("Cancelling...");
     syncControls();
-    try { await api.cancel(projection.conversationId, newRequestId()); }
+    try { await api.cancel(conversationId, newRequestId()); }
     catch (error) {
       const message = messageOf(error);
       announce(message, true);
-      setComposerError(`Cancellation failed: ${message}`);
+      setComposerError(`Cancellation failed: ${message}`, conversationId);
     }
     finally { cancelling = false; syncControls(); }
   });
   form.addEventListener("submit", async event => {
     event.preventDefault();
-    if (!projection || !input.value.trim() || submitting) return;
+    if (!projection || submitting) return;
+    // In-flight staging is prospective content: an image-only submit during
+    // its own upload waits for the drain below rather than being refused.
+    if (!input.value.trim() && currentPendingAttachments().length === 0 && !attachmentStaging.has(projection.conversationId)) return;
     const conversationId = projection.conversationId;
     const text = input.value;
+    // Restoration must not pick between the failed message and edits made
+    // while it was in flight — both are the user's words. The captured
+    // text leads, the newer edits follow as their own line.
+    const restoreDraftText = () => {
+      if (!text.trim()) return;
+      input.value = input.value.trim() ? `${text}\n${input.value}` : text;
+      autosize(input);
+    };
+    // The same rule for a submission that ends while another conversation is
+    // selected: the switch already stored any newer edits as this
+    // conversation's draft, and the captured text — never sent — must lead
+    // rather than being discarded because the slot is occupied.
+    const mergeStoredDraft = () => {
+      if (!text.trim()) return;
+      const edits = presentation.drafts[conversationId];
+      presentation.drafts[conversationId] = edits?.trim() ? `${text}\n${edits}` : text;
+      save();
+    };
+    const refusalsAtSubmit = attachmentRefusals.get(conversationId) ?? 0;
+    submitting = true;
+    setComposerError(null);
+    // Captured AND cleared before any yield: the textarea stays editable
+    // while the drain below waits, and anything typed then belongs to the
+    // next message — an after-the-wait clear would erase it.
+    input.value = "";
+    presentation.drafts[conversationId] = "";
+    save();
+    autosize(input);
+    // An upload attached moments before Enter belongs to THIS message:
+    // submission waits for in-flight staging rather than snapshotting a list
+    // the upload has not reached yet (and leaking the image into the next
+    // message).
+    let stagingTail = attachmentStaging.get(conversationId);
+    if (stagingTail) {
+      noteComposer("Uploading images...");
+      // Drain, not snapshot: an intake can append a new chain link while
+      // this await yields, and a snapshot would submit without it.
+      while (stagingTail) {
+        await stagingTail.catch(() => undefined);
+        const next = attachmentStaging.get(conversationId);
+        stagingTail = next === stagingTail ? undefined : next;
+      }
+      // The wait yielded: the user may have switched conversations. The text
+      // belongs to the conversation it was written in, so it becomes that
+      // conversation's draft instead of being sent against the wrong one.
+      if (!projection || projection.conversationId !== conversationId) {
+        mergeStoredDraft();
+        submitting = false;
+        syncControls();
+        return;
+      }
+      // Edits made during the wait are the next draft, not part of this
+      // message; nothing to do — they are already in the input.
+    }
+    // A refusal that landed during the drain is a piece of THIS message
+    // going missing: the user pressed send believing the upload was
+    // included, so the send stops rather than delivering a partial prompt.
+    // The staging path already named the refusal on the error line, and any
+    // successfully staged files stay pending for the corrected retry.
+    if ((attachmentRefusals.get(conversationId) ?? 0) !== refusalsAtSubmit) {
+      restoreDraftText();
+      presentation.drafts[conversationId] = input.value;
+      save();
+      submitting = false;
+      noteComposer("Message not sent; draft kept");
+      renderAttachments();
+      syncControls();
+      return;
+    }
+    // The drain can end with nothing to send: an image-only submission whose
+    // upload was refused has no content left, and the staging path already
+    // explained why on the composer error line.
+    if (!text.trim() && (pendingAttachments.get(conversationId) ?? []).length === 0) {
+      // Restore the (empty) capture only if the user typed nothing meanwhile.
+      if (!input.value.trim() && text) { input.value = text; autosize(input); }
+      submitting = false;
+      syncControls();
+      return;
+    }
+    // Staged images can outlive the model choice that admitted them: a later
+    // switch to a model without image support disables further intake, but
+    // the send itself must refuse too, or the prompt would carry images the
+    // selected model cannot see and the outcome would be the provider's to
+    // improvise. Same wording as the intake refusal, plus the way out.
+    const support = attachmentModelSupport();
+    if (!support.supported && (pendingAttachments.get(conversationId) ?? []).length > 0) {
+      restoreDraftText();
+      presentation.drafts[conversationId] = input.value;
+      save();
+      submitting = false;
+      setComposerError(`${support.modelName} cannot see images. Remove them or pick a model with image support.`);
+      syncControls();
+      return;
+    }
+    // Captured and cleared optimistically like the text; restored on failure.
+    const stagedAttachments = [...(pendingAttachments.get(conversationId) ?? [])];
+    const attachmentRefs: MessageAttachment[] = stagedAttachments.map(({ id, name, mimeType }) => ({ id, name, mimeType }));
+    submittedAttachmentReserve.set(conversationId, (submittedAttachmentReserve.get(conversationId) ?? 0) + stagedAttachments.length);
+    const releaseAttachmentReserve = () => {
+      const remaining = (submittedAttachmentReserve.get(conversationId) ?? 0) - stagedAttachments.length;
+      if (remaining > 0) submittedAttachmentReserve.set(conversationId, remaining);
+      else submittedAttachmentReserve.delete(conversationId);
+    };
+    const attachmentKey = stagedAttachments.map(entry => entry.id).join("\n");
     const retry = retryRequests.get(conversationId);
-    const retriedRequest = retry?.text === text;
+    const retriedRequest = retry?.text === text && retry.attachments === attachmentKey;
     const requestId = retriedRequest ? retry!.requestId : newRequestId();
     const configuration = displayedConfiguration();
     const selectedModelRecord = declares("models") && configuration.model
@@ -1701,8 +2187,6 @@ export function initChat(): void {
       ? configuration.variant
       : undefined;
     const selectedMode = declares("modes") && modes.some(mode => mode.name === configuration.mode) ? configuration.mode : undefined;
-    submitting = true;
-    setComposerError(null);
     // Captured before the round trip: a queue event that lands while the
     // acceptance is in flight makes the stream authoritative, and the local
     // held echo below must then stand down. The epoch catches the same
@@ -1712,16 +2196,14 @@ export function initChat(): void {
     const projectionEpochAtSubmit = projectionEpoch;
     // Optimistic send: the message shows immediately and the input clears;
     // on failure the draft is removed and the text restored.
-    projection = addAcceptedDraft(projection, { requestId, messageId: `pending:${requestId}`, text });
-    input.value = "";
-    presentation.drafts[conversationId] = "";
-    save();
-    autosize(input);
+    projection = addAcceptedDraft(projection, { requestId, messageId: `pending:${requestId}`, text, ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}) });
+    setPendingAttachments(conversationId, []);
+    renderAttachments();
     noteComposer("Sending...");
     syncControls();
     scheduleRender(true);
     try {
-      const accepted = await api.prompt(conversationId, requestId, text, selectedModel, selectedMode, selectedVariant);
+      const accepted = await api.prompt(conversationId, requestId, text, selectedModel, selectedMode, selectedVariant, attachmentRefs.length ? attachmentRefs : undefined);
       retryRequests.delete(conversationId);
       stagedConfigurations.delete(conversationId);
       if (accepted.conversation) {
@@ -1754,36 +2236,48 @@ export function initChat(): void {
         // attempt really held has long been stated by the stream itself.
         projection = accepted.held
           ? !retriedRequest && projectionEpoch === projectionEpochAtSubmit
-            ? noteQueuedMessage(projection, { id: accepted.messageId, text, queuedAt: Date.now(), requestId }, queueRevisionAtSubmit)
+            ? noteQueuedMessage(projection, { id: accepted.messageId, text, queuedAt: Date.now(), requestId, ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}) }, queueRevisionAtSubmit)
             : removeAcceptedDraft(projection, requestId)
-          : confirmAcceptedDraft(projection, { requestId, messageId: accepted.messageId, text });
+          : confirmAcceptedDraft(projection, { requestId, messageId: accepted.messageId, text, ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}) });
         renderConfiguration();
         scheduleRender(true);
       }
       noteComposer(accepted.held ? "Queued — sends when the agent is ready" : "Message accepted");
-      setComposerError(null);
+      // Addressed to the submitted conversation, not the selection: the
+      // acceptance may land after a switch, and clearing the selected
+      // conversation's own error would erase an unrelated reason.
+      setComposerError(null, conversationId);
+      // The message is accepted; the local previews have no further use.
+      for (const staged of stagedAttachments) URL.revokeObjectURL(staged.previewUrl);
+      releaseAttachmentReserve();
     } catch (error) {
       const message = messageOf(error);
       announce(message, true);
-      retryRequests.set(conversationId, { text, requestId });
+      retryRequests.set(conversationId, { text, requestId, attachments: attachmentKey });
+      // The refused message's attachments go back to pending — uploaded bytes
+      // are still stored, so the references stay valid for the retry. The
+      // reserve releases only now that they are pending again, so intake
+      // during the flight could never overfill the restored draft.
+      setPendingAttachments(conversationId, [...stagedAttachments, ...(pendingAttachments.get(conversationId) ?? [])]);
+      releaseAttachmentReserve();
       if (projection?.conversationId === conversationId) {
         projection = removeAcceptedDraft(projection, requestId);
-        if (!input.value.trim()) {
-          input.value = text;
-          autosize(input);
-        }
+        restoreDraftText();
         presentation.drafts[conversationId] = input.value;
         save();
+        renderAttachments();
         scheduleRender();
       } else {
         // Switched away while the request was in flight: the live input now
         // belongs to another conversation, so the failed text goes back into
-        // the stored draft and reappears on return.
-        if (!presentation.drafts[conversationId]) presentation.drafts[conversationId] = text;
-        save();
+        // the stored draft — ahead of any edits stored by the switch — and
+        // reappears on return.
+        mergeStoredDraft();
       }
       submitting = false;
-      setComposerError(`${message}. Draft restored.`);
+      // Same addressing as the success clear: a refusal that lands after a
+      // switch waits with its own conversation instead of flashing here.
+      setComposerError(`${message}. Draft restored.`, conversationId);
       noteComposer("Message not accepted; draft restored");
       syncControls();
       return;

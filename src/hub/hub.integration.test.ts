@@ -1444,6 +1444,7 @@ describe("hub end to end", () => {
       ["GET", "/s/myproject/api/chat/conversations/local", "/s/{workspaceId}/api/chat/conversations/{conversationId}"],
       ["PATCH", "/s/myproject/api/chat/conversations/local", "/s/{workspaceId}/api/chat/conversations/{conversationId}", { requestId: "stopped-rename", title: "Renamed" }],
       ["GET", "/s/myproject/api/chat/conversations/local/events", "/s/{workspaceId}/api/chat/conversations/{conversationId}/events"],
+      ["GET", "/s/myproject/api/chat/attachments/11111111-2222-4333-8444-555555555555", "/s/{workspaceId}/api/chat/attachments/{attachmentId}"],
       ["POST", "/s/myproject/api/chat/conversations/local/cancel", "/s/{workspaceId}/api/chat/conversations/{conversationId}/cancel", { requestId: "stopped" }],
       ["DELETE", "/s/myproject/api/chat/conversations/local/queue/held-1", "/s/{workspaceId}/api/chat/conversations/{conversationId}/queue/{messageId}", { requestId: "stopped-unqueue" }],
       ["POST", "/s/myproject/api/chat/conversations/local/permissions/request", "/s/{workspaceId}/api/chat/conversations/{conversationId}/permissions/{interactionId}", { requestId: "stopped", outcome: "rejected" }],
@@ -1458,6 +1459,18 @@ describe("hub end to end", () => {
       expect(response.status).toBe(503);
       await assertContract(method, contractPath, response);
     }
+
+    // The attachment upload is multipart, so it probes the same
+    // stopped-workspace contract outside the JSON loop.
+    const uploadForm = new FormData();
+    uploadForm.append("file", new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], "probe.png", { type: "image/png" }));
+    const stoppedUpload = await fetch(`${origin}/s/myproject/api/chat/conversations/local/attachments`, {
+      method: "POST",
+      headers: { cookie, origin },
+      body: uploadForm,
+    });
+    expect(stoppedUpload.status).toBe(503);
+    await assertContract("POST", "/s/{workspaceId}/api/chat/conversations/{conversationId}/attachments", stoppedUpload);
   });
 
   test("a live session for a user removed from the config is rejected", async () => {

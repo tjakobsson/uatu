@@ -40,6 +40,18 @@ export class UnsupportedVariantSelectionError extends Error {
 
 export type ProviderPermissionReply = "once" | "always" | "reject";
 
+// Provider-neutral by contract: identity, display name, mime, and where the
+// stored bytes live on disk. How an attachment reaches the agent (file: URL,
+// inline base64, multipart, ...) is each provider's own concern — nothing
+// OpenCode-shaped may leak into this type, so a future non-OpenCode provider
+// reuses the store, routes, and UI unchanged.
+export type ProviderAttachment = {
+  id: string;
+  name: string;
+  mimeType: string;
+  absolutePath: string;
+};
+
 export interface OpenCodeProvider {
   /**
    * Who this provider is and what it offers, for the surface to name and to
@@ -65,7 +77,7 @@ export interface OpenCodeProvider {
   getConversationConfiguration(sessionId: string, completeMessages?: ProviderMessage[]): Promise<ConversationConfiguration>;
   listMessages(sessionId: string, options: { cursor?: string; limit: number }): Promise<ProviderPage<ProviderMessage>>;
   events(signal: AbortSignal): AsyncIterable<ProviderEvent>;
-  prompt(sessionId: string, input: { id: string; text: string; delivery: "queue"; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;
+  prompt(sessionId: string, input: { id: string; text: string; delivery: "queue"; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;
   command(sessionId: string, input: { id: string; name: string; arguments: string; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }>;
   interrupt(sessionId: string): Promise<void>;
   replyPermission(sessionId: string, requestId: string, reply: ProviderPermissionReply): Promise<void>;

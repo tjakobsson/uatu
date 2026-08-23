@@ -1,4 +1,5 @@
 import { OpenCodeChatAdapter, type ChatAdapterOptions, type ChatEventMetrics } from "./adapter";
+import { createAttachmentStore, type AttachmentStore, type StoredAttachment } from "./attachment-store";
 import { OpenCodeService, type OpenCodeServiceOptions } from "./opencode-service";
 import { createSdkV2Provider } from "./sdk-v2-provider";
 import type { OpenCodeProvider } from "./provider";
@@ -11,6 +12,7 @@ import type {
   ConversationConfiguration,
   ConversationSnapshot,
   ConversationSummary,
+  MessageAttachment,
   PermissionOutcome,
   ModelSelection,
   QuestionOutcome,
@@ -29,13 +31,17 @@ export interface WorkspaceChatService {
     snapshot: ConversationSnapshot;
     events: ReplaySubscription;
   }>;
-  prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string): Promise<{
+  prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string, attachments?: MessageAttachment[]): Promise<{
     messageId: string;
     held: boolean;
     configuration: ConversationConfiguration;
     conversation?: ConversationSummary;
   }>;
   removeQueued(id: string, messageId: string, requestId: string): Promise<{ removed: true }>;
+  // The attachment store is workspace state, not agent state: uploads and
+  // serving work regardless of whether the agent runtime is up.
+  saveAttachment(bytes: Uint8Array): Promise<{ id: string; mimeType: string; sizeBytes: number }>;
+  resolveAttachment(id: string): Promise<StoredAttachment | null>;
   renameConversation(id: string, requestId: string, title: string): Promise<{ conversation: ConversationSummary }>;
   cancel(id: string, requestId: string): Promise<{ cancelled: true }>;
   respondPermission(id: string, interactionId: string, requestId: string, outcome: PermissionOutcome): Promise<{ outcome: PermissionOutcome }>;
@@ -54,6 +60,9 @@ export type LazyOpenCodeChatServiceOptions = OpenCodeServiceOptions & {
   runtime?: OpenCodeService;
   createProvider?: (options: { endpoint: string; password: string; directory: string }) => OpenCodeProvider;
   createAdapter?: (options: ChatAdapterOptions) => OpenCodeChatAdapter;
+  // Overrides the XDG-resolved store; the e2e harness points this at a
+  // temporary directory.
+  attachmentStore?: AttachmentStore;
   // Passed through to the adapter's event pump so discarded-event counts land
   // in the workspace's diagnostic registry.
   metrics?: ChatEventMetrics;
@@ -64,6 +73,7 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
   private readonly workspacePath: string;
   private readonly createProvider: NonNullable<LazyOpenCodeChatServiceOptions["createProvider"]>;
   private readonly createAdapter: NonNullable<LazyOpenCodeChatServiceOptions["createAdapter"]>;
+  private readonly attachmentStore: AttachmentStore;
   private readonly metrics: ChatEventMetrics | undefined;
   private adapterPromise: Promise<OpenCodeChatAdapter> | null = null;
   private adapter: OpenCodeChatAdapter | null = null;
@@ -75,6 +85,7 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
     this.runtime = options.runtime ?? new OpenCodeService(options);
     this.createProvider = options.createProvider ?? createSdkV2Provider;
     this.createAdapter = options.createAdapter ?? (adapterOptions => new OpenCodeChatAdapter(adapterOptions));
+    this.attachmentStore = options.attachmentStore ?? createAttachmentStore({ workspacePath: options.workspacePath });
     this.metrics = options.metrics;
   }
 
@@ -148,8 +159,13 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
   async createConversation() { return (await this.requireAdapter()).createConversation(); }
   async history(id: string, options?: { cursor?: string; limit?: number }) { return (await this.requireAdapter()).history(id, options); }
   async subscribe(id: string, options?: { cursor?: string; signal?: AbortSignal }) { return (await this.requireAdapter()).subscribe(id, options); }
-  async prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string) { return (await this.requireAdapter()).prompt(id, requestId, text, model, mode, variant); }
+  async prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string, attachments?: MessageAttachment[]) { return (await this.requireAdapter()).prompt(id, requestId, text, model, mode, variant, attachments); }
   async removeQueued(id: string, messageId: string, requestId: string) { return (await this.requireAdapter()).removeQueued(id, messageId, requestId); }
+  async saveAttachment(bytes: Uint8Array) {
+    const stored = await this.attachmentStore.save(bytes);
+    return { id: stored.id, mimeType: stored.mimeType, sizeBytes: stored.sizeBytes };
+  }
+  async resolveAttachment(id: string) { return this.attachmentStore.resolve(id); }
   async cancel(id: string, requestId: string) { return (await this.requireAdapter()).abort(id, requestId); }
   async renameConversation(id: string, requestId: string, title: string) { return (await this.requireAdapter()).renameConversation(id, requestId, title); }
   async respondPermission(id: string, interactionId: string, requestId: string, outcome: PermissionOutcome) {
@@ -185,7 +201,12 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
       // pump failures are swallowed by the supervisor — without a probe an
       // incompatible server reports "ready" and then fails every operation.
       await provider.listModels();
-      const adapter = this.createAdapter({ provider, workspacePath: this.workspacePath, metrics: this.metrics });
+      const adapter = this.createAdapter({
+        provider,
+        workspacePath: this.workspacePath,
+        resolveAttachment: id => this.attachmentStore.resolve(id),
+        metrics: this.metrics,
+      });
       this.adapter = adapter;
       this.superviseEventPump(adapter);
       return adapter;

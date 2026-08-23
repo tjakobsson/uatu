@@ -561,3 +561,202 @@ describe("interaction items name the conversation that owns them", () => {
     }
   });
 });
+
+describe("user message attachments", () => {
+  test("v2 user files echo verbatim uris that recover the issued id", () => {
+    const items = normalizeProviderMessage({
+      id: "msg_1",
+      type: "user",
+      time: { created: 5 },
+      text: "look",
+      files: [
+        { uri: "file:///state/uatu/attachments/ab/11111111-2222-4333-8444-555555555555.png", mime: "image/png", name: "shot.png" },
+        { uri: "file:///somewhere/else/readme.png", mime: "image/png", name: "unlinked.png" },
+      ],
+    });
+    expect(items).toEqual([{
+      id: "message:msg_1",
+      type: "user_message",
+      createdAt: 5,
+      text: "look",
+      attachments: [
+        { id: "11111111-2222-4333-8444-555555555555", name: "shot.png", mimeType: "image/png" },
+        // Not an issued-id basename: an id-less placeholder reference.
+        { name: "unlinked.png", mimeType: "image/png" },
+      ],
+    }]);
+  });
+
+  test("a v2 user message without files carries no attachments key", () => {
+    const [item] = normalizeProviderMessage({ id: "msg_2", type: "user", time: { created: 1 }, text: "plain" });
+    expect(item).not.toHaveProperty("attachments");
+  });
+
+  test("classic stored file parts degrade to placeholders without passing bytes through", () => {
+    const items = normalizeProviderMessage({
+      info: { id: "msg_3", role: "user", time: { created: 7 } },
+      parts: [
+        { type: "text", text: "see attached" },
+        { type: "file", mime: "image/png", filename: "probe.png", url: "data:image/png;base64,AAAA" },
+      ],
+    });
+    expect(items).toEqual([{
+      id: "message:msg_3",
+      type: "user_message",
+      createdAt: 7,
+      text: "see attached",
+      attachments: [{ name: "probe.png", mimeType: "image/png" }],
+    }]);
+    expect(JSON.stringify(items)).not.toContain("base64");
+  });
+});
+
+describe("durable-store user messages (post-turn classic form)", () => {
+  test("synthetic captions stay out of the text and give the attachment its id back", () => {
+    // The exact shape a live session's durable store held after a real turn:
+    // real text, a synthetic Read caption carrying the stored path, and the
+    // file part rewritten to an inline data: URL.
+    const items = normalizeProviderMessage({
+      info: { id: "msg_9", role: "user", time: { created: 3 } },
+      parts: [
+        { type: "text", text: "Reply with the single word ok." },
+        { type: "text", synthetic: true, text: 'Called the Read tool with the following input: {"filePath":"/Users/x/.local/state/uatu/attachments/14adeeded8179012/eb638c39-4073-490b-b957-f5d5d1544a48.png"}' },
+        { type: "file", url: "data:image/png;base64,AAAA", mime: "image/png", filename: "live-check.png" },
+      ],
+    });
+    expect(items).toEqual([{
+      id: "message:msg_9",
+      type: "user_message",
+      createdAt: 3,
+      text: "Reply with the single word ok.",
+      attachments: [{ id: "eb638c39-4073-490b-b957-f5d5d1544a48", name: "live-check.png", mimeType: "image/png" }],
+    }]);
+    expect(JSON.stringify(items)).not.toContain("base64");
+    expect(JSON.stringify(items)).not.toContain("Read tool");
+  });
+
+  test("a file part without any caption stays an id-less placeholder", () => {
+    const items = normalizeProviderMessage({
+      info: { id: "msg_10", role: "user", time: { created: 3 } },
+      parts: [
+        { type: "text", text: "see attached" },
+        { type: "file", url: "data:image/png;base64,AAAA", mime: "image/png", filename: "orphan.png" },
+      ],
+    });
+    expect(items[0]).toEqual(expect.objectContaining({
+      attachments: [{ name: "orphan.png", mimeType: "image/png" }],
+    }));
+  });
+
+  test("captions pair with file parts in order across multiple attachments", () => {
+    const caption = (uuid: string) => ({ type: "text", synthetic: true, text: `Called the Read tool with the following input: {"filePath":"/state/a/${uuid}.webp"}` });
+    const items = normalizeProviderMessage({
+      info: { id: "msg_11", role: "user", time: { created: 3 } },
+      parts: [
+        { type: "text", text: "two images" },
+        caption("11111111-2222-4333-8444-555555555555"),
+        caption("22222222-2222-4333-8444-555555555555"),
+        { type: "file", url: "data:image/webp;base64,AAAA", mime: "image/webp", filename: "one.webp" },
+        { type: "file", url: "data:image/webp;base64,AAAA", mime: "image/webp", filename: "two.webp" },
+      ],
+    });
+    expect((items[0] as { attachments?: unknown }).attachments).toEqual([
+      { id: "11111111-2222-4333-8444-555555555555", name: "one.webp", mimeType: "image/webp" },
+      { id: "22222222-2222-4333-8444-555555555555", name: "two.webp", mimeType: "image/webp" },
+    ]);
+  });
+});
+
+describe("attachment contract filtering and caption alignment", () => {
+  test("non-image and mime-less provider files stay out of the attachments field", () => {
+    const [flat] = normalizeProviderMessage({
+      id: "msg_20", type: "user", time: { created: 1 }, text: "mixed",
+      files: [
+        { uri: "file:///s/11111111-2222-4333-8444-555555555555.png", mime: "image/png", name: "ok.png" },
+        { uri: "file:///s/notes.txt", mime: "text/plain", name: "notes.txt" },
+        { uri: "file:///s/mystery.bin", name: "mystery.bin" },
+        { uri: "file:///s/vector.svg", mime: "image/svg+xml", name: "vector.svg" },
+      ],
+    });
+    expect((flat as { attachments?: unknown[] }).attachments).toEqual([
+      { id: "11111111-2222-4333-8444-555555555555", name: "ok.png", mimeType: "image/png" },
+    ]);
+    const [stored] = normalizeProviderMessage({
+      info: { id: "msg_21", role: "user", time: { created: 1 } },
+      parts: [
+        { type: "text", text: "mixed" },
+        { type: "file", url: "data:text/plain;base64,AAAA", mime: "text/plain", filename: "notes.txt" },
+      ],
+    });
+    expect(stored).not.toHaveProperty("attachments");
+  });
+
+  test("a drifted caption yields a placeholder for its own slot, never a shifted id", () => {
+    const items = normalizeProviderMessage({
+      info: { id: "msg_22", role: "user", time: { created: 1 } },
+      parts: [
+        { type: "text", text: "two images" },
+        { type: "text", synthetic: true, text: "Called the Read tool with something unrecognizable" },
+        { type: "text", synthetic: true, text: 'Called the Read tool with the following input: {"filePath":"/s/22222222-2222-4333-8444-555555555555.webp"}' },
+        { type: "file", url: "data:image/webp;base64,AAAA", mime: "image/webp", filename: "one.webp" },
+        { type: "file", url: "data:image/webp;base64,AAAA", mime: "image/webp", filename: "two.webp" },
+      ],
+    });
+    expect((items[0] as { attachments?: unknown[] }).attachments).toEqual([
+      // Slot one drifted: placeholder, NOT the second caption's id.
+      { name: "one.webp", mimeType: "image/webp" },
+      { id: "22222222-2222-4333-8444-555555555555", name: "two.webp", mimeType: "image/webp" },
+    ]);
+  });
+});
+
+describe("replayed attachment names honor the response contract", () => {
+  test("an overlong provider filename truncates to 200 code points on both paths", () => {
+    const longName = "n".repeat(250) + ".png";
+    const [flat] = normalizeProviderMessage({
+      id: "msg_30", type: "user", time: { created: 1 }, text: "long",
+      files: [{ uri: "file:///s/11111111-2222-4333-8444-555555555555.png", mime: "image/png", name: longName }],
+    });
+    const flatName = (flat as { attachments: Array<{ name: string }> }).attachments[0]!.name;
+    expect([...flatName].length).toBe(200);
+    const [stored] = normalizeProviderMessage({
+      info: { id: "msg_31", role: "user", time: { created: 1 } },
+      parts: [{ type: "file", url: "data:image/png;base64,AAAA", mime: "image/png", filename: longName }],
+    });
+    const storedName = (stored as { attachments: Array<{ name: string }> }).attachments[0]!.name;
+    expect([...storedName].length).toBe(200);
+  });
+});
+
+describe("caption cardinality and replay bounds", () => {
+  test("a missing caption part disables positional recovery entirely", () => {
+    // One caption, two files: which file the surviving caption belongs to is
+    // unprovable, so both slots degrade to placeholders.
+    const items = normalizeProviderMessage({
+      info: { id: "msg_40", role: "user", time: { created: 1 } },
+      parts: [
+        { type: "text", text: "two images" },
+        { type: "text", synthetic: true, text: 'Called the Read tool with the following input: {"filePath":"/s/22222222-2222-4333-8444-555555555555.webp"}' },
+        { type: "file", url: "data:image/webp;base64,AAAA", mime: "image/webp", filename: "one.webp" },
+        { type: "file", url: "data:image/webp;base64,AAAA", mime: "image/webp", filename: "two.webp" },
+      ],
+    });
+    expect((items[0] as { attachments?: unknown[] }).attachments).toEqual([
+      { name: "one.webp", mimeType: "image/webp" },
+      { name: "two.webp", mimeType: "image/webp" },
+    ]);
+  });
+
+  test("replayed attachments cap at eight on both paths", () => {
+    const files = Array.from({ length: 10 }, (_, index) => ({
+      uri: `file:///s/${index}1111111-2222-4333-8444-555555555555.png`, mime: "image/png", name: `f${index}.png`,
+    }));
+    const [flat] = normalizeProviderMessage({ id: "msg_41", type: "user", time: { created: 1 }, text: "many", files });
+    expect((flat as { attachments: unknown[] }).attachments).toHaveLength(8);
+    const parts = Array.from({ length: 10 }, (_, index) => ({
+      type: "file", url: "data:image/png;base64,AAAA", mime: "image/png", filename: `f${index}.png`,
+    }));
+    const [stored] = normalizeProviderMessage({ info: { id: "msg_42", role: "user", time: { created: 1 } }, parts: [{ type: "text", text: "many" }, ...parts] });
+    expect((stored as { attachments: unknown[] }).attachments).toHaveLength(8);
+  });
+});

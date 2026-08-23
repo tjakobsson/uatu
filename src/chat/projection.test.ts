@@ -158,3 +158,24 @@ describe("chat projection", () => {
     expect(renamed.projection.configurationRevision).toBe(1);
   });
 });
+
+describe("sparse user-message updates preserve attachments", () => {
+  test("an upsert that omits attachments keeps the existing references", () => {
+    const attachments = [{ id: "11111111-2222-4333-8444-555555555555", name: "shot.png", mimeType: "image/png" }];
+    const initial = projectionFromSnapshot(snapshot([
+      { id: "message:m1", type: "user_message", createdAt: 2, text: "look", requestId: "r1", attachments },
+    ]));
+    const sparse = applyChatEvent(initial, {
+      generation: "g1", sequence: 5, conversationId: "c1", type: "item.upsert",
+      item: { id: "message:m1", type: "user_message", createdAt: 2, text: "look" },
+    });
+    expect(sparse.projection.items[0]).toMatchObject({ text: "look", requestId: "r1", attachments });
+
+    const replaced = [{ id: "22222222-2222-4333-8444-555555555555", name: "other.png", mimeType: "image/webp" }];
+    const authoritative = applyChatEvent(sparse.projection, {
+      generation: "g1", sequence: 6, conversationId: "c1", type: "item.upsert",
+      item: { id: "message:m1", type: "user_message", createdAt: 2, text: "look", attachments: replaced },
+    });
+    expect(authoritative.projection.items[0]).toMatchObject({ attachments: replaced });
+  });
+});

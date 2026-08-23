@@ -1,5 +1,6 @@
 import { boundedSet } from "../shared/bounded-map";
-import type { ConversationConfiguration, ConversationItem, ConversationStatus, StructuredQuestion, TokenUsage } from "./types";
+import { attachmentIdFromFileUri, attachmentIdFromText } from "./attachment-store";
+import { CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, type ConversationConfiguration, type ConversationItem, type ConversationStatus, type MessageAttachment, type StructuredQuestion, type TokenUsage } from "./types";
 
 type RecordValue = Record<string, unknown>;
 
@@ -203,8 +204,10 @@ export function normalizeProviderMessage(value: unknown, mintUsageCarrier = true
   const id = string(message.id, "message id");
   const createdAt = timestamp(record(message.time).created, 0);
   switch (message.type) {
-    case "user":
-      return [{ id: `message:${id}`, type: "user_message", createdAt, text: text(message.text) }];
+    case "user": {
+      const attachments = normalizeUserAttachments(message.files);
+      return [{ id: `message:${id}`, type: "user_message", createdAt, text: text(message.text), ...(attachments.length ? { attachments } : {}) }];
+    }
     case "assistant":
       return normalizeAssistant(message, id, createdAt, mintUsageCarrier);
     case "shell":
@@ -642,12 +645,90 @@ function usageUpsert(itemId: string, createdAt: number, usage: TokenUsage, model
   return { kind: "upsert", item: { id: itemId, type: "assistant_message", createdAt, markdown: "", usage, ...(model ? { model } : {}) } };
 }
 
+// V2 user messages echo `files: [{uri, mime, name}]` with the `file:` uri we
+// sent verbatim (verified against a live OpenCode 1.18 server; the classic
+// parts view does NOT preserve it — see normalizeStoredMessage). The uri
+// basename is the issued attachment id (design D5), which the client turns
+// into the workspace's serve-route URL. An entry whose uri does not parse to
+// an issued-id shape becomes an id-less placeholder reference.
+function normalizeUserAttachments(value: unknown): MessageAttachment[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap(entry => {
+    const file = record(entry);
+    // Same contract rule as the stored path: only the four image types the
+    // wire schema admits become attachment references.
+    const mimeType = contractImageMime(optionalString(file.mime));
+    if (mimeType === null) return [];
+    const id = attachmentIdFromFileUri(optionalString(file.uri) ?? "");
+    return [{
+      ...(id ? { id } : {}),
+      name: boundReplayedName(optionalString(file.name) ?? "attachment"),
+      mimeType,
+    }];
+  }).slice(0, CHAT_ATTACHMENTS_PER_MESSAGE);
+}
+
+// The response contract bounds attachment names to 200 characters; provider
+// history is under no such obligation, so replayed names are truncated (by
+// code point, matching JSON Schema maxLength) rather than emitted verbatim
+// for strict consumers to reject.
+function boundReplayedName(name: string): string {
+  const points = [...name];
+  return points.length <= 200 ? name : points.slice(0, 200).join("");
+}
+
+function contractImageMime(mime: string | undefined): string | null {
+  const normalized = mime?.toLowerCase();
+  return normalized !== undefined && (CHAT_ATTACHMENT_MIME_TYPES as readonly string[]).includes(normalized) ? normalized : null;
+}
+
 function normalizeStoredMessage(info: RecordValue, parts: unknown[], mintUsageCarrier: boolean): ConversationItem[] {
   const id = string(info.id, "message id");
   const createdAt = timestamp(record(info.time).created, 0);
   if (info.role === "user") {
-    const body = parts.map(part => record(part)).filter(part => part.type === "text").map(part => text(part.text)).join("");
-    return [{ id: `message:${id}`, type: "user_message", createdAt, text: body }];
+    const records = parts.map(part => record(part));
+    // Synthetic text parts are OpenCode's own captions addressed to the model
+    // (e.g. "Called the Read tool with {filePath: ...}" beside an attachment)
+    // — never words the user typed, so they stay out of the bubble.
+    const body = records.filter(part => part.type === "text" && part.synthetic !== true).map(part => text(part.text)).join("");
+    // The durable store rewrites file parts to inline data: URLs, losing the
+    // issued id — but each attachment's synthetic caption carries the stored
+    // path, whose basename IS the id (verified against a live session's
+    // store). Captions pair with file parts in order; an unpaired file part
+    // stays an id-less placeholder. Bytes are never passed through either
+    // way: projections carry references, not image payloads.
+    // Slots stay aligned, nulls included: one caption per file part, in
+    // order. Compacting away an unparseable caption would shift a later
+    // caption's id onto an earlier file — showing the wrong stored image is
+    // strictly worse than the spec'd placeholder.
+    const fileParts = records.filter(part => part.type === "file");
+    const parsedCaptions = records
+      .filter(part => part.type === "text" && part.synthetic === true)
+      .map(part => attachmentIdFromText(text(part.text)));
+    // Positional pairing is only trustworthy when one caption exists per
+    // file part. Any other cardinality means a caption is missing outright,
+    // and assigning the remainder by position could put a later id on an
+    // earlier file — the wrong stored image, strictly worse than the
+    // placeholder every unproven slot degrades to.
+    const captionSlots = parsedCaptions.length === fileParts.length ? parsedCaptions : [];
+    const attachments: MessageAttachment[] = fileParts.flatMap((part, index) => {
+      // The wire contract admits exactly the four image types; a
+      // pre-existing conversation's other files (a text attachment from the
+      // OpenCode TUI, a mime-less part) stay out of the attachments field
+      // rather than violating every strict consumer of revision 8.
+      const mimeType = contractImageMime(optionalString(part.mime));
+      if (mimeType === null) return [];
+      const recovered = attachmentIdFromFileUri(optionalString(part.url) ?? "") ?? captionSlots[index] ?? undefined;
+      return [{
+        ...(recovered ? { id: recovered } : {}),
+        name: boundReplayedName(optionalString(part.filename) ?? "attachment"),
+        mimeType,
+      }];
+    // The response contract caps attachments at eight per message; provider
+    // history is under no such bound, so the excess is dropped rather than
+    // emitted for strict consumers to reject.
+    }).slice(0, CHAT_ATTACHMENTS_PER_MESSAGE);
+    return [{ id: `message:${id}`, type: "user_message", createdAt, text: body, ...(attachments.length ? { attachments } : {}) }];
   }
   if (info.role === "assistant") {
     return normalizeAssistant({ content: parts, error: info.error, snapshot: info.snapshot, tokens: info.tokens, modelID: info.modelID ?? info.modelId, providerID: info.providerID ?? info.providerId, model: info.model }, id, createdAt, mintUsageCarrier);
