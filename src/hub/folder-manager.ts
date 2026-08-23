@@ -119,6 +119,14 @@ function absolutePath(value: unknown, field: string): string {
   return normalizeAbsolutePath(value);
 }
 
+// Control characters (Cc) AND Unicode format characters (Cf) are both
+// rejected: Cf covers the zero-width family, the bidi embedding and
+// override controls, and the BOM. None of them survive a nonempty check —
+// trim() leaves them in place — so a name made only of them would create a
+// directory that renders blank, and one containing a bidi control can make
+// the created folder display a name other than the path it occupies.
+const INVISIBLE_NAME_CHARACTER = /[\u0000-\u001f\u007f]|\p{Cf}/u;
+
 function folderName(value: unknown): string {
   if (
     typeof value !== "string"
@@ -128,7 +136,7 @@ function folderName(value: unknown): string {
     || value.startsWith(".")
     || value.includes("/")
     || value.includes("\\")
-    || /[\u0000-\u001f\u007f]/.test(value)
+    || INVISIBLE_NAME_CHARACTER.test(value)
   ) {
     throw new FolderManagerError("invalid-input", "name must be one visible non-hidden path segment");
   }

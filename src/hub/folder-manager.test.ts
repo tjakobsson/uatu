@@ -119,6 +119,31 @@ describe("FolderManager validation and unregistered operations", () => {
     }
   });
 
+  test("rejects invisible formatting characters while accepting ordinary non-ASCII", async () => {
+    const f = await fixture();
+    // Every one of these survives trim() and would name a directory that
+    // renders blank (zero-width only, BOM only) or displays a name other
+    // than the path it occupies (an embedded bidi override or isolate).
+    const invisible = [
+      "\u200b",
+      "\u200b\u200c\u200d",
+      "\ufeff",
+      "docs\u202egpj.txt",
+      "docs\u2066hidden\u2069",
+      "\u00ad",
+    ];
+    for (const name of invisible) {
+      await expect(f.manager.create({ parent: f.folders, name })).rejects.toMatchObject({ code: "invalid-input" });
+      await expect(f.manager.rename({ path: f.folders, name })).rejects.toMatchObject({ code: "invalid-input" });
+      expect(await exists(path.join(f.folders, name))).toBe(false);
+    }
+    // Visible non-ASCII is not formatting and stays acceptable.
+    for (const name of ["docs-ö", "文書", "Ünïcode dir"]) {
+      expect(await f.manager.create({ parent: f.folders, name })).toEqual({ path: path.join(f.folders, name) });
+      expect(await exists(path.join(f.folders, name))).toBe(true);
+    }
+  });
+
   test("creates, sibling-renames, and non-recursively removes an empty folder", async () => {
     const f = await fixture();
     const created = await f.manager.create({ parent: `${f.folders}/.`, name: "one" });

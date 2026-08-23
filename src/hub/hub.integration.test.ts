@@ -1311,6 +1311,70 @@ describe("hub end to end", () => {
     expect(registry.byPath(fenced)?.id).toBe(((await registered.json()) as { id: string }).id);
   }, 60_000);
 
+  test("forget refuses while a folder mutation journal awaits recovery", async () => {
+    const folder = path.join(tempRoot, "workspaces", "forget-journal-fenced");
+    execFileSync("mkdir", ["-p", folder]);
+    execFileSync("git", ["init"], { cwd: folder, stdio: "ignore" });
+    const registration = await fetch(`${origin}/api/hub/workspaces`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ path: folder, start: false }),
+    });
+    expect(registration.status).toBe(200);
+    const workspaceId = ((await registration.json()) as { id: string }).id;
+    const moved = path.join(tempRoot, "workspaces", "forget-journal-moved");
+    const journalPath = path.join(tempRoot, "pending-folder-mutation.json");
+
+    // A registered rename that moved the directory but could neither persist
+    // the registry nor roll back leaves exactly this record, and recovery
+    // restores its journaled entries verbatim. Forgetting first deletes this
+    // workspace's personal state and credential assignments; the restore
+    // would then resurrect the registration alone — a half-alive workspace
+    // the user explicitly removed.
+    await writeFile(journalPath, `${JSON.stringify({
+      version: 1,
+      operation: "rename",
+      source: folder,
+      destination: moved,
+      before: [{ id: workspaceId, path: folder, backend: "local" }],
+      after: [{ id: workspaceId, path: moved, backend: "local" }],
+    }, null, 2)}\n`, { mode: 0o600 });
+
+    try {
+      const fencedForget = await fetch(`${origin}/api/hub/workspaces/${workspaceId}/forget`, {
+        method: "POST",
+        headers: { cookie, origin },
+      });
+      expect(fencedForget.status).toBe(409);
+      await assertContract("POST", "/api/hub/workspaces/{workspaceId}/forget", fencedForget);
+      expect(await fencedForget.json()).toEqual({
+        error: "a pending folder mutation requires recovery before further registered changes",
+      });
+      expect(registry.byId(workspaceId)?.path).toBe(folder);
+
+      // Fail closed: a journal too corrupt to interpret is still a journal.
+      await writeFile(journalPath, "{ not json", { mode: 0o600 });
+      const corrupt = await fetch(`${origin}/api/hub/workspaces/${workspaceId}/forget`, {
+        method: "POST",
+        headers: { cookie, origin },
+      });
+      expect(corrupt.status).toBe(409);
+      expect(registry.byId(workspaceId)?.path).toBe(folder);
+    } finally {
+      // Every later test in this file mutates registered state, which the
+      // journal fences: a failure here must not leave one behind.
+      await rm(journalPath, { force: true });
+    }
+
+    // Recovery clearing the record reopens forgetting.
+    const forgottenAfterRecovery = await fetch(`${origin}/api/hub/workspaces/${workspaceId}/forget`, {
+      method: "POST",
+      headers: { cookie, origin },
+    });
+    expect(forgottenAfterRecovery.status).toBe(200);
+    expect(registry.byId(workspaceId)).toBeUndefined();
+  }, 60_000);
+
   test("forget unregisters a stopped workspace and refuses a running one", async () => {
     // plain-folder was registered (and stopped) by the init-offer test above.
     const runningRefusal = await fetch(`${origin}/api/hub/workspaces/myproject/forget`, {

@@ -1132,6 +1132,19 @@ export function createHubFetchHandler(deps: HubDeps) {
         if (cloneJobs.isTargetReserved(workspace.path)) {
           return json(409, { error: `workspace is being finalized by a clone job: ${workspaceId}` });
         }
+        // Forgetting is a registered-state mutation and is fenced by the
+        // folder-mutation journal exactly as registration and cloning are.
+        // A journal that outlived its mutation records registry entries
+        // recovery will restore verbatim: forgetting one first deletes its
+        // personal state and credential assignments, and the restore then
+        // resurrects the registration alone — a half-alive workspace the
+        // user explicitly removed. Fails closed, so an uninspectable
+        // journal is treated as pending.
+        try {
+          await deps.folderManager?.assertNoPendingMutation();
+        } catch (error) {
+          return folderError(error);
+        }
         try {
           await sessions.runWhileStopped(workspaceId, () =>
             personalState.forgetWorkspace(
