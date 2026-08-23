@@ -67,7 +67,7 @@ export type HubDeps = {
   sessions: SessionManager;
   sessionStore: HubSessionStore;
   personalState: PersonalWorkspaceStateStore;
-  folderManager?: Pick<FolderManager, "create" | "rename" | "remove">;
+  folderManager?: Pick<FolderManager, "create" | "rename" | "remove" | "assertNoPendingMutation">;
   reservations?: PathReservationCoordinator;
   cloneJobs?: CloneJobManager;
   cloneCredentials?: CloneCredentialResolver;
@@ -404,6 +404,25 @@ export function createHubFetchHandler(deps: HubDeps) {
     return json(200, { path: resolved, parent: parent === resolved ? null : parent, dirs });
   };
 
+  // Folder-state failures answer with the manager's own code, whatever
+  // route observed them; anything that is not a FolderManagerError never
+  // carries a caller-actionable message and stays a Hub-internal 500.
+  const folderError = (error: unknown): Response => {
+    if (!(error instanceof FolderManagerError)) {
+      return json(500, { error: "folder operation failed" }, NO_STORE_HEADERS);
+    }
+    const status = error.code === "invalid-input"
+      ? 400
+      : error.code === "permission-denied"
+        ? 403
+        : error.code === "not-found"
+          ? 404
+          : error.code === "conflict" || error.code === "not-empty"
+            ? 409
+            : 500;
+    return json(status, { error: error.message }, NO_STORE_HEADERS);
+  };
+
   // POST /api/hub/workspaces {path, init?} — registers any absolute folder
   // path. The git preflight mirrors the desktop launcher's rules: a
   // definitive not-a-repository answer yields a 409 {needsInit:true} the
@@ -441,6 +460,22 @@ export function createHubFetchHandler(deps: HubDeps) {
       return json(409, { error: `folder is currently being cloned: ${folder}` });
     }
     try {
+      // Registration is a registered-state mutation and is fenced by the
+      // folder-mutation journal exactly as create/rename/remove are. A
+      // journal that outlived its mutation is the only record tying a
+      // moved-or-removed directory back to its old registration, and
+      // startup recovery restores that entry at its journaled path: minting
+      // a fresh id for the same directory here would make the restore
+      // collide, leaving the Hub unstartable without manual state repair.
+      // Checked under the reservation, so no mutation of this folder can be
+      // journaling concurrently, and failing closed — an uninspectable
+      // journal is treated as pending.
+      try {
+        await deps.folderManager?.assertNoPendingMutation();
+      } catch (error) {
+        return folderError(error);
+      }
+
       // The canonicalization above ran before the lease, so a folder
       // rename can have completed in between — the lease would then cover
       // a stale path and the git probe treats a missing directory as
@@ -596,22 +631,6 @@ export function createHubFetchHandler(deps: HubDeps) {
         connection: "keep-alive",
       },
     });
-  };
-
-  const folderError = (error: unknown): Response => {
-    if (!(error instanceof FolderManagerError)) {
-      return json(500, { error: "folder operation failed" }, NO_STORE_HEADERS);
-    }
-    const status = error.code === "invalid-input"
-      ? 400
-      : error.code === "permission-denied"
-        ? 403
-        : error.code === "not-found"
-          ? 404
-          : error.code === "conflict" || error.code === "not-empty"
-            ? 409
-            : 500;
-    return json(status, { error: error.message }, NO_STORE_HEADERS);
   };
 
   const mutateFolder = async (

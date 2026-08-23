@@ -692,7 +692,10 @@ export class FolderManager {
   // flip the existence probes recovery relies on — recreating a removed
   // journal source would restore the old registration onto an unrelated
   // directory. Nothing proceeds until recover() has resolved the record.
-  private async assertNoPendingMutation(): Promise<void> {
+  // Public because workspace registration is fenced by the same record: it
+  // mints a stable id for a directory recovery may still have to restore an
+  // older entry onto, and a collision there leaves the Hub unstartable.
+  async assertNoPendingMutation(): Promise<void> {
     try {
       await this.fs.lstat(this.options.journalPath);
     } catch (error) {
