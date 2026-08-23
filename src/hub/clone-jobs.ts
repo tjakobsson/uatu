@@ -177,6 +177,10 @@ export class CloneJobManager {
     return this.reservations.isReserved(target);
   }
 
+  reserveTarget(target: string): PathReservation | undefined {
+    return this.reservations.acquire([target]);
+  }
+
   subscribe(owner: string, jobId: string, afterEventId: number, listener: (event: CloneJobEvent) => void): (() => void) | null {
     const job = this.owned(owner, jobId);
     if (!job) return null;
