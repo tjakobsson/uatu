@@ -542,6 +542,64 @@ describe("commit-boundary failure injection", () => {
     expect(await journalExists(f.journalPath)).toBe(false);
   });
 
+  test("a credential disabled after resolution fails the commit inside the transaction", async () => {
+    // The selection passes pre-validation, then a concurrent operator
+    // disables it before the assignment transaction (interposed here on
+    // git init, which runs between the two). The store itself would accept
+    // the stale assignment — the id still exists — so the transaction's
+    // own revalidation must fail the commit and roll the registration back.
+    const f = await fixture({
+      probeNotRepository: true,
+      onInit: async () => {
+        await f.credentials.transaction(draft => {
+          const record = draft.credentials.find(credential => credential.id === "auth-key");
+          if (record) record.enabled = false;
+        });
+      },
+    });
+    await addSshCredential(f.credentials, "auth-key");
+    const folder = path.join(f.folders, "plain");
+    await fs.mkdir(folder);
+    await expect(f.coordinator.configureExisting({
+      path: folder,
+      displayName: "Plain",
+      authentication: [{ credentialId: "auth-key", host: "github.com" }],
+      init: true,
+    })).rejects.toMatchObject({ code: "credential" });
+    expect(f.registry.byPath(folder)).toBeUndefined();
+    expect(f.credentials.snapshot().assignments).toEqual([]);
+    expect(await journalExists(f.journalPath)).toBe(false);
+  });
+
+  test("recovery recognizes a committed entry renamed before the crash", async () => {
+    // The registry save makes the entry visible (and renamable) before the
+    // journal clears; recognition must rest on immutable id + path so a
+    // user rename in that window cannot get the registration rolled back.
+    const f = await fixture();
+    await addSshCredential(f.credentials, "auth-key");
+    const folder = await gitRepository(f.folders, "committed");
+    await f.registry.register(folder, "local", "Renamed After Commit");
+    const journal = {
+      version: 1,
+      operation: "configure-existing",
+      createdFolder: false,
+      entry: { id: "committed", path: folder, backend: "local", displayName: "Committed" },
+      previousEntry: null,
+      previousAssignments: [],
+      desiredAssignments: [
+        { workspaceId: "committed", credentialId: "auth-key", role: "authentication" as const, host: "github.com" },
+      ],
+    };
+    await fs.writeFile(f.journalPath, `${JSON.stringify(journal)}\n`, { mode: 0o600 });
+    await fs.chmod(f.journalPath, 0o600);
+
+    await f.coordinator.recover();
+    // The newer name survives; only the assignments are completed.
+    expect(f.registry.byId("committed")?.displayName).toBe("Renamed After Commit");
+    expect(f.credentials.snapshot().assignments).toEqual(journal.desiredAssignments);
+    expect(await journalExists(f.journalPath)).toBe(false);
+  });
+
   test("recovery rejects a journal that is not owner-only", async () => {
     const f = await fixture();
     await fs.writeFile(f.journalPath, `${JSON.stringify({ version: 1 })}\n`, { mode: 0o644 });

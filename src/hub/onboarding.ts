@@ -476,10 +476,14 @@ export class WorkspaceOnboardingCoordinator {
     return this.enqueue(async () => {
       const pending = await this.journal.read();
       if (!pending) return;
+      // Committed is recognized by immutable identity (id + path) only.
+      // The display name is user-editable the moment the registry save
+      // makes the entry visible, so a rename between commit and a crash
+      // must not reclassify the registration as uncommitted — the newer
+      // name is preserved and only the assignments are completed.
       const current = this.options.registry.byId(pending.entry.id);
       const committed = current !== undefined
-        && normalizeAbsolutePath(current.path) === pending.entry.path
-        && current.displayName === pending.entry.displayName;
+        && normalizeAbsolutePath(current.path) === pending.entry.path;
       if (committed) {
         await this.replaceWorkspaceAssignments(pending.entry.id, pending.desiredAssignments);
       } else {
@@ -684,7 +688,7 @@ export class WorkspaceOnboardingCoordinator {
       }
 
       try {
-        await this.replaceWorkspaceAssignments(entry.id, options.desired);
+        await this.commitDesiredAssignments(entry.id, options.desired);
       } catch (error) {
         try {
           await this.options.registry.remove(entry.id);
@@ -715,6 +719,33 @@ export class WorkspaceOnboardingCoordinator {
       started: false,
       startError: null,
     };
+  }
+
+  // Commits the desired set, re-running the full selection rules against
+  // the transaction draft. The set was resolved from a pre-commit snapshot,
+  // and a concurrent credential mutation (delete, disable, capability or
+  // host edit) can land in between; the store's own validation only rejects
+  // dangling ids. A drifted selection throws inside the serialized
+  // transaction, so nothing commits and the caller's normal credential
+  // rollback path undoes the registration. Rollback and recovery keep using
+  // replaceWorkspaceAssignments — a restored previous state must never be
+  // re-judged against newer credential rules.
+  private async commitDesiredAssignments(workspaceId: string, desired: CredentialAssignment[]): Promise<void> {
+    if (desired.length === 0) {
+      await this.replaceWorkspaceAssignments(workspaceId, desired);
+      return;
+    }
+    const selections = {
+      authentication: desired
+        .filter(assignment => assignment.role === "authentication")
+        .map(assignment => ({ credentialId: assignment.credentialId, host: assignment.host })),
+      signing: desired.find(assignment => assignment.role === "signing")?.credentialId ?? null,
+    };
+    await this.options.credentials.transaction(draft => {
+      resolveOnboardingAssignments(workspaceId, selections, draft);
+      draft.assignments = draft.assignments.filter(assignment => assignment.workspaceId !== workspaceId);
+      draft.assignments.push(...structuredClone(desired));
+    });
   }
 
   private async replaceWorkspaceAssignments(workspaceId: string, assignments: CredentialAssignment[]): Promise<void> {
