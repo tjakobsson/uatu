@@ -1034,6 +1034,81 @@ describe("FolderManager journal recovery", () => {
     expect(await exists(f.journalPath)).toBe(false);
   });
 
+  test("removal recovery leaves a workspace that reused the freed id untouched", async () => {
+    // A registration admitted before the removal journaled its record is
+    // past the fence and reserves an unrelated path, so once the removal
+    // frees the basename slug the registry re-mints it for that newcomer.
+    // A journal surviving the failed finalization then names an id that
+    // belongs to a different, live workspace: recovery must not forget it.
+    const f = await fixture();
+    const removedFolder = path.join(f.folders, "a", "foo");
+    const newFolder = path.join(f.folders, "b", "foo");
+    await Promise.all([fs.mkdir(removedFolder, { recursive: true }), fs.mkdir(newFolder, { recursive: true })]);
+    const removed = await f.registry.register(removedFolder);
+    await f.personalState.patch("alice", removed.id, { follow: true });
+    // The removal rmdir'd its folder and committed the registry deletion,
+    // then failed finalizing — the pending forget and the journal survive.
+    await fs.rmdir(removedFolder);
+    await expect(f.personalState.forgetWorkspace(
+      removed.id,
+      () => f.registry.remove(removed.id),
+      async () => { throw new Error("finalize failed"); },
+    )).rejects.toThrow("finalize failed");
+    const newcomer = await f.registry.register(newFolder);
+    expect(newcomer.id).toBe(removed.id);
+    await f.personalState.patch("bob", newcomer.id, { follow: true });
+    await f.credentials.transaction(state => state.credentials.push({
+      id: "key", name: "Key", type: "ssh", enabled: true,
+      capabilities: ["ssh-signing"], metadata: { publicKey: "ssh-ed25519 AAAA", fingerprint: "SHA256:test" },
+      createdAt: "2026-08-23T00:00:00.000Z",
+    }));
+    await f.credentials.assign({ workspaceId: newcomer.id, credentialId: "key", role: "signing" });
+    await writeJournal(f.journalPath, { version: 1, operation: "remove", source: removedFolder, entry: removed });
+
+    await f.manager.recover();
+    expect(f.registry.byId(newcomer.id)).toEqual(newcomer);
+    expect(f.personalState.get("bob", newcomer.id).follow).toBe(true);
+    expect(f.credentials.snapshot().assignments).toHaveLength(1);
+    expect(await exists(f.journalPath)).toBe(false);
+    // The removed workspace's own records are dead — dropped, never
+    // resurrected onto the id its successor now owns, here or in the
+    // startup sweep that follows recovery.
+    expect(f.personalState.get("alice", newcomer.id)).toEqual({ version: 1 });
+    await f.personalState.recoverPendingForgets(
+      workspaceId => f.registry.byId(workspaceId) !== undefined,
+      async workspaceId => { await f.credentials.removeWorkspaceAssignments(workspaceId); },
+    );
+    expect(f.personalState.get("alice", newcomer.id)).toEqual({ version: 1 });
+    expect(f.personalState.get("bob", newcomer.id).follow).toBe(true);
+    expect(f.credentials.snapshot().assignments).toHaveLength(1);
+  });
+
+  test("removal recovery does not repoint a reused id onto a surviving source", async () => {
+    // Same id reuse, but the source survived the crash. Restoring by id
+    // would move the newcomer's registration onto the journaled path; the
+    // journaled registration is dropped instead, folder intact on disk.
+    const f = await fixture();
+    const removedFolder = path.join(f.folders, "a", "foo");
+    const newFolder = path.join(f.folders, "b", "foo");
+    await Promise.all([fs.mkdir(removedFolder, { recursive: true }), fs.mkdir(newFolder, { recursive: true })]);
+    const removed = await f.registry.register(removedFolder);
+    await f.registry.remove(removed.id);
+    const newcomer = await f.registry.register(newFolder);
+    expect(newcomer.id).toBe(removed.id);
+    await writeJournal(f.journalPath, {
+      version: 1,
+      operation: "remove",
+      source: removedFolder,
+      entry: removed,
+      identity: await identityOf(removedFolder),
+    });
+
+    await f.manager.recover();
+    expect(f.registry.list()).toEqual([newcomer]);
+    expect(await exists(removedFolder)).toBe(true);
+    expect(await exists(f.journalPath)).toBe(false);
+  });
+
   test("removal recovery refuses any content at the source, even with a matching identity", async () => {
     // Inode numbers are reusable after an rmdir, so a matching identity
     // cannot prove the directory is ours. Emptiness can: the removal only

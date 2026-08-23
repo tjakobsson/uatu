@@ -622,6 +622,21 @@ export class FolderManager {
       }
 
       const sourceExists = await this.isDirectDirectory(pending.source);
+      // Every step below is keyed by the journaled id alone, and that id can
+      // have been re-minted for a DIFFERENT folder: a registration admitted
+      // before this removal wrote its journal is past the fence (mutations
+      // check the record only at admission) and reserves its own
+      // non-overlapping path, so once the removal frees the basename slug
+      // the registry hands it straight to that newcomer. The registry's
+      // current occupant therefore counts as the journaled workspace only
+      // when it IS the complete journaled entry — same id, same path, same
+      // backend. Anything else is a live workspace this journal knows
+      // nothing about.
+      const registered = this.options.registry.byId(pending.entry.id);
+      const reusedId = registered !== undefined && (
+        normalizeAbsolutePath(registered.path) !== pending.entry.path
+        || registered.backend !== pending.entry.backend
+      );
       if (sourceExists) {
         // A surviving source must plausibly BE the journaled directory.
         // The identity check catches path swaps, but inode numbers are
@@ -639,21 +654,40 @@ export class FolderManager {
         if ((await this.fs.readdir(pending.source)).length > 0) {
           throw new Error("pending folder removal recovery found an unrecognized directory; manual reconciliation required");
         }
-        await this.options.registry.restoreEntries([pending.entry]);
-      } else if (this.options.registry.byId(pending.entry.id)) {
+        // restoreEntries reconciles by id, so restoring onto a reused id
+        // would repoint the new owner's registration at the journaled path
+        // and strand its folder unregistered. The journaled registration is
+        // dropped instead: its directory survives on disk, and registering
+        // it again mints a fresh id.
+        if (!reusedId) await this.options.registry.restoreEntries([pending.entry]);
+      } else if (registered && !reusedId) {
         await this.options.personalState.forgetWorkspace(
           pending.entry.id,
           () => this.options.registry.remove(pending.entry.id),
           async () => { await this.options.credentials.removeWorkspaceAssignments(pending.entry.id); },
         );
-      } else {
+      } else if (!registered) {
         await this.options.personalState.removeWorkspace(pending.entry.id);
       }
+      // A reused id leaves nothing to finish under it. The journaled
+      // workspace's own leftovers — personal state records, credential
+      // assignments — are filed under an id the new workspace now owns, so
+      // they are indistinguishable from (and inseparable of) the new
+      // owner's: deleting by id would destroy live data, and restoring the
+      // pending-forget records would overwrite it. Recovery therefore drops
+      // only the pending-forget journal (dead records of a workspace whose
+      // registration is already gone) and touches nothing else keyed by the
+      // id. Stale leftovers orphaned under the new owner are the lesser
+      // harm next to deleting a workspace this journal never described.
+      const journaledIdReused = (workspaceId: string) => reusedId && workspaceId === pending.entry.id;
       await this.options.personalState.recoverPendingForgets(
-        workspaceId => this.options.registry.byId(workspaceId) !== undefined,
-        async workspaceId => { await this.options.credentials.removeWorkspaceAssignments(workspaceId); },
+        workspaceId => !journaledIdReused(workspaceId) && this.options.registry.byId(workspaceId) !== undefined,
+        async workspaceId => {
+          if (journaledIdReused(workspaceId)) return;
+          await this.options.credentials.removeWorkspaceAssignments(workspaceId);
+        },
       );
-      if (!sourceExists) await this.options.credentials.removeWorkspaceAssignments(pending.entry.id);
+      if (!sourceExists && !reusedId) await this.options.credentials.removeWorkspaceAssignments(pending.entry.id);
       await this.journal.clear();
     });
   }
