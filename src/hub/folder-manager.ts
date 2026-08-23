@@ -58,7 +58,7 @@ export type PendingFolderMutation = RenameJournal | RemoveJournal;
 type FileSystem = Pick<typeof nodeFs, "lstat" | "realpath" | "mkdir" | "rename" | "rmdir" | "readFile" | "open" | "unlink" | "chmod" | "rm">;
 
 type FolderRegistry = Pick<WorkspaceRegistry,
-  "atOrBelow" | "byId" | "byPath" | "remove" | "replacePathPrefix" | "restoreEntries"
+  "atOrBelow" | "byId" | "byPath" | "list" | "remove" | "replacePathPrefix" | "restoreEntries"
 >;
 
 type FolderSessions = Pick<SessionManager, "runWithSessionsStopped">;
@@ -290,7 +290,11 @@ export class FolderManager {
       const reservation = this.reserve([source, destination]);
       try {
         await this.assertMissing(destination);
+        await this.reconcileRegisteredAliases();
         const affected = this.options.registry.atOrBelow(source);
+        // Refused before session coordination so a doomed mutation never
+        // stops sessions it cannot proceed to move.
+        if (affected.length > 0) await this.assertNoPendingMutation();
         return await this.options.sessions.runWithSessionsStopped(
           affected.map(entry => entry.id),
           parsed.stop === true,
@@ -320,7 +324,9 @@ export class FolderManager {
       const source = await this.canonicalDirectory(parsed.path);
       const reservation = this.reserve([source]);
       try {
+        await this.reconcileRegisteredAliases();
         const entry = this.options.registry.byPath(source);
+        if (entry) await this.assertNoPendingMutation();
         return await this.options.sessions.runWithSessionsStopped(
           entry ? [entry.id] : [],
           parsed.stop === true,
@@ -403,6 +409,47 @@ export class FolderManager {
     if (stats.isSymbolicLink() || !stats.isDirectory()) {
       throw new FolderManagerError("invalid-input", "folder path must name a direct non-symbolic-link directory");
     }
+  }
+
+  // Registries persisted before path canonicalization can hold alias paths
+  // (a registration reached through a symlinked ancestor). Canonical-source
+  // lookups would treat those entries as unrelated and mutate the directory
+  // without stopping their sessions or updating their registered paths, so
+  // mutations first rewrite any stored alias to its canonical form. A path
+  // that no longer resolves is left alone — the entry stays registered at
+  // its recorded path, exactly as a vanished folder does.
+  private async reconcileRegisteredAliases(): Promise<void> {
+    for (const entry of this.options.registry.list()) {
+      const persisted = normalizeAbsolutePath(entry.path);
+      let canonical: string;
+      try {
+        canonical = normalizeAbsolutePath(await this.fs.realpath(persisted));
+      } catch {
+        continue;
+      }
+      if (canonical === persisted) continue;
+      try {
+        await this.options.registry.replacePathPrefix(persisted, canonical);
+      } catch (error) {
+        throw safeFsError(error, "registered workspace path reconciliation failed");
+      }
+    }
+  }
+
+  // A journal that outlives its mutation is the only recovery record for a
+  // workspace whose directory and registered state no longer agree. The
+  // journal holds a single record, so the next registered mutation would
+  // replace it — and, on success, clear it — leaving the earlier workspace
+  // registered at a missing path with no trace. Refuse registered mutations
+  // until recover() has resolved the pending record.
+  private async assertNoPendingMutation(): Promise<void> {
+    try {
+      await this.fs.lstat(this.options.journalPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw safeFsError(error, "folder mutation journal inspection failed");
+    }
+    throw new FolderManagerError("conflict", "a pending folder mutation requires recovery before further registered changes");
   }
 
   private async canonicalDirectory(folderPath: string): Promise<string> {
