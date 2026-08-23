@@ -705,8 +705,11 @@ export class FolderManager {
   // directory. Sibling recovery journals (the onboarding journal) freeze
   // mutations the same way: their recovery matches entries by recorded
   // path, which a rename would invalidate. Nothing proceeds until the
-  // pending record is recovered.
-  private async assertNoPendingMutation(): Promise<void> {
+  // pending record is recovered. Public because workspace registration is
+  // fenced by the same records: it mints a stable id for a directory
+  // recovery may still have to restore an older entry onto, and a
+  // collision there leaves the Hub unstartable.
+  async assertNoPendingMutation(): Promise<void> {
     for (const journalPath of [this.options.journalPath, ...this.options.recoveryJournalPaths ?? []]) {
       let pending = true;
       try {

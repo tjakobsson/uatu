@@ -212,7 +212,7 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '409':
-          description: Initialization confirmation required or target reserved
+          description: Initialization confirmation required, target reserved, or a pending folder mutation awaits recovery
           content:
             application/json:
               schema: { $ref: '#/components/schemas/WorkspaceConflict' }
