@@ -38,7 +38,9 @@ export type RenameFolderResult = { path: string; workspaceIds: string[] };
 export type RemoveFolderResult = { path: string; workspaceId?: string };
 export type CoordinatedFolderResult<T> = SessionsStoppedResult<T>;
 
-// dev+ino as strings (64-bit inode numbers exceed safe JSON integers).
+// dev+ino as strings, captured and compared through bigint lstat — 64-bit
+// inode numbers exceed safe JSON integers AND Number precision, and a
+// rounded ino could make two distinct directories serialize identically.
 // Recorded so recovery can tell the successfully renamed folder — and, on
 // the claimed-placeholder fallback path, our own empty destination claim —
 // from a foreign directory.
@@ -531,7 +533,7 @@ export class FolderManager {
           // foreign recreated the source. Emptiness alone proves
           // nothing, and a journal predating identities stays a loud
           // failure.
-          const destinationStats = await this.fs.lstat(pending.destination);
+          const destinationStats = await this.fs.lstat(pending.destination, { bigint: true });
           const matches = (identity: DirectoryIdentity | undefined) =>
             identity !== undefined
             && String(destinationStats.dev) === identity.dev
@@ -559,7 +561,7 @@ export class FolderManager {
         // registrations, their personal state, or their assignments.
         if (pending.identities) {
           const survivor = renamed ? pending.destination : pending.source;
-          const stats = await this.fs.lstat(survivor);
+          const stats = await this.fs.lstat(survivor, { bigint: true });
           if (String(stats.dev) !== pending.identities.source.dev || String(stats.ino) !== pending.identities.source.ino) {
             throw new Error("pending folder rename recovery found an unrecognized directory; manual reconciliation required");
           }
@@ -577,7 +579,7 @@ export class FolderManager {
         // not inherit the registration. Journals without a recorded
         // identity keep the existence-only behavior.
         if (pending.identity) {
-          const stats = await this.fs.lstat(pending.source);
+          const stats = await this.fs.lstat(pending.source, { bigint: true });
           if (String(stats.dev) !== pending.identity.dev || String(stats.ino) !== pending.identity.ino) {
             throw new Error("pending folder removal recovery found an unrecognized directory; manual reconciliation required");
           }
@@ -685,7 +687,7 @@ export class FolderManager {
       // foreign process between these steps is caught by identity where
       // inode numbers cooperate.
       await this.fs.mkdir(destination);
-      claim = directoryIdentity(await this.fs.lstat(destination));
+      claim = directoryIdentity(await this.fs.lstat(destination, { bigint: true }));
       await this.fs.rename(source, destination);
       claim = undefined;
     } catch (error) {
@@ -699,7 +701,7 @@ export class FolderManager {
   // additionally refuses anything non-empty.
   private async removeOwnedClaim(destination: string, claim: DirectoryIdentity): Promise<void> {
     try {
-      const stats = await this.fs.lstat(destination);
+      const stats = await this.fs.lstat(destination, { bigint: true });
       if (String(stats.dev) !== claim.dev || String(stats.ino) !== claim.ino) return;
       await this.fs.rmdir(destination);
     } catch {
@@ -718,7 +720,7 @@ export class FolderManager {
   private async assertClaimOwned(destination: string, claim: DirectoryIdentity): Promise<void> {
     let stats;
     try {
-      stats = await this.fs.lstat(destination);
+      stats = await this.fs.lstat(destination, { bigint: true });
     } catch (error) {
       throw safeFsError(error, "rename destination claim inspection failed");
     }
@@ -760,7 +762,7 @@ export class FolderManager {
       // The journaled source identity lets recovery recognize the moved
       // folder if a crash lands between the rename and the registry update
       // while something foreign recreates the source.
-      const sourceIdentity = directoryIdentity(await this.fs.lstat(source));
+      const sourceIdentity = directoryIdentity(await this.fs.lstat(source, { bigint: true }));
       const base = { version: JOURNAL_VERSION, operation: "rename", source, destination, before, after } as const;
       let moved = false;
       if (this.renameNoReplace) {
@@ -779,7 +781,7 @@ export class FolderManager {
         // claim-bearing.
         if (this.renameNoReplace) await this.journal.clear();
         await this.fs.mkdir(destination);
-        claim = directoryIdentity(await this.fs.lstat(destination));
+        claim = directoryIdentity(await this.fs.lstat(destination, { bigint: true }));
         await this.journal.write({ ...base, identities: { source: sourceIdentity, claim } });
         // The journal write above is real I/O; re-verify the claim is
         // still ours before the rename that replaces it.
@@ -822,7 +824,7 @@ export class FolderManager {
         operation: "remove",
         source,
         entry,
-        identity: directoryIdentity(await this.fs.lstat(source)),
+        identity: directoryIdentity(await this.fs.lstat(source, { bigint: true })),
       };
       await this.journal.write(pending);
       await this.fs.rmdir(source);
