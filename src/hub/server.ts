@@ -441,6 +441,18 @@ export function createHubFetchHandler(deps: HubDeps) {
       return json(409, { error: `folder is currently being cloned: ${folder}` });
     }
     try {
+      // The canonicalization above ran before the lease, so a folder
+      // rename can have completed in between — the lease would then cover
+      // a stale path and the git probe treats a missing directory as
+      // indeterminate, persisting a dead registration. Re-checked under
+      // the lease, no further rename can move the folder.
+      try {
+        if ((await fs.realpath(folder)) !== folder) {
+          return json(409, { error: `folder moved during registration: ${folder}` });
+        }
+      } catch {
+        return json(404, { error: `no such folder: ${folder}` });
+      }
       const gitCommand = deps.gitCommand?.() ?? "git";
       const probe = await probeGitRepository(folder, gitCommand);
       if (probe.kind === "not-a-repository") {
