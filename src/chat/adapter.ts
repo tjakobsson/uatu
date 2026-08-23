@@ -554,11 +554,13 @@ export class OpenCodeChatAdapter {
         };
         queue.push(held);
         this.heldQueues.set(conversationId, queue);
-        // A submission is what reactivates a queue a cancellation paused,
-        // and it likewise releases the open-admission hold on command heads
-        // — the user is acting on a conversation that reads idle.
+        // A submission is what reactivates a queue a cancellation paused.
         this.dormantQueues.delete(conversationId);
-        this.openAdmissions.delete(conversationId);
+        // The open-admission hold releases only when the conversation reads
+        // idle — that is the pinned-queue exit this clear exists for. A
+        // submission during an active turn must not disarm the guard that
+        // keeps command heads out of that turn.
+        if (!busy) this.openAdmissions.delete(conversationId);
         // The staged selection commits on submission, exactly as an
         // immediately dispatched prompt commits it; delivery re-asserts the
         // same values on the wire.
