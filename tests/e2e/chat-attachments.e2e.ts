@@ -529,6 +529,32 @@ test.describe("upload refusal during the drain", () => {
     expect(prompted).toBe(false);
     await page.unroute("**/attachments");
   });
+
+  test("an all-unsupported drop during the drain blocks the send too", async ({ page }) => {
+    await newConversation(page);
+    await page.route("**/attachments", async route => {
+      await new Promise(resolve => setTimeout(resolve, 600));
+      await route.continue();
+    });
+    await page.locator("#chat-attach-input").setInputFiles({ name: "first.png", mimeType: "image/png", buffer: PNG });
+    let prompted = false;
+    page.on("request", request => { if (request.url().endsWith("/prompts")) prompted = true; });
+    await page.locator("#chat-input").fill("meant to carry the notes");
+    await page.locator("#chat-input").press("Enter");
+    // Nothing in this drop could stage, but it was meant for the message
+    // being drained — the refusal must stop the send all the same.
+    await page.evaluate(() => {
+      const form = document.querySelector<HTMLFormElement>("#chat-composer")!;
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(["not an image"], "notes.txt", { type: "text/plain" }));
+      form.dispatchEvent(new DragEvent("drop", { dataTransfer: transfer, bubbles: true, cancelable: true }));
+    });
+    await expect(page.locator("#chat-composer-error")).toContainText("Only PNG, JPEG, GIF, or WebP");
+    await expect(page.locator("#chat-attachments .chat-attachment")).toHaveCount(1);
+    await expect(page.locator("#chat-input")).toHaveValue("meant to carry the notes");
+    expect(prompted).toBe(false);
+    await page.unroute("**/attachments");
+  });
 });
 
 test.describe("draft restoration with mid-flight edits", () => {

@@ -1183,6 +1183,12 @@ export function initChat(): void {
     const dropped = Array.from(event.dataTransfer?.files ?? []);
     const images = dropped.filter(attachableClaim);
     if (images.length === 0) {
+      // Counted like every other refusal: files dropped while a submit
+      // drains were meant for that message, and the post-drain guard must
+      // see the loss even when nothing in the drop could stage. (Paste has
+      // no such branch — an imageless paste is not intercepted at all.)
+      const conversationId = activeConversationId();
+      if (conversationId) noteAttachmentRefusal(conversationId, dropped.length);
       setComposerError("Only PNG, JPEG, GIF, or WebP images can be attached.");
       return;
     }
