@@ -225,7 +225,9 @@ The Chat action that creates another conversation with the current workspace age
 - **AND** activating it does not change the workspace agent
 
 ### Requirement: The workspace API exposes normalized chat operations
-The workspace API SHALL provide authenticated operations to list, create, and read conversations; start a prompt turn; cancel the active turn; answer a pending permission; and answer or reject a structured question. Mutation requests SHALL be origin-protected under cookie authentication, SHALL validate conversation ownership against the workspace directory, and SHALL use client-generated request identifiers to make network retries idempotent. Provider-specific payloads and credentials MUST NOT be exposed as the public contract when a normalized UatuCode representation exists.
+The workspace API SHALL provide authenticated operations to list, create, and read conversations; start a prompt turn; remove a queued message; cancel the active turn; answer a pending permission; and answer or reject a structured question. Mutation requests SHALL be origin-protected under cookie authentication, SHALL validate conversation ownership against the workspace directory, and SHALL use client-generated request identifiers to make network retries idempotent. Provider-specific payloads and credentials MUST NOT be exposed as the public contract when a normalized UatuCode representation exists.
+
+A prompt accepted while the conversation is running SHALL be reported as queued, identifying the held message so a client can later remove it. Conversation reads SHALL include the currently held messages in submission order, so a client joining or reloading mid-run presents the same queue as one that watched it build.
 
 The API SHALL report which agent a workspace's Chat is talking to, and which capabilities that agent declares. A capability is declared only when the agent actually supports it; the absence of a declaration SHALL be a normal, expected state rather than an error or an empty result. Consumers SHALL be able to decide what to present from the declaration alone, without probing an operation to discover whether it works.
 
@@ -236,8 +238,18 @@ The API SHALL name a way of working a **mode**, and SHALL name the program Chat 
 - **THEN** the server returns the original accepted result or current outcome
 - **AND** OpenCode receives the prompt at most once
 
+#### Scenario: Retried removal is applied once
+- **WHEN** a client retries a queued-message removal with the same request identifier after losing the response
+- **THEN** the server reports the original outcome
+- **AND** at most one held message is removed
+
+#### Scenario: A reload shows the queue as it stands
+- **WHEN** a client loads a conversation snapshot while messages are held
+- **THEN** the response identifies the held messages in submission order
+- **AND** the client can present and remove them without having observed their submission
+
 #### Scenario: Cross-origin mutation is rejected
-- **WHEN** a cookie-authenticated cross-origin request attempts to prompt, cancel, or answer an agent request
+- **WHEN** a cookie-authenticated cross-origin request attempts to prompt, remove a queued message, cancel, or answer an agent request
 - **THEN** the workspace rejects it without changing the conversation
 
 #### Scenario: Base-path deployment uses relocated chat routes
@@ -263,6 +275,8 @@ The API SHALL name a way of working a **mode**, and SHALL name the program Chat 
 ### Requirement: Conversation updates are structured and reconnectable
 The server SHALL normalize OpenCode activity into ordered conversation events covering user and assistant content, reasoning, tool lifecycle, permission requests and resolutions, structured questions and resolutions, context compaction, reverted work, turn status, cancellation, completion, warnings, and errors. Normalization SHALL recognize each of these regardless of which of OpenCode's event-naming generations announced it, and when one logical occurrence is announced more than once the timeline SHALL contain a single entry for it.
 
+Changes to a conversation's held-message queue — a message held, a message removed, a message delivered to the agent — SHALL be announced on the same ordered event stream, so every connected client presents the same queue at the same point in the conversation.
+
 An event the server does not recognize, or whose payload it cannot parse, SHALL be skipped without ending or restarting the event stream, and SHALL be counted by type so an operator can discover what a running workspace is discarding. Counting MUST NOT record event payloads.
 
 A history snapshot SHALL identify a stream cursor; reconnecting from a retained cursor SHALL replay every later event in order before delivering live events. If the cursor is no longer replayable or belongs to an earlier server generation, the server SHALL explicitly require a fresh snapshot. Applying a snapshot followed by its event stream MUST NOT duplicate message content or tool entries.
@@ -270,6 +284,11 @@ A history snapshot SHALL identify a stream cursor; reconnecting from a retained 
 #### Scenario: Stream reconnect replays missed output
 - **WHEN** the event connection drops during an assistant response and reconnects with a retained cursor
 - **THEN** every event after that cursor is replayed once in order before live output continues
+
+#### Scenario: Queue changes reach every connected client
+- **WHEN** a message is held, removed, or delivered while more than one client watches the conversation
+- **THEN** each client receives the change on the ordered event stream
+- **AND** all clients present the same held messages in the same order
 
 #### Scenario: Stale cursor requests resynchronization
 - **WHEN** a client reconnects with a cursor outside retained history or from an earlier workspace-server generation
@@ -523,43 +542,6 @@ Every answered question request SHALL contain exactly one answer array for each 
 - **WHEN** every question has a semantically valid answer and the user confirms the form
 - **THEN** OpenCode receives the ordered string arrays once
 - **AND** the request resolves everywhere it is shown under the existing ownership rules
-
-### Requirement: Users can prompt, steer, and cancel the active conversation
-The Chat composer SHALL submit non-empty text to the selected conversation and clearly distinguish ready, sending, running, interrupted, and failed states. While OpenCode supports steering a running session, a subsequent submitted prompt SHALL be presented as a steer of the active turn rather than an unrelated concurrent turn. The user SHALL be able to cancel an active turn without deleting its completed history, and transport failure SHALL preserve the draft until acceptance is known.
-
-The surface SHALL name the agent it is talking to, taking that name from what the agent reports rather than from fixed copy. Text presented to the user SHALL NOT assume a particular agent, so that installing a different agent changes the name shown and nothing else.
-
-The way of working a prompt runs under SHALL be presented as a **mode** — the agent's own named ways of working, such as building or planning. It SHALL NOT be called an agent, because that word names the program Chat talks to.
-
-A control the surface offers the user to start an operation — a picker such as the mode or model chooser — SHALL be presented only when the agent declares the capability behind it. Where that capability is undeclared, the control SHALL be absent rather than shown inert, shown empty, or shown with an error. Reactive interaction controls — those that appear only in response to an agent-raised request, governed by "Users can resolve agent interaction requests in context" — are not covered here: an agent that lacks a capability raises no request of that kind, so the control has nothing to appear for. Absence of a capability SHALL NOT degrade any capability the agent does declare.
-
-#### Scenario: Empty prompt is not submitted
-- **WHEN** the composer contains only whitespace
-- **THEN** the send action is unavailable and no mutation is sent
-
-#### Scenario: Follow-up steers a running turn
-- **WHEN** the user submits another prompt while the selected OpenCode conversation is running and steering is available
-- **THEN** the prompt is associated with the active turn and the UI identifies it as a steer
-
-#### Scenario: Cancellation preserves completed content
-- **WHEN** the user cancels a running turn
-- **THEN** OpenCode is asked to abort that turn
-- **AND** content and tool activity already received remain in the timeline with an interrupted outcome
-
-#### Scenario: The surface names its agent
-- **WHEN** a conversation is open and the agent has reported its identity
-- **THEN** the surface names that agent
-- **AND** no user-visible text names a different agent
-
-#### Scenario: Ways of working are presented as modes
-- **WHEN** the agent offers more than one way of working, such as building and planning
-- **THEN** the user selects between them as modes
-- **AND** they are not labelled agents
-
-#### Scenario: An undeclared proactive control leaves nothing behind
-- **WHEN** the agent does not declare the capability behind a control the surface offers the user to start an operation, such as a mode or model picker
-- **THEN** that control is absent from the surface
-- **AND** the controls for declared capabilities are unaffected
 
 ### Requirement: Timeline position remains stable under streaming and navigation
 The Chat timeline SHALL remain pinned to the latest content only while the user is at or near its end. Once the user scrolls away, streaming, tool updates, image or code layout, and activity expansion MUST NOT steal the reading position; an accessible latest-content affordance SHALL indicate unseen updates and return to the end. Prepending older history SHALL preserve the same visible content and offset. Opening a conversation SHALL restore that client's last reading position when possible, otherwise it SHALL open at the latest turn.
@@ -910,3 +892,92 @@ Code-block copy controls SHALL be keyboard operable and directly reachable on co
 - **WHEN** clipboard access is unavailable or rejects the write
 - **THEN** conversation content remains unchanged
 - **AND** Chat reports failure without an uncaught error
+
+### Requirement: Users can prompt, queue, and cancel the active conversation
+The Chat composer SHALL submit non-empty text to the selected conversation and clearly distinguish ready, sending, running, interrupted, and failed states. A prompt submitted while the conversation is running SHALL be held in a workspace-owned queue rather than delivered to the agent mid-turn. Held messages SHALL be presented adjacent to the composer, in submission order, visibly marked as queued, and SHALL NOT appear as part of the running turn's timeline. While the agent continues to stream output, held messages SHALL remain adjacent to the composer rather than drifting into the transcript. The queue SHALL be bounded per conversation; a submission that would exceed the bound SHALL be refused without altering the held messages, with the draft preserved.
+
+When the running turn ends on its own, the workspace SHALL deliver held messages to the agent one at a time in submission order; a delivered message SHALL leave the queue presentation and begin its own turn at the end of the timeline. The user SHALL be able to remove any message that is still held; a removed message is never delivered. Removal of a message that has already been delivered SHALL be refused without altering the conversation.
+
+The user SHALL be able to cancel an active turn without deleting its completed history. Cancellation SHALL NOT deliver held messages: they remain queued, removable, and visible, and the queue stays dormant until the user next submits a prompt, which joins the end of the queue and resumes delivery from its head. Transport failure SHALL preserve the draft until acceptance is known.
+
+The surface SHALL name the agent it is talking to, taking that name from what the agent reports rather than from fixed copy. Text presented to the user SHALL NOT assume a particular agent, so that installing a different agent changes the name shown and nothing else.
+
+The way of working a prompt runs under SHALL be presented as a **mode** — the agent's own named ways of working, such as building or planning. It SHALL NOT be called an agent, because that word names the program Chat talks to.
+
+A control the surface offers the user to start an operation — a picker such as the mode or model chooser — SHALL be presented only when the agent declares the capability behind it. Where that capability is undeclared, the control SHALL be absent rather than shown inert, shown empty, or shown with an error. Reactive interaction controls — those that appear only in response to an agent-raised request, governed by "Users can resolve agent interaction requests in context" — are not covered here: an agent that lacks a capability raises no request of that kind, so the control has nothing to appear for. Absence of a capability SHALL NOT degrade any capability the agent does declare.
+
+#### Scenario: Empty prompt is not submitted
+- **WHEN** the composer contains only whitespace
+- **THEN** the send action is unavailable and no mutation is sent
+
+#### Scenario: Follow-up queues while the agent works
+- **WHEN** the user submits a prompt while the selected conversation is running
+- **THEN** the message is held by the workspace rather than delivered to the agent
+- **AND** it is presented adjacent to the composer, marked as queued
+
+#### Scenario: Queued messages stay with the composer while output streams
+- **WHEN** the agent continues streaming output after messages were queued
+- **THEN** the held messages remain adjacent to the composer
+- **AND** no held message appears between items of the running turn
+
+#### Scenario: A queued message is delivered when the turn ends
+- **WHEN** the running turn completes on its own while messages are held
+- **THEN** the workspace delivers the oldest held message to the agent
+- **AND** it leaves the queue presentation and starts its own turn at the end of the timeline
+
+#### Scenario: A queued message can be removed
+- **WHEN** the user removes a message that is still held
+- **THEN** it disappears from the queue on every client
+- **AND** it is never delivered to the agent
+
+#### Scenario: A full queue refuses further submissions
+- **WHEN** a conversation's held queue is at its bound and the user submits another prompt while the agent works
+- **THEN** the submission is refused and the draft is preserved
+- **AND** the messages already held are unaffected
+
+#### Scenario: Removing an already-delivered message is refused
+- **WHEN** a removal arrives for a message the workspace has already delivered to the agent
+- **THEN** the removal is refused without altering the conversation
+- **AND** the client learns the message is no longer held
+
+#### Scenario: Cancellation preserves completed content
+- **WHEN** the user cancels a running turn
+- **THEN** OpenCode is asked to abort that turn
+- **AND** content and tool activity already received remain in the timeline with an interrupted outcome
+
+#### Scenario: Cancellation leaves the queue dormant
+- **WHEN** the user cancels a running turn while messages are held
+- **THEN** the held messages remain queued, visible, and removable
+- **AND** none of them is delivered as a consequence of the cancellation
+
+#### Scenario: A new submission resumes a dormant queue
+- **WHEN** the user submits a prompt while the conversation is idle and messages are held from before a cancellation
+- **THEN** the new message joins the end of the queue
+- **AND** delivery resumes from the head of the queue in submission order
+
+#### Scenario: The surface names its agent
+- **WHEN** a conversation is open and the agent has reported its identity
+- **THEN** the surface names that agent
+- **AND** no user-visible text names a different agent
+
+#### Scenario: Ways of working are presented as modes
+- **WHEN** the agent offers more than one way of working, such as building and planning
+- **THEN** the user selects between them as modes
+- **AND** they are not labelled agents
+
+#### Scenario: An undeclared proactive control leaves nothing behind
+- **WHEN** the agent does not declare the capability behind a control the surface offers the user to start an operation, such as a mode or model picker
+- **THEN** that control is absent from the surface
+- **AND** the controls for declared capabilities are unaffected
+
+### Requirement: Timeline order follows the conversation's message order
+The Chat timeline SHALL present items in the conversation's own order — parent messages in their provider-assigned order, and within a message, parts in the order the provider delivers them — regardless of the order in which updates arrived. An update belonging to an earlier message MUST NOT render after items of a later message. A client that applied a conversation's events live SHALL present the same cross-message order as a client that loaded the same conversation from a fresh snapshot. Within one message, live events carry no provider position, so parts the provider itself delivered out of order remain in delivery order until the next snapshot load.
+
+#### Scenario: A late update for an earlier message keeps its place
+- **WHEN** an update arrives for a message that precedes items already shown
+- **THEN** the item renders in its parent message's position
+- **AND** it does not appear at the end of the timeline
+
+#### Scenario: Live and reloaded timelines agree
+- **WHEN** one client watched a conversation stream live and another loads it fresh
+- **THEN** both present the same messages and their items in the same cross-message order
