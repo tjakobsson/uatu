@@ -1353,6 +1353,24 @@ describe("hub end to end", () => {
     expect(registry.list().filter(entry => entry.id.startsWith("alias-repo"))).toHaveLength(1);
   });
 
+  test("session starts freeze while an onboarding journal is pending", async () => {
+    // A pending journal can cover a partially configured registration;
+    // starting it would project the previous or empty assignment set.
+    const journal = path.join(tempRoot, "pending-onboarding.json");
+    await writeFile(journal, "{}\n", { mode: 0o600 });
+    try {
+      const fenced = await fetch(`${origin}/api/hub/sessions/myproject/start`, {
+        method: "POST",
+        headers: { cookie, origin },
+      });
+      expect(fenced.status).toBe(409);
+      await assertContract("POST", "/api/hub/sessions/{workspaceId}/start", fenced);
+      expect(((await fenced.json()) as { error: string }).error).toContain("pending onboarding");
+    } finally {
+      await rm(journal, { force: true });
+    }
+  });
+
   test("forget unregisters a stopped workspace and refuses a running one", async () => {
     // plain-folder was registered (and stopped) by the init-offer test above.
     const runningRefusal = await fetch(`${origin}/api/hub/workspaces/myproject/forget`, {

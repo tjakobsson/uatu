@@ -62,11 +62,15 @@ async function fixture(git: GitBehavior = {}) {
   };
   const sessions = {
     start(id: string) {
-      return runExclusive(id, async () => {
-        if (startError) throw startError;
-        started.push(id);
-        return {} as never;
-      });
+      return runExclusive(id, () => sessions.startWhileLifecycleQueueHeld(id));
+    },
+    // Mirrors the real held-queue start, including its registry check —
+    // a forgotten workspace must fail the start, not silently "run".
+    async startWhileLifecycleQueueHeld(id: string) {
+      if (startError) throw startError;
+      if (!registry.byId(id)) throw new Error(`unknown workspace: ${id}`);
+      started.push(id);
+      return {} as never;
     },
     runExclusive,
   };
@@ -405,7 +409,7 @@ describe("commit-boundary failure injection", () => {
     const f = await fixture();
     const folder = await gitRepository(f.folders, "repo");
     const failingFs = Object.assign(Object.create(fs), fs, {
-      open: async () => { throw new Error("injected journal failure"); },
+      open: async () => { throw Object.assign(new Error("injected journal failure"), { code: "EACCES" }); },
     }) as typeof fs;
     const coordinator = new WorkspaceOnboardingCoordinator({
       journalPath: f.journalPath,
@@ -416,9 +420,32 @@ describe("commit-boundary failure injection", () => {
       git: f.git,
       fs: failingFs,
     });
-    await expect(coordinator.configureExisting({ path: folder, displayName: "Repo" })).rejects.toThrow();
+    // A Hub-owned state write failing (even with EACCES) is a retryable
+    // server error, never the 400 the folder-path permission mapping
+    // would produce.
+    await expect(coordinator.configureExisting({ path: folder, displayName: "Repo" })).rejects.toMatchObject({ code: "internal" });
     expect(f.registry.byPath(folder)).toBeUndefined();
     expect(f.credentials.snapshot().assignments).toEqual([]);
+  });
+
+  test("a forget queued mid-commit cannot slip before a requested first start", async () => {
+    const f = await fixture();
+    const folder = await gitRepository(f.folders, "racy");
+    const committing = f.coordinator.configureExisting({ path: folder, displayName: "Racy", start: true });
+    // The registration becomes visible mid-commit; a forget queued on the
+    // same workspace at that moment must run after the whole
+    // commit-plus-start section, not between its halves — otherwise the
+    // result would claim a preserved workspace that no longer exists.
+    while (!f.registry.byId("racy")) await new Promise(resolve => setTimeout(resolve, 1));
+    const forgetting = f.sessions.runExclusive("racy", async () => {
+      await f.registry.remove("racy");
+    });
+    const result = await committing;
+    await forgetting;
+
+    expect(result.started).toBe(true);
+    expect(result.startError).toBeNull();
+    expect(f.started).toEqual(["racy"]);
   });
 
   test("a registry persistence failure clears the journal and leaves no assignments", async () => {
@@ -840,12 +867,13 @@ describe("concurrency", () => {
     };
     const assignmentsSeenByStart: number[] = [];
     const sessions = {
-      start: (id: string) => f.sessions.runExclusive(id, async () => {
+      start: (id: string) => f.sessions.runExclusive(id, () => sessions.startWhileLifecycleQueueHeld(id)),
+      startWhileLifecycleQueueHeld: async (id: string) => {
         assignmentsSeenByStart.push(
           f.credentials.snapshot().assignments.filter(a => a.workspaceId === id).length,
         );
         return {} as never;
-      }),
+      },
       runExclusive: f.sessions.runExclusive,
     };
     const coordinator = new WorkspaceOnboardingCoordinator({

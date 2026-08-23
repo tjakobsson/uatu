@@ -375,6 +375,12 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
+        '409':
+          description: A pending onboarding journal awaits Hub recovery; starts are refused so a partially configured workspace cannot run.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: a pending onboarding requires Hub recovery before session starts }
         '500': { $ref: '#/components/responses/Error' }
   /api/hub/sessions/{workspaceId}/stop:
     parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]

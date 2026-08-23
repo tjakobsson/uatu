@@ -107,7 +107,7 @@ type FileSystem = Pick<typeof nodeFs, "lstat" | "realpath" | "mkdir" | "rmdir" |
 
 type OnboardingRegistry = Pick<WorkspaceRegistry, "byId" | "byPath" | "list" | "registerWithStatus" | "remove" | "replacePathPrefix" | "restoreEntries">;
 type OnboardingCredentials = Pick<CredentialMetadataStore, "snapshot" | "transaction">;
-type OnboardingSessions = Pick<SessionManager, "start" | "runExclusive">;
+type OnboardingSessions = Pick<SessionManager, "runExclusive" | "startWhileLifecycleQueueHeld">;
 
 export type OnboardingGit = {
   probe(folder: string): Promise<GitProbeResult>;
@@ -452,18 +452,14 @@ export class WorkspaceOnboardingCoordinator {
   // selections, committing everything before any optional start.
   async configureExisting(value: unknown): Promise<OnboardingResult> {
     const input = parseConfigureExisting(value);
-    const committed = await this.enqueue(() => this.commitExisting(input));
-    if (committed.alreadyRegistered || !input.start) return committed;
-    return await this.startCommitted(committed);
+    return await this.enqueue(() => this.commitExisting(input));
   }
 
   // Creates a new child repository under a canonical parent and registers
   // it stopped with its configuration.
   async createWorkspace(value: unknown): Promise<OnboardingResult> {
     const input = parseCreateWorkspace(value);
-    const committed = await this.enqueue(() => this.commitCreate(input));
-    if (!input.start) return committed;
-    return await this.startCommitted(committed);
+    return await this.enqueue(() => this.commitCreate(input));
   }
 
   // Clone completion path: the folder was just produced by a clone job that
@@ -552,17 +548,6 @@ export class WorkspaceOnboardingCoordinator {
     return next;
   }
 
-  private async startCommitted(committed: OnboardingResult): Promise<OnboardingResult> {
-    try {
-      await this.options.sessions.start(committed.entry.id);
-      return { ...committed, started: true };
-    } catch (error) {
-      // The configuration committed; a failed explicitly-requested start
-      // preserves the stopped workspace and reports the error.
-      return { ...committed, started: false, startError: error instanceof Error ? error.message : String(error) };
-    }
-  }
-
   private async commitExisting(input: ConfigureExistingInput): Promise<OnboardingResult> {
     await this.assertNoPendingOnboarding();
     const canonical = await this.canonicalDirectory(input.path);
@@ -602,6 +587,7 @@ export class WorkspaceOnboardingCoordinator {
         planned,
         desired,
         createdFolder: false,
+        start: input.start,
       });
     } finally {
       reservation.release();
@@ -652,6 +638,7 @@ export class WorkspaceOnboardingCoordinator {
           planned,
           desired,
           createdFolder: true,
+          start: input.start,
         });
       } catch (error) {
         if (error instanceof OnboardingError && error.code === "recovery-required") throw error;
@@ -683,14 +670,9 @@ export class WorkspaceOnboardingCoordinator {
       { authentication: options.authentication, signing: options.signing },
       this.options.credentials.snapshot(),
     );
-    return await this.commitPlanned({ ...options, planned, desired });
+    return await this.commitPlanned({ ...options, planned, desired, start: false });
   }
 
-  // A surviving journal is the only recovery record of an onboarding that
-  // failed midway (rollback or clear failed). The journal holds one
-  // record, so beginning another onboarding would replace it — and, on
-  // success, clear it — leaving recovery unable to undo the earlier
-  // partial registration. Mirrors FolderManager.assertNoPendingMutation.
   // Legacy registries can hold alias paths; the canonical byPath and
   // planWorkspaceId lookups would miss them and mint a duplicate stable id
   // for the same repository. Flows registering existing folders reconcile
@@ -707,12 +689,17 @@ export class WorkspaceOnboardingCoordinator {
     }
   }
 
+  // A surviving journal is the only recovery record of an onboarding that
+  // failed midway (rollback or clear failed). The journal holds one
+  // record, so beginning another onboarding would replace it — and, on
+  // success, clear it — leaving recovery unable to undo the earlier
+  // partial registration. Mirrors FolderManager.assertNoPendingMutation.
   private async assertNoPendingOnboarding(): Promise<void> {
     try {
       await this.fs.lstat(this.options.journalPath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-      throw safeFsError(error, "onboarding journal inspection failed");
+      throw new OnboardingError("internal", "onboarding journal inspection failed", { cause: error });
     }
     throw new OnboardingError("recovery-required", "a pending onboarding requires Hub recovery before new workspace changes");
   }
@@ -725,6 +712,7 @@ export class WorkspaceOnboardingCoordinator {
     planned: string;
     desired: CredentialAssignment[];
     createdFolder: boolean;
+    start: boolean;
   }): Promise<OnboardingResult> {
     const entry: WorkspaceEntry = {
       id: options.planned,
@@ -743,17 +731,23 @@ export class WorkspaceOnboardingCoordinator {
       previousAssignments,
       desiredAssignments: options.desired,
     };
-    // The whole two-store commit runs inside the workspace's session
-    // lifecycle queue. The registry save makes the id visible to
-    // /api/hub/state and the start route mid-commit; without this section a
-    // concurrent start could run before the assignment commit and project
-    // the old (empty) assignment set into the new session. Queued here, that
-    // start executes only after both stores committed.
+    // The whole two-store commit — and a requested first start — runs
+    // inside the workspace's session lifecycle queue. The registry save
+    // makes the id visible to /api/hub/state and the workspace routes
+    // mid-commit; without this section a concurrent start could run before
+    // the assignment commit and project the old (empty) assignment set
+    // into the new session, and a forget observed mid-commit could slip
+    // between the commit and the requested start. Queued here, both
+    // execute only after this whole section.
+    let started = false;
+    let startError: string | null = null;
     await this.options.sessions.runExclusive(options.planned, async () => {
       try {
         await this.journal.write(pending);
       } catch (error) {
-        throw safeFsError(error, "onboarding journal write failed");
+        // A Hub-owned state write, not a folder-path problem: EACCES here
+        // is a retryable server failure, never a request correction.
+        throw new OnboardingError("internal", "onboarding journal write failed", { cause: error });
       }
 
       let registered: WorkspaceEntry;
@@ -769,9 +763,10 @@ export class WorkspaceOnboardingCoordinator {
         }
       } catch (error) {
         // The registry rolls its own failed mutation back; only the journal
-        // needs clearing.
+        // needs clearing. Registry persistence is a Hub-owned state write —
+        // classified internal, like the journal above.
         await this.journal.clear().catch(() => undefined);
-        throw error instanceof OnboardingError ? error : safeFsError(error, "workspace registration failed");
+        throw error instanceof OnboardingError ? error : new OnboardingError("internal", "workspace registration failed", { cause: error });
       }
 
       try {
@@ -798,6 +793,17 @@ export class WorkspaceOnboardingCoordinator {
         // job) can report the preserved workspace.
         throw new OnboardingError("recovery-required", "workspace onboarding committed but its journal could not be cleared; restart the Hub to reconcile", { cause: error, committedEntry: { ...entry } });
       }
+
+      if (options.start) {
+        try {
+          await this.options.sessions.startWhileLifecycleQueueHeld(entry.id);
+          started = true;
+        } catch (error) {
+          // The configuration committed; a failed explicitly-requested
+          // start preserves the stopped workspace and reports the error.
+          startError = error instanceof Error ? error.message : String(error);
+        }
+      }
     });
 
     return {
@@ -805,8 +811,8 @@ export class WorkspaceOnboardingCoordinator {
       created: true,
       alreadyRegistered: false,
       createdFolder: options.createdFolder,
-      started: false,
-      startError: null,
+      started,
+      startError,
     };
   }
 

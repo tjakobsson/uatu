@@ -148,7 +148,26 @@ export class SessionManager {
       return joined;
     }
 
-    const operation = this.enqueue(workspaceId, async () => {
+    const operation = this.enqueue(workspaceId, () => this.startWhileLifecycleQueueHeld(workspaceId));
+
+    let published: Promise<RunningSession>;
+    published = operation.finally(() => {
+      if (this.starting.get(workspaceId) === published) {
+        this.starting.delete(workspaceId);
+        this.startFailureCallbacks.delete(workspaceId);
+      }
+    });
+    this.starting.set(workspaceId, published);
+    return published;
+  }
+
+  // PRECONDITION: the caller already owns this workspace's lifecycle queue
+  // (or IS the queued start operation). Onboarding uses this to run a
+  // requested first start inside the same exclusive section as its
+  // two-store commit, so a forget queued mid-commit cannot slip between
+  // the commit and the start.
+  async startWhileLifecycleQueueHeld(workspaceId: string): Promise<RunningSession> {
+    {
       const existing = this.running.get(workspaceId);
       if (existing) {
         return existing;
@@ -201,17 +220,7 @@ export class SessionManager {
         }
       });
       return session;
-    });
-
-    let published: Promise<RunningSession>;
-    published = operation.finally(() => {
-      if (this.starting.get(workspaceId) === published) {
-        this.starting.delete(workspaceId);
-        this.startFailureCallbacks.delete(workspaceId);
-      }
-    });
-    this.starting.set(workspaceId, published);
-    return published;
+    }
   }
 
   // onStopped runs inside the same lifecycle operation, after the child is

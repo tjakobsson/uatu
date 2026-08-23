@@ -1345,6 +1345,14 @@ export function createHubFetchHandler(deps: HubDeps) {
           return json(404, { error: `unknown workspace: ${workspaceId}` });
         }
         if (action[2] === "start") {
+          // A pending onboarding journal can cover a partially configured
+          // registration (an assignment commit whose rollback also
+          // failed); starting it would project the previous or empty
+          // assignment set. Frozen until recovery, like assignment
+          // mutations and folder changes.
+          if (deps.onboarding && await deps.onboarding.hasPendingRecovery()) {
+            return json(409, { error: "a pending onboarding requires Hub recovery before session starts" }, NO_STORE_HEADERS);
+          }
           try {
             await sessions.start(workspaceId);
             return json(200, { id: workspaceId, running: true });
