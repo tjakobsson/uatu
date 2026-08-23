@@ -3,7 +3,7 @@ import path from "node:path";
 
 import type { CredentialMetadataStore } from "./credential-store";
 import type { PersonalWorkspaceStateStore } from "./personal-state";
-import { normalizeAbsolutePath, PathReservationCoordinator } from "./path-reservations";
+import { isPathAtOrBelow, normalizeAbsolutePath, PathReservationCoordinator } from "./path-reservations";
 import { loadNoReplaceRename, type NoReplaceRename } from "./rename-no-replace";
 import type { WorkspaceEntry, WorkspaceRegistry } from "./registry";
 import type { SessionManager, SessionsStoppedResult } from "./sessions";
@@ -73,7 +73,7 @@ type RemoveJournal = {
 
 export type PendingFolderMutation = RenameJournal | RemoveJournal;
 
-type FileSystem = Pick<typeof nodeFs, "lstat" | "realpath" | "mkdir" | "rename" | "rmdir" | "readFile" | "open" | "unlink" | "chmod" | "rm">;
+type FileSystem = Pick<typeof nodeFs, "lstat" | "realpath" | "mkdir" | "readdir" | "rename" | "rmdir" | "readFile" | "open" | "unlink" | "chmod" | "rm">;
 
 type FolderRegistry = Pick<WorkspaceRegistry,
   "atOrBelow" | "byId" | "byPath" | "list" | "remove" | "replacePathPrefix" | "restoreEntries"
@@ -336,10 +336,15 @@ async function canonicalizeNearestAncestor(
 // aliases to their canonical form before any exact-path lookup. A vanished
 // folder stays registered, but at its canonical spelling: the missing leaf
 // is rejoined onto its deepest existing ancestor's resolution.
+// Returns the canonical paths of unresolvable duplicate pairs (both the
+// alias and canonical spelling registered): callers that mutate folders
+// must refuse operations overlapping those paths, since lookups see only
+// the canonical twin.
 export async function reconcileRegisteredAliasPaths(
   registry: Pick<WorkspaceRegistry, "list" | "replacePathPrefix">,
   fileSystem: Pick<FileSystem, "realpath"> = nodeFs,
-): Promise<void> {
+): Promise<string[]> {
+  const collided: string[] = [];
   // Every rewrite invalidates the snapshot: a parent prefix replacement
   // also moves its descendants, and a rewritten descendant may still
   // traverse a further symlink. Each pass therefore restarts from a fresh
@@ -379,9 +384,10 @@ export async function reconcileRegisteredAliasPaths(
           // registration flow allowed. Neither entry can be rewritten or
           // merged automatically (each carries its own stable id,
           // personal state, and assignments), so the alias twin stays as
-          // recorded: canonical lookups are served by the canonical twin,
-          // and every unrelated folder keeps working instead of one
-          // duplicate freezing all mutations and registrations globally.
+          // recorded and the collided canonical path is reported to the
+          // caller: unrelated folders keep working, while mutations that
+          // would touch the collided tree must refuse.
+          if (!collided.includes(canonical)) collided.push(canonical);
           continue;
         }
         throw safeFsError(error, "registered workspace path reconciliation failed");
@@ -389,7 +395,7 @@ export async function reconcileRegisteredAliasPaths(
       rewrote = true;
       break;
     }
-    if (!rewrote) return;
+    if (!rewrote) return collided;
   }
 }
 
@@ -425,7 +431,7 @@ export class FolderManager {
         // the old workspace's stable id, personal state, and credential
         // assignments. Reconciled first, so an alias-spelled stale claim
         // matches its canonical destination too.
-        await this.reconcileRegisteredAliases();
+        this.assertNoCollidedOverlap(await this.reconcileRegisteredAliases(), destination);
         if (this.options.registry.atOrBelow(destination).length > 0) {
           throw new FolderManagerError("conflict", "destination is claimed by a registered workspace");
         }
@@ -450,7 +456,9 @@ export class FolderManager {
       const reservation = this.reserve([source, destination]);
       try {
         await this.assertMissing(destination);
-        await this.reconcileRegisteredAliases();
+        const collided = await this.reconcileRegisteredAliases();
+        this.assertNoCollidedOverlap(collided, source);
+        this.assertNoCollidedOverlap(collided, destination);
         const affected = this.options.registry.atOrBelow(source);
         // A destination absent on disk can still be claimed by a registered
         // workspace — missing paths are deliberately retained. Renaming
@@ -495,7 +503,7 @@ export class FolderManager {
       const source = await this.canonicalDirectory(parsed.path);
       const reservation = this.reserve([source]);
       try {
-        await this.reconcileRegisteredAliases();
+        this.assertNoCollidedOverlap(await this.reconcileRegisteredAliases(), source);
         const entry = this.options.registry.byPath(source);
         return await this.options.sessions.runWithSessionsStopped(
           entry ? [entry.id] : [],
@@ -584,16 +592,21 @@ export class FolderManager {
 
       const sourceExists = await this.isDirectDirectory(pending.source);
       if (sourceExists) {
-        // A surviving source must BE the journaled directory: an rmdir
-        // that committed frees its inode forever, so a directory some
-        // other process recreated at the path can never match and must
-        // not inherit the registration. Journals without a recorded
-        // identity keep the existence-only behavior.
+        // A surviving source must plausibly BE the journaled directory.
+        // The identity check catches path swaps, but inode numbers are
+        // reusable after an rmdir, so emptiness is the load-bearing
+        // proof: the removal only ever deletes an EMPTY directory, and
+        // restoring the registration over an empty directory recreates
+        // the exact pre-removal state — while any content marks a
+        // directory that was never the one this journal removed.
         if (pending.identity) {
           const stats = await this.fs.lstat(pending.source, { bigint: true });
           if (String(stats.dev) !== pending.identity.dev || String(stats.ino) !== pending.identity.ino) {
             throw new Error("pending folder removal recovery found an unrecognized directory; manual reconciliation required");
           }
+        }
+        if ((await this.fs.readdir(pending.source)).length > 0) {
+          throw new Error("pending folder removal recovery found an unrecognized directory; manual reconciliation required");
         }
         await this.options.registry.restoreEntries([pending.entry]);
       } else if (this.options.registry.byId(pending.entry.id)) {
@@ -638,8 +651,21 @@ export class FolderManager {
     }
   }
 
-  private reconcileRegisteredAliases(): Promise<void> {
+  private reconcileRegisteredAliases(): Promise<string[]> {
     return reconcileRegisteredAliasPaths(this.options.registry, this.fs);
+  }
+
+  // A collided pair (both the alias and canonical spelling registered)
+  // cannot be coordinated: lookups see only the canonical twin, so a
+  // mutation touching that physical tree could skip the alias twin's
+  // session stops and strand its registration at a missing path. Refused
+  // until one twin is removed from the registry.
+  private assertNoCollidedOverlap(collided: readonly string[], target: string): void {
+    for (const canonical of collided) {
+      if (isPathAtOrBelow(canonical, target) || isPathAtOrBelow(target, canonical)) {
+        throw new FolderManagerError("conflict", "folder has duplicate alias registrations that require manual cleanup");
+      }
+    }
   }
 
   // A journal that outlives its mutation is the only recovery record for a
