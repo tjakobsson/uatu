@@ -86,6 +86,15 @@ export function sortHubWorkspaces(
 // page is never replaced before the request that clears the cookie has
 // actually gone out. Same-origin form posts send Origin, satisfying the hub's
 // CSRF check the same way the dashboard's does.
+// Whether a failed switcher start is the locked-credential rejection from
+// credential-context resolution — normal after a Hub restart, when every
+// encrypted assigned credential starts locked. The switcher has no masked
+// passphrase surface, so this failure routes to the dashboard's
+// credential-aware start flow instead of dead-ending at "start failed".
+export function startFailureNeedsHubUnlock(message: string): boolean {
+  return /locked|unlock/i.test(message);
+}
+
 export function submitHubSignOut(doc: Document): void {
   const form = doc.createElement("form");
   form.method = "post";
@@ -209,9 +218,21 @@ export function initHubNav(): void {
             event.preventDefault();
             state.textContent = "starting…";
             void fetch(`/api/hub/sessions/${encodeURIComponent(workspace.id)}/start`, { method: "POST" })
-              .then(response => {
-                if (!response.ok) throw new Error(`start failed (${response.status})`);
-                window.location.href = item.href;
+              .then(async response => {
+                if (response.ok) {
+                  window.location.href = item.href;
+                  return;
+                }
+                const body = (await response.json().catch(() => ({}))) as { error?: unknown };
+                const message = typeof body.error === "string" ? body.error : "";
+                if (startFailureNeedsHubUnlock(message)) {
+                  // The switcher has no passphrase surface; the dashboard's
+                  // credential-aware start flow collects it.
+                  state.textContent = "unlock in Hub…";
+                  window.location.href = "/";
+                  return;
+                }
+                state.textContent = "start failed";
               })
               .catch(() => {
                 state.textContent = "start failed";

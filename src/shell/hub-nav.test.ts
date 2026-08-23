@@ -4,6 +4,7 @@ import {
   chipDotClass,
   parseHubState,
   sortHubWorkspaces,
+  startFailureNeedsHubUnlock,
   submitHubSignOut,
   workspaceIdFromBasePath,
   workspaceMenuDetail,
@@ -118,6 +119,19 @@ describe("workspace menu labels", () => {
       summary("api-2", false, "API", ""),
     ];
     expect(workspaceMenuDetail(duplicates, duplicates[1]!)).toBe("api-2");
+  });
+});
+
+describe("startFailureNeedsHubUnlock", () => {
+  test("locked-credential rejections route to the dashboard's unlock flow", () => {
+    // The exact server messages from credential-context resolution.
+    expect(startFailureNeedsHubUnlock("an assigned SSH credential is locked; unlock it before starting the workspace")).toBe(true);
+    expect(startFailureNeedsHubUnlock("the assigned OpenPGP credential is locked; unlock it before starting the workspace")).toBe(true);
+  });
+
+  test("other failures stay inline in the switcher", () => {
+    expect(startFailureNeedsHubUnlock("session for 'repo' failed to start: child exited (code 1)")).toBe(false);
+    expect(startFailureNeedsHubUnlock("")).toBe(false);
   });
 });
 
