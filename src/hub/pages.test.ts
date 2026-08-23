@@ -190,6 +190,11 @@ describe("clone page", () => {
     expect(html).toContain('refreshWorkspaceState().catch(() => {})');
     expect(html).toContain('response.status === 404 && browseParent');
     expect(html).toContain("another client may have renamed or removed it");
+    // A configured-but-unavailable default parent silently falls back to
+    // home; the page must say so before the user onboards into home.
+    expect(html).toContain('id="defaults-fallback-notice"');
+    expect(html).toContain("updateDefaultsFallbackNotice(state.workspaceDefaults)");
+    expect(html).toContain("is currently unavailable — showing ");
     // Folder names may legitimately carry whitespace (the rename field is
     // even pre-filled with the current basename); only emptiness is judged
     // trimmed and the submitted name keeps its whitespace.
@@ -424,6 +429,10 @@ describe("stopped session page", () => {
     expect(html).toContain(">Configure</a>");
     expect(html).toContain('"/api/hub/sessions/payments-service/start"');
     expect(html).not.toContain("<strong>payments-service</strong>");
+    // A locked-credential rejection routes to the dashboard's masked
+    // unlock flow instead of dead-ending on this page.
+    expect(html).toContain("/locked|unlock/i.test(error.message)");
+    expect(html).toContain('location.href = "/"');
   });
 
   test("an unregistered id only links back to the dashboard", () => {

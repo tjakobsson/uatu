@@ -522,6 +522,21 @@ export class WorkspaceOnboardingCoordinator {
     });
   }
 
+  // Whether a pending onboarding journal is on disk. Assignment-mutating
+  // routes fence on this: recovery decides between completing and
+  // preserving by comparing the current assignment set against the
+  // journaled pre-commit set, and a mutation while the journal lingers
+  // would make a deliberate revocation back to that set indistinguishable
+  // from an unfinished commit.
+  async hasPendingRecovery(): Promise<boolean> {
+    try {
+      await this.fs.lstat(this.options.journalPath);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
     const next = this.operationChain.then(operation, operation);
     this.operationChain = next.catch(() => undefined);

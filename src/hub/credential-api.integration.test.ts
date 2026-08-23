@@ -17,6 +17,8 @@ import { CredentialToolManager } from "./credential-tools";
 import { CredentialApi, credentialApiError } from "./credential-api";
 import { OpenPgpCredentialManager } from "./openpgp-credentials";
 import { PersonalWorkspaceStateStore } from "./personal-state";
+import { WorkspaceOnboardingCoordinator } from "./onboarding";
+import { PathReservationCoordinator } from "./path-reservations";
 import { WorkspaceRegistry } from "./registry";
 import { startHubServer } from "./server";
 import { SessionManager } from "./sessions";
@@ -137,12 +139,21 @@ async function fixture(root: string) {
       { name: "bob", passwordHash: await hashPassword("bob password") },
     ],
   };
+  const onboardingJournal = path.join(state, "pending-onboarding.json");
+  const onboarding = new WorkspaceOnboardingCoordinator({
+    journalPath: onboardingJournal,
+    registry,
+    credentials: metadata,
+    sessions,
+    reservations: new PathReservationCoordinator(),
+  });
   const server = startHubServer({
     config,
     registry,
     sessions,
     sessionStore,
     personalState,
+    onboarding,
     credentialApi: {
       metadata,
       tools,
@@ -153,7 +164,7 @@ async function fixture(root: string) {
     },
   });
   servers.push(server);
-  return { server, metadata, tokenStore, tokens, workspace, state, openpgp, registry, personalState, sessions, backendEvents };
+  return { server, metadata, tokenStore, tokens, workspace, state, openpgp, registry, personalState, sessions, backendEvents, onboardingJournal };
 }
 
 async function login(origin: string, name: string, password: string): Promise<string> {
@@ -342,6 +353,53 @@ describe("credential API integration", () => {
     expect(restartText).not.toContain(secret);
     expect(restarted.tokenStore.get(credentialId)).toBe(secret);
   }, 30_000);
+
+  test("assignment mutations freeze while an onboarding journal is pending", async () => {
+    // Onboarding recovery compares the workspace's current assignments
+    // against the journaled pre-commit set; a mutation while the journal
+    // lingers would make a deliberate revocation back to that set
+    // indistinguishable from an unfinished commit.
+    const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));
+    roots.push(root);
+    const f = await fixture(root);
+    const origin = `http://127.0.0.1:${f.server.port}`;
+    const cookie = await login(origin, "alice", "alice password");
+    const create = await post(origin, cookie, "/api/hub/credentials/token", {
+      name: "Fence token",
+      host: "github.com",
+      token: "fence-secret",
+      capabilities: ["https-git"],
+    });
+    const credentialId = ((await create.json()) as { credential: { id: string } }).credential.id;
+
+    const { writeFile, unlink } = await import("node:fs/promises");
+    await writeFile(f.onboardingJournal, "{}\n", { mode: 0o600 });
+    const fencedAssign = await post(origin, cookie, `/api/hub/credentials/${credentialId}/assign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+    });
+    expect(fencedAssign.status).toBe(409);
+    expect(((await fencedAssign.json()) as { error: string }).error).toContain("pending onboarding");
+    const fencedUnassign = await post(origin, cookie, `/api/hub/credentials/${credentialId}/unassign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+    });
+    expect(fencedUnassign.status).toBe(409);
+    const fencedDelete = await post(origin, cookie, `/api/hub/credentials/${credentialId}/delete`, { confirm: true, unassign: true });
+    expect(fencedDelete.status).toBe(409);
+    expect(f.metadata.snapshot().assignments).toEqual([]);
+    expect(f.metadata.snapshot().credentials.some(item => item.id === credentialId)).toBe(true);
+
+    await unlink(f.onboardingJournal);
+    const assigned = await post(origin, cookie, `/api/hub/credentials/${credentialId}/assign`, {
+      workspaceId: f.workspace.id,
+      role: "authentication",
+      host: "github.com",
+    });
+    expect(assigned.status).toBe(200);
+  });
 
   test("enforces same-origin, strict bodies, references, and confirmed delete-and-unassign", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "uatu-credential-api-"));

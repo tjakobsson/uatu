@@ -180,6 +180,18 @@ export function createHubFetchHandler(deps: HubDeps) {
       workspaceIds = [...new Set([...workspaceIds, ...affectedWorkspaces()])].sort();
     }
   };
+  // Assignment mutations freeze while a pending onboarding journal exists:
+  // its recovery decides between completing and preserving by comparing
+  // the current assignment set against the journaled pre-commit set, and a
+  // mutation in between would make a deliberate revocation back to that
+  // set indistinguishable from an unfinished commit. Mirrors the folder
+  // manager's mutation freeze.
+  const assignmentsFencedByOnboarding = async (): Promise<Response | null> => {
+    if (deps.onboarding && await deps.onboarding.hasPendingRecovery()) {
+      return json(409, { error: "a pending onboarding requires Hub recovery before credential assignment changes" }, NO_STORE_HEADERS);
+    }
+    return null;
+  };
   const stopProviderCliSessions = async (credentialId: string): Promise<void> => {
     const workspaceIds = sessions.runningWorkspaceIdsUsingCredential(credentialId);
     const results = await Promise.allSettled(workspaceIds.map(id => sessions.stopWhileLifecycleQueueHeld(id)));
@@ -1153,6 +1165,8 @@ export function createHubFetchHandler(deps: HubDeps) {
       const workspaceCredentialAssignments = /^\/api\/hub\/workspaces\/([^/]+)\/credential-assignments$/.exec(pathname);
       if (workspaceCredentialAssignments && credentialApi) {
         const headers = NO_STORE_HEADERS;
+        const fenced = await assignmentsFencedByOnboarding();
+        if (fenced) return fenced;
         try {
           const workspaceId = decodeURIComponent(workspaceCredentialAssignments[1]!);
           const body = await readCredentialJson(request);
@@ -1194,6 +1208,10 @@ export function createHubFetchHandler(deps: HubDeps) {
           if (action) {
             const credentialId = decodeURIComponent(action[1]!);
             const operation = action[2]!;
+            if (operation === "assign" || operation === "unassign" || operation === "delete") {
+              const fenced = await assignmentsFencedByOnboarding();
+              if (fenced) return fenced;
+            }
             if (operation === "unlock" || operation === "test") {
               const client = clientKeyForRateLimit(server.requestIP?.(request)?.address ?? null, request.headers.get("x-forwarded-for"));
               if (!credentialLimiter.allow(`${session.user}:${client}:passphrase`, 10)) return json(429, { error: "too many credential operations; wait a minute and try again" }, headers);

@@ -468,6 +468,7 @@ function authenticatedPage(pageName: AuthenticatedPage, authenticatedUser: strin
     <button type="button" id="create-workspace-open">Create workspace</button>
     <p id="new-folder-error" class="local-error" role="alert" hidden></p>
   </form>
+  <p id="defaults-fallback-notice" class="local-error" role="alert" hidden style="padding: 0 1rem;"></p>
   <p id="browser-error" class="local-error" role="alert" hidden style="padding: 0 1rem;"></p>
   <div id="browser" class="folder-browser"><p class="empty">Loading…</p></div>
   ${sharedUidAdvisory}
@@ -1428,6 +1429,22 @@ async function refreshWorkspaceState() {
   if (!response.ok) return;
   const state = await response.json();
   dashboardWorkspaces = state.workspaces || [];
+  updateDefaultsFallbackNotice(state.workspaceDefaults);
+}
+// A configured default parent that later became missing or unreadable
+// silently falls back to the Hub user's home for pathless browsing; the
+// page must say so, or the user creates and clones into home believing
+// the configured location is still in effect.
+function updateDefaultsFallbackNotice(defaults) {
+  const notice = document.getElementById("defaults-fallback-notice");
+  if (!notice) return;
+  if (defaults && defaults.configured && !defaults.configuredAvailable) {
+    notice.textContent = "Configured default workspace parent " + defaults.configured
+      + " is currently unavailable — showing " + defaults.effective + " instead. Fix the folder or update it in Settings.";
+    notice.hidden = false;
+  } else {
+    notice.hidden = true;
+  }
 }
 async function requestFolderMutation(endpoint, request) {
   try {
@@ -2515,6 +2532,13 @@ export function stoppedSessionPage(workspaceId: string, registered: boolean, dis
         if (!response.ok) throw new Error(payload.error || ("start failed (" + response.status + ")"));
         location.reload();
       } catch (error) {
+        if (/locked|unlock/i.test(error.message)) {
+          // This page has no passphrase surface; the dashboard's
+          // credential-aware start flow collects it.
+          button.textContent = "Unlock in Hub…";
+          location.href = "/";
+          return;
+        }
         errorTarget.textContent = error.message;
         errorTarget.hidden = false;
         button.disabled = false;
