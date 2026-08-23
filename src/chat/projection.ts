@@ -22,6 +22,11 @@ export type ChatProjection = {
   // stream is the authority and an echo could resurrect an entry the stream
   // already delivered or removed.
   queueRevision: number;
+  // Counts applied configuration events, for the same reason: an acceptance's
+  // committed configuration is stale the moment a configuration event has
+  // spoken since the submission left — the stream publishes commits in
+  // server order, so whatever it said is at least as new as the response.
+  configurationRevision: number;
 };
 
 export type ProjectionResult = { projection: ChatProjection; outcome: "applied" | "duplicate" | "gap" | "resync" };
@@ -42,6 +47,7 @@ export function projectionFromSnapshot(snapshot: ConversationSnapshot, acceptedD
     acceptedDrafts: reconcileDrafts(acceptedDrafts, snapshot.items, queued),
     queued,
     queueRevision: 0,
+    configurationRevision: 0,
   };
 }
 
@@ -130,6 +136,7 @@ export function applyChatEvent(current: ChatProjection, event: ChatEvent, cursor
   let configuration = current.configuration;
   let queued = current.queued;
   let queueRevision = current.queueRevision;
+  let configurationRevision = current.configurationRevision;
   if (event.type === "item.upsert") {
     const index = items.findIndex(item => item.id === event.item.id);
     const existing = index < 0 ? undefined : items[index];
@@ -144,6 +151,7 @@ export function applyChatEvent(current: ChatProjection, event: ChatEvent, cursor
     if (conversation) conversation = { ...conversation, status: event.status };
   } else if (event.type === "conversation.configuration") {
     configuration = event.configuration;
+    configurationRevision += 1;
   } else if (event.type === "conversation.updated") {
     conversation = event.conversation;
     status = event.conversation.status;
@@ -162,6 +170,7 @@ export function applyChatEvent(current: ChatProjection, event: ChatEvent, cursor
       configuration,
       queued,
       queueRevision,
+      configurationRevision,
       acceptedDrafts: reconcileDrafts(current.acceptedDrafts, items, queued),
     },
     outcome: "applied",

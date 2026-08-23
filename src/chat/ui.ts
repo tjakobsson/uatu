@@ -1708,6 +1708,7 @@ export function initChat(): void {
     // held echo below must then stand down. The epoch catches the same
     // staleness across a projection reload, where the revision restarts.
     const queueRevisionAtSubmit = projection.queueRevision;
+    const configurationRevisionAtSubmit = projection.configurationRevision;
     const projectionEpochAtSubmit = projectionEpoch;
     // Optimistic send: the message shows immediately and the input clears;
     // on failure the draft is removed and the text restored.
@@ -1730,7 +1731,16 @@ export function initChat(): void {
         if (chatTitle) chatTitle.textContent = displayConversationTitle(accepted.conversation);
       }
       if (projection?.conversationId === conversationId) {
-        projection = { ...projection, configuration: accepted.configuration };
+        // The acceptance's committed configuration stands only while the
+        // stream has not spoken since the request left and the projection
+        // was not reloaded — a configuration event that landed meanwhile
+        // (a reactivated queue head re-asserting its frozen selections, or
+        // this very commit's own event) is at least as new as this
+        // response, and a retried request can carry a receipt replayed
+        // from before all of it. Same authority rule as the queue echo.
+        if (!retriedRequest && projectionEpoch === projectionEpochAtSubmit && projection.configurationRevision === configurationRevisionAtSubmit) {
+          projection = { ...projection, configuration: accepted.configuration };
+        }
         // A held acceptance moves the draft into the queue dock immediately;
         // the server's queue event restates the same state and converges. A
         // dispatched acceptance becomes a timeline item. The echo carries the

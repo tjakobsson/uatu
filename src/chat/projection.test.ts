@@ -146,10 +146,15 @@ describe("chat projection", () => {
       configuration: { model: { providerId: "openai", modelId: "gpt" }, mode: "build" },
     });
     expect(configured.projection.configuration).toEqual({ model: { providerId: "openai", modelId: "gpt" }, mode: "build" });
+    // Configuration events count, like queue events, so an acceptance's
+    // committed configuration can tell whether the stream outran it.
+    expect(initial.configurationRevision).toBe(0);
+    expect(configured.projection.configurationRevision).toBe(1);
     const renamed = applyChatEvent(configured.projection, {
       generation: "g1", sequence: 6, conversationId: "c1", type: "conversation.updated",
       conversation: { ...snapshot().conversation, title: "Renamed" },
     });
     expect(renamed.projection.conversation?.title).toBe("Renamed");
+    expect(renamed.projection.configurationRevision).toBe(1);
   });
 });
