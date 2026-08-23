@@ -4,7 +4,7 @@ import {
   type CloneCredentialResolver,
   type ResolvedCloneCredential,
 } from "./credential-context";
-import type { WorkspaceEntry } from "./registry";
+import { defaultWorkspaceDisplayName, type WorkspaceEntry } from "./registry";
 import {
   normalizeAbsolutePath,
   PathReservationCoordinator,
@@ -13,8 +13,12 @@ import {
 
 export type CloneJobPhase = "cloning" | "registering" | "starting";
 export type CloneJobResult =
-  | { status: "succeeded"; workspaceId: string; target: string }
-  | { status: "clone-failed" | "register-failed" | "start-failed" | "cleanup-failed"; target: string; error: string }
+  // `running` distinguishes a stopped registered completion (the default)
+  // from an explicitly requested started one; only the latter navigates.
+  | { status: "succeeded"; workspaceId: string; target: string; running: boolean }
+  // A start-failed result carries the workspaceId when the configuration
+  // committed and the stopped workspace was preserved for retry.
+  | { status: "clone-failed" | "register-failed" | "start-failed" | "cleanup-failed"; target: string; error: string; workspaceId?: string }
   | { status: "cancelled" | "timed-out"; target: string; reason?: "inactivity" | "lifetime" };
 
 export type CloneJobEvent =
@@ -24,8 +28,21 @@ export type CloneJobEvent =
 
 type Registry = {
   byPath(target: string): WorkspaceEntry | undefined;
-  register(target: string): Promise<WorkspaceEntry>;
+  register(target: string, backend?: "local", displayName?: string): Promise<WorkspaceEntry>;
   remove(workspaceId: string): Promise<boolean>;
+};
+
+// The onboarding coordinator seam: clone completion commits registration
+// and the explicitly retained assignments as one coherent result, and
+// cancellation rollback removes whatever that commit installed.
+type CloneOnboarding = {
+  configureCloned(options: {
+    path: string;
+    displayName: string;
+    authentication: Array<{ credentialId: string; host: string }>;
+    signing: string | null;
+  }): Promise<{ entry: WorkspaceEntry }>;
+  removeWorkspaceAssignments(workspaceId: string): Promise<unknown>;
 };
 
 // The lifecycle hooks mirror SessionManager: registration and assignment
@@ -48,6 +65,7 @@ export type CloneJobManagerOptions = {
   registry: Registry;
   sessions: Sessions;
   credentials?: CloneCredentialResolver;
+  onboarding?: CloneOnboarding;
   id?: () => string;
   timer?: CloneJobTimer;
   maxReplayBytes?: number;
@@ -80,6 +98,14 @@ type Job = {
   pendingOutput: string;
   retainAssignment: boolean;
   assigned: boolean;
+  // Independent workspace configuration: the display name is separate from
+  // the checkout folder, retained authentication is separate from the clone
+  // identity, and start is explicit intent defaulting off.
+  displayName?: string;
+  retainedAuthentication: Array<{ credentialId: string; host: string }>;
+  signing: string | null;
+  start: boolean;
+  assignedRetained: boolean;
   done: Promise<void>;
   resolveDone(): void;
   reservation: PathReservation;
@@ -98,6 +124,7 @@ export class CloneJobManager {
   private readonly registry: Registry;
   private readonly sessions: Sessions;
   private readonly credentials: CloneCredentialResolver;
+  private readonly onboarding?: CloneOnboarding;
   private readonly makeId: () => string;
   private readonly timer: CloneJobTimer;
   private readonly maxReplayBytes: number;
@@ -112,6 +139,7 @@ export class CloneJobManager {
     this.registry = options.registry;
     this.sessions = options.sessions;
     this.credentials = options.credentials ?? EMPTY_CLONE_CREDENTIAL_RESOLVER;
+    this.onboarding = options.onboarding;
     this.makeId = options.id ?? (() => crypto.randomUUID());
     this.timer = options.timer ?? defaultTimer;
     this.maxReplayBytes = options.maxReplayBytes ?? 64 * 1024;
@@ -130,7 +158,14 @@ export class CloneJobManager {
     owner: string,
     url: string,
     target: string,
-    options: { credential?: ResolvedCloneCredential; retainAssignment?: boolean } = {},
+    options: {
+      credential?: ResolvedCloneCredential;
+      retainAssignment?: boolean;
+      displayName?: string;
+      retainedAuthentication?: Array<{ credentialId: string; host: string }>;
+      signing?: string | null;
+      start?: boolean;
+    } = {},
   ): { jobId: string } {
     if (this.closed) throw new Error("clone job manager is closed");
     const normalizedTarget = normalizeAbsolutePath(target);
@@ -151,6 +186,11 @@ export class CloneJobManager {
       pendingOutput: "",
       retainAssignment: options.retainAssignment === true,
       assigned: false,
+      displayName: options.displayName,
+      retainedAuthentication: options.retainedAuthentication ?? [],
+      signing: options.signing ?? null,
+      start: options.start === true,
+      assignedRetained: false,
       events: [],
       replayBytes: 0,
       nextEventId: 1,
@@ -314,7 +354,22 @@ export class CloneJobManager {
         return;
       }
       try {
-        job.registered = await this.registry.register(job.target);
+        if (this.onboarding) {
+          // The coordinator commits registration and the explicitly retained
+          // assignments as one coherent result while this job still holds
+          // the target's path reservation. The clone identity is never
+          // retained implicitly — only selections listed here commit.
+          const result = await this.onboarding.configureCloned({
+            path: job.target,
+            displayName: job.displayName ?? defaultWorkspaceDisplayName(job.target),
+            authentication: job.retainedAuthentication,
+            signing: job.signing,
+          });
+          job.registered = result.entry;
+          job.assignedRetained = job.retainedAuthentication.length > 0 || job.signing !== null;
+        } else {
+          job.registered = await this.registry.register(job.target, "local", job.displayName);
+        }
       } catch (error) {
         await this.finish(job, job.stop ?? { status: "register-failed", target: job.target, error: errorText(error) });
         return;
@@ -324,7 +379,10 @@ export class CloneJobManager {
         return;
       }
 
-      if (job.credential && job.retainAssignment) {
+      // Legacy clone-credential retention: only for assemblies without the
+      // onboarding coordinator; the coordinator path commits retained
+      // selections above.
+      if (!this.onboarding && job.credential && job.retainAssignment) {
         try {
           await this.sessions.runExclusive(job.registered.id, () =>
             this.credentials.assign(job.registered!.id, job.credential!));
@@ -343,26 +401,55 @@ export class CloneJobManager {
         return;
       }
 
-      this.setPhase(job, "starting");
-      // undefined = the lifecycle hook never ran and the rollback still must.
-      let hookRollbackError: string | null | undefined;
-      try {
-        await this.sessions.start(job.registered.id, async () => {
-          hookRollbackError = await this.rollbackWithinLifecycle(job, job.registered!);
-        });
-      } catch (error) {
-        const rollbackError = hookRollbackError === undefined
-          ? await this.rollback(job, job.registered)
-          : hookRollbackError;
-        if (job.stop) {
-          await this.finish(job, rollbackError ? this.rollbackFailure(job, rollbackError) : job.stop);
-          return;
-        }
-        const detail = rollbackError ? `${errorText(error)}; registration rollback failed: ${rollbackError}` : errorText(error);
-        await this.finish(job, { status: "start-failed", target: job.target, error: detail });
+      if (!job.start) {
+        // The default completion: a configured stopped workspace. No
+        // session, no navigation — the page offers Start and dashboard.
+        await this.finish(job, { status: "succeeded", workspaceId: job.registered.id, target: job.target, running: false });
         return;
       }
+
+      this.setPhase(job, "starting");
+      if (this.onboarding) {
+        // The configuration has committed; an explicitly requested start
+        // that fails preserves the stopped workspace and reports the error.
+        try {
+          await this.sessions.start(job.registered.id);
+        } catch (error) {
+          if (job.stop) {
+            await this.finishAfterRollback(job, job.registered);
+            return;
+          }
+          await this.finish(job, {
+            status: "start-failed",
+            target: job.target,
+            error: errorText(error),
+            workspaceId: job.registered.id,
+          });
+          return;
+        }
+      } else {
+        // undefined = the lifecycle hook never ran and the rollback still must.
+        let hookRollbackError: string | null | undefined;
+        try {
+          await this.sessions.start(job.registered.id, async () => {
+            hookRollbackError = await this.rollbackWithinLifecycle(job, job.registered!);
+          });
+        } catch (error) {
+          const rollbackError = hookRollbackError === undefined
+            ? await this.rollback(job, job.registered)
+            : hookRollbackError;
+          if (job.stop) {
+            await this.finish(job, rollbackError ? this.rollbackFailure(job, rollbackError) : job.stop);
+            return;
+          }
+          const detail = rollbackError ? `${errorText(error)}; registration rollback failed: ${rollbackError}` : errorText(error);
+          await this.finish(job, { status: "start-failed", target: job.target, error: detail });
+          return;
+        }
+      }
       if (job.stop) {
+        // undefined = the lifecycle hook never ran and the rollback still must.
+        let hookRollbackError: string | null | undefined;
         try {
           await this.sessions.stop(job.registered.id, async () => {
             hookRollbackError = await this.rollbackWithinLifecycle(job, job.registered!);
@@ -381,7 +468,7 @@ export class CloneJobManager {
         await this.finish(job, rollbackError ? this.rollbackFailure(job, rollbackError) : job.stop);
         return;
       }
-      await this.finish(job, { status: "succeeded", workspaceId: job.registered.id, target: job.target });
+      await this.finish(job, { status: "succeeded", workspaceId: job.registered.id, target: job.target, running: true });
     } catch (error) {
       if (job.process) await this.terminateProcess(job).catch(() => undefined);
       await this.finish(job, { status: "clone-failed", target: job.target, error: errorText(error) });
@@ -466,6 +553,10 @@ export class CloneJobManager {
   private async rollbackWithinLifecycle(job: Job, entry: WorkspaceEntry): Promise<string | null> {
     let unassigned = false;
     try {
+      if (job.assignedRetained && this.onboarding) {
+        await this.onboarding.removeWorkspaceAssignments(entry.id);
+        job.assignedRetained = false;
+      }
       if (job.assigned && job.credential) {
         await this.credentials.unassign(entry.id, job.credential);
         job.assigned = false;

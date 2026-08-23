@@ -14,8 +14,28 @@ import { appBasePath } from "../shared/app-url";
 
 export type HubWorkspaceSummary = {
   id: string;
+  // Mutable human label; the id stays the routing identity. Pre-display-name
+  // hubs are tolerated by falling back to the id.
+  displayName: string;
+  path: string;
   running: boolean;
 };
+
+export function workspaceMenuLabel(workspace: HubWorkspaceSummary): string {
+  return workspace.displayName || workspace.id;
+}
+
+// Duplicate display names are legal; the menu disambiguates them with the
+// workspace path (or stable id when no path is known).
+export function workspaceMenuDetail(
+  workspaces: HubWorkspaceSummary[],
+  workspace: HubWorkspaceSummary,
+): string | null {
+  const label = workspaceMenuLabel(workspace);
+  const duplicates = workspaces.filter(candidate => workspaceMenuLabel(candidate) === label);
+  if (duplicates.length < 2) return null;
+  return workspace.path || workspace.id;
+}
 
 // Extracts the workspace id from a hub-shaped base path ("/s/uatu/" →
 // "uatu"). Null for the default "/" and for prefixes that are not
@@ -52,7 +72,10 @@ export function sortHubWorkspaces(
     if (workspace.id === currentId) return 0;
     return workspace.running ? 1 : 2;
   };
-  return [...workspaces].sort((a, b) => rank(a) - rank(b) || a.id.localeCompare(b.id));
+  return [...workspaces].sort((a, b) =>
+    rank(a) - rank(b)
+    || workspaceMenuLabel(a).localeCompare(workspaceMenuLabel(b))
+    || a.id.localeCompare(b.id));
 }
 
 // Signs out by submitting a real form POST, exactly as the hub dashboard's
@@ -85,13 +108,18 @@ export function parseHubState(payload: unknown): HubStateSummary | null {
   return {
     workspaces: workspaces
       .filter(
-        (entry): entry is { id: string; running: boolean } =>
+        (entry): entry is { id: string; running: boolean; displayName?: unknown; path?: unknown } =>
           typeof entry === "object" &&
           entry !== null &&
           typeof (entry as { id?: unknown }).id === "string" &&
           typeof (entry as { running?: unknown }).running === "boolean",
       )
-      .map(({ id, running }) => ({ id, running })),
+      .map(entry => ({
+        id: entry.id,
+        displayName: typeof entry.displayName === "string" && entry.displayName !== "" ? entry.displayName : entry.id,
+        path: typeof entry.path === "string" ? entry.path : "",
+        running: entry.running,
+      })),
   };
 }
 
@@ -159,13 +187,37 @@ export function initHubNav(): void {
       item.appendChild(dot);
       const itemLabel = document.createElement("span");
       itemLabel.className = "hub-menu-label";
-      itemLabel.textContent = workspace.id;
+      itemLabel.textContent = workspaceMenuLabel(workspace);
       item.appendChild(itemLabel);
+      const detail = workspaceMenuDetail(latest, workspace);
+      if (detail !== null) {
+        const detailSpan = document.createElement("span");
+        detailSpan.className = "hub-menu-state";
+        detailSpan.textContent = detail;
+        item.appendChild(detailSpan);
+      }
       if (!workspace.running) {
         const state = document.createElement("span");
         state.className = "hub-menu-state";
         state.textContent = "stopped";
         item.appendChild(state);
+        // A stopped target's session URL answers 503; Start it instead of
+        // navigating into an unavailable page. Only a successful start
+        // navigates.
+        if (workspace.id !== currentId) {
+          item.addEventListener("click", event => {
+            event.preventDefault();
+            state.textContent = "starting…";
+            void fetch(`/api/hub/sessions/${encodeURIComponent(workspace.id)}/start`, { method: "POST" })
+              .then(response => {
+                if (!response.ok) throw new Error(`start failed (${response.status})`);
+                window.location.href = item.href;
+              })
+              .catch(() => {
+                state.textContent = "start failed";
+              });
+          });
+        }
       }
       menu.appendChild(item);
     }
@@ -196,7 +248,8 @@ export function initHubNav(): void {
       return;
     }
     latest = state.workspaces;
-    label.textContent = currentId;
+    const current = state.workspaces.find(workspace => workspace.id === currentId);
+    label.textContent = current ? workspaceMenuLabel(current) : currentId;
     updateChipDot();
     control.hidden = false;
 

@@ -100,6 +100,7 @@ function fixture(overrides: {
   lifetimeMs?: number;
   retentionMs?: number;
   reservations?: PathReservationCoordinator;
+  onboarding?: boolean;
 } = {}) {
   const timer = new FakeTimer();
   const processes: FakeProcess[] = [];
@@ -135,7 +136,7 @@ function fixture(overrides: {
     },
     async register(target: string) {
       if (registerError) throw registerError;
-      const entry = { id: "repo", path: target, backend: "local" as const };
+      const entry = { id: "repo", path: target, backend: "local" as const, displayName: "repo" };
       registered.set(entry.id, entry);
       return entry;
     },
@@ -179,11 +180,27 @@ function fixture(overrides: {
       return enqueue(id, operation);
     },
   };
+  const onboardingCalls: Array<{ path: string; displayName: string; authentication: Array<{ credentialId: string; host: string }>; signing: string | null }> = [];
+  const assignmentsRemoved: string[] = [];
+  let onboardingError: Error | undefined;
+  const onboarding = overrides.onboarding ? {
+    async configureCloned(options: typeof onboardingCalls[number]) {
+      if (onboardingError) throw onboardingError;
+      onboardingCalls.push(options);
+      const entry = { id: "repo", path: options.path, backend: "local" as const, displayName: options.displayName };
+      registered.set(entry.id, entry);
+      return { entry };
+    },
+    async removeWorkspaceAssignments(workspaceId: string) {
+      assignmentsRemoved.push(workspaceId);
+    },
+  } : undefined;
   let id = 0;
   const manager = new CloneJobManager({
     processFactory,
     registry,
     sessions,
+    onboarding,
     credentials: {
       // Mirrors the stored resolver: an SSH-selected job re-resolves inside
       // the runtime section and must get a live credential back.
@@ -219,6 +236,8 @@ function fixture(overrides: {
   });
   return {
     manager, timer, processes, starts, registered, removed, started, stopped, assigned, unassigned, sessions, runtimeSections,
+    onboardingCalls, assignmentsRemoved,
+    failOnboarding(error: Error) { onboardingError = error; },
     failRegister(error: Error) { registerError = error; },
     failRemove(error: Error) { removeError = error; },
     failStart(error: Error) { startError = error; },
@@ -326,7 +345,7 @@ describe("CloneJobManager ownership and replay", () => {
 describe("CloneJobManager state machine", () => {
   test("registers only after clone success, starts, and reports success", async () => {
     const f = fixture();
-    const { jobId } = f.manager.create("alice", "remote", "/tmp/repo");
+    const { jobId } = f.manager.create("alice", "remote", "/tmp/repo", { start: true });
     await tick();
     expect(f.registered.size).toBe(0);
     const events: CloneJobEvent[] = [];
@@ -338,7 +357,7 @@ describe("CloneJobManager state machine", () => {
     expect(events.filter(event => event.type === "phase").map(event => event.data.phase)).toEqual([
       "cloning", "registering", "starting",
     ]);
-    expect(events.at(-1)?.data).toEqual({ status: "succeeded", workspaceId: "repo", target: "/tmp/repo" });
+    expect(events.at(-1)?.data).toEqual({ status: "succeeded", workspaceId: "repo", target: "/tmp/repo", running: true });
   });
 
   test("passes the selected credential to Git and retains its assignment only after registration", async () => {
@@ -346,6 +365,7 @@ describe("CloneJobManager state machine", () => {
     const { jobId } = f.manager.create("alice", "git@github.com:acme/repo.git", "/tmp/selected", {
       credential: selectedCredential,
       retainAssignment: true,
+      start: true,
     });
     const events: CloneJobEvent[] = [];
     f.manager.subscribe("alice", jobId, 0, event => events.push(event));
@@ -367,6 +387,7 @@ describe("CloneJobManager state machine", () => {
     const { jobId } = f.manager.create("alice", "git@github.com:acme/repo.git", "/tmp/selected-fail", {
       credential: selectedCredential,
       retainAssignment: true,
+      start: true,
     });
     await tick();
     f.processes[0].exit(0);
@@ -411,6 +432,7 @@ describe("CloneJobManager state machine", () => {
     const { jobId } = f.manager.create("alice", "git@github.com:acme/repo.git", "/tmp/assign-race", {
       credential: selectedCredential,
       retainAssignment: true,
+      start: true,
     });
     await tick();
     f.processes[0].exit(0);
@@ -439,6 +461,7 @@ describe("CloneJobManager state machine", () => {
     const { jobId } = f.manager.create("alice", "git@github.com:acme/repo.git", "/tmp/cancel-race", {
       credential: selectedCredential,
       retainAssignment: true,
+      start: true,
     });
     await tick();
     f.processes[0].exit(0);
@@ -470,6 +493,7 @@ describe("CloneJobManager state machine", () => {
     const { jobId } = f.manager.create("alice", "git@github.com:acme/repo.git", "/tmp/selected-rollback-fail", {
       credential: selectedCredential,
       retainAssignment: true,
+      start: true,
     });
     await tick();
     f.processes[0].exit(0);
@@ -549,7 +573,7 @@ describe("CloneJobManager state machine", () => {
     f.holdStart();
     f.failStop(new Error("backend refused stop"));
     const events: CloneJobEvent[] = [];
-    const { jobId } = f.manager.create("alice", "remote", "/tmp/cleanup-fail");
+    const { jobId } = f.manager.create("alice", "remote", "/tmp/cleanup-fail", { start: true });
     f.manager.subscribe("alice", jobId, 0, event => events.push(event));
     await tick();
     f.processes[0].exit(0);
@@ -609,7 +633,7 @@ describe("CloneJobManager state machine", () => {
     f.holdStart();
     f.failRemove(new Error("registry is read-only"));
     const events: CloneJobEvent[] = [];
-    const { jobId } = f.manager.create("alice", "remote", "/tmp/rollback-fail");
+    const { jobId } = f.manager.create("alice", "remote", "/tmp/rollback-fail", { start: true });
     f.manager.subscribe("alice", jobId, 0, event => events.push(event));
     await tick();
     f.processes[0].exit(0);
@@ -672,7 +696,7 @@ describe("CloneJobManager state machine", () => {
     const f = fixture();
     f.failStart(new Error("no session URL"));
     const events: CloneJobEvent[] = [];
-    const { jobId } = f.manager.create("alice", "remote", "/tmp/keep-checkout");
+    const { jobId } = f.manager.create("alice", "remote", "/tmp/keep-checkout", { start: true });
     f.manager.subscribe("alice", jobId, 0, event => events.push(event));
     await tick();
     f.processes[0].exit(0);
@@ -689,7 +713,7 @@ describe("CloneJobManager state machine", () => {
     const { jobId } = f.manager.create("alice", "remote", target);
     f.manager.subscribe("alice", jobId, 0, event => events.push(event));
     await tick();
-    f.registered.set("existing", { id: "existing", path: target, backend: "local" });
+    f.registered.set("existing", { id: "existing", path: target, backend: "local", displayName: "existing" });
     f.processes[0].exit(0);
     await tick();
 
@@ -795,6 +819,127 @@ describe("CloneJobManager input, timers, and cleanup", () => {
     await f.manager.close();
     expect(capture(f.manager, "alice", active.jobId).at(-1)?.data).toMatchObject({ status: "cancelled" });
     expect(() => f.manager.create("alice", "remote", "/tmp/nope")).toThrow("closed");
+  });
+});
+
+describe("CloneJobManager onboarding coordination", () => {
+  test("a successful clone finishes stopped by default with independent names and retained selections", async () => {
+    const f = fixture({ onboarding: true });
+    const { jobId } = f.manager.create("alice", "remote", "/tmp/payments-service", {
+      displayName: "Payments API",
+      retainedAuthentication: [{ credentialId: "workspace-auth", host: "github.com" }],
+      signing: "sign-key",
+    });
+    await tick();
+    f.processes[0].exit(0);
+    await tick();
+
+    expect(f.onboardingCalls).toEqual([{
+      path: "/tmp/payments-service",
+      displayName: "Payments API",
+      authentication: [{ credentialId: "workspace-auth", host: "github.com" }],
+      signing: "sign-key",
+    }]);
+    expect(f.started).toEqual([]);
+    expect(f.registered.get("repo")?.displayName).toBe("Payments API");
+    expect(capture(f.manager, "alice", jobId).at(-1)?.data).toEqual({
+      status: "succeeded", workspaceId: "repo", target: "/tmp/payments-service", running: false,
+    });
+  });
+
+  test("the workspace display name defaults from the checkout folder when omitted", async () => {
+    const f = fixture({ onboarding: true });
+    f.manager.create("alice", "remote", "/tmp/my-checkout");
+    await tick();
+    f.processes[0].exit(0);
+    await tick();
+    expect(f.onboardingCalls[0]?.displayName).toBe("my-checkout");
+  });
+
+  test("selecting a clone credential retains nothing implicitly", async () => {
+    const f = fixture({ onboarding: true });
+    const { jobId } = f.manager.create("alice", "git@github.com:acme/repo.git", "/tmp/no-retain", {
+      credential: selectedCredential,
+    });
+    await tick();
+    f.processes[0].exit(0);
+    await tick();
+
+    expect(f.onboardingCalls[0]?.authentication).toEqual([]);
+    expect(f.onboardingCalls[0]?.signing).toBeNull();
+    expect(f.assigned).toEqual([]);
+    expect(capture(f.manager, "alice", jobId).at(-1)?.data).toMatchObject({ status: "succeeded", running: false });
+  });
+
+  test("an explicitly requested start runs after commit and reports a running workspace", async () => {
+    const f = fixture({ onboarding: true });
+    const { jobId } = f.manager.create("alice", "remote", "/tmp/started", { start: true });
+    await tick();
+    f.processes[0].exit(0);
+    await tick();
+    expect(f.started).toEqual(["repo"]);
+    expect(capture(f.manager, "alice", jobId).at(-1)?.data).toEqual({
+      status: "succeeded", workspaceId: "repo", target: "/tmp/started", running: true,
+    });
+  });
+
+  test("a failed requested start preserves the committed configuration", async () => {
+    const f = fixture({ onboarding: true });
+    f.failStart(new Error("assigned credential is locked"));
+    const { jobId } = f.manager.create("alice", "remote", "/tmp/preserved", {
+      retainedAuthentication: [{ credentialId: "workspace-auth", host: "github.com" }],
+      start: true,
+    });
+    await tick();
+    f.processes[0].exit(0);
+    await tick();
+
+    expect(f.registered.has("repo")).toBe(true);
+    expect(f.removed).toEqual([]);
+    expect(f.assignmentsRemoved).toEqual([]);
+    expect(capture(f.manager, "alice", jobId).at(-1)?.data).toEqual({
+      status: "start-failed",
+      target: "/tmp/preserved",
+      error: "assigned credential is locked",
+      workspaceId: "repo",
+    });
+  });
+
+  test("cancellation during a requested start rolls registration and retained assignments back", async () => {
+    const f = fixture({ onboarding: true });
+    f.holdStart();
+    const { jobId } = f.manager.create("alice", "remote", "/tmp/cancelled", {
+      retainedAuthentication: [{ credentialId: "workspace-auth", host: "github.com" }],
+      start: true,
+    });
+    await tick();
+    f.processes[0].exit(0);
+    await tick();
+
+    const cancelling = f.manager.cancel("alice", jobId);
+    f.releaseHeldStart();
+    expect(await cancelling).toBe("cancelled");
+    expect(f.assignmentsRemoved).toEqual(["repo"]);
+    expect(f.removed).toEqual(["repo"]);
+    expect(f.registered.size).toBe(0);
+  });
+
+  test("a coordinator commit failure reports registration failure without a workspace", async () => {
+    const f = fixture({ onboarding: true });
+    f.failOnboarding(new Error("credential assignment failed: unknown credential"));
+    const { jobId } = f.manager.create("alice", "remote", "/tmp/commit-fail", {
+      retainedAuthentication: [{ credentialId: "missing", host: "github.com" }],
+    });
+    await tick();
+    f.processes[0].exit(0);
+    await tick();
+
+    expect(f.registered.size).toBe(0);
+    expect(f.started).toEqual([]);
+    expect(capture(f.manager, "alice", jobId).at(-1)?.data).toMatchObject({
+      status: "register-failed",
+      error: expect.stringContaining("unknown credential"),
+    });
   });
 });
 

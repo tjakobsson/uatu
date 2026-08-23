@@ -1,5 +1,10 @@
 {
   "id": 3,
   "event": "result",
-  "data": { "status": "succeeded", "workspaceId": "repo", "target": "/src/repo" }
+  "data": {
+    "status": "succeeded",
+    "workspaceId": "repo",
+    "target": "/src/repo",
+    "running": false
+  }
 }

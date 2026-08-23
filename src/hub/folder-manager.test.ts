@@ -264,6 +264,19 @@ describe("FolderManager registered mutations", () => {
     expect(await exists(f.journalPath)).toBe(false);
   });
 
+  test("folder rename preserves a custom workspace display name", async () => {
+    const f = await fixture();
+    const source = path.join(f.folders, "payments-service");
+    await fs.mkdir(source);
+    const entry = await f.registry.register(source, "local", "Payments API");
+
+    completed(await f.manager.rename({ path: source, name: "billing-service" }));
+    const renamed = f.registry.byId(entry.id);
+    expect(renamed?.path).toBe(path.join(f.folders, "billing-service"));
+    expect(renamed?.displayName).toBe("Payments API");
+    expect(renamed?.id).toBe(entry.id);
+  });
+
   test("reports all running workspaces, then stops them before authorized rename", async () => {
     const f = await fixture();
     const source = path.join(f.folders, "group");
@@ -430,6 +443,20 @@ describe("FolderManager journal recovery", () => {
     expect(f.registry.byId(entry.id)).toBeUndefined();
     expect(f.personalState.get("alice", entry.id)).toEqual({ version: 1 });
     expect(f.credentials.snapshot().assignments).toEqual([]);
+    expect(await exists(f.journalPath)).toBe(false);
+  });
+
+  test("recovers a pre-display-name journal by defaulting names from basenames", async () => {
+    const f = await fixture();
+    const source = path.join(f.folders, "legacy-repo");
+    await fs.mkdir(source);
+    const entry = await f.registry.register(source);
+    await f.registry.remove(entry.id);
+    const legacyEntry = { id: entry.id, path: source, backend: "local" } as WorkspaceEntry;
+    await writeJournal(f.journalPath, { version: 1, operation: "remove", source, entry: legacyEntry });
+
+    await f.manager.recover();
+    expect(f.registry.byId(entry.id)).toEqual({ ...legacyEntry, displayName: "legacy-repo" });
     expect(await exists(f.journalPath)).toBe(false);
   });
 

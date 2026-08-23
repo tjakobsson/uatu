@@ -415,7 +415,7 @@ function authenticatedChrome(current: AuthenticatedPage): string {
   return `${brandHeader()}
 <nav class="hub-nav" aria-label="Hub">
   ${link("dashboard", "/", "Dashboard")}
-  ${link("clone", "/clone", "Clone")}
+  ${link("clone", "/clone", "Add workspace")}
   ${link("settings", "/settings", "Settings")}
   <form class="sign-out" method="post" action="/logout"><button type="submit">Sign out</button></form>
 </nav>`;
@@ -460,10 +460,12 @@ function authenticatedPage(pageName: AuthenticatedPage, authenticatedUser: strin
   const sharedUidDismissalKey = JSON.stringify(`uatu.hub.notice.shared-uid-v1:${Buffer.from(authenticatedUser).toString("base64url")}`);
   const sharedUidAdvisory = `<p class="advisory" data-shared-uid-warning><span>${sharedUidWarning}</span><button type="button" data-dismiss-shared-uid>Dismiss</button></p>`;
   const addFolder = `<section class="pane">
-  <div class="pane-header"><h2>Add folder</h2><span id="browse-path" class="pane-meta"></span></div>
+  <div class="pane-header"><h2>Add workspace</h2><span id="browse-path" class="pane-meta"></span></div>
+  <p class="empty" style="padding-top: 0;">Create a new workspace, pick an existing folder below, or clone a repository. New workspaces are added stopped; start them when you are ready.</p>
   <form id="new-folder-form" class="form-row folder-create-form">
     <input id="new-folder-name" type="text" required aria-label="New folder name" placeholder="New folder name" />
     <button type="submit">Create folder</button>
+    <button type="button" id="create-workspace-open">Create workspace</button>
     <p id="new-folder-error" class="local-error" role="alert" hidden></p>
   </form>
   <p id="browser-error" class="local-error" role="alert" hidden style="padding: 0 1rem;"></p>
@@ -471,12 +473,20 @@ function authenticatedPage(pageName: AuthenticatedPage, authenticatedUser: strin
   ${sharedUidAdvisory}
   <form class="form-stack" id="clone-form" style="border-top: 1px solid var(--border-soft);">
     <input type="text" id="clone-url" placeholder="Clone a repository into this folder — git URL" aria-label="Git clone URL" />
-    <input type="text" id="clone-folder-name" placeholder="Folder name (optional)" aria-label="Checkout folder name" />
-    <label>Hub credential
+    <input type="text" id="clone-folder-name" placeholder="Checkout folder name (defaults from the URL)" aria-label="Checkout folder name" />
+    <input type="text" id="clone-display-name" maxlength="64" placeholder="Workspace name (defaults from the checkout folder)" aria-label="Workspace display name" />
+    <label>Clone credential
       <select id="clone-credential" aria-describedby="clone-credential-help"><option value="">None — answer prompts interactively</option></select>
     </label>
-    <p id="clone-credential-help" class="row-detail" style="margin: 0;">Only credentials compatible with the URL are shown. Interactive responses are used once and are not saved.</p>
-    <label class="choice-row"><input type="checkbox" id="clone-retain-assignment" disabled /> Retain this credential assignment after registration</label>
+    <p id="clone-credential-help" class="row-detail" style="margin: 0;">Used only for this clone. Only credentials compatible with the URL are shown; interactive responses are used once and are not saved.</p>
+    <label>Workspace authentication
+      <select id="clone-retained-auth" aria-describedby="clone-retained-auth-help"><option value="">None</option></select>
+    </label>
+    <p id="clone-retained-auth-help" class="row-detail" style="margin: 0;">Kept as the workspace's authentication default after registration. Selecting a clone credential suggests it here but never retains it on its own.</p>
+    <label>Commit signing
+      <select id="clone-signing"><option value="">None</option></select>
+    </label>
+    <label class="choice-row"><input type="checkbox" id="clone-start-after" /> Start after clone</label>
     <div id="clone-unlock" class="inline-form" hidden>
       <label>Unlock passphrase<input id="clone-unlock-passphrase" type="password" autocomplete="off" /></label>
       <span class="row-detail">Unlock the selected Hub credential before Git starts.</span>
@@ -508,7 +518,48 @@ function authenticatedPage(pageName: AuthenticatedPage, authenticatedUser: strin
       <p id="rename-folder-error" class="local-error" role="alert" hidden></p>
       <div class="folder-dialog-actions">
         <button id="rename-folder-cancel" type="button">Cancel</button>
-        <button id="rename-folder-submit" class="primary" type="submit">Rename</button>
+        <button id="rename-folder-submit" class="primary" type="submit">Rename folder</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="add-workspace-dialog" class="credential-dialog" aria-labelledby="add-workspace-title">
+    <form id="add-workspace-form" class="form-stack">
+      <h2 id="add-workspace-title">Add workspace</h2>
+      <p id="add-workspace-path" class="row-detail" style="margin: 0; word-break: break-all;"></p>
+      <label>Workspace name<input id="add-workspace-name" type="text" maxlength="64" required /></label>
+      <label>Authentication
+        <select id="add-workspace-auth"><option value="">None</option></select>
+      </label>
+      <label id="add-workspace-host-label">Authentication host<input id="add-workspace-host" type="text" placeholder="github.com" /></label>
+      <label>Commit signing
+        <select id="add-workspace-signing"><option value="">None</option></select>
+      </label>
+      <p id="add-workspace-error" class="local-error" role="alert" hidden></p>
+      <div class="folder-dialog-actions">
+        <button id="add-workspace-cancel" type="button">Cancel</button>
+        <button id="add-workspace-start" type="button">Add and start</button>
+        <button id="add-workspace-submit" class="primary" type="submit">Add workspace</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="create-workspace-dialog" class="credential-dialog" aria-labelledby="create-workspace-title">
+    <form id="create-workspace-form" class="form-stack">
+      <h2 id="create-workspace-title">Create workspace</h2>
+      <p id="create-workspace-parent" class="row-detail" style="margin: 0; word-break: break-all;"></p>
+      <label>Folder name<input id="create-workspace-folder" type="text" required /></label>
+      <label>Workspace name<input id="create-workspace-name" type="text" maxlength="64" required /></label>
+      <label>Authentication
+        <select id="create-workspace-auth"><option value="">None</option></select>
+      </label>
+      <label id="create-workspace-host-label">Authentication host<input id="create-workspace-host" type="text" placeholder="github.com" /></label>
+      <label>Commit signing
+        <select id="create-workspace-signing"><option value="">None</option></select>
+      </label>
+      <p class="row-detail" style="margin: 0;">Creates the folder, runs git init, and adds the workspace stopped.</p>
+      <p id="create-workspace-error" class="local-error" role="alert" hidden></p>
+      <div class="folder-dialog-actions">
+        <button id="create-workspace-cancel" type="button">Cancel</button>
+        <button id="create-workspace-submit" class="primary" type="submit">Create workspace</button>
       </div>
     </form>
   </dialog>
@@ -605,12 +656,27 @@ function authenticatedPage(pageName: AuthenticatedPage, authenticatedUser: strin
   <div id="workspaces"><p class="empty">Loading…</p></div>
 </section>`;
   const settings = `${credentials}<section class="pane">
+  <div class="pane-header"><h2>Workspace defaults</h2></div>
+  <form id="workspace-defaults-form" class="form-stack">
+    <p id="workspace-defaults-status" class="row-detail" style="margin: 0;">Loading…</p>
+    <label>Default workspace parent
+      <input id="workspace-defaults-parent" type="text" placeholder="/absolute/path/to/workspaces" aria-describedby="workspace-defaults-help" />
+    </label>
+    <p id="workspace-defaults-help" class="row-detail" style="margin: 0;">The initial location for Create workspace, Clone, and folder browsing. Workspaces can still be added from anywhere.</p>
+    <p id="workspace-defaults-error" class="local-error" role="alert" hidden></p>
+    <div class="form-row" style="padding: 0;">
+      <button type="submit" class="primary">Save default parent</button>
+      <button type="button" id="workspace-defaults-clear">Clear</button>
+    </div>
+  </form>
+</section>
+<section class="pane">
   <div class="pane-header"><h2>Devices</h2></div>
   <div id="devices"><p class="empty">Loading…</p></div>
 </section>`;
   const content = pageName === "dashboard" ? dashboard : pageName === "clone" ? addFolder : settings;
   return page(
-    pageName === "dashboard" ? "UatuCode Hub" : `UatuCode Hub — ${pageName === "clone" ? "Clone" : "Settings"}`,
+    pageName === "dashboard" ? "UatuCode Hub" : `UatuCode Hub — ${pageName === "clone" ? "Add workspace" : "Settings"}`,
     `${authenticatedChrome(pageName)}
 <div data-hub-page="${pageName}">
 <p id="hub-version" class="hub-version"></p>
@@ -775,7 +841,7 @@ function credentialLockState(credential) {
 }
 function workspaceName(workspaceId) {
   const workspace = dashboardWorkspaces.find(item => item.id === workspaceId);
-  return workspace ? (workspace.name || workspace.id) : workspaceId;
+  return workspace ? (workspace.displayName || workspace.id) : workspaceId;
 }
 function assignmentSummary(assignments) {
   const names = [...new Set(assignments.map(item => workspaceName(item.workspaceId)))];
@@ -949,7 +1015,7 @@ function workspaceAssignmentForm(actionError) {
   form.appendChild(el("h4", null, "Assign workspace credentials"));
   const workspaceLabel = el("label", null, "Workspace");
   const workspace = document.createElement("select");
-  for (const item of dashboardWorkspaces) workspace.appendChild(new Option(item.name || item.id, item.id));
+  for (const item of dashboardWorkspaces) workspace.appendChild(new Option((item.displayName || item.id) + " · " + item.path, item.id));
   workspaceLabel.appendChild(workspace);
   const authenticationLabel = el("label", null, "🔑 Authentication");
   const authentication = document.createElement("select");
@@ -1047,7 +1113,8 @@ function renderWorkspaceAssignments() {
   for (const workspace of assignedWorkspaces) {
     const assignmentRow = el("div", "assignment-row");
     const assignmentMain = el("div", "row-main");
-    assignmentMain.appendChild(el("strong", null, workspace.name || workspace.id));
+    assignmentMain.appendChild(el("strong", null, workspaceLabel(workspace)));
+    assignmentMain.appendChild(el("span", "row-detail", workspace.path));
     const pills = el("div", "assignment-pills");
     for (const entry of workspaceAssignmentEntries(workspace.id)) {
       const authentication = entry.assignment.role === "authentication";
@@ -1056,7 +1123,7 @@ function renderWorkspaceAssignments() {
       const remove = el("button", null, "×");
       remove.type = "button";
       remove.title = "Remove " + (authentication ? "authentication" : "signing") + " assignment";
-      remove.setAttribute("aria-label", remove.title + " for " + (workspace.name || workspace.id));
+      remove.setAttribute("aria-label", remove.title + " for " + workspaceLabel(workspace));
       remove.onclick = () => removeWorkspaceAssignment(entry, workspace, remove, actionError);
       pill.appendChild(remove);
       pills.appendChild(pill);
@@ -1183,7 +1250,7 @@ function unlockForWorkspace(workspace, credentials) {
   return new Promise(resolve => {
     const dialog = el("dialog", "credential-dialog");
     const header = el("div", "pane-header");
-    header.appendChild(el("h2", null, "Unlock credentials for " + workspace.id));
+    header.appendChild(el("h2", null, "Unlock credentials for " + (workspace.displayName || workspace.id)));
     const form = el("form", "form-stack");
     form.method = "dialog";
     form.appendChild(el("p", "credential-summary", "Unlock the assigned credentials, then the workspace will resume."));
@@ -1244,35 +1311,105 @@ async function prepareWorkspaceResume(workspace, errorTarget) {
   const locked = lockedWorkspaceCredentials(workspace.id);
   return !locked.length || await unlockForWorkspace(workspace, locked);
 }
-// Returns true when it navigated into a session (the caller's button then
-// stays in its busy state — the overlay owns the screen until the session
-// page replaces us), false when the user declined or an error was shown.
-async function addFolder(folder, errorTarget) {
-  setLocalError(errorTarget, "");
+function workspaceLabel(w) { return w.displayName || w.id; }
+function workspaceById(id) {
+  return dashboardWorkspaces.find(entry => entry.id === id)
+    || { id, displayName: id, credentialAssignments: { authentication: [], signing: [] } };
+}
+// Starts a registered stopped workspace through the credential-aware flow:
+// confirm missing assignments, unlock locked ones through the masked dialog,
+// start, and navigate. Shared by the dashboard's Start action and the
+// directory browser's Start rows. On success the button STAYS busy — the
+// overlay owns the screen until the session page replaces us.
+async function startRegisteredWorkspace(w, button, errorTarget) {
+  if (!hasCredentialAssignments(w.credentialAssignments) && !confirm(
+    'No credentials are assigned to "' + workspaceLabel(w) + '". Git authentication and commit signing may be unavailable, but the workspace can still start. Continue?'
+  )) return;
+  const target = errorTarget || actionErrorFor(button);
+  setLocalError(target, "");
+  if (!(await prepareWorkspaceResume(w, target))) return;
+  uiBusy += 1;
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = "Starting…";
   try {
-    const result = await api("/api/hub/workspaces", { path: folder });
-    openSession(result.id);
-    return true;
+    await api("/api/hub/sessions/" + encodeURIComponent(w.id) + "/start");
+    // uiBusy stays held: the page is navigating away and any repaint now
+    // would flash idle controls under the overlay.
+    openSession(w.id);
   } catch (error) {
-    if (error.payload && error.payload.needsInit) {
-      if (!confirm('"' + folder + '" is not a git repository. Initialize one with git init and serve it?')) return false;
-      try {
-        const result = await api("/api/hub/workspaces", { path: folder, init: true });
-        openSession(result.id);
-        return true;
-      } catch (inner) { setLocalError(errorTarget, inner.message); }
-      return false;
-    }
-    setLocalError(errorTarget, error.message);
-    return false;
+    setLocalError(target, error.message);
+    uiBusy -= 1;
+    button.disabled = false;
+    button.textContent = original;
   }
 }
+// Rename workspace changes only the mutable display name — safe while the
+// session is running or stopped; the id, URL, and folder are untouched.
+async function renameWorkspace(w, button, refreshView) {
+  const next = prompt('Rename workspace "' + workspaceLabel(w) + '"', workspaceLabel(w));
+  if (next === null) return;
+  const errorTarget = actionErrorFor(button);
+  setLocalError(errorTarget, "");
+  await withBusy(button, "Renaming…", async () => {
+    try {
+      await api("/api/hub/workspaces/" + encodeURIComponent(w.id) + "/display-name", { displayName: next });
+      await refreshView();
+    } catch (error) { setLocalError(errorTarget, error.message); }
+  });
+}
+function authCapableCredentials() {
+  return credentialCatalog.filter(credential => credential.enabled && (credential.type === "ssh"
+    ? credential.capabilities.includes("ssh-authentication")
+    : credential.capabilities.some(capability => capability === "https-git" || capability === "github-cli" || capability === "gitlab-cli")));
+}
+function signingCapableCredentials() {
+  return credentialCatalog.filter(credential => credential.enabled
+    && credential.capabilities.some(capability => capability === "ssh-signing" || capability === "openpgp-signing"));
+}
+function fillCredentialSelect(select, credentials, emptyLabel) {
+  const selected = select.value;
+  select.replaceChildren(new Option(emptyLabel, ""));
+  for (const credential of credentials) {
+    select.appendChild(new Option(credential.name + " · " + credentialHost(credential), credential.id));
+  }
+  if ([...select.options].some(option => option.value === selected)) select.value = selected;
+}
+// Keeps an authentication-host input coherent with the selected credential:
+// tokens pin their provider host; SSH keys need the user's chosen host.
+function syncAuthHost(select, hostInput) {
+  const credential = credentialCatalog.find(item => item.id === select.value);
+  if (!credential) {
+    hostInput.disabled = true;
+    hostInput.value = "";
+    return;
+  }
+  if (credential.type === "token") {
+    hostInput.value = credential.metadata.host;
+    hostInput.disabled = true;
+    return;
+  }
+  hostInput.disabled = false;
+  if (!hostInput.value.trim()) hostInput.value = "github.com";
+}
+function authSelectionFrom(select, hostInput, errorTarget) {
+  if (!select.value) return [];
+  const host = hostInput.value.trim();
+  if (!host) {
+    setLocalError(errorTarget, "Enter the provider host the authentication default applies to.");
+    return null;
+  }
+  return [{ credentialId: select.value, host }];
+}
 
-// The Add Folder browser: one directory level at a time, drill in by name,
-// add the current candidate with its button. Server defaults to the home
-// directory; the resolved path comes back with every listing.
+// The Add workspace browser: one directory level at a time, drill in by
+// name, configure the current candidate with its button. The server starts
+// pathless listings at the effective default workspace parent; the resolved
+// path comes back with every listing.
 let browsePath = null;
 let browseParent = null;
+// Assigned by initClonePage — loadBrowser rows open the dialog through it.
+let openAddWorkspaceDialog = () => {};
 function childFolderPath(parent, name) {
   const separator = parent.includes("\\\\") && !parent.includes("/") ? "\\\\" : "/";
   return parent + (parent.endsWith("/") || parent.endsWith("\\\\") ? "" : separator) + name;
@@ -1362,34 +1499,34 @@ async function loadBrowser({ fallbackToParent = false } = {}) {
   }
   for (const dir of listing.dirs) {
     const folder = childFolderPath(listing.path, dir.name);
+    const registered = Boolean(dir.registeredId);
+    // Lifecycle-aware rows: unregistered folders offer Add workspace,
+    // registered stopped ones Start (through the credential-aware flow),
+    // running ones Open. Filesystem actions keep explicit folder nouns.
     rows.push(row({
       title: dir.name,
       titleClick: () => { browsePath = folder; loadBrowser(); },
-      chip: dir.registeredId ? "added" : (dir.git ? "git" : "no git"),
-      chipWarn: !dir.registeredId && !dir.git,
+      detail: registered && dir.displayName && dir.displayName !== dir.name ? 'workspace "' + dir.displayName + '"' : undefined,
+      chip: registered ? (dir.running ? "running" : "stopped") : (dir.git ? "git" : "no git"),
+      chipWarn: !registered && !dir.git,
       buttons: [
-        dir.registeredId
-          ? { label: "Open", ariaLabel: "Open " + dir.name, onClick: () => openSession(dir.registeredId) }
+        registered
+          ? (dir.running
+            ? { label: "Open", ariaLabel: "Open " + (dir.displayName || dir.name), onClick: () => openSession(dir.registeredId) }
+            : {
+              label: "Start",
+              ariaLabel: "Start " + (dir.displayName || dir.name),
+              onClick: button => startRegisteredWorkspace(workspaceById(dir.registeredId), button, document.getElementById("browser-error")),
+            })
           : {
-            label: "Add",
-            ariaLabel: "Add " + dir.name,
-            onClick: async button => {
-              const errorTarget = actionErrorFor(button);
-              uiBusy += 1;
-              const original = button.textContent;
-              button.disabled = true;
-              button.textContent = "Starting…";
-              if (!(await addFolder(folder, errorTarget))) {
-                uiBusy -= 1;
-                button.disabled = false;
-                button.textContent = original;
-              }
-            },
+            label: "Add workspace",
+            ariaLabel: "Add workspace for " + dir.name,
+            onClick: () => openAddWorkspaceDialog(folder, dir.name, dir.git),
           },
-        { label: "Rename", ariaLabel: "Rename " + dir.name, onClick: button => openRenameFolder(folder, dir.name, button) },
+        { label: "Rename folder", ariaLabel: "Rename folder " + dir.name, onClick: button => openRenameFolder(folder, dir.name, button) },
         {
-          label: "Remove",
-          ariaLabel: "Remove " + dir.name,
+          label: "Remove folder",
+          ariaLabel: "Remove folder " + dir.name,
           className: "danger",
           onClick: button => removeFolder(folder, dir.name, button),
         },
@@ -1415,67 +1552,57 @@ async function refresh(force) {
   renderInto(
     document.getElementById("sessions"),
     running.map(w => row({
-      title: w.id,
+      title: workspaceLabel(w),
       href: sessionUrl(w.id),
       path: w.path,
       detail: credentialAssignmentSummary(w.credentialAssignments) + " · " + shellSummary(w.shells),
       live: true,
-      button: {
-        label: "Stop",
-        className: "danger",
-        onClick: async button => {
-          if (!confirm('Stop session "' + w.id + '"? Its shells will be terminated.')) return;
-          const errorTarget = actionErrorFor(button);
-          setLocalError(errorTarget, "");
-          await withBusy(button, "Stopping…", async () => {
-            try { await api("/api/hub/sessions/" + encodeURIComponent(w.id) + "/stop"); await refresh(true); }
-            catch (error) { setLocalError(errorTarget, error.message); }
-          });
+      buttons: [
+        {
+          label: "Rename workspace",
+          ariaLabel: "Rename workspace " + workspaceLabel(w),
+          onClick: button => renameWorkspace(w, button, () => refresh(true)),
         },
-      },
+        {
+          label: "Stop",
+          className: "danger",
+          onClick: async button => {
+            if (!confirm('Stop session "' + workspaceLabel(w) + '"? Its shells will be terminated.')) return;
+            const errorTarget = actionErrorFor(button);
+            setLocalError(errorTarget, "");
+            await withBusy(button, "Stopping…", async () => {
+              try { await api("/api/hub/sessions/" + encodeURIComponent(w.id) + "/stop"); await refresh(true); }
+              catch (error) { setLocalError(errorTarget, error.message); }
+            });
+          },
+        },
+      ],
     })),
-    "No sessions running — resume or serve a workspace below.",
+    "No sessions running — start a workspace below.",
   );
 
   const stopped = state.workspaces.filter(w => !w.running);
   const rows = [
     ...stopped.map(w => row({
-      title: w.id,
+      title: workspaceLabel(w),
       path: w.path,
       detail: credentialAssignmentSummary(w.credentialAssignments),
       live: false,
       buttons: [
         {
-          label: "Resume",
-          // On success the button STAYS "Starting…" — restoring it while
-          // the overlay covers the load read as a return to idle. Only an
-          // error brings it back.
-          onClick: async button => {
-            if (!hasCredentialAssignments(w.credentialAssignments) && !confirm(
-              'No credentials are assigned to "' + w.id + '". Git authentication and commit signing may be unavailable, but the workspace can still start. Continue?'
-            )) return;
-            const errorTarget = actionErrorFor(button);
-            setLocalError(errorTarget, "");
-            if (!(await prepareWorkspaceResume(w, errorTarget))) return;
-            uiBusy += 1;
-            const original = button.textContent;
-            button.disabled = true;
-            button.textContent = "Starting…";
-            try {
-              await api("/api/hub/sessions/" + encodeURIComponent(w.id) + "/start");
-              // uiBusy stays held: the page is navigating away and any
-              // repaint now would flash idle controls under the overlay.
-              openSession(w.id);
-            } catch (error) {
-              setLocalError(errorTarget, error.message);
-              uiBusy -= 1;
-              button.disabled = false;
-              button.textContent = original;
-            }
-          },
+          label: "Start",
+          ariaLabel: "Start " + workspaceLabel(w),
+          onClick: button => startRegisteredWorkspace(w, button),
         },
         {
-          label: "Forget",
+          label: "Rename workspace",
+          ariaLabel: "Rename workspace " + workspaceLabel(w),
+          onClick: button => renameWorkspace(w, button, () => refresh(true)),
+        },
+        {
+          // Remove from Hub unregisters only; the folder stays on disk.
+          label: "Remove from Hub",
+          ariaLabel: "Remove " + workspaceLabel(w) + " from Hub",
           className: "danger",
           onClick: async button => {
             const errorTarget = actionErrorFor(button);
@@ -1492,7 +1619,7 @@ async function refresh(force) {
   renderInto(
     document.getElementById("workspaces"),
     rows,
-    "No stopped workspaces — add a folder below to serve one.",
+    "No stopped workspaces — use Add workspace to configure one.",
   );
 }
 // The device-session list: every active session of the signed-in user,
@@ -1563,7 +1690,10 @@ const cloneResponse = document.getElementById("clone-response");
 const cloneResponseLabel = document.getElementById("clone-response-label");
 const cloneCancel = document.getElementById("clone-cancel");
 const cloneCredential = document.getElementById("clone-credential");
-const cloneRetainAssignment = document.getElementById("clone-retain-assignment");
+const cloneDisplayName = document.getElementById("clone-display-name");
+const cloneRetainedAuth = document.getElementById("clone-retained-auth");
+const cloneSigning = document.getElementById("clone-signing");
+const cloneStartAfter = document.getElementById("clone-start-after");
 const cloneUnlock = document.getElementById("clone-unlock");
 const cloneUnlockPassphrase = document.getElementById("clone-unlock-passphrase");
 const cloneFormError = document.getElementById("clone-form-error");
@@ -1638,8 +1768,203 @@ async function loadCloneCredentials() {
     const payload = await response.json();
     credentialCatalog = payload.credentials || [];
     updateCloneCredentials();
+    updateOnboardingCredentialSelects();
   } catch (error) { showError(error.message); }
 }
+
+// --- Add workspace (existing folder) dialog -------------------------------
+const addWorkspaceDialog = document.getElementById("add-workspace-dialog");
+const addWorkspaceForm = document.getElementById("add-workspace-form");
+const addWorkspacePath = document.getElementById("add-workspace-path");
+const addWorkspaceName = document.getElementById("add-workspace-name");
+const addWorkspaceAuth = document.getElementById("add-workspace-auth");
+const addWorkspaceHost = document.getElementById("add-workspace-host");
+const addWorkspaceSigning = document.getElementById("add-workspace-signing");
+const addWorkspaceError = document.getElementById("add-workspace-error");
+const addWorkspaceCancel = document.getElementById("add-workspace-cancel");
+const addWorkspaceStart = document.getElementById("add-workspace-start");
+const addWorkspaceSubmit = document.getElementById("add-workspace-submit");
+const createWorkspaceDialog = document.getElementById("create-workspace-dialog");
+const createWorkspaceForm = document.getElementById("create-workspace-form");
+const createWorkspaceParent = document.getElementById("create-workspace-parent");
+const createWorkspaceFolder = document.getElementById("create-workspace-folder");
+const createWorkspaceName = document.getElementById("create-workspace-name");
+const createWorkspaceAuth = document.getElementById("create-workspace-auth");
+const createWorkspaceHost = document.getElementById("create-workspace-host");
+const createWorkspaceSigning = document.getElementById("create-workspace-signing");
+const createWorkspaceError = document.getElementById("create-workspace-error");
+const createWorkspaceCancel = document.getElementById("create-workspace-cancel");
+const createWorkspaceSubmit = document.getElementById("create-workspace-submit");
+let pendingAddWorkspace = null;
+let addWorkspaceBusy = false;
+let createWorkspaceBusy = false;
+
+function updateOnboardingCredentialSelects() {
+  fillCredentialSelect(addWorkspaceAuth, authCapableCredentials(), "None");
+  fillCredentialSelect(addWorkspaceSigning, signingCapableCredentials(), "None");
+  fillCredentialSelect(createWorkspaceAuth, authCapableCredentials(), "None");
+  fillCredentialSelect(createWorkspaceSigning, signingCapableCredentials(), "None");
+  syncAuthHost(addWorkspaceAuth, addWorkspaceHost);
+  syncAuthHost(createWorkspaceAuth, createWorkspaceHost);
+}
+addWorkspaceAuth.addEventListener("change", () => syncAuthHost(addWorkspaceAuth, addWorkspaceHost));
+createWorkspaceAuth.addEventListener("change", () => syncAuthHost(createWorkspaceAuth, createWorkspaceHost));
+
+function setAddWorkspaceBusy(busy) {
+  addWorkspaceBusy = busy;
+  for (const control of [addWorkspaceName, addWorkspaceAuth, addWorkspaceHost, addWorkspaceSigning, addWorkspaceCancel, addWorkspaceStart, addWorkspaceSubmit]) {
+    control.disabled = busy;
+  }
+  if (!busy) syncAuthHost(addWorkspaceAuth, addWorkspaceHost);
+}
+openAddWorkspaceDialog = (folder, name, git) => {
+  pendingAddWorkspace = { folder, git };
+  addWorkspacePath.textContent = folder;
+  addWorkspaceName.value = name;
+  setLocalError(addWorkspaceError, "");
+  updateOnboardingCredentialSelects();
+  setAddWorkspaceBusy(false);
+  addWorkspaceDialog.showModal();
+  addWorkspaceName.focus();
+  addWorkspaceName.select();
+};
+addWorkspaceCancel.onclick = () => {
+  // Cancellation is mutation-free: nothing was sent.
+  pendingAddWorkspace = null;
+  addWorkspaceDialog.close();
+};
+addWorkspaceDialog.addEventListener("cancel", event => {
+  if (addWorkspaceBusy) { event.preventDefault(); return; }
+  pendingAddWorkspace = null;
+});
+// Commits the configuration (always stopped — start is a separate explicit
+// step so locked credentials go through the masked unlock flow). Returns the
+// onboarding result, or null when the user declined or an error was shown;
+// the form is preserved for correction on failure.
+async function submitAddWorkspace() {
+  if (!pendingAddWorkspace) return null;
+  const folder = pendingAddWorkspace.folder;
+  const authentication = authSelectionFrom(addWorkspaceAuth, addWorkspaceHost, addWorkspaceError);
+  if (authentication === null) return null;
+  const request = {
+    path: folder,
+    displayName: addWorkspaceName.value.trim(),
+    authentication,
+    signing: addWorkspaceSigning.value || null,
+  };
+  if (!pendingAddWorkspace.git) {
+    if (!confirm('"' + folder + '" is not a git repository. Initialize one with git init and add it?')) return null;
+    request.init = true;
+  }
+  try {
+    return await api("/api/hub/workspaces/configure", request);
+  } catch (error) {
+    if (error.payload && error.payload.needsInit) {
+      if (!confirm('"' + folder + '" is not a git repository. Initialize one with git init and add it?')) return null;
+      try { return await api("/api/hub/workspaces/configure", { ...request, init: true }); }
+      catch (inner) { setLocalError(addWorkspaceError, inner.message); return null; }
+    }
+    setLocalError(addWorkspaceError, error.message);
+    return null;
+  }
+}
+addWorkspaceForm.onsubmit = async event => {
+  event.preventDefault();
+  if (addWorkspaceBusy) return;
+  setLocalError(addWorkspaceError, "");
+  setAddWorkspaceBusy(true);
+  addWorkspaceSubmit.textContent = "Adding…";
+  const result = await submitAddWorkspace();
+  setAddWorkspaceBusy(false);
+  addWorkspaceSubmit.textContent = "Add workspace";
+  if (!result) return;
+  pendingAddWorkspace = null;
+  addWorkspaceDialog.close();
+  await refreshAfterFolderMutation();
+};
+addWorkspaceStart.onclick = async () => {
+  if (addWorkspaceBusy) return;
+  setLocalError(addWorkspaceError, "");
+  setAddWorkspaceBusy(true);
+  addWorkspaceStart.textContent = "Adding…";
+  const result = await submitAddWorkspace();
+  setAddWorkspaceBusy(false);
+  addWorkspaceStart.textContent = "Add and start";
+  if (!result) return;
+  // The configuration is committed; the explicit start goes through the
+  // normal credential-aware flow (masked unlock included). A start failure
+  // leaves the configured stopped workspace in place.
+  pendingAddWorkspace = null;
+  addWorkspaceDialog.close();
+  await refreshAfterFolderMutation();
+  await startRegisteredWorkspace(
+    workspaceById(result.workspace.id),
+    addWorkspaceStart,
+    document.getElementById("browser-error"),
+  );
+};
+
+// --- Create workspace dialog ---------------------------------------------
+// Folder and workspace names track each other until the workspace name is
+// edited on its own.
+let createNameLinked = true;
+createWorkspaceFolder.addEventListener("input", () => {
+  if (createNameLinked) createWorkspaceName.value = createWorkspaceFolder.value;
+});
+createWorkspaceName.addEventListener("input", () => {
+  createNameLinked = createWorkspaceName.value === createWorkspaceFolder.value;
+});
+function setCreateWorkspaceBusy(busy) {
+  createWorkspaceBusy = busy;
+  for (const control of [createWorkspaceFolder, createWorkspaceName, createWorkspaceAuth, createWorkspaceHost, createWorkspaceSigning, createWorkspaceCancel, createWorkspaceSubmit]) {
+    control.disabled = busy;
+  }
+  if (!busy) syncAuthHost(createWorkspaceAuth, createWorkspaceHost);
+}
+document.getElementById("create-workspace-open").onclick = () => {
+  createWorkspaceParent.textContent = "In " + (browsePath || "the default workspace folder");
+  createWorkspaceFolder.value = "";
+  createWorkspaceName.value = "";
+  createNameLinked = true;
+  setLocalError(createWorkspaceError, "");
+  updateOnboardingCredentialSelects();
+  setCreateWorkspaceBusy(false);
+  createWorkspaceDialog.showModal();
+  createWorkspaceFolder.focus();
+};
+createWorkspaceCancel.onclick = () => createWorkspaceDialog.close();
+createWorkspaceDialog.addEventListener("cancel", event => {
+  if (createWorkspaceBusy) event.preventDefault();
+});
+createWorkspaceForm.onsubmit = async event => {
+  event.preventDefault();
+  if (createWorkspaceBusy) return;
+  setLocalError(createWorkspaceError, "");
+  const authentication = authSelectionFrom(createWorkspaceAuth, createWorkspaceHost, createWorkspaceError);
+  if (authentication === null) return;
+  setCreateWorkspaceBusy(true);
+  createWorkspaceSubmit.textContent = "Creating…";
+  try {
+    await api("/api/hub/workspaces/create", {
+      parent: browsePath,
+      folderName: createWorkspaceFolder.value.trim(),
+      displayName: createWorkspaceName.value.trim(),
+      authentication,
+      signing: createWorkspaceSigning.value || null,
+    });
+    createWorkspaceDialog.close();
+    await refreshAfterFolderMutation();
+  } catch (error) {
+    // Actionable failures preserve the form. A retained initialized
+    // repository is called out with its retry path.
+    const retained = error.payload && error.payload.retainedPath;
+    setLocalError(createWorkspaceError, retained
+      ? error.message + ' Use "Add workspace" on the retained folder to finish adding it.'
+      : error.message);
+  }
+  setCreateWorkspaceBusy(false);
+  createWorkspaceSubmit.textContent = "Create workspace";
+};
 
 function remoteKind(url) {
   const value = url.trim().toLowerCase();
@@ -1662,6 +1987,25 @@ function cloneCompatible(credential, kind, url) {
   }
   catch { return false; }
 }
+// Host a retained authentication selection applies to: tokens pin their
+// provider host; SSH keys use the clone URL's remote host.
+function remoteHostFromUrl(url) {
+  const value = url.trim();
+  try {
+    const parsed = new URL(value);
+    if (parsed.hostname) {
+      const hostname = parsed.hostname.endsWith(".") ? parsed.hostname.slice(0, -1) : parsed.hostname;
+      return hostname.toLowerCase() + (parsed.port ? ":" + parsed.port : "");
+    }
+  } catch {}
+  const scp = /^(?:[^@/:\\s]+@)?([^/:\\s]+):/.exec(value);
+  return scp ? scp[1].toLowerCase() : null;
+}
+function retainedHostFor(credential) {
+  if (!credential) return null;
+  if (credential.type === "token") return credential.metadata.host;
+  return remoteHostFromUrl(document.getElementById("clone-url").value) || "github.com";
+}
 function updateCloneCredentials() {
   const selected = cloneCredential.value;
   const url = document.getElementById("clone-url").value;
@@ -1672,17 +2016,35 @@ function updateCloneCredentials() {
     cloneCredential.appendChild(new Option(credential.name + " · " + credentialHost(credential) + suffix, credential.id));
   }
   if ([...cloneCredential.options].some(option => option.value === selected)) cloneCredential.value = selected;
+  fillCredentialSelect(cloneRetainedAuth, authCapableCredentials(), "None");
+  fillCredentialSelect(cloneSigning, signingCapableCredentials(), "None");
   updateCloneCredentialState();
 }
+// Selecting a clone identity SUGGESTS it as the retained workspace
+// authentication but never commits it on its own; the user can clear the
+// suggestion, and clearing the clone credential clears an untouched one.
+let retainedAuthTouched = false;
+cloneRetainedAuth.addEventListener("change", () => { retainedAuthTouched = true; });
 function updateCloneCredentialState() {
   const selected = credentialCatalog.find(item => item.id === cloneCredential.value);
-  cloneRetainAssignment.disabled = !selected;
-  if (!selected) cloneRetainAssignment.checked = false;
+  if (!retainedAuthTouched) {
+    cloneRetainedAuth.value = selected && [...cloneRetainedAuth.options].some(option => option.value === selected.id)
+      ? selected.id
+      : "";
+  }
   cloneUnlock.hidden = !selected || !isCredentialLocked(selected);
   if (cloneUnlock.hidden) cloneUnlockPassphrase.value = "";
 }
 document.getElementById("clone-url").addEventListener("input", updateCloneCredentials);
 cloneCredential.addEventListener("change", updateCloneCredentialState);
+// The workspace display name tracks the checkout folder name until edited.
+let cloneNameTouched = false;
+cloneDisplayName.addEventListener("input", () => {
+  cloneNameTouched = cloneDisplayName.value !== document.getElementById("clone-folder-name").value;
+});
+document.getElementById("clone-folder-name").addEventListener("input", () => {
+  if (!cloneNameTouched) cloneDisplayName.value = document.getElementById("clone-folder-name").value;
+});
 
 function setCloneActive(active) {
   cloneResponseForm.hidden = !active;
@@ -1693,8 +2055,11 @@ function setCloneActive(active) {
   cloneSubmit.disabled = active;
   document.getElementById("clone-url").disabled = active;
   document.getElementById("clone-folder-name").disabled = active;
+  cloneDisplayName.disabled = active;
   cloneCredential.disabled = active;
-  cloneRetainAssignment.disabled = active || !cloneCredential.value;
+  cloneRetainedAuth.disabled = active;
+  cloneSigning.disabled = active;
+  cloneStartAfter.disabled = active;
   cloneUnlockPassphrase.disabled = active;
 }
 function setClonePhase(phase, label) {
@@ -1757,9 +2122,13 @@ async function finishClone(result) {
     "timed-out": "Clone timed out.",
     "clone-failed": "Clone failed.",
     "register-failed": "Workspace registration failed.",
-    "start-failed": "Clone completed, but the session could not start.",
+    "start-failed": result.workspaceId
+      ? "Workspace added stopped, but the requested session start failed. Start it from its folder row or the dashboard."
+      : "Clone completed, but the session could not start.",
     "cleanup-failed": "Clone cleanup failed; review the output and workspace state.",
-    succeeded: "Clone complete. Opening session…",
+    succeeded: result.running === false
+      ? "Workspace added. Start it from its folder row or the dashboard."
+      : "Clone complete. Opening session…",
   };
   const error = result.error || result.message;
   setClonePhase(status, labels[status] || error || "Clone ended.");
@@ -1768,15 +2137,14 @@ async function finishClone(result) {
   if (error && status !== "succeeded") appendCloneOutput((cloneOutput.textContent ? "\\n" : "") + error + "\\n");
   if (status === "succeeded") {
     const workspaceId = result.workspaceId || result.id;
-    if (!workspaceId) {
-      setClonePhase("start-failed", "Clone completed, but no session was returned.");
-    } else {
+    if (workspaceId && result.running !== false) {
+      // Only an explicitly requested successful start navigates.
       await loadBrowser();
       openSession(workspaceId);
       return;
     }
   }
-  await loadBrowser();
+  await Promise.all([loadBrowser(), refreshWorkspaceState().catch(() => {})]);
 }
 function connectCloneEvents() {
   closeCloneEvents();
@@ -1845,24 +2213,34 @@ cloneForm.onsubmit = async event => {
       await api(credentialPath + "/" + encodeURIComponent(selectedCredential.id) + "/unlock", { passphrase });
       await loadCloneCredentials();
     }
-    const request = { url, dest: browsePath, folderName };
-    if (selectedCredential) {
-      request.credentialId = selectedCredential.id;
-      request.retainAssignment = cloneRetainAssignment.checked;
+    const request = { url, dest: browsePath, folderName, start: cloneStartAfter.checked };
+    const displayName = cloneDisplayName.value.trim();
+    if (displayName) request.displayName = displayName;
+    if (selectedCredential) request.credentialId = selectedCredential.id;
+    const retainedCredential = credentialCatalog.find(item => item.id === cloneRetainedAuth.value);
+    if (retainedCredential) {
+      request.retainedAuthentication = [{ credentialId: retainedCredential.id, host: retainedHostFor(retainedCredential) }];
     }
+    if (cloneSigning.value) request.signing = cloneSigning.value;
     const result = await api("/api/hub/clone-jobs", request);
     cloneJobId = result.jobId;
     if (!cloneJobId) throw new Error("clone job did not return an id");
     sessionStorage.setItem(cloneJobStorageKey, cloneJobId);
     input.value = "";
     folderNameInput.value = "";
+    cloneDisplayName.value = "";
+    cloneNameTouched = false;
     cloneCredential.value = "";
-    cloneRetainAssignment.checked = false;
+    cloneRetainedAuth.value = "";
+    cloneSigning.value = "";
+    cloneStartAfter.checked = false;
+    retainedAuthTouched = false;
     updateCloneCredentialState();
     button.textContent = "Clone";
     setCloneActive(true);
     connectCloneEvents();
   } catch (error) {
+    // The form is preserved on an actionable failure.
     setLocalError(cloneFormError, error.message);
     setClonePhase("clone-failed", "Could not start clone.");
     setCloneActive(false);
@@ -1871,8 +2249,11 @@ cloneForm.onsubmit = async event => {
     button.disabled = false;
     input.disabled = false;
     folderNameInput.disabled = false;
+    cloneDisplayName.disabled = false;
     cloneCredential.disabled = false;
-    cloneRetainAssignment.disabled = !cloneCredential.value;
+    cloneRetainedAuth.disabled = false;
+    cloneSigning.disabled = false;
+    cloneStartAfter.disabled = false;
     cloneUnlockPassphrase.disabled = false;
     button.textContent = "Clone";
   }
@@ -1903,9 +2284,11 @@ window.addEventListener("pageshow", event => {
   if (cloneJobId) connectCloneEvents();
   loadBrowser();
   loadCloneCredentials();
+  refreshWorkspaceState().catch(() => {});
 });
 loadBrowser();
 loadCloneCredentials();
+refreshWorkspaceState().catch(() => {});
 if (cloneJobId) {
   clonePanel.hidden = false;
   cloneBusy = true;
@@ -1940,8 +2323,65 @@ function bindCredentialForm(id, endpoint, buildBody) {
     });
   };
 }
+function describeWorkspaceDefaults(state) {
+  if (!state.configured) return "No default configured — onboarding starts at the Hub user's home directory (" + state.effective + ").";
+  if (state.configuredAvailable) return "Configured default: " + state.configured;
+  return "Configured default " + state.configured + " is currently unavailable; onboarding falls back to " + state.effective + ".";
+}
+async function loadWorkspaceDefaults() {
+  const status = document.getElementById("workspace-defaults-status");
+  try {
+    const response = await fetch("/api/hub/settings/workspace-defaults");
+    if (!response.ok) {
+      status.textContent = "Workspace defaults are unavailable.";
+      return;
+    }
+    const state = await response.json();
+    status.textContent = describeWorkspaceDefaults(state);
+    const input = document.getElementById("workspace-defaults-parent");
+    if (!input.value.trim() || input.dataset.autofilled === "true") {
+      input.value = state.configured || "";
+      input.dataset.autofilled = "true";
+    }
+  } catch {
+    status.textContent = "Workspace defaults could not be loaded.";
+  }
+}
+function initWorkspaceDefaults() {
+  const form = document.getElementById("workspace-defaults-form");
+  const input = document.getElementById("workspace-defaults-parent");
+  const errorTarget = document.getElementById("workspace-defaults-error");
+  input.addEventListener("input", () => { input.dataset.autofilled = "false"; });
+  form.onsubmit = async event => {
+    event.preventDefault();
+    setLocalError(errorTarget, "");
+    const value = input.value.trim();
+    if (!value) { setLocalError(errorTarget, "Enter an absolute directory path, or use Clear."); return; }
+    const button = form.querySelector('button[type="submit"]');
+    await withBusy(button, "Saving…", async () => {
+      try {
+        await api("/api/hub/settings/workspace-defaults", { defaultWorkspaceParent: value });
+        input.dataset.autofilled = "true";
+        await loadWorkspaceDefaults();
+      } catch (error) { setLocalError(errorTarget, error.message); }
+    });
+  };
+  document.getElementById("workspace-defaults-clear").onclick = async event => {
+    setLocalError(errorTarget, "");
+    await withBusy(event.target, "Clearing…", async () => {
+      try {
+        await api("/api/hub/settings/workspace-defaults", { defaultWorkspaceParent: null });
+        input.value = "";
+        input.dataset.autofilled = "true";
+        await loadWorkspaceDefaults();
+      } catch (error) { setLocalError(errorTarget, error.message); }
+    });
+  };
+  loadWorkspaceDefaults();
+}
 function initSettingsPage() {
   initSharedUidAdvisory();
+  initWorkspaceDefaults();
   for (const reveal of document.querySelectorAll("[data-reveal-secret]")) {
     const field = document.getElementById(reveal.dataset.revealSecret);
     reveal.onclick = () => {
@@ -1982,6 +2422,7 @@ function initSettingsPage() {
     loadDevices();
     loadCredentials();
     loadTools();
+    loadWorkspaceDefaults();
   });
   loadSettingsState();
   loadDevices();
@@ -2019,17 +2460,48 @@ export function settingsPage(authenticatedUser: string): string {
   return authenticatedPage("settings", authenticatedUser);
 }
 
-export function stoppedSessionPage(workspaceId: string, registered: boolean): string {
+export function stoppedSessionPage(workspaceId: string, registered: boolean, displayName?: string): string {
+  const label = escapeHtml(displayName || workspaceId);
   const detail = registered
-    ? `The session for <strong>${escapeHtml(workspaceId)}</strong> is not running. You can resume it from the dashboard.`
+    ? `The session for <strong>${label}</strong> is not running.`
     : `No workspace <strong>${escapeHtml(workspaceId)}</strong> is registered on this hub.`;
+  // A registered stopped workspace offers Start and Configure directly
+  // instead of dead-ending on a link back to the dashboard.
+  const actions = registered
+    ? `<div class="form-row" style="padding: 0 1rem 1rem;">
+    <button id="stopped-start" class="primary" type="button">Start</button>
+    <a href="/settings" style="align-self: center;">Configure</a>
+    <a href="/" style="align-self: center;">Dashboard</a>
+  </div>
+  <p id="stopped-error" class="local-error" role="alert" hidden style="margin: 0 1rem 1rem;"></p>
+  <script>
+    document.getElementById("stopped-start").onclick = async () => {
+      const button = document.getElementById("stopped-start");
+      const errorTarget = document.getElementById("stopped-error");
+      errorTarget.hidden = true;
+      button.disabled = true;
+      button.textContent = "Starting…";
+      try {
+        const response = await fetch("/api/hub/sessions/${encodeURIComponent(workspaceId)}/start", { method: "POST" });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.error || ("start failed (" + response.status + ")"));
+        location.reload();
+      } catch (error) {
+        errorTarget.textContent = error.message;
+        errorTarget.hidden = false;
+        button.disabled = false;
+        button.textContent = "Start";
+      }
+    };
+  </script>`
+    : `<p class="empty"><a href="/">Back to the dashboard</a></p>`;
   return page(
     "UatuCode Hub — session unavailable",
     `${brandHeader()}
 <section class="pane">
   <div class="pane-header"><h2>Session unavailable</h2></div>
   <p class="empty" style="font-size: 0.85rem;">${detail}</p>
-  <p class="empty"><a href="/">Back to the dashboard</a></p>
+  ${actions}
 </section>`,
   );
 }

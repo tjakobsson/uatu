@@ -116,6 +116,7 @@ describe("Hub credential contracts", () => {
       workspaceApiRevision: 6,
       workspaces: [{
         id: "uatu",
+        displayName: "Uatu Docs",
         path: "/src/uatu",
         backend: "local",
         running: true,
@@ -132,7 +133,7 @@ describe("Hub credential contracts", () => {
       version: "0.5.1 (abcdef0)",
       hubApiRevision: 4,
       workspaceApiRevision: 6,
-      workspaces: [{ id: "uatu", path: "/src/uatu", backend: "local", running: true, credentialRestartRequired: false, workspaceApiRevision: 6 }],
+      workspaces: [{ id: "uatu", displayName: "uatu", path: "/src/uatu", backend: "local", running: true, credentialRestartRequired: false, workspaceApiRevision: 6 }],
     })).toBe(false);
   });
 

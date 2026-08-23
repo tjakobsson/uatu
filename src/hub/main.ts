@@ -33,11 +33,15 @@ import {
   credentialTokenStorePath,
   credentialToolsPath,
   folderMutationJournalPath,
+  hubPreferencesPath,
+  onboardingJournalPath,
   personalWorkspaceStatePath,
   registryPath,
   resolveHubStateRoot,
   sessionsPath,
 } from "./state-dir";
+import { HubPreferencesStore } from "./preferences";
+import { WorkspaceOnboardingCoordinator } from "./onboarding";
 import { startHubServer } from "./server";
 import { SessionManager } from "./sessions";
 
@@ -285,6 +289,8 @@ export async function runHub(options: RunHubOptions): Promise<void> {
 
   const registry = new WorkspaceRegistry(registryPath(stateRoot));
   await registry.load();
+  const preferences = new HubPreferencesStore(hubPreferencesPath(stateRoot));
+  await preferences.load();
   const personalState = new PersonalWorkspaceStateStore(personalWorkspaceStatePath(stateRoot));
   const credentialMetadata = new CredentialMetadataStore(credentialsPath(stateRoot));
   await Promise.all([personalState.load(), credentialMetadata.load()]);
@@ -467,6 +473,15 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     reservations,
   });
   await folderManager.recover();
+  const onboarding = new WorkspaceOnboardingCoordinator({
+    journalPath: onboardingJournalPath(stateRoot),
+    registry,
+    credentials: credentialMetadata,
+    sessions,
+    reservations,
+    gitCommand: () => activePaths.get("git") ?? path.join(stateRoot, ".unavailable-git"),
+  });
+  await onboarding.recover();
   await personalState.recoverPendingForgets(
     workspaceId => registry.byId(workspaceId) !== undefined,
     async workspaceId => { await credentialMetadata.removeWorkspaceAssignments(workspaceId); },
@@ -476,6 +491,10 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     registry,
     sessions,
     credentials: cloneCredentials,
+    onboarding: {
+      configureCloned: options => onboarding.configureCloned(options),
+      removeWorkspaceAssignments: workspaceId => credentialMetadata.removeWorkspaceAssignments(workspaceId),
+    },
     reservations,
   });
   const server = startHubServer({
@@ -484,6 +503,8 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     sessions,
     sessionStore,
     personalState,
+    preferences,
+    onboarding,
     gitCommand: () => activePaths.get("git") ?? path.join(stateRoot, ".unavailable-git"),
     cloneCredentials,
     cloneJobs,

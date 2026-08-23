@@ -23,7 +23,9 @@ import type { HubConfig } from "./config";
 import { CredentialMetadataStore } from "./credential-store";
 import { FolderManager } from "./folder-manager";
 import { PathReservationCoordinator } from "./path-reservations";
+import { WorkspaceOnboardingCoordinator } from "./onboarding";
 import { PersonalWorkspaceStateStore } from "./personal-state";
+import { HubPreferencesStore } from "./preferences";
 import { WorkspaceRegistry } from "./registry";
 import { startHubServer } from "./server";
 import { SessionManager } from "./sessions";
@@ -72,6 +74,7 @@ let cookie = "";
 let bearerId = "";
 let cloneJobs: CloneJobManager;
 let reservations: PathReservationCoordinator;
+let preferences: HubPreferencesStore;
 const managedCloneStarts: Array<CloneCredentialProcessContext | undefined> = [];
 const managedCloneAssignments: string[] = [];
 let managedAssignmentBarrier: Promise<void> | undefined;
@@ -196,12 +199,24 @@ beforeAll(async () => {
     reservations,
   });
   await folderManager.recover();
+  preferences = new HubPreferencesStore(path.join(tempRoot, "hub-preferences.json"));
+  await preferences.load();
+  const onboarding = new WorkspaceOnboardingCoordinator({
+    journalPath: path.join(tempRoot, "pending-onboarding.json"),
+    registry,
+    credentials: credentialMetadata,
+    sessions,
+    reservations,
+  });
+  await onboarding.recover();
   server = startHubServer({
     config,
     registry,
     sessions,
     sessionStore,
     personalState,
+    preferences,
+    onboarding,
     cloneJobs,
     folderManager,
     reservations,
@@ -517,6 +532,180 @@ describe("hub end to end", () => {
     const { HUB_API_REVISION, WORKSPACE_API_REVISION } = await import("../shared/version");
     expect(payload.hubApiRevision).toBe(HUB_API_REVISION);
     expect(payload.workspaceApiRevision).toBe(WORKSPACE_API_REVISION);
+
+    // Rename workspace works while the session is running: only the label
+    // changes; the child process, path, and stable id are untouched.
+    const renamed = await fetch(`${origin}/api/hub/workspaces/myproject/display-name`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ displayName: "My Project" }),
+    });
+    expect(renamed.status).toBe(200);
+    await assertContract("POST", "/api/hub/workspaces/{workspaceId}/display-name", renamed);
+    const renamedPayload = (await renamed.json()) as { workspace: { displayName: string; running: boolean; id: string } };
+    expect(renamedPayload.workspace).toMatchObject({ id: "myproject", displayName: "My Project", running: true });
+    expect(sessions.isRunning("myproject")).toBe(true);
+
+    const missingRename = await fetch(`${origin}/api/hub/workspaces/never-was/display-name`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ displayName: "Nope" }),
+    });
+    expect(missingRename.status).toBe(404);
+    await assertContract("POST", "/api/hub/workspaces/{workspaceId}/display-name", missingRename);
+  }, 60_000);
+
+  test("configure, create, and workspace-default operations commit stopped configurations", async () => {
+    const parent = path.join(tempRoot, "workspaces");
+
+    // Unauthenticated and cross-origin mutations are rejected before dispatch.
+    const anonymous = await fetch(`${origin}/api/hub/workspaces/configure`, { method: "POST", body: "{}" });
+    expect(anonymous.status).toBe(401);
+    const crossOrigin = await fetch(`${origin}/api/hub/workspaces/configure`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin: "https://evil.example" },
+      body: JSON.stringify({ path: parent, displayName: "X" }),
+    });
+    expect(crossOrigin.status).toBe(403);
+
+    // Configure an existing repository: stopped by default, custom name.
+    const folder = path.join(parent, "configure-demo");
+    execFileSync("mkdir", ["-p", folder]);
+    execFileSync("git", ["init"], { cwd: folder, stdio: "ignore" });
+    const configured = await fetch(`${origin}/api/hub/workspaces/configure`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ path: folder, displayName: "Config Demo" }),
+    });
+    expect(configured.status).toBe(200);
+    await assertContract("POST", "/api/hub/workspaces/configure", configured);
+    const configuredPayload = (await configured.json()) as {
+      workspace: { id: string; displayName: string; running: boolean };
+      started: boolean;
+      startError: string | null;
+    };
+    expect(configuredPayload.workspace.displayName).toBe("Config Demo");
+    expect(configuredPayload.started).toBe(false);
+    expect(configuredPayload.startError).toBeNull();
+    expect(sessions.isRunning(configuredPayload.workspace.id)).toBe(false);
+
+    // Re-configuring a registered folder conflicts instead of mutating.
+    const conflicted = await fetch(`${origin}/api/hub/workspaces/configure`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ path: folder, displayName: "Other" }),
+    });
+    expect(conflicted.status).toBe(409);
+    await assertContract("POST", "/api/hub/workspaces/configure", conflicted);
+    expect(registry.byPath(folder)?.displayName).toBe("Config Demo");
+
+    // An invalid credential selection rolls everything back atomically.
+    const rollbackFolder = path.join(parent, "rollback-demo");
+    execFileSync("mkdir", ["-p", rollbackFolder]);
+    execFileSync("git", ["init"], { cwd: rollbackFolder, stdio: "ignore" });
+    const invalidCredential = await fetch(`${origin}/api/hub/workspaces/configure`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({
+        path: rollbackFolder,
+        displayName: "Doomed",
+        authentication: [{ credentialId: "missing-credential", host: "github.com" }],
+      }),
+    });
+    expect(invalidCredential.status).toBe(409);
+    expect(registry.byPath(rollbackFolder)).toBeUndefined();
+
+    // Create a new workspace: folder created, git initialized, stopped, and
+    // duplicate display names are accepted.
+    const created = await fetch(`${origin}/api/hub/workspaces/create`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ parent, folderName: "created-demo", displayName: "Config Demo" }),
+    });
+    expect(created.status).toBe(200);
+    await assertContract("POST", "/api/hub/workspaces/create", created);
+    const createdPayload = (await created.json()) as { workspace: { id: string; displayName: string; path: string } };
+    expect(createdPayload.workspace.displayName).toBe("Config Demo");
+    expect((await stat(path.join(createdPayload.workspace.path, ".git"))).isDirectory()).toBe(true);
+    expect(sessions.isRunning(createdPayload.workspace.id)).toBe(false);
+    expect(createdPayload.workspace.id).not.toBe(configuredPayload.workspace.id);
+
+    // An occupied destination fails without touching the existing entry.
+    const occupied = await fetch(`${origin}/api/hub/workspaces/create`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ parent, folderName: "created-demo", displayName: "Second" }),
+    });
+    expect(occupied.status).toBe(409);
+    await assertContract("POST", "/api/hub/workspaces/create", occupied);
+
+    // Add and start: an explicit start request boots a real session.
+    const startedFolder = path.join(parent, "start-demo");
+    execFileSync("mkdir", ["-p", startedFolder]);
+    execFileSync("git", ["init"], { cwd: startedFolder, stdio: "ignore" });
+    const started = await fetch(`${origin}/api/hub/workspaces/configure`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ path: startedFolder, displayName: "Started Demo", start: true }),
+    });
+    expect(started.status).toBe(200);
+    const startedPayload = (await started.json()) as { workspace: { id: string }; started: boolean };
+    expect(startedPayload.started).toBe(true);
+    expect(sessions.isRunning(startedPayload.workspace.id)).toBe(true);
+    await sessions.stop(startedPayload.workspace.id);
+
+    // Workspace defaults: read, set, browse from, reject invalid, clear.
+    const defaults = await fetch(`${origin}/api/hub/settings/workspace-defaults`, { headers: { cookie } });
+    expect(defaults.status).toBe(200);
+    await assertContract("GET", "/api/hub/settings/workspace-defaults", defaults);
+    expect(((await defaults.json()) as { configured: string | null }).configured).toBeNull();
+
+    const savedDefaults = await fetch(`${origin}/api/hub/settings/workspace-defaults`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ defaultWorkspaceParent: parent }),
+    });
+    expect(savedDefaults.status).toBe(200);
+    await assertContract("POST", "/api/hub/settings/workspace-defaults", savedDefaults);
+    expect((await savedDefaults.json()) as object).toEqual({
+      configured: parent,
+      configuredAvailable: true,
+      effective: parent,
+    });
+
+    // Pathless browsing now starts at the configured default parent, and
+    // registration remains unrestricted elsewhere (covered above: myproject
+    // and the temp folders live outside any configured default).
+    const pathlessBrowse = await fetch(`${origin}/api/hub/browse`, { headers: { cookie } });
+    expect(pathlessBrowse.status).toBe(200);
+    expect(((await pathlessBrowse.json()) as { path: string }).path).toBe(parent);
+
+    const invalidDefault = await fetch(`${origin}/api/hub/settings/workspace-defaults`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ defaultWorkspaceParent: "relative/path" }),
+    });
+    expect(invalidDefault.status).toBe(400);
+    await assertContract("POST", "/api/hub/settings/workspace-defaults", invalidDefault);
+    expect(preferences.configuredDefaultWorkspaceParent()).toBe(parent);
+
+    // Hub state reports the configured default alongside workspaces.
+    const stateWithDefaults = await fetch(`${origin}/api/hub/state`, { headers: { cookie } });
+    const statePayload = (await stateWithDefaults.json()) as {
+      workspaceDefaults?: { configured: string | null; effective: string };
+      workspaces: Array<{ id: string; displayName: string }>;
+    };
+    expect(statePayload.workspaceDefaults?.configured).toBe(parent);
+    expect(statePayload.workspaces.find(entry => entry.id === configuredPayload.workspace.id)?.displayName).toBe("Config Demo");
+
+    // Clearing restores the home-directory default.
+    const cleared = await fetch(`${origin}/api/hub/settings/workspace-defaults`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ defaultWorkspaceParent: null }),
+    });
+    expect(cleared.status).toBe(200);
+    expect(((await cleared.json()) as { configured: string | null; effective: string }).configured).toBeNull();
   }, 60_000);
 
   test("authenticated pages split dashboard, clone, and settings content", async () => {
@@ -1159,7 +1348,9 @@ describe("hub end to end", () => {
     const cloned = await fetch(`${origin}/api/hub/clone-jobs`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie, origin },
-      body: JSON.stringify({ url: source, dest }),
+      // Start after clone is explicit opt-in; this flow exercises the
+      // requested-start path through to a served session.
+      body: JSON.stringify({ url: source, dest, start: true }),
     });
     expect(cloned.status).toBe(202);
     await assertContract("POST", "/api/hub/clone-jobs", cloned);

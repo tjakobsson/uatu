@@ -41,6 +41,14 @@ export function folderMutationJournalPath(stateRoot: string): string {
   return path.join(stateRoot, "pending-folder-mutation.json");
 }
 
+export function hubPreferencesPath(stateRoot: string): string {
+  return path.join(stateRoot, "hub-preferences.json");
+}
+
+export function onboardingJournalPath(stateRoot: string): string {
+  return path.join(stateRoot, "pending-onboarding.json");
+}
+
 // The server-side session store: opaque session ids mapped to user, issue
 // time, and revocation state. Deleting the file invalidates every session.
 export function sessionsPath(stateRoot: string): string {

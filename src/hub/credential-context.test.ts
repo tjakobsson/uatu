@@ -48,7 +48,7 @@ async function fixture() {
   return {
     root,
     home,
-    workspace: { id: "project", path: workspacePath, backend: "local" as const },
+    workspace: { id: "project", path: workspacePath, backend: "local" as const, displayName: "project" },
   };
 }
 

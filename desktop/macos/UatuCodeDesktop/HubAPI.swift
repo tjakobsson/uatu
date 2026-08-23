@@ -16,13 +16,25 @@ struct HubShellInfo: Codable, Equatable {
 
 struct HubWorkspace: Codable, Equatable, Identifiable {
     let id: String
+    /// Mutable human label, required since Hub API revision 5. Decoded
+    /// optionally so a pre-revision-5 hub still connects; presentation
+    /// falls back to the stable id through `title`.
+    let displayName: String?
     let path: String
     let running: Bool
     let shells: [HubShellInfo]?
+
+    /// What to show users. The stable `id` remains the routing identity
+    /// (`/s/<id>/`) and never changes on renames; `displayName` may.
+    var title: String { displayName ?? id }
 }
 
 struct HubState: Codable, Equatable {
     let version: String?
+    /// Hub wire-contract generation. Revision 5 added required workspace
+    /// display names, onboarding configuration operations, and stopped-by-
+    /// default clone completion; this client tolerates 4 and 5.
+    let hubApiRevision: Int?
     let workspaces: [HubWorkspace]
 }
 

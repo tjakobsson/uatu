@@ -4,7 +4,7 @@ import path from "node:path";
 import type { CredentialMetadataStore } from "./credential-store";
 import type { PersonalWorkspaceStateStore } from "./personal-state";
 import { normalizeAbsolutePath, PathReservationCoordinator } from "./path-reservations";
-import type { WorkspaceEntry, WorkspaceRegistry } from "./registry";
+import { defaultWorkspaceDisplayName, validateWorkspaceDisplayName, type WorkspaceEntry, type WorkspaceRegistry } from "./registry";
 import type { SessionManager, SessionsStoppedResult } from "./sessions";
 
 const JOURNAL_VERSION = 1 as const;
@@ -152,11 +152,17 @@ function safeFsError(error: unknown, fallback: string): FolderManagerError {
 }
 
 function parseEntry(value: unknown): WorkspaceEntry {
-  const entry = closedJournalObject(value, ["id", "path", "backend"], "workspace entry");
+  const entry = closedJournalObject(value, ["id", "path", "backend", "displayName"], "workspace entry");
   if (typeof entry.id !== "string" || entry.id === "" || entry.backend !== "local") {
     throw new Error("invalid workspace entry");
   }
-  return { id: entry.id, path: journalAbsolutePath(entry.path), backend: "local" };
+  const source = journalAbsolutePath(entry.path);
+  // Journals written before display names existed lack the field; default it
+  // exactly like registry migration so recovery restores a valid entry.
+  const displayName = entry.displayName === undefined
+    ? defaultWorkspaceDisplayName(source)
+    : validateWorkspaceDisplayName(entry.displayName);
+  return { id: entry.id, path: source, backend: "local", displayName };
 }
 
 function closedJournalObject(value: unknown, fields: readonly string[], label: string): Record<string, unknown> {

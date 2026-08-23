@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 
 import { LOCAL_CREDENTIAL_ASSIGNMENT_WARNING } from "./credential-context";
-import { clonePage, dashboardPage, loginPage, settingsPage } from "./pages";
+import { clonePage, dashboardPage, loginPage, settingsPage, stoppedSessionPage } from "./pages";
 
 const htmlFor = {
   dashboard: () => dashboardPage("alice"),
@@ -66,8 +66,18 @@ describe("authenticated Hub pages", () => {
     expect(html).toContain('parts.push("✎ Signing: " + signing.join(", "))');
     expect(html).toContain("if (!hasCredentialAssignments(w.credentialAssignments) && !confirm(");
     expect(html).toContain("Git authentication and commit signing may be unavailable, but the workspace can still start. Continue?");
-    expect(html.indexOf("if (!hasCredentialAssignments(w.credentialAssignments)")).toBeLessThan(html.indexOf("uiBusy += 1", html.indexOf('label: "Resume"')));
-    expect(html).toContain("prepareWorkspaceResume(w, errorTarget)");
+    const startFlow = html.indexOf("async function startRegisteredWorkspace");
+    expect(startFlow).toBeGreaterThan(0);
+    expect(html.indexOf("if (!hasCredentialAssignments(w.credentialAssignments)", startFlow)).toBeLessThan(html.indexOf("uiBusy += 1", startFlow));
+    expect(html).toContain("prepareWorkspaceResume(w, target)");
+    expect(html).toContain('label: "Start"');
+    expect(html).toContain('label: "Rename workspace"');
+    expect(html).toContain('label: "Remove from Hub"');
+    expect(html).not.toContain('label: "Resume"');
+    expect(html).not.toContain('label: "Forget"');
+    // Rows title by mutable display name with the path as secondary detail.
+    expect(html).toContain("title: workspaceLabel(w)");
+    expect(html).toContain('"/display-name", { displayName: next }');
     expect(html).toContain("Unlock credentials for ");
     expect(html).toContain("Unlock and resume");
     expect(html).toContain('field.credential.id) + "/unlock"');
@@ -84,7 +94,11 @@ describe("clone page", () => {
     }
     expect(document.querySelector('#clone-response[type="password"]')).not.toBeNull();
     expect(html).toContain("folderNameInput.value.trim()");
-    expect(html).toContain("{ url, dest: browsePath, folderName }");
+    expect(html).toContain("{ url, dest: browsePath, folderName, start: cloneStartAfter.checked }");
+    // Start after clone is explicit and defaults off; stopped completion is the norm.
+    expect(document.querySelector("#clone-start-after[type=checkbox]")?.hasAttribute("checked")).toBe(false);
+    expect(html).toContain("Workspace added. Start it from its folder row or the dashboard.");
+    expect(html).toContain("if (workspaceId && result.running !== false) {");
     expect(html).toContain("Available for any Git or SSH prompt");
   });
 
@@ -113,14 +127,18 @@ describe("clone page", () => {
     expect(select.options[0]?.value).toBe("");
     expect(select.options[0]?.textContent).toContain("answer prompts interactively");
     expect(document.querySelector('#clone-unlock-passphrase[type="password"]')).not.toBeNull();
-    expect(document.getElementById("clone-retain-assignment")?.hasAttribute("disabled")).toBe(true);
+    expect((document.getElementById("clone-retained-auth") as HTMLSelectElement).options[0]?.textContent).toBe("None");
     expect(document.querySelector("[data-shared-uid-warning] span")?.textContent).toBe(LOCAL_CREDENTIAL_ASSIGNMENT_WARNING);
     expect(document.querySelector("[data-dismiss-shared-uid]")).not.toBeNull();
     expect(html).toContain("uatu.hub.notice.shared-uid-v1:YWxpY2U");
     expect(html).toContain("cloneCompatible");
     expect(html).toContain("isCredentialLocked(selectedCredential)");
     expect(html).toContain("request.credentialId = selectedCredential.id");
-    expect(html).toContain("request.retainAssignment = cloneRetainAssignment.checked");
+    // The clone identity is only a suggestion for retention — never an
+    // implicit workspace grant.
+    expect(html).toContain("never retains it on its own");
+    expect(html).toContain("request.retainedAuthentication = [{ credentialId: retainedCredential.id, host: retainedHostFor(retainedCredential) }]");
+    expect(html).not.toContain("retainAssignment");
     expect(html).toContain('(?:[^@/:\\s]+@)?');
     expect(html).toContain('value.startsWith("git+ssh://")');
     // HTTPS hosts are normalized like the backend before token matching.
@@ -150,8 +168,8 @@ describe("clone page", () => {
     expect(document.querySelectorAll('[role="alert"]').length).toBeGreaterThanOrEqual(4);
     expect(html).toContain('input.value = name;');
     expect(html).toContain('input.select();');
-    expect(html).toContain('ariaLabel: "Rename " + dir.name');
-    expect(html).toContain('ariaLabel: "Remove " + dir.name');
+    expect(html).toContain('ariaLabel: "Rename folder " + dir.name');
+    expect(html).toContain('ariaLabel: "Remove folder " + dir.name');
     expect(html).toContain('Only empty folders can be removed. This cannot be undone.');
   });
 
@@ -222,7 +240,83 @@ describe("clone page", () => {
   });
 });
 
+describe("add workspace page", () => {
+  test("labels the page Add workspace and organizes three entry modes", () => {
+    const html = htmlFor.clone();
+    expect(html).toContain("Add workspace</a>");
+    expect(html).toContain("UatuCode Hub — Add workspace");
+    expect(html).toContain("<h2>Add workspace</h2>");
+    expect(html).toContain("Create a new workspace, pick an existing folder below, or clone a repository.");
+    const document = documentFor("clone");
+    expect(document.getElementById("create-workspace-open")).not.toBeNull();
+    expect(document.getElementById("add-workspace-dialog")).not.toBeNull();
+    expect(document.getElementById("clone-form")).not.toBeNull();
+  });
+
+  test("the existing-folder dialog carries name, path, credentials, and both add actions", () => {
+    const html = htmlFor.clone();
+    const document = documentFor("clone");
+    for (const id of [
+      "add-workspace-path", "add-workspace-name", "add-workspace-auth", "add-workspace-host",
+      "add-workspace-signing", "add-workspace-error", "add-workspace-cancel", "add-workspace-start", "add-workspace-submit",
+    ]) {
+      expect(document.getElementById(id)).not.toBeNull();
+    }
+    expect(document.querySelector('#add-workspace-dialog[aria-labelledby="add-workspace-title"]')).not.toBeNull();
+    expect(document.getElementById("add-workspace-submit")?.textContent).toBe("Add workspace");
+    expect(document.getElementById("add-workspace-start")?.textContent).toBe("Add and start");
+    // The display name prefills from the folder basename and stays editable.
+    expect(html).toContain("addWorkspaceName.value = name;");
+    expect(html).toContain("addWorkspaceName.select();");
+    // The commit is stopped-by-default; start is a separate explicit flow
+    // that reuses the masked unlock path after the configuration commits.
+    expect(html).toContain('api("/api/hub/workspaces/configure", request)');
+    expect(html).not.toContain('"/api/hub/workspaces/configure", { ...request, start: true }');
+    expect(html).toContain("startRegisteredWorkspace(");
+    // Cancellation is mutation-free and errors preserve the form.
+    expect(html).toContain("Cancellation is mutation-free: nothing was sent.");
+    expect(html).toContain("setLocalError(addWorkspaceError, error.message)");
+  });
+
+  test("the create-workspace dialog links names until edited and reports retained folders", () => {
+    const html = htmlFor.clone();
+    const document = documentFor("clone");
+    for (const id of [
+      "create-workspace-parent", "create-workspace-folder", "create-workspace-name",
+      "create-workspace-auth", "create-workspace-signing", "create-workspace-error", "create-workspace-submit",
+    ]) {
+      expect(document.getElementById(id)).not.toBeNull();
+    }
+    expect(html).toContain("if (createNameLinked) createWorkspaceName.value = createWorkspaceFolder.value;");
+    expect(html).toContain('api("/api/hub/workspaces/create"');
+    expect(html).toContain("Creates the folder, runs git init, and adds the workspace stopped.");
+    expect(html).toContain('Use "Add workspace" on the retained folder to finish adding it.');
+    expect(html).toContain("setCreateWorkspaceBusy(true)");
+  });
+
+  test("browser rows are lifecycle-aware with display-name detail", () => {
+    const html = htmlFor.clone();
+    expect(html).toContain('label: "Open"');
+    expect(html).toContain('label: "Start"');
+    expect(html).toContain('label: "Add workspace"');
+    expect(html).toContain('dir.running ? "running" : "stopped"');
+    expect(html).toContain("'workspace \"' + dir.displayName + '\"'");
+  });
+});
+
 describe("settings page", () => {
+  test("manages the default workspace parent with fallback explanation", () => {
+    const html = htmlFor.settings();
+    const document = documentFor("settings");
+    for (const id of ["workspace-defaults-form", "workspace-defaults-parent", "workspace-defaults-clear", "workspace-defaults-status", "workspace-defaults-error"]) {
+      expect(document.getElementById(id)).not.toBeNull();
+    }
+    expect(html).toContain('api("/api/hub/settings/workspace-defaults", { defaultWorkspaceParent: value })');
+    expect(html).toContain('api("/api/hub/settings/workspace-defaults", { defaultWorkspaceParent: null })');
+    expect(html).toContain("is currently unavailable; onboarding falls back to");
+    expect(html).toContain("Workspaces can still be added from anywhere.");
+  });
+
   test("shares the dismissible shared-UID advisory with clone", () => {
     const alice = htmlFor.settings();
     const bob = settingsPage("bob");
@@ -303,5 +397,28 @@ describe("settings page", () => {
     expect(html).not.toContain('showError("")');
     expect(html).toContain("@media (max-width: 520px)");
     expect(html).not.toMatch(/least[- ]privilege|credential isolation|isolated credential/i);
+  });
+});
+
+describe("stopped session page", () => {
+  test("titles by display name and offers Start and Configure for registered workspaces", () => {
+    const html = stoppedSessionPage("payments-service", true, "Payments API");
+    expect(html).toContain("<strong>Payments API</strong>");
+    expect(html).toContain('id="stopped-start"');
+    expect(html).toContain(">Configure</a>");
+    expect(html).toContain('"/api/hub/sessions/payments-service/start"');
+    expect(html).not.toContain("<strong>payments-service</strong>");
+  });
+
+  test("an unregistered id only links back to the dashboard", () => {
+    const html = stoppedSessionPage("gone", false);
+    expect(html).toContain("<strong>gone</strong>");
+    expect(html).not.toContain('id="stopped-start"');
+    expect(html).toContain('href="/"');
+  });
+
+  test("escapes display names and ids", () => {
+    const html = stoppedSessionPage("x", true, "<script>alert(1)</script>");
+    expect(html).not.toContain("<script>alert(1)</script>");
   });
 });

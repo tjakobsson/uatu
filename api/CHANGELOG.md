@@ -2,6 +2,27 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required.
 
+## Hub 5 / Workspace 7 - Unreleased
+
+Compatibility: breaking (Hub)
+
+### Changes
+
+- `HubWorkspace` gained required `displayName`: a mutable human-facing label (trimmed, 1-64 visible characters, not unique) separate from the immutable stable id and folder path. Existing registrations receive a basename-derived default at migration; ids, `/s/<id>/` URLs, personal state, and assignments are unchanged.
+- `HubState` gained optional `workspaceDefaults` reporting the configured and effective default workspace parent with an availability flag.
+- `BrowseResult` directory entries gained required `displayName` (null for unregistered directories) and `running`, so clients can offer Add workspace, Start, or Open per row without extra requests.
+- Added `hubConfigureWorkspace` (`POST /api/hub/workspaces/configure`): registers an existing folder with a display name, authentication host defaults, signing default, and an explicit `start` intent defaulting to false. Registration and all requested assignments commit as one coherent result; a failed explicitly requested start preserves the configured stopped workspace and is reported in `startError`.
+- Added `hubCreateConfiguredWorkspace` (`POST /api/hub/workspaces/create`): creates one visible child folder under an absolute parent without replacement, runs `git init`, and registers it stopped with its configuration. Failures after initialization retain the repository and report `retainedPath` for retry through the configure operation.
+- Added `hubUpdateWorkspaceDisplayName` (`POST /api/hub/workspaces/{workspaceId}/display-name`), valid while running or stopped; only the label changes.
+- Added `hubGetWorkspaceDefaults` / `hubUpdateWorkspaceDefaults` (`/api/hub/settings/workspace-defaults`): a Hub-wide optional default workspace parent validated as an existing direct non-symbolic-link directory. It seeds create, clone, and pathless browse locations and never restricts where workspaces register; null clears it.
+- `CreateCloneJobRequest` gained `displayName`, `retainedAuthentication`, `signing`, and explicit `start` defaulting to false. The clone credential is never retained as a workspace assignment implicitly; `retainAssignment` remains as the explicit legacy form of retention. A successful clone without requested start now finishes as a registered stopped workspace.
+- `CloneResult` (streaming) `succeeded` gained required `running`; `start-failed` gained optional `workspaceId` identifying a preserved stopped workspace whose configuration committed before the start failed.
+- The legacy `hubCreateWorkspace` operation is retained as a compatibility shorthand with its historical start-by-default behavior and basename-derived display name.
+
+### Migration
+
+Strict Hub consumers must regenerate against Hub revision 5: accept required `displayName` on workspaces and browse entries, required `running` on successful clone results, and optional `workspaceDefaults` on Hub state. Clients that relied on clone jobs starting a session must send `start: true`; clone completion without it ends on a stopped registered workspace. New onboarding flows should prefer `hubConfigureWorkspace`/`hubCreateConfiguredWorkspace` over the legacy registration operation.
+
 ## Hub 4 / Workspace 7 - Unreleased
 
 Compatibility: breaking (workspace)

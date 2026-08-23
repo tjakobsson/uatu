@@ -118,8 +118,8 @@ schemas:
     additionalProperties: false
   CloneResult:
     oneOf:
-      - { type: object, required: [status, workspaceId, target], properties: { status: { const: succeeded }, workspaceId: { type: string }, target: { type: string } }, additionalProperties: false }
-      - { type: object, required: [status, target, error], properties: { status: { enum: [clone-failed, register-failed, start-failed, cleanup-failed] }, target: { type: string }, error: { type: string } }, additionalProperties: false }
+      - { type: object, required: [status, workspaceId, target, running], properties: { status: { const: succeeded }, workspaceId: { type: string }, target: { type: string }, running: { type: boolean, description: "false = the registered workspace finished stopped (the default); true = an explicitly requested start succeeded." } }, additionalProperties: false }
+      - { type: object, required: [status, target, error], properties: { status: { enum: [clone-failed, register-failed, start-failed, cleanup-failed] }, target: { type: string }, error: { type: string }, workspaceId: { type: string, description: "Present on start-failed when the configuration committed and the stopped workspace was preserved." } }, additionalProperties: false }
       - { type: object, required: [status, target], properties: { status: { enum: [cancelled, timed-out] }, target: { type: string }, reason: { enum: [inactivity, lifetime] } }, additionalProperties: false }
   SearchStreamItem:
     oneOf:
