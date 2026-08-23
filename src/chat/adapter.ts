@@ -508,10 +508,7 @@ export class OpenCodeChatAdapter {
       const projection = this.projection(conversationId);
       const currentConfiguration = await this.configuration(conversationId);
       const variantModel = await this.validateSelections(currentConfiguration, model, mode, variant);
-      // liveTurns as well as projection status: a projection evicted mid-turn
-      // comes back "idle" while the turn is still running, and dispatching
-      // into it would race the very turn the queue exists to wait out.
-      const busy = projection.status === "running" || projection.status === "sending" || this.liveTurns.has(conversationId);
+      const busy = this.turnActive(conversationId, projection);
       const queue = this.heldQueues.get(conversationId) ?? [];
       // Order is absolute: while anything is held, a new submission joins the
       // back of the queue even when the conversation is momentarily idle —
@@ -651,13 +648,12 @@ export class OpenCodeChatAdapter {
       const accepted = slash
         ? await this.provider.command(conversationId, { id: input.messageId, name: slash.name, arguments: slash.arguments, model: input.model, mode, variant })
         : await this.provider.prompt(conversationId, { id: input.messageId, text, delivery: "queue", model: input.model, mode, variant });
-      // "sending" ends at acceptance, BEFORE the rename side-work below: the
-      // straggler guard in ConversationProjection.apply treats a completion
-      // seen during "sending" as belonging to the previous turn, so the
-      // state must not span the rename's provider round trips — a fast
-      // turn's genuine completion arriving there would be swallowed and the
-      // conversation stuck "running". The pump's terminal status outranks
-      // this optimistic promotion for a turn that ends later.
+      // "sending" ends at acceptance, BEFORE the rename side-work below —
+      // the dispatch is no longer in flight once the provider has accepted
+      // it, so the state must not span the rename's provider round trips.
+      // Guarded, not unconditional: a fast turn's completion can outrun the
+      // acceptance response, and a terminal status that already landed must
+      // not be overwritten back to "running".
       if (projection.status === "sending") projection.statusUpdate("running");
       if (renameToFirstPrompt) {
         try {
@@ -720,6 +716,13 @@ export class OpenCodeChatAdapter {
     projection.replay.publish({ type: "conversation.queue", queued: this.queuedMessages(conversationId), change });
   }
 
+  // liveTurns as well as projection status: a projection evicted mid-turn
+  // comes back "idle" while the turn is still running, and dispatching
+  // into it would race the very turn the queue exists to wait out.
+  private turnActive(conversationId: string, projection: ConversationProjection): boolean {
+    return projection.status === "running" || projection.status === "sending" || this.liveTurns.has(conversationId);
+  }
+
   // Fire-and-forget by design: delivery is triggered by status transitions
   // and its failures are reported through the conversation itself (a failed
   // status plus a paused queue), not to whichever caller happened to trip it.
@@ -737,7 +740,7 @@ export class OpenCodeChatAdapter {
     const projection = this.projection(conversationId);
     // Re-held, not lost: a conversation that reports busy again before this
     // ran keeps the message queued, and the next end-of-turn retries.
-    if (projection.status === "running" || projection.status === "sending" || this.liveTurns.has(conversationId)) return;
+    if (this.turnActive(conversationId, projection)) return;
     let session: ProviderSession;
     try {
       session = await this.requireSession(conversationId);
@@ -751,6 +754,11 @@ export class OpenCodeChatAdapter {
       this.dormantQueues.add(conversationId);
       return;
     }
+    // The lookup awaited, and the pump runs outside the admission lane: a
+    // busy report can land meanwhile — e.g. the merged stream correcting a
+    // stale terminal event. Re-held, not lost, exactly like the guard above;
+    // the corrected turn's own end retries.
+    if (this.turnActive(conversationId, projection)) return;
     try {
       await this.dispatchPrompt(conversationId, projection, session, {
         messageId: held.id,
@@ -825,9 +833,13 @@ export class OpenCodeChatAdapter {
       } catch (error) {
         // A failed interrupt leaves the turn running, so the pause must not
         // outlive the cancellation it belonged to — but only the pause this
-        // cancellation itself added.
+        // cancellation itself added. The projection keeps reporting that
+        // turn live: downgrading it to "failed" would clear the active-turn
+        // guard and let the next submission release the queue head into a
+        // turn the provider never stopped. The thrown error already tells
+        // the caller the cancellation failed, and the turn's own terminal
+        // event still ends the status.
         if (paused) this.dormantQueues.delete(conversationId);
-        projection.statusUpdate("failed", errorMessage(error));
         throw error;
       }
     }));

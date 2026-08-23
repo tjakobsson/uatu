@@ -1084,6 +1084,37 @@ describe("prompt, abort, permission, and question mutations", () => {
     expect(provider.prompts[1]).toEqual(expect.objectContaining({ text: "second", id: held.messageId }));
   });
 
+  test("a busy report landing during the delivery-time lookup keeps the head held", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    let message = 0;
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
+
+    expect((await adapter.prompt("session", "r1", "first")).held).toBe(false);
+    const held = await adapter.prompt("session", "r2", "second");
+    expect(held.held).toBe(true);
+
+    // The merged stream corrects a stale terminal report while the delivery's
+    // session lookup is still awaiting. The busy guard already passed before
+    // the lookup, so it is rechecked after — the head stays held and
+    // removable instead of dispatching into the corrected, still-active turn.
+    const lookup = provider.getSession.bind(provider);
+    provider.getSession = async sessionId => {
+      provider.getSession = lookup;
+      adapter.projectionForTests("session").statusUpdate("running");
+      return lookup(sessionId);
+    };
+    adapter.projectionForTests("session").statusUpdate("completed");
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(provider.prompts).toHaveLength(1);
+    expect((await adapter.history("session")).queued).toEqual([expect.objectContaining({ id: held.messageId, text: "second" })]);
+
+    // The corrected turn's own end retries and delivers the same head.
+    adapter.projectionForTests("session").statusUpdate("completed");
+    for (let attempt = 0; attempt < 200 && provider.prompts.length < 2; attempt += 1) await new Promise(resolve => setTimeout(resolve, 1));
+    expect(provider.prompts[1]).toEqual(expect.objectContaining({ text: "second", id: held.messageId }));
+  });
+
   test("a held message freezes the configuration it was submitted under", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
@@ -1173,6 +1204,35 @@ describe("prompt, abort, permission, and question mutations", () => {
     adapter.projectionForTests("session").statusUpdate("completed");
     for (let attempt = 0; attempt < 200 && provider.prompts.length < 3; attempt += 1) await new Promise(resolve => setTimeout(resolve, 1));
     expect(provider.prompts[2]).toEqual(expect.objectContaining({ text: "fourth", id: fourth.messageId }));
+  });
+
+  test("a failed interrupt keeps the turn live so a following submission cannot release the queue", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    let message = 0;
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
+
+    expect((await adapter.prompt("session", "r1", "first")).held).toBe(false);
+    const held = await adapter.prompt("session", "r2", "second");
+    expect(held.held).toBe(true);
+
+    // The interrupt is refused while the provider turn keeps running. The
+    // projection must keep reporting that turn live — a "failed" downgrade
+    // would read as idle to the next submission, which would then release
+    // the queue head into a turn the provider never stopped.
+    provider.interrupt = async () => { throw new Error("interrupt refused"); };
+    await expect(adapter.abort("session", "cancel-1")).rejects.toThrow("interrupt refused");
+    expect(adapter.projectionForTests("session").status).toBe("running");
+
+    expect((await adapter.prompt("session", "r3", "third")).held).toBe(true);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(provider.prompts).toHaveLength(1);
+    expect((await adapter.history("session")).queued).toHaveLength(2);
+
+    // The turn's own terminal event still ends the status and delivers.
+    adapter.projectionForTests("session").statusUpdate("completed");
+    for (let attempt = 0; attempt < 200 && provider.prompts.length < 2; attempt += 1) await new Promise(resolve => setTimeout(resolve, 1));
+    expect(provider.prompts[1]).toEqual(expect.objectContaining({ text: "second", id: held.messageId }));
   });
 
   test("a failed delivery pauses the queue instead of hammering a failing conversation", async () => {

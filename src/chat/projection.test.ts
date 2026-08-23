@@ -112,7 +112,9 @@ describe("chat projection", () => {
       item: { id: "permission:p1", type: "permission", createdAt: 15, requestId: "p1", action: "edit", resources: ["file.ts"], status: "pending" },
     });
     expect(recovered.projection.items.map(item => item.id)).toEqual(["message:u1", "permission:p1", "part:a1"]);
-    // Equal timestamps keep arrival order — the provider's own part order.
+    // Equal timestamps keep arrival order — which matches the provider's
+    // part order only when parts arrive in order; a snapshot reload restores
+    // the exact order otherwise.
     const tied = applyChatEvent(recovered.projection, {
       generation: "g1", sequence: 6, conversationId: "c1", type: "item.upsert",
       item: { id: "part:a2", type: "assistant_message", createdAt: 20, markdown: "more" },
