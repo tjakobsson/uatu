@@ -21,7 +21,7 @@ afterEach(async () => {
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 
 async function fixture(options: { fs?: typeof fs; reservations?: PathReservationCoordinator } = {}) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "uatu-folders-"));
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "uatu-folders-")));
   tempDirectories.push(root);
   const state = path.join(root, "state");
   const folders = path.join(root, "folders");
@@ -127,6 +127,49 @@ describe("FolderManager validation and unregistered operations", () => {
     await fs.writeFile(path.join(source, ".hidden"), "content");
     await expect(f.manager.remove({ path: source })).rejects.toMatchObject({ code: "not-empty" });
     expect(await exists(path.join(source, ".hidden"))).toBe(true);
+  });
+
+  test("canonicalizes symlinked ancestors before reservations and registry lookup", async () => {
+    const f = await fixture();
+    const source = path.join(f.folders, "source");
+    const alias = path.join(f.root, "folder-alias");
+    await fs.mkdir(source);
+    await fs.symlink(f.folders, alias);
+    const entry = await f.registry.register(source);
+    const clone = f.reservations.acquire([path.join(source, "clone")])!;
+
+    await expect(f.manager.rename({ path: path.join(alias, "source"), name: "renamed" })).rejects.toMatchObject({ code: "conflict" });
+    clone.release();
+
+    const result = completed(await f.manager.rename({ path: path.join(alias, "source"), name: "renamed" }));
+    const destination = path.join(f.folders, "renamed");
+    expect(result).toEqual({ path: destination, workspaceIds: [entry.id] });
+    expect(f.registry.byId(entry.id)?.path).toBe(destination);
+  });
+
+  test("does not replace a destination created after the preflight check", async () => {
+    const destinationName = "destination";
+    let raceEnabled = false;
+    const injected = Object.assign({}, fs, {
+      mkdir: async (candidate: string, options?: Parameters<typeof fs.mkdir>[1]) => {
+        if (raceEnabled && path.basename(candidate) === destinationName) {
+          raceEnabled = false;
+          await fs.mkdir(candidate);
+          await fs.writeFile(path.join(candidate, "competitor.txt"), "kept");
+        }
+        return fs.mkdir(candidate, options);
+      },
+    }) as typeof fs;
+    const f = await fixture({ fs: injected });
+    const source = path.join(f.folders, "source");
+    const destination = path.join(f.folders, destinationName);
+    await fs.mkdir(source);
+    await fs.writeFile(path.join(source, "source.txt"), "source");
+    raceEnabled = true;
+
+    await expect(f.manager.rename({ path: source, name: destinationName })).rejects.toMatchObject({ code: "conflict" });
+    expect(await fs.readFile(path.join(source, "source.txt"), "utf8")).toBe("source");
+    expect(await fs.readFile(path.join(destination, "competitor.txt"), "utf8")).toBe("kept");
   });
 
   test("maps filesystem permission failures without exposing host error details", async () => {

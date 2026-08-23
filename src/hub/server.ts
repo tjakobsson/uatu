@@ -376,9 +376,10 @@ export function createHubFetchHandler(deps: HubDeps) {
     if (!path.isAbsolute(requested)) {
       return json(400, { error: "path must be absolute" });
     }
-    const resolved = path.resolve(requested);
+    let resolved = path.resolve(requested);
     let dirents;
     try {
+      resolved = await fs.realpath(resolved);
       dirents = await fs.readdir(resolved, { withFileTypes: true });
     } catch {
       return json(404, { error: `cannot read directory: ${resolved}` });
@@ -423,9 +424,11 @@ export function createHubFetchHandler(deps: HubDeps) {
     if (requested === "" || !path.isAbsolute(requested)) {
       return json(400, { error: "an absolute folder path is required" });
     }
-    const folder = path.resolve(requested);
+    const requestedFolder = path.resolve(requested);
+    let folder = requestedFolder;
     let isDirectory = false;
     try {
+      folder = await fs.realpath(requestedFolder);
       isDirectory = (await fs.stat(folder)).isDirectory();
     } catch {
       isDirectory = false;
@@ -433,37 +436,41 @@ export function createHubFetchHandler(deps: HubDeps) {
     if (!isDirectory) {
       return json(404, { error: `no such folder: ${folder}` });
     }
-    if (cloneJobs.isTargetReserved(folder)) {
+    const reservation = cloneJobs.reserveTarget(folder);
+    if (!reservation) {
       return json(409, { error: `folder is currently being cloned: ${folder}` });
     }
-
-    const gitCommand = deps.gitCommand?.() ?? "git";
-    const probe = await probeGitRepository(folder, gitCommand);
-    if (probe.kind === "not-a-repository") {
-      if (body.init !== true) {
-        return json(409, { needsInit: true, error: `${folder} is not a git repository` });
-      }
-      const initialized = await gitInit(folder, gitCommand);
-      if (!initialized.ok) {
-        return json(500, { error: `git init failed: ${initialized.error}` });
-      }
-    }
-
-    const { entry, created } = await registry.registerWithStatus(folder);
-    if (body.start === false) {
-      return json(200, { id: entry.id, running: false });
-    }
     try {
-      await sessions.start(entry.id, created ? async () => {
-        if (!(await registry.remove(entry.id))) throw new Error(`workspace registration was not removed: ${entry.id}`);
-        await deps.credentialApi?.metadata.removeWorkspaceAssignments(entry.id);
-      } : undefined);
-    } catch (error) {
-      // A folder that fails to serve is not left registered — mirroring the
-      // launcher rule that a declined/failed folder leaves no trace.
-      return json(500, { error: error instanceof Error ? error.message : String(error) });
+      const gitCommand = deps.gitCommand?.() ?? "git";
+      const probe = await probeGitRepository(folder, gitCommand);
+      if (probe.kind === "not-a-repository") {
+        if (body.init !== true) {
+          return json(409, { needsInit: true, error: `${folder} is not a git repository` });
+        }
+        const initialized = await gitInit(folder, gitCommand);
+        if (!initialized.ok) {
+          return json(500, { error: `git init failed: ${initialized.error}` });
+        }
+      }
+
+      const { entry, created } = await registry.registerWithStatus(folder);
+      if (body.start === false) {
+        return json(200, { id: entry.id, running: false });
+      }
+      try {
+        await sessions.start(entry.id, created ? async () => {
+          if (!(await registry.remove(entry.id))) throw new Error(`workspace registration was not removed: ${entry.id}`);
+          await deps.credentialApi?.metadata.removeWorkspaceAssignments(entry.id);
+        } : undefined);
+      } catch (error) {
+        // A folder that fails to serve is not left registered — mirroring the
+        // launcher rule that a declined/failed folder leaves no trace.
+        return json(500, { error: error instanceof Error ? error.message : String(error) });
+      }
+      return json(200, { id: entry.id });
+    } finally {
+      reservation.release();
     }
-    return json(200, { id: entry.id });
   };
 
   // A clone is a user-owned, addressable job: creation returns immediately;

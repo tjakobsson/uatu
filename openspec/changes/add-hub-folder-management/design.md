@@ -43,7 +43,7 @@ Separate operations keep each closed request schema simple and give independent 
 
 ### 3. Validate a parent plus one visible path segment
 
-Create accepts an absolute parent and rename accepts an absolute source plus a replacement basename. Names are rejected when empty, `.` or `..`, prefixed with `.`, contain NUL, or contain either platform path separator. The coordinator derives destinations itself and never accepts a client-computed destination. It normalizes lexical absolute paths consistently with registration, uses `lstat` for mutation sources, rejects symbolic links, and checks destination nonexistence before `fs.rename`.
+Create accepts an absolute parent and rename accepts an absolute source plus a replacement basename. Names are rejected when empty, `.` or `..`, prefixed with `.`, contain NUL, or contain either platform path separator. The coordinator derives destinations itself and never accepts a client-computed destination. It uses `lstat` to reject a symbolic-link source, canonicalizes existing paths with `realpath` before coordination, and atomically claims the absent destination name before `fs.rename` so a concurrent creator cannot be replaced.
 
 Remove uses non-recursive `rmdir`; no precomputed listing is treated as proof of emptiness. This lets the filesystem reject files, hidden entries, and directories added in a race. Rename never relies on platform-specific overwrite behavior: an existing destination is a conflict before the call, and any race is surfaced rather than handled by removal.
 
@@ -51,7 +51,7 @@ Hidden folder creation is excluded because the existing browser intentionally hi
 
 ### 4. Use one hierarchy-aware path reservation coordinator for clones and folder mutations
 
-Extract clone target reservations behind a shared in-memory path reservation service. A reservation conflicts when either path equals or is an ancestor of the other, using normalized component-aware `path.relative` checks rather than string prefixes. Clone creation reserves its target as it does today. Folder create reserves the child destination; rename reserves source and destination subtrees; remove reserves its source.
+Extract clone target reservations behind a shared in-memory path reservation service. A reservation conflicts when either path equals or is an ancestor of the other, using normalized component-aware `path.relative` checks rather than string prefixes. Clone creation reserves its target as it does today. Workspace registration holds the same reservation through filesystem preflight and persistence. Folder create reserves the child destination; rename reserves source and destination subtrees; remove reserves its source.
 
 Conflict checking and reservation acquisition happen synchronously in one coordinator before asynchronous work begins. This closes the check-then-act race where a clone could start after a folder operation checked `isTargetReserved`. Reservations remain process-local because active clone jobs and session children are themselves process-local.
 

@@ -55,7 +55,7 @@ type RemoveJournal = {
 
 export type PendingFolderMutation = RenameJournal | RemoveJournal;
 
-type FileSystem = Pick<typeof nodeFs, "lstat" | "mkdir" | "rename" | "rmdir" | "readFile" | "open" | "unlink" | "chmod" | "rm">;
+type FileSystem = Pick<typeof nodeFs, "lstat" | "realpath" | "mkdir" | "rename" | "rmdir" | "readFile" | "open" | "unlink" | "chmod" | "rm">;
 
 type FolderRegistry = Pick<WorkspaceRegistry,
   "atOrBelow" | "byId" | "byPath" | "remove" | "replacePathPrefix" | "restoreEntries"
@@ -266,10 +266,10 @@ export class FolderManager {
   create(input: unknown): Promise<CreateFolderResult> {
     return this.enqueue(async () => {
       const parsed = parseCreate(input);
-      const destination = path.join(parsed.parent, parsed.name);
+      const parent = await this.canonicalDirectory(parsed.parent);
+      const destination = path.join(parent, parsed.name);
       const reservation = this.reserve([destination]);
       try {
-        await this.assertDirectory(parsed.parent);
         await this.assertMissing(destination);
         await this.fs.mkdir(destination);
         return { path: destination };
@@ -284,28 +284,28 @@ export class FolderManager {
   rename(input: unknown): Promise<CoordinatedFolderResult<RenameFolderResult>> {
     return this.enqueue(async () => {
       const parsed = parseRename(input);
-      const destination = path.join(path.dirname(parsed.path), parsed.name);
-      if (destination === parsed.path) throw new FolderManagerError("conflict", "source and destination are the same folder");
-      const reservation = this.reserve([parsed.path, destination]);
+      const source = await this.canonicalDirectory(parsed.path);
+      const destination = path.join(path.dirname(source), parsed.name);
+      if (destination === source) throw new FolderManagerError("conflict", "source and destination are the same folder");
+      const reservation = this.reserve([source, destination]);
       try {
-        await this.assertDirectory(parsed.path);
         await this.assertMissing(destination);
-        const affected = this.options.registry.atOrBelow(parsed.path);
+        const affected = this.options.registry.atOrBelow(source);
         return await this.options.sessions.runWithSessionsStopped(
           affected.map(entry => entry.id),
           parsed.stop === true,
           async () => {
-            await this.assertDirectory(parsed.path);
+            await this.assertDirectory(source);
             await this.assertMissing(destination);
             if (affected.length === 0) {
               try {
-                await this.fs.rename(parsed.path, destination);
+                await this.renameWithoutReplacement(source, destination);
               } catch (error) {
                 throw safeFsError(error, "folder rename failed");
               }
               return { path: destination, workspaceIds: [] };
             }
-            return await this.renameRegistered(parsed.path, destination, affected);
+            return await this.renameRegistered(source, destination, affected);
           },
         );
       } finally {
@@ -317,24 +317,24 @@ export class FolderManager {
   remove(input: unknown): Promise<CoordinatedFolderResult<RemoveFolderResult>> {
     return this.enqueue(async () => {
       const parsed = parseRemove(input);
-      const reservation = this.reserve([parsed.path]);
+      const source = await this.canonicalDirectory(parsed.path);
+      const reservation = this.reserve([source]);
       try {
-        await this.assertDirectory(parsed.path);
-        const entry = this.options.registry.byPath(parsed.path);
+        const entry = this.options.registry.byPath(source);
         return await this.options.sessions.runWithSessionsStopped(
           entry ? [entry.id] : [],
           parsed.stop === true,
           async () => {
-            await this.assertDirectory(parsed.path);
+            await this.assertDirectory(source);
             if (!entry) {
               try {
-                await this.fs.rmdir(parsed.path);
+                await this.fs.rmdir(source);
               } catch (error) {
                 throw safeFsError(error, "folder removal failed");
               }
-              return { path: parsed.path };
+              return { path: source };
             }
-            return await this.removeRegistered(parsed.path, entry);
+            return await this.removeRegistered(source, entry);
           },
         );
       } finally {
@@ -405,6 +405,30 @@ export class FolderManager {
     }
   }
 
+  private async canonicalDirectory(folderPath: string): Promise<string> {
+    await this.assertDirectory(folderPath);
+    try {
+      return normalizeAbsolutePath(await this.fs.realpath(folderPath));
+    } catch (error) {
+      throw safeFsError(error, "folder inspection failed");
+    }
+  }
+
+  private async renameWithoutReplacement(source: string, destination: string): Promise<void> {
+    let claimed = false;
+    try {
+      // mkdir atomically claims the absent name. POSIX rename may then replace
+      // only our empty claim; a competing entry makes either step fail.
+      await this.fs.mkdir(destination);
+      claimed = true;
+      await this.fs.rename(source, destination);
+      claimed = false;
+    } catch (error) {
+      if (claimed) await this.fs.rmdir(destination).catch(() => undefined);
+      throw error;
+    }
+  }
+
   private async assertMissing(candidate: string): Promise<void> {
     try {
       await this.fs.lstat(candidate);
@@ -436,7 +460,7 @@ export class FolderManager {
     const pending: RenameJournal = { version: JOURNAL_VERSION, operation: "rename", source, destination, before, after };
     try {
       await this.journal.write(pending);
-      await this.fs.rename(source, destination);
+      await this.renameWithoutReplacement(source, destination);
     } catch (error) {
       await this.journal.clear().catch(() => undefined);
       throw safeFsError(error, "registered folder rename failed");
@@ -450,7 +474,7 @@ export class FolderManager {
       return { path: destination, workspaceIds: before.map(entry => entry.id) };
     } catch (error) {
       try {
-        await this.fs.rename(destination, source);
+        await this.renameWithoutReplacement(destination, source);
         if (registryUpdated) await this.options.registry.restoreEntries(before);
         await this.journal.clear();
       } catch (rollbackError) {

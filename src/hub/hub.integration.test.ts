@@ -79,7 +79,7 @@ let releaseManagedAssignment: (() => void) | undefined;
 let enterManagedAssignment: (() => void) | undefined;
 
 beforeAll(async () => {
-  tempRoot = await mkdtemp(path.join(os.tmpdir(), "uatu-hub-int-"));
+  tempRoot = await realpath(await mkdtemp(path.join(os.tmpdir(), "uatu-hub-int-")));
   workspace = path.join(tempRoot, "workspaces", "myproject");
   execFileSync("mkdir", ["-p", workspace]);
   execFileSync("git", ["init"], { cwd: workspace, stdio: "ignore" });
@@ -830,6 +830,31 @@ describe("hub end to end", () => {
     expect(bearer.status).toBe(400);
     await assertContract("POST", "/api/hub/folders/create", bearer);
     expect(await bearer.json()).toEqual({ error: "parent must be an absolute path" });
+  });
+
+  test("workspace registration holds the shared path reservation through persistence", async () => {
+    const folder = path.join(tempRoot, "registration-reservation");
+    await mkdir(folder);
+    execFileSync("git", ["init"], { cwd: folder, stdio: "ignore" });
+    const canonicalFolder = await realpath(folder);
+    const originalRegister = registry.registerWithStatus.bind(registry);
+    let reservedDuringRegistration = false;
+    registry.registerWithStatus = async (...args) => {
+      reservedDuringRegistration = reservations.isReserved(canonicalFolder);
+      return originalRegister(...args);
+    };
+    try {
+      const response = await fetch(`${origin}/api/hub/workspaces`, {
+        method: "POST",
+        headers: { cookie, origin, "content-type": "application/json" },
+        body: JSON.stringify({ path: folder, start: false }),
+      });
+      expect(response.status).toBe(200);
+      expect(reservedDuringRegistration).toBe(true);
+      expect(reservations.isReserved(canonicalFolder)).toBe(false);
+    } finally {
+      registry.registerWithStatus = originalRegister;
+    }
   });
 
   test("folder mutation routes enforce closed validation and typed missing errors", async () => {
