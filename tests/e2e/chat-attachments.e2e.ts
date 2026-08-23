@@ -277,3 +277,37 @@ test.describe("image-only messages", () => {
     await expect(message.locator("div")).toHaveCount(1);
   });
 });
+
+test.describe("staging chain regressions", () => {
+  test.beforeEach(async ({ page, request }) => bootChat(page, request));
+
+  test("an upload started while submission drains still joins the message", async ({ page }) => {
+    await newConversation(page);
+    await page.route("**/attachments", async route => {
+      await new Promise(resolve => setTimeout(resolve, 400));
+      await route.continue();
+    });
+    // First upload in flight; Enter lands during it; a second attach starts
+    // while submission is draining the chain. Both must ride this message.
+    await page.locator("#chat-attach-input").setInputFiles({ name: "first.png", mimeType: "image/png", buffer: PNG });
+    await page.locator("#chat-input").fill("both images please");
+    const accepted = page.waitForResponse(response => response.url().endsWith("/prompts"));
+    await page.locator("#chat-input").press("Enter");
+    await page.locator("#chat-attach-input").setInputFiles({ name: "second.png", mimeType: "image/png", buffer: PNG });
+    const body = (await accepted).request().postDataJSON() as { attachments?: Array<{ name: string }> };
+    expect(body.attachments?.map(entry => entry.name).sort()).toEqual(["first.png", "second.png"]);
+    await expect(page.locator("#chat-attachments")).toBeHidden();
+    await page.unroute("**/attachments");
+  });
+
+  test("overlapping intakes near the bound keep eight and refuse the excess", async ({ page }) => {
+    await newConversation(page);
+    for (let index = 0; index < 7; index += 1) await attachViaPicker(page, `base-${index}.png`);
+    // Two back-to-back pastes race for the last slot: staging is serialized,
+    // so exactly one lands and the other is refused — never nine pending.
+    await pasteImage(page, { name: "eighth.png" });
+    await pasteImage(page, { name: "ninth.png" });
+    await expect(page.locator("#chat-composer-error")).toContainText("at most 8 images");
+    await expect(page.locator("#chat-attachments .chat-attachment")).toHaveCount(8);
+  });
+});

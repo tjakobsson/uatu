@@ -878,10 +878,13 @@ export function initChat(): void {
   // ------------------------------------------------------------------
   type PendingAttachment = MessageAttachment & { id: string; previewUrl: string };
   const pendingAttachments = new Map<string, PendingAttachment[]>();
-  // Uploads still in flight, per conversation. Submission awaits these so an
-  // image attached moments before Enter joins the message it was attached
-  // for instead of leaking into the next one.
-  const attachmentStagingWaits = new Map<string, Promise<void>[]>();
+  // One serialized staging chain per conversation. Serialization makes the
+  // per-message bound check honest — a second paste near the eight-image
+  // limit runs after the first and sees its result instead of racing past
+  // the cap — and submission drains the chain (re-reading the tail until
+  // nothing new was appended while it waited) so an image attached moments
+  // before Enter joins the message it was attached for.
+  const attachmentStaging = new Map<string, Promise<void>>();
   const supportedAttachmentTypes = new Set<string>(CHAT_ATTACHMENT_MIME_TYPES);
 
   // The conversation attachments belong to. The projection may still be
@@ -974,7 +977,7 @@ export function initChat(): void {
       setComposerError(`${support.modelName} cannot see images. Pick a model with image support to attach.`);
       return;
     }
-    const task = (async () => {
+    const task = (attachmentStaging.get(conversationId) ?? Promise.resolve()).then(async () => {
       for (const file of files) {
         if ((pendingAttachments.get(conversationId) ?? []).length >= CHAT_ATTACHMENTS_PER_MESSAGE) {
           setComposerError(`A message can carry at most ${CHAT_ATTACHMENTS_PER_MESSAGE} images.`);
@@ -999,17 +1002,12 @@ export function initChat(): void {
           setComposerError(`Could not attach ${file.name || "image"}: ${messageOf(error)}`);
         }
       }
-    })();
-    const waits = attachmentStagingWaits.get(conversationId) ?? [];
-    waits.push(task);
-    attachmentStagingWaits.set(conversationId, waits);
+    });
+    attachmentStaging.set(conversationId, task);
     try {
       await task;
     } finally {
-      const list = attachmentStagingWaits.get(conversationId) ?? [];
-      const index = list.indexOf(task);
-      if (index >= 0) list.splice(index, 1);
-      if (list.length === 0) attachmentStagingWaits.delete(conversationId);
+      if (attachmentStaging.get(conversationId) === task) attachmentStaging.delete(conversationId);
     }
     renderAttachments();
     syncControls();
@@ -1917,10 +1915,16 @@ export function initChat(): void {
     // submission waits for in-flight staging rather than snapshotting a list
     // the upload has not reached yet (and leaking the image into the next
     // message).
-    const staging = attachmentStagingWaits.get(conversationId);
-    if (staging?.length) {
+    let stagingTail = attachmentStaging.get(conversationId);
+    if (stagingTail) {
       noteComposer("Uploading images...");
-      await Promise.all([...staging]).catch(() => undefined);
+      // Drain, not snapshot: an intake can append a new chain link while
+      // this await yields, and a snapshot would submit without it.
+      while (stagingTail) {
+        await stagingTail.catch(() => undefined);
+        const next = attachmentStaging.get(conversationId);
+        stagingTail = next === stagingTail ? undefined : next;
+      }
       // The wait yielded: the user may have switched conversations. The text
       // belongs to the conversation it was written in, so it becomes that
       // conversation's draft instead of being sent against the wrong one.
