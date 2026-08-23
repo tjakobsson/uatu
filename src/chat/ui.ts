@@ -904,11 +904,13 @@ export function initChat(): void {
     if (count > 0) attachmentRefusals.set(conversationId, (attachmentRefusals.get(conversationId) ?? 0) + count);
   };
 
-  // The prompt route bounds attachment names to 200 UTF-8 bytes; an overlong
-  // filename staged verbatim would upload fine and then fail every send.
-  // Truncated here, on a code-point boundary, so the reference stays sendable.
+  // The prompt route bounds attachment names to 200 UTF-8 bytes and refuses
+  // blank ones; a name staged verbatim past either rule would upload fine
+  // and then fail every send. Bounded here — fallback for empty and
+  // whitespace-only, truncation on a code-point boundary — so the reference
+  // stays sendable.
   const boundAttachmentName = (name: string): string => {
-    const trimmed = name || "image";
+    const trimmed = name.trim() === "" ? "image" : name;
     const encoder = new TextEncoder();
     if (encoder.encode(trimmed).length <= 200) return trimmed;
     let bounded = trimmed;

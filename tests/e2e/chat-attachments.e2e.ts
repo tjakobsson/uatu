@@ -593,6 +593,25 @@ test.describe("typeless intake defers to the byte sniff", () => {
   });
 });
 
+test.describe("attachment name fallback", () => {
+  test.beforeEach(async ({ page, request }) => bootChat(page, request));
+
+  test("a whitespace-only filename falls back and the reference stays sendable", async ({ page }) => {
+    await newConversation(page);
+    // Legal on Unix, and constructible from the clipboard: a name the
+    // prompt route would refuse as blank must never stage verbatim.
+    await pasteImage(page, { name: " " });
+    const chip = page.locator("#chat-attachments .chat-attachment");
+    await expect(chip).toHaveCount(1);
+    await expect(chip.first()).toContainText("image");
+    const accepted = page.waitForResponse(response => response.url().endsWith("/prompts"));
+    await page.locator("#chat-input").fill("named by fallback");
+    await page.locator("#chat-input").press("Enter");
+    const body = (await accepted).request().postDataJSON() as { attachments?: Array<{ name: string }> };
+    expect(body.attachments?.[0]?.name).toBe("image");
+  });
+});
+
 test.describe("model switch after staging", () => {
   test.beforeEach(async ({ page, request }) => bootChat(page, request));
 
