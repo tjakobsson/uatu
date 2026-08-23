@@ -184,6 +184,12 @@ describe("clone page", () => {
     expect(html).toContain('refreshWorkspaceState().catch(() => {})');
     expect(html).toContain('response.status === 404 && browseParent');
     expect(html).toContain("another client may have renamed or removed it");
+    // The rename field is pre-filled with the current basename, which may
+    // legitimately carry whitespace; only emptiness is judged trimmed and
+    // the submitted name keeps its whitespace.
+    expect(html).toContain("const name = renameFolderName.value;");
+    expect(html).toContain("if (!name.trim()) return;");
+    expect(html).not.toContain("renameFolderName.value.trim()");
   });
 
   test("retries needsStop with named workspace confirmation and stop authorization", async () => {

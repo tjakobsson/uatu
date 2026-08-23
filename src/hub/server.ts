@@ -854,11 +854,13 @@ export function createHubFetchHandler(deps: HubDeps) {
     }
     const status = error.code === "invalid-input"
       ? 400
-      : error.code === "not-found"
-        ? 404
-        : error.code === "conflict" || error.code === "not-empty"
-          ? 409
-          : 500;
+      : error.code === "permission-denied"
+        ? 403
+        : error.code === "not-found"
+          ? 404
+          : error.code === "conflict" || error.code === "not-empty"
+            ? 409
+            : 500;
     return json(status, { error: error.message }, NO_STORE_HEADERS);
   };
 

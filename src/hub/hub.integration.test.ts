@@ -1080,6 +1080,18 @@ describe("hub end to end", () => {
     expect(missing.status).toBe(404);
     await assertContract("POST", "/api/hub/folders/remove", missing);
     expect(await missing.json()).toEqual({ error: "folder was not found" });
+
+    // A filesystem authorization failure is the contract's 403, not a 500.
+    const locked = path.join(tempRoot, "folder-locked");
+    await mkdir(locked, { mode: 0o500 });
+    const denied = await fetch(`${origin}/api/hub/folders/create`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ parent: locked, name: "child" }),
+    });
+    expect(denied.status).toBe(403);
+    await assertContract("POST", "/api/hub/folders/create", denied);
+    expect(await denied.json()).toEqual({ error: "filesystem permission denied" });
   });
 
   test("folder routes create, rename, and remove without overwriting or recursive deletion", async () => {

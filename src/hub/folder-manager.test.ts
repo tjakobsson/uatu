@@ -352,6 +352,81 @@ describe("FolderManager registered mutations", () => {
     completed(await operation);
   });
 
+  test("preserves an unresolved mutation journal by refusing later registered mutations", async () => {
+    const f = await fixture();
+    const doomed = path.join(f.folders, "doomed");
+    const other = path.join(f.folders, "other");
+    await Promise.all([fs.mkdir(doomed), fs.mkdir(other)]);
+    const doomedEntry = await f.registry.register(doomed);
+    const otherEntry = await f.registry.register(other);
+    const failingPersonalState = Object.assign(Object.create(f.personalState), f.personalState, {
+      forgetWorkspace: async () => { throw new Error("injected personal-state failure"); },
+    });
+    const failing = new FolderManager({
+      journalPath: f.journalPath,
+      registry: f.registry,
+      sessions: f.sessions,
+      personalState: failingPersonalState,
+      credentials: f.credentials,
+      reservations: f.reservations,
+    });
+    // The removal deletes the directory, then fails past the point of no
+    // return — the journal is the only remaining record of "doomed".
+    await expect(failing.remove({ path: doomed })).rejects.toMatchObject({ code: "internal" });
+    expect(await exists(doomed)).toBe(false);
+    expect(await exists(f.journalPath)).toBe(true);
+
+    // Later registered mutations must refuse rather than replace that
+    // record; unregistered operations stay available.
+    await expect(f.manager.rename({ path: other, name: "renamed" })).rejects.toMatchObject({ code: "conflict" });
+    await expect(f.manager.remove({ path: other })).rejects.toMatchObject({ code: "conflict" });
+    await f.manager.create({ parent: f.folders, name: "fresh" });
+    const journal = JSON.parse(await fs.readFile(f.journalPath, "utf8")) as { operation: string; source: string };
+    expect(journal).toMatchObject({ operation: "remove", source: doomed });
+
+    await f.manager.recover();
+    expect(f.registry.byId(doomedEntry.id)).toBeUndefined();
+    expect(await exists(f.journalPath)).toBe(false);
+    completed(await f.manager.rename({ path: other, name: "renamed" }));
+    expect(f.registry.byId(otherEntry.id)?.path).toBe(path.join(f.folders, "renamed"));
+  });
+
+  test("reconciles persisted alias paths before canonical rename lookup", async () => {
+    const f = await fixture();
+    const project = path.join(f.folders, "project");
+    await fs.mkdir(project);
+    const alias = path.join(f.root, "legacy-alias");
+    await fs.symlink(f.folders, alias);
+    // A pre-canonicalization registry entry: persisted through the
+    // symlinked ancestor, invisible to canonical byPath/atOrBelow.
+    const entry = await f.registry.register(path.join(alias, "project"));
+    expect(f.registry.atOrBelow(project)).toEqual([]);
+    await f.sessions.start(entry.id);
+
+    // The running session must be seen — a missed lookup would move the
+    // folder out from under it without stopping anything.
+    const conflict = await f.manager.rename({ path: project, name: "renamed" });
+    expect(conflict).toEqual({ status: "needs-stop", workspaceIds: [entry.id] });
+
+    const destination = path.join(f.folders, "renamed");
+    const result = completed(await f.manager.rename({ path: project, name: "renamed", stop: true }));
+    expect(result).toEqual({ path: destination, workspaceIds: [entry.id] });
+    expect(f.stopped).toEqual([entry.id]);
+    expect(f.registry.byId(entry.id)?.path).toBe(destination);
+  });
+
+  test("removes an alias-registered workspace addressed by its canonical path", async () => {
+    const f = await fixture();
+    const project = path.join(f.folders, "empty");
+    await fs.mkdir(project);
+    const alias = path.join(f.root, "legacy-alias");
+    await fs.symlink(f.folders, alias);
+    const entry = await f.registry.register(path.join(alias, "empty"));
+
+    expect(completed(await f.manager.remove({ path: project }))).toEqual({ path: project, workspaceId: entry.id });
+    expect(f.registry.byId(entry.id)).toBeUndefined();
+  });
+
   test("removes an exact registered empty folder and clears personal and credential metadata", async () => {
     const f = await fixture();
     const source = path.join(f.folders, "empty");

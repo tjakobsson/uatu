@@ -1739,8 +1739,12 @@ renameFolderForm.onsubmit = async event => {
   event.preventDefault();
   if (!pendingRename) return;
   const rename = pendingRename;
-  const name = renameFolderName.value.trim();
-  if (!name) return;
+  // Emptiness is judged on the trimmed value, but the submitted name keeps
+  // its whitespace: the server accepts visible padded names, and the field
+  // is pre-filled with the current basename — trimming here would silently
+  // rename " project " on an untouched submit.
+  const name = renameFolderName.value;
+  if (!name.trim()) return;
   setLocalError(renameFolderError, "");
   renameFolderSubmit.disabled = true;
   renameFolderCancel.disabled = true;
