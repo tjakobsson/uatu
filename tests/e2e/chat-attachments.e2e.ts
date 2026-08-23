@@ -671,6 +671,10 @@ test.describe("upload refusals stay with their conversation", () => {
     // Switch away while the refusal is in flight: it must not flash here.
     await page.locator("#chat-conversation-select").selectOption(first);
     await failed;
+    // Same rule as the chat.e2e sibling: the handler's status note is the
+    // proof the rejection actually ran before the error's absence means
+    // anything.
+    await expect(page.locator("#chat-composer-status-live")).toHaveText("Message not accepted; draft restored");
     await expect(page.locator("#chat-composer-error")).toBeHidden();
     // The failed conversation holds both the restored draft and the reason.
     await page.locator("#chat-conversation-select").selectOption(second);

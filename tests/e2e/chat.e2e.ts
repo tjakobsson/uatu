@@ -434,6 +434,10 @@ test.describe("desktop OpenCode chat", () => {
     // rejection lands.
     await page.locator("#chat-conversation-select").selectOption(second.conversation.id);
     await failed;
+    // The response landing is not the rejection handler running: wait for
+    // the handler's own status note before asserting where the error went,
+    // or a regression writing to the selection could slip past both checks.
+    await expect(page.locator("#chat-composer-status-live")).toHaveText("Message not accepted; draft restored");
     // The refusal belongs to the conversation that submitted: nothing
     // flashes here, and the reason waits with the restored draft.
     await expect(page.locator("#chat-composer-error")).toBeHidden();
