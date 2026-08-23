@@ -1115,6 +1115,58 @@ describe("prompt, abort, permission, and question mutations", () => {
     expect(provider.prompts[1]).toEqual(expect.objectContaining({ text: "second", id: held.messageId }));
   });
 
+  test("a delivery publishes to the replacement projection after an eviction during its lookup", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("a"), fixtureSession("b"), fixtureSession("c")];
+    let message = 0;
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", maxProjections: 2, id: () => `id-${++message}` });
+
+    expect((await adapter.prompt("a", "r1", "first")).held).toBe(false);
+    const held = await adapter.prompt("a", "r2", "second");
+    expect(held.held).toBe(true);
+    const original = adapter.projectionForTests("a");
+
+    // The delivery's session lookup stalls; meanwhile activity on other
+    // conversations evicts "a"'s projection and a client reopens it,
+    // receiving a replacement whose snapshot still shows the held head. The
+    // delivered event must reach that replacement — it has no provider-side
+    // echo, so a subscriber who missed it would show the departed head as
+    // still held until the next queue change.
+    let releaseLookup!: () => void;
+    const gate = new Promise<void>(resolve => { releaseLookup = resolve; });
+    let entered!: () => void;
+    const enteredLookup = new Promise<void>(resolve => { entered = resolve; });
+    const lookup = provider.getSession.bind(provider);
+    provider.getSession = async sessionId => {
+      if (sessionId !== "a") return lookup(sessionId);
+      provider.getSession = lookup;
+      entered();
+      await gate;
+      return lookup(sessionId);
+    };
+    original.statusUpdate("completed");
+    await enteredLookup;
+
+    await adapter.subscribe("b").then(result => result.events.cancel());
+    await adapter.subscribe("c").then(result => result.events.cancel());
+    const snapshot = await adapter.history("a");
+    expect(snapshot.queued).toEqual([expect.objectContaining({ id: held.messageId })]);
+    expect(adapter.projectionForTests("a")).not.toBe(original);
+    const { events } = await adapter.subscribe("a", { cursor: snapshot.cursor });
+
+    releaseLookup();
+    const iterator = events[Symbol.asyncIterator]();
+    const seen: string[] = [];
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const next = await Promise.race([iterator.next(), Bun.sleep(500).then(() => "timeout" as const)]);
+      if (next === "timeout" || (next as IteratorResult<unknown>).done) break;
+      seen.push(JSON.stringify((next as IteratorResult<unknown>).value));
+      if (seen[seen.length - 1].includes(`"delivered"`)) break;
+    }
+    events.cancel();
+    expect(seen.some(frame => frame.includes(`"delivered"`) && frame.includes(held.messageId))).toBe(true);
+  });
+
   test("a held message freezes the configuration it was submitted under", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];

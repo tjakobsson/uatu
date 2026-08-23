@@ -544,8 +544,8 @@ export class OpenCodeChatAdapter {
         // The staged selection commits on submission, exactly as an
         // immediately dispatched prompt commits it; delivery re-asserts the
         // same values on the wire.
-        const configuration = this.commitConfiguration(conversationId, projection, currentConfiguration, model, mode, variant);
-        this.publishQueue(conversationId, projection, { kind: "held", messageId: held.id });
+        const configuration = this.commitConfiguration(conversationId, currentConfiguration, model, mode, variant);
+        this.publishQueue(conversationId, { kind: "held", messageId: held.id });
         if (!busy) this.scheduleDelivery(conversationId);
         return { messageId: held.id, held: true, configuration };
       }
@@ -573,7 +573,7 @@ export class OpenCodeChatAdapter {
       if (index < 0) throw new QueuedMessageNotHeldError();
       queue.splice(index, 1);
       if (queue.length === 0) this.heldQueues.delete(conversationId);
-      this.publishQueue(conversationId, this.projection(conversationId), { kind: "removed", messageId });
+      this.publishQueue(conversationId, { kind: "removed", messageId });
       return { removed: true as const };
     }));
   }
@@ -670,7 +670,7 @@ export class OpenCodeChatAdapter {
         } catch { /* cosmetic — listConversations repairs default titles later */ }
       }
       projection.upsert({ id: `message:${accepted.messageId}`, type: "user_message", createdAt: Date.now(), text, requestId: input.requestId });
-      const configuration = this.commitConfiguration(conversationId, projection, this.configurations.get(conversationId) ?? {}, input.model, mode, variant);
+      const configuration = this.commitConfiguration(conversationId, this.configurations.get(conversationId) ?? {}, input.model, mode, variant);
       return { messageId: accepted.messageId, configuration, ...(conversation ? { conversation } : {}) };
     } catch (error) {
       const mapped = error instanceof UnsupportedVariantSelectionError
@@ -684,7 +684,7 @@ export class OpenCodeChatAdapter {
   // Provider events can update the cache while prompt admission awaits.
   // Merge onto the latest value synchronously so omitted fields preserve
   // that newer state rather than restoring the pre-admission snapshot.
-  private commitConfiguration(conversationId: string, projection: ConversationProjection, fallback: ConversationConfiguration, model?: ModelSelection, mode?: string, variant?: string): ConversationConfiguration {
+  private commitConfiguration(conversationId: string, fallback: ConversationConfiguration, model?: ModelSelection, mode?: string, variant?: string): ConversationConfiguration {
     const latestConfiguration = this.configurations.get(conversationId) ?? fallback;
     const configuration: ConversationConfiguration = {
       ...latestConfiguration,
@@ -702,7 +702,11 @@ export class OpenCodeChatAdapter {
     // selection, matching a running TUI.
     if (configuration.model) this.newConversationDefaults = configuration;
     if (!sameConfiguration(latestConfiguration, configuration)) {
-      projection.replay.publish({ type: "conversation.configuration", configuration });
+      // Resolved at publish time, not at the caller's capture: awaits sit
+      // between a caller picking up its projection and this publication, and
+      // an LRU eviction in that window would send the event into a replay no
+      // current subscriber holds.
+      this.projection(conversationId).replay.publish({ type: "conversation.configuration", configuration });
     }
     return configuration;
   }
@@ -712,8 +716,12 @@ export class OpenCodeChatAdapter {
     return (this.heldQueues.get(conversationId) ?? []).map(({ id, text, queuedAt, requestId }) => ({ id, text, queuedAt, requestId }));
   }
 
-  private publishQueue(conversationId: string, projection: ConversationProjection, change: { kind: "held" | "removed" | "delivered"; messageId: string }): void {
-    projection.replay.publish({ type: "conversation.queue", queued: this.queuedMessages(conversationId), change });
+  // Resolved at publish time for the same eviction reason as configuration
+  // commits: the delivered event especially has no provider-side echo, so a
+  // subscriber who arrived on a replacement projection would otherwise show
+  // the departed head as still held until the next queue change.
+  private publishQueue(conversationId: string, change: { kind: "held" | "removed" | "delivered"; messageId: string }): void {
+    this.projection(conversationId).replay.publish({ type: "conversation.queue", queued: this.queuedMessages(conversationId), change });
   }
 
   // liveTurns as well as projection status: a projection evicted mid-turn
@@ -737,10 +745,9 @@ export class OpenCodeChatAdapter {
     const queue = this.heldQueues.get(conversationId);
     const held = queue?.[0];
     if (!queue || !held) return;
-    const projection = this.projection(conversationId);
     // Re-held, not lost: a conversation that reports busy again before this
     // ran keeps the message queued, and the next end-of-turn retries.
-    if (this.turnActive(conversationId, projection)) return;
+    if (this.turnActive(conversationId, this.projection(conversationId))) return;
     let session: ProviderSession;
     try {
       session = await this.requireSession(conversationId);
@@ -757,7 +764,10 @@ export class OpenCodeChatAdapter {
     // The lookup awaited, and the pump runs outside the admission lane: a
     // busy report can land meanwhile — e.g. the merged stream correcting a
     // stale terminal event. Re-held, not lost, exactly like the guard above;
-    // the corrected turn's own end retries.
+    // the corrected turn's own end retries. Reacquired as well as rechecked:
+    // an LRU eviction during the lookup would leave a captured projection
+    // stale, and the dispatch must publish where current subscribers listen.
+    const projection = this.projection(conversationId);
     if (this.turnActive(conversationId, projection)) return;
     try {
       await this.dispatchPrompt(conversationId, projection, session, {
@@ -770,7 +780,7 @@ export class OpenCodeChatAdapter {
       });
       queue.shift();
       if (queue.length === 0) this.heldQueues.delete(conversationId);
-      this.publishQueue(conversationId, projection, { kind: "delivered", messageId: held.id });
+      this.publishQueue(conversationId, { kind: "delivered", messageId: held.id });
     } catch {
       // The provider refused the delivery. The message stays held and the
       // queue pauses so a failing conversation is not hammered once per
