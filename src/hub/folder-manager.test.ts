@@ -498,6 +498,58 @@ describe("FolderManager registered mutations", () => {
     completed(await f.manager.rename({ path: source, name: "vanished" }));
   });
 
+  test("reconciles chained aliases across rewritten descendants", async () => {
+    const f = await fixture();
+    const group = path.join(f.folders, "group");
+    const other = path.join(f.root, "other");
+    const otherRepo = path.join(other, "repo");
+    await fs.mkdir(group);
+    await fs.mkdir(otherRepo, { recursive: true });
+    await fs.symlink(other, path.join(group, "link"));
+    const alias = path.join(f.root, "legacy-alias");
+    await fs.symlink(f.folders, alias);
+    // The parent alias is listed first; its bulk rewrite moves the
+    // descendant to a path that still traverses the `link` symlink, so a
+    // single stale-snapshot pass would leave it unreconciled.
+    const parentEntry = await f.registry.register(path.join(alias, "group"));
+    const chained = await f.registry.register(path.join(alias, "group", "link", "repo"));
+
+    await f.manager.create({ parent: f.folders, name: "trigger" });
+    expect(f.registry.byId(parentEntry.id)?.path).toBe(group);
+    expect(f.registry.byId(chained.id)?.path).toBe(otherRepo);
+  });
+
+  test("a claim swapped from under the rename conflicts instead of replacing", async () => {
+    // A same-user process rmdir+mkdirs the destination while the journal
+    // is being written: the recorded claim identity no longer matches, so
+    // the rename must refuse — and the cleanup must not delete the foreign
+    // directory either.
+    let swapArmed = false;
+    let swapTarget = "";
+    const injected = Object.assign({}, fs, {
+      rename: async (from: string, to: string) => {
+        if (swapArmed && to.endsWith("pending-folder-mutation.json")) {
+          swapArmed = false;
+          await fs.rmdir(swapTarget);
+          await fs.mkdir(swapTarget);
+        }
+        return fs.rename(from, to);
+      },
+    }) as typeof fs;
+    const f = await fixture({ fs: injected });
+    const source = path.join(f.folders, "source");
+    await fs.mkdir(source);
+    await fs.writeFile(path.join(source, "kept.txt"), "kept");
+    await f.registry.register(source);
+    swapTarget = path.join(f.folders, "destination");
+    swapArmed = true;
+
+    await expect(f.manager.rename({ path: source, name: "destination" })).rejects.toMatchObject({ code: "conflict" });
+    expect(await fs.readFile(path.join(source, "kept.txt"), "utf8")).toBe("kept");
+    expect(await exists(swapTarget)).toBe(true);
+    expect(await exists(f.journalPath)).toBe(false);
+  });
+
   test("stale alias claims block their canonical create and rename destinations", async () => {
     const f = await fixture();
     const alias = path.join(f.root, "legacy-alias");
