@@ -121,6 +121,19 @@ test.describe("chat image attachments", () => {
     await expect(page.locator("#chat-attachments .chat-attachment")).toHaveCount(2);
     await expect(page.locator("#chat-input")).toHaveValue("words that must survive");
 
+    // A paste with nothing attachable in it is refused out loud rather than
+    // passing silently; it stages nothing and leaves the draft alone.
+    await page.evaluate(() => {
+      const input = document.querySelector<HTMLTextAreaElement>("#chat-input")!;
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(["%PDF-1.4"], "spec.pdf", { type: "application/pdf" }));
+      input.focus();
+      input.dispatchEvent(new ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true }));
+    });
+    await expect(page.locator("#chat-composer-error")).toContainText("Only PNG, JPEG, GIF, or WebP");
+    await expect(page.locator("#chat-attachments .chat-attachment")).toHaveCount(2);
+    await expect(page.locator("#chat-input")).toHaveValue("words that must survive");
+
     // The per-message bound refuses the ninth image and keeps the eight.
     for (let index = 0; index < 6; index += 1) await attachViaPicker(page, `extra-${index}.png`);
     await expect(page.locator("#chat-attachments .chat-attachment")).toHaveCount(8);
@@ -557,6 +570,33 @@ test.describe("upload refusal during the drain", () => {
     await expect(page.locator("#chat-composer-error")).toContainText("Only PNG, JPEG, GIF, or WebP");
     await expect(page.locator("#chat-attachments .chat-attachment")).toHaveCount(1);
     await expect(page.locator("#chat-input")).toHaveValue("meant to carry the notes");
+    expect(prompted).toBe(false);
+    await page.unroute("**/attachments");
+  });
+
+  test("an all-unsupported paste during the drain blocks the send too", async ({ page }) => {
+    await newConversation(page);
+    await page.route("**/attachments", async route => {
+      await new Promise(resolve => setTimeout(resolve, 600));
+      await route.continue();
+    });
+    await page.locator("#chat-attach-input").setInputFiles({ name: "first.png", mimeType: "image/png", buffer: PNG });
+    let prompted = false;
+    page.on("request", request => { if (request.url().endsWith("/prompts")) prompted = true; });
+    await page.locator("#chat-input").fill("meant to carry the spec");
+    await page.locator("#chat-input").press("Enter");
+    // A paste is no different from a drop here: the file was meant for the
+    // message being drained, so its refusal must stop the send.
+    await page.evaluate(() => {
+      const input = document.querySelector<HTMLTextAreaElement>("#chat-input")!;
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(["%PDF-1.4"], "spec.pdf", { type: "application/pdf" }));
+      input.focus();
+      input.dispatchEvent(new ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true }));
+    });
+    await expect(page.locator("#chat-composer-error")).toContainText("Only PNG, JPEG, GIF, or WebP");
+    await expect(page.locator("#chat-attachments .chat-attachment")).toHaveCount(1);
+    await expect(page.locator("#chat-input")).toHaveValue("meant to carry the spec");
     expect(prompted).toBe(false);
     await page.unroute("**/attachments");
   });

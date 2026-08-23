@@ -529,23 +529,26 @@ export class OpenCodeChatAdapter {
     conversation?: ConversationSummary;
   }> {
     if (!text.trim() && !attachments?.length) throw new Error("prompt must not be empty");
-    return this.receipts.run(`prompt:${conversationId}:${requestId}`, async () => {
-      // Refused only for text that actually parses as a listed command — an
-      // unlisted "/typo" or a pasted path fragment is prose and keeps its
-      // images. The classification freezes here: dispatch never re-parses an
-      // attachment-bearing prompt, so a command list that changes while a
-      // message is held cannot reroute it onto the command path, which
-      // carries no attachments. A failed listing propagates (same rule as
-      // dispatch): admitting "/compact" with images as prose because the
-      // list was momentarily unavailable would send a command as chat text.
-      // Inside the receipt on purpose: a retry of an accepted request must
-      // replay the receipt, never reconsult a list that may have changed or
-      // gone unavailable since — and a refusal is not cached (a rejected
-      // receipt is dropped), so a transient listing failure stays retryable.
-      if (attachments?.length && text.startsWith("/") && parseSlashCommand(text, await this.provider.listCommands()) !== undefined) {
-        throw new CommandAttachmentsError();
-      }
-      return this.enqueuePromptAdmission(conversationId, async () => {
+    return this.receipts.run(`prompt:${conversationId}:${requestId}`, () =>
+      this.enqueuePromptAdmission(conversationId, async () => {
+        // Refused only for text that actually parses as a listed command — an
+        // unlisted "/typo" or a pasted path fragment is prose and keeps its
+        // images. The classification freezes here: dispatch never re-parses an
+        // attachment-bearing prompt, so a command list that changes while a
+        // message is held cannot reroute it onto the command path, which
+        // carries no attachments. A failed listing propagates (same rule as
+        // dispatch): admitting "/compact" with images as prose because the
+        // list was momentarily unavailable would send a command as chat text.
+        // Inside the admission lane on purpose: a slow listing would otherwise
+        // let a later submission overtake this one and commit its
+        // configuration first. Inside the receipt too: a retry of an accepted
+        // request must replay the receipt, never reconsult a list that may
+        // have changed or gone unavailable since — and a refusal is not cached
+        // (a rejected receipt is dropped), so a transient listing failure
+        // stays retryable.
+        if (attachments?.length && text.startsWith("/") && parseSlashCommand(text, await this.provider.listCommands()) !== undefined) {
+          throw new CommandAttachmentsError();
+        }
         const session = await this.requireSession(conversationId);
         const projection = this.projection(conversationId);
         const currentConfiguration = await this.configuration(conversationId);
@@ -606,8 +609,7 @@ export class OpenCodeChatAdapter {
           ...(variant ? { variant } : {}),
         });
         return { ...dispatched, held: false };
-      });
-    });
+      }));
   }
 
   async removeQueued(conversationId: string, messageId: string, requestId: string): Promise<{ removed: true }> {

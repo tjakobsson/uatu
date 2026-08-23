@@ -2640,6 +2640,31 @@ describe("prompt attachments", () => {
     expect(provider.prompts[0]!.attachments).toHaveLength(1);
   });
 
+  test("a slow command listing does not let a later prompt overtake the slash-prose one", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    let releaseListing: () => void = () => {};
+    const listing = new Promise<void>(resolve => { releaseListing = resolve; });
+    provider.listCommands = async () => {
+      await listing;
+      return provider.commands;
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
+    // Classification happens inside the per-conversation admission lane, so an
+    // ordinary prompt submitted afterwards cannot be admitted — and dispatched,
+    // committing its configuration — while the attachment-bearing one is still
+    // waiting on the listing.
+    const first = adapter.prompt("session", "r1", "/unknown focus", undefined, undefined, undefined, [ref("11111111-2222-4333-8444-555555555555")]);
+    const second = adapter.prompt("session", "r2", "second");
+    await Bun.sleep(5);
+    expect(provider.prompts).toHaveLength(0);
+    releaseListing();
+    expect((await first).held).toBe(false);
+    expect((await second).held).toBe(true);
+    expect(provider.prompts).toHaveLength(1);
+    expect(provider.prompts[0]!.text).toBe("/unknown focus");
+  });
+
   test("a retry of an accepted slash-prose prompt replays the receipt after the command list changes", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];

@@ -1023,9 +1023,9 @@ export function initChat(): void {
   const attachableClaim = (file: File) => file.type === "" || file.type.startsWith("image/");
 
   // A mixed drop or paste stages its images but must not let the rest vanish
-  // silently — a file that disappears without a word reads as attached. The
-  // all-unsupported intakes keep their path-specific behavior (drop errors,
-  // paste falls through to the default), so this speaks only for the mix.
+  // silently — a file that disappears without a word reads as attached. An
+  // intake with nothing supported in it is refused by its own branch before
+  // reaching here, so this speaks only for the mix.
   const warnUnsupportedIntake = (files: File[], images: File[]) => {
     if (images.length === 0 || images.length === files.length) return;
     const refused = files.filter(file => !attachableClaim(file));
@@ -1157,11 +1157,22 @@ export function initChat(): void {
   input.addEventListener("paste", event => {
     if (!event.clipboardData) return;
     const pastedFiles = Array.from(event.clipboardData.files);
-    const files = pastedFiles.filter(attachableClaim);
-    if (files.length === 0) return;
+    if (pastedFiles.length === 0) return;
     // Without the capability there is no image intake at all: default paste
-    // behavior stands untouched.
+    // behavior stands untouched, refusals included.
     if (agent && !declares("attachments")) return;
+    const files = pastedFiles.filter(attachableClaim);
+    if (files.length === 0) {
+      // Counted like every other refusal: files pasted while a submit drains
+      // were meant for that message, and the post-drain guard must see the
+      // loss even when nothing in the paste could stage. Deliberately without
+      // preventDefault — the clipboard may carry text alongside the refused
+      // file, and that text still rides the browser's own paste.
+      const conversationId = activeConversationId();
+      if (conversationId) noteAttachmentRefusal(conversationId, pastedFiles.length);
+      setComposerError("Only PNG, JPEG, GIF, or WebP images can be attached.");
+      return;
+    }
     event.preventDefault();
     // A paste that carries both text and images keeps both (spec): the text
     // enters the draft at the caret exactly as an unintercepted paste would.
@@ -1200,8 +1211,7 @@ export function initChat(): void {
     if (images.length === 0) {
       // Counted like every other refusal: files dropped while a submit
       // drains were meant for that message, and the post-drain guard must
-      // see the loss even when nothing in the drop could stage. (Paste has
-      // no such branch — an imageless paste is not intercepted at all.)
+      // see the loss even when nothing in the drop could stage.
       const conversationId = activeConversationId();
       if (conversationId) noteAttachmentRefusal(conversationId, dropped.length);
       setComposerError("Only PNG, JPEG, GIF, or WebP images can be attached.");
