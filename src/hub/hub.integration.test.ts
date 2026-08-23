@@ -1146,6 +1146,59 @@ describe("hub end to end", () => {
     expect(registry.list().filter(entry => entry.id.startsWith("alias-repo"))).toHaveLength(1);
   });
 
+  test("registration refuses while a folder mutation journal awaits recovery", async () => {
+    const fenced = path.join(tempRoot, "workspaces", "journal-fenced");
+    execFileSync("mkdir", ["-p", fenced]);
+    execFileSync("git", ["init"], { cwd: fenced, stdio: "ignore" });
+    const journalPath = path.join(tempRoot, "pending-folder-mutation.json");
+
+    // A rename that moved the directory but could neither persist the
+    // registry nor roll back leaves exactly this record. Registering the
+    // destination now would mint a second id for a path recovery still has
+    // to restore the journaled entry onto — a collision that stops the Hub
+    // from starting at all.
+    await writeFile(journalPath, `${JSON.stringify({
+      version: 1,
+      operation: "rename",
+      source: path.join(tempRoot, "workspaces", "journal-source"),
+      destination: fenced,
+      before: [{ id: "journal-source", path: path.join(tempRoot, "workspaces", "journal-source"), backend: "local" }],
+      after: [{ id: "journal-source", path: fenced, backend: "local" }],
+    }, null, 2)}\n`, { mode: 0o600 });
+
+    const fencedResponse = await fetch(`${origin}/api/hub/workspaces`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ path: fenced, start: false }),
+    });
+    expect(fencedResponse.status).toBe(409);
+    await assertContract("POST", "/api/hub/workspaces", fencedResponse);
+    expect(await fencedResponse.json()).toEqual({
+      error: "a pending folder mutation requires recovery before further registered changes",
+    });
+    expect(registry.byPath(fenced)).toBeUndefined();
+
+    // Fail closed: a journal too corrupt to interpret is still a journal.
+    await writeFile(journalPath, "{ not json", { mode: 0o600 });
+    const corrupt = await fetch(`${origin}/api/hub/workspaces`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ path: fenced, start: false }),
+    });
+    expect(corrupt.status).toBe(409);
+    expect(registry.byPath(fenced)).toBeUndefined();
+
+    // Recovery clearing the record reopens registration.
+    await rm(journalPath);
+    const registered = await fetch(`${origin}/api/hub/workspaces`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ path: fenced, start: false }),
+    });
+    expect(registered.status).toBe(200);
+    expect(registry.byPath(fenced)?.id).toBe(((await registered.json()) as { id: string }).id);
+  }, 60_000);
+
   test("forget unregisters a stopped workspace and refuses a running one", async () => {
     // plain-folder was registered (and stopped) by the init-offer test above.
     const runningRefusal = await fetch(`${origin}/api/hub/workspaces/myproject/forget`, {
