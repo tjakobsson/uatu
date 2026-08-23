@@ -306,6 +306,13 @@ export class FolderManager {
       const destination = path.join(parent, parsed.name);
       const reservation = this.reserve([destination]);
       try {
+        // A missing directory's registration is deliberately retained;
+        // creating an unrelated empty folder at that path would hand it
+        // the old workspace's stable id, personal state, and credential
+        // assignments.
+        if (this.options.registry.atOrBelow(destination).length > 0) {
+          throw new FolderManagerError("conflict", "destination is claimed by a registered workspace");
+        }
         await this.assertMissing(destination);
         await this.fs.mkdir(destination);
         return { path: destination };
@@ -405,7 +412,19 @@ export class FolderManager {
           this.isDirectDirectory(pending.source),
           this.isDirectDirectory(pending.destination),
         ]);
-        if (sourceExists === destinationExists) {
+        if (sourceExists && destinationExists) {
+          // A crash between renameWithoutReplacement's mkdir claim and its
+          // rename leaves our empty placeholder at the destination while
+          // the source is untouched. Reclaiming the placeholder (rmdir
+          // refuses anything non-empty) turns this back into the
+          // source-only state; a populated destination stays a loud
+          // failure — that state was never ours to resolve.
+          try {
+            await this.fs.rmdir(pending.destination);
+          } catch (error) {
+            throw new Error("ambiguous pending folder rename: expected exactly one of source or destination to exist", { cause: error });
+          }
+        } else if (!sourceExists && !destinationExists) {
           throw new Error("ambiguous pending folder rename: expected exactly one of source or destination to exist");
         }
         await this.options.registry.restoreEntries(sourceExists ? pending.before : pending.after);
