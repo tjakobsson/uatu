@@ -600,6 +600,40 @@ describe("commit-boundary failure injection", () => {
     expect(await journalExists(f.journalPath)).toBe(false);
   });
 
+  test("recovery does not resurrect assignments revoked after the commit", async () => {
+    // The journal's clear failed after both stores committed and the hub
+    // kept serving: a credential deletion then legitimately revoked the
+    // committed assignment. On restart the desired set no longer resolves,
+    // so recovery must keep the newer (empty) assignment state instead of
+    // replaying the journal — while still clearing it.
+    const f = await fixture();
+    await addSshCredential(f.credentials, "auth-key");
+    const folder = await gitRepository(f.folders, "committed");
+    await f.registry.register(folder, "local", "Committed");
+    const journal = {
+      version: 1,
+      operation: "configure-existing",
+      createdFolder: false,
+      entry: { id: "committed", path: folder, backend: "local", displayName: "Committed" },
+      previousEntry: null,
+      previousAssignments: [],
+      desiredAssignments: [
+        { workspaceId: "committed", credentialId: "auth-key", role: "signing" as const },
+      ],
+    };
+    await fs.writeFile(f.journalPath, `${JSON.stringify(journal)}\n`, { mode: 0o600 });
+    await fs.chmod(f.journalPath, 0o600);
+    await f.credentials.transaction(draft => {
+      draft.credentials = draft.credentials.filter(credential => credential.id !== "auth-key");
+      draft.assignments = draft.assignments.filter(assignment => assignment.credentialId !== "auth-key");
+    });
+
+    await f.coordinator.recover();
+    expect(f.registry.byId("committed")?.displayName).toBe("Committed");
+    expect(f.credentials.snapshot().assignments).toEqual([]);
+    expect(await journalExists(f.journalPath)).toBe(false);
+  });
+
   test("recovery rejects a journal that is not owner-only", async () => {
     const f = await fixture();
     await fs.writeFile(f.journalPath, `${JSON.stringify({ version: 1 })}\n`, { mode: 0o644 });

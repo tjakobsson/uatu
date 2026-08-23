@@ -270,6 +270,20 @@ export function resolveOnboardingAssignments(
   return desired;
 }
 
+// Rebuilds the input-shaped selections from resolved assignments so a
+// desired set can be re-judged by resolveOnboardingAssignments later.
+function selectionsFromAssignments(desired: CredentialAssignment[]): {
+  authentication: AuthenticationSelection[];
+  signing: string | null;
+} {
+  return {
+    authentication: desired
+      .filter(assignment => assignment.role === "authentication")
+      .map(assignment => ({ credentialId: assignment.credentialId, host: assignment.host })),
+    signing: desired.find(assignment => assignment.role === "signing")?.credentialId ?? null,
+  };
+}
+
 function closedJournalObject(value: unknown, fields: readonly string[], label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object`);
   const record = value as Record<string, unknown>;
@@ -480,12 +494,14 @@ export class WorkspaceOnboardingCoordinator {
       // The display name is user-editable the moment the registry save
       // makes the entry visible, so a rename between commit and a crash
       // must not reclassify the registration as uncommitted — the newer
-      // name is preserved and only the assignments are completed.
+      // name is preserved and only the assignments are completed. The path
+      // cannot drift the same way: the folder manager refuses registered
+      // mutations while a recovery journal is pending.
       const current = this.options.registry.byId(pending.entry.id);
       const committed = current !== undefined
         && normalizeAbsolutePath(current.path) === pending.entry.path;
       if (committed) {
-        await this.replaceWorkspaceAssignments(pending.entry.id, pending.desiredAssignments);
+        await this.completeRecoveredAssignments(pending.entry.id, pending.desiredAssignments);
       } else {
         if (pending.previousEntry) {
           await this.options.registry.restoreEntries([pending.previousEntry]);
@@ -727,7 +743,7 @@ export class WorkspaceOnboardingCoordinator {
   // host edit) can land in between; the store's own validation only rejects
   // dangling ids. A drifted selection throws inside the serialized
   // transaction, so nothing commits and the caller's normal credential
-  // rollback path undoes the registration. Rollback and recovery keep using
+  // rollback path undoes the registration. Rollback keeps using
   // replaceWorkspaceAssignments — a restored previous state must never be
   // re-judged against newer credential rules.
   private async commitDesiredAssignments(workspaceId: string, desired: CredentialAssignment[]): Promise<void> {
@@ -735,17 +751,31 @@ export class WorkspaceOnboardingCoordinator {
       await this.replaceWorkspaceAssignments(workspaceId, desired);
       return;
     }
-    const selections = {
-      authentication: desired
-        .filter(assignment => assignment.role === "authentication")
-        .map(assignment => ({ credentialId: assignment.credentialId, host: assignment.host })),
-      signing: desired.find(assignment => assignment.role === "signing")?.credentialId ?? null,
-    };
+    const selections = selectionsFromAssignments(desired);
     await this.options.credentials.transaction(draft => {
       resolveOnboardingAssignments(workspaceId, selections, draft);
       draft.assignments = draft.assignments.filter(assignment => assignment.workspaceId !== workspaceId);
       draft.assignments.push(...structuredClone(desired));
     });
+  }
+
+  // Completing a committed onboarding replays the journaled desired set —
+  // unless credential state moved on while the journal lingered (its clear
+  // failed and the hub kept serving until this restart): a credential
+  // deleted or disabled after commit had its revocation applied to the
+  // live store, and blindly reinstalling would resurrect the revoked
+  // assignment. When the desired set no longer resolves against the
+  // current store, the newer credential state wins and the assignments
+  // are left untouched.
+  private async completeRecoveredAssignments(workspaceId: string, desired: CredentialAssignment[]): Promise<void> {
+    if (desired.length > 0) {
+      try {
+        resolveOnboardingAssignments(workspaceId, selectionsFromAssignments(desired), this.options.credentials.snapshot());
+      } catch {
+        return;
+      }
+    }
+    await this.replaceWorkspaceAssignments(workspaceId, desired);
   }
 
   private async replaceWorkspaceAssignments(workspaceId: string, assignments: CredentialAssignment[]): Promise<void> {

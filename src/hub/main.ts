@@ -466,6 +466,9 @@ export async function runHub(options: RunHubOptions): Promise<void> {
   const reservations = new PathReservationCoordinator();
   const folderManager = new FolderManager({
     journalPath: folderMutationJournalPath(stateRoot),
+    // A pending onboarding journal freezes registered folder mutations:
+    // onboarding recovery recognizes its committed entry by id + path.
+    recoveryJournalPaths: [onboardingJournalPath(stateRoot)],
     registry,
     sessions,
     personalState,

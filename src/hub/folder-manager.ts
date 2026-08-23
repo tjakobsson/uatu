@@ -67,6 +67,11 @@ type CredentialState = Pick<CredentialMetadataStore, "removeWorkspaceAssignments
 
 export type FolderManagerOptions = {
   journalPath: string;
+  // Journals of sibling coordinators (the onboarding journal) whose pending
+  // record also freezes registered mutations: a committed-but-uncleared
+  // onboarding is recognized during its recovery by id + path, so its
+  // folder must not move before that recovery reconciles.
+  recoveryJournalPaths?: readonly string[];
   registry: FolderRegistry;
   sessions: FolderSessions;
   personalState: PersonalState;
@@ -446,16 +451,25 @@ export class FolderManager {
   // workspace whose directory and registered state no longer agree. The
   // journal holds a single record, so the next registered mutation would
   // replace it — and, on success, clear it — leaving the earlier workspace
-  // registered at a missing path with no trace. Refuse registered mutations
-  // until recover() has resolved the pending record.
+  // registered at a missing path with no trace. Sibling recovery journals
+  // freeze registered mutations for the same reason: their recovery matches
+  // entries by recorded path, which a rename would invalidate. Refuse until
+  // the pending record is recovered.
   private async assertNoPendingMutation(): Promise<void> {
-    try {
-      await this.fs.lstat(this.options.journalPath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-      throw safeFsError(error, "folder mutation journal inspection failed");
+    for (const journalPath of [this.options.journalPath, ...this.options.recoveryJournalPaths ?? []]) {
+      let pending = true;
+      try {
+        await this.fs.lstat(journalPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw safeFsError(error, "recovery journal inspection failed");
+        }
+        pending = false;
+      }
+      if (pending) {
+        throw new FolderManagerError("conflict", "a pending recovery journal requires Hub recovery before further registered changes");
+      }
     }
-    throw new FolderManagerError("conflict", "a pending folder mutation requires recovery before further registered changes");
   }
 
   private async canonicalDirectory(folderPath: string): Promise<string> {

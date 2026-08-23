@@ -391,6 +391,34 @@ describe("FolderManager registered mutations", () => {
     expect(f.registry.byId(otherEntry.id)?.path).toBe(path.join(f.folders, "renamed"));
   });
 
+  test("a pending sibling recovery journal freezes registered mutations", async () => {
+    const f = await fixture();
+    const registered = path.join(f.folders, "registered");
+    await fs.mkdir(registered);
+    const entry = await f.registry.register(registered);
+    const onboardingJournal = path.join(f.state, "pending-onboarding.json");
+    const manager = new FolderManager({
+      journalPath: f.journalPath,
+      recoveryJournalPaths: [onboardingJournal],
+      registry: f.registry,
+      sessions: f.sessions,
+      personalState: f.personalState,
+      credentials: f.credentials,
+      reservations: f.reservations,
+    });
+
+    // Onboarding recovery matches its committed entry by id + path; a
+    // rename while that journal lingers would break the match.
+    await fs.writeFile(onboardingJournal, "{}\n", { mode: 0o600 });
+    await expect(manager.rename({ path: registered, name: "renamed" })).rejects.toMatchObject({ code: "conflict" });
+    await expect(manager.remove({ path: registered })).rejects.toMatchObject({ code: "conflict" });
+    await manager.create({ parent: f.folders, name: "unregistered-still-fine" });
+
+    await fs.unlink(onboardingJournal);
+    completed(await manager.rename({ path: registered, name: "renamed" }));
+    expect(f.registry.byId(entry.id)?.path).toBe(path.join(f.folders, "renamed"));
+  });
+
   test("reconciles persisted alias paths before canonical rename lookup", async () => {
     const f = await fixture();
     const project = path.join(f.folders, "project");
