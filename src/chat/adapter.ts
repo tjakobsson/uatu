@@ -1780,11 +1780,17 @@ function latestModel(byMessage: Map<string, MessageModel> | undefined): string |
 function mergeInteraction(current: ConversationItem | undefined, incoming: ConversationItem): ConversationItem {
   if (!current || current.type !== incoming.type) return incoming;
   if (current.type === "user_message" && incoming.type === "user_message") {
-    if (current.requestId && !incoming.requestId) return { ...incoming, text: current.text, requestId: current.requestId };
+    // Same rule as text below: an update that omits attachments is sparse —
+    // classic event aliases and empty-parts message.updated frames know
+    // nothing of them — not an instruction to strip the thumbnails.
+    const attachments = incoming.attachments ?? current.attachments;
+    const preserved = attachments?.length ? { attachments } : {};
+    if (current.requestId && !incoming.requestId) return { ...incoming, text: current.text, requestId: current.requestId, ...preserved };
     // A history-loaded message carries no requestId, and message.updated events
     // normalize with empty parts — an empty incoming text is "no new content",
     // not a blanking instruction.
-    if (!incoming.text) return { ...incoming, text: current.text };
+    if (!incoming.text) return { ...incoming, text: current.text, ...preserved };
+    return { ...incoming, ...preserved };
   }
   if (current.type === "assistant_message" && incoming.type === "assistant_message") {
     return mergeAssistantMessage(current, incoming);

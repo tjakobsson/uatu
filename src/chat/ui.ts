@@ -187,7 +187,11 @@ export function initChat(): void {
   // receipt dedupes instead of starting a second agent turn. Keyed per
   // conversation: a success elsewhere must not discard another
   // conversation's unresolved id.
-  const retryRequests = new Map<string, { text: string; requestId: string }>();
+  // `attachments` joins the retry identity: a resubmission with the same text
+  // but a changed attachment set is a different message, and reusing the old
+  // request id would let the server replay the first acceptance receipt for a
+  // payload the provider never saw.
+  const retryRequests = new Map<string, { text: string; requestId: string; attachments: string }>();
   let commandMatch: ReturnType<typeof matchingCommands> = null;
   let commandIndex = 0;
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -874,6 +878,10 @@ export function initChat(): void {
   // ------------------------------------------------------------------
   type PendingAttachment = MessageAttachment & { id: string; previewUrl: string };
   const pendingAttachments = new Map<string, PendingAttachment[]>();
+  // Uploads still in flight, per conversation. Submission awaits these so an
+  // image attached moments before Enter joins the message it was attached
+  // for instead of leaking into the next one.
+  const attachmentStagingWaits = new Map<string, Promise<void>[]>();
   const supportedAttachmentTypes = new Set<string>(CHAT_ATTACHMENT_MIME_TYPES);
 
   const currentPendingAttachments = (): PendingAttachment[] =>
@@ -955,29 +963,42 @@ export function initChat(): void {
       return;
     }
     const conversationId = projection.conversationId;
-    for (const file of files) {
-      if ((pendingAttachments.get(conversationId) ?? []).length >= CHAT_ATTACHMENTS_PER_MESSAGE) {
-        setComposerError(`A message can carry at most ${CHAT_ATTACHMENTS_PER_MESSAGE} images.`);
-        break;
+    const task = (async () => {
+      for (const file of files) {
+        if ((pendingAttachments.get(conversationId) ?? []).length >= CHAT_ATTACHMENTS_PER_MESSAGE) {
+          setComposerError(`A message can carry at most ${CHAT_ATTACHMENTS_PER_MESSAGE} images.`);
+          break;
+        }
+        if (!supportedAttachmentTypes.has(file.type.toLowerCase())) {
+          setComposerError(`${file.name || "That file"} is not a supported image (PNG, JPEG, GIF, WebP).`);
+          continue;
+        }
+        if (file.size > CHAT_ATTACHMENT_MAX_BYTES) {
+          setComposerError(`${file.name || "That image"} is larger than the ${Math.round(CHAT_ATTACHMENT_MAX_BYTES / (1024 * 1024))} MiB limit.`);
+          continue;
+        }
+        try {
+          const stored = await api.uploadAttachment(conversationId, file);
+          // Keyed to the conversation the upload was staged for, which may no
+          // longer be the selected one by the time the round trip returns.
+          const entries = pendingAttachments.get(conversationId) ?? [];
+          entries.push({ id: stored.id, name: file.name || "image", mimeType: stored.mimeType, previewUrl: URL.createObjectURL(file) });
+          setPendingAttachments(conversationId, entries);
+        } catch (error) {
+          setComposerError(`Could not attach ${file.name || "image"}: ${messageOf(error)}`);
+        }
       }
-      if (!supportedAttachmentTypes.has(file.type.toLowerCase())) {
-        setComposerError(`${file.name || "That file"} is not a supported image (PNG, JPEG, GIF, WebP).`);
-        continue;
-      }
-      if (file.size > CHAT_ATTACHMENT_MAX_BYTES) {
-        setComposerError(`${file.name || "That image"} is larger than the ${Math.round(CHAT_ATTACHMENT_MAX_BYTES / (1024 * 1024))} MiB limit.`);
-        continue;
-      }
-      try {
-        const stored = await api.uploadAttachment(conversationId, file);
-        // Keyed to the conversation the upload was staged for, which may no
-        // longer be the selected one by the time the round trip returns.
-        const entries = pendingAttachments.get(conversationId) ?? [];
-        entries.push({ id: stored.id, name: file.name || "image", mimeType: stored.mimeType, previewUrl: URL.createObjectURL(file) });
-        setPendingAttachments(conversationId, entries);
-      } catch (error) {
-        setComposerError(`Could not attach ${file.name || "image"}: ${messageOf(error)}`);
-      }
+    })();
+    const waits = attachmentStagingWaits.get(conversationId) ?? [];
+    waits.push(task);
+    attachmentStagingWaits.set(conversationId, waits);
+    try {
+      await task;
+    } finally {
+      const list = attachmentStagingWaits.get(conversationId) ?? [];
+      const index = list.indexOf(task);
+      if (index >= 0) list.splice(index, 1);
+      if (list.length === 0) attachmentStagingWaits.delete(conversationId);
     }
     renderAttachments();
   };
@@ -1874,8 +1895,32 @@ export function initChat(): void {
     if (!projection || !input.value.trim() || submitting) return;
     const conversationId = projection.conversationId;
     const text = input.value;
+    submitting = true;
+    setComposerError(null);
+    // An upload attached moments before Enter belongs to THIS message:
+    // submission waits for in-flight staging rather than snapshotting a list
+    // the upload has not reached yet (and leaking the image into the next
+    // message).
+    const staging = attachmentStagingWaits.get(conversationId);
+    if (staging?.length) {
+      noteComposer("Uploading images...");
+      await Promise.all([...staging]).catch(() => undefined);
+      // The wait yielded: the user may have switched conversations. The text
+      // belongs to the conversation it was written in, so it becomes that
+      // conversation's draft instead of being sent against the wrong one.
+      if (!projection || projection.conversationId !== conversationId) {
+        if (!presentation.drafts[conversationId]) { presentation.drafts[conversationId] = text; save(); }
+        submitting = false;
+        syncControls();
+        return;
+      }
+    }
+    // Captured and cleared optimistically like the text; restored on failure.
+    const stagedAttachments = [...(pendingAttachments.get(conversationId) ?? [])];
+    const attachmentRefs: MessageAttachment[] = stagedAttachments.map(({ id, name, mimeType }) => ({ id, name, mimeType }));
+    const attachmentKey = stagedAttachments.map(entry => entry.id).join("\n");
     const retry = retryRequests.get(conversationId);
-    const retriedRequest = retry?.text === text;
+    const retriedRequest = retry?.text === text && retry.attachments === attachmentKey;
     const requestId = retriedRequest ? retry!.requestId : newRequestId();
     const configuration = displayedConfiguration();
     const selectedModelRecord = declares("models") && configuration.model
@@ -1886,11 +1931,6 @@ export function initChat(): void {
       ? configuration.variant
       : undefined;
     const selectedMode = declares("modes") && modes.some(mode => mode.name === configuration.mode) ? configuration.mode : undefined;
-    // Captured and cleared optimistically like the text; restored on failure.
-    const stagedAttachments = [...(pendingAttachments.get(conversationId) ?? [])];
-    const attachmentRefs: MessageAttachment[] = stagedAttachments.map(({ id, name, mimeType }) => ({ id, name, mimeType }));
-    submitting = true;
-    setComposerError(null);
     // Captured before the round trip: a queue event that lands while the
     // acceptance is in flight makes the stream authoritative, and the local
     // held echo below must then stand down. The epoch catches the same
@@ -1957,7 +1997,7 @@ export function initChat(): void {
     } catch (error) {
       const message = messageOf(error);
       announce(message, true);
-      retryRequests.set(conversationId, { text, requestId });
+      retryRequests.set(conversationId, { text, requestId, attachments: attachmentKey });
       // The refused message's attachments go back to pending — uploaded bytes
       // are still stored, so the references stay valid for the retry.
       setPendingAttachments(conversationId, [...stagedAttachments, ...(pendingAttachments.get(conversationId) ?? [])]);

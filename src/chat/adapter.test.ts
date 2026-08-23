@@ -2665,3 +2665,27 @@ describe("prompt attachments", () => {
     expect(provider.prompts).toHaveLength(1);
   });
 });
+
+describe("sparse user-message updates preserve attachments", () => {
+  test("an attachment-less upsert for the same message keeps the thumbnails", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const projection = adapter.projectionForTests("session");
+    const attachments = [{ id: "11111111-2222-4333-8444-555555555555", name: "shot.png", mimeType: "image/png" }];
+    projection.upsert({ id: "message:m1", type: "user_message", createdAt: 1, text: "look", requestId: "r1", attachments });
+
+    // A classic event alias knows nothing of attachments: text-only restate.
+    projection.upsert({ id: "message:m1", type: "user_message", createdAt: 1, text: "look" });
+    expect(projection.items()[0]).toEqual(expect.objectContaining({ text: "look", requestId: "r1", attachments }));
+
+    // An empty-parts message.updated frame: empty text AND no attachments.
+    projection.upsert({ id: "message:m1", type: "user_message", createdAt: 1, text: "" });
+    expect(projection.items()[0]).toEqual(expect.objectContaining({ text: "look", attachments }));
+
+    // An update that does carry attachments is authoritative, not sparse.
+    const replaced = [{ id: "22222222-2222-4333-8444-555555555555", name: "other.png", mimeType: "image/webp" }];
+    projection.upsert({ id: "message:m1", type: "user_message", createdAt: 1, text: "look", attachments: replaced });
+    expect(projection.items()[0]).toEqual(expect.objectContaining({ attachments: replaced }));
+  });
+});

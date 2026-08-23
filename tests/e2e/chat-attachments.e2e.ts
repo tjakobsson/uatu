@@ -202,3 +202,50 @@ test.describe("chat image attachments", () => {
     expect(anonymous.status()).toBe(401);
   });
 });
+
+test.describe("chat image attachments — review regressions", () => {
+  test.beforeEach(async ({ page, request }) => bootChat(page, request));
+
+  test("a submit racing an in-flight upload waits and sends the image with that message", async ({ page }) => {
+    await newConversation(page);
+    // Stall the upload long enough for Enter to land while it is in flight.
+    await page.route("**/attachments", async route => {
+      await new Promise(resolve => setTimeout(resolve, 700));
+      await route.continue();
+    });
+    await page.locator("#chat-attach-input").setInputFiles({ name: "racing.png", mimeType: "image/png", buffer: PNG });
+    await page.locator("#chat-input").fill("message with a racing image");
+    const accepted = page.waitForResponse(response => response.url().endsWith("/prompts"));
+    await page.locator("#chat-input").press("Enter");
+    const promptBody = (await accepted).request().postDataJSON() as { attachments?: unknown[] };
+    // The prompt carried the attachment despite Enter beating the upload.
+    expect(promptBody.attachments).toHaveLength(1);
+    await expect(page.locator("#chat-items .chat-user-message .chat-message-attachment-thumb")).toHaveCount(1);
+    // Nothing leaked into pending for a next message.
+    await expect(page.locator("#chat-attachments")).toBeHidden();
+    await page.unroute("**/attachments");
+  });
+
+  test("a retry with a changed attachment set mints a fresh request id", async ({ page, request }) => {
+    await newConversation(page);
+    await attachViaPicker(page);
+    await control(request, { action: "failPrompt" });
+    const failed = page.waitForResponse(response => response.url().endsWith("/prompts"));
+    await page.locator("#chat-input").fill("same words twice");
+    await page.locator("#chat-input").press("Enter");
+    await failed;
+    await expect(page.locator("#chat-composer-error")).toContainText("Draft restored");
+    // The refused message's attachment came back to pending; remove it, so
+    // the resubmission has the same text but a different attachment set.
+    await expect(page.locator("#chat-attachments .chat-attachment")).toHaveCount(1);
+    await page.locator("#chat-attachments .chat-attachment-remove").click();
+    const resubmitted = page.waitForResponse(response => response.url().endsWith("/prompts"));
+    await page.locator("#chat-input").press("Enter");
+    await resubmitted;
+    const stats = await control(request, { action: "stats" }) as { promptAttempts: string[] };
+    // Two attempts, two distinct request ids: the changed set is a different
+    // message, never a replay of the failed one's receipt.
+    expect(stats.promptAttempts).toHaveLength(2);
+    expect(new Set(stats.promptAttempts).size).toBe(2);
+  });
+});

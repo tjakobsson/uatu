@@ -208,9 +208,13 @@ function insertInConversationOrder(items: ConversationItem[], incoming: Conversa
 function mergeUpsert(existing: ConversationItem | undefined, incoming: ConversationItem): ConversationItem {
   if (!existing || existing.type !== incoming.type) return incoming;
   if (existing.type === "user_message" && incoming.type === "user_message") {
+    // An update that omits attachments is sparse, not a strip instruction —
+    // mirrors the workspace-side mergeInteraction rule.
+    const attachments = incoming.attachments ?? existing.attachments;
+    const preserved = attachments?.length ? { attachments } : {};
     return existing.requestId && !incoming.requestId
-      ? { ...incoming, text: existing.text, requestId: existing.requestId }
-      : incoming;
+      ? { ...incoming, text: existing.text, requestId: existing.requestId, ...preserved }
+      : { ...incoming, ...preserved };
   }
   if (existing.type === "assistant_message" && incoming.type === "assistant_message") {
     return mergeAssistantMessage(existing, incoming);
