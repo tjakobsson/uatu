@@ -1082,7 +1082,17 @@ export function initChat(): void {
   // Escape closes natively; any click dismisses too — the dialog is a
   // viewer, not a form, so there is nothing a stray click could lose.
   imageViewer?.addEventListener("click", closeAttachmentViewer);
-  imageViewer?.addEventListener("close", () => { if (imageViewerImage) imageViewerImage.src = ""; });
+  imageViewer?.addEventListener("close", () => {
+    if (imageViewerImage) imageViewerImage.src = "";
+    // The dialog's focus restoration targets whatever held focus before
+    // showModal(). A pointer flow in Safari focuses the tabindex="0" log,
+    // not the thumbnail button, and the restored focus then paints a ring
+    // around the whole conversation. Blurring only the container is safe:
+    // a keyboard flow restores to the thumbnail button itself, which keeps
+    // its own focus ring untouched.
+    const restored = document.activeElement;
+    if (restored instanceof HTMLElement && restored.classList.contains("chat-timeline")) restored.blur();
+  });
   imageViewerClose?.addEventListener("click", closeAttachmentViewer);
 
   attachButton?.addEventListener("click", () => {

@@ -5149,6 +5149,20 @@ body.is-resizing-chat .chat-resizer {
   scroll-padding-block: 1rem;
 }
 
+/* Same treatment as .preview-shell: the log is focusable (tabindex="0") for
+   keyboard scrolling, but a default ring would frame the whole conversation —
+   most visibly when closing the image viewer, whose focus restoration lands
+   on this container in browsers where a tap focused it rather than the
+   thumbnail button (Safari). Keyboard focus keeps a restrained inset edge. */
+.chat-timeline:focus {
+  outline: none;
+}
+
+.chat-timeline:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
 #chat-items,
 #chat-drilldown-items,
 .chat-item,

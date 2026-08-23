@@ -379,6 +379,25 @@ test.describe("attachment viewer", () => {
     // Still in the conversation — no navigation happened.
     await expect(page.locator("#chat-items")).toContainText("see attached");
   });
+
+  test("closing the viewer never leaves the log holding a focus ring", async ({ page }) => {
+    await newConversation(page);
+    await attachViaPicker(page);
+    await send(page, "ring check");
+    // Safari focuses the tapped tabindex="0" log, not the thumbnail button,
+    // so the dialog's focus restoration returns to the container and paints
+    // a ring around the whole conversation. Emulate that flow: the log holds
+    // focus and the opening click is synthetic, moving none.
+    await page.evaluate(() => {
+      document.getElementById("chat-timeline")!.focus();
+      document.querySelector<HTMLButtonElement>("#chat-items .chat-attachment-view")!.click();
+    });
+    await expect(page.locator("#chat-image-viewer")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#chat-image-viewer")).toBeHidden();
+    // The close handler blurs the restored container focus.
+    await expect.poll(() => page.evaluate(() => document.activeElement?.id ?? "")).not.toBe("chat-timeline");
+  });
 });
 
 test.describe("composer edits during the upload drain", () => {
