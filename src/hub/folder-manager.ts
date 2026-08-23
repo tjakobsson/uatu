@@ -812,6 +812,31 @@ export class FolderManager {
     throw new FolderManagerError("conflict", "destination already exists");
   }
 
+  // Clears the journal a FAILED mutation left behind and returns the error
+  // to throw. A journal that survives its own mutation fences every later
+  // folder change, workspace registration, and session start until
+  // recover() resolves it — and recovery of a source the operation never
+  // managed to touch (a still-populated directory) refuses as
+  // unrecognized, which leaves the Hub unstartable. So a clear failure must
+  // not disappear behind the original error, which is routinely an
+  // ordinary retryable 409 ("folder is not empty") that would tell the
+  // caller to empty the directory and try again — a retry the surviving
+  // journal refuses. Both facts travel in one internal error, the original
+  // first inside the cause, mirroring the rename rollback below.
+  private async failedMutationError(error: unknown, fallback: string): Promise<FolderManagerError> {
+    const original = safeFsError(error, fallback);
+    try {
+      await this.journal.clear();
+    } catch (clearError) {
+      return new FolderManagerError(
+        "internal",
+        `${original.message}, and its pending folder mutation journal could not be cleared; restart the Hub to recover before further folder changes`,
+        { cause: new AggregateError([original, clearError]) },
+      );
+    }
+    return original;
+  }
+
   private async isDirectDirectory(candidate: string): Promise<boolean> {
     try {
       const stats = await this.fs.lstat(candidate);
@@ -874,8 +899,7 @@ export class FolderManager {
       }
     } catch (error) {
       if (claim) await this.removeOwnedClaim(destination, claim);
-      await this.journal.clear().catch(() => undefined);
-      throw safeFsError(error, "registered folder rename failed");
+      throw await this.failedMutationError(error, "registered folder rename failed");
     }
 
     let registryUpdated = false;
@@ -912,8 +936,7 @@ export class FolderManager {
       await this.journal.write(pending);
       await this.fs.rmdir(source);
     } catch (error) {
-      await this.journal.clear().catch(() => undefined);
-      throw safeFsError(error, "registered folder removal failed");
+      throw await this.failedMutationError(error, "registered folder removal failed");
     }
     try {
       await this.options.personalState.forgetWorkspace(
@@ -924,7 +947,16 @@ export class FolderManager {
       await this.journal.clear();
       return { path: source, workspaceId: entry.id };
     } catch (error) {
-      throw safeFsError(error, "registered folder removal requires recovery");
+      // Past the point of no return: the directory is gone and the journal
+      // is its only remaining record. Whichever step failed — the forget or
+      // the clear — that record survives and fences everything, so the
+      // answer is always the recovery-required internal error and never an
+      // errno-shaped 403/409 that reads as a retryable filesystem problem.
+      throw new FolderManagerError(
+        "internal",
+        "registered folder removal requires recovery; restart the Hub to resolve the pending folder mutation journal",
+        { cause: error },
+      );
     }
   }
 }

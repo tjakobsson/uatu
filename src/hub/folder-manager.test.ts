@@ -799,6 +799,50 @@ describe("FolderManager registered mutations", () => {
     expect(f.credentials.snapshot().assignments).toEqual([]);
     expect(await exists(source)).toBe(false);
   });
+
+  test("surfaces a journal that survives its failed or committed removal", async () => {
+    const journalUnlinkFails = { enabled: false };
+    const failingFs = {
+      ...fs,
+      unlink: async (target: string) => {
+        if (journalUnlinkFails.enabled && target.endsWith("pending-folder-mutation.json")) {
+          const error = new Error("EACCES: permission denied") as NodeJS.ErrnoException;
+          error.code = "EACCES";
+          throw error;
+        }
+        return fs.unlink(target);
+      },
+    } as typeof fs;
+    const f = await fixture({ fs: failingFs });
+
+    // A non-empty source fails its rmdir; the journal clear failing too
+    // must not hide behind the retryable not-empty conflict — the journal
+    // survives on disk and fences everything until recovery.
+    const populated = path.join(f.folders, "populated");
+    await fs.mkdir(populated);
+    await fs.writeFile(path.join(populated, "keep.txt"), "content");
+    await f.registry.register(populated);
+    journalUnlinkFails.enabled = true;
+    await expect(f.manager.remove({ path: populated })).rejects.toMatchObject({
+      code: "internal",
+      message: expect.stringContaining("could not be cleared"),
+    });
+    expect(await exists(f.journalPath)).toBe(true);
+    await fs.rm(f.journalPath, { force: true });
+
+    // Past the rmdir the journal is the removal's only record: a clear
+    // failure is the recovery-required internal error, never an
+    // errno-shaped permission refusal that reads as retryable.
+    const empty = path.join(f.folders, "empty");
+    await fs.mkdir(empty);
+    await f.registry.register(empty);
+    await expect(f.manager.remove({ path: empty })).rejects.toMatchObject({
+      code: "internal",
+      message: expect.stringContaining("requires recovery"),
+    });
+    expect(await exists(empty)).toBe(false);
+    expect(await exists(f.journalPath)).toBe(true);
+  });
 });
 
 describe("FolderManager journal recovery", () => {
