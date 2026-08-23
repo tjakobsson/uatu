@@ -33,8 +33,6 @@ Running and stopped workspace rows SHALL show a neutral summary of assigned auth
 - **AND** a locked credential opens a masked unlock dialog that resumes the workspace after successful unlock
 - **AND** backend startup validation reports a disabled or otherwise unavailable credential
 
-## MODIFIED Requirements
-
 ### Requirement: Clone page adds folders through a server-side directory browser
 The authenticated `/clone` page SHALL offer workspace registration by browsing the hub host's filesystem, not by typing paths: the hub SHALL expose a directory-listing API that, for a given absolute path (defaulting to the daemon user's home), returns its parent and its child directories — each with its name, whether it is a git repository, and its registered workspace id if any — listing directories only and hiding dot-directories. The clone page SHALL present this as a drill-down browser ending in an "add this folder" action. Filesystem visibility through the browser is within the documented trust model: hub users already hold shell access through the embedded terminal.
 
@@ -107,3 +105,13 @@ The authenticated `/clone` page SHALL show live terminal output and current phas
 #### Scenario: Clone succeeds after interaction
 - **WHEN** the user supplies the required responses and the clone, registration, and session start all succeed
 - **THEN** the clone page reports completion and navigates to the new workspace session
+
+## REMOVED Requirements
+
+### Requirement: Dashboard adds folders through a server-side directory browser
+**Reason**: Workspace registration and cloning moved from the dashboard to the dedicated `/clone` page, with managed credential selection added to the clone flow.
+**Migration**: Use the replacement requirement, "Clone page adds folders through a server-side directory browser."
+
+### Requirement: Dashboard handles interactive clone progress
+**Reason**: Interactive clone progress moved from the dashboard to the dedicated `/clone` page and now includes managed credential unlocking.
+**Migration**: Use the replacement requirement, "Clone page handles interactive clone progress."
