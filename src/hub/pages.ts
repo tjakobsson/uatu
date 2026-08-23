@@ -1246,14 +1246,14 @@ function openSession(id) {
   document.body.appendChild(overlay);
   location.href = sessionUrl(id);
 }
-function unlockForWorkspace(workspace, credentials) {
+function unlockCredentialsDialog(title, summary, confirmLabel, credentials, refresh) {
   return new Promise(resolve => {
     const dialog = el("dialog", "credential-dialog");
     const header = el("div", "pane-header");
-    header.appendChild(el("h2", null, "Unlock credentials for " + (workspace.displayName || workspace.id)));
+    header.appendChild(el("h2", null, title));
     const form = el("form", "form-stack");
     form.method = "dialog";
-    form.appendChild(el("p", "credential-summary", "Unlock the assigned credentials, then the workspace will resume."));
+    form.appendChild(el("p", "credential-summary", summary));
     const fields = credentials.map(credential => {
       const label = el("label", null, credential.name + " passphrase");
       const input = document.createElement("input");
@@ -1270,7 +1270,7 @@ function unlockForWorkspace(workspace, credentials) {
     const actions = el("div", "credential-dialog-actions");
     const cancel = el("button", null, "Cancel");
     cancel.type = "button";
-    const unlock = el("button", "primary", "Unlock and resume");
+    const unlock = el("button", "primary", confirmLabel);
     actions.append(cancel, unlock);
     form.append(errorTarget, actions);
     dialog.append(header, form);
@@ -1292,7 +1292,7 @@ function unlockForWorkspace(workspace, credentials) {
             field.input.value = "";
             await api(credentialPath + "/" + encodeURIComponent(field.credential.id) + "/unlock", { passphrase });
           }
-          await loadDashboardCredentials();
+          await refresh();
           finish(true);
         } catch (error) { setLocalError(errorTarget, error.message); }
       });
@@ -1300,6 +1300,15 @@ function unlockForWorkspace(workspace, credentials) {
     dialog.showModal();
     fields[0].input.focus();
   });
+}
+function unlockForWorkspace(workspace, credentials) {
+  return unlockCredentialsDialog(
+    "Unlock credentials for " + (workspace.displayName || workspace.id),
+    "Unlock the assigned credentials, then the workspace will resume.",
+    "Unlock and resume",
+    credentials,
+    loadDashboardCredentials,
+  );
 }
 async function prepareWorkspaceResume(workspace, errorTarget) {
   try {
@@ -2214,11 +2223,30 @@ cloneForm.onsubmit = async event => {
       await api(credentialPath + "/" + encodeURIComponent(selectedCredential.id) + "/unlock", { passphrase });
       await loadCloneCredentials();
     }
+    const retainedCredential = credentialCatalog.find(item => item.id === cloneRetainedAuth.value);
+    const signingCredential = credentialCatalog.find(item => item.id === cloneSigning.value);
+    if (cloneStartAfter.checked) {
+      // A requested start resolves the retained and signing credentials at
+      // session launch; a locked one would turn the finished clone into a
+      // deterministic start failure, so they go through the masked unlock
+      // dialog now (the clone credential was unlocked above).
+      const lockedForStart = [...new Set([retainedCredential, signingCredential]
+        .filter(item => item && (!selectedCredential || item.id !== selectedCredential.id))
+        .filter(isCredentialLocked))];
+      if (lockedForStart.length > 0 && !(await unlockCredentialsDialog(
+        "Unlock credentials to start after clone",
+        "The selected workspace credentials must be unlocked before the started session can use them.",
+        "Unlock and clone",
+        lockedForStart,
+        loadCloneCredentials,
+      ))) {
+        throw new Error("start after clone needs the selected workspace credentials unlocked");
+      }
+    }
     const request = { url, dest: browsePath, folderName, start: cloneStartAfter.checked };
     const displayName = cloneDisplayName.value.trim();
     if (displayName) request.displayName = displayName;
     if (selectedCredential) request.credentialId = selectedCredential.id;
-    const retainedCredential = credentialCatalog.find(item => item.id === cloneRetainedAuth.value);
     if (retainedCredential) {
       request.retainedAuthentication = [{ credentialId: retainedCredential.id, host: retainedHostFor(retainedCredential) }];
     }

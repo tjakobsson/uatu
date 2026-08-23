@@ -686,6 +686,40 @@ describe("commit-boundary failure injection", () => {
     expect(await journalExists(f.journalPath)).toBe(false);
   });
 
+  test("recovery preserves assignment choices made after the commit", async () => {
+    // Both stores committed but the clear failed and the hub kept serving:
+    // the user then replaced the committed assignment with a different,
+    // still-valid credential. The current set no longer matches the
+    // journaled pre-commit state, so recovery must keep the newer choice
+    // instead of replaying the journal — while still clearing it.
+    const f = await fixture();
+    await addSshCredential(f.credentials, "original-key");
+    await addSshCredential(f.credentials, "replacement-key");
+    const folder = await gitRepository(f.folders, "committed");
+    await f.registry.register(folder, "local", "Committed");
+    const journal = {
+      version: 1,
+      operation: "configure-existing",
+      createdFolder: false,
+      entry: { id: "committed", path: folder, backend: "local", displayName: "Committed" },
+      previousEntry: null,
+      previousAssignments: [],
+      desiredAssignments: [
+        { workspaceId: "committed", credentialId: "original-key", role: "signing" as const },
+      ],
+    };
+    await fs.writeFile(f.journalPath, `${JSON.stringify(journal)}\n`, { mode: 0o600 });
+    await fs.chmod(f.journalPath, 0o600);
+    const replacement = [{ workspaceId: "committed", credentialId: "replacement-key", role: "signing" as const }];
+    await f.credentials.transaction(draft => {
+      draft.assignments = structuredClone(replacement);
+    });
+
+    await f.coordinator.recover();
+    expect(f.credentials.snapshot().assignments).toEqual(replacement);
+    expect(await journalExists(f.journalPath)).toBe(false);
+  });
+
   test("recovery rejects a journal that is not owner-only", async () => {
     const f = await fixture();
     await fs.writeFile(f.journalPath, `${JSON.stringify({ version: 1 })}\n`, { mode: 0o644 });

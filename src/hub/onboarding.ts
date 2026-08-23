@@ -271,6 +271,11 @@ export function resolveOnboardingAssignments(
   return desired;
 }
 
+function sameAssignmentSet(left: CredentialAssignment[], right: CredentialAssignment[]): boolean {
+  return left.length === right.length
+    && right.every(assignment => left.some(existing => JSON.stringify(existing) === JSON.stringify(assignment)));
+}
+
 // Rebuilds the input-shaped selections from resolved assignments so a
 // desired set can be re-judged by resolveOnboardingAssignments later.
 function selectionsFromAssignments(desired: CredentialAssignment[]): {
@@ -504,7 +509,7 @@ export class WorkspaceOnboardingCoordinator {
       const committed = current !== undefined
         && normalizeAbsolutePath(current.path) === pending.entry.path;
       if (committed) {
-        await this.completeRecoveredAssignments(pending.entry.id, pending.desiredAssignments);
+        await this.completeRecoveredAssignments(pending.entry.id, pending.desiredAssignments, pending.previousAssignments);
       } else {
         if (pending.previousEntry) {
           await this.options.registry.restoreEntries([pending.previousEntry]);
@@ -797,14 +802,22 @@ export class WorkspaceOnboardingCoordinator {
   }
 
   // Completing a committed onboarding replays the journaled desired set —
-  // unless credential state moved on while the journal lingered (its clear
-  // failed and the hub kept serving until this restart): a credential
-  // deleted or disabled after commit had its revocation applied to the
-  // live store, and blindly reinstalling would resurrect the revoked
-  // assignment. When the desired set no longer resolves against the
-  // current store, the newer credential state wins and the assignments
-  // are left untouched.
-  private async completeRecoveredAssignments(workspaceId: string, desired: CredentialAssignment[]): Promise<void> {
+  // unless state moved on while the journal lingered (its clear failed and
+  // the hub kept serving until this restart). Two drift signals defer to
+  // the newer state: the workspace's current assignments no longer match
+  // the recorded pre-commit set (the desired set, or a later user choice,
+  // already landed — replaying would undo a revocation or replacement),
+  // or the desired set no longer resolves against the current store (a
+  // credential was deleted or disabled after commit). Only the recorded
+  // pre-commit state with a still-valid desired set is completed.
+  private async completeRecoveredAssignments(
+    workspaceId: string,
+    desired: CredentialAssignment[],
+    previous: CredentialAssignment[],
+  ): Promise<void> {
+    const current = this.options.credentials.snapshot().assignments
+      .filter(assignment => assignment.workspaceId === workspaceId);
+    if (!sameAssignmentSet(current, previous)) return;
     if (desired.length > 0) {
       try {
         resolveOnboardingAssignments(workspaceId, selectionsFromAssignments(desired), this.options.credentials.snapshot());
@@ -818,9 +831,7 @@ export class WorkspaceOnboardingCoordinator {
   private async replaceWorkspaceAssignments(workspaceId: string, assignments: CredentialAssignment[]): Promise<void> {
     const current = this.options.credentials.snapshot().assignments
       .filter(assignment => assignment.workspaceId === workspaceId);
-    const unchanged = current.length === assignments.length
-      && assignments.every(assignment => current.some(existing => JSON.stringify(existing) === JSON.stringify(assignment)));
-    if (unchanged) return;
+    if (sameAssignmentSet(current, assignments)) return;
     await this.options.credentials.transaction(draft => {
       draft.assignments = draft.assignments.filter(assignment => assignment.workspaceId !== workspaceId);
       draft.assignments.push(...structuredClone(assignments));

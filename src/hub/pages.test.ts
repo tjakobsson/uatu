@@ -134,6 +134,12 @@ describe("clone page", () => {
     expect(html).toContain("cloneCompatible");
     expect(html).toContain("isCredentialLocked(selectedCredential)");
     expect(html).toContain("request.credentialId = selectedCredential.id");
+    // A requested start must not be doomed by locked retained or signing
+    // credentials: they go through the masked dialog before the job is
+    // created, with the already-unlocked clone credential excluded.
+    expect(html).toContain("Unlock credentials to start after clone");
+    expect(html).toContain('"Unlock and clone"');
+    expect(html).toContain("item.id !== selectedCredential.id");
     // The clone identity is never an implicit workspace grant: nothing
     // pre-fills the retained control, so an untouched form retains nothing.
     expect(html).toContain("The clone credential is never retained on its own");
