@@ -1056,6 +1056,47 @@ describe("prompt, abort, permission, and question mutations", () => {
     expect((await adapter.history("session")).queued).toEqual([]);
   });
 
+  test("a held slash command waits out a straggling completion instead of firing into the active turn", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    let message = 0;
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
+
+    expect((await adapter.prompt("session", "r1", "first")).held).toBe(false);
+    await adapter.prompt("session", "r2", "second");
+    const command = await adapter.prompt("session", "r3", "/review the queue");
+    expect(command.held).toBe(true);
+
+    // Delivery of "second" stalls in dispatch while a straggling duplicate
+    // completion of the previous turn applies. The early-released "second"
+    // is absorbed by the provider's own queue delivery, but the command
+    // head has no such protection — it must stay held until a terminal
+    // report follows the admission "second" just made.
+    let releaseDelivery!: () => void;
+    const gate = new Promise<void>(resolve => { releaseDelivery = resolve; });
+    let entered!: () => void;
+    const enteredDelivery = new Promise<void>(resolve => { entered = resolve; });
+    const accept = provider.prompt.bind(provider);
+    provider.prompt = async (sessionId, input) => {
+      entered();
+      await gate;
+      return accept(sessionId, input);
+    };
+    adapter.projectionForTests("session").apply({ kind: "status", status: "completed" });
+    await enteredDelivery;
+    adapter.projectionForTests("session").apply({ kind: "status", status: "completed" });
+    releaseDelivery();
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(provider.commandCalls).toEqual([]);
+    expect((await adapter.history("session")).queued).toEqual([expect.objectContaining({ id: command.messageId, text: "/review the queue" })]);
+
+    // The turn's genuine end is the unambiguous release.
+    adapter.projectionForTests("session").apply({ kind: "status", status: "completed" });
+    for (let attempt = 0; attempt < 200 && provider.commandCalls.length < 1; attempt += 1) await new Promise(resolve => setTimeout(resolve, 1));
+    expect(provider.commandCalls[0]).toEqual(expect.objectContaining({ name: "review", arguments: "the queue" }));
+    expect((await adapter.history("session")).queued).toEqual([]);
+  });
+
   test("a delivery-time session lookup failure pauses the queue instead of stranding it", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];

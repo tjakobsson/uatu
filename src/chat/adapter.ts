@@ -153,6 +153,16 @@ export class OpenCodeChatAdapter {
   // survives projection eviction. This is what distinguishes "the store says
   // running because OpenCode died mid-turn" from "running right now".
   private readonly liveTurns = new Set<string>();
+  // Admissions this adapter made with no terminal report applied since.
+  // Status events carry no turn identity, so a straggling duplicate
+  // completion can clear liveTurns while the admitted turn still runs; a
+  // prompt released early is absorbed by the provider's own queue delivery,
+  // but provider.command() fires immediately, so held slash commands wait
+  // for a terminal report that follows the last admission. A fresh
+  // submission clears the hold — the documented resume trigger, matching
+  // dormant queues — which also bounds the fast-turn case where a
+  // completion outruns its own acceptance and would otherwise pin this.
+  private readonly openAdmissions = new Set<string>();
   private readonly maxProjections: number;
   private readonly coalesceWindowMs: number | undefined;
   private readonly metrics: ChatEventMetrics | undefined;
@@ -539,8 +549,11 @@ export class OpenCodeChatAdapter {
         };
         queue.push(held);
         this.heldQueues.set(conversationId, queue);
-        // A submission is what reactivates a queue a cancellation paused.
+        // A submission is what reactivates a queue a cancellation paused,
+        // and it likewise releases the open-admission hold on command heads
+        // — the user is acting on a conversation that reads idle.
         this.dormantQueues.delete(conversationId);
+        this.openAdmissions.delete(conversationId);
         // The staged selection commits on submission, exactly as an
         // immediately dispatched prompt commits it; delivery re-asserts the
         // same values on the wire.
@@ -648,6 +661,7 @@ export class OpenCodeChatAdapter {
       const accepted = slash
         ? await this.provider.command(conversationId, { id: input.messageId, name: slash.name, arguments: slash.arguments, model: input.model, mode, variant })
         : await this.provider.prompt(conversationId, { id: input.messageId, text, delivery: "queue", model: input.model, mode, variant });
+      this.openAdmissions.add(conversationId);
       // "sending" ends at acceptance, BEFORE the rename side-work below —
       // the dispatch is no longer in flight once the provider has accepted
       // it, so the state must not span the rename's provider round trips.
@@ -748,6 +762,13 @@ export class OpenCodeChatAdapter {
     // Re-held, not lost: a conversation that reports busy again before this
     // ran keeps the message queued, and the next end-of-turn retries.
     if (this.turnActive(conversationId, this.projection(conversationId))) return;
+    // A "/"-prefixed head waits while an admission has no terminal report
+    // after it: a straggling duplicate completion can read as end-of-turn
+    // while the admitted turn still runs, and unlike a queue-delivered
+    // prompt, provider.command() would fire into it immediately. The prefix
+    // over-approximates — an unlisted command dispatches as prose — at
+    // worst holding a "/"-prefixed prompt to the same stricter rule.
+    if (held.text.startsWith("/") && this.openAdmissions.has(conversationId)) return;
     let session: ProviderSession;
     try {
       session = await this.requireSession(conversationId);
@@ -1433,7 +1454,12 @@ export class OpenCodeChatAdapter {
     }
     const projection = new ConversationProjection(new ConversationReplay(this.generation, id, this.replayBytes), status => {
       if (status === "running" || status === "sending") this.liveTurns.add(id);
-      else this.liveTurns.delete(id);
+      else {
+        this.liveTurns.delete(id);
+        // A terminal report closes the last admission — the only signal
+        // available without turn identity; held slash commands key on it.
+        this.openAdmissions.delete(id);
+      }
       // A turn that ended on its own releases the next held message. Only
       // these two: an interruption leaves the queue dormant by decision, and
       // a failure must not restart a failing conversation by itself.
