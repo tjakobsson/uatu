@@ -37,6 +37,11 @@ export type RenameFolderResult = { path: string; workspaceIds: string[] };
 export type RemoveFolderResult = { path: string; workspaceId?: string };
 export type CoordinatedFolderResult<T> = SessionsStoppedResult<T>;
 
+// dev+ino as strings (64-bit inode numbers exceed safe JSON integers).
+// Recorded so recovery can tell OUR empty destination claim from a foreign
+// directory or from the successfully renamed folder itself.
+type DirectoryIdentity = { dev: string; ino: string };
+
 type RenameJournal = {
   version: typeof JOURNAL_VERSION;
   operation: "rename";
@@ -44,6 +49,9 @@ type RenameJournal = {
   destination: string;
   before: WorkspaceEntry[];
   after: WorkspaceEntry[];
+  // Absent in journals from builds that predate claim identities; recovery
+  // then treats a both-exist state as ambiguous, exactly as before.
+  identities?: { source: DirectoryIdentity; claim: DirectoryIdentity };
 };
 
 type RemoveJournal = {
@@ -167,6 +175,23 @@ function closedJournalObject(value: unknown, fields: readonly string[], label: s
   return record;
 }
 
+function parseIdentity(value: unknown): DirectoryIdentity {
+  const record = closedJournalObject(value, ["dev", "ino"], "directory identity");
+  if (typeof record.dev !== "string" || record.dev === "" || typeof record.ino !== "string" || record.ino === "") {
+    throw new Error("invalid directory identity");
+  }
+  return { dev: record.dev, ino: record.ino };
+}
+
+function parseIdentities(value: unknown): { source: DirectoryIdentity; claim: DirectoryIdentity } {
+  const record = closedJournalObject(value, ["source", "claim"], "rename journal identities");
+  return { source: parseIdentity(record.source), claim: parseIdentity(record.claim) };
+}
+
+function directoryIdentity(stats: { dev: number | bigint; ino: number | bigint }): DirectoryIdentity {
+  return { dev: String(stats.dev), ino: String(stats.ino) };
+}
+
 function journalAbsolutePath(value: unknown): string {
   if (typeof value !== "string" || value.includes("\0") || !path.isAbsolute(value)) throw new Error("journal path must be absolute");
   return normalizeAbsolutePath(value);
@@ -176,7 +201,7 @@ function parseJournal(value: unknown): PendingFolderMutation {
   const base = closedJournalObject(
     value,
     (value as { operation?: unknown })?.operation === "rename"
-      ? ["version", "operation", "source", "destination", "before", "after"]
+      ? ["version", "operation", "source", "destination", "before", "after", "identities"]
       : ["version", "operation", "source", "entry"],
     "folder mutation journal",
   );
@@ -197,6 +222,7 @@ function parseJournal(value: unknown): PendingFolderMutation {
       destination: journalAbsolutePath(base.destination),
       before,
       after,
+      ...(base.identities === undefined ? {} : { identities: parseIdentities(base.identities) }),
     };
   }
   if (base.operation === "remove") {
@@ -253,33 +279,66 @@ class FolderMutationJournal {
   }
 }
 
+// Canonicalizes a possibly-missing path: the deepest existing ancestor is
+// resolved with realpath and the missing remainder rejoined verbatim (its
+// components do not exist, so they cannot traverse further symlinks).
+// Returns undefined when no ancestor resolves; missing-path errors on an
+// ancestor walk down, everything else (EACCES) propagates.
+async function canonicalizeNearestAncestor(
+  persisted: string,
+  fileSystem: Pick<FileSystem, "realpath">,
+): Promise<string | undefined> {
+  let prefix = persisted;
+  const suffix: string[] = [];
+  for (;;) {
+    const parent = path.dirname(prefix);
+    if (parent === prefix) return undefined;
+    suffix.unshift(path.basename(prefix));
+    prefix = parent;
+    try {
+      return path.join(await fileSystem.realpath(prefix), ...suffix);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (code === "ENOENT" || code === "ENOTDIR") continue;
+      throw error;
+    }
+  }
+}
+
 // Registries persisted before path canonicalization can hold alias paths
 // (a registration reached through a symlinked ancestor). Canonical-path
 // lookups would treat those entries as unrelated — a folder mutation would
-// skip their session stops and path updates, and workspace registration
-// would mint a duplicate id for the same repository — so both reconcile
-// stored aliases to their canonical form before any exact-path lookup. A
-// path that cannot exist anymore is left alone: the entry stays registered
-// at its recorded path, exactly as a vanished folder does.
+// skip their session stops and path updates, workspace registration would
+// mint a duplicate id for the same repository, and a stale claim would not
+// block its canonical destination — so all of them reconcile stored
+// aliases to their canonical form before any exact-path lookup. A vanished
+// folder stays registered, but at its canonical spelling: the missing leaf
+// is rejoined onto its deepest existing ancestor's resolution.
 export async function reconcileRegisteredAliasPaths(
   registry: Pick<WorkspaceRegistry, "list" | "replacePathPrefix">,
   fileSystem: Pick<FileSystem, "realpath"> = nodeFs,
 ): Promise<void> {
   for (const entry of registry.list()) {
     const persisted = normalizeAbsolutePath(entry.path);
-    let canonical: string;
+    let canonical: string | undefined;
     try {
       canonical = normalizeAbsolutePath(await fileSystem.realpath(persisted));
     } catch (error) {
       const code = (error as NodeJS.ErrnoException)?.code;
-      // Only a missing path is the vanished-folder case. Anything else
-      // (EACCES on an alias ancestor) fails the caller closed: skipping
-      // would silently exempt this entry from canonical-path matching
-      // while its directory may still be affected.
-      if (code === "ENOENT" || code === "ENOTDIR") continue;
-      throw safeFsError(error, "registered workspace path reconciliation failed");
+      // Anything but a missing path (EACCES on an alias ancestor) fails
+      // the caller closed: skipping would silently exempt this entry from
+      // canonical-path matching while its directory may still be affected.
+      if (code !== "ENOENT" && code !== "ENOTDIR") {
+        throw safeFsError(error, "registered workspace path reconciliation failed");
+      }
+      try {
+        const rejoined = await canonicalizeNearestAncestor(persisted, fileSystem);
+        canonical = rejoined === undefined ? undefined : normalizeAbsolutePath(rejoined);
+      } catch (ancestorError) {
+        throw safeFsError(ancestorError, "registered workspace path reconciliation failed");
+      }
     }
-    if (canonical === persisted) continue;
+    if (canonical === undefined || canonical === persisted) continue;
     try {
       await registry.replacePathPrefix(persisted, canonical);
     } catch (error) {
@@ -309,7 +368,9 @@ export class FolderManager {
         // A missing directory's registration is deliberately retained;
         // creating an unrelated empty folder at that path would hand it
         // the old workspace's stable id, personal state, and credential
-        // assignments.
+        // assignments. Reconciled first, so an alias-spelled stale claim
+        // matches its canonical destination too.
+        await this.reconcileRegisteredAliases();
         if (this.options.registry.atOrBelow(destination).length > 0) {
           throw new FolderManagerError("conflict", "destination is claimed by a registered workspace");
         }
@@ -412,22 +473,39 @@ export class FolderManager {
           this.isDirectDirectory(pending.source),
           this.isDirectDirectory(pending.destination),
         ]);
+        let renamed: boolean;
         if (sourceExists && destinationExists) {
-          // A crash between renameWithoutReplacement's mkdir claim and its
-          // rename leaves our empty placeholder at the destination while
-          // the source is untouched. Reclaiming the placeholder (rmdir
-          // refuses anything non-empty) turns this back into the
-          // source-only state; a populated destination stays a loud
-          // failure — that state was never ours to resolve.
-          try {
-            await this.fs.rmdir(pending.destination);
-          } catch (error) {
-            throw new Error("ambiguous pending folder rename: expected exactly one of source or destination to exist", { cause: error });
+          // Both existing is resolvable only through the journaled
+          // identities: the destination carrying the recorded claim
+          // identity is our crashed empty placeholder (reclaimed —
+          // rmdir refuses anything non-empty), while the recorded
+          // source identity means the rename completed and something
+          // foreign recreated the source. Emptiness alone proves
+          // nothing, and a journal predating identities stays a loud
+          // failure.
+          const destinationStats = await this.fs.lstat(pending.destination);
+          const matches = (identity: DirectoryIdentity | undefined) =>
+            identity !== undefined
+            && String(destinationStats.dev) === identity.dev
+            && String(destinationStats.ino) === identity.ino;
+          if (matches(pending.identities?.claim)) {
+            try {
+              await this.fs.rmdir(pending.destination);
+            } catch (error) {
+              throw new Error("ambiguous pending folder rename: expected exactly one of source or destination to exist", { cause: error });
+            }
+            renamed = false;
+          } else if (matches(pending.identities?.source)) {
+            renamed = true;
+          } else {
+            throw new Error("ambiguous pending folder rename: expected exactly one of source or destination to exist");
           }
         } else if (!sourceExists && !destinationExists) {
           throw new Error("ambiguous pending folder rename: expected exactly one of source or destination to exist");
+        } else {
+          renamed = destinationExists;
         }
-        await this.options.registry.restoreEntries(sourceExists ? pending.before : pending.after);
+        await this.options.registry.restoreEntries(renamed ? pending.after : pending.before);
         await this.journal.clear();
         return;
       }
@@ -551,11 +629,32 @@ export class FolderManager {
       ...entry,
       path: path.join(destination, path.relative(source, entry.path)),
     }));
-    const pending: RenameJournal = { version: JOURNAL_VERSION, operation: "rename", source, destination, before, after };
+    // The destination is claimed BEFORE the journal so the claim's identity
+    // can be recorded in it — recovery can then tell our empty placeholder
+    // from a foreign directory or the renamed folder itself. A crash before
+    // the journal write leaves only an inert empty directory, which is
+    // ordinary removable clutter, never a recovery state.
+    let claimed = false;
     try {
+      await this.fs.mkdir(destination);
+      claimed = true;
+      const [sourceStats, claimStats] = await Promise.all([this.fs.lstat(source), this.fs.lstat(destination)]);
+      const pending: RenameJournal = {
+        version: JOURNAL_VERSION,
+        operation: "rename",
+        source,
+        destination,
+        before,
+        after,
+        identities: { source: directoryIdentity(sourceStats), claim: directoryIdentity(claimStats) },
+      };
       await this.journal.write(pending);
-      await this.renameWithoutReplacement(source, destination);
+      // POSIX rename may replace only our empty claim; a competing entry
+      // makes it fail.
+      await this.fs.rename(source, destination);
+      claimed = false;
     } catch (error) {
+      if (claimed) await this.fs.rmdir(destination).catch(() => undefined);
       await this.journal.clear().catch(() => undefined);
       throw safeFsError(error, "registered folder rename failed");
     }
