@@ -4,6 +4,8 @@ import {
   type CloneCredentialResolver,
   type ResolvedCloneCredential,
 } from "./credential-context";
+import { OnboardingError } from "./onboarding";
+import type { PersonalWorkspaceStateStore } from "./personal-state";
 import { defaultWorkspaceDisplayName, type WorkspaceEntry } from "./registry";
 import {
   normalizeAbsolutePath,
@@ -66,6 +68,12 @@ export type CloneJobManagerOptions = {
   sessions: Sessions;
   credentials?: CloneCredentialResolver;
   onboarding?: CloneOnboarding;
+  // When present, cancellation rollback forgets the registration through
+  // the personal-state store's durable pending-forget record, so a crash
+  // between the registry removal and the retained-assignment removal is
+  // finished by startup recovery instead of leaving hidden assignments
+  // for an unregistered id.
+  personalState?: Pick<PersonalWorkspaceStateStore, "forgetWorkspace">;
   id?: () => string;
   timer?: CloneJobTimer;
   maxReplayBytes?: number;
@@ -125,6 +133,7 @@ export class CloneJobManager {
   private readonly sessions: Sessions;
   private readonly credentials: CloneCredentialResolver;
   private readonly onboarding?: CloneOnboarding;
+  private readonly personalState?: Pick<PersonalWorkspaceStateStore, "forgetWorkspace">;
   private readonly makeId: () => string;
   private readonly timer: CloneJobTimer;
   private readonly maxReplayBytes: number;
@@ -140,6 +149,7 @@ export class CloneJobManager {
     this.sessions = options.sessions;
     this.credentials = options.credentials ?? EMPTY_CLONE_CREDENTIAL_RESOLVER;
     this.onboarding = options.onboarding;
+    this.personalState = options.personalState;
     this.makeId = options.id ?? (() => crypto.randomUUID());
     this.timer = options.timer ?? defaultTimer;
     this.maxReplayBytes = options.maxReplayBytes ?? 64 * 1024;
@@ -371,7 +381,32 @@ export class CloneJobManager {
           job.registered = await this.registry.register(job.target, "local", job.displayName);
         }
       } catch (error) {
-        await this.finish(job, job.stop ?? { status: "register-failed", target: job.target, error: errorText(error) });
+        const committed = error instanceof OnboardingError ? error.committedEntry : undefined;
+        if (!committed) {
+          await this.finish(job, job.stop ?? { status: "register-failed", target: job.target, error: errorText(error) });
+          return;
+        }
+        // Both stores committed and only the onboarding journal failed to
+        // clear: the workspace is fully registered and restart recovery
+        // will simply confirm it. Reporting a registration failure here
+        // would be false — the job reports the preserved stopped
+        // workspace, or honors a cancellation with a normal rollback.
+        job.registered = committed;
+        job.assignedRetained = job.retainedAuthentication.length > 0 || job.signing !== null;
+        if (job.stop) {
+          await this.finishAfterRollback(job, committed);
+          return;
+        }
+        if (job.start) {
+          await this.finish(job, {
+            status: "start-failed",
+            target: job.target,
+            workspaceId: committed.id,
+            error: "workspace registered, but the Hub needs a restart to reconcile its onboarding journal before starting it",
+          });
+          return;
+        }
+        await this.finish(job, { status: "succeeded", workspaceId: committed.id, target: job.target, running: false });
         return;
       }
       if (job.stop) {
@@ -558,16 +593,31 @@ export class CloneJobManager {
         job.assigned = false;
         unassigned = true;
       }
-      if (!(await this.registry.remove(entry.id))) throw new Error("workspace registration was not removed");
       // Retained assignments are removed only AFTER the registration is
       // gone: a failed registry removal (which the registry rolls back
       // itself) must leave the still-registered workspace with its full
-      // committed configuration, never registered-but-stripped. A failure
-      // here instead leaves stray assignments for an unregistered id, which
-      // the reported cleanup failure directs the operator to review.
-      if (job.assignedRetained && this.onboarding) {
-        await this.onboarding.removeWorkspaceAssignments(entry.id);
+      // committed configuration, never registered-but-stripped. With the
+      // personal-state store, both steps run under its durable
+      // pending-forget record, so a crash between them is finished by
+      // startup recovery instead of leaving hidden assignments for an
+      // unregistered id.
+      if (this.personalState) {
+        await this.personalState.forgetWorkspace(
+          entry.id,
+          () => this.registry.remove(entry.id),
+          async () => {
+            if (job.assignedRetained && this.onboarding) {
+              await this.onboarding.removeWorkspaceAssignments(entry.id);
+            }
+          },
+        );
         job.assignedRetained = false;
+      } else {
+        if (!(await this.registry.remove(entry.id))) throw new Error("workspace registration was not removed");
+        if (job.assignedRetained && this.onboarding) {
+          await this.onboarding.removeWorkspaceAssignments(entry.id);
+          job.assignedRetained = false;
+        }
       }
       return null;
     } catch (error) {

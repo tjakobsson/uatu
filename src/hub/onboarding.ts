@@ -42,17 +42,23 @@ export class OnboardingError extends Error {
   constructor(
     readonly code: OnboardingErrorCode,
     message: string,
-    options?: ErrorOptions & { retainedPath?: string },
+    options?: ErrorOptions & { retainedPath?: string; committedEntry?: WorkspaceEntry },
   ) {
     super(message, options);
     this.name = "OnboardingError";
     this.retainedPath = options?.retainedPath;
+    this.committedEntry = options?.committedEntry;
   }
 
   // Set when a created repository outlives a failed onboarding: the folder
   // was initialized, cannot be proven free of user content, and is retained
   // for retry through the Existing folder flow.
   readonly retainedPath: string | undefined;
+
+  // Set when both stores committed and only the journal failed to clear:
+  // the workspace is fully registered and recovery will preserve it, so
+  // callers can report the committed entry instead of a phantom failure.
+  readonly committedEntry: WorkspaceEntry | undefined;
 }
 
 export type AuthenticationSelection = { credentialId: string; host: string };
@@ -787,8 +793,10 @@ export class WorkspaceOnboardingCoordinator {
         await this.journal.clear();
       } catch (error) {
         // Both stores committed; recovery would simply confirm the desired
-        // state, but an uncleaned journal must still be surfaced.
-        throw new OnboardingError("recovery-required", "workspace onboarding committed but its journal could not be cleared; restart the Hub to reconcile", { cause: error });
+        // state, but an uncleaned journal must still be surfaced. The
+        // committed entry travels with the error so callers (the clone
+        // job) can report the preserved workspace.
+        throw new OnboardingError("recovery-required", "workspace onboarding committed but its journal could not be cleared; restart the Hub to reconcile", { cause: error, committedEntry: { ...entry } });
       }
     });
 

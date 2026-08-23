@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { CloneProcess, CloneProcessFactory, CloneProcessStart } from "./clone-process";
 import { CloneJobManager, type CloneJobEvent, type CloneJobTimer } from "./clone-jobs";
 import type { ResolvedCloneCredential } from "./credential-context";
+import { OnboardingError } from "./onboarding";
 import { PathReservationCoordinator } from "./path-reservations";
 import type { WorkspaceEntry } from "./registry";
 
@@ -101,6 +102,7 @@ function fixture(overrides: {
   retentionMs?: number;
   reservations?: PathReservationCoordinator;
   onboarding?: boolean;
+  personalState?: boolean;
 } = {}) {
   const timer = new FakeTimer();
   const processes: FakeProcess[] = [];
@@ -185,7 +187,13 @@ function fixture(overrides: {
   let onboardingError: Error | undefined;
   const onboarding = overrides.onboarding ? {
     async configureCloned(options: typeof onboardingCalls[number]) {
-      if (onboardingError) throw onboardingError;
+      if (onboardingError) {
+        // A committed-entry error models the journal-clear failure: both
+        // stores committed before the throw.
+        const committed = onboardingError instanceof OnboardingError ? onboardingError.committedEntry : undefined;
+        if (committed) registered.set(committed.id, committed);
+        throw onboardingError;
+      }
       onboardingCalls.push(options);
       const entry = { id: "repo", path: options.path, backend: "local" as const, displayName: options.displayName };
       registered.set(entry.id, entry);
@@ -195,12 +203,29 @@ function fixture(overrides: {
       assignmentsRemoved.push(workspaceId);
     },
   } : undefined;
+  const forgetFlow: Array<{ id: string; order: string[] }> = [];
+  const personalState = overrides.personalState ? {
+    async forgetWorkspace(
+      workspaceId: string,
+      removeRegistryEntry: () => Promise<boolean>,
+      finalizeCommittedForget: () => Promise<void> = async () => {},
+    ) {
+      const order: string[] = ["journal"];
+      if (!(await removeRegistryEntry())) throw new Error(`unknown workspace: ${workspaceId}`);
+      order.push("registry");
+      await finalizeCommittedForget();
+      order.push("finalize");
+      forgetFlow.push({ id: workspaceId, order });
+      return true;
+    },
+  } : undefined;
   let id = 0;
   const manager = new CloneJobManager({
     processFactory,
     registry,
     sessions,
     onboarding,
+    personalState,
     credentials: {
       // Mirrors the stored resolver: an SSH-selected job re-resolves inside
       // the runtime section and must get a live credential back.
@@ -236,7 +261,7 @@ function fixture(overrides: {
   });
   return {
     manager, timer, processes, starts, registered, removed, started, stopped, assigned, unassigned, sessions, runtimeSections,
-    onboardingCalls, assignmentsRemoved,
+    onboardingCalls, assignmentsRemoved, forgetFlow,
     failOnboarding(error: Error) { onboardingError = error; },
     failRegister(error: Error) { registerError = error; },
     failRemove(error: Error) { removeError = error; },
@@ -944,6 +969,65 @@ describe("CloneJobManager onboarding coordination", () => {
     // never registered with its assignments silently stripped.
     expect(f.registered.has("repo")).toBe(true);
     expect(f.assignmentsRemoved).toEqual([]);
+  });
+
+  test("a committed onboarding whose journal fails to clear reports the preserved workspace", async () => {
+    const f = fixture({ onboarding: true });
+    const committed = { id: "repo", path: "/tmp/committed", backend: "local" as const, displayName: "Repo" };
+    f.failOnboarding(new OnboardingError(
+      "recovery-required",
+      "workspace onboarding committed but its journal could not be cleared; restart the Hub to reconcile",
+      { committedEntry: committed },
+    ));
+    const { jobId } = f.manager.create("alice", "remote", "/tmp/committed", {
+      retainedAuthentication: [{ credentialId: "workspace-auth", host: "github.com" }],
+    });
+    await tick();
+    f.processes[0].exit(0);
+    await tick();
+
+    // Both stores committed; a register-failed here would be false.
+    expect(f.registered.has("repo")).toBe(true);
+    expect(capture(f.manager, "alice", jobId).at(-1)?.data).toEqual({
+      status: "succeeded", workspaceId: "repo", target: "/tmp/committed", running: false,
+    });
+  });
+
+  test("a committed journal-clear failure with a requested start reports the stopped workspace", async () => {
+    const f = fixture({ onboarding: true });
+    const committed = { id: "repo", path: "/tmp/committed-start", backend: "local" as const, displayName: "Repo" };
+    f.failOnboarding(new OnboardingError("recovery-required", "journal could not be cleared", { committedEntry: committed }));
+    const { jobId } = f.manager.create("alice", "remote", "/tmp/committed-start", { start: true });
+    await tick();
+    f.processes[0].exit(0);
+    await tick();
+
+    expect(f.started).toEqual([]);
+    const result = capture(f.manager, "alice", jobId).at(-1)?.data as { status: string; workspaceId?: string };
+    expect(result.status).toBe("start-failed");
+    expect(result.workspaceId).toBe("repo");
+  });
+
+  test("cancellation rollback forgets through the durable personal-state record", async () => {
+    // Registry removal and retained-assignment removal must be one
+    // recoverable operation: the pending-forget record survives a crash
+    // between them and startup recovery finishes the assignment cleanup.
+    const f = fixture({ onboarding: true, personalState: true });
+    f.holdStart();
+    const { jobId } = f.manager.create("alice", "remote", "/tmp/durable-cancel", {
+      retainedAuthentication: [{ credentialId: "workspace-auth", host: "github.com" }],
+      start: true,
+    });
+    await tick();
+    f.processes[0].exit(0);
+    await tick();
+
+    const cancelling = f.manager.cancel("alice", jobId);
+    f.releaseHeldStart();
+    expect(await cancelling).toBe("cancelled");
+    expect(f.forgetFlow).toEqual([{ id: "repo", order: ["journal", "registry", "finalize"] }]);
+    expect(f.assignmentsRemoved).toEqual(["repo"]);
+    expect(f.registered.size).toBe(0);
   });
 
   test("a coordinator commit failure reports registration failure without a workspace", async () => {

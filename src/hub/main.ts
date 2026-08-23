@@ -494,6 +494,7 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     registry,
     sessions,
     credentials: cloneCredentials,
+    personalState,
     onboarding: {
       configureCloned: options => onboarding.configureCloned(options),
       removeWorkspaceAssignments: workspaceId => credentialMetadata.removeWorkspaceAssignments(workspaceId),
