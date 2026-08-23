@@ -55,8 +55,9 @@ type RenameJournal = {
   after: WorkspaceEntry[];
   // Absent in journals from builds that predate identities; recovery then
   // treats a both-exist state as ambiguous, exactly as before. claim is
-  // recorded only by the fallback strategy — the no-replace rename path
-  // never creates a placeholder.
+  // recorded only by the claimed-placeholder strategy — neither the
+  // no-replace rename path nor the Windows plain rename creates a
+  // placeholder.
   identities?: { source: DirectoryIdentity; claim?: DirectoryIdentity };
 };
 
@@ -94,6 +95,9 @@ export type FolderManagerOptions = {
   // Test seam for the kernel no-replace rename; defaults to the platform
   // primitive on the real filesystem and to none with an injected fs.
   renameNoReplace?: NoReplaceRename | null;
+  // Test seam for the platform whose rename semantics apply; defaults to
+  // the running platform. Only "win32" vs everything else matters.
+  platform?: NodeJS.Platform;
 };
 
 function closedObject(value: unknown, fields: readonly string[]): Record<string, unknown> {
@@ -403,6 +407,7 @@ export class FolderManager {
   private readonly fs: FileSystem;
   private readonly journal: FolderMutationJournal;
   private readonly renameNoReplace: NoReplaceRename | null;
+  private readonly claimsDestination: boolean;
   private operationChain: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly options: FolderManagerOptions) {
@@ -416,6 +421,17 @@ export class FolderManager {
       : options.fs
         ? null
         : loadNoReplaceRename();
+    // Which fallback the rename degrades to when no kernel no-replace
+    // primitive is available. POSIX rename() silently replaces an EMPTY
+    // destination directory, so the fallback must claim the destination
+    // itself (mkdir) and replace only that claim. Windows rename refuses
+    // ANY existing destination, an empty directory included — a plain
+    // rename is already a no-replace rename there, and loadNoReplaceRename()
+    // returns null on win32, so claiming first would make the placeholder we
+    // just created block every rename, registered or not. There is no
+    // Windows CI, so that path stays as simple as the platform allows:
+    // probe the destination, then rename.
+    this.claimsDestination = (options.platform ?? process.platform) !== "win32";
   }
 
   create(input: unknown): Promise<CreateFolderResult> {
@@ -713,10 +729,19 @@ export class FolderManager {
   private async renameWithoutReplacement(source: string, destination: string): Promise<void> {
     // The kernel refuses an existing destination atomically — no claim, no
     // placeholder, no ownership question. An unsupported syscall degrades
-    // to the claimed strategy below, which surfaces genuine errors
-    // faithfully and never replaces anything beyond its own placeholder —
-    // a plain rename would reopen the hole.
+    // to the platform's fallback: on Windows a plain rename, which refuses
+    // an existing destination by itself, and on POSIX the claimed strategy
+    // below, which surfaces genuine errors faithfully and never replaces
+    // anything beyond its own placeholder — a plain POSIX rename would
+    // reopen the hole.
     if (this.renameNoReplace && await this.tryNativeRename(source, destination)) return;
+    if (!this.claimsDestination) {
+      // Windows: the rename below refuses an existing destination itself;
+      // the probe only turns that refusal into the conflict error shape.
+      await this.assertMissing(destination);
+      await this.fs.rename(source, destination);
+      return;
+    }
     let claim: DirectoryIdentity | undefined;
     try {
       // Fallback: mkdir atomically claims the absent name and POSIX rename
@@ -806,7 +831,7 @@ export class FolderManager {
         await this.journal.write({ ...base, identities: { source: sourceIdentity } });
         moved = await this.tryNativeRename(source, destination);
       }
-      if (!moved) {
+      if (!moved && this.claimsDestination) {
         // Claimed fallback: the destination is claimed BEFORE the journal
         // so the claim's identity can be recorded in it — recovery can
         // then tell our empty placeholder from a foreign directory or the
@@ -825,6 +850,16 @@ export class FolderManager {
         await this.assertClaimOwned(destination, claim);
         await this.fs.rename(source, destination);
         claim = undefined;
+      } else if (!moved) {
+        // Windows: no placeholder exists to record, so the journal carries
+        // the source identity alone — exactly the shape the native
+        // no-replace path writes, and recovery reads it the same way. A
+        // crash before the rename leaves the destination absent; a foreign
+        // directory appearing there is the ambiguous both-exist state,
+        // which is a loud failure rather than a silent replacement.
+        await this.assertMissing(destination);
+        await this.journal.write({ ...base, identities: { source: sourceIdentity } });
+        await this.fs.rename(source, destination);
       }
     } catch (error) {
       if (claim) await this.removeOwnedClaim(destination, claim);
