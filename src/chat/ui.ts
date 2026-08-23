@@ -1000,6 +1000,22 @@ export function initChat(): void {
     }
   };
 
+  // A typeless file stays a candidate — the staging gate and the upload
+  // route's byte sniff decide, not the browser's filename-derived claim.
+  const attachableClaim = (file: File) => file.type === "" || file.type.startsWith("image/");
+
+  // A mixed drop or paste stages its images but must not let the rest vanish
+  // silently — a file that disappears without a word reads as attached. The
+  // all-unsupported intakes keep their path-specific behavior (drop errors,
+  // paste falls through to the default), so this speaks only for the mix.
+  const warnUnsupportedIntake = (files: File[], images: File[]) => {
+    if (images.length === 0 || images.length === files.length) return;
+    const refused = files.filter(file => !attachableClaim(file));
+    setComposerError(refused.length === 1
+      ? `${refused[0]!.name || "That file"} is not a supported image (PNG, JPEG, GIF, WebP).`
+      : `${refused.length} files are not supported images (PNG, JPEG, GIF, WebP).`);
+  };
+
   /**
    * Client-side screening only smooths the path — the upload route re-checks
    * type and size authoritatively (and by bytes, not by claim). A refusal
@@ -1117,9 +1133,8 @@ export function initChat(): void {
   });
   input.addEventListener("paste", event => {
     if (!event.clipboardData) return;
-    // A typeless file stays a candidate — the staging gate and the upload
-    // route's byte sniff decide, not the browser's filename-derived claim.
-    const files = Array.from(event.clipboardData.files).filter(file => file.type === "" || file.type.startsWith("image/"));
+    const pastedFiles = Array.from(event.clipboardData.files);
+    const files = pastedFiles.filter(attachableClaim);
     if (files.length === 0) return;
     // Without the capability there is no image intake at all: default paste
     // behavior stands untouched.
@@ -1136,6 +1151,7 @@ export function initChat(): void {
       input.setSelectionRange(caret, caret);
       input.dispatchEvent(new Event("input", { bubbles: true }));
     }
+    warnUnsupportedIntake(pastedFiles, files);
     void stageAttachmentFiles(files);
   });
   const dragCarriesFiles = (event: DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes("Files");
@@ -1156,13 +1172,13 @@ export function initChat(): void {
     if (!dragCarriesFiles(event) || (agent && !declares("attachments"))) return;
     event.preventDefault();
     form.classList.remove("is-drop-target");
-    // Same rule as paste: a typeless drop goes to the byte sniff, not to a
-    // refusal built on a claim the file never made.
-    const images = Array.from(event.dataTransfer?.files ?? []).filter(file => file.type === "" || file.type.startsWith("image/"));
+    const dropped = Array.from(event.dataTransfer?.files ?? []);
+    const images = dropped.filter(attachableClaim);
     if (images.length === 0) {
       setComposerError("Only PNG, JPEG, GIF, or WebP images can be attached.");
       return;
     }
+    warnUnsupportedIntake(dropped, images);
     void stageAttachmentFiles(images);
   });
 
@@ -2019,6 +2035,16 @@ export function initChat(): void {
       input.value = input.value.trim() ? `${text}\n${input.value}` : text;
       autosize(input);
     };
+    // The same rule for a submission that ends while another conversation is
+    // selected: the switch already stored any newer edits as this
+    // conversation's draft, and the captured text — never sent — must lead
+    // rather than being discarded because the slot is occupied.
+    const mergeStoredDraft = () => {
+      if (!text.trim()) return;
+      const edits = presentation.drafts[conversationId];
+      presentation.drafts[conversationId] = edits?.trim() ? `${text}\n${edits}` : text;
+      save();
+    };
     const refusalsAtSubmit = attachmentRefusals.get(conversationId) ?? 0;
     submitting = true;
     setComposerError(null);
@@ -2047,7 +2073,7 @@ export function initChat(): void {
       // belongs to the conversation it was written in, so it becomes that
       // conversation's draft instead of being sent against the wrong one.
       if (!projection || projection.conversationId !== conversationId) {
-        if (!presentation.drafts[conversationId]) { presentation.drafts[conversationId] = text; save(); }
+        mergeStoredDraft();
         submitting = false;
         syncControls();
         return;
@@ -2197,9 +2223,9 @@ export function initChat(): void {
       } else {
         // Switched away while the request was in flight: the live input now
         // belongs to another conversation, so the failed text goes back into
-        // the stored draft and reappears on return.
-        if (!presentation.drafts[conversationId]) presentation.drafts[conversationId] = text;
-        save();
+        // the stored draft — ahead of any edits stored by the switch — and
+        // reappears on return.
+        mergeStoredDraft();
       }
       submitting = false;
       setComposerError(`${message}. Draft restored.`);

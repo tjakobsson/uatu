@@ -529,79 +529,85 @@ export class OpenCodeChatAdapter {
     conversation?: ConversationSummary;
   }> {
     if (!text.trim() && !attachments?.length) throw new Error("prompt must not be empty");
-    // Refused only for text that actually parses as a listed command — an
-    // unlisted "/typo" or a pasted path fragment is prose and keeps its
-    // images. The classification freezes here: dispatch never re-parses an
-    // attachment-bearing prompt, so a command list that changes while a
-    // message is held cannot reroute it onto the command path, which
-    // carries no attachments. A failed listing propagates (same rule as
-    // dispatch): admitting "/compact" with images as prose because the list
-    // was momentarily unavailable would send a command as chat text.
-    if (attachments?.length && text.startsWith("/") && parseSlashCommand(text, await this.provider.listCommands()) !== undefined) {
-      throw new CommandAttachmentsError();
-    }
-    return this.receipts.run(`prompt:${conversationId}:${requestId}`, () => this.enqueuePromptAdmission(conversationId, async () => {
-      const session = await this.requireSession(conversationId);
-      const projection = this.projection(conversationId);
-      const currentConfiguration = await this.configuration(conversationId);
-      const variantModel = await this.validateSelections(currentConfiguration, model, mode, variant);
-      // Validated at admission whether the message dispatches or holds, so an
-      // unknown reference is refused while the submitting client still has
-      // the draft to restore.
-      const attachmentRefs = await this.validateAttachments(attachments);
-      const busy = this.turnActive(conversationId, projection);
-      const queue = this.heldQueues.get(conversationId) ?? [];
-      // Order is absolute: while anything is held, a new submission joins the
-      // back of the queue even when the conversation is momentarily idle —
-      // dormant after a cancellation, or between deliveries.
-      if (busy || queue.length > 0) {
-        if (queue.length >= MAX_HELD_MESSAGES
-          || queue.reduce((total, entry) => total + Buffer.byteLength(entry.text), 0) + Buffer.byteLength(text) > MAX_HELD_TEXT_BYTES) {
-          throw new ChatQueueFullError();
+    return this.receipts.run(`prompt:${conversationId}:${requestId}`, async () => {
+      // Refused only for text that actually parses as a listed command — an
+      // unlisted "/typo" or a pasted path fragment is prose and keeps its
+      // images. The classification freezes here: dispatch never re-parses an
+      // attachment-bearing prompt, so a command list that changes while a
+      // message is held cannot reroute it onto the command path, which
+      // carries no attachments. A failed listing propagates (same rule as
+      // dispatch): admitting "/compact" with images as prose because the
+      // list was momentarily unavailable would send a command as chat text.
+      // Inside the receipt on purpose: a retry of an accepted request must
+      // replay the receipt, never reconsult a list that may have changed or
+      // gone unavailable since — and a refusal is not cached (a rejected
+      // receipt is dropped), so a transient listing failure stays retryable.
+      if (attachments?.length && text.startsWith("/") && parseSlashCommand(text, await this.provider.listCommands()) !== undefined) {
+        throw new CommandAttachmentsError();
+      }
+      return this.enqueuePromptAdmission(conversationId, async () => {
+        const session = await this.requireSession(conversationId);
+        const projection = this.projection(conversationId);
+        const currentConfiguration = await this.configuration(conversationId);
+        const variantModel = await this.validateSelections(currentConfiguration, model, mode, variant);
+        // Validated at admission whether the message dispatches or holds, so an
+        // unknown reference is refused while the submitting client still has
+        // the draft to restore.
+        const attachmentRefs = await this.validateAttachments(attachments);
+        const busy = this.turnActive(conversationId, projection);
+        const queue = this.heldQueues.get(conversationId) ?? [];
+        // Order is absolute: while anything is held, a new submission joins the
+        // back of the queue even when the conversation is momentarily idle —
+        // dormant after a cancellation, or between deliveries.
+        if (busy || queue.length > 0) {
+          if (queue.length >= MAX_HELD_MESSAGES
+            || queue.reduce((total, entry) => total + Buffer.byteLength(entry.text), 0) + Buffer.byteLength(text) > MAX_HELD_TEXT_BYTES) {
+            throw new ChatQueueFullError();
+          }
+          // The EFFECTIVE selections are resolved and frozen at submission, not
+          // just the explicitly supplied ones: a later submission may move the
+          // conversation's configuration before this delivers, and a held
+          // message that stored nothing would silently inherit that drift while
+          // its delivery reported the drifted configuration as its own. An
+          // explicit model without a variant clears the variant, exactly as an
+          // immediate dispatch commits it.
+          const heldModel = variantModel ?? currentConfiguration.model;
+          const heldMode = mode ?? currentConfiguration.mode;
+          const heldVariant = variant ?? (model === undefined ? currentConfiguration.variant : undefined);
+          const held: HeldMessage = {
+            id: this.id(),
+            text,
+            queuedAt: Date.now(),
+            requestId,
+            ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}),
+            ...(heldModel ? { model: heldModel } : {}),
+            ...(heldMode ? { mode: heldMode } : {}),
+            ...(heldVariant ? { variant: heldVariant } : {}),
+          };
+          queue.push(held);
+          this.heldQueues.set(conversationId, queue);
+          // A submission is what reactivates a queue a cancellation paused.
+          this.dormantQueues.delete(conversationId);
+          // The staged selection commits on submission, exactly as an
+          // immediately dispatched prompt commits it; delivery re-asserts the
+          // same values on the wire.
+          const configuration = this.commitConfiguration(conversationId, currentConfiguration, model, mode, variant);
+          this.publishQueue(conversationId, { kind: "held", messageId: held.id });
+          if (!busy) this.scheduleDelivery(conversationId);
+          return { messageId: held.id, held: true, configuration };
         }
-        // The EFFECTIVE selections are resolved and frozen at submission, not
-        // just the explicitly supplied ones: a later submission may move the
-        // conversation's configuration before this delivers, and a held
-        // message that stored nothing would silently inherit that drift while
-        // its delivery reported the drifted configuration as its own. An
-        // explicit model without a variant clears the variant, exactly as an
-        // immediate dispatch commits it.
-        const heldModel = variantModel ?? currentConfiguration.model;
-        const heldMode = mode ?? currentConfiguration.mode;
-        const heldVariant = variant ?? (model === undefined ? currentConfiguration.variant : undefined);
-        const held: HeldMessage = {
-          id: this.id(),
+        const dispatched = await this.dispatchPrompt(conversationId, projection, session, {
+          messageId: this.id(),
           text,
-          queuedAt: Date.now(),
           requestId,
           ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}),
-          ...(heldModel ? { model: heldModel } : {}),
-          ...(heldMode ? { mode: heldMode } : {}),
-          ...(heldVariant ? { variant: heldVariant } : {}),
-        };
-        queue.push(held);
-        this.heldQueues.set(conversationId, queue);
-        // A submission is what reactivates a queue a cancellation paused.
-        this.dormantQueues.delete(conversationId);
-        // The staged selection commits on submission, exactly as an
-        // immediately dispatched prompt commits it; delivery re-asserts the
-        // same values on the wire.
-        const configuration = this.commitConfiguration(conversationId, currentConfiguration, model, mode, variant);
-        this.publishQueue(conversationId, { kind: "held", messageId: held.id });
-        if (!busy) this.scheduleDelivery(conversationId);
-        return { messageId: held.id, held: true, configuration };
-      }
-      const dispatched = await this.dispatchPrompt(conversationId, projection, session, {
-        messageId: this.id(),
-        text,
-        requestId,
-        ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}),
-        ...(variantModel ? { model: variantModel } : {}),
-        ...(mode ? { mode } : {}),
-        ...(variant ? { variant } : {}),
+          ...(variantModel ? { model: variantModel } : {}),
+          ...(mode ? { mode } : {}),
+          ...(variant ? { variant } : {}),
+        });
+        return { ...dispatched, held: false };
       });
-      return { ...dispatched, held: false };
-    }));
+    });
   }
 
   async removeQueued(conversationId: string, messageId: string, requestId: string): Promise<{ removed: true }> {

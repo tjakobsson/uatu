@@ -103,8 +103,21 @@ test.describe("chat image attachments", () => {
     await expect(page.locator("#chat-attachments .chat-attachment")).toHaveCount(1);
     await expect(page.locator("#chat-input")).toHaveValue("words that must survive");
 
+    // A mixed paste stages the image and refuses the rest out loud.
+    await page.evaluate(async ({ bytes }) => {
+      const input = document.querySelector<HTMLTextAreaElement>("#chat-input")!;
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([new Uint8Array(bytes)], "mixed-paste.png", { type: "image/png" }));
+      transfer.items.add(new File(["words"], "clipboard.txt", { type: "text/plain" }));
+      input.focus();
+      input.dispatchEvent(new ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true }));
+    }, { bytes: Array.from(PNG) });
+    await expect(page.locator("#chat-composer-error")).toContainText("clipboard.txt is not a supported image");
+    await expect(page.locator("#chat-attachments .chat-attachment")).toHaveCount(2);
+    await expect(page.locator("#chat-input")).toHaveValue("words that must survive");
+
     // The per-message bound refuses the ninth image and keeps the eight.
-    for (let index = 0; index < 7; index += 1) await attachViaPicker(page, `extra-${index}.png`);
+    for (let index = 0; index < 6; index += 1) await attachViaPicker(page, `extra-${index}.png`);
     await expect(page.locator("#chat-attachments .chat-attachment")).toHaveCount(8);
     await pasteImage(page, { name: "ninth.png" });
     await expect(page.locator("#chat-composer-error")).toContainText("at most 8 images");
@@ -137,6 +150,18 @@ test.describe("chat image attachments", () => {
     });
     await expect(page.locator("#chat-composer-error")).toContainText("Only PNG, JPEG, GIF, or WebP");
     await expect(page.locator("#chat-attachments .chat-attachment")).toHaveCount(1);
+
+    // A mixed drop stages the image and refuses the rest out loud — a file
+    // that vanished silently would read as attached.
+    await page.evaluate(async ({ bytes }) => {
+      const form = document.querySelector<HTMLFormElement>("#chat-composer")!;
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([new Uint8Array(bytes)], "mixed.png", { type: "image/png" }));
+      transfer.items.add(new File(["words"], "notes.txt", { type: "text/plain" }));
+      form.dispatchEvent(new DragEvent("drop", { dataTransfer: transfer, bubbles: true, cancelable: true }));
+    }, { bytes: Array.from(PNG) });
+    await expect(page.locator("#chat-composer-error")).toContainText("notes.txt is not a supported image");
+    await expect(page.locator("#chat-attachments .chat-attachment")).toHaveCount(2);
   });
 
   test("attach affordances are absent without the capability and inactive for a blind model", async ({ page, request }) => {
@@ -419,6 +444,35 @@ test.describe("composer edits during the upload drain", () => {
     const body = (await accepted).request().postDataJSON() as { text: string };
     expect(body.text).toBe("the message that sends");
     await expect(page.locator("#chat-input")).toHaveValue("draft for later");
+    await page.unroute("**/attachments");
+  });
+});
+
+test.describe("conversation switch during the upload drain", () => {
+  test.beforeEach(async ({ page, request }) => bootChat(page, request));
+
+  test("the submitted text survives a switch, ahead of edits typed meanwhile", async ({ page }) => {
+    const first = await newConversation(page);
+    const second = await newConversation(page);
+    await page.route("**/attachments", async route => {
+      await new Promise(resolve => setTimeout(resolve, 700));
+      await route.continue();
+    });
+    await page.locator("#chat-attach-input").setInputFiles({ name: "slow.png", mimeType: "image/png", buffer: PNG });
+    await page.locator("#chat-input").fill("the submitted text");
+    await page.locator("#chat-input").press("Enter");
+    await page.locator("#chat-input").pressSequentially("newer edits");
+    // Switch away before the drain completes: the switch stores the newer
+    // edits as the conversation's draft, and the drained submission must
+    // merge its never-sent text ahead of them rather than yielding to the
+    // occupied slot.
+    await page.locator("#chat-conversation-select").selectOption(first);
+    await expect.poll(() => page.evaluate(() =>
+      Object.keys(localStorage).some(key => key.includes("chat-presentation")
+        && (localStorage.getItem(key) ?? "").includes("the submitted text\\nnewer edits")),
+    )).toBe(true);
+    await page.locator("#chat-conversation-select").selectOption(second);
+    await expect(page.locator("#chat-input")).toHaveValue("the submitted text\nnewer edits");
     await page.unroute("**/attachments");
   });
 });

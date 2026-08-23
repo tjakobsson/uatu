@@ -2640,6 +2640,21 @@ describe("prompt attachments", () => {
     expect(provider.prompts[0]!.attachments).toHaveLength(1);
   });
 
+  test("a retry of an accepted slash-prose prompt replays the receipt after the command list changes", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
+    const accepted = await adapter.prompt("session", "r1", "/unknown focus", undefined, undefined, undefined, [ref("11111111-2222-4333-8444-555555555555")]);
+    // The list gains the name after acceptance. A lost-response retry must
+    // replay the receipt, never reclassify: refusing now would restore a
+    // draft the provider already received.
+    provider.commands = [...provider.commands, { name: "unknown", description: "New", argumentHint: "", kind: "command" as const }];
+    const retried = await adapter.prompt("session", "r1", "/unknown focus", undefined, undefined, undefined, [ref("11111111-2222-4333-8444-555555555555")]);
+    expect(retried.messageId).toBe(accepted.messageId);
+    expect(provider.prompts).toHaveLength(1);
+    expect(provider.commandCalls).toHaveLength(0);
+  });
+
   test("held messages keep their references, expose them on the wire, and deliver them", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
