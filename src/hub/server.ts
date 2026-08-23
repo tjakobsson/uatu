@@ -40,7 +40,7 @@ import {
 import { cloneTargetName, gitInit, probeGitRepository, validCloneFolderName } from "./git";
 import { FolderManagerError, reconcileRegisteredAliasPaths, type FolderManager } from "./folder-manager";
 import { clonePage, dashboardPage, loginPage, settingsPage, stoppedSessionPage } from "./pages";
-import { normalizeAbsolutePath, pathsOverlap, type PathReservationCoordinator } from "./path-reservations";
+import { isPathAtOrBelow, normalizeAbsolutePath, pathsOverlap, type PathReservationCoordinator } from "./path-reservations";
 import {
   bridgeWebSocketHandlers,
   childUrlFor,
@@ -646,21 +646,15 @@ export function createHubFetchHandler(deps: HubDeps) {
           return folderError(error);
         }
 
-        // realpath needs the destination to exist, so the clone creates it —
-        // the first filesystem change, and only now that the fence has
-        // passed under the reservation. The prediction above holds unless
-        // the hierarchy changed under us: a symlink planted between the two
-        // would put the real target outside the reservation just taken.
-        // Refused rather than chased.
-        await fs.mkdir(resolvedDest, { recursive: true });
-        const created = path.join(await fs.realpath(resolvedDest), requestedFolderName || cloneTargetName(url)!);
-        if (normalizeAbsolutePath(created) !== target) {
-          return json(409, { error: `clone destination changed while it was being prepared: ${resolvedDest}` });
-        }
-
-        // Legacy registrations can persist alias spellings of the target or
-        // of a folder beneath it; reconciled first, the claim check below
-        // sees them at the canonical path the clone would populate.
+        // Legacy registrations can persist alias spellings of the target, of
+        // a folder beneath it, or of one of its ancestors; reconciled first,
+        // the claim checks below see them at the canonical paths this clone
+        // would populate or recreate. Reconciliation only rewrites how a
+        // registration spells its path — a registered directory that vanished
+        // stays registered, at the canonical spelling of its recorded path —
+        // so it never hides the stale claims those checks look for. It reads
+        // the registry and realpaths existing ancestors, touching nothing on
+        // disk, and so runs before the mkdir below.
         let collided: string[];
         try {
           collided = await reconcileRegisteredAliasPaths(registry);
@@ -680,6 +674,38 @@ export function createHubFetchHandler(deps: HubDeps) {
         const claimed = registry.atOrBelow(target);
         if (claimed.length > 0) {
           return json(409, { error: `workspace is already registered: ${claimed[0]!.path}` });
+        }
+        // The claim above sees only the target's subtree, but the recursive
+        // mkdir below reaches further up: it recreates every missing ancestor
+        // of the target too. An ancestor whose directory vanished keeps its
+        // registration just as deliberately, so resurrecting it and cloning
+        // underneath would point that stable id — with its personal state and
+        // credential assignments — at a hierarchy this clone just made.
+        // Refused while the ancestor is still absent, which is also the only
+        // way the refusal can leave it that way. Scoped to ancestors that are
+        // actually missing: an existing registered ancestor is untouched by
+        // the mkdir and keeps meaning what it always did, so cloning into a
+        // live workspace's folder stays allowed, exactly as creating a folder
+        // there does. Under the reservation, which overlaps every ancestor,
+        // so no folder mutation can create or move one between here and the
+        // mkdir.
+        for (const entry of registry.list()) {
+          const ancestor = normalizeAbsolutePath(entry.path);
+          if (!isPathAtOrBelow(target, ancestor)) continue;
+          if (await fs.stat(ancestor).then(() => true).catch(() => false)) continue;
+          return json(409, { error: `workspace is registered at a missing ancestor: ${ancestor}` });
+        }
+
+        // realpath needs the destination to exist, so the clone creates it —
+        // the first filesystem change, and only now that the fence and the
+        // claim checks have passed under the reservation. The prediction
+        // above holds unless the hierarchy changed under us: a symlink
+        // planted between the two would put the real target outside the
+        // reservation just taken. Refused rather than chased.
+        await fs.mkdir(resolvedDest, { recursive: true });
+        const created = path.join(await fs.realpath(resolvedDest), requestedFolderName || cloneTargetName(url)!);
+        if (normalizeAbsolutePath(created) !== target) {
+          return json(409, { error: `clone destination changed while it was being prepared: ${resolvedDest}` });
         }
         if (await fs.stat(target).then(() => true).catch(() => false)) {
           return json(409, { error: `target already exists: ${target}` });

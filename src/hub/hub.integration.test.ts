@@ -1627,6 +1627,58 @@ describe("hub end to end", () => {
     expect(await registry.remove(stale.id)).toBe(true);
   }, 30_000);
 
+  test("clone refuses a target under a missing registered ancestor without recreating it", async () => {
+    // The destination the clone would create is itself a registered
+    // workspace whose directory vanished — a registration deliberately
+    // retained. The recursive mkdir that prepares the destination would
+    // resurrect that folder, and the claim check only ever looks at or below
+    // the target, so the clone would fill a hierarchy the old stable id, its
+    // personal state, and its credential assignments still point at.
+    const dest = path.join(tempRoot, "missing-ancestor-checkouts");
+    const stale = path.join(dest, "stale");
+    await mkdir(stale, { recursive: true });
+    const retained = await registry.register(stale);
+    await rm(stale, { recursive: true, force: true });
+    const target = path.join(stale, "ancestor-clone");
+
+    const refused = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ url: "interactive:ancestor-clone", dest: stale }),
+    });
+    expect(refused.status).toBe(409);
+    await assertContract("POST", "/api/hub/clone-jobs", refused);
+    expect(((await refused.json()) as { error: string }).error).toContain(
+      `workspace is registered at a missing ancestor: ${stale}`,
+    );
+    // The refusal is only worth anything while the ancestor is still absent:
+    // nothing was recreated, no job took the reservation, and the retained
+    // registration still records the same path.
+    expect(await stat(stale).then(() => true).catch(() => false)).toBe(false);
+    expect(cloneJobs.isTargetReserved(target)).toBe(false);
+    expect(registry.byId(retained.id)?.path).toBe(stale);
+    expect(registry.byPath(target)).toBeUndefined();
+
+    // An ancestor that still exists is untouched by the mkdir, so cloning
+    // inside a live registered workspace stays allowed as it always was.
+    await mkdir(stale, { recursive: true });
+    const nested = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ url: "interactive:ancestor-clone", dest: stale }),
+    });
+    expect(nested.status).toBe(202);
+    const jobId = ((await nested.json()) as { jobId: string }).jobId;
+    const cancelled = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/cancel`, {
+      method: "POST",
+      headers: { cookie, origin },
+    });
+    expect(cancelled.status).toBe(200);
+
+    expect(await registry.remove(retained.id)).toBe(true);
+    await rm(dest, { recursive: true, force: true });
+  }, 30_000);
+
   test("forget cannot pass a clone registration before retained assignment commits", async () => {
     const dest = path.join(tempRoot, "forget-race-checkouts");
     managedAssignmentBarrier = new Promise(resolve => {

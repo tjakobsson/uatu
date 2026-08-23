@@ -216,6 +216,41 @@ describe("Hub folder mutation contracts", () => {
     expect(stopConflict({ error: "affected workspace sessions must be stopped", needsStop: false, workspaceIds: ["old"] })).toBe(false);
     expect(stopConflict({ error: "affected workspace sessions must be stopped", needsStop: true, workspaceIds: [], extra: true })).toBe(false);
   });
+
+  test("FolderName rejects the invisible names the server rejects", async () => {
+    const openapi = await readYaml<{ components: { schemas: Record<string, { pattern: string }> } }>("api/openapi.yaml");
+    const folderName = createAjv().compile(schemaForAjv(openapi.components.schemas.FolderName, openapi.components.schemas));
+    // The published pattern is also compiled the way a consumer matching
+    // UTF-16 code units would — the two modes differ above the BMP, and only
+    // the second can see a surrogate pair.
+    const utf16 = new RegExp(openapi.components.schemas.FolderName.pattern);
+
+    for (const name of ["new-project", "docs 2", "日本語", "café"]) {
+      expect(folderName(name)).toBe(true);
+      expect(utf16.test(name)).toBe(true);
+    }
+    // Every one of these is rejected by the server's folder-name validator:
+    // an OpenAPI-valid request must not be able to carry them.
+    for (const name of [
+      "\u200b", // zero-width space alone: nonempty, renders blank
+      "zero\u200bwidth",
+      "project\u202etxt", // right-to-left override: displays as a different name
+      "\u00adsoft", // soft hyphen
+      "\ufeffbom", // byte order mark
+      "word\u2060joiner",
+      "ayah\u06dd", // Arabic end of ayah
+      "\u180emongolian", // Mongolian vowel separator
+      "annotation\ufff9", // interlinear annotation anchor
+    ]) {
+      expect(folderName(name)).toBe(false);
+      expect(utf16.test(name)).toBe(false);
+    }
+    // Format characters above the BMP: enforced by the UTF-16 spelling, which
+    // is why the pattern carries the surrogate pairs at all.
+    for (const name of ["tag\u{e0020}s", "music\u{1d173}", "\u{110bd}x", "\u{13430}x", "\u{1bca0}x", "\u{e0001}x"]) {
+      expect(utf16.test(name)).toBe(false);
+    }
+  });
 });
 
 describe("structured question answers", () => {
