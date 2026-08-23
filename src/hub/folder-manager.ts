@@ -63,6 +63,10 @@ type RemoveJournal = {
   operation: "remove";
   source: string;
   entry: WorkspaceEntry;
+  // The removed directory's identity, recorded before the rmdir. Absent in
+  // journals from builds that predate identities; recovery then falls back
+  // to existence alone, exactly as before.
+  identity?: DirectoryIdentity;
 };
 
 export type PendingFolderMutation = RenameJournal | RemoveJournal;
@@ -212,7 +216,7 @@ function parseJournal(value: unknown): PendingFolderMutation {
     value,
     (value as { operation?: unknown })?.operation === "rename"
       ? ["version", "operation", "source", "destination", "before", "after", "identities"]
-      : ["version", "operation", "source", "entry"],
+      : ["version", "operation", "source", "entry", "identity"],
     "folder mutation journal",
   );
   if (base.version !== JOURNAL_VERSION) throw new Error("unsupported folder mutation journal version");
@@ -236,7 +240,13 @@ function parseJournal(value: unknown): PendingFolderMutation {
     };
   }
   if (base.operation === "remove") {
-    return { version: JOURNAL_VERSION, operation: "remove", source: journalAbsolutePath(base.source), entry: parseEntry(base.entry) };
+    return {
+      version: JOURNAL_VERSION,
+      operation: "remove",
+      source: journalAbsolutePath(base.source),
+      entry: parseEntry(base.entry),
+      ...(base.identity === undefined ? {} : { identity: parseIdentity(base.identity) }),
+    };
   }
   throw new Error("unsupported folder mutation journal operation");
 }
@@ -561,6 +571,17 @@ export class FolderManager {
 
       const sourceExists = await this.isDirectDirectory(pending.source);
       if (sourceExists) {
+        // A surviving source must BE the journaled directory: an rmdir
+        // that committed frees its inode forever, so a directory some
+        // other process recreated at the path can never match and must
+        // not inherit the registration. Journals without a recorded
+        // identity keep the existence-only behavior.
+        if (pending.identity) {
+          const stats = await this.fs.lstat(pending.source);
+          if (String(stats.dev) !== pending.identity.dev || String(stats.ino) !== pending.identity.ino) {
+            throw new Error("pending folder removal recovery found an unrecognized directory; manual reconciliation required");
+          }
+        }
         await this.options.registry.restoreEntries([pending.entry]);
       } else if (this.options.registry.byId(pending.entry.id)) {
         await this.options.personalState.forgetWorkspace(
@@ -635,23 +656,28 @@ export class FolderManager {
     }
   }
 
-  private async renameWithoutReplacement(source: string, destination: string): Promise<void> {
-    if (this.renameNoReplace) {
-      // The kernel refuses an existing destination atomically — no claim,
-      // no placeholder, no ownership question. errno does not cross the
-      // FFI boundary: a failure with a visible destination is the
-      // conflict; any other failure (an exported syscall the running
-      // kernel or filesystem rejects, or a real error we cannot name)
-      // falls through to the claimed strategy below, which surfaces
-      // genuine errors faithfully and never replaces anything beyond its
-      // own placeholder — a plain rename here would reopen the hole.
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        if (this.renameNoReplace(source, destination) === 0) return;
-        if (await this.fs.lstat(destination).then(() => true, () => false)) {
-          throw new FolderManagerError("conflict", "destination already exists");
-        }
+  // Attempts the kernel no-replace rename. True on success; false when the
+  // exported syscall is rejected while the destination stays absent (the
+  // running kernel or filesystem does not support it — the caller degrades
+  // to the claimed strategy); throws the conflict when the destination is
+  // visible. errno does not cross the FFI boundary, hence the probing.
+  private async tryNativeRename(source: string, destination: string): Promise<boolean> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (this.renameNoReplace!(source, destination) === 0) return true;
+      if (await this.fs.lstat(destination).then(() => true, () => false)) {
+        throw new FolderManagerError("conflict", "destination already exists");
       }
     }
+    return false;
+  }
+
+  private async renameWithoutReplacement(source: string, destination: string): Promise<void> {
+    // The kernel refuses an existing destination atomically — no claim, no
+    // placeholder, no ownership question. An unsupported syscall degrades
+    // to the claimed strategy below, which surfaces genuine errors
+    // faithfully and never replaces anything beyond its own placeholder —
+    // a plain rename would reopen the hole.
+    if (this.renameNoReplace && await this.tryNativeRename(source, destination)) return;
     let claim: DirectoryIdentity | undefined;
     try {
       // Fallback: mkdir atomically claims the absent name and POSIX rename
@@ -731,41 +757,30 @@ export class FolderManager {
     }));
     let claim: DirectoryIdentity | undefined;
     try {
+      // The journaled source identity lets recovery recognize the moved
+      // folder if a crash lands between the rename and the registry update
+      // while something foreign recreates the source.
+      const sourceIdentity = directoryIdentity(await this.fs.lstat(source));
+      const base = { version: JOURNAL_VERSION, operation: "rename", source, destination, before, after } as const;
+      let moved = false;
       if (this.renameNoReplace) {
-        // The journaled source identity lets recovery recognize the moved
-        // folder if a crash lands between the rename and the registry
-        // update while something foreign recreates the source.
-        const sourceStats = await this.fs.lstat(source);
-        const pending: RenameJournal = {
-          version: JOURNAL_VERSION,
-          operation: "rename",
-          source,
-          destination,
-          before,
-          after,
-          identities: { source: directoryIdentity(sourceStats) },
-        };
-        await this.journal.write(pending);
-        await this.renameWithoutReplacement(source, destination);
-      } else {
-        // Fallback strategy: the destination is claimed BEFORE the journal
-        // so the claim's identity can be recorded in it — recovery can then
-        // tell our empty placeholder from a foreign directory or the
-        // renamed folder itself. A crash before the journal write leaves
-        // only an inert empty directory, never a recovery state.
+        await this.journal.write({ ...base, identities: { source: sourceIdentity } });
+        moved = await this.tryNativeRename(source, destination);
+      }
+      if (!moved) {
+        // Claimed fallback: the destination is claimed BEFORE the journal
+        // so the claim's identity can be recorded in it — recovery can
+        // then tell our empty placeholder from a foreign directory or the
+        // renamed folder itself. A source-only journal from an unsupported
+        // native attempt above must not survive into this window (a crash
+        // between the mkdir and the claim-bearing journal would read as
+        // ambiguous), so it is cleared first: every crash state is then
+        // either journal-less — an inert empty directory at worst — or
+        // claim-bearing.
+        if (this.renameNoReplace) await this.journal.clear();
         await this.fs.mkdir(destination);
-        const [sourceStats, claimStats] = await Promise.all([this.fs.lstat(source), this.fs.lstat(destination)]);
-        claim = directoryIdentity(claimStats);
-        const pending: RenameJournal = {
-          version: JOURNAL_VERSION,
-          operation: "rename",
-          source,
-          destination,
-          before,
-          after,
-          identities: { source: directoryIdentity(sourceStats), claim },
-        };
-        await this.journal.write(pending);
+        claim = directoryIdentity(await this.fs.lstat(destination));
+        await this.journal.write({ ...base, identities: { source: sourceIdentity, claim } });
         // The journal write above is real I/O; re-verify the claim is
         // still ours before the rename that replaces it.
         await this.assertClaimOwned(destination, claim);
@@ -799,8 +814,16 @@ export class FolderManager {
   }
 
   private async removeRegistered(source: string, entry: WorkspaceEntry): Promise<RemoveFolderResult> {
-    const pending: RemoveJournal = { version: JOURNAL_VERSION, operation: "remove", source, entry };
     try {
+      // The recorded identity lets recovery refuse a directory some other
+      // process recreated at the source after the rmdir committed.
+      const pending: RemoveJournal = {
+        version: JOURNAL_VERSION,
+        operation: "remove",
+        source,
+        entry,
+        identity: directoryIdentity(await this.fs.lstat(source)),
+      };
       await this.journal.write(pending);
       await this.fs.rmdir(source);
     } catch (error) {
