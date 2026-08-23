@@ -1373,6 +1373,41 @@ describe("hub end to end", () => {
     }
   });
 
+  test("session starts freeze while a folder mutation journal is pending", async () => {
+    // A registered rename or removal whose filesystem and registry halves
+    // diverged leaves the registry pointing at the journaled source path:
+    // starting now either fails on a directory that is gone or serves the
+    // workspace from whatever was recreated at that path.
+    const journal = path.join(tempRoot, "pending-folder-mutation.json");
+    const source = path.join(tempRoot, "workspaces", "start-journal-source");
+    await writeFile(journal, `${JSON.stringify({
+      version: 1,
+      operation: "remove",
+      source,
+      before: [{ id: "start-journal-source", path: source, backend: "local" }],
+      after: [],
+    }, null, 2)}\n`, { mode: 0o600 });
+    try {
+      const fenced = await fetch(`${origin}/api/hub/sessions/myproject/start`, {
+        method: "POST",
+        headers: { cookie, origin },
+      });
+      expect(fenced.status).toBe(409);
+      await assertContract("POST", "/api/hub/sessions/{workspaceId}/start", fenced);
+      expect(((await fenced.json()) as { error: string }).error).toContain("pending recovery journal");
+    } finally {
+      await rm(journal, { force: true });
+    }
+
+    // Recovery clearing the record reopens session starts: whatever the
+    // start then does, it is no longer refused by the fence.
+    const unfenced = await fetch(`${origin}/api/hub/sessions/myproject/start`, {
+      method: "POST",
+      headers: { cookie, origin },
+    });
+    expect(unfenced.status).not.toBe(409);
+  });
+
   test("registration refuses while a folder mutation journal awaits recovery", async () => {
     const fenced = path.join(tempRoot, "workspaces", "journal-fenced");
     execFileSync("mkdir", ["-p", fenced]);

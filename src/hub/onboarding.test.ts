@@ -156,6 +156,32 @@ describe("onboarding input validation", () => {
     await expect(f.coordinator.createWorkspace({ parent: f.folders, folderName: "a/b", displayName: "X" }))
       .rejects.toMatchObject({ code: "invalid-input" });
   });
+
+  test("rejects folder names that are invisible or visually misleading", async () => {
+    const f = await fixture();
+    // trim() leaves zero-width and bidi characters in place, so a name made
+    // only of them passes the emptiness check and would create a directory
+    // that renders blank; a bidi override makes the created folder display a
+    // name other than the path segment it occupies.
+    const invisible = [
+      "\u200b",
+      "\ufeff\u200d",
+      "docs\u202egnp.txt",
+      "in\u200bvisible",
+    ];
+    for (const folderName of invisible) {
+      await expect(f.coordinator.createWorkspace({ parent: f.folders, folderName, displayName: "X" }))
+        .rejects.toMatchObject({ code: "invalid-input" });
+      expect(await fs.lstat(path.join(f.folders, folderName)).then(() => true, () => false)).toBe(false);
+    }
+
+    // Ordinary non-ASCII names stay legal — the rule targets invisible
+    // formatting, not everything outside ASCII.
+    for (const folderName of ["docs-\u00f6", "\u6587\u66f8"]) {
+      const result = await f.coordinator.createWorkspace({ parent: f.folders, folderName, displayName: "X" });
+      expect(result.entry.path).toBe(path.join(f.folders, folderName));
+    }
+  });
 });
 
 describe("credential selection validation", () => {

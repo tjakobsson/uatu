@@ -1400,6 +1400,18 @@ export function createHubFetchHandler(deps: HubDeps) {
           if (deps.onboarding && await deps.onboarding.hasPendingRecovery()) {
             return json(409, { error: "a pending onboarding requires Hub recovery before session starts" }, NO_STORE_HEADERS);
           }
+          // A pending folder mutation freezes starts for the mirror-image
+          // reason: a registered rename or removal whose filesystem and
+          // registry halves diverged leaves the registry pointing at the
+          // journaled source path. Starting now either fails against a
+          // directory that is gone or — if something recreated that path —
+          // serves the workspace from unrelated content. Failing closed on
+          // an uninspectable journal, as the mutation routes do.
+          try {
+            await deps.folderManager?.assertNoPendingMutation();
+          } catch (error) {
+            return folderError(error);
+          }
           try {
             await sessions.start(workspaceId);
             return json(200, { id: workspaceId, running: true });
