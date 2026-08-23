@@ -510,16 +510,19 @@ describe("FolderManager registered mutations", () => {
     expect(f.registry.byId(entry.id)?.path).toBe(aliasProject);
   });
 
-  test("rejects a rename destination claimed by a stale registration", async () => {
+  test("rejects rename and create destinations claimed by a stale registration", async () => {
     const f = await fixture();
     const source = path.join(f.folders, "source");
     await fs.mkdir(source);
     // The workspace's folder is gone but its registration is deliberately
-    // retained; its path must not be claimable by unrelated content.
+    // retained; its path must not be claimable by unrelated content —
+    // neither by moving a folder onto it nor by creating an empty one.
     const stale = await f.registry.register(path.join(f.folders, "vanished"));
 
     await expect(f.manager.rename({ path: source, name: "vanished" })).rejects.toMatchObject({ code: "conflict" });
+    await expect(f.manager.create({ parent: f.folders, name: "vanished" })).rejects.toMatchObject({ code: "conflict" });
     expect(await exists(source)).toBe(true);
+    expect(await exists(path.join(f.folders, "vanished"))).toBe(false);
     expect(f.registry.byId(stale.id)?.path).toBe(path.join(f.folders, "vanished"));
 
     await f.registry.remove(stale.id);
@@ -581,19 +584,44 @@ describe("FolderManager journal recovery", () => {
     expect(await exists(f.journalPath)).toBe(false);
   });
 
+  test("recovers a crash between the destination claim and the rename", async () => {
+    // renameWithoutReplacement journals, then mkdir-claims the destination,
+    // then renames. A crash between the last two steps leaves source plus
+    // an empty destination placeholder — an ordinary crash state that must
+    // not brick startup.
+    const f = await fixture();
+    const source = path.join(f.folders, "source");
+    const destination = path.join(f.folders, "destination");
+    await Promise.all([fs.mkdir(source), fs.mkdir(destination)]);
+    const entry = await f.registry.register(source);
+    await writeJournal(f.journalPath, renameJournal(source, destination, [entry]));
+
+    await f.manager.recover();
+    expect(f.registry.byId(entry.id)?.path).toBe(source);
+    expect(await exists(destination)).toBe(false);
+    expect(await exists(f.journalPath)).toBe(false);
+  });
+
   test.each([
-    ["both", true, true],
+    ["both with a populated destination", true, true],
     ["neither", false, false],
   ] as const)("fails loudly for ambiguous rename state: %s", async (_label, sourceExists, destinationExists) => {
     const f = await fixture();
     const source = path.join(f.folders, "source");
     const destination = path.join(f.folders, "destination");
     if (sourceExists) await fs.mkdir(source);
-    if (destinationExists) await fs.mkdir(destination);
+    if (destinationExists) {
+      // A populated destination was never our claim placeholder.
+      await fs.mkdir(destination);
+      await fs.writeFile(path.join(destination, "content.txt"), "kept");
+    }
     const entry = await f.registry.register(source);
     await writeJournal(f.journalPath, renameJournal(source, destination, [entry]));
     await expect(f.manager.recover()).rejects.toThrow("ambiguous pending folder rename");
     expect(await exists(f.journalPath)).toBe(true);
+    if (destinationExists) {
+      expect(await fs.readFile(path.join(destination, "content.txt"), "utf8")).toBe("kept");
+    }
   });
 
   test.each([true, false])("restores retained removal state with registry present=%s", async registryPresent => {
