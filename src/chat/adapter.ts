@@ -153,21 +153,6 @@ export class OpenCodeChatAdapter {
   // survives projection eviction. This is what distinguishes "the store says
   // running because OpenCode died mid-turn" from "running right now".
   private readonly liveTurns = new Set<string>();
-  // Admissions this adapter made with no terminal report applied since.
-  // Status events carry no turn identity, so a straggling duplicate
-  // completion can clear liveTurns while the admitted turn still runs; a
-  // prompt released early is absorbed by the provider's own queue delivery,
-  // but provider.command() fires immediately, so held slash commands wait
-  // for a terminal report that follows the last admission. A fresh
-  // submission clears the hold — the documented resume trigger, matching
-  // dormant queues.
-  private readonly openAdmissions = new Set<string>();
-  // Counts terminal reports per conversation. A prompt's queue admission
-  // cannot span its own turn's end, so a terminal seen during that await is
-  // always stale — but the classic command route resolves at its own turn's
-  // end for fast turns, and reopening the admission there would pin later
-  // command heads behind a turn that already finished.
-  private readonly terminalReports = new Map<string, number>();
   private readonly maxProjections: number;
   private readonly coalesceWindowMs: number | undefined;
   private readonly metrics: ChatEventMetrics | undefined;
@@ -556,11 +541,6 @@ export class OpenCodeChatAdapter {
         this.heldQueues.set(conversationId, queue);
         // A submission is what reactivates a queue a cancellation paused.
         this.dormantQueues.delete(conversationId);
-        // The open-admission hold releases only when the conversation reads
-        // idle — that is the pinned-queue exit this clear exists for. A
-        // submission during an active turn must not disarm the guard that
-        // keeps command heads out of that turn.
-        if (!busy) this.openAdmissions.delete(conversationId);
         // The staged selection commits on submission, exactly as an
         // immediately dispatched prompt commits it; delivery re-asserts the
         // same values on the wire.
@@ -665,19 +645,9 @@ export class OpenCodeChatAdapter {
       const slash = text.startsWith("/")
         ? parseSlashCommand(text, await this.provider.listCommands())
         : undefined;
-      const terminalsBefore = this.terminalReports.get(conversationId) ?? 0;
       const accepted = slash
         ? await this.provider.command(conversationId, { id: input.messageId, name: slash.name, arguments: slash.arguments, model: input.model, mode, variant })
         : await this.provider.prompt(conversationId, { id: input.messageId, text, delivery: "queue", model: input.model, mode, variant });
-      // A prompt admission opens unconditionally: its own turn cannot have
-      // ended during the await, so a terminal seen there was stale and the
-      // turn is genuinely starting. A command that saw a terminal during its
-      // await most plausibly just watched its own fast turn finish (the
-      // classic route resolves at turn end), and reopening the admission
-      // would pin "/"-prefixed heads behind a turn that already ended.
-      if (!slash || (this.terminalReports.get(conversationId) ?? 0) === terminalsBefore) {
-        this.openAdmissions.add(conversationId);
-      }
       // "sending" ends at acceptance, BEFORE the rename side-work below —
       // the dispatch is no longer in flight once the provider has accepted
       // it, so the state must not span the rename's provider round trips.
@@ -776,15 +746,15 @@ export class OpenCodeChatAdapter {
     const held = queue?.[0];
     if (!queue || !held) return;
     // Re-held, not lost: a conversation that reports busy again before this
-    // ran keeps the message queued, and the next end-of-turn retries.
+    // ran keeps the message queued, and the next end-of-turn retries. A
+    // straggling duplicate completion can still release a head early; that
+    // is bounded for prompts by the provider's queue delivery, and for
+    // slash commands by OpenCode's runner itself — a command on a busy
+    // session joins the in-flight run (SessionRunState.ensureRunning), so
+    // its expanded template is answered by the running turn rather than
+    // starting a concurrent one. Either way the cost is the removal window,
+    // never turn corruption.
     if (this.turnActive(conversationId, this.projection(conversationId))) return;
-    // A "/"-prefixed head waits while an admission has no terminal report
-    // after it: a straggling duplicate completion can read as end-of-turn
-    // while the admitted turn still runs, and unlike a queue-delivered
-    // prompt, provider.command() would fire into it immediately. The prefix
-    // over-approximates — an unlisted command dispatches as prose — at
-    // worst holding a "/"-prefixed prompt to the same stricter rule.
-    if (held.text.startsWith("/") && this.openAdmissions.has(conversationId)) return;
     let session: ProviderSession;
     try {
       session = await this.requireSession(conversationId);
@@ -1470,13 +1440,7 @@ export class OpenCodeChatAdapter {
     }
     const projection = new ConversationProjection(new ConversationReplay(this.generation, id, this.replayBytes), status => {
       if (status === "running" || status === "sending") this.liveTurns.add(id);
-      else {
-        this.liveTurns.delete(id);
-        // A terminal report closes the last admission — the only signal
-        // available without turn identity; held slash commands key on it.
-        this.openAdmissions.delete(id);
-        this.terminalReports.set(id, (this.terminalReports.get(id) ?? 0) + 1);
-      }
+      else this.liveTurns.delete(id);
       // A turn that ended on its own releases the next held message. Only
       // these two: an interruption leaves the queue dormant by decision, and
       // a failure must not restart a failing conversation by itself.
