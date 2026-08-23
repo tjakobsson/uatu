@@ -40,7 +40,7 @@ import {
 import { cloneTargetName, gitInit, probeGitRepository, validCloneFolderName } from "./git";
 import { FolderManagerError, reconcileRegisteredAliasPaths, type FolderManager } from "./folder-manager";
 import { clonePage, dashboardPage, loginPage, settingsPage, stoppedSessionPage } from "./pages";
-import type { PathReservationCoordinator } from "./path-reservations";
+import { pathsOverlap, type PathReservationCoordinator } from "./path-reservations";
 import {
   bridgeWebSocketHandlers,
   childUrlFor,
@@ -593,8 +593,28 @@ export function createHubFetchHandler(deps: HubDeps) {
       }
       let job: { jobId: string } | undefined;
       try {
-        if (registry.byPath(target)) {
-          return json(409, { error: `workspace is already registered: ${target}` });
+        // Legacy registrations can persist alias spellings of the target or
+        // of a folder beneath it; reconciled first, the claim check below
+        // sees them at the canonical path the clone would populate.
+        let collided: string[];
+        try {
+          collided = await reconcileRegisteredAliasPaths(registry);
+        } catch (error) {
+          return folderError(error);
+        }
+        if (collided.some(canonical => pathsOverlap(canonical, target))) {
+          return json(409, { error: "folder has duplicate alias registrations that require manual cleanup" });
+        }
+        // A registered workspace whose directory is missing keeps its
+        // registration deliberately, and that claim covers the whole
+        // subtree: cloning into an absent /src/repo that still holds a
+        // registered /src/repo/sub would hand that stable workspace id —
+        // with its personal state and credential assignments — unrelated
+        // cloned content. Rejected at or below the target, as the folder
+        // create and rename paths already do.
+        const claimed = registry.atOrBelow(target);
+        if (claimed.length > 0) {
+          return json(409, { error: `workspace is already registered: ${claimed[0]!.path}` });
         }
         if (await fs.stat(target).then(() => true).catch(() => false)) {
           return json(409, { error: `target already exists: ${target}` });

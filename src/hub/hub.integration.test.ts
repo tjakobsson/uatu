@@ -1067,20 +1067,20 @@ describe("hub end to end", () => {
     await mkdir(destination);
     const canonicalDestination = await realpath(destination);
     const target = path.join(canonicalDestination, "checked-clone");
-    const originalByPath = registry.byPath.bind(registry);
+    const originalAtOrBelow = registry.atOrBelow.bind(registry);
     let mutationBlocked: boolean | undefined;
     // A folder mutation racing this clone reserves the target before it
     // touches disk. Standing in for one at the moment the route decides the
     // target is free: unreserved checks would let it win the reservation and
     // land — creating the directory, or renaming a registered workspace onto
     // it — after the verdict but before the clone started.
-    registry.byPath = (candidate: string) => {
+    registry.atOrBelow = (candidate: string) => {
       if (candidate === target && mutationBlocked === undefined) {
         const competing = reservations.acquire([target]);
         mutationBlocked = competing === undefined;
         competing?.release();
       }
-      return originalByPath(candidate);
+      return originalAtOrBelow(candidate);
     };
     let jobId = "";
     try {
@@ -1095,7 +1095,7 @@ describe("hub end to end", () => {
       // The very reservation the checks ran under is the one the job holds.
       expect(reservations.isReserved(target)).toBe(true);
     } finally {
-      registry.byPath = originalByPath;
+      registry.atOrBelow = originalAtOrBelow;
       if (jobId !== "") {
         await fetch(`${origin}/api/hub/clone-jobs/${jobId}/cancel`, {
           method: "POST",
@@ -1391,6 +1391,43 @@ describe("hub end to end", () => {
     expect(nested.status).toBe(400);
     expect(((await nested.json()) as { error: string }).error).toContain("single folder name");
   }, 60_000);
+
+  test("clone refuses a target whose subtree a registered workspace still claims", async () => {
+    // A workspace registered below the target keeps its registration when
+    // its directory vanishes. Cloning into the (absent) ancestor would fill
+    // that subtree with unrelated content while the old stable id, personal
+    // state, and credential assignments still point at it.
+    const source = path.join(tempRoot, "stale-claim-source");
+    execFileSync("mkdir", ["-p", source]);
+    execFileSync("git", ["init"], { cwd: source, stdio: "ignore" });
+    await writeFile(path.join(source, "README.md"), "# Stale Claim\n");
+
+    const dest = path.join(tempRoot, "stale-claim-checkouts");
+    const target = path.join(dest, "stale-parent");
+    const descendant = path.join(target, "sub");
+    await mkdir(descendant, { recursive: true });
+    const stale = await registry.register(descendant);
+    await rm(target, { recursive: true, force: true });
+
+    const refused = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ url: source, dest, folderName: "stale-parent" }),
+    });
+    expect(refused.status).toBe(409);
+    await assertContract("POST", "/api/hub/clone-jobs", refused);
+    expect(((await refused.json()) as { error: string }).error).toContain(
+      `workspace is already registered: ${descendant}`,
+    );
+    // No job started: nothing holds the target reservation and the target
+    // was never populated or registered.
+    expect(cloneJobs.isTargetReserved(target)).toBe(false);
+    expect(await stat(target).then(() => true).catch(() => false)).toBe(false);
+    expect(registry.byPath(target)).toBeUndefined();
+    expect(registry.byId(stale.id)?.path).toBe(descendant);
+
+    expect(await registry.remove(stale.id)).toBe(true);
+  }, 30_000);
 
   test("forget cannot pass a clone registration before retained assignment commits", async () => {
     const dest = path.join(tempRoot, "forget-race-checkouts");
