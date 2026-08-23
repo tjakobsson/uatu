@@ -41,7 +41,13 @@ export interface SessionBackend {
   start(workspace: WorkspaceEntry, basePath: string, credentials: ResolvedCredentialContext): Promise<RunningSession>;
 }
 
-const URL_LINE_TIMEOUT_MS = 30_000;
+// INACTIVITY timeout, not a startup deadline: the child emits periodic
+// progress lines while preparing (a large tree's watcher setup alone can
+// take minutes — chokidar attaches at roughly 5ms per file on macOS), so
+// any stdout output re-arms the timer and only a silent child — hung, or an
+// old build that predates the heartbeat AND takes longer than this — is
+// killed.
+const STARTUP_INACTIVITY_TIMEOUT_MS = 30_000;
 const SIGTERM_GRACE_MS = 3_000;
 
 export type LocalBackendOptions = {
@@ -53,6 +59,7 @@ export type LocalBackendOptions = {
   spawn?: typeof Bun.spawn;
   env?: NodeJS.ProcessEnv;
   terminationGraceMs?: number;
+  startupInactivityMs?: number;
 };
 
 export function resolveUatuArgv(): string[] {
@@ -68,12 +75,14 @@ export class LocalProcessBackend implements SessionBackend {
   private readonly spawn: typeof Bun.spawn;
   private readonly env: NodeJS.ProcessEnv;
   private readonly terminationGraceMs: number;
+  private readonly startupInactivityMs: number;
 
   constructor(options: LocalBackendOptions = {}) {
     this.uatuArgv = options.uatuArgv ?? resolveUatuArgv();
     this.spawn = options.spawn ?? Bun.spawn;
     this.env = options.env ?? process.env;
     this.terminationGraceMs = options.terminationGraceMs ?? SIGTERM_GRACE_MS;
+    this.startupInactivityMs = options.startupInactivityMs ?? STARTUP_INACTIVITY_TIMEOUT_MS;
   }
 
   async start(workspace: WorkspaceEntry, basePath: string, credentials: ResolvedCredentialContext): Promise<RunningSession> {
@@ -123,7 +132,7 @@ export class LocalProcessBackend implements SessionBackend {
 
     let url: URL;
     try {
-      const line = await readFirstUrlLine(child.stdout, URL_LINE_TIMEOUT_MS, child);
+      const line = await readFirstUrlLine(child.stdout, this.startupInactivityMs, child);
       url = new URL(line);
     } catch (error) {
       await terminate(child, this.terminationGraceMs);
@@ -154,10 +163,13 @@ export class LocalProcessBackend implements SessionBackend {
 }
 
 // Reads the child's stdout until the first line containing an http:// URL —
-// the CLI's supervisor contract — or rejects on timeout / early exit.
+// the CLI's supervisor contract — or rejects on inactivity / early exit.
+// The timer re-arms on every stdout chunk: a slow start that keeps talking
+// (the CLI's supervised startup heartbeat) can take as long as it needs,
+// while a silent child is still bounded.
 async function readFirstUrlLine(
   stream: ReadableStream<Uint8Array>,
-  timeoutMs: number,
+  inactivityMs: number,
   child: Subprocess,
 ): Promise<string> {
   const decoder = new TextDecoder();
@@ -165,9 +177,18 @@ async function readFirstUrlLine(
   let buffered = "";
 
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  let rejectInactive!: (error: Error) => void;
   const timeout = new Promise<never>((_, reject) => {
-    timeoutHandle = setTimeout(() => reject(new Error("no session URL on stdout within 30s")), timeoutMs);
+    rejectInactive = reject;
   });
+  const armTimeout = () => {
+    clearTimeout(timeoutHandle);
+    timeoutHandle = setTimeout(
+      () => rejectInactive(new Error(`no session URL or startup output on stdout within ${Math.round(inactivityMs / 1000)}s`)),
+      inactivityMs,
+    );
+  };
+  armTimeout();
   const earlyExit = child.exited.then(code => {
     throw new Error(`child exited (code ${code}) before printing a session URL`);
   });
@@ -178,6 +199,7 @@ async function readFirstUrlLine(
       if (next.done) {
         throw new Error("child stdout closed before printing a session URL");
       }
+      armTimeout();
       buffered += decoder.decode(next.value, { stream: true });
       // Parse COMPLETE lines only. The contract is a URL line; matching the
       // raw buffer would accept a chunk-split fragment ("http://127" parses

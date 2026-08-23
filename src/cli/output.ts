@@ -61,6 +61,10 @@ export function printStartupBanner(
   stream.write(`\n${STARTUP_BANNER}\n\n`);
 }
 
+function indexingLabel(entries: WatchEntry[]): string {
+  return entries.length === 1 ? entries[0]!.absolutePath : `${entries.length} roots`;
+}
+
 export function printIndexingStatus(
   entries: WatchEntry[],
   stream: { isTTY?: boolean; write(chunk: string): unknown } = process.stdout,
@@ -69,8 +73,7 @@ export function printIndexingStatus(
     return () => undefined;
   }
 
-  const label = entries.length === 1 ? entries[0]!.absolutePath : `${entries.length} roots`;
-  const message = `Indexing ${label}...`;
+  const message = `Indexing ${indexingLabel(entries)}...`;
   let cleared = false;
   stream.write(message);
 
@@ -80,5 +83,73 @@ export function printIndexingStatus(
     }
     cleared = true;
     stream.write(`\r${" ".repeat(message.length)}\r`);
+  };
+}
+
+export const STARTUP_HEARTBEAT_INTERVAL_SECONDS = 5;
+
+// The heartbeat loop as sh argv. printf (not echo) so an arbitrary root
+// path in $0 is emitted verbatim, and the label/interval travel as
+// positional parameters — never interpolated into the script string.
+export function startupHeartbeatArgv(label: string, intervalSeconds: number): string[] {
+  return [
+    "sh",
+    "-c",
+    'while :; do printf \'uatu: starting — indexing %s\\n\' "$0"; sleep "$1"; done',
+    label,
+    String(intervalSeconds),
+  ];
+}
+
+// Supervised (piped-stdout) starts announce progress periodically so the
+// supervising hub can tell a slow start — a large tree's cold watcher setup
+// can take minutes — from a hung child, which its startup inactivity
+// timeout must still catch. The lines never contain a URL, so every
+// supervisor's URL-line scan (which drops non-matching lines by contract)
+// skips them; TTY starts keep the inline indexing status instead.
+//
+// The heartbeat is a helper PROCESS inheriting our stdout pipe, not an
+// in-process timer: watcher setup attaches Bun's fs.watch synchronously per
+// directory entry and starves the event loop for the whole preparation
+// window (observed: 5 timer ticks in 47s on a 4k-file tree), so a timer
+// here would fire exactly never while it is needed most. Each printf line
+// is one atomic pipe write well under PIPE_BUF, so it can interleave with
+// the URL line only between lines, never inside one.
+export function startSupervisedStartupHeartbeat(
+  entries: WatchEntry[],
+  stream: { isTTY?: boolean } = process.stdout,
+  intervalSeconds: number = STARTUP_HEARTBEAT_INTERVAL_SECONDS,
+  spawner: (argv: string[], options: { stdout: "inherit"; stderr: "ignore"; stdin: "ignore" }) => { kill(): void } = (argv, options) => Bun.spawn(argv, options),
+): () => void {
+  if (stream.isTTY || process.platform === "win32") {
+    return () => undefined;
+  }
+
+  let helper: { kill(): void } | undefined;
+  try {
+    helper = spawner(startupHeartbeatArgv(indexingLabel(entries), intervalSeconds), {
+      // fd 1 is the supervisor's pipe; the helper writes to it directly. If
+      // this process dies without stopping the helper, its next write hits a
+      // closed pipe and SIGPIPE ends it.
+      stdout: "inherit",
+      stderr: "ignore",
+      stdin: "ignore",
+    });
+  } catch {
+    // Best-effort: a start without heartbeats degrades to the supervisor's
+    // plain inactivity timeout, exactly the pre-heartbeat behavior.
+    return () => undefined;
+  }
+  let stopped = false;
+  return () => {
+    if (stopped) {
+      return;
+    }
+    stopped = true;
+    try {
+      helper?.kill();
+    } catch {
+      // Already exited.
+    }
   };
 }
