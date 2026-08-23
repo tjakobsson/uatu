@@ -66,6 +66,81 @@ describe("SessionManager.isStarting", () => {
   });
 });
 
+describe("SessionManager start precondition", () => {
+  test("checks the fence after the lifecycle queue grants, not when start is called", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-fence-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    await registry.register("/srv/workspaces/fenced");
+
+    let spawns = 0;
+    const backend: SessionBackend = {
+      start: async workspace => {
+        spawns += 1;
+        return fakeSession(workspace.id);
+      },
+    };
+    // Stands in for the folder-mutation journal: absent when the start is
+    // requested, present by the time the queue grants it.
+    let mutationPending = false;
+    const sessions = new SessionManager(
+      registry,
+      { local: backend },
+      EMPTY_CREDENTIAL_CONTEXT_RESOLVER,
+      async () => {
+        if (mutationPending) throw new Error("a pending folder mutation requires recovery");
+      },
+    );
+
+    // A registered folder rename holds the workspace's lifecycle queue for
+    // its whole journalled window; this stands in for that hold.
+    let releaseQueue!: () => void;
+    const held = new Promise<void>(resolve => {
+      releaseQueue = resolve;
+    });
+    const holding = sessions.runExclusive("fenced", () => held);
+
+    const startPromise = sessions.start("fenced");
+    expect(sessions.isStarting("fenced")).toBe(true);
+    // The mutation journals while the start waits its turn — a check made
+    // when start() was called (a route-level fence) had already passed.
+    mutationPending = true;
+    releaseQueue();
+    await holding;
+
+    await expect(startPromise).rejects.toThrow("a pending folder mutation requires recovery");
+    expect(spawns).toBe(0);
+    expect(sessions.isRunning("fenced")).toBe(false);
+    expect(sessions.isStarting("fenced")).toBe(false);
+  });
+
+  test("a refused start leaves the caller's registration cleanup alone", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-fence-cleanup-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    await registry.register("/srv/workspaces/fenced-cleanup");
+
+    const backend: SessionBackend = { start: async workspace => fakeSession(workspace.id) };
+    const sessions = new SessionManager(
+      registry,
+      { local: backend },
+      EMPTY_CREDENTIAL_CONTEXT_RESOLVER,
+      async () => { throw new Error("a pending folder mutation requires recovery"); },
+    );
+
+    // Unregistering is itself a registered-state mutation the same journal
+    // fences, so the refusal must not run the failure cleanup that performs
+    // one; the registration stays and the start is retried after recovery.
+    let cleanups = 0;
+    await expect(sessions.start("fenced-cleanup", async () => { cleanups += 1; }))
+      .rejects.toThrow("a pending folder mutation requires recovery");
+    expect(cleanups).toBe(0);
+    expect(registry.byId("fenced-cleanup")).toBeDefined();
+  });
+});
+
 describe("SessionManager credential contexts", () => {
   test("passes the resolved context explicitly and reports assignment changes as restart-required", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-session-credentials-"));

@@ -40,6 +40,11 @@ export class SessionManager {
     private readonly registry: WorkspaceRegistry,
     private readonly backends: Record<WorkspaceEntry["backend"], SessionBackend>,
     private readonly credentials: CredentialContextResolver,
+    // Precondition for spawning a child, evaluated INSIDE the queued start
+    // operation (see start()). Injected rather than imported because the
+    // folder manager that owns the recovery journal takes this manager as a
+    // dependency and is therefore assembled after it.
+    private readonly assertStartAllowed?: () => Promise<void>,
   ) {}
 
   get(workspaceId: string): RunningSession | undefined {
@@ -151,6 +156,25 @@ export class SessionManager {
       if (existing) {
         return existing;
       }
+
+      // The folder-mutation journal fence runs HERE, under this workspace's
+      // lifecycle queue, and not at the route that asked for the start.
+      // Registered folder renames and removals write, clear, and roll back
+      // their journal inside the runWithSessionsStopped callback, which
+      // holds the lifecycle queue of EVERY workspace the mutation touches
+      // for the whole journalled window. So while this operation owns the
+      // queue no mutation of this workspace can be mid-journal, and a
+      // journal that a failed rollback or finalization left behind is
+      // already on disk for the check to observe. A check made before the
+      // call — at the route — proves nothing: a mutation may journal
+      // between it and the moment the queue grants this operation, and the
+      // child would then be spawned with this workspace's credentials and
+      // personal identity in whatever content now sits at the registered
+      // path. Checked before the spawn block below, so a refusal spawns
+      // nothing and mutates no registered state (the caller's failure
+      // cleanup unregisters, which is itself fenced while recovery is
+      // pending).
+      await this.assertStartAllowed?.();
 
       let workspace: WorkspaceEntry;
       let session: RunningSession;

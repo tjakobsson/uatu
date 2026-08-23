@@ -222,11 +222,13 @@ paths:
       operationId: hubStartWorkspace
       tags: [Hub]
       summary: Start a registered workspace
+      description: Refused with 409 while a pending folder mutation awaits recovery; the check runs inside the workspace lifecycle operation, so a folder mutation cannot journal between it and the start.
       responses:
         '200': { $ref: '#/components/responses/WorkspaceAction' }
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
   /api/hub/sessions/{workspaceId}/stop:
     parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]

@@ -106,7 +106,7 @@ beforeAll(async () => {
   await sessionStore.load();
   sessions = new SessionManager(registry, {
     local: new LocalProcessBackend({ uatuArgv: ["bun", "run", CLI_PATH] }),
-  }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
+  }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER, () => folderManager.assertNoPendingMutation());
   const realCloneProcess = new CloneProcessAdapter();
   const processFactory: CloneProcessFactory = {
     start(options) {
@@ -1377,6 +1377,70 @@ describe("hub end to end", () => {
     expect(registry.byPath(fenced)?.id).toBe(((await registered.json()) as { id: string }).id);
   }, 60_000);
 
+  test("starting a session refuses while a folder mutation journal awaits recovery", async () => {
+    const folder = path.join(tempRoot, "workspaces", "start-journal-fenced");
+    execFileSync("mkdir", ["-p", folder]);
+    execFileSync("git", ["init"], { cwd: folder, stdio: "ignore" });
+    const registration = await fetch(`${origin}/api/hub/workspaces`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ path: folder, start: false }),
+    });
+    expect(registration.status).toBe(200);
+    const workspaceId = ((await registration.json()) as { id: string }).id;
+    const moved = path.join(tempRoot, "workspaces", "start-journal-moved");
+    const journalPath = path.join(tempRoot, "pending-folder-mutation.json");
+
+    // A registered rename that moved the directory and then failed both its
+    // registry update and its rollback leaves exactly this record. The
+    // registry still names the source, which recovery may yet have to move
+    // or restore: a child spawned there now would carry this workspace's
+    // credentials and personal identity into whatever recreated the source.
+    await writeFile(journalPath, `${JSON.stringify({
+      version: 1,
+      operation: "rename",
+      source: folder,
+      destination: moved,
+      before: [{ id: workspaceId, path: folder, backend: "local" }],
+      after: [{ id: workspaceId, path: moved, backend: "local" }],
+    }, null, 2)}\n`, { mode: 0o600 });
+
+    try {
+      const fenced = await fetch(`${origin}/api/hub/sessions/${workspaceId}/start`, {
+        method: "POST",
+        headers: { cookie, origin },
+      });
+      expect(fenced.status).toBe(409);
+      await assertContract("POST", "/api/hub/sessions/{workspaceId}/start", fenced);
+      expect(await fenced.json()).toEqual({
+        error: "a pending folder mutation requires recovery before further registered changes",
+      });
+      expect(sessions.isRunning(workspaceId)).toBe(false);
+
+      // Fail closed: a journal too corrupt to interpret is still a journal.
+      await writeFile(journalPath, "{ not json", { mode: 0o600 });
+      const corrupt = await fetch(`${origin}/api/hub/sessions/${workspaceId}/start`, {
+        method: "POST",
+        headers: { cookie, origin },
+      });
+      expect(corrupt.status).toBe(409);
+      expect(sessions.isRunning(workspaceId)).toBe(false);
+    } finally {
+      // Every later test in this file mutates registered state, which the
+      // journal fences: a failure here must not leave one behind.
+      await rm(journalPath, { force: true });
+    }
+
+    // Recovery clearing the record reopens starting.
+    const started = await fetch(`${origin}/api/hub/sessions/${workspaceId}/start`, {
+      method: "POST",
+      headers: { cookie, origin },
+    });
+    expect(started.status).toBe(200);
+    expect(sessions.isRunning(workspaceId)).toBe(true);
+    await sessions.stop(workspaceId);
+  }, 60_000);
+
   test("forget refuses while a folder mutation journal awaits recovery", async () => {
     const folder = path.join(tempRoot, "workspaces", "forget-journal-fenced");
     execFileSync("mkdir", ["-p", folder]);
@@ -1439,6 +1503,67 @@ describe("hub end to end", () => {
     });
     expect(forgottenAfterRecovery.status).toBe(200);
     expect(registry.byId(workspaceId)).toBeUndefined();
+  }, 60_000);
+
+  test("forget refuses a journal that lands while it waits for the workspace queue", async () => {
+    const folder = path.join(tempRoot, "workspaces", "forget-journal-race");
+    execFileSync("mkdir", ["-p", folder]);
+    execFileSync("git", ["init"], { cwd: folder, stdio: "ignore" });
+    const registration = await fetch(`${origin}/api/hub/workspaces`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ path: folder, start: false }),
+    });
+    expect(registration.status).toBe(200);
+    const workspaceId = ((await registration.json()) as { id: string }).id;
+    const moved = path.join(tempRoot, "workspaces", "forget-journal-race-moved");
+    const journalPath = path.join(tempRoot, "pending-folder-mutation.json");
+
+    // Occupy this workspace's lifecycle queue the way a registered folder
+    // rename does through runWithSessionsStopped, and journal only after the
+    // forget request is past the route's outer checks: the check the forget
+    // is fenced by must be the one it makes under the queue, not one it made
+    // before asking for it.
+    let releaseQueue!: () => void;
+    const held = new Promise<void>(resolve => {
+      releaseQueue = resolve;
+    });
+    const holding = sessions.runExclusive(workspaceId, () => held);
+    const forgetting = fetch(`${origin}/api/hub/workspaces/${workspaceId}/forget`, {
+      method: "POST",
+      headers: { cookie, origin },
+    });
+    try {
+      // Ample time for an in-process request to reach the route and queue
+      // behind the hold. A slower machine only weakens the proof — a journal
+      // that lands before the route runs is refused either way — so this can
+      // never make the test red.
+      await Bun.sleep(250);
+      await writeFile(journalPath, `${JSON.stringify({
+        version: 1,
+        operation: "rename",
+        source: folder,
+        destination: moved,
+        before: [{ id: workspaceId, path: folder, backend: "local" }],
+        after: [{ id: workspaceId, path: moved, backend: "local" }],
+      }, null, 2)}\n`, { mode: 0o600 });
+      releaseQueue();
+      await holding;
+
+      const response = await forgetting;
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        error: "a pending folder mutation requires recovery before further registered changes",
+      });
+      // Nothing of the workspace was deleted, so recovery restoring the
+      // journaled entry cannot resurrect a registration without its state.
+      expect(registry.byId(workspaceId)?.path).toBe(folder);
+    } finally {
+      releaseQueue();
+      await holding.catch(() => undefined);
+      await forgetting.catch(() => undefined);
+      await rm(journalPath, { force: true });
+    }
   }, 60_000);
 
   test("forget unregisters a stopped workspace and refuses a running one", async () => {

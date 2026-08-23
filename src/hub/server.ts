@@ -544,7 +544,12 @@ export function createHubFetchHandler(deps: HubDeps) {
         } : undefined);
       } catch (error) {
         // A folder that fails to serve is not left registered — mirroring the
-        // launcher rule that a declined/failed folder leaves no trace.
+        // launcher rule that a declined/failed folder leaves no trace. The
+        // journal fence inside the start is the exception: a mutation that
+        // journalled after the check above refuses before anything spawns
+        // and must not itself unregister while recovery is pending, so the
+        // registration stays and the start is retried after recovery.
+        if (error instanceof FolderManagerError) return folderError(error);
         return json(500, { error: error instanceof Error ? error.message : String(error) });
       }
       return json(200, { id: entry.id });
@@ -1181,9 +1186,17 @@ export function createHubFetchHandler(deps: HubDeps) {
         }
         if (action[2] === "start") {
           try {
+            // Starting is fenced by the folder-mutation journal from inside
+            // the workspace's lifecycle operation (see SessionManager.start):
+            // a journal that outlived its mutation means the registry may
+            // still point at a path recovery has to move or restore, and a
+            // child spawned there would carry this workspace's credentials
+            // and personal identity into unrelated content. The refusal
+            // arrives as a FolderManagerError and answers 409.
             await sessions.start(workspaceId);
             return json(200, { id: workspaceId, running: true });
           } catch (error) {
+            if (error instanceof FolderManagerError) return folderError(error);
             return json(500, { error: error instanceof Error ? error.message : String(error) });
           }
         }
@@ -1212,21 +1225,30 @@ export function createHubFetchHandler(deps: HubDeps) {
         // resurrects the registration alone — a half-alive workspace the
         // user explicitly removed. Fails closed, so an uninspectable
         // journal is treated as pending.
+        //
+        // The check runs INSIDE the lifecycle operation, not before it.
+        // Registered folder renames and removals journal from inside their
+        // runWithSessionsStopped callback, which holds this workspace's
+        // lifecycle queue for the whole journalled window; under the queue
+        // no mutation of this workspace can be mid-journal, while one that
+        // already finished — including a rename that failed its rollback —
+        // has left its record on disk where this check sees it. A check
+        // before runWhileStopped() would instead admit the forget and let a
+        // rename reserve the workspace, journal, and release the queue
+        // first, so the forget would delete the personal state and
+        // credential assignments of a registration recovery then restores.
         try {
-          await deps.folderManager?.assertNoPendingMutation();
-        } catch (error) {
-          return folderError(error);
-        }
-        try {
-          await sessions.runWhileStopped(workspaceId, () =>
-            personalState.forgetWorkspace(
+          await sessions.runWhileStopped(workspaceId, async () => {
+            await deps.folderManager?.assertNoPendingMutation();
+            await personalState.forgetWorkspace(
               workspaceId,
               () => registry.remove(workspaceId),
               async () => { await deps.credentialApi?.metadata.removeWorkspaceAssignments(workspaceId); },
-            )
-          );
+            );
+          });
           return json(200, { id: workspaceId, forgotten: true });
         } catch (error) {
+          if (error instanceof FolderManagerError) return folderError(error);
           const message = error instanceof Error ? error.message : String(error);
           if (message.includes("before forgetting")) return json(409, { error: message });
           return json(500, { error: "failed to forget workspace" });
