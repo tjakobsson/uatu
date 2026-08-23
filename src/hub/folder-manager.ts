@@ -85,6 +85,9 @@ export type FolderManagerOptions = {
   credentials: CredentialState;
   reservations: PathReservationCoordinator;
   fs?: FileSystem;
+  // Test seam for the kernel no-replace rename; defaults to the platform
+  // primitive on the real filesystem and to none with an injected fs.
+  renameNoReplace?: NoReplaceRename | null;
 };
 
 function closedObject(value: unknown, fields: readonly string[]): Record<string, unknown> {
@@ -379,7 +382,11 @@ export class FolderManager {
     // The kernel-level no-replace rename applies only to the real
     // filesystem; an injected fs (failure-injection tests) exercises the
     // claimed-placeholder fallback its hooks can observe.
-    this.renameNoReplace = options.fs ? null : loadNoReplaceRename();
+    this.renameNoReplace = options.renameNoReplace !== undefined
+      ? options.renameNoReplace
+      : options.fs
+        ? null
+        : loadNoReplaceRename();
   }
 
   create(input: unknown): Promise<CreateFolderResult> {
@@ -435,7 +442,13 @@ export class FolderManager {
           async () => {
             await this.assertDirectory(source);
             await this.assertMissing(destination);
-            if (affected.length === 0) {
+            // Predecessors in the lifecycle queue (a concurrent forget) may
+            // have unregistered entries after the capture above; the
+            // re-read keeps a forgotten entry out of the journal, which
+            // recovery would otherwise resurrect with its personal state
+            // and assignments already deleted.
+            const current = this.options.registry.atOrBelow(source);
+            if (current.length === 0) {
               try {
                 await this.renameWithoutReplacement(source, destination);
               } catch (error) {
@@ -443,7 +456,7 @@ export class FolderManager {
               }
               return { path: destination, workspaceIds: [] };
             }
-            return await this.renameRegistered(source, destination, affected);
+            return await this.renameRegistered(source, destination, current);
           },
         );
       } finally {
@@ -529,6 +542,17 @@ export class FolderManager {
           throw new Error("ambiguous pending folder rename: expected exactly one of source or destination to exist");
         } else {
           renamed = destinationExists;
+        }
+        // With recorded identities, the surviving directory must BE the
+        // journaled source — moved or not. An unrelated directory created
+        // at either pathname during the crash window must not inherit the
+        // registrations, their personal state, or their assignments.
+        if (pending.identities) {
+          const survivor = renamed ? pending.destination : pending.source;
+          const stats = await this.fs.lstat(survivor);
+          if (String(stats.dev) !== pending.identities.source.dev || String(stats.ino) !== pending.identities.source.ino) {
+            throw new Error("pending folder rename recovery found an unrecognized directory; manual reconciliation required");
+          }
         }
         await this.options.registry.restoreEntries(renamed ? pending.after : pending.before);
         await this.journal.clear();
@@ -616,16 +640,17 @@ export class FolderManager {
       // The kernel refuses an existing destination atomically — no claim,
       // no placeholder, no ownership question. errno does not cross the
       // FFI boundary: a failure with a visible destination is the
-      // conflict; otherwise the plain rename call surfaces the real error
-      // faithfully (the destination was just observed absent twice).
+      // conflict; any other failure (an exported syscall the running
+      // kernel or filesystem rejects, or a real error we cannot name)
+      // falls through to the claimed strategy below, which surfaces
+      // genuine errors faithfully and never replaces anything beyond its
+      // own placeholder — a plain rename here would reopen the hole.
       for (let attempt = 0; attempt < 2; attempt += 1) {
         if (this.renameNoReplace(source, destination) === 0) return;
         if (await this.fs.lstat(destination).then(() => true, () => false)) {
           throw new FolderManagerError("conflict", "destination already exists");
         }
       }
-      await this.fs.rename(source, destination);
-      return;
     }
     let claim: DirectoryIdentity | undefined;
     try {

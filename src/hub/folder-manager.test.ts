@@ -20,7 +20,7 @@ afterEach(async () => {
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 
-async function fixture(options: { fs?: typeof fs; reservations?: PathReservationCoordinator } = {}) {
+async function fixture(options: { fs?: typeof fs; reservations?: PathReservationCoordinator; renameNoReplace?: (from: string, to: string) => number } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "uatu-folders-")));
   tempDirectories.push(root);
   const state = path.join(root, "state");
@@ -52,6 +52,7 @@ async function fixture(options: { fs?: typeof fs; reservations?: PathReservation
     credentials,
     reservations,
     fs: options.fs,
+    ...(options.renameNoReplace === undefined ? {} : { renameNoReplace: options.renameNoReplace }),
   });
   return { root, state, folders, registry, personalState, credentials, sessions, reservations, journalPath, manager, stopped };
 }
@@ -519,6 +520,60 @@ describe("FolderManager registered mutations", () => {
     expect(f.registry.byId(chained.id)?.path).toBe(otherRepo);
   });
 
+  test("a failing no-replace primitive degrades to the claimed strategy, never a replacing rename", async () => {
+    // renameat2 can be exported yet rejected by the running kernel or
+    // filesystem; the degradation path must be the claimed placeholder,
+    // whose mkdir precedes any rename — a plain rename would silently
+    // replace a directory created after the last existence probe.
+    const mkdirs: string[] = [];
+    const injected = Object.assign({}, fs, {
+      mkdir: async (candidate: string, options?: Parameters<typeof fs.mkdir>[1]) => {
+        mkdirs.push(candidate);
+        return fs.mkdir(candidate, options);
+      },
+    }) as typeof fs;
+    const f = await fixture({ fs: injected, renameNoReplace: () => -1 });
+    const source = path.join(f.folders, "source");
+    const destination = path.join(f.folders, "destination");
+    await fs.mkdir(source);
+    await fs.writeFile(path.join(source, "kept.txt"), "kept");
+
+    completed(await f.manager.rename({ path: source, name: "destination" }));
+    expect(await fs.readFile(path.join(destination, "kept.txt"), "utf8")).toBe("kept");
+    expect(mkdirs).toContain(destination);
+  });
+
+  test("a rename raced by a concurrent forget degrades to an unregistered rename", async () => {
+    const f = await fixture();
+    const source = path.join(f.folders, "raced");
+    await fs.mkdir(source);
+    const entry = await f.registry.register(source);
+    // The forget wins the lifecycle queue: journaling the stale entry
+    // would let a crash after the move resurrect a workspace whose
+    // personal state and assignments were already deleted.
+    const racedSessions = {
+      runWithSessionsStopped: async <T,>(ids: string[], stop: boolean, operation: () => Promise<T>) => {
+        await f.registry.remove(entry.id);
+        return f.sessions.runWithSessionsStopped(ids, stop, operation);
+      },
+    };
+    const manager = new FolderManager({
+      journalPath: f.journalPath,
+      registry: f.registry,
+      sessions: racedSessions as never,
+      personalState: f.personalState,
+      credentials: f.credentials,
+      reservations: f.reservations,
+    });
+
+    expect(completed(await manager.rename({ path: source, name: "renamed" }))).toEqual({
+      path: path.join(f.folders, "renamed"),
+      workspaceIds: [],
+    });
+    expect(await exists(f.journalPath)).toBe(false);
+    expect(f.registry.byId(entry.id)).toBeUndefined();
+  });
+
   test("a claim swapped from under the rename conflicts instead of replacing", async () => {
     // A same-user process replaces the destination while the journal is
     // being written: the recorded claim identity no longer matches, so the
@@ -671,6 +726,28 @@ describe("FolderManager journal recovery", () => {
     expect(await exists(destination)).toBe(true);
     expect(await exists(source)).toBe(true);
     expect(await exists(f.journalPath)).toBe(false);
+  });
+
+  test("rejects a lone surviving directory that is not the journaled source", async () => {
+    // The moved (or unmoved) folder was itself replaced by an unrelated
+    // directory during the crash window: existence alone must not attach
+    // the old stable ids and credentials to it.
+    const f = await fixture();
+    const source = path.join(f.folders, "source");
+    const destination = path.join(f.folders, "destination");
+    const entry = await f.registry.register(source);
+    await fs.mkdir(destination);
+    await writeJournal(f.journalPath, renameJournal(source, destination, [entry], {
+      source: { dev: "0", ino: "1" },
+      claim: { dev: "0", ino: "2" },
+    }));
+    await expect(f.manager.recover()).rejects.toThrow("unrecognized directory");
+    expect(await exists(f.journalPath)).toBe(true);
+
+    // Same for a lone source that is not the recorded one.
+    await fs.rename(destination, source);
+    await expect(f.manager.recover()).rejects.toThrow("unrecognized directory");
+    expect(await exists(f.journalPath)).toBe(true);
   });
 
   test("fails loudly when both exist and neither identity matches", async () => {
