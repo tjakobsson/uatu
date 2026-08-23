@@ -315,6 +315,22 @@ describe("create new workspace", () => {
     expect(await journalExists(f.journalPath)).toBe(false);
   });
 
+  test("a stale alias registration blocks its canonical create destination", async () => {
+    const f = await fixture();
+    const alias = path.join(f.root, "legacy-alias");
+    await fs.symlink(f.folders, alias);
+    // Registered through the alias and the folder later vanished: nothing
+    // exists on disk, but the claim maps to the canonical destination —
+    // creating there would hand the new repository the old workspace's id
+    // and credential assignments through the alias.
+    const stale = await f.registry.register(path.join(alias, "vanished"), "local", "Stale");
+
+    await expect(f.coordinator.createWorkspace({ parent: f.folders, folderName: "vanished", displayName: "Fresh" }))
+      .rejects.toMatchObject({ code: "conflict" });
+    expect(await fs.lstat(path.join(f.folders, "vanished")).then(() => true, () => false)).toBe(false);
+    expect(f.registry.byId(stale.id)?.path).toBe(path.join(f.folders, "vanished"));
+  });
+
   test("an existing destination fails without registering or modifying it", async () => {
     const f = await fixture();
     const occupied = path.join(f.folders, "taken");
@@ -718,6 +734,27 @@ describe("commit-boundary failure injection", () => {
     await f.coordinator.recover();
     expect(f.credentials.snapshot().assignments).toEqual(replacement);
     expect(await journalExists(f.journalPath)).toBe(false);
+  });
+
+  test("the pending-recovery probe fails closed when the journal cannot be inspected", async () => {
+    const f = await fixture();
+    expect(await f.coordinator.hasPendingRecovery()).toBe(false);
+    await fs.writeFile(f.journalPath, "{}\n", { mode: 0o600 });
+    expect(await f.coordinator.hasPendingRecovery()).toBe(true);
+    await fs.unlink(f.journalPath);
+
+    const denied = new WorkspaceOnboardingCoordinator({
+      journalPath: f.journalPath,
+      registry: f.registry,
+      credentials: f.credentials,
+      sessions: f.sessions,
+      reservations: f.reservations,
+      fs: Object.assign({}, fs, {
+        lstat: async () => { throw Object.assign(new Error("injected inspection failure"), { code: "EACCES" }); },
+      }) as never,
+    });
+    // An uninspectable journal must fence, not admit.
+    expect(await denied.hasPendingRecovery()).toBe(true);
   });
 
   test("recovery rejects a journal that is not owner-only", async () => {

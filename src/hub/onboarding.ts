@@ -532,8 +532,11 @@ export class WorkspaceOnboardingCoordinator {
     try {
       await this.fs.lstat(this.options.journalPath);
       return true;
-    } catch {
-      return false;
+    } catch (error) {
+      // Only a confirmed absence clears the fence. An uninspectable
+      // journal (EACCES, I/O error) fails closed: proceeding could let a
+      // later recovery overwrite the very mutation being admitted.
+      return (error as NodeJS.ErrnoException).code !== "ENOENT";
     }
   }
 
@@ -605,6 +608,11 @@ export class WorkspaceOnboardingCoordinator {
     const destination = path.join(parent, input.folderName);
     const reservation = this.reserve([destination]);
     try {
+      // Reconciled like the existing-folder and clone flows: a stale
+      // registration persisted through a symlinked ancestor must block its
+      // canonical destination, or the new repository inherits the old
+      // workspace's id and credential assignments through the alias.
+      await this.reconcileRegisteredAliases();
       if (this.options.registry.byPath(destination)) {
         throw new OnboardingError("conflict", `destination is already a registered workspace: ${destination}`);
       }
