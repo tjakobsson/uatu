@@ -900,6 +900,9 @@ export function initChat(): void {
   // deliver a partial prompt. Refusals from before the submit are the
   // user's informed choice to send without the refused file.
   const attachmentRefusals = new Map<string, number>();
+  const noteAttachmentRefusal = (conversationId: string, count = 1) => {
+    if (count > 0) attachmentRefusals.set(conversationId, (attachmentRefusals.get(conversationId) ?? 0) + count);
+  };
 
   // The prompt route bounds attachment names to 200 UTF-8 bytes; an overlong
   // filename staged verbatim would upload fine and then fail every send.
@@ -1011,6 +1014,11 @@ export function initChat(): void {
   const warnUnsupportedIntake = (files: File[], images: File[]) => {
     if (images.length === 0 || images.length === files.length) return;
     const refused = files.filter(file => !attachableClaim(file));
+    // Counted like any staging refusal: a mix dropped while a submit drains
+    // is content meant for that very message, and the post-drain guard must
+    // see the loss rather than send the supported subset alone.
+    const conversationId = activeConversationId();
+    if (conversationId) noteAttachmentRefusal(conversationId, refused.length);
     setComposerError(refused.length === 1
       ? `${refused[0]!.name || "That file"} is not a supported image (PNG, JPEG, GIF, WebP).`
       : `${refused.length} files are not supported images (PNG, JPEG, GIF, WebP).`);
@@ -1031,7 +1039,7 @@ export function initChat(): void {
       setComposerError(`${support.modelName} cannot see images. Pick a model with image support to attach.`);
       return;
     }
-    const noteRefusal = () => attachmentRefusals.set(conversationId, (attachmentRefusals.get(conversationId) ?? 0) + 1);
+    const noteRefusal = () => noteAttachmentRefusal(conversationId);
     const task = (attachmentStaging.get(conversationId) ?? Promise.resolve()).then(async () => {
       for (const file of files) {
         if ((pendingAttachments.get(conversationId) ?? []).length + (submittedAttachmentReserve.get(conversationId) ?? 0) >= CHAT_ATTACHMENTS_PER_MESSAGE) {

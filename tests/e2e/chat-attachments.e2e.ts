@@ -500,6 +500,35 @@ test.describe("upload refusal during the drain", () => {
     expect(prompted).toBe(false);
     await page.unroute("**/attachments");
   });
+
+  test("a mixed intake during the drain blocks the send like any refusal", async ({ page }) => {
+    await newConversation(page);
+    await page.route("**/attachments", async route => {
+      await new Promise(resolve => setTimeout(resolve, 600));
+      await route.continue();
+    });
+    await page.locator("#chat-attach-input").setInputFiles({ name: "first.png", mimeType: "image/png", buffer: PNG });
+    let prompted = false;
+    page.on("request", request => { if (request.url().endsWith("/prompts")) prompted = true; });
+    await page.locator("#chat-input").fill("needs every file");
+    await page.locator("#chat-input").press("Enter");
+    // A mixed drop while the submit drains: the image joins this message,
+    // the text file is refused — a piece of the message went missing, so
+    // nothing may send.
+    await page.evaluate(async ({ bytes }) => {
+      const form = document.querySelector<HTMLFormElement>("#chat-composer")!;
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([new Uint8Array(bytes)], "second.png", { type: "image/png" }));
+      transfer.items.add(new File(["words"], "notes.txt", { type: "text/plain" }));
+      form.dispatchEvent(new DragEvent("drop", { dataTransfer: transfer, bubbles: true, cancelable: true }));
+    }, { bytes: Array.from(PNG) });
+    await expect(page.locator("#chat-composer-error")).toContainText("notes.txt is not a supported image");
+    // Both staged images survive as pending, the draft is intact, no prompt.
+    await expect(page.locator("#chat-attachments .chat-attachment")).toHaveCount(2);
+    await expect(page.locator("#chat-input")).toHaveValue("needs every file");
+    expect(prompted).toBe(false);
+    await page.unroute("**/attachments");
+  });
 });
 
 test.describe("draft restoration with mid-flight edits", () => {
