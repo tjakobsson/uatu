@@ -109,14 +109,15 @@ describe("startSupervisedStartupHeartbeat", () => {
     // fd 1 passes straight through to the supervisor's pipe.
     expect(spawns[0]!.options.stdout).toBe("inherit");
     expect(spawns[0]!.argv.slice(0, 2)).toEqual(["sh", "-c"]);
-    // The label, interval, and iteration cap travel as positional
-    // parameters, never interpolated into the script — a hostile root path
-    // cannot inject.
+    // The label, interval, iteration cap, and parent PID travel as
+    // positional parameters, never interpolated into the script — a hostile
+    // root path cannot inject.
     expect(spawns[0]!.argv[2]).not.toContain("/repo");
     expect(spawns[0]!.argv[3]).toBe("/repo");
     expect(spawns[0]!.argv[4]).toBe("5");
     // 15 minutes of 5-second intervals.
     expect(spawns[0]!.argv[5]).toBe("180");
+    expect(spawns[0]!.argv[6]).toBe(String(process.pid));
     stop();
     stop();
     expect(killed).toBe(1);
@@ -153,16 +154,17 @@ describe("startSupervisedStartupHeartbeat", () => {
     expect(output.split("\n").filter(line => line !== "")).toHaveLength(3);
   });
 
-  test("the helper loop exits when its parent process dies", async () => {
+  test("the helper loop exits when its watched parent process dies", async () => {
     // The hub's terminate() signals only the serve PID and holds the pipe's
     // read end, so an uncleaned helper would loop forever: the script must
-    // notice its parent is gone. Spawn the helper from a short-lived
-    // intermediate shell standing in for a SIGKILLed serve process.
+    // notice the serve process is gone. Spawn the helper from a short-lived
+    // intermediate shell standing in for a SIGKILLed serve process, with
+    // that shell's own PID ($$) as the watched positional.
     const [, , script, label, interval, cap] = startupHeartbeatArgv("docs", 0, 1_000_000);
     const wrapper = Bun.spawn(
       // The helper script and its positionals pass through untouched;
       // the outer shell backgrounds the helper and dies immediately.
-      ["sh", "-c", 'sh -c "$0" "$1" "$2" "$3" & exit 0', script!, label!, interval!, cap!],
+      ["sh", "-c", 'sh -c "$0" "$1" "$2" "$3" "$$" & exit 0', script!, label!, interval!, cap!],
       { stdout: "pipe", stderr: "ignore", stdin: "ignore" },
     );
     // stdout reaches EOF only once every writer — including the orphaned

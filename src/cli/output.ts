@@ -96,24 +96,31 @@ export const STARTUP_HEARTBEAT_INTERVAL_SECONDS = 5;
 export const STARTUP_HEARTBEAT_MAX_DURATION_SECONDS = 15 * 60;
 
 // The heartbeat loop as sh argv. printf (not echo) so an arbitrary root
-// path in $0 is emitted verbatim, and the label/interval/cap travel as
+// path in $0 is emitted verbatim, and the label/interval/cap/pid travel as
 // positional parameters — never interpolated into the script string.
 //
 // The loop is self-limiting in two ways so no JS-side cleanup path is
 // load-bearing: it stops after $2 iterations (the absolute duration cap),
-// and it probes its parent — the serving process — with kill -0 before
+// and it probes the serving process — its PID passed in $3, because $PPID
+// discovered inside the helper is wrong when the parent dies before the
+// shell starts and it launches already reparented — with kill -0 before
 // every line, so a parent that dies without calling the stop callback
 // (SIGKILL, the hub's terminate() signaling only the child PID) orphans
-// the helper for at most one interval. $PPID is fixed at shell startup,
-// so after reparenting the probe targets the dead PID and fails.
-export function startupHeartbeatArgv(label: string, intervalSeconds: number, maxIterations: number): string[] {
+// the helper for at most one interval.
+export function startupHeartbeatArgv(
+  label: string,
+  intervalSeconds: number,
+  maxIterations: number,
+  parentPid: number = process.pid,
+): string[] {
   return [
     "sh",
     "-c",
-    'i=0; while [ "$i" -lt "$2" ] && kill -0 "$PPID" 2>/dev/null; do printf \'uatu: starting — indexing %s\\n\' "$0"; sleep "$1"; i=$((i+1)); done',
+    'i=0; while [ "$i" -lt "$2" ] && kill -0 "$3" 2>/dev/null; do printf \'uatu: starting — indexing %s\\n\' "$0"; sleep "$1"; i=$((i+1)); done',
     label,
     String(intervalSeconds),
     String(maxIterations),
+    String(parentPid),
   ];
 }
 
