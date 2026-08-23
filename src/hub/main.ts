@@ -478,6 +478,9 @@ export async function runHub(options: RunHubOptions): Promise<void> {
   await folderManager.recover();
   const onboarding = new WorkspaceOnboardingCoordinator({
     journalPath: onboardingJournalPath(stateRoot),
+    // A pending folder mutation freezes onboarding, mirroring the folder
+    // manager's fence on the onboarding journal.
+    recoveryJournalPaths: [folderMutationJournalPath(stateRoot)],
     registry,
     credentials: credentialMetadata,
     sessions,

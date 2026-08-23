@@ -182,7 +182,7 @@ function fixture(overrides: {
       return enqueue(id, operation);
     },
   };
-  const onboardingCalls: Array<{ path: string; displayName: string; authentication: Array<{ credentialId: string; host: string }>; signing: string | null }> = [];
+  const onboardingCalls: Array<{ path: string; displayName: string; authentication: Array<{ credentialId: string; host: string }>; signing: string | null; start?: boolean }> = [];
   const assignmentsRemoved: string[] = [];
   let onboardingError: Error | undefined;
   const onboarding = overrides.onboarding ? {
@@ -197,7 +197,19 @@ function fixture(overrides: {
       onboardingCalls.push(options);
       const entry = { id: "repo", path: options.path, backend: "local" as const, displayName: options.displayName };
       registered.set(entry.id, entry);
-      return { entry };
+      // Mirrors the coordinator's lifecycle-protected in-commit start: a
+      // failure preserves the committed stopped registration.
+      let startedInCommit = false;
+      let startError: string | null = null;
+      if ((options as { start?: boolean }).start) {
+        try {
+          await sessions.start(entry.id);
+          startedInCommit = true;
+        } catch (error) {
+          startError = error instanceof Error ? error.message : String(error);
+        }
+      }
+      return { entry, started: startedInCommit, startError };
     },
     async removeWorkspaceAssignments(workspaceId: string) {
       assignmentsRemoved.push(workspaceId);
@@ -864,6 +876,7 @@ describe("CloneJobManager onboarding coordination", () => {
       displayName: "Payments API",
       authentication: [{ credentialId: "workspace-auth", host: "github.com" }],
       signing: "sign-key",
+      start: false,
     }]);
     expect(f.started).toEqual([]);
     expect(f.registered.get("repo")?.displayName).toBe("Payments API");

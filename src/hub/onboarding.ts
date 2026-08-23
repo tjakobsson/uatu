@@ -116,6 +116,11 @@ export type OnboardingGit = {
 
 export type WorkspaceOnboardingOptions = {
   journalPath: string;
+  // Journals of sibling coordinators (the folder-mutation journal) whose
+  // pending record also freezes onboarding: registering or creating at a
+  // path a pending folder removal recorded would hand its recovery an
+  // unrecognized directory and abort the next startup.
+  recoveryJournalPaths?: readonly string[];
   registry: OnboardingRegistry;
   credentials: OnboardingCredentials;
   sessions: OnboardingSessions;
@@ -470,6 +475,7 @@ export class WorkspaceOnboardingCoordinator {
     displayName: string;
     authentication: AuthenticationSelection[];
     signing: string | null;
+    start?: boolean;
   }): Promise<OnboardingResult> {
     return this.enqueue(async () => {
       await this.assertNoPendingOnboarding();
@@ -486,6 +492,7 @@ export class WorkspaceOnboardingCoordinator {
         authentication: authenticationSelections(options.authentication),
         signing: signingSelection(options.signing),
         createdFolder: false,
+        start: options.start === true,
       });
     });
   }
@@ -663,6 +670,7 @@ export class WorkspaceOnboardingCoordinator {
     authentication: AuthenticationSelection[];
     signing: string | null;
     createdFolder: boolean;
+    start: boolean;
   }): Promise<OnboardingResult> {
     const planned = this.planWorkspaceId(options.canonical);
     const desired = resolveOnboardingAssignments(
@@ -670,7 +678,7 @@ export class WorkspaceOnboardingCoordinator {
       { authentication: options.authentication, signing: options.signing },
       this.options.credentials.snapshot(),
     );
-    return await this.commitPlanned({ ...options, planned, desired, start: false });
+    return await this.commitPlanned({ ...options, planned, desired });
   }
 
   // Legacy registries can hold alias paths; the canonical byPath and
@@ -693,15 +701,26 @@ export class WorkspaceOnboardingCoordinator {
   // failed midway (rollback or clear failed). The journal holds one
   // record, so beginning another onboarding would replace it — and, on
   // success, clear it — leaving recovery unable to undo the earlier
-  // partial registration. Mirrors FolderManager.assertNoPendingMutation.
+  // partial registration. Sibling recovery journals (the folder-mutation
+  // journal) fence for the reverse reason: creating or registering at a
+  // path a pending folder removal recorded would hand its recovery an
+  // unrecognized directory and abort the next startup. Mirrors
+  // FolderManager.assertNoPendingMutation.
   private async assertNoPendingOnboarding(): Promise<void> {
-    try {
-      await this.fs.lstat(this.options.journalPath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-      throw new OnboardingError("internal", "onboarding journal inspection failed", { cause: error });
+    for (const journalPath of [this.options.journalPath, ...this.options.recoveryJournalPaths ?? []]) {
+      let pending = true;
+      try {
+        await this.fs.lstat(journalPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw new OnboardingError("internal", "recovery journal inspection failed", { cause: error });
+        }
+        pending = false;
+      }
+      if (pending) {
+        throw new OnboardingError("recovery-required", "a pending recovery journal requires Hub recovery before new workspace changes");
+      }
     }
-    throw new OnboardingError("recovery-required", "a pending onboarding requires Hub recovery before new workspace changes");
   }
 
   // The journaled two-store commit. Runs only inside the operation chain.

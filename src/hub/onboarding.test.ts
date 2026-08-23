@@ -461,6 +461,33 @@ describe("commit-boundary failure injection", () => {
     expect(await journalExists(f.journalPath)).toBe(true);
   });
 
+  test("a pending folder-mutation journal freezes onboarding", async () => {
+    // Registering or creating at a path a pending folder removal recorded
+    // would hand its recovery an unrecognized directory and abort the
+    // next startup; onboarding fences on the sibling journal exactly as
+    // the folder manager fences on this one.
+    const f = await fixture();
+    const folderJournal = path.join(f.state, "pending-folder-mutation.json");
+    const coordinator = new WorkspaceOnboardingCoordinator({
+      journalPath: f.journalPath,
+      recoveryJournalPaths: [folderJournal],
+      registry: f.registry,
+      credentials: f.credentials,
+      sessions: f.sessions,
+      reservations: f.reservations,
+      git: f.git,
+    });
+    const folder = await gitRepository(f.folders, "repo");
+    await fs.writeFile(folderJournal, "{}\n", { mode: 0o600 });
+    await expect(coordinator.configureExisting({ path: folder, displayName: "Repo" }))
+      .rejects.toMatchObject({ code: "recovery-required" });
+    expect(f.registry.byPath(folder)).toBeUndefined();
+
+    await fs.unlink(folderJournal);
+    const result = await coordinator.configureExisting({ path: folder, displayName: "Repo" });
+    expect(result.created).toBe(true);
+  });
+
   test("a forget queued mid-commit cannot slip before a requested first start", async () => {
     const f = await fixture();
     const folder = await gitRepository(f.folders, "racy");

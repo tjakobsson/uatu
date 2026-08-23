@@ -43,7 +43,11 @@ type CloneOnboarding = {
     displayName: string;
     authentication: Array<{ credentialId: string; host: string }>;
     signing: string | null;
-  }): Promise<{ entry: WorkspaceEntry }>;
+    // A requested first start runs inside the coordinator's
+    // lifecycle-protected commit; a separately queued start could run
+    // after a forget that observed the registration mid-commit.
+    start?: boolean;
+  }): Promise<{ entry: WorkspaceEntry; started?: boolean; startError?: string | null }>;
   removeWorkspaceAssignments(workspaceId: string): Promise<unknown>;
 };
 
@@ -363,18 +367,25 @@ export class CloneJobManager {
         });
         return;
       }
+      let commitStarted = false;
+      let commitStartError: string | null = null;
       try {
         if (this.onboarding) {
           // The coordinator commits registration and the explicitly retained
           // assignments as one coherent result while this job still holds
           // the target's path reservation. The clone identity is never
-          // retained implicitly — only selections listed here commit.
+          // retained implicitly — only selections listed here commit. A
+          // requested start rides inside the same lifecycle-protected
+          // commit so a forget queued mid-commit cannot slip before it.
           const result = await this.onboarding.configureCloned({
             path: job.target,
             displayName: job.displayName ?? defaultWorkspaceDisplayName(job.target),
             authentication: job.retainedAuthentication,
             signing: job.signing,
+            start: job.start && !job.stop,
           });
+          commitStarted = result.started === true;
+          commitStartError = result.startError ?? null;
           job.registered = result.entry;
           job.assignedRetained = job.retainedAuthentication.length > 0 || job.signing !== null;
         } else {
@@ -409,7 +420,10 @@ export class CloneJobManager {
         await this.finish(job, { status: "succeeded", workspaceId: committed.id, target: job.target, running: false });
         return;
       }
-      if (job.stop) {
+      // A cancellation that raced a commit whose requested start already
+      // ran must flow through the stop-then-rollback path below — a plain
+      // rollback would remove the registration under a running session.
+      if (job.stop && !commitStarted) {
         await this.finishAfterRollback(job, job.registered);
         return;
       }
@@ -431,7 +445,7 @@ export class CloneJobManager {
           return;
         }
       }
-      if (job.stop) {
+      if (job.stop && !commitStarted) {
         await this.finishAfterRollback(job, job.registered);
         return;
       }
@@ -445,11 +459,11 @@ export class CloneJobManager {
 
       this.setPhase(job, "starting");
       if (this.onboarding) {
-        // The configuration has committed; an explicitly requested start
-        // that fails preserves the stopped workspace and reports the error.
-        try {
-          await this.sessions.start(job.registered.id);
-        } catch (error) {
+        // The requested start already ran inside the commit's lifecycle
+        // section; a failure preserved the stopped workspace. A start
+        // skipped because a cancellation raced the commit is treated as a
+        // failure of the cancelled job, resolved by the rollback below.
+        if (!commitStarted) {
           if (job.stop) {
             await this.finishAfterRollback(job, job.registered);
             return;
@@ -457,7 +471,7 @@ export class CloneJobManager {
           await this.finish(job, {
             status: "start-failed",
             target: job.target,
-            error: errorText(error),
+            error: commitStartError ?? "the requested start did not run",
             workspaceId: job.registered.id,
           });
           return;
