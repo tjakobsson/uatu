@@ -88,23 +88,42 @@ export function printIndexingStatus(
 
 export const STARTUP_HEARTBEAT_INTERVAL_SECONDS = 5;
 
+// Absolute ceiling on how long the helper keeps re-arming the supervisor's
+// inactivity timer. A start still preparing past this point is treated as
+// wedged: the heartbeat stops and the supervisor's inactivity timeout takes
+// over. Generous on purpose — at ~5ms per watched file this covers trees an
+// order of magnitude larger than the slowest observed start (~55s).
+export const STARTUP_HEARTBEAT_MAX_DURATION_SECONDS = 15 * 60;
+
 // The heartbeat loop as sh argv. printf (not echo) so an arbitrary root
-// path in $0 is emitted verbatim, and the label/interval travel as
+// path in $0 is emitted verbatim, and the label/interval/cap travel as
 // positional parameters — never interpolated into the script string.
-export function startupHeartbeatArgv(label: string, intervalSeconds: number): string[] {
+//
+// The loop is self-limiting in two ways so no JS-side cleanup path is
+// load-bearing: it stops after $2 iterations (the absolute duration cap),
+// and it probes its parent — the serving process — with kill -0 before
+// every line, so a parent that dies without calling the stop callback
+// (SIGKILL, the hub's terminate() signaling only the child PID) orphans
+// the helper for at most one interval. $PPID is fixed at shell startup,
+// so after reparenting the probe targets the dead PID and fails.
+export function startupHeartbeatArgv(label: string, intervalSeconds: number, maxIterations: number): string[] {
   return [
     "sh",
     "-c",
-    'while :; do printf \'uatu: starting — indexing %s\\n\' "$0"; sleep "$1"; done',
+    'i=0; while [ "$i" -lt "$2" ] && kill -0 "$PPID" 2>/dev/null; do printf \'uatu: starting — indexing %s\\n\' "$0"; sleep "$1"; i=$((i+1)); done',
     label,
     String(intervalSeconds),
+    String(maxIterations),
   ];
 }
 
-// Supervised (piped-stdout) starts announce progress periodically so the
-// supervising hub can tell a slow start — a large tree's cold watcher setup
-// can take minutes — from a hung child, which its startup inactivity
-// timeout must still catch. The lines never contain a URL, so every
+// Supervised starts announce progress periodically so the supervising hub
+// can tell a slow start — a large tree's cold watcher setup can take
+// minutes — from a hung child, which its startup inactivity timeout must
+// still catch. Supervision is detected by the same marker as
+// shouldWarnServeDeprecation: the hub always passes --exit-on-stdin-close.
+// A merely redirected direct `uatu serve` keeps its exact stdout contract
+// (the URL line and nothing else). The lines never contain a URL, so every
 // supervisor's URL-line scan (which drops non-matching lines by contract)
 // skips them; TTY starts keep the inline indexing status instead.
 //
@@ -117,20 +136,22 @@ export function startupHeartbeatArgv(label: string, intervalSeconds: number): st
 // the URL line only between lines, never inside one.
 export function startSupervisedStartupHeartbeat(
   entries: WatchEntry[],
+  options: { exitOnStdinClose: boolean },
   stream: { isTTY?: boolean } = process.stdout,
   intervalSeconds: number = STARTUP_HEARTBEAT_INTERVAL_SECONDS,
   spawner: (argv: string[], options: { stdout: "inherit"; stderr: "ignore"; stdin: "ignore" }) => { kill(): void } = (argv, options) => Bun.spawn(argv, options),
 ): () => void {
-  if (stream.isTTY || process.platform === "win32") {
+  if (!options.exitOnStdinClose || stream.isTTY || process.platform === "win32") {
     return () => undefined;
   }
 
+  const maxIterations = Math.max(1, Math.ceil(STARTUP_HEARTBEAT_MAX_DURATION_SECONDS / intervalSeconds));
   let helper: { kill(): void } | undefined;
   try {
-    helper = spawner(startupHeartbeatArgv(indexingLabel(entries), intervalSeconds), {
-      // fd 1 is the supervisor's pipe; the helper writes to it directly. If
-      // this process dies without stopping the helper, its next write hits a
-      // closed pipe and SIGPIPE ends it.
+    helper = spawner(startupHeartbeatArgv(indexingLabel(entries), intervalSeconds, maxIterations), {
+      // fd 1 is the supervisor's pipe; the helper writes to it directly.
+      // The stop callback is the fast path; the loop's own parent probe
+      // and iteration cap bound the helper when no cleanup here runs.
       stdout: "inherit",
       stderr: "ignore",
       stdin: "ignore",

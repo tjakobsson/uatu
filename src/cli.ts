@@ -162,9 +162,10 @@ async function runWatch(options: WatchOptions) {
   }
 
   const clearIndexingStatus = printIndexingStatus(rootEntries, process.stdout);
-  // Piped stdout (a supervising hub) gets periodic progress lines instead of
-  // the TTY status, so its startup watchdog can tell slow from hung.
-  const stopStartupHeartbeat = startSupervisedStartupHeartbeat(rootEntries, process.stdout);
+  // Hub-supervised children (marked by --exit-on-stdin-close) get periodic
+  // progress lines instead of the TTY status, so the hub's startup watchdog
+  // can tell slow from hung.
+  const stopStartupHeartbeat = startSupervisedStartupHeartbeat(rootEntries, options, process.stdout);
   let watchSession: ReturnType<typeof createWatchSession> | null = null;
   let server: ReturnType<typeof Bun.serve> | null = null;
   let terminalServer: ReturnType<typeof createTerminalServer> | null = null;

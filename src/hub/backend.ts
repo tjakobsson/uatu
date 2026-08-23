@@ -46,7 +46,10 @@ export interface SessionBackend {
 // take minutes — chokidar attaches at roughly 5ms per file on macOS), so
 // any stdout output re-arms the timer and only a silent child — hung, or an
 // old build that predates the heartbeat AND takes longer than this — is
-// killed.
+// killed. The child's heartbeat is itself capped (its
+// STARTUP_HEARTBEAT_MAX_DURATION_SECONDS), so a child that wedges without
+// exiting stops re-arming this timer and is reaped one inactivity window
+// after that cap.
 const STARTUP_INACTIVITY_TIMEOUT_MS = 30_000;
 const SIGTERM_GRACE_MS = 3_000;
 
