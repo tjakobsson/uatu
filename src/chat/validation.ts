@@ -15,6 +15,7 @@ import type {
   ConversationSummary,
   InteractionRequest,
   PermissionRequest,
+  QueuedMessage,
   QuestionOutcome,
   QuestionRequest,
   StructuredQuestion,
@@ -318,15 +319,29 @@ export function parseConversationItem(value: unknown): ConversationItem {
 
 export function parseConversationSnapshot(value: unknown): ConversationSnapshot {
   const record = expectRecord(value, "conversation snapshot");
-  expectKeys(record, ["conversation", "configuration", "generation", "cursor", "items", "olderCursor"], "conversation snapshot");
+  expectKeys(record, ["conversation", "configuration", "generation", "cursor", "items", "queued", "olderCursor"], "conversation snapshot");
   parseConversationSummary(record.conversation);
   parseConversationConfiguration(record.configuration);
   expectIdentity(record.generation, "generation");
   expectNonEmptyString(record.cursor, "cursor");
   if (!Array.isArray(record.items)) throw new Error("snapshot items must be an array");
   record.items.forEach(parseConversationItem);
+  if (record.queued !== undefined) parseQueuedMessages(record.queued);
   if (record.olderCursor !== undefined) expectNonEmptyString(record.olderCursor, "older cursor");
   return value as ConversationSnapshot;
+}
+
+export function parseQueuedMessages(value: unknown): QueuedMessage[] {
+  if (!Array.isArray(value)) throw new Error("queued messages must be an array");
+  for (const entry of value) {
+    const record = expectRecord(entry, "queued message");
+    expectKeys(record, ["id", "text", "queuedAt", "requestId"], "queued message");
+    expectIdentity(record.id, "queued message id");
+    expectNonEmptyString(record.text, "queued message text");
+    expectTimestamp(record.queuedAt, "queued message queuedAt");
+    if (record.requestId !== undefined) expectIdentity(record.requestId, "queued message requestId");
+  }
+  return value as QueuedMessage[];
 }
 
 export function parseChatEvent(value: unknown): ChatEvent {
@@ -366,6 +381,15 @@ export function parseChatEvent(value: unknown): ChatEvent {
       parseConversationSummary(record.conversation);
       if ((record.conversation as ConversationSummary).id !== record.conversationId) throw new Error("updated conversation id does not match event");
       break;
+    case "conversation.queue": {
+      expectKeys(record, ["generation", "sequence", "conversationId", "type", "queued", "change"], "queue event");
+      parseQueuedMessages(record.queued);
+      const change = expectRecord(record.change, "queue change");
+      expectKeys(change, ["kind", "messageId"], "queue change");
+      expectOneOf(change.kind, ["held", "removed", "delivered"], "queue change kind");
+      expectIdentity(change.messageId, "queue change message id");
+      break;
+    }
     case "resync":
       expectKeys(record, ["generation", "sequence", "conversationId", "type", "reason"], "resync event");
       expectOneOf(record.reason, ["generation-changed", "retention-gap", "invalid-cursor"], "resync reason");

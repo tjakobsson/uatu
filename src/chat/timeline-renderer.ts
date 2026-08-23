@@ -4,7 +4,7 @@ import { renderChatMarkdown } from "./markdown";
 import { resolveWorkspaceFileReference } from "./file-references";
 import { describeToolDetail, deriveTodoActivities, patchDiffLines, todoActivitySummary, toolSubject, type DiffLine, type TodoEntry, type TodoSummary, type ToolDetail } from "./tool-detail";
 import type { AcceptedDraft, ChatProjection } from "./projection";
-import type { ActivityStatus, ConversationItem, ConversationStatus, PermissionOutcome, QuestionRequest, TokenUsage, ToolItem } from "./types";
+import type { ActivityStatus, ConversationItem, ConversationStatus, PermissionOutcome, QueuedMessage, QuestionRequest, TokenUsage, ToolItem } from "./types";
 
 type RenderedEntry = { node: HTMLElement; item: ConversationItem; active: boolean; variant: string };
 
@@ -21,7 +21,7 @@ export class TimelineRenderer {
   private conversationId: string | null = null;
 
   /** Reconciles the DOM under `target` and returns the created or changed nodes. */
-  render(target: HTMLElement, projection: ChatProjection | null, expanded: Set<string>, queued: ReadonlySet<string> = new Set(), allowSubagents = true): HTMLElement[] {
+  render(target: HTMLElement, projection: ChatProjection | null, expanded: Set<string>, allowSubagents = true): HTMLElement[] {
     if (!projection) {
       this.reset();
       clearChildren(target);
@@ -70,7 +70,6 @@ export class TimelineRenderer {
     for (const [visibleIndex, item] of visible.entries()) {
       const active = activeRequests.has(item.id);
       const todo = todoLabels.get(item.id);
-      const isQueued = queued.has(item.id);
       const duration = durations.get(item.id);
       // Everything outside the item itself that changes its markup, so a
       // cached node is only reused when it would render identically.
@@ -79,11 +78,11 @@ export class TimelineRenderer {
       const entry = this.entries.get(item.id);
       // Completion is monotonic for an item. A new turn makes the conversation
       // active again, but must not revoke copy actions from an answer that was
-      // already observed in a terminal state. A steer never reaches that state,
-      // so its still-streaming assistant remains incomplete.
+      // already observed in a terminal state. An assistant still streaming
+      // when a later user message is visible remains incomplete.
       const completedAssistant = item.type === "assistant_message"
         && (entry?.node.dataset.complete === "true" || assistantMessageComplete(visible, visibleIndex, projection.status));
-      const variant = [todo?.label ?? "", todo?.task ?? "", String(isQueued), duration === undefined ? "" : String(duration), String(foreign), String(allowSubagents), String(completedAssistant)].join("\u0001");
+      const variant = [todo?.label ?? "", todo?.task ?? "", duration === undefined ? "" : String(duration), String(foreign), String(allowSubagents), String(completedAssistant)].join("\u0001");
       if (entry && entry.item === item && entry.active === active && entry.variant === variant) {
         nodes.set(item.id, entry.node);
         continue;
@@ -122,7 +121,7 @@ export class TimelineRenderer {
       // auto-open rule for the rest of the run, so a tool that keeps talking
       // cannot reopen a row the reader shut.
       const readerClosed = entry?.node.hasAttribute(READER_CLOSED) ?? false;
-      const node = buildNode(renderItem(item, open, active, todo, isQueued, duration, foreign, readerClosed, allowSubagents, completedAssistant));
+      const node = buildNode(renderItem(item, open, active, todo, duration, foreign, readerClosed, allowSubagents, completedAssistant));
       if (completedAssistant) decorateAssistantCopyActions(node);
       entry?.node.remove();
       this.entries.set(item.id, { node, item, active, variant });
@@ -431,12 +430,63 @@ function renderDraft(draft: AcceptedDraft): string {
   return `<article class="chat-item chat-user-message is-pending" data-chat-item-id="draft-${escapeHtmlAttribute(draft.requestId)}"><p>${escapeHtml(draft.text)}</p><small>${label}</small></article>`;
 }
 
-export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, queued = false, durationMs?: number, foreign = false, readerClosed = false, allowSubagents = true, completedAssistant = false): string {
+// A held message is not a timeline item: it renders in the dock above the
+// composer, keeps its removal control, and only becomes a transcript entry
+// when the workspace delivers it.
+function renderQueued(held: QueuedMessage): string {
+  const id = escapeHtmlAttribute(held.id);
+  return `<article class="chat-queued-message is-held" role="listitem" data-chat-queued-id="${id}"><p>${escapeHtml(held.text)}</p><footer class="chat-queued-row"><small class="chat-queued-tag">Queued — sends when the agent is ready</small><button type="button" class="chat-queued-remove" data-queue-remove="${id}">Remove</button></footer></article>`;
+}
+
+/**
+ * Reconciles the queue dock — the strip docked to the composer that shows
+ * what the workspace holds. Deliberately outside the timeline scroll: a held
+ * message must sit against the composer whatever length the transcript is
+ * and wherever the reader has scrolled it.
+ */
+export class QueueDockRenderer {
+  private readonly entries = new Map<string, { node: HTMLElement; held: QueuedMessage }>();
+
+  render(target: HTMLElement, queued: readonly QueuedMessage[]): void {
+    const ordered: HTMLElement[] = [];
+    for (const held of queued) {
+      const entry = this.entries.get(held.id);
+      if (entry && entry.held.text === held.text) {
+        ordered.push(entry.node);
+        continue;
+      }
+      const node = buildNode(renderQueued(held));
+      entry?.node.remove();
+      this.entries.set(held.id, { node, held });
+      ordered.push(node);
+    }
+    const live = new Set(queued.map(held => held.id));
+    for (const [id, entry] of this.entries) {
+      if (!live.has(id)) {
+        entry.node.remove();
+        this.entries.delete(id);
+      }
+    }
+    let cursor = target.firstElementChild;
+    for (const node of ordered) {
+      if (node === cursor) {
+        cursor = cursor.nextElementSibling;
+        continue;
+      }
+      target.insertBefore(node, cursor);
+    }
+    target.hidden = queued.length === 0;
+  }
+
+  reset(): void {
+    this.entries.clear();
+  }
+}
+
+export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, durationMs?: number, foreign = false, readerClosed = false, allowSubagents = true, completedAssistant = false): string {
   const id = escapeHtmlAttribute(item.id);
   const stamp = timestampAttribute(item.createdAt);
-  // A message sent mid-turn is accepted but not yet acted on. Without a mark
-  // it looks identical to one the agent has already read.
-  if (item.type === "user_message") return `<article class="chat-item chat-user-message${queued ? " is-queued" : ""}" data-chat-item-id="${id}"${stamp}><div>${escapeHtml(item.text)}</div>${queued ? `<small class="chat-queued-tag">Queued — the agent is still working</small>` : ""}</article>`;
+  if (item.type === "user_message") return `<article class="chat-item chat-user-message" data-chat-item-id="${id}"${stamp}><div>${escapeHtml(item.text)}</div></article>`;
   if (item.type === "assistant_message") return `<article class="chat-item chat-assistant-message" data-chat-item-id="${id}" data-complete="${completedAssistant}"${stamp}><div class="chat-assistant-content markdown-body">${renderChatMarkdown(item.markdown)}</div></article>`;
   if (item.type === "turn_status") {
     const worked = durationMs === undefined ? "" : formatWorked(durationMs);

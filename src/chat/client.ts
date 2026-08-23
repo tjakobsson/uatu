@@ -92,7 +92,7 @@ export class ChatApiClient {
 
   prompt(conversationId: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string): Promise<{
     messageId: string;
-    delivery: "steer" | "queue";
+    held: boolean;
     configuration: ConversationConfiguration;
     conversation?: ConversationSummary;
   }> {
@@ -100,14 +100,23 @@ export class ChatApiClient {
       appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/prompts`),
       { requestId, text, ...(model ? { model } : {}), ...(mode ? { mode } : {}), ...(variant ? { variant } : {}) },
       value => {
-        const result = value as { messageId: string; delivery: "steer" | "queue"; configuration?: unknown; conversation?: unknown };
+        const result = value as { messageId: string; held: boolean; configuration?: unknown; conversation?: unknown };
         return {
           messageId: result.messageId,
-          delivery: result.delivery,
+          held: result.held === true,
           configuration: parseConversationConfiguration(result.configuration),
           ...(result.conversation ? { conversation: parseConversationSummary(result.conversation) } : {}),
         };
       },
+    );
+  }
+
+  removeQueued(conversationId: string, messageId: string, requestId: string): Promise<{ removed: boolean }> {
+    return this.mutate(
+      appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/queue/${encodeURIComponent(messageId)}`),
+      { requestId },
+      value => value as { removed: boolean },
+      "DELETE",
     );
   }
 
