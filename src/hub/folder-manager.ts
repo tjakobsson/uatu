@@ -373,6 +373,17 @@ export async function reconcileRegisteredAliasPaths(
       try {
         await registry.replacePathPrefix(persisted, canonical);
       } catch (error) {
+        if (error instanceof Error && /workspace path collision/.test(error.message)) {
+          // A legacy registry can hold BOTH the alias and the canonical
+          // spelling of one repository — a state the old lexical
+          // registration flow allowed. Neither entry can be rewritten or
+          // merged automatically (each carries its own stable id,
+          // personal state, and assignments), so the alias twin stays as
+          // recorded: canonical lookups are served by the canonical twin,
+          // and every unrelated folder keeps working instead of one
+          // duplicate freezing all mutations and registrations globally.
+          continue;
+        }
         throw safeFsError(error, "registered workspace path reconciliation failed");
       }
       rewrote = true;
