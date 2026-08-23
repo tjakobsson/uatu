@@ -608,13 +608,13 @@ export function createHubFetchHandler(deps: HubDeps) {
         // The configuration fully committed; only the journal failed to
         // clear. A 500 would read as "nothing happened" while retries are
         // fenced by the pending recovery journal — report the preserved
-        // stopped workspace instead, with the recovery requirement in
-        // startError exactly like a failed requested start.
-        return json(200, onboardingSuccess({
-          entry: error.committedEntry,
-          started: false,
-          startError: error.message,
-        }), NO_STORE_HEADERS);
+        // stopped workspace instead. startError stays reserved for an
+        // explicitly requested start; the recovery requirement travels in
+        // its own field.
+        return json(200, {
+          ...onboardingSuccess({ entry: error.committedEntry, started: false, startError: null }),
+          recoveryRequired: error.message,
+        }, NO_STORE_HEADERS);
       }
       const body: Record<string, unknown> = { error: error.message };
       if (error.retainedPath !== undefined) body.retainedPath = error.retainedPath;

@@ -1508,6 +1508,7 @@ components:
         workspace: { $ref: '#/components/schemas/OnboardedWorkspace' }
         started: { type: boolean }
         startError: { type: [string, 'null'], description: "Non-null exactly when an explicitly requested start failed after the configuration committed; the workspace is preserved stopped for retry." }
+        recoveryRequired: { type: string, description: "Present when the configuration committed but its recovery journal could not be cleared: the workspace is preserved stopped, and the Hub needs a restart before starts, assignment changes, folder mutations, and further onboarding resume." }
       additionalProperties: false
     WorkspaceOnboardingError:
       type: object

@@ -1874,7 +1874,7 @@ addWorkspaceDialog.addEventListener("cancel", event => {
 // step so locked credentials go through the masked unlock flow). Returns the
 // onboarding result, or null when the user declined or an error was shown;
 // the form is preserved for correction on failure.
-async function submitAddWorkspace() {
+async function submitAddWorkspace(start) {
   if (!pendingAddWorkspace) return null;
   const folder = pendingAddWorkspace.folder;
   const authentication = authSelectionFrom(addWorkspaceAuth, addWorkspaceHost, addWorkspaceError);
@@ -1885,6 +1885,7 @@ async function submitAddWorkspace() {
     authentication,
     signing: addWorkspaceSigning.value || null,
   };
+  if (start) request.start = true;
   if (!pendingAddWorkspace.git) {
     if (!confirm('"' + folder + '" is not a git repository. Initialize one with git init and add it?')) return null;
     request.init = true;
@@ -1918,22 +1919,45 @@ addWorkspaceForm.onsubmit = async event => {
 addWorkspaceStart.onclick = async () => {
   if (addWorkspaceBusy) return;
   setLocalError(addWorkspaceError, "");
+  // The requested first start runs inside the commit's lifecycle section
+  // on the server — a separate start after the commit could target an
+  // entry another client already forgot. Locked selected credentials
+  // would doom that in-commit start, so they go through the masked
+  // unlock dialog first.
+  const lockedSelected = [...new Set([addWorkspaceAuth.value, addWorkspaceSigning.value]
+    .filter(Boolean)
+    .map(id => credentialCatalog.find(item => item.id === id))
+    .filter(item => item && isCredentialLocked(item)))];
+  if (lockedSelected.length > 0 && !(await unlockCredentialsDialog(
+    "Unlock credentials to start the workspace",
+    "The selected workspace credentials must be unlocked before the started session can use them.",
+    "Unlock and start",
+    lockedSelected,
+    loadCloneCredentials,
+  ))) return;
   setAddWorkspaceBusy(true);
   addWorkspaceStart.textContent = "Adding…";
-  const result = await submitAddWorkspace();
+  const result = await submitAddWorkspace(true);
   setAddWorkspaceBusy(false);
   addWorkspaceStart.textContent = "Add and start";
   if (!result) return;
-  // The configuration is committed; the explicit start goes through the
-  // normal credential-aware flow (masked unlock included). A start failure
-  // leaves the configured stopped workspace in place.
   pendingAddWorkspace = null;
   addWorkspaceDialog.close();
   await refreshAfterFolderMutation();
-  await startRegisteredWorkspace(
-    workspaceById(result.workspace.id),
-    addWorkspaceStart,
+  if (result.started) {
+    openSession(result.workspace.id);
+    return;
+  }
+  // The configuration committed; a failed requested start (or a pending
+  // recovery) leaves the stopped workspace in place.
+  const label = result.workspace.displayName || result.workspace.id;
+  setLocalError(
     document.getElementById("browser-error"),
+    result.startError
+      ? 'Could not start "' + label + '": ' + result.startError
+      : result.recoveryRequired
+        ? '"' + label + '" was added stopped: ' + result.recoveryRequired
+        : '"' + label + '" was added stopped.',
   );
 };
 

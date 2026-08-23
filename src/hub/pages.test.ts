@@ -289,11 +289,16 @@ describe("add workspace page", () => {
     // The display name prefills from the folder basename and stays editable.
     expect(html).toContain("addWorkspaceName.value = name;");
     expect(html).toContain("addWorkspaceName.select();");
-    // The commit is stopped-by-default; start is a separate explicit flow
-    // that reuses the masked unlock path after the configuration commits.
+    // The commit is stopped-by-default; Add-and-start carries the explicit
+    // start intent through the same lifecycle-protected request (after the
+    // masked unlock for locked selected credentials) — a separate start
+    // after the commit could target an entry another client already forgot.
     expect(html).toContain('api("/api/hub/workspaces/configure", request)');
-    expect(html).not.toContain('"/api/hub/workspaces/configure", { ...request, start: true }');
-    expect(html).toContain("startRegisteredWorkspace(");
+    expect(html).toContain("if (start) request.start = true;");
+    expect(html).toContain("submitAddWorkspace(true)");
+    expect(html).toContain("Unlock credentials to start the workspace");
+    expect(html).toContain("openSession(result.workspace.id)");
+    expect(html).toContain("result.recoveryRequired");
     // Cancellation is mutation-free and errors preserve the form.
     expect(html).toContain("Cancellation is mutation-free: nothing was sent.");
     expect(html).toContain("setLocalError(addWorkspaceError, error.message)");

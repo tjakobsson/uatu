@@ -47,7 +47,10 @@ export function validateWorkspaceDisplayName(value: unknown): string {
 // names existed: the folder basename, sanitized just enough to satisfy
 // validation.
 export function defaultWorkspaceDisplayName(folderPath: string): string {
-  const base = path.basename(folderPath).replace(/\p{Cc}/gu, "").trim();
+  // Cc AND Cf: generated defaults must satisfy the same invariant as
+  // user-supplied names — a basename of zero-width characters would
+  // otherwise migrate into a blank (or bidi-spoofed) persisted name.
+  const base = path.basename(folderPath).replace(/[\p{Cc}\p{Cf}]/gu, "").trim();
   const bounded = [...base].slice(0, WORKSPACE_DISPLAY_NAME_MAX_LENGTH).join("").trim();
   return bounded === "" ? "workspace" : bounded;
 }
