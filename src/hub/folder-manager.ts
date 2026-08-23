@@ -294,6 +294,13 @@ export class FolderManager {
         await this.assertMissing(destination);
         await this.reconcileRegisteredAliases();
         const affected = this.options.registry.atOrBelow(source);
+        // A destination absent on disk can still be claimed by a registered
+        // workspace — missing paths are deliberately retained. Renaming
+        // onto it would point that stable workspace id (and its personal
+        // state and credential assignments) at unrelated content.
+        if (this.options.registry.atOrBelow(destination).length > 0) {
+          throw new FolderManagerError("conflict", "destination is claimed by a registered workspace");
+        }
         return await this.options.sessions.runWithSessionsStopped(
           affected.map(entry => entry.id),
           parsed.stop === true,
@@ -415,7 +422,7 @@ export class FolderManager {
   // lookups would treat those entries as unrelated and mutate the directory
   // without stopping their sessions or updating their registered paths, so
   // mutations first rewrite any stored alias to its canonical form. A path
-  // that no longer resolves is left alone — the entry stays registered at
+  // that cannot exist anymore is left alone — the entry stays registered at
   // its recorded path, exactly as a vanished folder does.
   private async reconcileRegisteredAliases(): Promise<void> {
     for (const entry of this.options.registry.list()) {
@@ -423,8 +430,14 @@ export class FolderManager {
       let canonical: string;
       try {
         canonical = normalizeAbsolutePath(await this.fs.realpath(persisted));
-      } catch {
-        continue;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException)?.code;
+        // Only a missing path is the vanished-folder case. Anything else
+        // (EACCES on an alias ancestor) fails the mutation closed:
+        // skipping would silently exempt this entry from session stops
+        // and path updates while its directory may still be affected.
+        if (code === "ENOENT" || code === "ENOTDIR") continue;
+        throw safeFsError(error, "registered workspace path reconciliation failed");
       }
       if (canonical === persisted) continue;
       try {

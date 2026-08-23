@@ -405,6 +405,55 @@ describe("FolderManager registered mutations", () => {
     expect(f.registry.byId(entry.id)?.path).toBe(destination);
   });
 
+  test("fails closed when alias reconciliation cannot inspect a registered path", async () => {
+    const f = await fixture();
+    const project = path.join(f.folders, "project");
+    await fs.mkdir(project);
+    const alias = path.join(f.root, "legacy-alias");
+    await fs.symlink(f.folders, alias);
+    const aliasProject = path.join(alias, "project");
+    const entry = await f.registry.register(aliasProject);
+    const injected = Object.assign({}, fs, {
+      realpath: (async (candidate: string) => {
+        if (candidate === aliasProject) {
+          throw Object.assign(new Error("injected inaccessible alias"), { code: "EACCES" });
+        }
+        return fs.realpath(candidate);
+      }) as typeof fs.realpath,
+    }) as typeof fs;
+    const manager = new FolderManager({
+      journalPath: f.journalPath,
+      registry: f.registry,
+      sessions: f.sessions,
+      personalState: f.personalState,
+      credentials: f.credentials,
+      reservations: f.reservations,
+      fs: injected,
+    });
+
+    // Skipping the unreadable alias would move the folder without seeing
+    // its registration; the mutation must refuse instead.
+    await expect(manager.rename({ path: project, name: "renamed" })).rejects.toMatchObject({ code: "permission-denied" });
+    expect(await exists(project)).toBe(true);
+    expect(f.registry.byId(entry.id)?.path).toBe(aliasProject);
+  });
+
+  test("rejects a rename destination claimed by a stale registration", async () => {
+    const f = await fixture();
+    const source = path.join(f.folders, "source");
+    await fs.mkdir(source);
+    // The workspace's folder is gone but its registration is deliberately
+    // retained; its path must not be claimable by unrelated content.
+    const stale = await f.registry.register(path.join(f.folders, "vanished"));
+
+    await expect(f.manager.rename({ path: source, name: "vanished" })).rejects.toMatchObject({ code: "conflict" });
+    expect(await exists(source)).toBe(true);
+    expect(f.registry.byId(stale.id)?.path).toBe(path.join(f.folders, "vanished"));
+
+    await f.registry.remove(stale.id);
+    completed(await f.manager.rename({ path: source, name: "vanished" }));
+  });
+
   test("removes an alias-registered workspace addressed by its canonical path", async () => {
     const f = await fixture();
     const project = path.join(f.folders, "empty");
