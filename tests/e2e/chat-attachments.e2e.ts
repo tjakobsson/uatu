@@ -28,9 +28,14 @@ async function control(request: APIRequestContext, body: Record<string, unknown>
 }
 
 async function newConversation(page: Page): Promise<string> {
+  const select = page.locator("#chat-conversation-select");
+  // Waits for the value to CHANGE, not merely be non-empty: a second call
+  // would otherwise read the previous conversation's id before the newly
+  // created one lands in the select.
+  const before = await select.inputValue().catch(() => "");
   await page.getByRole("button", { name: "New conversation" }).click();
-  await expect(page.locator("#chat-conversation-select")).not.toHaveValue("");
-  return page.locator("#chat-conversation-select").inputValue();
+  await expect(select).not.toHaveValue(before);
+  return select.inputValue();
 }
 
 async function attachViaPicker(page: Page, name = "shot.png"): Promise<void> {
@@ -590,6 +595,30 @@ test.describe("typeless intake defers to the byte sniff", () => {
     await page.locator("#chat-input").press("Enter");
     const body = (await accepted).request().postDataJSON() as { attachments?: Array<{ mimeType: string }> };
     expect(body.attachments?.[0]?.mimeType).toBe("image/png");
+  });
+});
+
+test.describe("upload refusals stay with their conversation", () => {
+  test.beforeEach(async ({ page, request }) => bootChat(page, request));
+
+  test("a refusal landing after a switch waits for its own conversation", async ({ page }) => {
+    const first = await newConversation(page);
+    const second = await newConversation(page);
+    await page.route("**/attachments", async route => {
+      await new Promise(resolve => setTimeout(resolve, 600));
+      await route.fulfill({ status: 415, contentType: "application/json", body: JSON.stringify({ error: "attachments must be PNG, JPEG, GIF, or WebP images" }) });
+    });
+    await page.locator("#chat-attach-input").setInputFiles({ name: "doomed.png", mimeType: "image/png", buffer: PNG });
+    // Switch away before the refusal lands: it must not flash here...
+    await page.locator("#chat-conversation-select").selectOption(first);
+    await page.waitForResponse(response => response.url().includes("/attachments"));
+    await expect(page.locator("#chat-composer-error")).toBeHidden();
+    // ...and the reason is waiting where the upload belonged.
+    await page.locator("#chat-conversation-select").selectOption(second);
+    await expect(page.locator("#chat-composer-error")).toContainText("Could not attach");
+    await page.locator("#chat-conversation-select").selectOption(first);
+    await expect(page.locator("#chat-composer-error")).toBeHidden();
+    await page.unroute("**/attachments");
   });
 });
 

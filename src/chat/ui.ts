@@ -870,9 +870,22 @@ export function initChat(): void {
     if (show) waitingLabel.textContent = workingText();
   };
 
-  const setComposerError = (message: string | null) => {
+  const showComposerError = (message: string | null) => {
     composerError.textContent = message ?? "";
     composerError.hidden = !message;
+  };
+  // Composer errors belong to the conversation they happened in: an upload
+  // that fails after the user switched away must not flash its refusal into
+  // the selected conversation, and the reason must still be waiting when its
+  // own conversation is selected again. Callers with a captured id (the
+  // staging chain) pass it; everything else speaks about the selection.
+  const composerErrors = new Map<string, string>();
+  const setComposerError = (message: string | null, conversationId = activeConversationId()) => {
+    if (conversationId) {
+      if (message) composerErrors.set(conversationId, message);
+      else composerErrors.delete(conversationId);
+    }
+    if (!conversationId || conversationId === activeConversationId()) showComposerError(message);
   };
 
   // ------------------------------------------------------------------
@@ -1045,7 +1058,7 @@ export function initChat(): void {
     const task = (attachmentStaging.get(conversationId) ?? Promise.resolve()).then(async () => {
       for (const file of files) {
         if ((pendingAttachments.get(conversationId) ?? []).length + (submittedAttachmentReserve.get(conversationId) ?? 0) >= CHAT_ATTACHMENTS_PER_MESSAGE) {
-          setComposerError(`A message can carry at most ${CHAT_ATTACHMENTS_PER_MESSAGE} images.`);
+          setComposerError(`A message can carry at most ${CHAT_ATTACHMENTS_PER_MESSAGE} images.`, conversationId);
           noteRefusal();
           break;
         }
@@ -1054,12 +1067,12 @@ export function initChat(): void {
         // the authoritative magic-byte sniff on the upload route decides.
         // Only an explicit non-image claim is refused without the round trip.
         if (file.type !== "" && !supportedAttachmentTypes.has(file.type.toLowerCase())) {
-          setComposerError(`${file.name || "That file"} is not a supported image (PNG, JPEG, GIF, WebP).`);
+          setComposerError(`${file.name || "That file"} is not a supported image (PNG, JPEG, GIF, WebP).`, conversationId);
           noteRefusal();
           continue;
         }
         if (file.size > CHAT_ATTACHMENT_MAX_BYTES) {
-          setComposerError(`${file.name || "That image"} is larger than the ${Math.round(CHAT_ATTACHMENT_MAX_BYTES / (1024 * 1024))} MiB limit.`);
+          setComposerError(`${file.name || "That image"} is larger than the ${Math.round(CHAT_ATTACHMENT_MAX_BYTES / (1024 * 1024))} MiB limit.`, conversationId);
           noteRefusal();
           continue;
         }
@@ -1071,7 +1084,7 @@ export function initChat(): void {
           entries.push({ id: stored.id, name: boundAttachmentName(file.name), mimeType: stored.mimeType, previewUrl: URL.createObjectURL(file) });
           setPendingAttachments(conversationId, entries);
         } catch (error) {
-          setComposerError(`Could not attach ${file.name || "image"}: ${messageOf(error)}`);
+          setComposerError(`Could not attach ${file.name || "image"}: ${messageOf(error)}`, conversationId);
           noteRefusal();
         }
       }
@@ -1330,7 +1343,9 @@ export function initChat(): void {
     form.hidden = false;
     save();
     projection = null;
-    setComposerError(null);
+    // Not a clear: the incoming conversation may hold a refusal that landed
+    // while it was deselected, and it surfaces now.
+    showComposerError(composerErrors.get(id) ?? null);
     renderConfiguration();
     syncContextIndicator();
     input.value = presentation.drafts[id] ?? "";
