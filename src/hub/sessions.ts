@@ -98,24 +98,23 @@ export class SessionManager {
     });
   }
 
-  // Installs one shared barrier on every affected queue before waiting for
-  // any predecessor. Later lifecycle calls therefore wait for the whole
-  // operation, without acquiring workspace queues one at a time.
+  // Acquires every affected queue NESTED in ascending id order — the same
+  // total order server.ts's revokeExclusive uses for its multi-workspace
+  // acquisitions — so the two composite shapes cannot deadlock. A
+  // simultaneous barrier across all queues can: it would hold a later
+  // queue while waiting for an earlier queue's predecessor, while that
+  // predecessor (a nested composite already holding the earlier queue)
+  // waits to acquire the later one.
   async runWithSessionsStopped<T>(
     workspaceIds: Iterable<string>,
     stopAuthorized: boolean,
     operation: () => Promise<T>,
   ): Promise<SessionsStoppedResult<T>> {
     const ids = [...new Set(workspaceIds)].sort();
-    const predecessors = ids.map(id => this.lifecycle.get(id) ?? Promise.resolve());
-    let releaseBarrier!: () => void;
-    const barrier = new Promise<void>(resolve => { releaseBarrier = resolve; });
-    for (const id of ids) {
-      this.lifecycle.set(id, barrier);
-    }
-
-    try {
-      await Promise.all(predecessors);
+    const acquire = async (index: number): Promise<SessionsStoppedResult<T>> => {
+      if (index < ids.length) {
+        return this.enqueue(ids[index]!, () => acquire(index + 1));
+      }
       const needsStop = ids.filter(id => this.running.has(id));
       if (needsStop.length > 0 && !stopAuthorized) {
         return { status: "needs-stop", workspaceIds: needsStop };
@@ -130,9 +129,8 @@ export class SessionManager {
       }
 
       return { status: "completed", value: await operation() };
-    } finally {
-      releaseBarrier();
-    }
+    };
+    return acquire(0);
   }
 
   // Starts (or joins the pending start of) the session for a registered
