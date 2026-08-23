@@ -616,6 +616,34 @@ describe("FolderManager registered mutations", () => {
     expect(f.registry.byId(entry.id)).toBeUndefined();
   });
 
+  test("a degraded registered rename journals its fallback claim", async () => {
+    // When the native no-replace rename is exported but rejected, the
+    // claimed fallback must reach the journal BEFORE the replacing rename:
+    // a crash in the claim window must read as a reclaimable state, never
+    // as the ambiguous both-exist failure that blocks startup.
+    let midFlight: { identities?: { source?: unknown; claim?: unknown } } | undefined;
+    let journalPath = "";
+    let source = "";
+    const injected = Object.assign({}, fs, {
+      rename: async (from: string, to: string) => {
+        if (from === source) {
+          midFlight = JSON.parse(await fs.readFile(journalPath, "utf8")) as typeof midFlight;
+        }
+        return fs.rename(from, to);
+      },
+    }) as typeof fs;
+    const f = await fixture({ fs: injected, renameNoReplace: () => -1 });
+    journalPath = f.journalPath;
+    source = path.join(f.folders, "source");
+    await fs.mkdir(source);
+    await f.registry.register(source);
+
+    completed(await f.manager.rename({ path: source, name: "renamed" }));
+    expect(midFlight?.identities?.source).toBeDefined();
+    expect(midFlight?.identities?.claim).toBeDefined();
+    expect(await exists(f.journalPath)).toBe(false);
+  });
+
   test("a claim swapped from under the rename conflicts instead of replacing", async () => {
     // A same-user process replaces the destination while the journal is
     // being written: the recorded claim identity no longer matches, so the
@@ -883,6 +911,29 @@ describe("FolderManager journal recovery", () => {
 
     await f.manager.recover();
     expect(f.registry.byId(entry.id)).toEqual({ ...legacyEntry, displayName: "legacy-repo" });
+    expect(await exists(f.journalPath)).toBe(false);
+  });
+
+  test("removal recovery refuses a recreated directory at the source", async () => {
+    const f = await fixture();
+    const source = path.join(f.folders, "source");
+    await fs.mkdir(source);
+    const entry = await f.registry.register(source);
+    const identity = await identityOf(source);
+    // The rmdir committed and another process recreated the path (the
+    // replacement is created before the removal so its inode is distinct
+    // on every filesystem).
+    await fs.mkdir(`${source}.next`);
+    await fs.rmdir(source);
+    await fs.rename(`${source}.next`, source);
+    await writeJournal(f.journalPath, { version: 1, operation: "remove", source, entry, identity });
+    await expect(f.manager.recover()).rejects.toThrow("unrecognized directory");
+    expect(await exists(f.journalPath)).toBe(true);
+
+    // The journaled directory itself restores normally.
+    await writeJournal(f.journalPath, { version: 1, operation: "remove", source, entry, identity: await identityOf(source) });
+    await f.manager.recover();
+    expect(f.registry.byId(entry.id)).toEqual(entry);
     expect(await exists(f.journalPath)).toBe(false);
   });
 
