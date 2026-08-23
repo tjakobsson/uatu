@@ -679,6 +679,26 @@ describe("FolderManager registered mutations", () => {
     expect(await exists(f.journalPath)).toBe(false);
   });
 
+  test("a legacy alias+canonical duplicate does not freeze unrelated mutations", async () => {
+    const f = await fixture();
+    const project = path.join(f.folders, "project");
+    const unrelated = path.join(f.folders, "unrelated");
+    await Promise.all([fs.mkdir(project), fs.mkdir(unrelated)]);
+    const alias = path.join(f.root, "legacy-alias");
+    await fs.symlink(f.folders, alias);
+    // The pre-canonicalization flow could register BOTH spellings of one
+    // repository. The duplicate cannot be merged automatically, but it
+    // must not make every other folder unmanageable.
+    const canonicalTwin = await f.registry.register(project);
+    const aliasTwin = await f.registry.register(path.join(alias, "project"));
+
+    completed(await f.manager.rename({ path: unrelated, name: "renamed" }));
+    expect(await exists(path.join(f.folders, "renamed"))).toBe(true);
+    // Both twins survive untouched; canonical lookups serve the canonical one.
+    expect(f.registry.byId(canonicalTwin.id)?.path).toBe(project);
+    expect(f.registry.byId(aliasTwin.id)?.path).toBe(path.join(alias, "project"));
+  });
+
   test("stale alias claims block their canonical create and rename destinations", async () => {
     const f = await fixture();
     const alias = path.join(f.root, "legacy-alias");

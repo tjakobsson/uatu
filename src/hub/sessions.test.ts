@@ -690,6 +690,36 @@ describe("SessionManager composite lifecycle barrier", () => {
     expect(sessions.isRunning("beta")).toBe(true);
   });
 
+  test("composite stop coordination cannot deadlock against nested acquisitions", async () => {
+    // Mirrors server.ts's revokeExclusive shape: a composite that holds
+    // alpha while acquiring beta. If the folder composite installed one
+    // simultaneous barrier across both queues, the two would wait on each
+    // other forever; sorted nested acquisition shares its total order.
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-composite-deadlock-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    await registry.register("/srv/workspaces/alpha");
+    await registry.register("/srv/workspaces/beta");
+    const backend: SessionBackend = { start: async workspace => fakeSession(workspace.id) };
+    const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
+
+    let releaseAlpha!: () => void;
+    const alphaHeld = new Promise<void>(resolve => { releaseAlpha = resolve; });
+    const inflight = sessions.runExclusive("alpha", () => alphaHeld);
+    // The nested composite queues on alpha behind the in-flight op...
+    const nested = sessions.runExclusive("alpha", () => sessions.runExclusive("beta", async () => "nested"));
+    await tick();
+    // ...and the folder composite arrives on [alpha, beta] after it.
+    const composite = sessions.runWithSessionsStopped(["alpha", "beta"], false, async () => "composite");
+    await tick();
+    releaseAlpha();
+
+    expect(await nested).toBe("nested");
+    expect(await composite).toEqual({ status: "completed", value: "composite" });
+    await inflight;
+  });
+
   test("queues a start until a registered path update has completed", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-composite-path-"));
     tempDirectories.push(dir);
