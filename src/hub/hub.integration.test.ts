@@ -1331,6 +1331,28 @@ describe("hub end to end", () => {
     await sessions.stop(id);
   }, 60_000);
 
+  test("registering a canonical path reconciles a legacy alias registration", async () => {
+    const real = path.join(tempRoot, "workspaces", "alias-repo");
+    execFileSync("mkdir", ["-p", real]);
+    execFileSync("git", ["init"], { cwd: real, stdio: "ignore" });
+    const alias = path.join(tempRoot, "legacy-workspaces");
+    await symlink(path.join(tempRoot, "workspaces"), alias);
+    // A pre-canonicalization registry entry persisted through the symlinked
+    // ancestor; the exact-path lookup must find it — not mint a second
+    // stable id for the same repository with separated personal state.
+    const legacy = await registry.register(path.join(alias, "alias-repo"));
+
+    const registered = await fetch(`${origin}/api/hub/workspaces`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ path: real, start: false }),
+    });
+    expect(registered.status).toBe(200);
+    expect(((await registered.json()) as { id: string }).id).toBe(legacy.id);
+    expect(registry.byPath(real)?.id).toBe(legacy.id);
+    expect(registry.list().filter(entry => entry.id.startsWith("alias-repo"))).toHaveLength(1);
+  });
+
   test("forget unregisters a stopped workspace and refuses a running one", async () => {
     // plain-folder was registered (and stopped) by the init-offer test above.
     const runningRefusal = await fetch(`${origin}/api/hub/workspaces/myproject/forget`, {
