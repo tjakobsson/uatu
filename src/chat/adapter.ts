@@ -101,8 +101,9 @@ export class UnknownAttachmentError extends Error {
 
 // Attachments cannot ride a slash command: the provider's command dispatch
 // has no attachment surface, and silently dropping images the user attached
-// would be worse than refusing. Checked at admission by text shape so a held
-// message can never fail on this at delivery time.
+// would be worse than refusing. Checked at admission against the live
+// command list; dispatch pins attachment-bearing prompts to the prose route,
+// so a held message can never fail on this at delivery time.
 export class CommandAttachmentsError extends Error {
   constructor() {
     super("attachments cannot be sent with a slash command");
@@ -528,10 +529,17 @@ export class OpenCodeChatAdapter {
     conversation?: ConversationSummary;
   }> {
     if (!text.trim() && !attachments?.length) throw new Error("prompt must not be empty");
-    // Refused for any "/"-leading text, not just known commands: whether the
-    // text parses as a command is only knowable at dispatch, and a held
-    // message must never be the one to find out (see CommandAttachmentsError).
-    if (attachments?.length && text.trimStart().startsWith("/")) throw new CommandAttachmentsError();
+    // Refused only for text that actually parses as a listed command — an
+    // unlisted "/typo" or a pasted path fragment is prose and keeps its
+    // images. The classification freezes here: dispatch never re-parses an
+    // attachment-bearing prompt, so a command list that changes while a
+    // message is held cannot reroute it onto the command path, which
+    // carries no attachments. A failed listing propagates (same rule as
+    // dispatch): admitting "/compact" with images as prose because the list
+    // was momentarily unavailable would send a command as chat text.
+    if (attachments?.length && text.startsWith("/") && parseSlashCommand(text, await this.provider.listCommands()) !== undefined) {
+      throw new CommandAttachmentsError();
+    }
     return this.receipts.run(`prompt:${conversationId}:${requestId}`, () => this.enqueuePromptAdmission(conversationId, async () => {
       const session = await this.requireSession(conversationId);
       const projection = this.projection(conversationId);
@@ -710,8 +718,12 @@ export class OpenCodeChatAdapter {
     try {
       // A failed command listing propagates: classifying "/compact" as
       // plain prose because the list was momentarily unavailable would
-      // send the text as a message and report it accepted.
-      const slash = text.startsWith("/")
+      // send the text as a message and report it accepted. Attachments pin
+      // the prose route without consulting the list: admission already
+      // proved the text was no listed command, and re-parsing here could
+      // reroute a held message onto the command path — which carries no
+      // attachments — if the list changed while it waited.
+      const slash = text.startsWith("/") && !input.attachments?.length
         ? parseSlashCommand(text, await this.provider.listCommands())
         : undefined;
       // Stored bytes are located at dispatch, not carried by the held entry:

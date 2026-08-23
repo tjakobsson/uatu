@@ -894,6 +894,12 @@ export function initChat(): void {
   // ignored them could push the restored draft past eight and make every
   // retry refusable.
   const submittedAttachmentReserve = new Map<string, number>();
+  // Monotonic per-conversation refusal count. Submission compares it across
+  // the staging drain: a refusal that lands while a submit waits is a piece
+  // of THAT message going missing, and the send must stop rather than
+  // deliver a partial prompt. Refusals from before the submit are the
+  // user's informed choice to send without the refused file.
+  const attachmentRefusals = new Map<string, number>();
 
   // The prompt route bounds attachment names to 200 UTF-8 bytes; an overlong
   // filename staged verbatim would upload fine and then fail every send.
@@ -1009,10 +1015,12 @@ export function initChat(): void {
       setComposerError(`${support.modelName} cannot see images. Pick a model with image support to attach.`);
       return;
     }
+    const noteRefusal = () => attachmentRefusals.set(conversationId, (attachmentRefusals.get(conversationId) ?? 0) + 1);
     const task = (attachmentStaging.get(conversationId) ?? Promise.resolve()).then(async () => {
       for (const file of files) {
         if ((pendingAttachments.get(conversationId) ?? []).length + (submittedAttachmentReserve.get(conversationId) ?? 0) >= CHAT_ATTACHMENTS_PER_MESSAGE) {
           setComposerError(`A message can carry at most ${CHAT_ATTACHMENTS_PER_MESSAGE} images.`);
+          noteRefusal();
           break;
         }
         // An empty type claim is unknown, not unsupported: browsers derive
@@ -1021,10 +1029,12 @@ export function initChat(): void {
         // Only an explicit non-image claim is refused without the round trip.
         if (file.type !== "" && !supportedAttachmentTypes.has(file.type.toLowerCase())) {
           setComposerError(`${file.name || "That file"} is not a supported image (PNG, JPEG, GIF, WebP).`);
+          noteRefusal();
           continue;
         }
         if (file.size > CHAT_ATTACHMENT_MAX_BYTES) {
           setComposerError(`${file.name || "That image"} is larger than the ${Math.round(CHAT_ATTACHMENT_MAX_BYTES / (1024 * 1024))} MiB limit.`);
+          noteRefusal();
           continue;
         }
         try {
@@ -1036,6 +1046,7 @@ export function initChat(): void {
           setPendingAttachments(conversationId, entries);
         } catch (error) {
           setComposerError(`Could not attach ${file.name || "image"}: ${messageOf(error)}`);
+          noteRefusal();
         }
       }
     });
@@ -2000,6 +2011,15 @@ export function initChat(): void {
     if (!input.value.trim() && currentPendingAttachments().length === 0 && !attachmentStaging.has(projection.conversationId)) return;
     const conversationId = projection.conversationId;
     const text = input.value;
+    // Restoration must not pick between the failed message and edits made
+    // while it was in flight — both are the user's words. The captured
+    // text leads, the newer edits follow as their own line.
+    const restoreDraftText = () => {
+      if (!text.trim()) return;
+      input.value = input.value.trim() ? `${text}\n${input.value}` : text;
+      autosize(input);
+    };
+    const refusalsAtSubmit = attachmentRefusals.get(conversationId) ?? 0;
     submitting = true;
     setComposerError(null);
     // Captured AND cleared before any yield: the textarea stays editable
@@ -2035,6 +2055,21 @@ export function initChat(): void {
       // Edits made during the wait are the next draft, not part of this
       // message; nothing to do — they are already in the input.
     }
+    // A refusal that landed during the drain is a piece of THIS message
+    // going missing: the user pressed send believing the upload was
+    // included, so the send stops rather than delivering a partial prompt.
+    // The staging path already named the refusal on the error line, and any
+    // successfully staged files stay pending for the corrected retry.
+    if ((attachmentRefusals.get(conversationId) ?? 0) !== refusalsAtSubmit) {
+      restoreDraftText();
+      presentation.drafts[conversationId] = input.value;
+      save();
+      submitting = false;
+      noteComposer("Message not sent; draft kept");
+      renderAttachments();
+      syncControls();
+      return;
+    }
     // The drain can end with nothing to send: an image-only submission whose
     // upload was refused has no content left, and the staging path already
     // explained why on the composer error line.
@@ -2052,7 +2087,7 @@ export function initChat(): void {
     // improvise. Same wording as the intake refusal, plus the way out.
     const support = attachmentModelSupport();
     if (!support.supported && (pendingAttachments.get(conversationId) ?? []).length > 0) {
-      if (!input.value.trim() && text) { input.value = text; autosize(input); }
+      restoreDraftText();
       presentation.drafts[conversationId] = input.value;
       save();
       submitting = false;
@@ -2154,10 +2189,7 @@ export function initChat(): void {
       releaseAttachmentReserve();
       if (projection?.conversationId === conversationId) {
         projection = removeAcceptedDraft(projection, requestId);
-        if (!input.value.trim()) {
-          input.value = text;
-          autosize(input);
-        }
+        restoreDraftText();
         presentation.drafts[conversationId] = input.value;
         save();
         renderAttachments();

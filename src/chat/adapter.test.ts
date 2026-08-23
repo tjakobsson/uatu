@@ -2625,6 +2625,21 @@ describe("prompt attachments", () => {
     expect(provider.commandCalls).toHaveLength(0);
   });
 
+  test("admits slash-leading prose with attachments when no listed command matches", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
+    // "/unknown" is not in the command list, so dispatch would send it as an
+    // ordinary prompt — admission must classify the same way and keep the
+    // images rather than refusing on shape alone.
+    const accepted = await adapter.prompt("session", "r1", "/unknown focus", undefined, undefined, undefined, [ref("11111111-2222-4333-8444-555555555555")]);
+    expect(accepted.messageId).toBeTruthy();
+    expect(provider.commandCalls).toHaveLength(0);
+    expect(provider.prompts).toHaveLength(1);
+    expect(provider.prompts[0]!.text).toBe("/unknown focus");
+    expect(provider.prompts[0]!.attachments).toHaveLength(1);
+  });
+
   test("held messages keep their references, expose them on the wire, and deliver them", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];

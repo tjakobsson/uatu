@@ -423,6 +423,49 @@ test.describe("composer edits during the upload drain", () => {
   });
 });
 
+test.describe("upload refusal during the drain", () => {
+  test.beforeEach(async ({ page, request }) => bootChat(page, request));
+
+  test("a text draft does not send when its in-flight upload is refused", async ({ page }) => {
+    await newConversation(page);
+    // The upload outlives Enter, then fails: the submit drained a chain
+    // that lost a piece of this very message, so nothing may send.
+    await page.route("**/attachments", async route => {
+      await new Promise(resolve => setTimeout(resolve, 500));
+      await route.fulfill({ status: 415, contentType: "application/json", body: JSON.stringify({ error: "attachments must be PNG, JPEG, GIF, or WebP images" }) });
+    });
+    await page.locator("#chat-attach-input").setInputFiles({ name: "doomed.png", mimeType: "image/png", buffer: PNG });
+    let prompted = false;
+    page.on("request", request => { if (request.url().endsWith("/prompts")) prompted = true; });
+    await page.locator("#chat-input").fill("words that need their image");
+    await page.locator("#chat-input").press("Enter");
+    await expect(page.locator("#chat-composer-error")).toContainText("Could not attach");
+    // The send stopped: the draft is intact and no prompt left the client.
+    await expect(page.locator("#chat-input")).toHaveValue("words that need their image");
+    await expect(page.locator("#chat-items .chat-user-message")).toHaveCount(0);
+    expect(prompted).toBe(false);
+    await page.unroute("**/attachments");
+  });
+});
+
+test.describe("draft restoration with mid-flight edits", () => {
+  test.beforeEach(async ({ page, request }) => bootChat(page, request));
+
+  test("a failing submission restores its text ahead of edits typed meanwhile", async ({ page, request }) => {
+    await newConversation(page);
+    await control(request, { action: "failPrompt" });
+    const failed = page.waitForResponse(response => response.url().endsWith("/prompts"));
+    await page.locator("#chat-input").fill("the failed message");
+    await page.locator("#chat-input").press("Enter");
+    // Typed while the refusal is in flight — the next draft, until the
+    // failure makes the sent text a draft again too. Both survive.
+    await page.locator("#chat-input").pressSequentially("meanwhile edits");
+    await failed;
+    await expect(page.locator("#chat-composer-error")).toContainText("Draft restored");
+    await expect(page.locator("#chat-input")).toHaveValue("the failed message\nmeanwhile edits");
+  });
+});
+
 test.describe("typeless intake defers to the byte sniff", () => {
   test.beforeEach(async ({ page, request }) => bootChat(page, request));
 
