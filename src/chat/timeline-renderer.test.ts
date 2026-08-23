@@ -21,6 +21,7 @@ function projectionWith(items: ConversationItem[], overrides: Partial<ChatProjec
     acceptedDrafts: [],
     queued: [],
     queueRevision: 0,
+    configurationRevision: 0,
     ...overrides,
   };
 }
