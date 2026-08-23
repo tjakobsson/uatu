@@ -225,6 +225,23 @@ describe("configure existing folder", () => {
     expect(await journalExists(f.journalPath)).toBe(false);
   });
 
+  test("configuring a canonical path recognizes a legacy alias registration", async () => {
+    const f = await fixture();
+    const folder = await gitRepository(f.folders, "repo");
+    const alias = path.join(f.root, "legacy-alias");
+    await fs.symlink(f.folders, alias);
+    // A pre-canonicalization registry entry persisted through the symlinked
+    // ancestor must short-circuit as already registered — not mint a second
+    // stable id for the same repository.
+    const legacy = await f.registry.register(path.join(alias, "repo"), "local", "Legacy");
+
+    const result = await f.coordinator.configureExisting({ path: folder, displayName: "Repo" });
+    expect(result.alreadyRegistered).toBe(true);
+    expect(result.entry.id).toBe(legacy.id);
+    expect(f.registry.byPath(folder)?.id).toBe(legacy.id);
+    expect(f.registry.list().filter(entry => entry.id.startsWith("repo"))).toHaveLength(1);
+  });
+
   test("an already-registered folder short-circuits without mutation", async () => {
     const f = await fixture();
     const folder = await gitRepository(f.folders, "repo");
@@ -444,11 +461,13 @@ describe("commit-boundary failure injection", () => {
     const brokenRegistry = {
       byId: (id: string) => f.registry.byId(id),
       byPath: (p: string) => f.registry.byPath(p),
+      list: () => f.registry.list(),
       registerWithStatus: (p: string, backend: "local", name?: string) => f.registry.registerWithStatus(p, backend, name),
       remove: async (id: string) => {
         if (failRemove) throw new Error("injected rollback failure");
         return f.registry.remove(id);
       },
+      replacePathPrefix: (source: string, destination: string) => f.registry.replacePathPrefix(source, destination),
       restoreEntries: (entries: never) => f.registry.restoreEntries(entries),
     };
     let failTransaction = true;

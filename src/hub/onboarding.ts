@@ -15,6 +15,7 @@ import path from "node:path";
 
 import type { CredentialMetadataStore } from "./credential-store";
 import { normalizeProviderHost, type CredentialAssignment, type CredentialRecord, type CredentialState } from "./credential-types";
+import { FolderManagerError, reconcileRegisteredAliasPaths } from "./folder-manager";
 import { gitInit, probeGitRepository, type GitProbeResult } from "./git";
 import { normalizeAbsolutePath, type PathReservationCoordinator } from "./path-reservations";
 import {
@@ -98,7 +99,7 @@ type PendingOnboarding = {
 
 type FileSystem = Pick<typeof nodeFs, "lstat" | "realpath" | "mkdir" | "rmdir" | "readFile" | "open" | "unlink" | "chmod" | "rm" | "rename" | "readdir">;
 
-type OnboardingRegistry = Pick<WorkspaceRegistry, "byId" | "byPath" | "registerWithStatus" | "remove" | "restoreEntries">;
+type OnboardingRegistry = Pick<WorkspaceRegistry, "byId" | "byPath" | "list" | "registerWithStatus" | "remove" | "replacePathPrefix" | "restoreEntries">;
 type OnboardingCredentials = Pick<CredentialMetadataStore, "snapshot" | "transaction">;
 type OnboardingSessions = Pick<SessionManager, "start" | "runExclusive">;
 
@@ -466,6 +467,7 @@ export class WorkspaceOnboardingCoordinator {
     return this.enqueue(async () => {
       await this.assertNoPendingOnboarding();
       const canonical = await this.canonicalDirectory(options.path);
+      await this.reconcileRegisteredAliases();
       if (this.options.registry.byPath(canonical)) {
         throw new OnboardingError("conflict", `folder is already registered: ${canonical}`);
       }
@@ -535,6 +537,7 @@ export class WorkspaceOnboardingCoordinator {
   private async commitExisting(input: ConfigureExistingInput): Promise<OnboardingResult> {
     await this.assertNoPendingOnboarding();
     const canonical = await this.canonicalDirectory(input.path);
+    await this.reconcileRegisteredAliases();
     const existing = this.options.registry.byPath(canonical);
     if (existing) {
       // Idempotent short-circuit for the legacy registration adapter; the
@@ -654,6 +657,22 @@ export class WorkspaceOnboardingCoordinator {
   // record, so beginning another onboarding would replace it — and, on
   // success, clear it — leaving recovery unable to undo the earlier
   // partial registration. Mirrors FolderManager.assertNoPendingMutation.
+  // Legacy registries can hold alias paths; the canonical byPath and
+  // planWorkspaceId lookups would miss them and mint a duplicate stable id
+  // for the same repository. Flows registering existing folders reconcile
+  // stored aliases first — the same shared pass the folder manager and the
+  // legacy registration route run.
+  private async reconcileRegisteredAliases(): Promise<void> {
+    try {
+      await reconcileRegisteredAliasPaths(this.options.registry, this.fs);
+    } catch (error) {
+      if (error instanceof FolderManagerError) {
+        throw new OnboardingError(error.code === "conflict" ? "conflict" : "internal", error.message, { cause: error });
+      }
+      throw error;
+    }
+  }
+
   private async assertNoPendingOnboarding(): Promise<void> {
     try {
       await this.fs.lstat(this.options.journalPath);
