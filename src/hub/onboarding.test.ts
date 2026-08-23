@@ -51,12 +51,24 @@ async function fixture(git: GitBehavior = {}) {
   await Promise.all([registry.load(), credentials.load()]);
   const started: string[] = [];
   let startError: Error | undefined;
+  // Mirrors SessionManager's per-workspace lifecycle queue: start and
+  // runExclusive sections for one workspace serialize in call order.
+  const lifecycle = new Map<string, Promise<unknown>>();
+  const runExclusive = <T,>(id: string, operation: () => Promise<T>): Promise<T> => {
+    const previous = lifecycle.get(id) ?? Promise.resolve();
+    const next = previous.then(operation, operation);
+    lifecycle.set(id, next.then(() => undefined, () => undefined));
+    return next;
+  };
   const sessions = {
-    async start(id: string) {
-      if (startError) throw startError;
-      started.push(id);
-      return {} as never;
+    start(id: string) {
+      return runExclusive(id, async () => {
+        if (startError) throw startError;
+        started.push(id);
+        return {} as never;
+      });
     },
+    runExclusive,
   };
   const reservations = new PathReservationCoordinator();
   const journalPath = path.join(state, "pending-onboarding.json");
@@ -593,6 +605,57 @@ describe("concurrency", () => {
     expect(fulfilled).toHaveLength(1);
     expect(rejected).toHaveLength(1);
     expect((rejected[0] as PromiseRejectedResult).reason).toMatchObject({ code: "conflict" });
+  });
+
+  test("a start racing the commit only runs after the assignments committed", async () => {
+    const f = await fixture();
+    await addSshCredential(f.credentials, "auth-key");
+    const folder = await gitRepository(f.folders, "raced");
+
+    // Delay the assignment commit so a start issued after the registry save
+    // (when the id is already visible) has a real window to race into.
+    let releaseTransaction!: () => void;
+    const gate = new Promise<void>(resolve => { releaseTransaction = resolve; });
+    const gatedCredentials = {
+      snapshot: () => f.credentials.snapshot(),
+      transaction: async (mutate: never) => {
+        await gate;
+        return f.credentials.transaction(mutate);
+      },
+    };
+    const assignmentsSeenByStart: number[] = [];
+    const sessions = {
+      start: (id: string) => f.sessions.runExclusive(id, async () => {
+        assignmentsSeenByStart.push(
+          f.credentials.snapshot().assignments.filter(a => a.workspaceId === id).length,
+        );
+        return {} as never;
+      }),
+      runExclusive: f.sessions.runExclusive,
+    };
+    const coordinator = new WorkspaceOnboardingCoordinator({
+      journalPath: f.journalPath,
+      registry: f.registry,
+      credentials: gatedCredentials as never,
+      sessions,
+      reservations: f.reservations,
+      git: f.git,
+    });
+
+    const committing = coordinator.configureExisting({
+      path: folder,
+      displayName: "Raced",
+      authentication: [{ credentialId: "auth-key", host: "github.com" }],
+    });
+    // Wait until the registration is visible mid-commit, then start it.
+    while (!f.registry.byId("raced")) await new Promise(resolve => setTimeout(resolve, 1));
+    const racingStart = sessions.start("raced");
+    releaseTransaction();
+    await Promise.all([committing, racingStart]);
+
+    // The queued start observed the committed assignment set, never the
+    // registered-but-unconfigured intermediate state.
+    expect(assignmentsSeenByStart).toEqual([1]);
   });
 
   test("configureCloned commits while the clone job still holds the target reservation", async () => {

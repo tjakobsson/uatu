@@ -134,9 +134,11 @@ describe("clone page", () => {
     expect(html).toContain("cloneCompatible");
     expect(html).toContain("isCredentialLocked(selectedCredential)");
     expect(html).toContain("request.credentialId = selectedCredential.id");
-    // The clone identity is only a suggestion for retention — never an
-    // implicit workspace grant.
-    expect(html).toContain("never retains it on its own");
+    // The clone identity is never an implicit workspace grant: nothing
+    // pre-fills the retained control, so an untouched form retains nothing.
+    expect(html).toContain("The clone credential is never retained on its own");
+    expect(html).toContain("NEVER pre-fills this control");
+    expect(html).not.toContain("cloneRetainedAuth.value = selected");
     expect(html).toContain("request.retainedAuthentication = [{ credentialId: retainedCredential.id, host: retainedHostFor(retainedCredential) }]");
     expect(html).not.toContain("retainAssignment");
     expect(html).toContain('(?:[^@/:\\s]+@)?');

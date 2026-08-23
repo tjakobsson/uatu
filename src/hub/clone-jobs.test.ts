@@ -924,6 +924,28 @@ describe("CloneJobManager onboarding coordination", () => {
     expect(f.registered.size).toBe(0);
   });
 
+  test("a failed registration removal during cancellation keeps retained assignments intact", async () => {
+    const f = fixture({ onboarding: true });
+    f.holdStart();
+    f.failRemove(new Error("registry is read-only"));
+    const { jobId } = f.manager.create("alice", "remote", "/tmp/retained-rollback", {
+      retainedAuthentication: [{ credentialId: "workspace-auth", host: "github.com" }],
+      start: true,
+    });
+    await tick();
+    f.processes[0].exit(0);
+    await tick();
+
+    const cancelling = f.manager.cancel("alice", jobId);
+    f.releaseHeldStart();
+    expect(await cancelling).toBe("cleanup-failed");
+    // The registration removal failed (and the registry rolled itself
+    // back), so the workspace must keep its full committed configuration —
+    // never registered with its assignments silently stripped.
+    expect(f.registered.has("repo")).toBe(true);
+    expect(f.assignmentsRemoved).toEqual([]);
+  });
+
   test("a coordinator commit failure reports registration failure without a workspace", async () => {
     const f = fixture({ onboarding: true });
     f.failOnboarding(new Error("credential assignment failed: unknown credential"));

@@ -100,7 +100,7 @@ type FileSystem = Pick<typeof nodeFs, "lstat" | "realpath" | "mkdir" | "rmdir" |
 
 type OnboardingRegistry = Pick<WorkspaceRegistry, "byId" | "byPath" | "registerWithStatus" | "remove" | "restoreEntries">;
 type OnboardingCredentials = Pick<CredentialMetadataStore, "snapshot" | "transaction">;
-type OnboardingSessions = Pick<SessionManager, "start">;
+type OnboardingSessions = Pick<SessionManager, "start" | "runExclusive">;
 
 export type OnboardingGit = {
   probe(folder: string): Promise<GitProbeResult>;
@@ -652,52 +652,60 @@ export class WorkspaceOnboardingCoordinator {
       previousAssignments,
       desiredAssignments: options.desired,
     };
-    try {
-      await this.journal.write(pending);
-    } catch (error) {
-      throw safeFsError(error, "onboarding journal write failed");
-    }
-
-    let registered: WorkspaceEntry;
-    try {
-      const result = await this.options.registry.registerWithStatus(options.canonical, "local", options.displayName);
-      registered = result.entry;
-      if (!result.created || registered.id !== options.planned) {
-        // The planned id was taken between planning and commit — impossible
-        // while every registration path flows through this chain, so treat
-        // it as an internal invariant break and undo the registration.
-        if (result.created) await this.options.registry.remove(registered.id);
-        throw new OnboardingError("internal", `workspace id changed during onboarding commit: ${registered.id}`);
-      }
-    } catch (error) {
-      // The registry rolls its own failed mutation back; only the journal
-      // needs clearing.
-      await this.journal.clear().catch(() => undefined);
-      throw error instanceof OnboardingError ? error : safeFsError(error, "workspace registration failed");
-    }
-
-    try {
-      await this.replaceWorkspaceAssignments(entry.id, options.desired);
-    } catch (error) {
+    // The whole two-store commit runs inside the workspace's session
+    // lifecycle queue. The registry save makes the id visible to
+    // /api/hub/state and the start route mid-commit; without this section a
+    // concurrent start could run before the assignment commit and project
+    // the old (empty) assignment set into the new session. Queued here, that
+    // start executes only after both stores committed.
+    await this.options.sessions.runExclusive(options.planned, async () => {
       try {
-        await this.options.registry.remove(entry.id);
-        await this.replaceWorkspaceAssignments(entry.id, previousAssignments);
-        await this.journal.clear();
-      } catch (rollbackError) {
-        throw new OnboardingError("recovery-required", "workspace onboarding failed and requires Hub recovery", {
-          cause: new AggregateError([error, rollbackError]),
-        });
+        await this.journal.write(pending);
+      } catch (error) {
+        throw safeFsError(error, "onboarding journal write failed");
       }
-      throw new OnboardingError("credential", `credential assignment failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
-    }
 
-    try {
-      await this.journal.clear();
-    } catch (error) {
-      // Both stores committed; recovery would simply confirm the desired
-      // state, but an uncleaned journal must still be surfaced.
-      throw new OnboardingError("recovery-required", "workspace onboarding committed but its journal could not be cleared; restart the Hub to reconcile", { cause: error });
-    }
+      let registered: WorkspaceEntry;
+      try {
+        const result = await this.options.registry.registerWithStatus(options.canonical, "local", options.displayName);
+        registered = result.entry;
+        if (!result.created || registered.id !== options.planned) {
+          // The planned id was taken between planning and commit — impossible
+          // while every registration path flows through this chain, so treat
+          // it as an internal invariant break and undo the registration.
+          if (result.created) await this.options.registry.remove(registered.id);
+          throw new OnboardingError("internal", `workspace id changed during onboarding commit: ${registered.id}`);
+        }
+      } catch (error) {
+        // The registry rolls its own failed mutation back; only the journal
+        // needs clearing.
+        await this.journal.clear().catch(() => undefined);
+        throw error instanceof OnboardingError ? error : safeFsError(error, "workspace registration failed");
+      }
+
+      try {
+        await this.replaceWorkspaceAssignments(entry.id, options.desired);
+      } catch (error) {
+        try {
+          await this.options.registry.remove(entry.id);
+          await this.replaceWorkspaceAssignments(entry.id, previousAssignments);
+          await this.journal.clear();
+        } catch (rollbackError) {
+          throw new OnboardingError("recovery-required", "workspace onboarding failed and requires Hub recovery", {
+            cause: new AggregateError([error, rollbackError]),
+          });
+        }
+        throw new OnboardingError("credential", `credential assignment failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+      }
+
+      try {
+        await this.journal.clear();
+      } catch (error) {
+        // Both stores committed; recovery would simply confirm the desired
+        // state, but an uncleaned journal must still be surfaced.
+        throw new OnboardingError("recovery-required", "workspace onboarding committed but its journal could not be cleared; restart the Hub to reconcile", { cause: error });
+      }
+    });
 
     return {
       entry: { ...entry },

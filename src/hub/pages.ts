@@ -482,7 +482,7 @@ function authenticatedPage(pageName: AuthenticatedPage, authenticatedUser: strin
     <label>Workspace authentication
       <select id="clone-retained-auth" aria-describedby="clone-retained-auth-help"><option value="">None</option></select>
     </label>
-    <p id="clone-retained-auth-help" class="row-detail" style="margin: 0;">Kept as the workspace's authentication default after registration. Selecting a clone credential suggests it here but never retains it on its own.</p>
+    <p id="clone-retained-auth-help" class="row-detail" style="margin: 0;">Kept as the workspace's authentication default after registration. The clone credential is never retained on its own — only a credential chosen here persists.</p>
     <label>Commit signing
       <select id="clone-signing"><option value="">None</option></select>
     </label>
@@ -2020,18 +2020,12 @@ function updateCloneCredentials() {
   fillCredentialSelect(cloneSigning, signingCapableCredentials(), "None");
   updateCloneCredentialState();
 }
-// Selecting a clone identity SUGGESTS it as the retained workspace
-// authentication but never commits it on its own; the user can clear the
-// suggestion, and clearing the clone credential clears an untouched one.
-let retainedAuthTouched = false;
-cloneRetainedAuth.addEventListener("change", () => { retainedAuthTouched = true; });
+// The retained workspace authentication is an explicit choice: selecting a
+// clone credential NEVER pre-fills this control — a submit with it untouched
+// must retain nothing, so the only way an assignment persists is the user
+// picking it here.
 function updateCloneCredentialState() {
   const selected = credentialCatalog.find(item => item.id === cloneCredential.value);
-  if (!retainedAuthTouched) {
-    cloneRetainedAuth.value = selected && [...cloneRetainedAuth.options].some(option => option.value === selected.id)
-      ? selected.id
-      : "";
-  }
   cloneUnlock.hidden = !selected || !isCredentialLocked(selected);
   if (cloneUnlock.hidden) cloneUnlockPassphrase.value = "";
 }
@@ -2234,7 +2228,6 @@ cloneForm.onsubmit = async event => {
     cloneRetainedAuth.value = "";
     cloneSigning.value = "";
     cloneStartAfter.checked = false;
-    retainedAuthTouched = false;
     updateCloneCredentialState();
     button.textContent = "Clone";
     setCloneActive(true);

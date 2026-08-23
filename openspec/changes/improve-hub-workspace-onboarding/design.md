@@ -98,7 +98,7 @@ Putting this in the daemon configuration file was rejected because browser Setti
 
 The configuration form fetches the public credential catalog once and filters authentication choices by detected Git remote transport/host when available; signing choices use declared signing capability. The request carries credential ids and authentication host selection, never secret material. Locked credentials may be assigned while stopped, but Add and start must use the existing masked unlock flow before startup.
 
-Clone identity and retained workspace identity are distinct fields. Selecting a clone identity preselects but does not automatically commit the corresponding retained authentication choice. Signing is independent. This avoids turning one-time clone access into a durable workspace grant.
+Clone identity and retained workspace identity are distinct fields. Selecting a clone identity makes the corresponding credential available in the retained-authentication control but never fills it in automatically — an untouched control retains nothing, so only an explicit selection persists. Signing is independent. This avoids turning one-time clone access into a durable workspace grant.
 
 ### 8. Make row actions lifecycle-aware and nouns explicit
 

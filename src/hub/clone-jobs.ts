@@ -553,16 +553,22 @@ export class CloneJobManager {
   private async rollbackWithinLifecycle(job: Job, entry: WorkspaceEntry): Promise<string | null> {
     let unassigned = false;
     try {
-      if (job.assignedRetained && this.onboarding) {
-        await this.onboarding.removeWorkspaceAssignments(entry.id);
-        job.assignedRetained = false;
-      }
       if (job.assigned && job.credential) {
         await this.credentials.unassign(entry.id, job.credential);
         job.assigned = false;
         unassigned = true;
       }
       if (!(await this.registry.remove(entry.id))) throw new Error("workspace registration was not removed");
+      // Retained assignments are removed only AFTER the registration is
+      // gone: a failed registry removal (which the registry rolls back
+      // itself) must leave the still-registered workspace with its full
+      // committed configuration, never registered-but-stripped. A failure
+      // here instead leaves stray assignments for an unregistered id, which
+      // the reported cleanup failure directs the operator to review.
+      if (job.assignedRetained && this.onboarding) {
+        await this.onboarding.removeWorkspaceAssignments(entry.id);
+        job.assignedRetained = false;
+      }
       return null;
     } catch (error) {
       if (unassigned && job.credential) {
