@@ -127,17 +127,24 @@ function absolutePath(value: unknown, field: string): string {
 // the created folder display a name other than the path it occupies.
 const INVISIBLE_NAME_CHARACTER = /[\u0000-\u001f\u007f]|\p{Cf}/u;
 
-function folderName(value: unknown): string {
-  if (
-    typeof value !== "string"
-    || value.trim() === ""
+/**
+ * The name rule itself, exported so the published `FolderName` pattern is
+ * checked against this predicate rather than against a copy of it.
+ */
+export function isVisibleFolderName(value: string): boolean {
+  return !(
+    value.trim() === ""
     || value === "."
     || value === ".."
     || value.startsWith(".")
     || value.includes("/")
     || value.includes("\\")
     || INVISIBLE_NAME_CHARACTER.test(value)
-  ) {
+  );
+}
+
+function folderName(value: unknown): string {
+  if (typeof value !== "string" || !isVisibleFolderName(value)) {
     throw new FolderManagerError("invalid-input", "name must be one visible non-hidden path segment");
   }
   return value;

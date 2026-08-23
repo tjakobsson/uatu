@@ -1266,14 +1266,15 @@ components:
     FolderName:
       type: string
       minLength: 1
-      pattern: '^(?!\.)(?![\s\S]*(?:[\\/\x00-\x1f\x7f\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890-\u0891\u08e2\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb]|\ud804[\udcbd\udccd]|\ud80d[\udc30-\udc3f]|\ud82f[\udca0-\udca3]|\ud834[\udd73-\udd7a]|\udb40[\udc01\udc20-\udc7f]))[\s\S]*\S[\s\S]*$'
+      pattern: '^(?!\.)(?![\s\S]*[\\/\x00-\x1f\x7f\p{Cf}])[\s\S]*\S[\s\S]*$'
       description: >-
         A visible, non-hidden single path segment. Dot-prefixed names, path separators, control characters,
         Unicode format characters (Cf — the zero-width family, the bidi embedding and override controls, the
         BOM, and the tag characters), and names made only of whitespace or format characters are rejected: none
         of them survive a nonempty check, and a bidi control can make a folder display a name other than the
-        path it occupies. The format characters above the BMP are spelled as surrogate pairs, so validators that
-        match whole code points enforce only the BMP ones; the server rejects every Cf character either way.
+        path it occupies. The pattern is a Unicode-mode expression, as JSON Schema requires, so its `\p{Cf}`
+        escape covers the format characters above the BMP as well; it accepts exactly the names the server
+        accepts.
     CreateFolderRequest:
       type: object
       required: [parent, name]
