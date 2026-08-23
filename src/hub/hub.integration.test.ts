@@ -1174,6 +1174,72 @@ describe("hub end to end", () => {
     expect(cancelled.status).toBe(200);
   }, 60_000);
 
+  test("clone creation refuses a journaled destination without creating it", async () => {
+    // The journal's removal source is the clone destination itself, and it is
+    // absent — exactly what a removal that deleted its folder but could not
+    // finish leaves behind. The destination is what the route would create to
+    // resolve the target, so the fence has to refuse before that mkdir: a
+    // recreated source is an unrelated directory to startup recovery, which
+    // fails identity validation there and leaves the Hub unstartable.
+    const canonicalRoot = await realpath(tempRoot);
+    const destination = path.join(canonicalRoot, "clone-journal-absent-dest");
+    const target = path.join(destination, "absent-dest-clone");
+    const journalPath = path.join(tempRoot, "pending-folder-mutation.json");
+    await writeFile(journalPath, `${JSON.stringify({
+      version: 1,
+      operation: "remove",
+      source: destination,
+      before: [{ id: "absent-dest-clone", path: destination, backend: "local" }],
+      after: [],
+    }, null, 2)}\n`, { mode: 0o600 });
+
+    try {
+      const fenced = await fetch(`${origin}/api/hub/clone-jobs`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie, origin },
+        body: JSON.stringify({ url: "interactive:absent-dest-clone", dest: destination }),
+      });
+      expect(fenced.status).toBe(409);
+      await assertContract("POST", "/api/hub/clone-jobs", fenced);
+      expect(await fenced.json()).toEqual({
+        error: "a pending folder mutation requires recovery before further registered changes",
+      });
+      // The journaled source stayed absent: no directory was created before
+      // the refusal, and no reservation outlived it.
+      expect(await stat(destination).then(() => true).catch(() => false)).toBe(false);
+      expect(reservations.isReserved(target)).toBe(false);
+    } finally {
+      await rm(journalPath, { force: true });
+      await rm(destination, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("clone reserves the canonical target through a symlinked, not-yet-created destination", async () => {
+    // The reservation and the fence now run before the destination exists, so
+    // the route predicts the canonical target rather than realpath'ing it. A
+    // symlinked ancestor with absent components under it is where a wrong
+    // prediction shows: an alias-spelled reservation folder mutations would
+    // not overlap, or a spurious "destination changed" refusal.
+    const canonicalRoot = await realpath(tempRoot);
+    const real = path.join(canonicalRoot, "clone-symlink-real");
+    await mkdir(real);
+    const link = path.join(canonicalRoot, "clone-symlink-link");
+    await symlink(real, link);
+    const cloned = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ url: "interactive:symlinked-clone", dest: path.join(link, "nested") }),
+    });
+    expect(cloned.status).toBe(202);
+    const jobId = ((await cloned.json()) as { jobId: string }).jobId;
+    expect(reservations.isReserved(path.join(real, "nested", "symlinked-clone"))).toBe(true);
+    const cancelled = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/cancel`, {
+      method: "POST",
+      headers: { cookie, origin },
+    });
+    expect(cancelled.status).toBe(200);
+  });
+
   test("start:false registers without starting a session (recents import)", async () => {
     const imported = path.join(tempRoot, "workspaces", "imported-only");
     execFileSync("mkdir", ["-p", imported]);

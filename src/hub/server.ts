@@ -40,7 +40,7 @@ import {
 import { cloneTargetName, gitInit, probeGitRepository, validCloneFolderName } from "./git";
 import { FolderManagerError, reconcileRegisteredAliasPaths, type FolderManager } from "./folder-manager";
 import { clonePage, dashboardPage, loginPage, settingsPage, stoppedSessionPage } from "./pages";
-import { pathsOverlap, type PathReservationCoordinator } from "./path-reservations";
+import { normalizeAbsolutePath, pathsOverlap, type PathReservationCoordinator } from "./path-reservations";
 import {
   bridgeWebSocketHandlers,
   childUrlFor,
@@ -102,6 +102,28 @@ function htmlResponse(body: string, status = 200): Response {
     status,
     headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
   });
+}
+
+// The canonical path a not-yet-created folder will have: realpath resolves
+// the nearest existing ancestor and the absent components are re-attached.
+// Read-only by construction — it is what lets a clone reserve and fence its
+// destination before creating it. Errors other than the absence being walked
+// past propagate: an unreadable ancestor must not silently downgrade to the
+// uncanonicalized spelling, which folder mutations would not overlap.
+async function canonicalizeAbsentPath(folderPath: string): Promise<string> {
+  const absent: string[] = [];
+  let current = normalizeAbsolutePath(folderPath);
+  for (;;) {
+    try {
+      return normalizeAbsolutePath(path.join(await fs.realpath(current), ...absent));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      const parent = path.dirname(current);
+      if ((code !== "ENOENT" && code !== "ENOTDIR") || parent === current) throw error;
+      absent.unshift(path.basename(current));
+      current = parent;
+    }
+  }
 }
 
 // The return-to target as the login form should carry it. "/" is the default
@@ -576,8 +598,19 @@ export function createHubFetchHandler(deps: HubDeps) {
         }
       }
       const resolvedDest = path.resolve(dest);
-      await fs.mkdir(resolvedDest, { recursive: true });
-      const target = path.join(await fs.realpath(resolvedDest), requestedFolderName || cloneTargetName(url)!);
+      // Nothing on disk may change before a fence that runs under a
+      // reservation overlapping the path being changed — and the mkdir
+      // below is such a change: recreating a directory a pending removal
+      // journal expects to be absent makes startup recovery validate
+      // identity against an unrelated folder, leaving the Hub unstartable.
+      // So the target is predicted, reserved, and fenced before anything is
+      // created. Predicting it means canonicalizing without touching disk
+      // (realpath needs an existing path, hence the walk up to the nearest
+      // existing ancestor): folder mutations reserve canonical spellings, so
+      // only a canonical reservation is guaranteed to overlap theirs.
+      const target = await canonicalizeAbsentPath(
+        path.join(resolvedDest, requestedFolderName || cloneTargetName(url)!),
+      );
       // Both checks below decide whether this clone may populate the target,
       // and a folder mutation completing after them would void that verdict:
       // a create can leave an empty directory here, a rename can move a
@@ -603,13 +636,26 @@ export function createHubFetchHandler(deps: HubDeps) {
         // Hub unstartable without manual state repair. Checked before the
         // reconciliation and claim checks below, since a pending journal
         // means the registry those checks read is exactly what recovery may
-        // still rewrite; and under the reservation, so no folder mutation of
-        // this target can be journaling concurrently. Fails closed: an
-        // uninspectable journal is treated as pending.
+        // still rewrite; before the mkdir below, so a journaled destination
+        // is refused while it is still absent; and under the reservation, so
+        // no folder mutation of this target can be journaling concurrently.
+        // Fails closed: an uninspectable journal is treated as pending.
         try {
           await deps.folderManager?.assertNoPendingMutation();
         } catch (error) {
           return folderError(error);
+        }
+
+        // realpath needs the destination to exist, so the clone creates it —
+        // the first filesystem change, and only now that the fence has
+        // passed under the reservation. The prediction above holds unless
+        // the hierarchy changed under us: a symlink planted between the two
+        // would put the real target outside the reservation just taken.
+        // Refused rather than chased.
+        await fs.mkdir(resolvedDest, { recursive: true });
+        const created = path.join(await fs.realpath(resolvedDest), requestedFolderName || cloneTargetName(url)!);
+        if (normalizeAbsolutePath(created) !== target) {
+          return json(409, { error: `clone destination changed while it was being prepared: ${resolvedDest}` });
         }
 
         // Legacy registrations can persist alias spellings of the target or
