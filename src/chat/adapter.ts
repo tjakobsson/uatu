@@ -160,9 +160,14 @@ export class OpenCodeChatAdapter {
   // but provider.command() fires immediately, so held slash commands wait
   // for a terminal report that follows the last admission. A fresh
   // submission clears the hold — the documented resume trigger, matching
-  // dormant queues — which also bounds the fast-turn case where a
-  // completion outruns its own acceptance and would otherwise pin this.
+  // dormant queues.
   private readonly openAdmissions = new Set<string>();
+  // Counts terminal reports per conversation. A prompt's queue admission
+  // cannot span its own turn's end, so a terminal seen during that await is
+  // always stale — but the classic command route resolves at its own turn's
+  // end for fast turns, and reopening the admission there would pin later
+  // command heads behind a turn that already finished.
+  private readonly terminalReports = new Map<string, number>();
   private readonly maxProjections: number;
   private readonly coalesceWindowMs: number | undefined;
   private readonly metrics: ChatEventMetrics | undefined;
@@ -658,10 +663,19 @@ export class OpenCodeChatAdapter {
       const slash = text.startsWith("/")
         ? parseSlashCommand(text, await this.provider.listCommands())
         : undefined;
+      const terminalsBefore = this.terminalReports.get(conversationId) ?? 0;
       const accepted = slash
         ? await this.provider.command(conversationId, { id: input.messageId, name: slash.name, arguments: slash.arguments, model: input.model, mode, variant })
         : await this.provider.prompt(conversationId, { id: input.messageId, text, delivery: "queue", model: input.model, mode, variant });
-      this.openAdmissions.add(conversationId);
+      // A prompt admission opens unconditionally: its own turn cannot have
+      // ended during the await, so a terminal seen there was stale and the
+      // turn is genuinely starting. A command that saw a terminal during its
+      // await most plausibly just watched its own fast turn finish (the
+      // classic route resolves at turn end), and reopening the admission
+      // would pin "/"-prefixed heads behind a turn that already ended.
+      if (!slash || (this.terminalReports.get(conversationId) ?? 0) === terminalsBefore) {
+        this.openAdmissions.add(conversationId);
+      }
       // "sending" ends at acceptance, BEFORE the rename side-work below —
       // the dispatch is no longer in flight once the provider has accepted
       // it, so the state must not span the rename's provider round trips.
@@ -1459,6 +1473,7 @@ export class OpenCodeChatAdapter {
         // A terminal report closes the last admission — the only signal
         // available without turn identity; held slash commands key on it.
         this.openAdmissions.delete(id);
+        this.terminalReports.set(id, (this.terminalReports.get(id) ?? 0) + 1);
       }
       // A turn that ended on its own releases the next held message. Only
       // these two: an interruption leaves the queue dormant by decision, and

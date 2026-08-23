@@ -1097,6 +1097,37 @@ describe("prompt, abort, permission, and question mutations", () => {
     expect((await adapter.history("session")).queued).toEqual([]);
   });
 
+  test("a command's own fast completion does not reopen the admission and pin the head behind it", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    let message = 0;
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `id-${++message}` });
+
+    // The classic command route resolves at turn end for fast turns, so the
+    // genuine completion lands during the acceptance await itself. The
+    // admission must not reopen after its own terminal report — that would
+    // hold the next command head (and everything behind it) with no further
+    // terminal event ever coming.
+    const dispatch = provider.command.bind(provider);
+    provider.command = async (sessionId, input) => {
+      adapter.projectionForTests("session").apply({ kind: "status", status: "completed" });
+      return dispatch(sessionId, input);
+    };
+
+    expect((await adapter.prompt("session", "r1", "first")).held).toBe(false);
+    await adapter.prompt("session", "r2", "/review one");
+    const second = await adapter.prompt("session", "r3", "/review two");
+    expect(second.held).toBe(true);
+
+    // The running turn ends; "/review one" delivers, completes inside its
+    // own acceptance, and "/review two" must follow without any manual
+    // terminal event in between.
+    adapter.projectionForTests("session").apply({ kind: "status", status: "completed" });
+    for (let attempt = 0; attempt < 200 && provider.commandCalls.length < 2; attempt += 1) await new Promise(resolve => setTimeout(resolve, 1));
+    expect(provider.commandCalls.map(call => call.arguments)).toEqual(["one", "two"]);
+    expect((await adapter.history("session")).queued).toEqual([]);
+  });
+
   test("a delivery-time session lookup failure pauses the queue instead of stranding it", async () => {
     const provider = new FakeProvider();
     provider.sessions = [fixtureSession("session")];
