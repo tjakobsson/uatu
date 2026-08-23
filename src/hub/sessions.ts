@@ -20,6 +20,10 @@ export function sessionBasePath(workspaceId: string): string {
   return `/s/${workspaceId}/`;
 }
 
+function shuttingDownMessage(workspaceId: string): string {
+  return `the hub is shutting down; refusing to start session '${workspaceId}'`;
+}
+
 export type SessionsStoppedResult<T> =
   | { status: "completed"; value: T }
   | { status: "needs-stop"; workspaceIds: string[] };
@@ -36,6 +40,13 @@ export class SessionManager {
   // cannot serialize against. Shutdown must still see them, or a child
   // spawning inside an onboarding commit outlives stopAll().
   private readonly lifecycleHeldStarts = new Map<string, number>();
+  // Latched by stopAll() BEFORE it snapshots its worklist. The two maps
+  // above only cover starts that have already announced themselves; a start
+  // that enters afterwards would spawn a child no queued stop covers. The
+  // latch never clears: once teardown has begun there is no supported way
+  // back to serving, and a hub whose shutdown failed keeps the state lease
+  // precisely so nothing new is spawned under it.
+  private shuttingDown = false;
   private readonly startFailureCallbacks = new Map<string, Array<() => Promise<void>>>();
   // Per-workspace operation chain tails.
   private readonly lifecycle = new Map<string, Promise<unknown>>();
@@ -142,17 +153,29 @@ export class SessionManager {
   // Starts (or joins the pending start of) the session for a registered
   // workspace.
   start(workspaceId: string, onFailure?: () => Promise<void>): Promise<RunningSession> {
+    const joined = this.starting.get(workspaceId);
+    // A request accepted before stopServer() can reach here after shutdown
+    // snapshotted; publishing into `starting` now would be too late to be
+    // stopped. Refused before the failure callbacks are registered, so a
+    // refusal never triggers a registration rollback mid-teardown — the
+    // workspace is simply left registered and stopped. Joining an already
+    // published start is still safe: that one IS in the snapshot.
+    if (!joined && this.shuttingDown) {
+      return Promise.reject(new Error(shuttingDownMessage(workspaceId)));
+    }
     if (onFailure) {
       const callbacks = this.startFailureCallbacks.get(workspaceId) ?? [];
       callbacks.push(onFailure);
       this.startFailureCallbacks.set(workspaceId, callbacks);
     }
-    const joined = this.starting.get(workspaceId);
     if (joined) {
       return joined;
     }
 
-    const operation = this.enqueue(workspaceId, () => this.startWhileLifecycleQueueHeld(workspaceId));
+    // The queued operation bypasses the shutdown gate on purpose: this call
+    // is published in `starting` from here on, so stopAll() either saw it
+    // and queued a stop behind it, or has not latched yet.
+    const operation = this.enqueue(workspaceId, () => this.spawnWhileLifecycleQueueHeld(workspaceId));
 
     let published: Promise<RunningSession>;
     published = operation.finally(() => {
@@ -170,7 +193,21 @@ export class SessionManager {
   // requested first start inside the same exclusive section as its
   // two-store commit, so a forget queued mid-commit cannot slip between
   // the commit and the start.
+  //
+  // Refuses once shutdown has begun. The commit that owns this queue was
+  // accepted before stopServer(), but it can arrive here after stopAll()
+  // snapshotted — while persisting the registry and assignments, say — and
+  // an unregistered start would then spawn a child that outlives teardown.
+  // The gate and the registration below are both synchronous with the call,
+  // and stopAll() latches before it snapshots, so no start can fall between
+  // the two. Onboarding treats the refusal as any other failed in-commit
+  // start: the workspace stays committed and stopped, with startError set.
   async startWhileLifecycleQueueHeld(workspaceId: string): Promise<RunningSession> {
+    if (this.shuttingDown) throw new Error(shuttingDownMessage(workspaceId));
+    return this.spawnWhileLifecycleQueueHeld(workspaceId);
+  }
+
+  private async spawnWhileLifecycleQueueHeld(workspaceId: string): Promise<RunningSession> {
     // Registered for the whole call — including the backend spawn — so a
     // shutdown arriving mid-commit enqueues a stop behind the section that
     // holds this queue, and waits for it there.
@@ -262,6 +299,9 @@ export class SessionManager {
   }
 
   async stopAll(): Promise<void> {
+    // Latched first: from here on no new start is admitted, so the snapshot
+    // below is complete rather than merely current.
+    this.shuttingDown = true;
     // Every workspace with a live child OR a pending/queued start gets a
     // stop enqueued behind whatever it is doing — including a start running
     // inside a lifecycle section someone else holds (onboarding's in-commit

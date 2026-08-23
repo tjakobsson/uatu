@@ -288,6 +288,85 @@ describe("SessionManager.stop during an in-flight start", () => {
     expect(sessions.runningIds()).toEqual([]);
   });
 
+  test("stopAll refuses an in-commit start that enters after its snapshot", async () => {
+    // The commit holds the lifecycle queue from its first store write, but
+    // only announces the start when it reaches startWhileLifecycleQueueHeld.
+    // A shutdown landing in between snapshots no work at all — nothing is
+    // running, starting, or lifecycle-held — so it finishes and releases the
+    // state lease while the accepted handler is still mid-commit. The start
+    // that follows must be refused, not spawned.
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-stopall-late-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    await registry.register("/srv/workspaces/committing");
+
+    let spawned = 0;
+    const backend: SessionBackend = {
+      start: async workspace => {
+        spawned += 1;
+        return fakeSession(workspace.id);
+      },
+    };
+    const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
+
+    let releasePersistence!: () => void;
+    const persisted = new Promise<void>(resolve => { releasePersistence = resolve; });
+    let startError: unknown;
+    const commit = sessions.runExclusive("committing", async () => {
+      // Stands in for the registry save and the assignment commit.
+      await persisted;
+      try {
+        await sessions.startWhileLifecycleQueueHeld("committing");
+      } catch (error) {
+        // Exactly how the onboarding coordinator absorbs a failed
+        // explicitly-requested start: committed, stopped, error reported.
+        startError = error;
+      }
+    });
+    await tick();
+
+    await sessions.stopAll();
+    releasePersistence();
+    await commit;
+
+    expect(spawned).toBe(0);
+    expect(startError).toBeInstanceOf(Error);
+    expect((startError as Error).message).toContain("shutting down");
+    expect(sessions.runningIds()).toEqual([]);
+    expect(sessions.isStarting("committing")).toBe(false);
+  });
+
+  test("stopAll refuses a start requested after its snapshot", async () => {
+    // Same window through the public path: stopServer() lets an accepted
+    // request finish, and its POST .../start reaches the manager after
+    // shutdown snapshotted.
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-stopall-late-start-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    await registry.register("/srv/workspaces/late");
+
+    let spawned = 0;
+    const backend: SessionBackend = {
+      start: async workspace => {
+        spawned += 1;
+        return fakeSession(workspace.id);
+      },
+    };
+    const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
+
+    await sessions.stopAll();
+    let rolledBack = false;
+    await expect(sessions.start("late", async () => { rolledBack = true; })).rejects.toThrow(/shutting down/);
+    expect(spawned).toBe(0);
+    // The refusal is not a start failure: nothing may mutate registered
+    // state while teardown is finishing.
+    expect(rolledBack).toBe(false);
+    expect(sessions.isStarting("late")).toBe(false);
+    expect(sessions.runningIds()).toEqual([]);
+  });
+
   test("stopAll attempts every session and aggregates failures", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-stopall-fail-"));
     tempDirectories.push(dir);
