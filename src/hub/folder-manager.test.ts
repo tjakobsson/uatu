@@ -352,7 +352,7 @@ describe("FolderManager registered mutations", () => {
     completed(await operation);
   });
 
-  test("preserves an unresolved mutation journal by refusing later registered mutations", async () => {
+  test("preserves an unresolved mutation journal by refusing all later mutations", async () => {
     const f = await fixture();
     const doomed = path.join(f.folders, "doomed");
     const other = path.join(f.folders, "other");
@@ -376,22 +376,25 @@ describe("FolderManager registered mutations", () => {
     expect(await exists(doomed)).toBe(false);
     expect(await exists(f.journalPath)).toBe(true);
 
-    // Later registered mutations must refuse rather than replace that
-    // record; unregistered operations stay available.
+    // Every later mutation must refuse rather than disturb that record —
+    // a registered one would replace the single-record journal, and even
+    // an unregistered create could recreate the removed source and make
+    // recovery restore the old registration onto an unrelated directory.
     await expect(f.manager.rename({ path: other, name: "renamed" })).rejects.toMatchObject({ code: "conflict" });
     await expect(f.manager.remove({ path: other })).rejects.toMatchObject({ code: "conflict" });
-    await f.manager.create({ parent: f.folders, name: "fresh" });
+    await expect(f.manager.create({ parent: f.folders, name: "doomed" })).rejects.toMatchObject({ code: "conflict" });
     const journal = JSON.parse(await fs.readFile(f.journalPath, "utf8")) as { operation: string; source: string };
     expect(journal).toMatchObject({ operation: "remove", source: doomed });
 
     await f.manager.recover();
     expect(f.registry.byId(doomedEntry.id)).toBeUndefined();
     expect(await exists(f.journalPath)).toBe(false);
+    await f.manager.create({ parent: f.folders, name: "fresh" });
     completed(await f.manager.rename({ path: other, name: "renamed" }));
     expect(f.registry.byId(otherEntry.id)?.path).toBe(path.join(f.folders, "renamed"));
   });
 
-  test("a pending sibling recovery journal freezes registered mutations", async () => {
+  test("a pending sibling recovery journal freezes folder mutations", async () => {
     const f = await fixture();
     const registered = path.join(f.folders, "registered");
     await fs.mkdir(registered);
@@ -408,11 +411,12 @@ describe("FolderManager registered mutations", () => {
     });
 
     // Onboarding recovery matches its committed entry by id + path; a
-    // rename while that journal lingers would break the match.
+    // rename while that journal lingers would break the match, and any
+    // mutation could disturb the state recovery reasons about.
     await fs.writeFile(onboardingJournal, "{}\n", { mode: 0o600 });
     await expect(manager.rename({ path: registered, name: "renamed" })).rejects.toMatchObject({ code: "conflict" });
     await expect(manager.remove({ path: registered })).rejects.toMatchObject({ code: "conflict" });
-    await manager.create({ parent: f.folders, name: "unregistered-still-fine" });
+    await expect(manager.create({ parent: f.folders, name: "blocked" })).rejects.toMatchObject({ code: "conflict" });
 
     await fs.unlink(onboardingJournal);
     completed(await manager.rename({ path: registered, name: "renamed" }));

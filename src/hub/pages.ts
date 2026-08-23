@@ -1708,8 +1708,11 @@ let clonePromptText = "";
 
 newFolderForm.onsubmit = async event => {
   event.preventDefault();
-  const name = newFolderName.value.trim();
-  if (!name) return;
+  // Same contract as the rename dialog: the server accepts visible padded
+  // names, so only emptiness is judged trimmed and the typed name is
+  // submitted as-is.
+  const name = newFolderName.value;
+  if (!name.trim()) return;
   setLocalError(newFolderError, "");
   const button = newFolderForm.querySelector('button[type="submit"]');
   await withBusy(button, "Creating…", async () => {
