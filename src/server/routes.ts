@@ -570,7 +570,7 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
       POST: async (request: RouteRequest) => chatMutation(request, ["requestId", "text", "model", "mode", "variant", "attachments"], async (id, body) => {
         const requestId = bodyIdentity(body, "requestId");
         if (requestId instanceof Response) return requestId;
-        if (typeof body.text !== "string" || !body.text.trim()) return chatError(400, "text must not be empty");
+        if (typeof body.text !== "string") return chatError(400, "text must be a string");
         if (Buffer.byteLength(body.text) > CHAT_PROMPT_BYTES) return chatError(413, "text is too large");
         const model = parseModelSelection(body.model);
         if (model instanceof Response) return model;
@@ -587,6 +587,9 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         if (variant !== undefined && model === undefined) return chatError(400, "variant requires a model selection");
         const attachments = parsePromptAttachments(body.attachments);
         if (attachments instanceof Response) return attachments;
+        // Words or images: a message needs content, and an image-only prompt
+        // is content (OpenCode admits empty text with files — verified live).
+        if (!body.text.trim() && !attachments?.length) return chatError(400, "text must not be empty");
         return run(() => deps.chatService.prompt(id, requestId, body.text as string, model, mode, variant, attachments), 202);
       }),
     },

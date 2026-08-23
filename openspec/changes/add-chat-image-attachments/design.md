@@ -125,10 +125,20 @@ classic part urls.
 `normalization.ts` maps the v2 user message's `files` into
 `UserMessageItem.attachments`: the uri basename (the issued uuid) is parsed
 back to the attachment id, which the client turns into the serve-route URL;
-`name` and `mime` ride along for display. A file entry whose uri basename is
-not an issued-id shape, and any classic-path `FilePart` (data: URL, no id),
-yields the spec'd placeholder — projections carry references, never bytes,
-so the echoed base64 on the classic path is deliberately not passed through.
+`name` and `mime` ride along for display.
+
+**Durable-store amendment (verified against a live session after a real
+turn):** the verbatim-uri echo holds only for the serving process's
+in-memory projection. Once a turn runs and the session restarts, replay
+comes from the classic durable store, where the file part is rewritten to an
+inline `data:` URL — but OpenCode also stores a `synthetic: true` text
+caption beside it ("Called the Read tool with {filePath: ...}") whose path
+basename is the issued uuid. Normalization therefore (a) filters synthetic
+captions out of the user's text — they are addressed to the model, not
+words the user typed — and (b) recovers attachment ids by pairing captions
+with file parts in order. A file part with neither a parseable uri nor a
+caption yields the spec'd placeholder — projections carry references, never
+bytes, so the stored base64 is deliberately not passed through.
 
 - Alternative — a server-side map from OpenCode part ids to attachment ids —
   adds persistent bookkeeping for the same result; the uri we control

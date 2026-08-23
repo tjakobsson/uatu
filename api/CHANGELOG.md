@@ -4,19 +4,19 @@ Entries are ordered newest first. Every entry has Hub and workspace revisions, a
 
 ## Hub 4 / Workspace 8 - Unreleased
 
-Compatibility: additive (workspace)
+Compatibility: breaking (workspace)
 
 ### Changes
 
 - The chat composer can attach images to a prompt. Added `workspaceUploadChatAttachment` (`POST .../chat/conversations/{conversationId}/attachments`): one PNG, JPEG, GIF, or WebP image per multipart request (field `file`, 10 MiB cap), sniffed from the bytes and stored outside every watched root; the response's `ChatAttachmentStored.id` is what later requests reference. The mutation is origin-protected.
 - Added `workspaceGetChatAttachment` (`GET .../chat/attachments/{attachmentId}`), serving a stored image's bytes under the workspace's chat authorization. Only workspace-issued identifiers resolve; anything else answers `404` without filesystem interpretation.
-- `ChatPromptRequest` gained optional `attachments`: up to 8 `{id, name, mimeType}` references to previously uploaded images, submitted together with the text as one message. Bytes never ride the prompt request. A reference the workspace has not stored, or attachments on a slash command, answer `400`.
+- `ChatPromptRequest` gained optional `attachments`: up to 8 `{id, name, mimeType}` references to previously uploaded images, submitted with the text as one message. `text` may now be empty when `attachments` is non-empty — an image-only prompt is valid (and `QueuedMessage.text` may be empty for such a message). Bytes never ride the prompt request. A reference the workspace has not stored, attachments on a slash command, or an empty text with no attachments answer `400`.
 - `UserMessageItem` and `QueuedMessage` gained optional `attachments` (`MessageAttachment` references): held messages keep their attachments and deliver them under the configuration frozen at submission, and replayed user messages restate theirs. A replayed attachment whose reference could not be recovered carries no `id`; clients render it as a labeled placeholder.
 - `ChatModel` gained optional `imageInput`, reporting whether the model can see image attachments; absent means not reported, which clients treat as no.
 
 ### Migration
 
-None.
+Strict workspace chat consumers must regenerate against workspace revision 8: the closed response objects for user message items, queued messages, and models gained optional properties (`attachments`, `imageInput`), so validators built from revision 7 reject conversation snapshots, chat events, and model listings produced by revision 8. Request producers need no changes — every new request field is optional, and existing prompts remain valid.
 
 ## Hub 4 / Workspace 7 - Unreleased
 

@@ -138,6 +138,18 @@ export function createAttachmentStore(options: AttachmentStoreOptions): Attachme
   };
 }
 
+// Finds an issued id inside free text — OpenCode's durable store rewrites a
+// file part's url to a data: URL, but the synthetic caption it adds beside it
+// ("Called the Read tool with {\"filePath\": ...}") carries the stored path,
+// whose basename is the issued uuid. Anchored to `<uuid>.<known-extension>`
+// so arbitrary caption prose cannot fabricate a reference.
+const ID_IN_TEXT_PATTERN = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.(?:png|jpg|gif|webp)\b/;
+
+export function attachmentIdFromText(value: string): string | null {
+  const match = ID_IN_TEXT_PATTERN.exec(value);
+  return match ? match[1]! : null;
+}
+
 // Parses an issued id back out of an echoed `file:` URI (design D5): accepts
 // exactly `<uuid>.<known-extension>` basenames and nothing else.
 export function attachmentIdFromFileUri(uri: string): string | null {

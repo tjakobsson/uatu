@@ -352,7 +352,7 @@ export function parseQueuedMessages(value: unknown): QueuedMessage[] {
     const record = expectRecord(entry, "queued message");
     expectKeys(record, ["id", "text", "queuedAt", "requestId", "attachments"], "queued message");
     expectIdentity(record.id, "queued message id");
-    expectNonEmptyString(record.text, "queued message text");
+    expectString(record.text, "queued message text");
     expectTimestamp(record.queuedAt, "queued message queuedAt");
     if (record.requestId !== undefined) expectIdentity(record.requestId, "queued message requestId");
     if (record.attachments !== undefined) parseMessageAttachments(record.attachments, "queued message attachment");

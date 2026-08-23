@@ -1,5 +1,5 @@
 import { boundedSet } from "../shared/bounded-map";
-import { attachmentIdFromFileUri } from "./attachment-store";
+import { attachmentIdFromFileUri, attachmentIdFromText } from "./attachment-store";
 import type { ConversationConfiguration, ConversationItem, ConversationStatus, MessageAttachment, StructuredQuestion, TokenUsage } from "./types";
 
 type RecordValue = Record<string, unknown>;
@@ -668,15 +668,30 @@ function normalizeStoredMessage(info: RecordValue, parts: unknown[], mintUsageCa
   const id = string(info.id, "message id");
   const createdAt = timestamp(record(info.time).created, 0);
   if (info.role === "user") {
-    const body = parts.map(part => record(part)).filter(part => part.type === "text").map(part => text(part.text)).join("");
-    // Classic file parts come back as inline data: URLs (verified live), so
-    // the issued id is unrecoverable here — these normalize to id-less
-    // placeholder references. The bytes are deliberately not passed through:
-    // projections carry references, never image payloads.
-    const attachments: MessageAttachment[] = parts.map(part => record(part)).filter(part => part.type === "file").map(part => ({
-      name: optionalString(part.filename) ?? "attachment",
-      mimeType: optionalString(part.mime) ?? "application/octet-stream",
-    }));
+    const records = parts.map(part => record(part));
+    // Synthetic text parts are OpenCode's own captions addressed to the model
+    // (e.g. "Called the Read tool with {filePath: ...}" beside an attachment)
+    // — never words the user typed, so they stay out of the bubble.
+    const body = records.filter(part => part.type === "text" && part.synthetic !== true).map(part => text(part.text)).join("");
+    // The durable store rewrites file parts to inline data: URLs, losing the
+    // issued id — but each attachment's synthetic caption carries the stored
+    // path, whose basename IS the id (verified against a live session's
+    // store). Captions pair with file parts in order; an unpaired file part
+    // stays an id-less placeholder. Bytes are never passed through either
+    // way: projections carry references, not image payloads.
+    const captionIds = records
+      .filter(part => part.type === "text" && part.synthetic === true)
+      .map(part => attachmentIdFromText(text(part.text)))
+      .filter((value): value is string => value !== null);
+    let caption = 0;
+    const attachments: MessageAttachment[] = records.filter(part => part.type === "file").map(part => {
+      const recovered = attachmentIdFromFileUri(optionalString(part.url) ?? "") ?? captionIds[caption++];
+      return {
+        ...(recovered ? { id: recovered } : {}),
+        name: optionalString(part.filename) ?? "attachment",
+        mimeType: optionalString(part.mime) ?? "application/octet-stream",
+      };
+    });
     return [{ id: `message:${id}`, type: "user_message", createdAt, text: body, ...(attachments.length ? { attachments } : {}) }];
   }
   if (info.role === "assistant") {

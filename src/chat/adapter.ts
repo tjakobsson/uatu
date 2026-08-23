@@ -527,7 +527,7 @@ export class OpenCodeChatAdapter {
     configuration: ConversationConfiguration;
     conversation?: ConversationSummary;
   }> {
-    if (!text.trim()) throw new Error("prompt must not be empty");
+    if (!text.trim() && !attachments?.length) throw new Error("prompt must not be empty");
     // Refused for any "/"-leading text, not just known commands: whether the
     // text parses as a command is only knowable at dispatch, and a held
     // message must never be the one to find out (see CommandAttachmentsError).

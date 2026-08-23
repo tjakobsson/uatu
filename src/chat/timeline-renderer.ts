@@ -464,7 +464,7 @@ export function decorateAttachmentImages(root: HTMLElement): void {
 
 function renderDraft(draft: AcceptedDraft): string {
   const label = draft.messageId.startsWith("pending:") ? "Sending…" : "Delivered, waiting for agent history";
-  return `<article class="chat-item chat-user-message is-pending" data-chat-item-id="draft-${escapeHtmlAttribute(draft.requestId)}">${renderMessageAttachments(draft.attachments)}<p>${escapeHtml(draft.text)}</p><small>${label}</small></article>`;
+  return `<article class="chat-item chat-user-message is-pending" data-chat-item-id="draft-${escapeHtmlAttribute(draft.requestId)}">${renderMessageAttachments(draft.attachments)}${draft.text ? `<p>${escapeHtml(draft.text)}</p>` : ""}<small>${label}</small></article>`;
 }
 
 // A held message is not a timeline item: it renders in the dock above the
@@ -472,7 +472,7 @@ function renderDraft(draft: AcceptedDraft): string {
 // when the workspace delivers it.
 function renderQueued(held: QueuedMessage): string {
   const id = escapeHtmlAttribute(held.id);
-  return `<article class="chat-queued-message is-held" role="listitem" data-chat-queued-id="${id}">${renderMessageAttachments(held.attachments)}<p>${escapeHtml(held.text)}</p><footer class="chat-queued-row"><small class="chat-queued-tag">Queued — sends when the agent is ready</small><button type="button" class="chat-queued-remove" data-queue-remove="${id}">Remove</button></footer></article>`;
+  return `<article class="chat-queued-message is-held" role="listitem" data-chat-queued-id="${id}">${renderMessageAttachments(held.attachments)}${held.text ? `<p>${escapeHtml(held.text)}</p>` : ""}<footer class="chat-queued-row"><small class="chat-queued-tag">Queued — sends when the agent is ready</small><button type="button" class="chat-queued-remove" data-queue-remove="${id}">Remove</button></footer></article>`;
 }
 
 /**
@@ -524,7 +524,7 @@ export class QueueDockRenderer {
 export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, durationMs?: number, foreign = false, readerClosed = false, allowSubagents = true, completedAssistant = false): string {
   const id = escapeHtmlAttribute(item.id);
   const stamp = timestampAttribute(item.createdAt);
-  if (item.type === "user_message") return `<article class="chat-item chat-user-message" data-chat-item-id="${id}"${stamp}>${renderMessageAttachments(item.attachments)}<div>${escapeHtml(item.text)}</div></article>`;
+  if (item.type === "user_message") return `<article class="chat-item chat-user-message" data-chat-item-id="${id}"${stamp}>${renderMessageAttachments(item.attachments)}${item.text ? `<div>${escapeHtml(item.text)}</div>` : ""}</article>`;
   if (item.type === "assistant_message") return `<article class="chat-item chat-assistant-message" data-chat-item-id="${id}" data-complete="${completedAssistant}"${stamp}><div class="chat-assistant-content markdown-body">${renderChatMarkdown(item.markdown)}</div></article>`;
   if (item.type === "turn_status") {
     const worked = durationMs === undefined ? "" : formatWorked(durationMs);

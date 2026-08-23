@@ -249,3 +249,31 @@ test.describe("chat image attachments — review regressions", () => {
     expect(new Set(stats.promptAttempts).size).toBe(2);
   });
 });
+
+test.describe("image-only messages", () => {
+  test.beforeEach(async ({ page, request }) => bootChat(page, request));
+
+  test("an attachment makes an empty draft sendable; removing it disables send again", async ({ page }) => {
+    await newConversation(page);
+    const send = page.locator("#chat-send");
+    await expect(send).toBeDisabled();
+
+    await attachViaPicker(page);
+    await expect(send).toBeEnabled();
+
+    // Removing the only attachment with no text returns to unsendable.
+    await page.locator("#chat-attachments .chat-attachment-remove").click();
+    await expect(send).toBeDisabled();
+
+    await attachViaPicker(page, "solo.png");
+    const accepted = page.waitForResponse(response => response.url().endsWith("/prompts"));
+    await send.click();
+    const body = (await accepted).request().postDataJSON() as { text: string; attachments?: unknown[] };
+    expect(body.text).toBe("");
+    expect(body.attachments).toHaveLength(1);
+    const message = page.locator("#chat-items .chat-user-message").last();
+    await expect(message.locator(".chat-message-attachment-thumb")).toHaveCount(1);
+    // No empty text block renders under the thumbnail.
+    await expect(message.locator("div")).toHaveCount(1);
+  });
+});

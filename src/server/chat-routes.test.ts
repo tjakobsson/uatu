@@ -433,3 +433,24 @@ describe("chat attachment routes", () => {
     expect(service.prompts).toBe(0);
   });
 });
+
+describe("image-only prompts", () => {
+  const ORIGIN = { origin: "http://127.0.0.1:4711" };
+  type Handler = { POST(request: Request & { params?: Record<string, string> }): Promise<Response> };
+  const send = (handler: Handler, body: Record<string, unknown>) => handler.POST(request("/api/chat/conversations/local/prompts", {
+    method: "POST",
+    headers: { ...ORIGIN, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  }, { conversationId: "local" }));
+
+  test("empty text with attachments is accepted; without them it is still refused", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/:conversationId/prompts"] as Handler;
+    const attachments = [{ id: "11111111-2222-4333-8444-555555555555", name: "shot.png", mimeType: "image/png" }];
+    expect((await send(handler, { requestId: "r-1", text: "", attachments })).status).toBe(202);
+    expect(service.promptAttachments).toEqual(attachments);
+    expect((await send(handler, { requestId: "r-2", text: "   " })).status).toBe(400);
+    expect((await send(handler, { requestId: "r-3", text: "", attachments: [] })).status).toBe(400);
+    expect(service.prompts).toBe(1);
+  });
+});

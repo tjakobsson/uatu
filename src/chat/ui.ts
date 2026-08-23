@@ -884,8 +884,17 @@ export function initChat(): void {
   const attachmentStagingWaits = new Map<string, Promise<void>[]>();
   const supportedAttachmentTypes = new Set<string>(CHAT_ATTACHMENT_MIME_TYPES);
 
-  const currentPendingAttachments = (): PendingAttachment[] =>
-    projection ? pendingAttachments.get(projection.conversationId) ?? [] : [];
+  // The conversation attachments belong to. The projection may still be
+  // loading when the user attaches — the selection is already made, so the
+  // selected id serves until the snapshot installs. Without this, an attach
+  // during the load window silently did nothing.
+  const activeConversationId = (): string | null =>
+    projection?.conversationId ?? presentation.selectedId ?? null;
+
+  const currentPendingAttachments = (): PendingAttachment[] => {
+    const conversationId = activeConversationId();
+    return conversationId ? pendingAttachments.get(conversationId) ?? [] : [];
+  };
 
   const setPendingAttachments = (conversationId: string, entries: PendingAttachment[]) => {
     if (entries.length > 0) pendingAttachments.set(conversationId, entries);
@@ -938,10 +947,12 @@ export function initChat(): void {
       remove.setAttribute("aria-label", `Remove ${entry.name}`);
       remove.textContent = "\u00d7";
       remove.addEventListener("click", () => {
-        if (!projection) return;
+        const conversationId = activeConversationId();
+        if (!conversationId) return;
         URL.revokeObjectURL(entry.previewUrl);
-        setPendingAttachments(projection.conversationId, currentPendingAttachments().filter(candidate => candidate !== entry));
+        setPendingAttachments(conversationId, currentPendingAttachments().filter(candidate => candidate !== entry));
         renderAttachments();
+        syncControls();
       });
       item.append(thumb, name, remove);
       attachmentsStrip.append(item);
@@ -955,14 +966,14 @@ export function initChat(): void {
    * nor the attachments already staged.
    */
   const stageAttachmentFiles = async (files: File[]) => {
-    if (!projection || files.length === 0) return;
+    const conversationId = activeConversationId();
+    if (!conversationId || files.length === 0) return;
     if (agent && !declares("attachments")) return;
     const support = attachmentModelSupport();
     if (!support.supported) {
       setComposerError(`${support.modelName} cannot see images. Pick a model with image support to attach.`);
       return;
     }
-    const conversationId = projection.conversationId;
     const task = (async () => {
       for (const file of files) {
         if ((pendingAttachments.get(conversationId) ?? []).length >= CHAT_ATTACHMENTS_PER_MESSAGE) {
@@ -1001,6 +1012,7 @@ export function initChat(): void {
       if (list.length === 0) attachmentStagingWaits.delete(conversationId);
     }
     renderAttachments();
+    syncControls();
   };
 
   attachButton?.addEventListener("click", () => {
@@ -1108,7 +1120,10 @@ export function initChat(): void {
     }
     send.type = running ? "button" : "submit";
     send.dataset.action = running ? "cancel" : "send";
-    send.disabled = running ? cancelling || !projection : submitting || !projection || !input.value.trim();
+    // A message needs content, not necessarily words: pending attachments make
+    // an empty draft sendable (image-only prompts are accepted end to end).
+    const hasContent = Boolean(input.value.trim()) || currentPendingAttachments().length > 0;
+    send.disabled = running ? cancelling || !projection : submitting || !projection || !hasContent;
     const action = running ? "Cancel" : "Send";
     sendLabel.textContent = action;
     send.setAttribute("aria-label", running ? "Cancel response" : "Send message");
@@ -1892,7 +1907,8 @@ export function initChat(): void {
   });
   form.addEventListener("submit", async event => {
     event.preventDefault();
-    if (!projection || !input.value.trim() || submitting) return;
+    if (!projection || submitting) return;
+    if (!input.value.trim() && currentPendingAttachments().length === 0) return;
     const conversationId = projection.conversationId;
     const text = input.value;
     submitting = true;

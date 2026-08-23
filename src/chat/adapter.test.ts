@@ -2689,3 +2689,18 @@ describe("sparse user-message updates preserve attachments", () => {
     expect(projection.items()[0]).toEqual(expect.objectContaining({ attachments: replaced }));
   });
 });
+
+describe("image-only prompts reach the provider", () => {
+  test("empty text with attachments dispatches; without them it is refused", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const resolveAttachment = async (id: string) => id === "11111111-2222-4333-8444-555555555555"
+      ? { id, mimeType: "image/png", absolutePath: "/state/a.png" }
+      : null;
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
+    const accepted = await adapter.prompt("session", "r1", "", undefined, undefined, undefined, [{ id: "11111111-2222-4333-8444-555555555555", name: "shot.png", mimeType: "image/png" }]);
+    expect(accepted.held).toBe(false);
+    expect(provider.prompts[0]).toEqual(expect.objectContaining({ text: "", attachments: [expect.objectContaining({ id: "11111111-2222-4333-8444-555555555555" })] }));
+    await expect(adapter.prompt("session2", "r2", "")).rejects.toThrow("prompt must not be empty");
+  });
+});

@@ -9,8 +9,9 @@ clipboard, dragging onto the composer, and an explicit attach control backed
 by a file picker. The attach control SHALL be visible without hover or
 keyboard affordances, so touch-only devices can attach images. Pending
 attachments SHALL be presented at the composer as thumbnails, each removable
-before send, and SHALL be submitted together with the composer text as one
-message.
+before send, and SHALL be submitted with the composer text as one message.
+Text is not a precondition: a message with attachments and no text SHALL be
+submittable, because the agent accepts image-only prompts.
 
 A paste that carries both text and images SHALL keep both: the text enters
 the composer and the images become pending attachments. Files of an
@@ -169,3 +170,86 @@ attachments: held messages deliver under their frozen configuration.
 #### Scenario: A held message delivers with its attachments
 - **WHEN** the running turn ends and a held message with attachments is delivered
 - **THEN** the agent receives the message text and its attachments under the configuration frozen at submission
+
+## MODIFIED Requirements
+
+### Requirement: Users can prompt, queue, and cancel the active conversation
+The Chat composer SHALL submit a message with content — non-empty text, at least one image attachment, or both — to the selected conversation and clearly distinguish ready, sending, running, interrupted, and failed states. A prompt submitted while the conversation is running SHALL be held in a workspace-owned queue rather than delivered to the agent mid-turn. Held messages SHALL be presented adjacent to the composer, in submission order, visibly marked as queued, and SHALL NOT appear as part of the running turn's timeline. While the agent continues to stream output, held messages SHALL remain adjacent to the composer rather than drifting into the transcript. The queue SHALL be bounded per conversation; a submission that would exceed the bound SHALL be refused without altering the held messages, with the draft preserved.
+
+When the running turn ends on its own, the workspace SHALL deliver held messages to the agent one at a time in submission order; a delivered message SHALL leave the queue presentation and begin its own turn at the end of the timeline. The user SHALL be able to remove any message that is still held; a removed message is never delivered. Removal of a message that has already been delivered SHALL be refused without altering the conversation.
+
+The user SHALL be able to cancel an active turn without deleting its completed history. Cancellation SHALL NOT deliver held messages: they remain queued, removable, and visible, and the queue stays dormant until the user next submits a prompt, which joins the end of the queue and resumes delivery from its head. Transport failure SHALL preserve the draft until acceptance is known.
+
+The surface SHALL name the agent it is talking to, taking that name from what the agent reports rather than from fixed copy. Text presented to the user SHALL NOT assume a particular agent, so that installing a different agent changes the name shown and nothing else.
+
+The way of working a prompt runs under SHALL be presented as a **mode** — the agent's own named ways of working, such as building or planning. It SHALL NOT be called an agent, because that word names the program Chat talks to.
+
+A control the surface offers the user to start an operation — a picker such as the mode or model chooser — SHALL be presented only when the agent declares the capability behind it. Where that capability is undeclared, the control SHALL be absent rather than shown inert, shown empty, or shown with an error. Reactive interaction controls — those that appear only in response to an agent-raised request, governed by "Users can resolve agent interaction requests in context" — are not covered here: an agent that lacks a capability raises no request of that kind, so the control has nothing to appear for. Absence of a capability SHALL NOT degrade any capability the agent does declare.
+
+#### Scenario: Empty prompt is not submitted
+- **WHEN** the composer contains only whitespace and no pending attachments
+- **THEN** the send action is unavailable and no mutation is sent
+
+#### Scenario: An image-only message is submittable
+- **WHEN** the composer contains only whitespace but at least one pending attachment
+- **THEN** the send action is available and the message submits with empty text
+
+#### Scenario: Follow-up queues while the agent works
+- **WHEN** the user submits a prompt while the selected conversation is running
+- **THEN** the message is held by the workspace rather than delivered to the agent
+- **AND** it is presented adjacent to the composer, marked as queued
+
+#### Scenario: Queued messages stay with the composer while output streams
+- **WHEN** the agent continues streaming output after messages were queued
+- **THEN** the held messages remain adjacent to the composer
+- **AND** no held message appears between items of the running turn
+
+#### Scenario: A queued message is delivered when the turn ends
+- **WHEN** the running turn completes on its own while messages are held
+- **THEN** the workspace delivers the oldest held message to the agent
+- **AND** it leaves the queue presentation and starts its own turn at the end of the timeline
+
+#### Scenario: A queued message can be removed
+- **WHEN** the user removes a message that is still held
+- **THEN** it disappears from the queue on every client
+- **AND** it is never delivered to the agent
+
+#### Scenario: A full queue refuses further submissions
+- **WHEN** a conversation's held queue is at its bound and the user submits another prompt while the agent works
+- **THEN** the submission is refused and the draft is preserved
+- **AND** the messages already held are unaffected
+
+#### Scenario: Removing an already-delivered message is refused
+- **WHEN** a removal arrives for a message the workspace has already delivered to the agent
+- **THEN** the removal is refused without altering the conversation
+- **AND** the client learns the message is no longer held
+
+#### Scenario: Cancellation preserves completed content
+- **WHEN** the user cancels a running turn
+- **THEN** OpenCode is asked to abort that turn
+- **AND** content and tool activity already received remain in the timeline with an interrupted outcome
+
+#### Scenario: Cancellation leaves the queue dormant
+- **WHEN** the user cancels a running turn while messages are held
+- **THEN** the held messages remain queued, visible, and removable
+- **AND** none of them is delivered as a consequence of the cancellation
+
+#### Scenario: A new submission resumes a dormant queue
+- **WHEN** the user submits a prompt while the conversation is idle and messages are held from before a cancellation
+- **THEN** the new message joins the end of the queue
+- **AND** delivery resumes from the head of the queue in submission order
+
+#### Scenario: The surface names its agent
+- **WHEN** a conversation is open and the agent has reported its identity
+- **THEN** the surface names that agent
+- **AND** no user-visible text names a different agent
+
+#### Scenario: Ways of working are presented as modes
+- **WHEN** the agent offers more than one way of working, such as building and planning
+- **THEN** the user selects between them as modes
+- **AND** they are not labelled agents
+
+#### Scenario: An undeclared proactive control leaves nothing behind
+- **WHEN** the agent does not declare the capability behind a control the surface offers the user to start an operation, such as a mode or model picker
+- **THEN** that control is absent from the surface
+- **AND** the controls for declared capabilities are unaffected

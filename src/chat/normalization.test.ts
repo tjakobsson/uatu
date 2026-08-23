@@ -610,3 +610,59 @@ describe("user message attachments", () => {
     expect(JSON.stringify(items)).not.toContain("base64");
   });
 });
+
+describe("durable-store user messages (post-turn classic form)", () => {
+  test("synthetic captions stay out of the text and give the attachment its id back", () => {
+    // The exact shape a live session's durable store held after a real turn:
+    // real text, a synthetic Read caption carrying the stored path, and the
+    // file part rewritten to an inline data: URL.
+    const items = normalizeProviderMessage({
+      info: { id: "msg_9", role: "user", time: { created: 3 } },
+      parts: [
+        { type: "text", text: "Reply with the single word ok." },
+        { type: "text", synthetic: true, text: 'Called the Read tool with the following input: {"filePath":"/Users/x/.local/state/uatu/attachments/14adeeded8179012/eb638c39-4073-490b-b957-f5d5d1544a48.png"}' },
+        { type: "file", url: "data:image/png;base64,AAAA", mime: "image/png", filename: "live-check.png" },
+      ],
+    });
+    expect(items).toEqual([{
+      id: "message:msg_9",
+      type: "user_message",
+      createdAt: 3,
+      text: "Reply with the single word ok.",
+      attachments: [{ id: "eb638c39-4073-490b-b957-f5d5d1544a48", name: "live-check.png", mimeType: "image/png" }],
+    }]);
+    expect(JSON.stringify(items)).not.toContain("base64");
+    expect(JSON.stringify(items)).not.toContain("Read tool");
+  });
+
+  test("a file part without any caption stays an id-less placeholder", () => {
+    const items = normalizeProviderMessage({
+      info: { id: "msg_10", role: "user", time: { created: 3 } },
+      parts: [
+        { type: "text", text: "see attached" },
+        { type: "file", url: "data:image/png;base64,AAAA", mime: "image/png", filename: "orphan.png" },
+      ],
+    });
+    expect(items[0]).toEqual(expect.objectContaining({
+      attachments: [{ name: "orphan.png", mimeType: "image/png" }],
+    }));
+  });
+
+  test("captions pair with file parts in order across multiple attachments", () => {
+    const caption = (uuid: string) => ({ type: "text", synthetic: true, text: `Called the Read tool with the following input: {"filePath":"/state/a/${uuid}.webp"}` });
+    const items = normalizeProviderMessage({
+      info: { id: "msg_11", role: "user", time: { created: 3 } },
+      parts: [
+        { type: "text", text: "two images" },
+        caption("11111111-2222-4333-8444-555555555555"),
+        caption("22222222-2222-4333-8444-555555555555"),
+        { type: "file", url: "data:image/webp;base64,AAAA", mime: "image/webp", filename: "one.webp" },
+        { type: "file", url: "data:image/webp;base64,AAAA", mime: "image/webp", filename: "two.webp" },
+      ],
+    });
+    expect((items[0] as { attachments?: unknown }).attachments).toEqual([
+      { id: "11111111-2222-4333-8444-555555555555", name: "one.webp", mimeType: "image/webp" },
+      { id: "22222222-2222-4333-8444-555555555555", name: "two.webp", mimeType: "image/webp" },
+    ]);
+  });
+});
