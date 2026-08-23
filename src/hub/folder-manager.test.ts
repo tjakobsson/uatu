@@ -71,7 +71,12 @@ async function writeJournal(filePath: string, journal: PendingFolderMutation, mo
   await fs.chmod(filePath, mode);
 }
 
-function renameJournal(source: string, destination: string, entries: WorkspaceEntry[]): PendingFolderMutation {
+function renameJournal(
+  source: string,
+  destination: string,
+  entries: WorkspaceEntry[],
+  identities?: { source: { dev: string; ino: string }; claim: { dev: string; ino: string } },
+): PendingFolderMutation {
   return {
     version: 1,
     operation: "rename",
@@ -79,7 +84,13 @@ function renameJournal(source: string, destination: string, entries: WorkspaceEn
     destination,
     before: entries,
     after: entries.map(entry => ({ ...entry, path: path.join(destination, path.relative(source, entry.path)) })),
+    ...(identities === undefined ? {} : { identities }),
   };
+}
+
+async function identityOf(candidate: string): Promise<{ dev: string; ino: string }> {
+  const stats = await fs.lstat(candidate);
+  return { dev: String(stats.dev), ino: String(stats.ino) };
 }
 
 describe("FolderManager validation and unregistered operations", () => {
@@ -529,6 +540,24 @@ describe("FolderManager registered mutations", () => {
     completed(await f.manager.rename({ path: source, name: "vanished" }));
   });
 
+  test("stale alias claims block their canonical create and rename destinations", async () => {
+    const f = await fixture();
+    const alias = path.join(f.root, "legacy-alias");
+    await fs.symlink(f.folders, alias);
+    // Registered through the alias and the folder later vanished: the full
+    // path no longer resolves, but the claim still maps to the canonical
+    // destination via its existing parent.
+    const stale = await f.registry.register(path.join(alias, "vanished"));
+    const source = path.join(f.folders, "source");
+    await fs.mkdir(source);
+
+    await expect(f.manager.create({ parent: f.folders, name: "vanished" })).rejects.toMatchObject({ code: "conflict" });
+    await expect(f.manager.rename({ path: source, name: "vanished" })).rejects.toMatchObject({ code: "conflict" });
+    expect(await exists(path.join(f.folders, "vanished"))).toBe(false);
+    // The stale claim itself is now canonically spelled.
+    expect(f.registry.byId(stale.id)?.path).toBe(path.join(f.folders, "vanished"));
+  });
+
   test("removes an alias-registered workspace addressed by its canonical path", async () => {
     const f = await fixture();
     const project = path.join(f.folders, "empty");
@@ -585,21 +614,71 @@ describe("FolderManager journal recovery", () => {
   });
 
   test("recovers a crash between the destination claim and the rename", async () => {
-    // renameWithoutReplacement journals, then mkdir-claims the destination,
-    // then renames. A crash between the last two steps leaves source plus
-    // an empty destination placeholder — an ordinary crash state that must
-    // not brick startup.
+    // The registered rename claims the destination, journals both
+    // identities, then renames. A crash before the rename leaves source
+    // plus our journaled empty placeholder — an ordinary crash state that
+    // must not brick startup.
     const f = await fixture();
     const source = path.join(f.folders, "source");
     const destination = path.join(f.folders, "destination");
     await Promise.all([fs.mkdir(source), fs.mkdir(destination)]);
     const entry = await f.registry.register(source);
-    await writeJournal(f.journalPath, renameJournal(source, destination, [entry]));
+    await writeJournal(f.journalPath, renameJournal(source, destination, [entry], {
+      source: await identityOf(source),
+      claim: await identityOf(destination),
+    }));
 
     await f.manager.recover();
     expect(f.registry.byId(entry.id)?.path).toBe(source);
     expect(await exists(destination)).toBe(false);
     expect(await exists(f.journalPath)).toBe(false);
+  });
+
+  test("recovers a completed rename whose source was recreated by a foreign process", async () => {
+    // Crash after the rename but before the registry update, with a foreign
+    // process recreating the source: the destination carries the recorded
+    // SOURCE identity (the moved folder), so recovery completes to the
+    // after-state and never deletes the renamed folder.
+    const f = await fixture();
+    const source = path.join(f.folders, "source");
+    const destination = path.join(f.folders, "destination");
+    await fs.mkdir(destination);
+    const entry = await f.registry.register(source);
+    const journal = renameJournal(source, destination, [entry], {
+      // The destination IS the moved source directory.
+      source: await identityOf(destination),
+      claim: { dev: "0", ino: "0" },
+    });
+    await fs.mkdir(source);
+    await writeJournal(f.journalPath, journal);
+
+    await f.manager.recover();
+    expect(f.registry.byId(entry.id)?.path).toBe(destination);
+    expect(await exists(destination)).toBe(true);
+    expect(await exists(source)).toBe(true);
+    expect(await exists(f.journalPath)).toBe(false);
+  });
+
+  test("fails loudly when both exist and neither identity matches", async () => {
+    // An empty destination that is neither our claim nor the moved source
+    // is a foreign directory; emptiness alone must never authorize rmdir.
+    // The same applies to journals from builds without recorded identities.
+    const f = await fixture();
+    const source = path.join(f.folders, "source");
+    const destination = path.join(f.folders, "destination");
+    await Promise.all([fs.mkdir(source), fs.mkdir(destination)]);
+    const entry = await f.registry.register(source);
+    await writeJournal(f.journalPath, renameJournal(source, destination, [entry], {
+      source: { dev: "0", ino: "1" },
+      claim: { dev: "0", ino: "2" },
+    }));
+    await expect(f.manager.recover()).rejects.toThrow("ambiguous pending folder rename");
+    expect(await exists(destination)).toBe(true);
+
+    await writeJournal(f.journalPath, renameJournal(source, destination, [entry]));
+    await expect(f.manager.recover()).rejects.toThrow("ambiguous pending folder rename");
+    expect(await exists(destination)).toBe(true);
+    expect(await exists(f.journalPath)).toBe(true);
   });
 
   test.each([
