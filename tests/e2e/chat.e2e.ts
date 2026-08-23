@@ -427,14 +427,19 @@ test.describe("desktop OpenCode chat", () => {
     await expect(page.locator("#chat-title")).toHaveText("First");
 
     await control(request, { action: "failPrompt" });
+    const failed = page.waitForResponse(response => response.url().endsWith("/prompts"));
     await page.locator("#chat-input").fill("doomed message");
     await page.locator("#chat-send").click();
     // Switch away inside the fixture's 500ms in-flight window, before the
     // rejection lands.
     await page.locator("#chat-conversation-select").selectOption(second.conversation.id);
-    await expect(page.locator("#chat-composer-error")).toContainText("Draft restored");
+    await failed;
+    // The refusal belongs to the conversation that submitted: nothing
+    // flashes here, and the reason waits with the restored draft.
+    await expect(page.locator("#chat-composer-error")).toBeHidden();
 
     await page.locator("#chat-conversation-select").selectOption(first.conversation.id);
+    await expect(page.locator("#chat-composer-error")).toContainText("Draft restored");
     await expect(page.locator("#chat-input")).toHaveValue("doomed message");
   });
 
