@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
 
-import { LOCAL_CREDENTIAL_ASSIGNMENT_WARNING } from "./credential-context";
+import { LOCAL_CREDENTIAL_ASSIGNMENT_WARNING, parseCloneRemote } from "./credential-context";
 import { clonePage, dashboardPage, loginPage, settingsPage, stoppedSessionPage } from "./pages";
 
 const htmlFor = {
@@ -30,6 +30,20 @@ function folderMutationFunction(html: string) {
       path: string,
       body: Record<string, unknown>,
     ) => Promise<unknown>;
+}
+
+// Extracts the clone form's retained-host resolution (remoteHostFromUrl +
+// retainedHostFor) with the clone-url input faked, so the client's parsing
+// can be asserted against the server's for the same remote spelling.
+function retainedHostFunction(html: string) {
+  const script = clientScript(html);
+  const start = script.indexOf("function remoteHostFromUrl");
+  const end = script.indexOf("function updateCloneCredentials", start);
+  const source = script.slice(start, end);
+  return (remote: string, credential: { type: string; metadata: Record<string, string> }) =>
+    new Function("document", `${source}\nreturn retainedHostFor;`)({
+      getElementById: () => ({ value: remote }),
+    })(credential) as string | null;
 }
 
 describe("authenticated Hub pages", () => {
@@ -152,6 +166,30 @@ describe("clone page", () => {
     // HTTPS hosts are normalized like the backend before token matching.
     expect(html).toContain('parsed.hostname.endsWith(".")');
     expect(html).not.toContain("at > 0");
+  });
+
+  test("resolves the retained SSH host from the same remote spellings the server parses", () => {
+    const retainedHostFor = retainedHostFunction(htmlFor.clone());
+    const sshKey = { type: "ssh", metadata: {} };
+    const token = { type: "token", metadata: { host: "github.example.com" } };
+    // A bracketed IPv6 literal survives whole — cutting it at the first
+    // colon (or falling back to github.com) would commit the retained key
+    // for a host the cloned origin never presents.
+    for (const remote of [
+      "git@[2001:db8::1]:owner/repo.git",
+      "ssh://git@[2001:db8::1]/owner/repo.git",
+      "git@github.example.com:owner/repo.git",
+      "ssh://git@github.example.com/owner/repo.git",
+      "git@192.0.2.10:owner/repo.git",
+      "git@[github.example.com]:owner/repo.git",
+    ]) {
+      expect(retainedHostFor(remote, sshKey)).toBe(parseCloneRemote(remote).host!);
+    }
+    expect(retainedHostFor("git@[2001:db8::1]:owner/repo.git", sshKey)).toBe("[2001:db8::1]");
+    // Tokens still pin their provider host, and an unusable remote keeps
+    // the existing default.
+    expect(retainedHostFor("git@[2001:db8::1]:owner/repo.git", token)).toBe("github.example.com");
+    expect(retainedHostFor("not a remote", sshKey)).toBe("github.com");
   });
 
   test("renders accessible folder management controls and a prefilled rename dialog", () => {

@@ -11,7 +11,7 @@ import logoAssetPath from "../assets/uatu-logo.svg" with { type: "file" };
 import { Buffer } from "node:buffer";
 
 import { escapeHtml } from "../shared/html";
-import { LOCAL_CREDENTIAL_ASSIGNMENT_WARNING } from "./credential-context";
+import { LOCAL_CREDENTIAL_ASSIGNMENT_WARNING, SCP_REMOTE_PATTERN } from "./credential-context";
 
 // Inline the brand SVG (the file ships a fixed navy fill; the dark-scheme
 // retint below only reaches presentation attributes when the markup is
@@ -2055,8 +2055,15 @@ function remoteHostFromUrl(url) {
       return hostname.toLowerCase() + (parsed.port ? ":" + parsed.port : "");
     }
   } catch {}
-  const scp = /^(?:[^@/:\\s]+@)?([^/:\\s]+):/.exec(value);
-  return scp ? scp[1].toLowerCase() : null;
+  // The server's clone-remote pattern, inlined so a bracketed IPv6 literal
+  // is captured whole instead of being cut at its first colon. Brackets
+  // survive on an address (that is the stored host form) and are stripped
+  // from a decorative bracketing of a plain host, exactly as the server
+  // does before normalizing.
+  const scp = /${SCP_REMOTE_PATTERN.source}/.exec(value);
+  if (!scp) return null;
+  const literal = scp[1].toLowerCase();
+  return literal.startsWith("[") && !literal.includes(":") ? literal.replace(/^\\[|\\]$/g, "") : literal;
 }
 function retainedHostFor(credential) {
   if (!credential) return null;

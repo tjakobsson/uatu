@@ -248,6 +248,46 @@ describe("SessionManager.stop during an in-flight start", () => {
     expect(sessions.runningIds()).toEqual([]);
   });
 
+  test("stopAll waits for a lifecycle-held start and terminates its child", async () => {
+    // Onboarding's in-commit start runs inside a lifecycle section it
+    // already holds, so it never publishes into `starting`. Shutdown
+    // arriving while the backend spawn is in flight must still cover it,
+    // or the child finishes spawning after the state lease is released.
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-stopall-held-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    await registry.register("/srv/workspaces/committing");
+
+    let releaseStart!: (session: RunningSession) => void;
+    const backend: SessionBackend = {
+      start: () =>
+        new Promise<RunningSession>(resolve => {
+          releaseStart = resolve;
+        }),
+    };
+    const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
+
+    // The commit holds the queue and starts inside it.
+    const commit = sessions.runExclusive("committing", () => sessions.startWhileLifecycleQueueHeld("committing"));
+    await tick();
+    expect(sessions.isRunning("committing")).toBe(false);
+    expect(sessions.isStarting("committing")).toBe(false);
+
+    let stopped = false;
+    const stopAllPromise = sessions.stopAll();
+    await tick();
+    // The spawn resolves after shutdown began — exactly the leak window.
+    releaseStart(fakeSession("committing", () => {
+      stopped = true;
+    }));
+
+    await commit;
+    await stopAllPromise;
+    expect(stopped).toBe(true);
+    expect(sessions.runningIds()).toEqual([]);
+  });
+
   test("stopAll attempts every session and aggregates failures", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-stopall-fail-"));
     tempDirectories.push(dir);

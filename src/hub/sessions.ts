@@ -30,6 +30,12 @@ export class SessionManager {
   // the chain — so gates (forget) and joiners see a queued start, not just
   // an executing one. Cleared when the call settles.
   private readonly starting = new Map<string, Promise<RunningSession>>();
+  // In-flight startWhileLifecycleQueueHeld calls, counted per workspace.
+  // These never enter `starting`: that map publishes queue-ENTERING start()
+  // calls, and a joiner handed one of these would be waiting on a start it
+  // cannot serialize against. Shutdown must still see them, or a child
+  // spawning inside an onboarding commit outlives stopAll().
+  private readonly lifecycleHeldStarts = new Map<string, number>();
   private readonly startFailureCallbacks = new Map<string, Array<() => Promise<void>>>();
   // Per-workspace operation chain tails.
   private readonly lifecycle = new Map<string, Promise<unknown>>();
@@ -165,7 +171,11 @@ export class SessionManager {
   // two-store commit, so a forget queued mid-commit cannot slip between
   // the commit and the start.
   async startWhileLifecycleQueueHeld(workspaceId: string): Promise<RunningSession> {
-    {
+    // Registered for the whole call — including the backend spawn — so a
+    // shutdown arriving mid-commit enqueues a stop behind the section that
+    // holds this queue, and waits for it there.
+    this.lifecycleHeldStarts.set(workspaceId, (this.lifecycleHeldStarts.get(workspaceId) ?? 0) + 1);
+    try {
       const existing = this.running.get(workspaceId);
       if (existing) {
         return existing;
@@ -218,6 +228,10 @@ export class SessionManager {
         }
       });
       return session;
+    } finally {
+      const remaining = (this.lifecycleHeldStarts.get(workspaceId) ?? 1) - 1;
+      if (remaining > 0) this.lifecycleHeldStarts.set(workspaceId, remaining);
+      else this.lifecycleHeldStarts.delete(workspaceId);
     }
   }
 
@@ -249,8 +263,10 @@ export class SessionManager {
 
   async stopAll(): Promise<void> {
     // Every workspace with a live child OR a pending/queued start gets a
-    // stop enqueued behind whatever it is doing.
-    const ids = new Set([...this.running.keys(), ...this.starting.keys()]);
+    // stop enqueued behind whatever it is doing — including a start running
+    // inside a lifecycle section someone else holds (onboarding's in-commit
+    // start), which the enqueued stop follows out of that section.
+    const ids = new Set([...this.running.keys(), ...this.starting.keys(), ...this.lifecycleHeldStarts.keys()]);
     const results = await Promise.allSettled([...ids].map(id => this.stop(id)));
     const failures = results.flatMap(result => result.status === "rejected" ? [result.reason] : []);
     if (failures.length > 0) throw new AggregateError(failures, "one or more workspace sessions failed to stop");
