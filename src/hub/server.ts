@@ -38,7 +38,9 @@ import {
   type CredentialApiServices,
 } from "./credential-api";
 import { cloneTargetName, gitInit, probeGitRepository, validCloneFolderName } from "./git";
+import { FolderManagerError, type FolderManager } from "./folder-manager";
 import { clonePage, dashboardPage, loginPage, settingsPage, stoppedSessionPage } from "./pages";
+import type { PathReservationCoordinator } from "./path-reservations";
 import {
   bridgeWebSocketHandlers,
   childUrlFor,
@@ -65,6 +67,8 @@ export type HubDeps = {
   sessions: SessionManager;
   sessionStore: HubSessionStore;
   personalState: PersonalWorkspaceStateStore;
+  folderManager?: Pick<FolderManager, "create" | "rename" | "remove">;
+  reservations?: PathReservationCoordinator;
   cloneJobs?: CloneJobManager;
   cloneCredentials?: CloneCredentialResolver;
   credentialApi?: CredentialApiServices;
@@ -114,6 +118,7 @@ export function createHubFetchHandler(deps: HubDeps) {
     registry,
     sessions,
     credentials: deps.cloneCredentials,
+    reservations: deps.reservations,
   });
   const limiter = new LoginRateLimiter();
   const credentialLimiter = new CredentialOperationRateLimiter();
@@ -563,6 +568,50 @@ export function createHubFetchHandler(deps: HubDeps) {
     });
   };
 
+  const folderError = (error: unknown): Response => {
+    if (!(error instanceof FolderManagerError)) {
+      return json(500, { error: "folder operation failed" }, NO_STORE_HEADERS);
+    }
+    const status = error.code === "invalid-input"
+      ? 400
+      : error.code === "not-found"
+        ? 404
+        : error.code === "conflict" || error.code === "not-empty"
+          ? 409
+          : 500;
+    return json(status, { error: error.message }, NO_STORE_HEADERS);
+  };
+
+  const mutateFolder = async (
+    request: Request,
+    operation: "create" | "rename" | "remove",
+  ): Promise<Response> => {
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return json(400, { error: "invalid JSON body" }, NO_STORE_HEADERS);
+    }
+    try {
+      if (operation === "create") {
+        return json(200, await deps.folderManager!.create(body), NO_STORE_HEADERS);
+      }
+      const result = operation === "rename"
+        ? await deps.folderManager!.rename(body)
+        : await deps.folderManager!.remove(body);
+      if (result.status === "needs-stop") {
+        return json(409, {
+          error: "affected workspace sessions must be stopped",
+          needsStop: true,
+          workspaceIds: result.workspaceIds,
+        }, NO_STORE_HEADERS);
+      }
+      return json(200, result.value, NO_STORE_HEADERS);
+    } catch (error) {
+      return folderError(error);
+    }
+  };
+
   return async (request: Request, server: HubServer): Promise<Response | undefined> => {
     const url = new URL(request.url);
     const pathname = url.pathname;
@@ -912,6 +961,11 @@ export function createHubFetchHandler(deps: HubDeps) {
       if (pathname === "/api/hub/workspaces") {
         return createWorkspace(request);
       }
+      if (deps.folderManager) {
+        if (pathname === "/api/hub/folders/create") return mutateFolder(request, "create");
+        if (pathname === "/api/hub/folders/rename") return mutateFolder(request, "rename");
+        if (pathname === "/api/hub/folders/remove") return mutateFolder(request, "remove");
+      }
       if (pathname === "/api/hub/clone-jobs") {
         return createCloneJob(request, session.user);
       }
@@ -998,6 +1052,7 @@ export function startHubServer(deps: HubDeps) {
     registry: deps.registry,
     sessions: deps.sessions,
     credentials: deps.cloneCredentials,
+    reservations: deps.reservations,
   });
   const handler = createHubFetchHandler({ ...deps, cloneJobs });
   const server = Bun.serve<BridgeData>({

@@ -184,6 +184,40 @@ describe("Hub credential contracts", () => {
   });
 });
 
+describe("Hub folder mutation contracts", () => {
+  test("requests, successes, and stop conflicts are closed", async () => {
+    const openapi = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");
+    const compile = (name: string) => createAjv().compile(schemaForAjv(openapi.components.schemas[name], openapi.components.schemas));
+
+    const createRequest = compile("CreateFolderRequest");
+    expect(createRequest({ parent: "/src", name: "new-project" })).toBe(true);
+    expect(createRequest({ parent: "/src", name: "new-project", extra: true })).toBe(false);
+    expect(createRequest({ parent: "/src", name: ".hidden" })).toBe(false);
+    expect(createRequest({ parent: "/src", name: "nested/folder" })).toBe(false);
+
+    const renameRequest = compile("RenameFolderRequest");
+    expect(renameRequest({ path: "/src/old", name: "new", stop: true })).toBe(true);
+    expect(renameRequest({ path: "/src/old", name: "new", stop: true, extra: true })).toBe(false);
+    const removeRequest = compile("RemoveFolderRequest");
+    expect(removeRequest({ path: "/src/old" })).toBe(true);
+    expect(removeRequest({ path: "/src/old", stop: "yes" })).toBe(false);
+
+    expect(compile("CreateFolderResult")({ path: "/src/new" })).toBe(true);
+    expect(compile("CreateFolderResult")({ path: "/src/new", extra: true })).toBe(false);
+    expect(compile("RenameFolderResult")({ path: "/src/new", workspaceIds: ["old"] })).toBe(true);
+    expect(compile("RenameFolderResult")({ path: "/src/new", workspaceIds: [], extra: true })).toBe(false);
+    expect(compile("RemoveFolderResult")({ path: "/src/old", workspaceId: "old" })).toBe(true);
+    expect(compile("RemoveFolderResult")({ path: "/src/old", removed: true })).toBe(false);
+
+    expect(compile("FolderMutationError")({ error: "destination already exists" })).toBe(true);
+    expect(compile("FolderMutationError")({ error: "conflict", needsStop: true })).toBe(false);
+    const stopConflict = compile("FolderStopConflict");
+    expect(stopConflict({ error: "affected workspace sessions must be stopped", needsStop: true, workspaceIds: ["old"] })).toBe(true);
+    expect(stopConflict({ error: "affected workspace sessions must be stopped", needsStop: false, workspaceIds: ["old"] })).toBe(false);
+    expect(stopConflict({ error: "affected workspace sessions must be stopped", needsStop: true, workspaceIds: [], extra: true })).toBe(false);
+  });
+});
+
 describe("structured question answers", () => {
   test("requires ordered non-empty answer arrays and documents custom strings", async () => {
     const openapi = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");

@@ -16,6 +16,7 @@ import {
   ensureCredentialStateDirs,
   ensureCanonicalStateDir,
   ensureStateDir,
+  folderMutationJournalPath,
   personalWorkspaceStatePath,
   registryPath,
   resolveHubStateRoot,
@@ -108,6 +109,7 @@ describe("resolveHubStateRoot", () => {
   test("persistent state and credential paths live under the state root", () => {
     expect(registryPath("/s")).toBe("/s/registry.json");
     expect(personalWorkspaceStatePath("/s")).toBe("/s/personal-workspace-state.json");
+    expect(folderMutationJournalPath("/s")).toBe("/s/pending-folder-mutation.json");
     expect(sessionsPath("/s")).toBe("/s/sessions.json");
     expect(credentialsPath("/s")).toBe("/s/credentials.json");
     expect(credentialToolsPath("/s")).toBe("/s/credential-tools.json");
