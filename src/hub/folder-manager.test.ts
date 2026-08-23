@@ -697,6 +697,13 @@ describe("FolderManager registered mutations", () => {
     // Both twins survive untouched; canonical lookups serve the canonical one.
     expect(f.registry.byId(canonicalTwin.id)?.path).toBe(project);
     expect(f.registry.byId(aliasTwin.id)?.path).toBe(path.join(alias, "project"));
+
+    // Mutations touching the collided tree itself must refuse: lookups
+    // would coordinate only the canonical twin and strand the alias one.
+    await expect(f.manager.rename({ path: project, name: "moved" })).rejects.toMatchObject({ code: "conflict" });
+    await expect(f.manager.remove({ path: project })).rejects.toMatchObject({ code: "conflict" });
+    await expect(f.manager.rename({ path: f.folders, name: "parent-moved" })).rejects.toMatchObject({ code: "conflict" });
+    expect(await exists(project)).toBe(true);
   });
 
   test("stale alias claims block their canonical create and rename destinations", async () => {
@@ -932,6 +939,28 @@ describe("FolderManager journal recovery", () => {
     await f.manager.recover();
     expect(f.registry.byId(entry.id)).toEqual({ ...legacyEntry, displayName: "legacy-repo" });
     expect(await exists(f.journalPath)).toBe(false);
+  });
+
+  test("removal recovery refuses any content at the source, even with a matching identity", async () => {
+    // Inode numbers are reusable after an rmdir, so a matching identity
+    // cannot prove the directory is ours. Emptiness can: the removal only
+    // ever deletes an EMPTY directory, so any content marks a directory
+    // this journal never removed.
+    const f = await fixture();
+    const source = path.join(f.folders, "source");
+    await fs.mkdir(source);
+    const entry = await f.registry.register(source);
+    await fs.writeFile(path.join(source, "foreign.txt"), "foreign");
+    await writeJournal(f.journalPath, {
+      version: 1,
+      operation: "remove",
+      source,
+      entry,
+      identity: await identityOf(source),
+    });
+    await expect(f.manager.recover()).rejects.toThrow("unrecognized directory");
+    expect(await fs.readFile(path.join(source, "foreign.txt"), "utf8")).toBe("foreign");
+    expect(await exists(f.journalPath)).toBe(true);
   });
 
   test("removal recovery refuses a recreated directory at the source", async () => {
