@@ -1566,6 +1566,122 @@ describe("hub end to end", () => {
     }
   }, 60_000);
 
+  test("forget refuses an id re-minted for another folder while it waits for the workspace queue", async () => {
+    // Two folders with the SAME basename, so the second mints the first's
+    // slug once the first frees it. Both are registered through the route,
+    // the way a user's second folder would be.
+    const original = path.join(tempRoot, "reuse-original", "reused-slug");
+    const newcomer = path.join(tempRoot, "reuse-newcomer", "reused-slug");
+    for (const folder of [original, newcomer]) {
+      execFileSync("mkdir", ["-p", folder]);
+      execFileSync("git", ["init"], { cwd: folder, stdio: "ignore" });
+    }
+    const registration = await fetch(`${origin}/api/hub/workspaces`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ path: original, start: false }),
+    });
+    expect(registration.status).toBe(200);
+    const workspaceId = ((await registration.json()) as { id: string }).id;
+    expect(registry.byId(workspaceId)?.path).toBe(original);
+
+    // Occupy the workspace's lifecycle queue the way a registered folder
+    // rename or removal does, and let the forget queue behind it.
+    let releaseQueue!: () => void;
+    const held = new Promise<void>(resolve => {
+      releaseQueue = resolve;
+    });
+    const holding = sessions.runExclusive(workspaceId, () => held);
+    const forgetting = fetch(`${origin}/api/hub/workspaces/${workspaceId}/forget`, {
+      method: "POST",
+      headers: { cookie, origin },
+    });
+    try {
+      // Ample time for an in-process request to reach the route, resolve the
+      // workspace, and queue behind the hold.
+      await Bun.sleep(250);
+
+      // A registered removal of the original completes normally: the entry
+      // is gone and its journal cleared, so the forget's fence sees nothing.
+      expect(await registry.remove(workspaceId)).toBe(true);
+      // A registration at a NON-overlapping path takes no lifecycle queue
+      // at all with start:false, so it claims the freed slug while the
+      // forget still waits.
+      const reregistration = await fetch(`${origin}/api/hub/workspaces`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie, origin },
+        body: JSON.stringify({ path: newcomer, start: false }),
+      });
+      expect(reregistration.status).toBe(200);
+      expect(((await reregistration.json()) as { id: string }).id).toBe(workspaceId);
+      await personalState.patch("tobias", workspaceId, { documentPath: "README.md" });
+
+      releaseQueue();
+      await holding;
+
+      const response = await forgetting;
+      // The newcomer is untouched: its registration, personal state and (with
+      // a credential API wired) its assignments belong to a workspace this
+      // request never described.
+      expect(registry.byId(workspaceId)?.path).toBe(newcomer);
+      expect(personalState.get("tobias", workspaceId).documentPath).toBe("README.md");
+      expect(response.status).toBe(409);
+      await assertContract("POST", "/api/hub/workspaces/{workspaceId}/forget", response);
+      expect(await response.json()).toEqual({
+        error: `workspace id now names a different registration: ${workspaceId}`,
+      });
+    } finally {
+      releaseQueue();
+      await holding.catch(() => undefined);
+      await forgetting.catch(() => undefined);
+      await personalState.removeWorkspace(workspaceId);
+      await registry.remove(workspaceId);
+    }
+  }, 60_000);
+
+  test("forget reports an unknown workspace when the registration goes while it waits", async () => {
+    const folder = path.join(tempRoot, "forget-vanished", "vanished-slug");
+    execFileSync("mkdir", ["-p", folder]);
+    execFileSync("git", ["init"], { cwd: folder, stdio: "ignore" });
+    const registration = await fetch(`${origin}/api/hub/workspaces`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ path: folder, start: false }),
+    });
+    expect(registration.status).toBe(200);
+    const workspaceId = ((await registration.json()) as { id: string }).id;
+
+    let releaseQueue!: () => void;
+    const held = new Promise<void>(resolve => {
+      releaseQueue = resolve;
+    });
+    const holding = sessions.runExclusive(workspaceId, () => held);
+    const forgetting = fetch(`${origin}/api/hub/workspaces/${workspaceId}/forget`, {
+      method: "POST",
+      headers: { cookie, origin },
+    });
+    try {
+      await Bun.sleep(250);
+      // A registered removal ahead of the forget unregistered it and cleaned
+      // its personal state and assignments on the way out, leaving nothing
+      // for this request to finish.
+      expect(await registry.remove(workspaceId)).toBe(true);
+      releaseQueue();
+      await holding;
+
+      const response = await forgetting;
+      expect(response.status).toBe(404);
+      await assertContract("POST", "/api/hub/workspaces/{workspaceId}/forget", response);
+      expect(await response.json()).toEqual({ error: `unknown workspace: ${workspaceId}` });
+      expect(registry.byId(workspaceId)).toBeUndefined();
+    } finally {
+      releaseQueue();
+      await holding.catch(() => undefined);
+      await forgetting.catch(() => undefined);
+      await registry.remove(workspaceId);
+    }
+  }, 60_000);
+
   test("forget unregisters a stopped workspace and refuses a running one", async () => {
     // plain-folder was registered (and stopped) by the init-offer test above.
     const runningRefusal = await fetch(`${origin}/api/hub/workspaces/myproject/forget`, {

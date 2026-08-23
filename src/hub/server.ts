@@ -1238,14 +1238,55 @@ export function createHubFetchHandler(deps: HubDeps) {
         // first, so the forget would delete the personal state and
         // credential assignments of a registration recovery then restores.
         try {
-          await sessions.runWhileStopped(workspaceId, async () => {
+          type ForgetOutcome = "forgotten" | "unknown" | "reused";
+          const outcome = await sessions.runWhileStopped(workspaceId, async (): Promise<ForgetOutcome> => {
             await deps.folderManager?.assertNoPendingMutation();
+            // Every deletion below is keyed by the id alone, and that id can
+            // have been re-minted for a DIFFERENT folder while this callback
+            // waited for the queue: a registered removal ahead of it frees
+            // the basename slug (and clears the journal the fence just
+            // read), and an already-admitted start:false registration or
+            // clone at a non-overlapping path takes no lifecycle queue at
+            // all, so it can claim the freed slug before the queue grants
+            // this callback. The registry's current occupant is therefore
+            // the workspace this request resolved only when it IS the
+            // complete captured entry — same id, same path, same backend.
+            const current = registry.byId(workspaceId);
+            if (!current) {
+              // The registration this request resolved is already gone, and
+              // whatever took it — a registered folder removal, another
+              // forget — deleted the personal state and credential
+              // assignments with it; one that failed partway would still be
+              // holding the journal the fence above reads. So nothing is
+              // left to finish under this id, while deleting by id anyway
+              // would destroy the records of whichever workspace mints the
+              // freed slug next. Answered as the same unknown workspace the
+              // route reports at admission: identical condition, observed
+              // one queue grant later.
+              return "unknown";
+            }
+            if (
+              normalizeAbsolutePath(current.path) !== normalizeAbsolutePath(workspace.path)
+              || current.backend !== workspace.backend
+            ) {
+              // A live workspace this request never described. Refused
+              // without touching anything: forgetting it would delete a
+              // registration, personal state and credential assignments the
+              // user never asked about, and the workspace they did ask about
+              // is gone either way.
+              return "reused";
+            }
             await personalState.forgetWorkspace(
               workspaceId,
               () => registry.remove(workspaceId),
               async () => { await deps.credentialApi?.metadata.removeWorkspaceAssignments(workspaceId); },
             );
+            return "forgotten";
           });
+          if (outcome === "unknown") return json(404, { error: `unknown workspace: ${workspaceId}` });
+          if (outcome === "reused") {
+            return json(409, { error: `workspace id now names a different registration: ${workspaceId}` });
+          }
           return json(200, { id: workspaceId, forgotten: true });
         } catch (error) {
           if (error instanceof FolderManagerError) return folderError(error);
