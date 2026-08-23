@@ -81,16 +81,6 @@ describe("chat projection", () => {
     ]));
     const retried = noteQueuedMessage(reloaded, { id: "held-1", text: "fast", queuedAt: 2, requestId: "r1" });
     expect(retried.queued).toEqual([]);
-
-    // The same retry after a reload that stripped requestIds: snapshot-loaded
-    // messages carry none, but delivery reuses the held id as the provider
-    // message id, so the delivered item is still recognized by id and the
-    // cached held receipt cannot resurrect a phantom entry.
-    const bare = projectionFromSnapshot(snapshot([
-      { id: "message:held-1", type: "user_message", createdAt: 3, text: "fast" },
-    ]));
-    const retriedBare = noteQueuedMessage(bare, { id: "held-1", text: "fast", queuedAt: 2, requestId: "r1" });
-    expect(retriedBare.queued).toEqual([]);
   });
 
   test("a refused removal drops the stale local entry and is a no-op otherwise", () => {

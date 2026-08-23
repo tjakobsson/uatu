@@ -74,14 +74,8 @@ export function addAcceptedDraft(current: ChatProjection, draft: AcceptedDraft):
  * would show a phantom no later event is guaranteed to clear.
  */
 export function noteQueuedMessage(current: ChatProjection, held: QueuedMessage, sinceRevision = current.queueRevision): ChatProjection {
-  // Delivered detection must survive a projection reload: only the live
-  // confirmation path stamps a requestId on timeline items, but delivery
-  // reuses the held id as the provider message id, so a snapshot-loaded
-  // copy of the delivered message is still recognizable by id. Without
-  // this, a retried acceptance answered from the receipt cache after a
-  // reload would resurrect a phantom entry.
-  const delivered = current.items.some(item => item.id === `message:${held.id}`
-    || (held.requestId !== undefined && item.type === "user_message" && item.requestId === held.requestId));
+  const delivered = held.requestId !== undefined
+    && current.items.some(item => item.type === "user_message" && item.requestId === held.requestId);
   const trustEcho = !delivered && current.queueRevision === sinceRevision;
   const queued = !trustEcho || current.queued.some(entry => entry.id === held.id)
     ? current.queued

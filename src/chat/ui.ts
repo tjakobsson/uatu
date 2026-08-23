@@ -1690,7 +1690,8 @@ export function initChat(): void {
     const conversationId = projection.conversationId;
     const text = input.value;
     const retry = retryRequests.get(conversationId);
-    const requestId = retry?.text === text ? retry.requestId : newRequestId();
+    const retriedRequest = retry?.text === text;
+    const requestId = retriedRequest ? retry!.requestId : newRequestId();
     const configuration = displayedConfiguration();
     const selectedModelRecord = declares("models") && configuration.model
       ? models.find(model => sameModel(model.selection, configuration.model!))
@@ -1735,10 +1736,14 @@ export function initChat(): void {
         // dispatched acceptance becomes a timeline item. The echo carries the
         // pre-flight queue revision so a delivery or removal that outran the
         // acceptance is not resurrected as a phantom entry — and stands down
-        // entirely if the projection was reloaded meanwhile, because the
-        // fresh snapshot already told the truth about the queue.
+        // entirely after a reload or on a retried request. The echo exists
+        // only to bridge a FRESH acceptance and its queue event: a retry's
+        // response can be a replayed receipt for a message the stream has
+        // since resolved (delivered, or removed by another client) with
+        // nothing durable left to check it against, while anything the first
+        // attempt really held has long been stated by the stream itself.
         projection = accepted.held
-          ? projectionEpoch === projectionEpochAtSubmit
+          ? !retriedRequest && projectionEpoch === projectionEpochAtSubmit
             ? noteQueuedMessage(projection, { id: accepted.messageId, text, queuedAt: Date.now(), requestId }, queueRevisionAtSubmit)
             : removeAcceptedDraft(projection, requestId)
           : confirmAcceptedDraft(projection, { requestId, messageId: accepted.messageId, text });
