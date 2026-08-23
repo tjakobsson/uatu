@@ -2038,15 +2038,18 @@ export function initChat(): void {
   });
   send.addEventListener("click", async () => {
     if (!projection || (projection.status !== "running" && projection.status !== "sending") || cancelling) return;
+    // Captured for the round trip: a failure landing after a switch belongs
+    // to the conversation whose turn was being cancelled.
+    const conversationId = projection.conversationId;
     cancelling = true;
-    setComposerError(null);
+    setComposerError(null, conversationId);
     noteComposer("Cancelling...");
     syncControls();
-    try { await api.cancel(projection.conversationId, newRequestId()); }
+    try { await api.cancel(conversationId, newRequestId()); }
     catch (error) {
       const message = messageOf(error);
       announce(message, true);
-      setComposerError(`Cancellation failed: ${message}`);
+      setComposerError(`Cancellation failed: ${message}`, conversationId);
     }
     finally { cancelling = false; syncControls(); }
   });
@@ -2230,7 +2233,10 @@ export function initChat(): void {
         scheduleRender(true);
       }
       noteComposer(accepted.held ? "Queued — sends when the agent is ready" : "Message accepted");
-      setComposerError(null);
+      // Addressed to the submitted conversation, not the selection: the
+      // acceptance may land after a switch, and clearing the selected
+      // conversation's own error would erase an unrelated reason.
+      setComposerError(null, conversationId);
       // The message is accepted; the local previews have no further use.
       for (const staged of stagedAttachments) URL.revokeObjectURL(staged.previewUrl);
       releaseAttachmentReserve();
@@ -2259,7 +2265,9 @@ export function initChat(): void {
         mergeStoredDraft();
       }
       submitting = false;
-      setComposerError(`${message}. Draft restored.`);
+      // Same addressing as the success clear: a refusal that lands after a
+      // switch waits with its own conversation instead of flashing here.
+      setComposerError(`${message}. Draft restored.`, conversationId);
       noteComposer("Message not accepted; draft restored");
       syncControls();
       return;

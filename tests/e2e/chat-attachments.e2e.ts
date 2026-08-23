@@ -620,6 +620,23 @@ test.describe("upload refusals stay with their conversation", () => {
     await expect(page.locator("#chat-composer-error")).toBeHidden();
     await page.unroute("**/attachments");
   });
+
+  test("a prompt failure landing after a switch keeps its reason with its conversation", async ({ page, request }) => {
+    const first = await newConversation(page);
+    const second = await newConversation(page);
+    await control(request, { action: "failPrompt" });
+    const failed = page.waitForResponse(response => response.url().endsWith("/prompts"));
+    await page.locator("#chat-input").fill("doomed message");
+    await page.locator("#chat-input").press("Enter");
+    // Switch away while the refusal is in flight: it must not flash here.
+    await page.locator("#chat-conversation-select").selectOption(first);
+    await failed;
+    await expect(page.locator("#chat-composer-error")).toBeHidden();
+    // The failed conversation holds both the restored draft and the reason.
+    await page.locator("#chat-conversation-select").selectOption(second);
+    await expect(page.locator("#chat-composer-error")).toContainText("Draft restored");
+    await expect(page.locator("#chat-input")).toHaveValue("doomed message");
+  });
 });
 
 test.describe("attachment name fallback", () => {
