@@ -148,6 +148,11 @@ export function startSupervisedStartupHeartbeat(
   intervalSeconds: number = STARTUP_HEARTBEAT_INTERVAL_SECONDS,
   spawner: (argv: string[], options: { stdout: "inherit"; stderr: "ignore"; stdin: "ignore" }) => { kill(): void } = (argv, options) => Bun.spawn(argv, options),
 ): () => void {
+  // Windows deliberately keeps the pre-heartbeat behavior: the supervisor's
+  // inactivity window is the whole startup budget there. The sh helper has
+  // no portable Windows equivalent, and with no Windows CI or release
+  // binaries (README: source installs only) a cmd/powershell keepalive
+  // would ship unverifiable; revisit when a Windows runner exists.
   if (!options.exitOnStdinClose || stream.isTTY || process.platform === "win32") {
     return () => undefined;
   }
