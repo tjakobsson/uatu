@@ -3,6 +3,7 @@ import type { OpencodeClient } from "@opencode-ai/sdk/v2/client";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { boundedSet } from "../shared/bounded-map";
 import { UnsupportedVariantSelectionError } from "./provider";
@@ -10,6 +11,7 @@ import type {
   OpenCodeProvider,
   PendingPermission,
   PendingQuestion,
+  ProviderAttachment,
   ProviderEvent,
   ProviderMessage,
   ProviderPage,
@@ -75,7 +77,7 @@ export class SdkV2Provider implements OpenCodeProvider {
     return {
       id: "opencode",
       name: "OpenCode",
-      capabilities: ["modes", "models", "commands", "questions", "permissions", "subagents", "variants", "context", "conversation-rename"],
+      capabilities: ["modes", "models", "commands", "questions", "permissions", "subagents", "variants", "context", "conversation-rename", "attachments"],
     };
   }
 
@@ -108,12 +110,17 @@ export class SdkV2Provider implements OpenCodeProvider {
       .flatMap(provider => Object.values(provider.models).map(model => {
         // OpenCode reports variants as a keyed map; the ids are its keys.
         const variants = Object.keys(model.variants ?? {});
+        // Either signal suffices: `input.image` is the precise claim, and
+        // `attachment` is the coarser legacy flag some catalog entries carry
+        // instead. Absence of both reads as "cannot", never as "unknown".
+        const imageInput = model.capabilities?.input?.image === true || model.capabilities?.attachment === true;
         return {
           selection: { providerId: provider.id, modelId: model.id },
           provider: provider.name,
           name: model.name,
           ...(variants.length ? { variants } : {}),
           ...(model.limit?.context ? { contextLimit: model.limit.context } : {}),
+          ...(imageInput ? { imageInput } : {}),
         };
       }))
       .sort((left, right) => left.provider.localeCompare(right.provider) || left.name.localeCompare(right.name));
@@ -329,14 +336,25 @@ export class SdkV2Provider implements OpenCodeProvider {
     yield* mergeProviderEvents([native.stream, classic.stream], signal);
   }
 
-  async prompt(sessionId: string, input: { id: string; text: string; delivery: "queue"; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
+  async prompt(sessionId: string, input: { id: string; text: string; delivery: "queue"; attachments?: ProviderAttachment[]; model?: ModelSelection; mode?: string; variant?: string }): Promise<{ messageId: string }> {
     const messageId = stableProviderId("msg", input.id);
     if (this.compatibilitySessions.has(sessionId)) {
       ensureSuccess(await this.client.session.promptAsync({
         sessionID: sessionId,
         directory: this.directory,
         messageID: messageId,
-        parts: [{ type: "text", text: input.text }],
+        parts: [
+          { type: "text", text: input.text },
+          // Classic file parts. OpenCode stores these as inline data: URLs
+          // (verified live), so replay linkage is lost on this path — the
+          // normalized attachment degrades to a placeholder by design.
+          ...(input.attachments ?? []).map(attachment => ({
+            type: "file" as const,
+            mime: attachment.mimeType,
+            filename: attachment.name,
+            url: pathToFileURL(attachment.absolutePath).href,
+          })),
+        ],
         ...(input.model ? { model: { providerID: input.model.providerId, modelID: input.model.modelId } } : {}),
         ...(input.mode ? { agent: input.mode } : {}),
         ...(input.variant ? { variant: input.variant } : {}),
@@ -349,10 +367,17 @@ export class SdkV2Provider implements OpenCodeProvider {
     // there is silently dropped — the selection would look accepted while the
     // session kept its previous agent.
     if (input.mode) ensureSuccess(await this.client.v2.session.switchAgent({ sessionID: sessionId, agent: input.mode }));
+    const files = (input.attachments ?? []).map(attachment => ({
+      // `file:` over `data:` because the processes share a disk (design D4):
+      // no base64 inflation, and the v2 projection echoes this uri verbatim,
+      // which is what replay linkage keys on (design D5).
+      uri: pathToFileURL(attachment.absolutePath).href,
+      name: attachment.name,
+    }));
     const admitted = unwrap(await this.client.v2.session.prompt({
       sessionID: sessionId,
       id: messageId,
-      prompt: { text: input.text },
+      prompt: { text: input.text, ...(files.length ? { files } : {}) },
       delivery: input.delivery,
       resume: true,
     }));

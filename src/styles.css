@@ -4832,6 +4832,120 @@ body.is-resizing-chat .chat-resizer {
 .chat-composer-actions > .chat-composer-status { grid-column: 3; }
 .chat-composer-actions > #chat-send { grid-column: 4; }
 
+/* With the attach control present (agent declares attachments) the rail gains
+   a leading fixed column; without it the four-column layout above stands, so
+   capability removal never leaves a hole in the grid. */
+.chat-composer-actions:has(> .chat-attach-button) {
+  grid-template-columns: 2.25rem auto minmax(0, 1fr) 2.25rem 2.55rem;
+}
+.chat-composer-actions:has(> .chat-attach-button) > .chat-attach-button { grid-column: 1; }
+.chat-composer-actions:has(> .chat-attach-button) > .chat-context-usage { grid-column: 2; }
+.chat-composer-actions:has(> .chat-attach-button) > .chat-configuration-trigger { grid-column: 3; }
+.chat-composer-actions:has(> .chat-attach-button) > .chat-composer-status { grid-column: 4; }
+.chat-composer-actions:has(> .chat-attach-button) > #chat-send { grid-column: 5; }
+
+.chat-attach-button {
+  display: grid;
+  place-items: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border: 1.5px solid var(--border-medium);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--text-subtle);
+  cursor: pointer;
+}
+
+.chat-attach-button:hover:not(:disabled) {
+  color: var(--text-strong);
+  border-color: var(--accent, #3b7dd8);
+}
+
+/* Inactive, not hidden: the selected model cannot see images, and the title/
+   aria-label name it as the reason. */
+.chat-attach-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Pending attachments: removable thumbnails above the textarea. */
+.chat-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding-bottom: 0.5rem;
+}
+
+.chat-attachments[hidden] {
+  display: none;
+}
+
+.chat-attachment {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  max-width: 14rem;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 0.5rem;
+  background: var(--surface);
+}
+
+.chat-attachment-thumb {
+  width: 2.25rem;
+  height: 2.25rem;
+  object-fit: cover;
+  border-radius: 0.35rem;
+}
+
+.chat-attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.8em;
+  color: var(--text-subtle);
+}
+
+.chat-attachment-remove {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 1.4rem;
+  height: 1.4rem;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-subtle);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.chat-attachment-remove:hover {
+  color: var(--text-strong);
+  background: var(--surface-raised);
+}
+
+/* A missing-bytes placeholder keeps the message legible without a broken
+   image: same footprint as a thumbnail, labeled by the attachment name. */
+.chat-attachment-missing {
+  display: grid;
+  place-items: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border: 1px dashed var(--border-medium);
+  border-radius: 0.35rem;
+  color: var(--text-subtle);
+  font-size: 0.7em;
+}
+
+/* Drop highlight while a file drag hovers the composer. */
+.chat-composer.is-drop-target {
+  outline: 2px dashed var(--accent, #3b7dd8);
+  outline-offset: -4px;
+}
+
 /* Request states. A user with ten requests could not tell which still needed
    them: every card rendered identically and the queued ones claimed to be
    superseded. State is carried as data so the card, the badge, and the
@@ -5894,6 +6008,15 @@ body.is-resizing-chat .chat-resizer {
 
 @container (min-width: 14rem) {
   .chat-configuration-details:not([hidden]) {
+    display: flex;
+  }
+}
+
+/* The attach control costs the rail its own column (~2.75rem with the gap),
+   so with it present the details threshold moves by the same amount — the
+   same panel width keeps showing the same information. */
+@container (min-width: 11.25rem) {
+  .chat-composer-actions:has(> .chat-attach-button) .chat-configuration-details:not([hidden]) {
     display: flex;
   }
 }
@@ -7497,4 +7620,36 @@ html[data-ui-mode="touch"] .chat-surface[data-chat-rail] .chat-timeline {
 
 .chat-prompt-rail-label[hidden] {
   display: none;
+}
+
+/* Images riding a sent, drafted, or queued user message. Thumbnails are
+   modest by design: the message stays a message, not a gallery. */
+.chat-message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+
+.chat-message-attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  max-width: 14rem;
+}
+
+.chat-message-attachment-thumb {
+  max-width: 8rem;
+  max-height: 6rem;
+  border-radius: 0.4rem;
+  border: 1px solid var(--border-soft);
+  object-fit: cover;
+}
+
+.chat-message-attachment .chat-attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.75em;
+  color: var(--text-subtle);
 }

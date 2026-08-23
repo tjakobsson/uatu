@@ -561,3 +561,52 @@ describe("interaction items name the conversation that owns them", () => {
     }
   });
 });
+
+describe("user message attachments", () => {
+  test("v2 user files echo verbatim uris that recover the issued id", () => {
+    const items = normalizeProviderMessage({
+      id: "msg_1",
+      type: "user",
+      time: { created: 5 },
+      text: "look",
+      files: [
+        { uri: "file:///state/uatu/attachments/ab/11111111-2222-4333-8444-555555555555.png", mime: "image/png", name: "shot.png" },
+        { uri: "file:///somewhere/else/readme.png", mime: "image/png", name: "unlinked.png" },
+      ],
+    });
+    expect(items).toEqual([{
+      id: "message:msg_1",
+      type: "user_message",
+      createdAt: 5,
+      text: "look",
+      attachments: [
+        { id: "11111111-2222-4333-8444-555555555555", name: "shot.png", mimeType: "image/png" },
+        // Not an issued-id basename: an id-less placeholder reference.
+        { name: "unlinked.png", mimeType: "image/png" },
+      ],
+    }]);
+  });
+
+  test("a v2 user message without files carries no attachments key", () => {
+    const [item] = normalizeProviderMessage({ id: "msg_2", type: "user", time: { created: 1 }, text: "plain" });
+    expect(item).not.toHaveProperty("attachments");
+  });
+
+  test("classic stored file parts degrade to placeholders without passing bytes through", () => {
+    const items = normalizeProviderMessage({
+      info: { id: "msg_3", role: "user", time: { created: 7 } },
+      parts: [
+        { type: "text", text: "see attached" },
+        { type: "file", mime: "image/png", filename: "probe.png", url: "data:image/png;base64,AAAA" },
+      ],
+    });
+    expect(items).toEqual([{
+      id: "message:msg_3",
+      type: "user_message",
+      createdAt: 7,
+      text: "see attached",
+      attachments: [{ name: "probe.png", mimeType: "image/png" }],
+    }]);
+    expect(JSON.stringify(items)).not.toContain("base64");
+  });
+});

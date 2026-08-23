@@ -9,7 +9,7 @@ import { ChatViewportController } from "./viewport";
 import { newRequestId } from "./ids";
 import { insertCommand, matchingCommands } from "./slash-commands";
 import { navigateWorkspaceFileReference, resolveWorkspaceFileReference } from "./file-references";
-import { READER_CLOSED, QueueDockRenderer, TimelineRenderer, decorateFileLinks, latestTodoEntries, statusLabel, subagentEntries, type SubagentEntry } from "./timeline-renderer";
+import { READER_CLOSED, QueueDockRenderer, TimelineRenderer, decorateAttachmentImages, decorateFileLinks, latestTodoEntries, statusLabel, subagentEntries, type SubagentEntry } from "./timeline-renderer";
 import { contextTokens, totalTokens } from "./usage";
 import {
   addAcceptedDraft,
@@ -22,7 +22,7 @@ import {
   removeAcceptedDraft,
   type ChatProjection,
 } from "./projection";
-import type { ChatAgent, ChatCapability, ChatMode, ChatAvailability, ChatCommand, ChatModel, ConversationConfiguration, ConversationItem, ConversationSummary, ModelSelection, PermissionOutcome, QuestionOutcome, TokenUsage } from "./types";
+import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, type ChatAgent, type ChatCapability, type ChatMode, type ChatAvailability, type ChatCommand, type ChatModel, type ConversationConfiguration, type ConversationItem, type ConversationSummary, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome, type TokenUsage } from "./types";
 import { formatDiagnostics } from "./diagnostics";
 import { collectQuestionAnswers, showQuestionPanel, syncQuestionControl, syncQuestionForm } from "./question-form";
 import { configurationOptionLabel, createChatConfigurationPicker, type ChatConfigurationPickerController } from "./configuration-picker";
@@ -83,6 +83,11 @@ export function initChat(): void {
   const composerStatus = document.querySelector<HTMLElement>("#chat-composer-status");
   const composerStatusLive = document.querySelector<HTMLElement>("#chat-composer-status-live");
   const composerError = document.querySelector<HTMLElement>("#chat-composer-error");
+  // Attachment surfaces. Guarded at use rather than joining the required
+  // check below, like the drill-down, so an older shell still runs Chat.
+  const attachButton = document.querySelector<HTMLButtonElement>("#chat-attach");
+  const attachInput = document.querySelector<HTMLInputElement>("#chat-attach-input");
+  const attachmentsStrip = document.querySelector<HTMLElement>("#chat-attachments");
   const copyStatus = document.querySelector<HTMLElement>("#chat-copy-status");
   const waiting = document.querySelector<HTMLElement>("#chat-waiting");
   const waitingLabel = document.querySelector<HTMLElement>("#chat-waiting-label");
@@ -239,6 +244,10 @@ export function initChat(): void {
     if (!declares("context")) contextUsage?.remove();
     if (!declares("conversation-rename")) renameButton?.remove();
     else if (renameButton) renameButton.hidden = false;
+    // Removed, not disabled, per the capability rule above. The model-level
+    // gate is different — see syncAttachControl: a model choice flips often,
+    // so there the control stays visible and goes inactive instead.
+    if (!declares("attachments")) attachButton?.remove();
   };
   nameAgent();
 
@@ -795,6 +804,7 @@ export function initChat(): void {
     syncControls();
     for (const node of dirty) {
       decorateFileLinks(node);
+      decorateAttachmentImages(node);
       // A freshly built question form starts with its primary button disabled;
       // this settles the tab strip and button state for its first step.
       node.querySelectorAll<HTMLFormElement>("form[data-question-form]").forEach(syncQuestionForm);
@@ -856,6 +866,177 @@ export function initChat(): void {
     composerError.textContent = message ?? "";
     composerError.hidden = !message;
   };
+
+  // ------------------------------------------------------------------
+  // Image attachments: staged per conversation, uploaded at attach time,
+  // referenced by id everywhere after (spec: bytes cross each boundary once).
+  // Pending state deliberately does not persist across reloads.
+  // ------------------------------------------------------------------
+  type PendingAttachment = MessageAttachment & { id: string; previewUrl: string };
+  const pendingAttachments = new Map<string, PendingAttachment[]>();
+  const supportedAttachmentTypes = new Set<string>(CHAT_ATTACHMENT_MIME_TYPES);
+
+  const currentPendingAttachments = (): PendingAttachment[] =>
+    projection ? pendingAttachments.get(projection.conversationId) ?? [] : [];
+
+  const setPendingAttachments = (conversationId: string, entries: PendingAttachment[]) => {
+    if (entries.length > 0) pendingAttachments.set(conversationId, entries);
+    else pendingAttachments.delete(conversationId);
+  };
+
+  // Whether the displayed model can see images. No selection means the agent
+  // chooses — unknown is not "no", so the intake stays open and the provider
+  // is the judge. A known selection without image support gates the intake,
+  // naming the model (spec: visible but inactive, because the model choice
+  // flips constantly and a vanishing control would be undiscoverable).
+  const attachmentModelSupport = (): { supported: true } | { supported: false; modelName: string } => {
+    if (!declares("models")) return { supported: true };
+    const selection = displayedConfiguration().model;
+    const record = selection ? models.find(model => sameModel(model.selection, selection)) : undefined;
+    if (!record) return { supported: true };
+    return record.imageInput === true
+      ? { supported: true }
+      : { supported: false, modelName: record.name };
+  };
+
+  const syncAttachControl = () => {
+    if (!attachButton?.isConnected) return;
+    const support = attachmentModelSupport();
+    attachButton.disabled = !support.supported;
+    const label = support.supported ? "Attach images" : `${support.modelName} cannot see images`;
+    attachButton.title = label;
+    attachButton.setAttribute("aria-label", label);
+  };
+
+  const renderAttachments = () => {
+    if (!attachmentsStrip) return;
+    const entries = currentPendingAttachments();
+    attachmentsStrip.textContent = "";
+    attachmentsStrip.hidden = entries.length === 0;
+    for (const entry of entries) {
+      const item = document.createElement("span");
+      item.className = "chat-attachment";
+      item.setAttribute("role", "listitem");
+      const thumb = document.createElement("img");
+      thumb.className = "chat-attachment-thumb";
+      thumb.src = entry.previewUrl;
+      thumb.alt = entry.name;
+      const name = document.createElement("span");
+      name.className = "chat-attachment-name";
+      name.textContent = entry.name;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "chat-attachment-remove";
+      remove.setAttribute("aria-label", `Remove ${entry.name}`);
+      remove.textContent = "\u00d7";
+      remove.addEventListener("click", () => {
+        if (!projection) return;
+        URL.revokeObjectURL(entry.previewUrl);
+        setPendingAttachments(projection.conversationId, currentPendingAttachments().filter(candidate => candidate !== entry));
+        renderAttachments();
+      });
+      item.append(thumb, name, remove);
+      attachmentsStrip.append(item);
+    }
+  };
+
+  /**
+   * Client-side screening only smooths the path — the upload route re-checks
+   * type and size authoritatively (and by bytes, not by claim). A refusal
+   * explains itself on the composer error line and touches neither the draft
+   * nor the attachments already staged.
+   */
+  const stageAttachmentFiles = async (files: File[]) => {
+    if (!projection || files.length === 0) return;
+    if (agent && !declares("attachments")) return;
+    const support = attachmentModelSupport();
+    if (!support.supported) {
+      setComposerError(`${support.modelName} cannot see images. Pick a model with image support to attach.`);
+      return;
+    }
+    const conversationId = projection.conversationId;
+    for (const file of files) {
+      if ((pendingAttachments.get(conversationId) ?? []).length >= CHAT_ATTACHMENTS_PER_MESSAGE) {
+        setComposerError(`A message can carry at most ${CHAT_ATTACHMENTS_PER_MESSAGE} images.`);
+        break;
+      }
+      if (!supportedAttachmentTypes.has(file.type.toLowerCase())) {
+        setComposerError(`${file.name || "That file"} is not a supported image (PNG, JPEG, GIF, WebP).`);
+        continue;
+      }
+      if (file.size > CHAT_ATTACHMENT_MAX_BYTES) {
+        setComposerError(`${file.name || "That image"} is larger than the ${Math.round(CHAT_ATTACHMENT_MAX_BYTES / (1024 * 1024))} MiB limit.`);
+        continue;
+      }
+      try {
+        const stored = await api.uploadAttachment(conversationId, file);
+        // Keyed to the conversation the upload was staged for, which may no
+        // longer be the selected one by the time the round trip returns.
+        const entries = pendingAttachments.get(conversationId) ?? [];
+        entries.push({ id: stored.id, name: file.name || "image", mimeType: stored.mimeType, previewUrl: URL.createObjectURL(file) });
+        setPendingAttachments(conversationId, entries);
+      } catch (error) {
+        setComposerError(`Could not attach ${file.name || "image"}: ${messageOf(error)}`);
+      }
+    }
+    renderAttachments();
+  };
+
+  attachButton?.addEventListener("click", () => {
+    if (attachButton.disabled) return;
+    attachInput?.click();
+  });
+  attachInput?.addEventListener("change", () => {
+    const files = Array.from(attachInput.files ?? []);
+    attachInput.value = "";
+    void stageAttachmentFiles(files);
+  });
+  input.addEventListener("paste", event => {
+    if (!event.clipboardData) return;
+    const files = Array.from(event.clipboardData.files).filter(file => file.type.startsWith("image/"));
+    if (files.length === 0) return;
+    // Without the capability there is no image intake at all: default paste
+    // behavior stands untouched.
+    if (agent && !declares("attachments")) return;
+    event.preventDefault();
+    // A paste that carries both text and images keeps both (spec): the text
+    // enters the draft at the caret exactly as an unintercepted paste would.
+    const text = event.clipboardData.getData("text/plain");
+    if (text) {
+      const start = input.selectionStart ?? input.value.length;
+      const end = input.selectionEnd ?? start;
+      input.value = input.value.slice(0, start) + text + input.value.slice(end);
+      const caret = start + text.length;
+      input.setSelectionRange(caret, caret);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    void stageAttachmentFiles(files);
+  });
+  const dragCarriesFiles = (event: DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes("Files");
+  form.addEventListener("dragover", event => {
+    if (!dragCarriesFiles(event) || (agent && !declares("attachments"))) return;
+    event.preventDefault();
+    form.classList.add("is-drop-target");
+  });
+  form.addEventListener("dragleave", event => {
+    const next = event.relatedTarget;
+    if (next instanceof Node && form.contains(next)) return;
+    form.classList.remove("is-drop-target");
+  });
+  // A cancelled drag (Escape) can end without a dragleave on the hovered
+  // target; dragend on window is the reset of last resort.
+  window.addEventListener("dragend", () => form.classList.remove("is-drop-target"));
+  form.addEventListener("drop", event => {
+    if (!dragCarriesFiles(event) || (agent && !declares("attachments"))) return;
+    event.preventDefault();
+    form.classList.remove("is-drop-target");
+    const images = Array.from(event.dataTransfer?.files ?? []).filter(file => file.type.startsWith("image/"));
+    if (images.length === 0) {
+      setComposerError("Only PNG, JPEG, GIF, or WebP images can be attached.");
+      return;
+    }
+    void stageAttachmentFiles(images);
+  });
 
   const syncRoutineStatus = () => {
     const conversationStatus = projection?.status;
@@ -959,6 +1140,7 @@ export function initChat(): void {
     ].filter(Boolean);
     configurationTrigger.setAttribute("aria-label", accessibleValues.length > 0 ? `Chat configuration. ${accessibleValues.join(". ")}` : "Chat settings");
     configurationPicker?.update({ agent, models, modes, configuration });
+    syncAttachControl();
     syncControls();
   };
 
@@ -987,6 +1169,7 @@ export function initChat(): void {
     syncContextIndicator();
     input.value = presentation.drafts[id] ?? "";
     autosize(input);
+    renderAttachments();
     announce("Loading conversation...");
     syncControls();
     try {
@@ -1000,6 +1183,7 @@ export function initChat(): void {
       projectionEpoch += 1;
       conversations = conversations.map(item => item.id === snapshot.conversation.id ? snapshot.conversation : item);
       renderConfiguration();
+      renderAttachments();
       announce(snapshot.items.length ? "" : "Start this conversation by sending a message.");
       anchor.restore(presentation.anchors[id] ?? null);
       scheduleRender(false, false);
@@ -1200,7 +1384,7 @@ export function initChat(): void {
       projection = prependSnapshot(projection, page);
       const dirty = renderer.render(items, projection, expanded, declares("subagents"));
       timeline.scrollTop = anchor.afterMutation(geometry());
-      for (const node of dirty) decorateFileLinks(node);
+      for (const node of dirty) { decorateFileLinks(node); decorateAttachmentImages(node); }
     } catch (error) { announce(messageOf(error), true); }
     finally { olderButton.disabled = false; syncControls(); }
   });
@@ -1389,6 +1573,7 @@ export function initChat(): void {
     drilldownTimeline.scrollTop = childAnchor.afterMutation(childAnchorGeometry(), newContent);
     for (const node of dirty) {
       decorateFileLinks(node);
+      decorateAttachmentImages(node);
       node.querySelectorAll<HTMLFormElement>("form[data-question-form]").forEach(syncQuestionForm);
     }
   };
@@ -1701,6 +1886,9 @@ export function initChat(): void {
       ? configuration.variant
       : undefined;
     const selectedMode = declares("modes") && modes.some(mode => mode.name === configuration.mode) ? configuration.mode : undefined;
+    // Captured and cleared optimistically like the text; restored on failure.
+    const stagedAttachments = [...(pendingAttachments.get(conversationId) ?? [])];
+    const attachmentRefs: MessageAttachment[] = stagedAttachments.map(({ id, name, mimeType }) => ({ id, name, mimeType }));
     submitting = true;
     setComposerError(null);
     // Captured before the round trip: a queue event that lands while the
@@ -1712,16 +1900,18 @@ export function initChat(): void {
     const projectionEpochAtSubmit = projectionEpoch;
     // Optimistic send: the message shows immediately and the input clears;
     // on failure the draft is removed and the text restored.
-    projection = addAcceptedDraft(projection, { requestId, messageId: `pending:${requestId}`, text });
+    projection = addAcceptedDraft(projection, { requestId, messageId: `pending:${requestId}`, text, ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}) });
     input.value = "";
     presentation.drafts[conversationId] = "";
+    setPendingAttachments(conversationId, []);
+    renderAttachments();
     save();
     autosize(input);
     noteComposer("Sending...");
     syncControls();
     scheduleRender(true);
     try {
-      const accepted = await api.prompt(conversationId, requestId, text, selectedModel, selectedMode, selectedVariant);
+      const accepted = await api.prompt(conversationId, requestId, text, selectedModel, selectedMode, selectedVariant, attachmentRefs.length ? attachmentRefs : undefined);
       retryRequests.delete(conversationId);
       stagedConfigurations.delete(conversationId);
       if (accepted.conversation) {
@@ -1754,18 +1944,23 @@ export function initChat(): void {
         // attempt really held has long been stated by the stream itself.
         projection = accepted.held
           ? !retriedRequest && projectionEpoch === projectionEpochAtSubmit
-            ? noteQueuedMessage(projection, { id: accepted.messageId, text, queuedAt: Date.now(), requestId }, queueRevisionAtSubmit)
+            ? noteQueuedMessage(projection, { id: accepted.messageId, text, queuedAt: Date.now(), requestId, ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}) }, queueRevisionAtSubmit)
             : removeAcceptedDraft(projection, requestId)
-          : confirmAcceptedDraft(projection, { requestId, messageId: accepted.messageId, text });
+          : confirmAcceptedDraft(projection, { requestId, messageId: accepted.messageId, text, ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}) });
         renderConfiguration();
         scheduleRender(true);
       }
       noteComposer(accepted.held ? "Queued — sends when the agent is ready" : "Message accepted");
       setComposerError(null);
+      // The message is accepted; the local previews have no further use.
+      for (const staged of stagedAttachments) URL.revokeObjectURL(staged.previewUrl);
     } catch (error) {
       const message = messageOf(error);
       announce(message, true);
       retryRequests.set(conversationId, { text, requestId });
+      // The refused message's attachments go back to pending — uploaded bytes
+      // are still stored, so the references stay valid for the retry.
+      setPendingAttachments(conversationId, [...stagedAttachments, ...(pendingAttachments.get(conversationId) ?? [])]);
       if (projection?.conversationId === conversationId) {
         projection = removeAcceptedDraft(projection, requestId);
         if (!input.value.trim()) {
@@ -1774,6 +1969,7 @@ export function initChat(): void {
         }
         presentation.drafts[conversationId] = input.value;
         save();
+        renderAttachments();
         scheduleRender();
       } else {
         // Switched away while the request was in flight: the live input now

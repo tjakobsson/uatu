@@ -4,7 +4,7 @@ import { boundedSet } from "../shared/bounded-map";
 import { ProviderUpdateCoalescer } from "./coalescer";
 import { createProviderEventMemory, normalizeProviderEvent, normalizeProviderMessage, storedMessageUsage, type NormalizedProviderUpdate } from "./normalization";
 import { mergeAssistantMessage, sameUsage, TOKEN_USAGE_COMPONENTS } from "./usage";
-import { UnsupportedVariantSelectionError, type OpenCodeProvider, type ProviderMessage, type ProviderPermissionReply, type ProviderSession } from "./provider";
+import { UnsupportedVariantSelectionError, type OpenCodeProvider, type ProviderAttachment, type ProviderMessage, type ProviderPermissionReply, type ProviderSession } from "./provider";
 import { IdempotencyReceipts } from "./receipts";
 import { ConversationReplay, type ReplaySubscription } from "./replay";
 import { ProviderTextReconciler } from "./text-reconciler";
@@ -19,6 +19,7 @@ import type {
   ConversationSnapshot,
   ConversationStatus,
   ConversationSummary,
+  MessageAttachment,
   PermissionOutcome,
   PermissionRequest,
   ModelSelection,
@@ -91,6 +92,24 @@ export class ChatQueueFullError extends Error {
   }
 }
 
+export class UnknownAttachmentError extends Error {
+  constructor() {
+    super("prompt references an attachment the workspace has not stored");
+    this.name = "UnknownAttachmentError";
+  }
+}
+
+// Attachments cannot ride a slash command: the provider's command dispatch
+// has no attachment surface, and silently dropping images the user attached
+// would be worse than refusing. Checked at admission by text shape so a held
+// message can never fail on this at delivery time.
+export class CommandAttachmentsError extends Error {
+  constructor() {
+    super("attachments cannot be sent with a slash command");
+    this.name = "CommandAttachmentsError";
+  }
+}
+
 // The queue is a short runway, not storage. Each prompt can carry 64 KiB and
 // every queue change republishes the whole queue to every subscriber, so an
 // unbounded queue lets one client grow both retained memory and per-event
@@ -120,6 +139,10 @@ const MAX_COUNTED_EVENT_TYPES = 64;
 export type ChatAdapterOptions = {
   provider: OpenCodeProvider;
   workspacePath: string;
+  // Resolves a workspace-issued attachment id to its stored bytes' location
+  // and sniffed type. Absent (a harness without a store) means every
+  // attachment-bearing prompt is refused as unknown.
+  resolveAttachment?: (id: string) => Promise<{ id: string; mimeType: string; absolutePath: string } | null>;
   generation?: string;
   replayBytes?: number;
   receiptEntries?: number;
@@ -138,6 +161,7 @@ export class OpenCodeChatAdapter {
   readonly generation: string;
   private readonly provider: OpenCodeProvider;
   private readonly workspacePath: string;
+  private readonly resolveAttachment: ChatAdapterOptions["resolveAttachment"];
   private readonly replayBytes: number;
   private readonly id: () => string;
   private readonly projections = new Map<string, ConversationProjection>();
@@ -206,6 +230,7 @@ export class OpenCodeChatAdapter {
   constructor(options: ChatAdapterOptions) {
     this.provider = options.provider;
     this.workspacePath = options.workspacePath;
+    this.resolveAttachment = options.resolveAttachment;
     this.generation = options.generation ?? randomBytes(16).toString("base64url");
     this.replayBytes = options.replayBytes ?? 256 * 1024;
     this.maxProjections = options.maxProjections ?? 64;
@@ -496,18 +521,26 @@ export class OpenCodeChatAdapter {
     });
   }
 
-  async prompt(conversationId: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string): Promise<{
+  async prompt(conversationId: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string, attachments?: MessageAttachment[]): Promise<{
     messageId: string;
     held: boolean;
     configuration: ConversationConfiguration;
     conversation?: ConversationSummary;
   }> {
     if (!text.trim()) throw new Error("prompt must not be empty");
+    // Refused for any "/"-leading text, not just known commands: whether the
+    // text parses as a command is only knowable at dispatch, and a held
+    // message must never be the one to find out (see CommandAttachmentsError).
+    if (attachments?.length && text.trimStart().startsWith("/")) throw new CommandAttachmentsError();
     return this.receipts.run(`prompt:${conversationId}:${requestId}`, () => this.enqueuePromptAdmission(conversationId, async () => {
       const session = await this.requireSession(conversationId);
       const projection = this.projection(conversationId);
       const currentConfiguration = await this.configuration(conversationId);
       const variantModel = await this.validateSelections(currentConfiguration, model, mode, variant);
+      // Validated at admission whether the message dispatches or holds, so an
+      // unknown reference is refused while the submitting client still has
+      // the draft to restore.
+      const attachmentRefs = await this.validateAttachments(attachments);
       const busy = this.turnActive(conversationId, projection);
       const queue = this.heldQueues.get(conversationId) ?? [];
       // Order is absolute: while anything is held, a new submission joins the
@@ -533,6 +566,7 @@ export class OpenCodeChatAdapter {
           text,
           queuedAt: Date.now(),
           requestId,
+          ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}),
           ...(heldModel ? { model: heldModel } : {}),
           ...(heldMode ? { mode: heldMode } : {}),
           ...(heldVariant ? { variant: heldVariant } : {}),
@@ -553,6 +587,7 @@ export class OpenCodeChatAdapter {
         messageId: this.id(),
         text,
         requestId,
+        ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}),
         ...(variantModel ? { model: variantModel } : {}),
         ...(mode ? { mode } : {}),
         ...(variant ? { variant } : {}),
@@ -576,6 +611,39 @@ export class OpenCodeChatAdapter {
       this.publishQueue(conversationId, { kind: "removed", messageId });
       return { removed: true as const };
     }));
+  }
+
+  /**
+   * Admission-time check that every reference resolves to stored bytes. The
+   * returned refs carry the sniffed mime type — the store's authority — over
+   * the client's claim; names stay client-supplied, the store keeps none.
+   */
+  private async validateAttachments(attachments?: MessageAttachment[]): Promise<MessageAttachment[]> {
+    if (!attachments?.length) return [];
+    const refs: MessageAttachment[] = [];
+    for (const attachment of attachments) {
+      const stored = attachment.id && this.resolveAttachment ? await this.resolveAttachment(attachment.id) : null;
+      if (!stored) throw new UnknownAttachmentError();
+      refs.push({ id: stored.id, name: attachment.name, mimeType: stored.mimeType });
+    }
+    return refs;
+  }
+
+  /**
+   * Dispatch-time location of stored bytes for the provider hand-off. Also
+   * runs for a message that validated when it was admitted to the queue: a
+   * reference that stopped resolving while held fails the delivery rather
+   * than handing the provider a dangling path.
+   */
+  private async locateAttachments(attachments?: MessageAttachment[]): Promise<ProviderAttachment[]> {
+    if (!attachments?.length) return [];
+    const located: ProviderAttachment[] = [];
+    for (const attachment of attachments) {
+      const stored = attachment.id && this.resolveAttachment ? await this.resolveAttachment(attachment.id) : null;
+      if (!stored) throw new UnknownAttachmentError();
+      located.push({ id: stored.id, name: attachment.name, mimeType: stored.mimeType, absolutePath: stored.absolutePath });
+    }
+    return located;
   }
 
   /**
@@ -621,6 +689,7 @@ export class OpenCodeChatAdapter {
     messageId: string;
     text: string;
     requestId: string;
+    attachments?: MessageAttachment[];
     model?: ModelSelection;
     mode?: string;
     variant?: string;
@@ -645,9 +714,13 @@ export class OpenCodeChatAdapter {
       const slash = text.startsWith("/")
         ? parseSlashCommand(text, await this.provider.listCommands())
         : undefined;
+      // Stored bytes are located at dispatch, not carried by the held entry:
+      // the queue holds references, and a reference that stopped resolving
+      // while held fails the delivery like any provider refusal.
+      const providerAttachments = await this.locateAttachments(input.attachments);
       const accepted = slash
         ? await this.provider.command(conversationId, { id: input.messageId, name: slash.name, arguments: slash.arguments, model: input.model, mode, variant })
-        : await this.provider.prompt(conversationId, { id: input.messageId, text, delivery: "queue", model: input.model, mode, variant });
+        : await this.provider.prompt(conversationId, { id: input.messageId, text, delivery: "queue", ...(providerAttachments.length ? { attachments: providerAttachments } : {}), model: input.model, mode, variant });
       // "sending" ends at acceptance, BEFORE the rename side-work below —
       // the dispatch is no longer in flight once the provider has accepted
       // it, so the state must not span the rename's provider round trips.
@@ -669,7 +742,7 @@ export class OpenCodeChatAdapter {
           }
         } catch { /* cosmetic — listConversations repairs default titles later */ }
       }
-      projection.upsert({ id: `message:${accepted.messageId}`, type: "user_message", createdAt: Date.now(), text, requestId: input.requestId });
+      projection.upsert({ id: `message:${accepted.messageId}`, type: "user_message", createdAt: Date.now(), text, requestId: input.requestId, ...(input.attachments?.length ? { attachments: input.attachments } : {}) });
       const configuration = this.commitConfiguration(conversationId, this.configurations.get(conversationId) ?? {}, input.model, mode, variant);
       return { messageId: accepted.messageId, configuration, ...(conversation ? { conversation } : {}) };
     } catch (error) {
@@ -713,7 +786,7 @@ export class OpenCodeChatAdapter {
 
   /** The held queue as it goes on the wire — handles, not dispatch payloads. */
   private queuedMessages(conversationId: string): QueuedMessage[] {
-    return (this.heldQueues.get(conversationId) ?? []).map(({ id, text, queuedAt, requestId }) => ({ id, text, queuedAt, requestId }));
+    return (this.heldQueues.get(conversationId) ?? []).map(({ id, text, queuedAt, requestId, attachments }) => ({ id, text, queuedAt, requestId, ...(attachments?.length ? { attachments } : {}) }));
   }
 
   // Resolved at publish time for the same eviction reason as configuration
@@ -781,6 +854,7 @@ export class OpenCodeChatAdapter {
         messageId: held.id,
         text: held.text,
         requestId: held.requestId,
+        ...(held.attachments?.length ? { attachments: held.attachments } : {}),
         ...(held.model ? { model: held.model } : {}),
         ...(held.mode ? { mode: held.mode } : {}),
         ...(held.variant ? { variant: held.variant } : {}),

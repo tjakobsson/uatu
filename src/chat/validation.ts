@@ -102,13 +102,27 @@ function parseChatStartupDiagnostics(value: unknown): ChatStartupDiagnostics {
 
 export function parseChatModel(value: unknown): ChatModel {
   const record = expectRecord(value, "chat model");
-  expectKeys(record, ["selection", "provider", "name", "variants", "contextLimit"], "chat model");
+  expectKeys(record, ["selection", "provider", "name", "variants", "contextLimit", "imageInput"], "chat model");
   expectModelSelection(record.selection);
   expectNonEmptyString(record.provider, "model provider");
   expectNonEmptyString(record.name, "model name");
   if (record.variants !== undefined) expectStringArray(record.variants, "model variants", true);
   if (record.contextLimit !== undefined && (typeof record.contextLimit !== "number" || record.contextLimit < 1)) throw new Error("model contextLimit must be a positive number");
+  if (record.imageInput !== undefined && typeof record.imageInput !== "boolean") throw new Error("model imageInput must be a boolean");
   return value as ChatModel;
+}
+
+// References only: an attachment on the wire is `{id?, name, mimeType}`, and
+// anything byte-shaped (a url, a data field) is a contract violation.
+export function parseMessageAttachments(value: unknown, field: string): void {
+  if (!Array.isArray(value)) throw new Error(`${field} must be an array`);
+  for (const entry of value) {
+    const record = expectRecord(entry, field);
+    expectKeys(record, ["id", "name", "mimeType"], field);
+    if (record.id !== undefined) expectIdentity(record.id, `${field} id`);
+    expectNonEmptyString(record.name, `${field} name`);
+    expectNonEmptyString(record.mimeType, `${field} mimeType`);
+  }
 }
 
 function expectModelSelection(value: unknown): void {
@@ -258,9 +272,10 @@ export function parseConversationItem(value: unknown): ConversationItem {
 
   switch (type) {
     case "user_message":
-      expectKeys(record, ["id", "type", "createdAt", "text", "requestId"], type);
+      expectKeys(record, ["id", "type", "createdAt", "text", "requestId", "attachments"], type);
       expectString(record.text, "user message text");
       expectOptionalIdentity(record.requestId, "user message request id");
+      if (record.attachments !== undefined) parseMessageAttachments(record.attachments, "user message attachment");
       break;
     case "assistant_message":
       expectKeys(record, ["id", "type", "createdAt", "markdown", "completedAt", "usage", "model"], type);
@@ -335,11 +350,12 @@ export function parseQueuedMessages(value: unknown): QueuedMessage[] {
   if (!Array.isArray(value)) throw new Error("queued messages must be an array");
   for (const entry of value) {
     const record = expectRecord(entry, "queued message");
-    expectKeys(record, ["id", "text", "queuedAt", "requestId"], "queued message");
+    expectKeys(record, ["id", "text", "queuedAt", "requestId", "attachments"], "queued message");
     expectIdentity(record.id, "queued message id");
     expectNonEmptyString(record.text, "queued message text");
     expectTimestamp(record.queuedAt, "queued message queuedAt");
     if (record.requestId !== undefined) expectIdentity(record.requestId, "queued message requestId");
+    if (record.attachments !== undefined) parseMessageAttachments(record.attachments, "queued message attachment");
   }
   return value as QueuedMessage[];
 }

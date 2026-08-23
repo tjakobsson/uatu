@@ -789,9 +789,23 @@
           <form id="chat-composer" class="chat-composer" hidden>
             <label class="sr-only" id="chat-input-label" for="chat-input">Send a message</label>
             <div id="chat-command-menu" class="chat-command-menu" role="listbox" aria-label="Slash commands" hidden></div>
+            <!-- Images staged for the next message: removable thumbnails,
+                 uploaded at attach time and referenced by id at send. -->
+            <div id="chat-attachments" class="chat-attachments" role="list" aria-label="Pending attachments" hidden></div>
             <textarea id="chat-input" rows="1" placeholder="Send a message…" aria-describedby="chat-composer-error" aria-controls="chat-command-menu" aria-expanded="false" aria-autocomplete="list"></textarea>
             <p id="chat-composer-error" class="chat-composer-error" hidden></p>
+            <input id="chat-attach-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
             <div class="chat-composer-actions">
+              <!-- Visible even when the selected model cannot see images (then
+                   inactive, naming the model): the model choice flips often,
+                   and a control that appears and disappears with it would be
+                   undiscoverable. Removed entirely only when the agent does
+                   not declare the attachments capability. -->
+              <button id="chat-attach" class="chat-attach-button" type="button" aria-label="Attach images" title="Attach images">
+                <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+                  <path d="M13.5 5.5 7.6 11.4a1.7 1.7 0 0 0 2.4 2.4l6-6a3.4 3.4 0 0 0-4.8-4.8l-6 6a5.1 5.1 0 0 0 7.2 7.2l5.4-5.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
               <!-- How full the context window is. The collapsed summary carries
                    the fill on its own; opening it shows the reported breakdown. -->
               <details id="chat-context-usage" class="chat-context-usage" hidden>

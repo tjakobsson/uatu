@@ -8,6 +8,7 @@ import type {
   ConversationConfiguration,
   ConversationSnapshot,
   ConversationSummary,
+  MessageAttachment,
   ModelSelection,
   PermissionOutcome,
   QuestionOutcome,
@@ -90,7 +91,7 @@ export class ChatApiClient {
     return this.get(appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}?${query}`), parseConversationSnapshot);
   }
 
-  prompt(conversationId: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string): Promise<{
+  prompt(conversationId: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string, attachments?: MessageAttachment[]): Promise<{
     messageId: string;
     held: boolean;
     configuration: ConversationConfiguration;
@@ -98,7 +99,7 @@ export class ChatApiClient {
   }> {
     return this.mutate(
       appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/prompts`),
-      { requestId, text, ...(model ? { model } : {}), ...(mode ? { mode } : {}), ...(variant ? { variant } : {}) },
+      { requestId, text, ...(model ? { model } : {}), ...(mode ? { mode } : {}), ...(variant ? { variant } : {}), ...(attachments?.length ? { attachments } : {}) },
       value => {
         const result = value as { messageId: string; held: boolean; configuration?: unknown; conversation?: unknown };
         return {
@@ -109,6 +110,31 @@ export class ChatApiClient {
         };
       },
     );
+  }
+
+  // Multipart, not JSON: the bytes ride the form field and the response is
+  // the reference every later payload uses. No content-type header set by
+  // hand — the browser owns the multipart boundary.
+  uploadAttachment(conversationId: string, file: Blob): Promise<{ id: string; mimeType: string; sizeBytes: number }> {
+    const form = new FormData();
+    form.append("file", file);
+    return this.request(
+      appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/attachments`),
+      { method: "POST", body: form },
+      value => {
+        const result = value as { id?: unknown; mimeType?: unknown; sizeBytes?: unknown };
+        if (typeof result.id !== "string" || typeof result.mimeType !== "string" || typeof result.sizeBytes !== "number") {
+          throw new ChatTransportError("Chat returned an invalid attachment record");
+        }
+        return { id: result.id, mimeType: result.mimeType, sizeBytes: result.sizeBytes };
+      },
+    );
+  }
+
+  // Where a stored attachment's bytes are served from; rides the same
+  // workspace authorization as every chat request.
+  attachmentUrl(id: string): string {
+    return appUrl(`/api/chat/attachments/${encodeURIComponent(id)}`);
   }
 
   removeQueued(conversationId: string, messageId: string, requestId: string): Promise<{ removed: boolean }> {

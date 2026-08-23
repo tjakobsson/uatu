@@ -1,5 +1,6 @@
 import { boundedSet } from "../shared/bounded-map";
-import type { ConversationConfiguration, ConversationItem, ConversationStatus, StructuredQuestion, TokenUsage } from "./types";
+import { attachmentIdFromFileUri } from "./attachment-store";
+import type { ConversationConfiguration, ConversationItem, ConversationStatus, MessageAttachment, StructuredQuestion, TokenUsage } from "./types";
 
 type RecordValue = Record<string, unknown>;
 
@@ -203,8 +204,10 @@ export function normalizeProviderMessage(value: unknown, mintUsageCarrier = true
   const id = string(message.id, "message id");
   const createdAt = timestamp(record(message.time).created, 0);
   switch (message.type) {
-    case "user":
-      return [{ id: `message:${id}`, type: "user_message", createdAt, text: text(message.text) }];
+    case "user": {
+      const attachments = normalizeUserAttachments(message.files);
+      return [{ id: `message:${id}`, type: "user_message", createdAt, text: text(message.text), ...(attachments.length ? { attachments } : {}) }];
+    }
     case "assistant":
       return normalizeAssistant(message, id, createdAt, mintUsageCarrier);
     case "shell":
@@ -642,12 +645,39 @@ function usageUpsert(itemId: string, createdAt: number, usage: TokenUsage, model
   return { kind: "upsert", item: { id: itemId, type: "assistant_message", createdAt, markdown: "", usage, ...(model ? { model } : {}) } };
 }
 
+// V2 user messages echo `files: [{uri, mime, name}]` with the `file:` uri we
+// sent verbatim (verified against a live OpenCode 1.18 server; the classic
+// parts view does NOT preserve it — see normalizeStoredMessage). The uri
+// basename is the issued attachment id (design D5), which the client turns
+// into the workspace's serve-route URL. An entry whose uri does not parse to
+// an issued-id shape becomes an id-less placeholder reference.
+function normalizeUserAttachments(value: unknown): MessageAttachment[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(entry => {
+    const file = record(entry);
+    const id = attachmentIdFromFileUri(optionalString(file.uri) ?? "");
+    return {
+      ...(id ? { id } : {}),
+      name: optionalString(file.name) ?? "attachment",
+      mimeType: optionalString(file.mime) ?? "application/octet-stream",
+    };
+  });
+}
+
 function normalizeStoredMessage(info: RecordValue, parts: unknown[], mintUsageCarrier: boolean): ConversationItem[] {
   const id = string(info.id, "message id");
   const createdAt = timestamp(record(info.time).created, 0);
   if (info.role === "user") {
     const body = parts.map(part => record(part)).filter(part => part.type === "text").map(part => text(part.text)).join("");
-    return [{ id: `message:${id}`, type: "user_message", createdAt, text: body }];
+    // Classic file parts come back as inline data: URLs (verified live), so
+    // the issued id is unrecoverable here — these normalize to id-less
+    // placeholder references. The bytes are deliberately not passed through:
+    // projections carry references, never image payloads.
+    const attachments: MessageAttachment[] = parts.map(part => record(part)).filter(part => part.type === "file").map(part => ({
+      name: optionalString(part.filename) ?? "attachment",
+      mimeType: optionalString(part.mime) ?? "application/octet-stream",
+    }));
+    return [{ id: `message:${id}`, type: "user_message", createdAt, text: body, ...(attachments.length ? { attachments } : {}) }];
   }
   if (info.role === "assistant") {
     return normalizeAssistant({ content: parts, error: info.error, snapshot: info.snapshot, tokens: info.tokens, modelID: info.modelID ?? info.modelId, providerID: info.providerID ?? info.providerId, model: info.model }, id, createdAt, mintUsageCarrier);

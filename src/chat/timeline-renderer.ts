@@ -1,10 +1,11 @@
+import { appUrl } from "../shared/app-url";
 import { escapeHtml, escapeHtmlAttribute } from "../shared/html";
 import { appState } from "../shell/state";
 import { renderChatMarkdown } from "./markdown";
 import { resolveWorkspaceFileReference } from "./file-references";
 import { describeToolDetail, deriveTodoActivities, patchDiffLines, todoActivitySummary, toolSubject, type DiffLine, type TodoEntry, type TodoSummary, type ToolDetail } from "./tool-detail";
 import type { AcceptedDraft, ChatProjection } from "./projection";
-import type { ActivityStatus, ConversationItem, ConversationStatus, PermissionOutcome, QueuedMessage, QuestionRequest, TokenUsage, ToolItem } from "./types";
+import type { ActivityStatus, ConversationItem, ConversationStatus, MessageAttachment, PermissionOutcome, QueuedMessage, QuestionRequest, TokenUsage, ToolItem } from "./types";
 
 type RenderedEntry = { node: HTMLElement; item: ConversationItem; active: boolean; variant: string };
 
@@ -425,9 +426,45 @@ function buildNode(html: string): HTMLElement {
   return host.firstElementChild as HTMLElement;
 }
 
+/**
+ * Shared by timeline items, drafts, and the queue dock. A reference without
+ * an id (a replayed attachment that could not be recovered) renders the
+ * labeled placeholder immediately; one whose stored bytes have since
+ * vanished gets the same treatment when its image errors
+ * (decorateAttachmentImages). Names are hostile input: escaped everywhere.
+ */
+function renderMessageAttachments(attachments: readonly MessageAttachment[] | undefined): string {
+  if (!attachments?.length) return "";
+  const entries = attachments.map(attachment => {
+    const name = escapeHtml(attachment.name);
+    if (!attachment.id) {
+      return `<span class="chat-message-attachment is-missing" role="listitem"><span class="chat-attachment-missing" aria-hidden="true">?</span><span class="chat-attachment-name">${name}</span></span>`;
+    }
+    const src = escapeHtmlAttribute(appUrl(`/api/chat/attachments/${encodeURIComponent(attachment.id)}`));
+    return `<span class="chat-message-attachment" role="listitem"><img class="chat-message-attachment-thumb" src="${src}" alt="${escapeHtmlAttribute(attachment.name)}" loading="lazy"><span class="chat-attachment-name">${name}</span></span>`;
+  });
+  return `<div class="chat-message-attachments" role="list" aria-label="Attached images">${entries.join("")}</div>`;
+}
+
+/** Swaps a thumbnail whose bytes are gone for the labeled placeholder. */
+export function decorateAttachmentImages(root: HTMLElement): void {
+  for (const image of root.querySelectorAll<HTMLImageElement>(".chat-message-attachment-thumb")) {
+    if (image.dataset.attachmentWatched) continue;
+    image.dataset.attachmentWatched = "true";
+    image.addEventListener("error", () => {
+      const placeholder = document.createElement("span");
+      placeholder.className = "chat-attachment-missing";
+      placeholder.setAttribute("aria-hidden", "true");
+      placeholder.textContent = "?";
+      image.closest(".chat-message-attachment")?.classList.add("is-missing");
+      image.replaceWith(placeholder);
+    }, { once: true });
+  }
+}
+
 function renderDraft(draft: AcceptedDraft): string {
   const label = draft.messageId.startsWith("pending:") ? "Sending…" : "Delivered, waiting for agent history";
-  return `<article class="chat-item chat-user-message is-pending" data-chat-item-id="draft-${escapeHtmlAttribute(draft.requestId)}"><p>${escapeHtml(draft.text)}</p><small>${label}</small></article>`;
+  return `<article class="chat-item chat-user-message is-pending" data-chat-item-id="draft-${escapeHtmlAttribute(draft.requestId)}">${renderMessageAttachments(draft.attachments)}<p>${escapeHtml(draft.text)}</p><small>${label}</small></article>`;
 }
 
 // A held message is not a timeline item: it renders in the dock above the
@@ -435,7 +472,7 @@ function renderDraft(draft: AcceptedDraft): string {
 // when the workspace delivers it.
 function renderQueued(held: QueuedMessage): string {
   const id = escapeHtmlAttribute(held.id);
-  return `<article class="chat-queued-message is-held" role="listitem" data-chat-queued-id="${id}"><p>${escapeHtml(held.text)}</p><footer class="chat-queued-row"><small class="chat-queued-tag">Queued — sends when the agent is ready</small><button type="button" class="chat-queued-remove" data-queue-remove="${id}">Remove</button></footer></article>`;
+  return `<article class="chat-queued-message is-held" role="listitem" data-chat-queued-id="${id}">${renderMessageAttachments(held.attachments)}<p>${escapeHtml(held.text)}</p><footer class="chat-queued-row"><small class="chat-queued-tag">Queued — sends when the agent is ready</small><button type="button" class="chat-queued-remove" data-queue-remove="${id}">Remove</button></footer></article>`;
 }
 
 /**
@@ -451,11 +488,12 @@ export class QueueDockRenderer {
     const ordered: HTMLElement[] = [];
     for (const held of queued) {
       const entry = this.entries.get(held.id);
-      if (entry && entry.held.text === held.text) {
+      if (entry && entry.held.text === held.text && JSON.stringify(entry.held.attachments ?? []) === JSON.stringify(held.attachments ?? [])) {
         ordered.push(entry.node);
         continue;
       }
       const node = buildNode(renderQueued(held));
+      decorateAttachmentImages(node);
       entry?.node.remove();
       this.entries.set(held.id, { node, held });
       ordered.push(node);
@@ -486,7 +524,7 @@ export class QueueDockRenderer {
 export function renderItem(item: ConversationItem, open: boolean, activeRequest: boolean, todo?: TodoSummary, durationMs?: number, foreign = false, readerClosed = false, allowSubagents = true, completedAssistant = false): string {
   const id = escapeHtmlAttribute(item.id);
   const stamp = timestampAttribute(item.createdAt);
-  if (item.type === "user_message") return `<article class="chat-item chat-user-message" data-chat-item-id="${id}"${stamp}><div>${escapeHtml(item.text)}</div></article>`;
+  if (item.type === "user_message") return `<article class="chat-item chat-user-message" data-chat-item-id="${id}"${stamp}>${renderMessageAttachments(item.attachments)}<div>${escapeHtml(item.text)}</div></article>`;
   if (item.type === "assistant_message") return `<article class="chat-item chat-assistant-message" data-chat-item-id="${id}" data-complete="${completedAssistant}"${stamp}><div class="chat-assistant-content markdown-body">${renderChatMarkdown(item.markdown)}</div></article>`;
   if (item.type === "turn_status") {
     const worked = durationMs === undefined ? "" : formatWorked(durationMs);

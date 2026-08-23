@@ -1,7 +1,7 @@
 import { mergeAssistantMessage } from "./usage";
-import type { ChatEvent, ConversationConfiguration, ConversationItem, ConversationSnapshot, ConversationStatus, ConversationSummary, QueuedMessage } from "./types";
+import type { ChatEvent, ConversationConfiguration, ConversationItem, ConversationSnapshot, ConversationStatus, ConversationSummary, MessageAttachment, QueuedMessage } from "./types";
 
-export type AcceptedDraft = { requestId: string; messageId: string; text: string };
+export type AcceptedDraft = { requestId: string; messageId: string; text: string; attachments?: MessageAttachment[] };
 export type ChatProjection = {
   conversationId: string;
   generation: string;
@@ -114,7 +114,7 @@ export function dropQueuedMessage(current: ChatProjection, messageId: string): C
 
 export function confirmAcceptedDraft(current: ChatProjection, draft: AcceptedDraft): ChatProjection {
   const id = `message:${draft.messageId}`;
-  const item: ConversationItem = { id, type: "user_message", createdAt: Date.now(), text: draft.text, requestId: draft.requestId };
+  const item: ConversationItem = { id, type: "user_message", createdAt: Date.now(), text: draft.text, requestId: draft.requestId, ...(draft.attachments?.length ? { attachments: draft.attachments } : {}) };
   const existing = current.items.findIndex(candidate => candidate.id === id);
   return {
     ...current,
