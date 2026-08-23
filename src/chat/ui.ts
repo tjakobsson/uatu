@@ -1015,7 +1015,11 @@ export function initChat(): void {
           setComposerError(`A message can carry at most ${CHAT_ATTACHMENTS_PER_MESSAGE} images.`);
           break;
         }
-        if (!supportedAttachmentTypes.has(file.type.toLowerCase())) {
+        // An empty type claim is unknown, not unsupported: browsers derive
+        // File.type from the filename and local files carry no guarantee, so
+        // the authoritative magic-byte sniff on the upload route decides.
+        // Only an explicit non-image claim is refused without the round trip.
+        if (file.type !== "" && !supportedAttachmentTypes.has(file.type.toLowerCase())) {
           setComposerError(`${file.name || "That file"} is not a supported image (PNG, JPEG, GIF, WebP).`);
           continue;
         }
@@ -1050,7 +1054,13 @@ export function initChat(): void {
 
   const openAttachmentViewer = (src: string, name: string) => {
     if (!imageViewer || !imageViewerImage) return;
-    imageViewerImage.src = src;
+    // The attribute round trip means the value technically arrives from the
+    // DOM, so it is re-validated against the only two shapes this app ever
+    // writes there: a staged blob: preview and the same-origin serve route.
+    let resolved: URL;
+    try { resolved = new URL(src, window.location.href); } catch { return; }
+    if (resolved.protocol !== "blob:" && resolved.origin !== window.location.origin) return;
+    imageViewerImage.src = resolved.href;
     imageViewerImage.alt = name;
     if (imageViewerName) imageViewerName.textContent = name;
     imageViewer.showModal();
@@ -1086,7 +1096,9 @@ export function initChat(): void {
   });
   input.addEventListener("paste", event => {
     if (!event.clipboardData) return;
-    const files = Array.from(event.clipboardData.files).filter(file => file.type.startsWith("image/"));
+    // A typeless file stays a candidate — the staging gate and the upload
+    // route's byte sniff decide, not the browser's filename-derived claim.
+    const files = Array.from(event.clipboardData.files).filter(file => file.type === "" || file.type.startsWith("image/"));
     if (files.length === 0) return;
     // Without the capability there is no image intake at all: default paste
     // behavior stands untouched.
@@ -1123,7 +1135,9 @@ export function initChat(): void {
     if (!dragCarriesFiles(event) || (agent && !declares("attachments"))) return;
     event.preventDefault();
     form.classList.remove("is-drop-target");
-    const images = Array.from(event.dataTransfer?.files ?? []).filter(file => file.type.startsWith("image/"));
+    // Same rule as paste: a typeless drop goes to the byte sniff, not to a
+    // refusal built on a claim the file never made.
+    const images = Array.from(event.dataTransfer?.files ?? []).filter(file => file.type === "" || file.type.startsWith("image/"));
     if (images.length === 0) {
       setComposerError("Only PNG, JPEG, GIF, or WebP images can be attached.");
       return;
@@ -2018,6 +2032,21 @@ export function initChat(): void {
       // Restore the (empty) capture only if the user typed nothing meanwhile.
       if (!input.value.trim() && text) { input.value = text; autosize(input); }
       submitting = false;
+      syncControls();
+      return;
+    }
+    // Staged images can outlive the model choice that admitted them: a later
+    // switch to a model without image support disables further intake, but
+    // the send itself must refuse too, or the prompt would carry images the
+    // selected model cannot see and the outcome would be the provider's to
+    // improvise. Same wording as the intake refusal, plus the way out.
+    const support = attachmentModelSupport();
+    if (!support.supported && (pendingAttachments.get(conversationId) ?? []).length > 0) {
+      if (!input.value.trim() && text) { input.value = text; autosize(input); }
+      presentation.drafts[conversationId] = input.value;
+      save();
+      submitting = false;
+      setComposerError(`${support.modelName} cannot see images. Remove them or pick a model with image support.`);
       syncControls();
       return;
     }

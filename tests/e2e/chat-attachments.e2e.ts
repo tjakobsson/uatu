@@ -1,6 +1,6 @@
 import type { APIRequestContext, Page } from "@playwright/test";
 
-import { openChatPanel } from "./chat-helpers";
+import { chooseChatModel, openChatPanel } from "./chat-helpers";
 import { expect, test } from "./fixtures";
 
 // 1x1 red PNG — small enough to inline, real enough to sniff.
@@ -401,6 +401,51 @@ test.describe("composer edits during the upload drain", () => {
     expect(body.text).toBe("the message that sends");
     await expect(page.locator("#chat-input")).toHaveValue("draft for later");
     await page.unroute("**/attachments");
+  });
+});
+
+test.describe("typeless intake defers to the byte sniff", () => {
+  test.beforeEach(async ({ page, request }) => bootChat(page, request));
+
+  test("a file with no MIME claim stages, and the stored type is the sniffed one", async ({ page }) => {
+    await newConversation(page);
+    // Browsers derive File.type from the filename; a local file with an
+    // unknown extension claims nothing. The bytes are a real PNG, so the
+    // upload route's sniff accepts it where a claim check would refuse.
+    await pasteImage(page, { type: "", name: "untyped" });
+    await expect(page.locator("#chat-attachments .chat-attachment")).toHaveCount(1);
+    const accepted = page.waitForResponse(response => response.url().endsWith("/prompts"));
+    await page.locator("#chat-input").fill("sniffed, not claimed");
+    await page.locator("#chat-input").press("Enter");
+    const body = (await accepted).request().postDataJSON() as { attachments?: Array<{ mimeType: string }> };
+    expect(body.attachments?.[0]?.mimeType).toBe("image/png");
+  });
+});
+
+test.describe("model switch after staging", () => {
+  test.beforeEach(async ({ page, request }) => bootChat(page, request));
+
+  test("a blind model chosen after staging blocks the send and names the model", async ({ page }) => {
+    await newConversation(page);
+    await chooseChatModel(page, "Claude Sonnet");
+    await page.locator("#chat-configuration-done").click();
+    await attachViaPicker(page);
+    await chooseChatModel(page, "GPT-5");
+    await page.locator("#chat-configuration-done").click();
+    await expect(page.locator("#chat-attach")).toBeDisabled();
+    await page.locator("#chat-input").fill("send with a blind model");
+    await page.locator("#chat-input").press("Enter");
+    await expect(page.locator("#chat-composer-error")).toContainText("GPT-5 cannot see images");
+    // Nothing left the composer: the image stays staged, the text stays put.
+    await expect(page.locator("#chat-attachments .chat-attachment")).toHaveCount(1);
+    await expect(page.locator("#chat-input")).toHaveValue("send with a blind model");
+    // Back on a capable model the very same draft sends, image included.
+    await chooseChatModel(page, "Claude Sonnet");
+    await page.locator("#chat-configuration-done").click();
+    const accepted = page.waitForResponse(response => response.url().endsWith("/prompts"));
+    await page.locator("#chat-input").press("Enter");
+    const body = (await accepted).request().postDataJSON() as { attachments?: unknown[] };
+    expect(body.attachments).toHaveLength(1);
   });
 });
 

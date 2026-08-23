@@ -345,9 +345,12 @@ export class SdkV2Provider implements OpenCodeProvider {
         messageID: messageId,
         parts: [
           { type: "text", text: input.text },
-          // Classic file parts. OpenCode stores these as inline data: URLs
-          // (verified live), so replay linkage is lost on this path — the
-          // normalized attachment degrades to a placeholder by design.
+          // Classic file parts. OpenCode's durable store rewrites these to
+          // inline data: URLs, but it writes one synthetic caption per file
+          // part naming the stored path, whose basename is this same id —
+          // normalizeStoredMessage recovers replay linkage from those
+          // captions (verified live). Only a part whose caption is missing
+          // or unparseable degrades to the spec'd placeholder.
           ...(input.attachments ?? []).map(attachment => ({
             type: "file" as const,
             mime: attachment.mimeType,
