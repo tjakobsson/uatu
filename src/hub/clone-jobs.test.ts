@@ -185,8 +185,11 @@ function fixture(overrides: {
   const onboardingCalls: Array<{ path: string; displayName: string; authentication: Array<{ credentialId: string; host: string }>; signing: string | null; start?: boolean }> = [];
   const assignmentsRemoved: string[] = [];
   let onboardingError: Error | undefined;
+  let onboardingBarrier: Promise<void> | undefined;
+  let releaseOnboarding: (() => void) | undefined;
   const onboarding = overrides.onboarding ? {
     async configureCloned(options: typeof onboardingCalls[number]) {
+      await onboardingBarrier;
       if (onboardingError) {
         // A committed-entry error models the journal-clear failure: both
         // stores committed before the throw.
@@ -281,6 +284,12 @@ function fixture(overrides: {
     failStop(error: Error) { stopError = error; },
     failAssign(error: Error) { assignError = error; },
     failUnassign(error: Error) { unassignError = error; },
+    holdOnboarding() {
+      onboardingBarrier = new Promise(resolve => {
+        releaseOnboarding = resolve;
+      });
+    },
+    releaseHeldOnboarding() { releaseOnboarding?.(); },
     holdStart() {
       startBarrier = new Promise(resolve => {
         releaseStart = resolve;
@@ -1019,6 +1028,65 @@ describe("CloneJobManager onboarding coordination", () => {
     const result = capture(f.manager, "alice", jobId).at(-1)?.data as { status: string; workspaceId?: string };
     expect(result.status).toBe("start-failed");
     expect(result.workspaceId).toBe("repo");
+  });
+
+  test("cancellation racing an uncleared journal rolls back and still reports the required restart", async () => {
+    const f = fixture({ onboarding: true });
+    const committed = { id: "repo", path: "/tmp/cancelled-journal", backend: "local" as const, displayName: "Repo" };
+    f.holdOnboarding();
+    f.failOnboarding(new OnboardingError(
+      "recovery-required",
+      "workspace onboarding committed but its journal could not be cleared; restart the Hub to reconcile",
+      { committedEntry: committed },
+    ));
+    const { jobId } = f.manager.create("alice", "remote", "/tmp/cancelled-journal", {
+      retainedAuthentication: [{ credentialId: "workspace-auth", host: "github.com" }],
+    });
+    await tick();
+    f.processes[0].exit(0);
+    await tick();
+
+    // The cancellation lands while the commit is in flight; the commit then
+    // lands but its journal survives on disk.
+    const cancelling = f.manager.cancel("alice", jobId);
+    await tick();
+    f.releaseHeldOnboarding();
+    // The rollback matches what recovery will do with a journal whose
+    // registration is gone: restore the recorded previous state.
+    expect(await cancelling).toBe("cleanup-failed");
+    expect(f.removed).toEqual(["repo"]);
+    expect(f.assignmentsRemoved).toEqual(["repo"]);
+    expect(f.registered.size).toBe(0);
+    // A plain `cancelled` would tell the client cleanup completed while the
+    // surviving journal fences the Hub until it restarts.
+    expect(capture(f.manager, "alice", jobId).at(-1)?.data).toMatchObject({
+      status: "cleanup-failed",
+      target: "/tmp/cancelled-journal",
+      error: expect.stringContaining("the Hub must be restarted to reconcile its onboarding journal"),
+    });
+  });
+
+  test("a failed rollback after a cancellation racing an uncleared journal reports both", async () => {
+    const f = fixture({ onboarding: true });
+    const committed = { id: "repo", path: "/tmp/cancelled-journal-stuck", backend: "local" as const, displayName: "Repo" };
+    f.holdOnboarding();
+    f.failRemove(new Error("registry is read-only"));
+    f.failOnboarding(new OnboardingError("recovery-required", "journal could not be cleared", { committedEntry: committed }));
+    const { jobId } = f.manager.create("alice", "remote", "/tmp/cancelled-journal-stuck", {});
+    await tick();
+    f.processes[0].exit(0);
+    await tick();
+
+    const cancelling = f.manager.cancel("alice", jobId);
+    await tick();
+    f.releaseHeldOnboarding();
+    expect(await cancelling).toBe("cleanup-failed");
+    expect(f.registered.has("repo")).toBe(true);
+    // Both the stuck registration and the surviving journal are reported.
+    const result = capture(f.manager, "alice", jobId).at(-1)?.data as { status: string; error: string };
+    expect(result.status).toBe("cleanup-failed");
+    expect(result.error).toContain("could not remove the workspace registration: registry is read-only");
+    expect(result.error).toContain("the Hub must be restarted");
   });
 
   test("cancellation rollback forgets through the durable personal-state record", async () => {

@@ -401,11 +401,23 @@ export class CloneJobManager {
         // clear: the workspace is fully registered and restart recovery
         // will simply confirm it. Reporting a registration failure here
         // would be false — the job reports the preserved stopped
-        // workspace, or honors a cancellation with a normal rollback.
+        // workspace, or honors a cancellation with a rollback that is
+        // itself reported as a cleanup failure.
         job.registered = committed;
         job.assignedRetained = job.retainedAuthentication.length > 0 || job.signing !== null;
         if (job.stop) {
-          await this.finishAfterRollback(job, committed);
+          // The cancellation still rolls the commit back, and recovery
+          // stays coherent with that: it recognizes a committed journal
+          // entry by finding its registration, so a removed registration
+          // makes recovery restore the recorded previous state — no entry
+          // and the pre-commit assignments — which is exactly this
+          // rollback. What must not be hidden is the journal itself. It
+          // survives on disk and fences starts, folder mutations,
+          // assignment changes, and further onboarding until the Hub
+          // restarts, so this reports a cleanup failure rather than the
+          // plain cancellation a client would read as normal cleanup.
+          const rollbackError = await this.rollback(job, committed);
+          await this.finish(job, this.pendingJournalFailure(job, rollbackError));
           return;
         }
         if (job.start) {
@@ -650,6 +662,22 @@ export class CloneJobManager {
   private async finishAfterRollback(job: Job, entry: WorkspaceEntry): Promise<void> {
     const rollbackError = await this.rollback(job, entry);
     await this.finish(job, rollbackError ? this.rollbackFailure(job, rollbackError) : job.stop!);
+  }
+
+  // A cancellation that raced a commit whose journal could not be cleared:
+  // the required Hub restart travels in the result's error, the one channel
+  // a stopped job can still report through (finish() collapses every other
+  // status back to the cancellation).
+  private pendingJournalFailure(job: Job, rollbackError: string | null): CloneJobResult {
+    const restart = "the Hub must be restarted to reconcile its onboarding journal before starts, "
+      + "folder mutations, assignment changes, and further onboarding resume";
+    return {
+      status: "cleanup-failed",
+      target: job.target,
+      error: rollbackError
+        ? `clone cancellation could not remove the workspace registration: ${rollbackError}; ${restart}`
+        : `the cancelled clone's workspace registration was rolled back, but ${restart}`,
+    };
   }
 
   private rollbackFailure(job: Job, error: string): CloneJobResult {
