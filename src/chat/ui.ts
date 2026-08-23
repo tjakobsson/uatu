@@ -15,6 +15,7 @@ import {
   addAcceptedDraft,
   applyChatEvent,
   confirmAcceptedDraft,
+  dropQueuedMessage,
   noteQueuedMessage,
   prependSnapshot,
   projectionFromSnapshot,
@@ -1170,12 +1171,21 @@ export function initChat(): void {
     const target = (event.target as Element).closest<HTMLButtonElement>("[data-queue-remove]");
     if (!target || !projection) return;
     // The server answers with a queue event that drops the entry on every
-    // client; no optimistic removal, so a refusal ("no longer held" — the
-    // message was delivered while the click was in flight) leaves the
-    // truth on screen.
+    // client; no optimistic removal. A refusal ("no longer held") is the
+    // server stating this entry does not exist for it — delivered while the
+    // click was in flight, removed elsewhere, or a stale echo a reload left
+    // behind — so the local copy reconciles to that instead of stranding a
+    // Remove button that can only ever 409.
+    const messageId = target.dataset.queueRemove!;
+    const conversationId = projection.conversationId;
     target.disabled = true;
-    void api.removeQueued(projection.conversationId, target.dataset.queueRemove!, newRequestId())
-      .catch(error => { announce(messageOf(error), true); })
+    void api.removeQueued(conversationId, messageId, newRequestId())
+      .catch(error => {
+        if (error instanceof ChatTransportError && error.status === 409 && projection?.conversationId === conversationId) {
+          projection = dropQueuedMessage(projection, messageId);
+          scheduleRender();
+        } else announce(messageOf(error), true);
+      })
       .finally(() => { target.disabled = false; });
   });
 
