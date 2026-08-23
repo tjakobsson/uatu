@@ -266,6 +266,7 @@ export class FolderManager {
   create(input: unknown): Promise<CreateFolderResult> {
     return this.enqueue(async () => {
       const parsed = parseCreate(input);
+      await this.assertNoPendingMutation();
       const parent = await this.canonicalDirectory(parsed.parent);
       const destination = path.join(parent, parsed.name);
       const reservation = this.reserve([destination]);
@@ -284,6 +285,7 @@ export class FolderManager {
   rename(input: unknown): Promise<CoordinatedFolderResult<RenameFolderResult>> {
     return this.enqueue(async () => {
       const parsed = parseRename(input);
+      await this.assertNoPendingMutation();
       const source = await this.canonicalDirectory(parsed.path);
       const destination = path.join(path.dirname(source), parsed.name);
       if (destination === source) throw new FolderManagerError("conflict", "source and destination are the same folder");
@@ -292,9 +294,6 @@ export class FolderManager {
         await this.assertMissing(destination);
         await this.reconcileRegisteredAliases();
         const affected = this.options.registry.atOrBelow(source);
-        // Refused before session coordination so a doomed mutation never
-        // stops sessions it cannot proceed to move.
-        if (affected.length > 0) await this.assertNoPendingMutation();
         return await this.options.sessions.runWithSessionsStopped(
           affected.map(entry => entry.id),
           parsed.stop === true,
@@ -321,12 +320,12 @@ export class FolderManager {
   remove(input: unknown): Promise<CoordinatedFolderResult<RemoveFolderResult>> {
     return this.enqueue(async () => {
       const parsed = parseRemove(input);
+      await this.assertNoPendingMutation();
       const source = await this.canonicalDirectory(parsed.path);
       const reservation = this.reserve([source]);
       try {
         await this.reconcileRegisteredAliases();
         const entry = this.options.registry.byPath(source);
-        if (entry) await this.assertNoPendingMutation();
         return await this.options.sessions.runWithSessionsStopped(
           entry ? [entry.id] : [],
           parsed.stop === true,
@@ -437,11 +436,13 @@ export class FolderManager {
   }
 
   // A journal that outlives its mutation is the only recovery record for a
-  // workspace whose directory and registered state no longer agree. The
-  // journal holds a single record, so the next registered mutation would
-  // replace it — and, on success, clear it — leaving the earlier workspace
-  // registered at a missing path with no trace. Refuse registered mutations
-  // until recover() has resolved the pending record.
+  // workspace whose directory and registered state no longer agree. Every
+  // mutation refuses while it exists, not just registered ones: a later
+  // registered mutation would replace the single-record journal (and, on
+  // success, clear it), while even an unregistered create or rename can
+  // flip the existence probes recovery relies on — recreating a removed
+  // journal source would restore the old registration onto an unrelated
+  // directory. Nothing proceeds until recover() has resolved the record.
   private async assertNoPendingMutation(): Promise<void> {
     try {
       await this.fs.lstat(this.options.journalPath);
