@@ -593,6 +593,25 @@ export function createHubFetchHandler(deps: HubDeps) {
       }
       let job: { jobId: string } | undefined;
       try {
+        // A clone populates a directory and registers it, so it is fenced by
+        // the folder-mutation journal exactly as registration is. A journal
+        // that outlived its mutation is the only record tying a moved-or-
+        // removed directory back to its old registration, and startup
+        // recovery validates identity at the journaled paths: creating a
+        // directory where recovery expects a removed folder — or minting a
+        // fresh id for one it must restore an older entry onto — leaves the
+        // Hub unstartable without manual state repair. Checked before the
+        // reconciliation and claim checks below, since a pending journal
+        // means the registry those checks read is exactly what recovery may
+        // still rewrite; and under the reservation, so no folder mutation of
+        // this target can be journaling concurrently. Fails closed: an
+        // uninspectable journal is treated as pending.
+        try {
+          await deps.folderManager?.assertNoPendingMutation();
+        } catch (error) {
+          return folderError(error);
+        }
+
         // Legacy registrations can persist alias spellings of the target or
         // of a folder beneath it; reconciled first, the claim check below
         // sees them at the canonical path the clone would populate.

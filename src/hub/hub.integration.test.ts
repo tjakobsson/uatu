@@ -1106,6 +1106,74 @@ describe("hub end to end", () => {
     expect(reservations.isReserved(target)).toBe(false);
   });
 
+  test("clone creation refuses while a folder mutation journal awaits recovery", async () => {
+    const destination = path.join(tempRoot, "clone-journal-fenced");
+    await mkdir(destination);
+    const canonicalDestination = await realpath(destination);
+    const target = path.join(canonicalDestination, "fenced-clone");
+    const journalPath = path.join(tempRoot, "pending-folder-mutation.json");
+
+    // A registered removal that deleted and unregistered its source but could
+    // not finish metadata cleanup leaves exactly this record. Cloning into
+    // that now-absent source passes both the registry and the on-disk checks,
+    // and startup recovery then finds a freshly created directory where it
+    // expects the removed folder: identity validation fails and the Hub will
+    // not start.
+    await writeFile(journalPath, `${JSON.stringify({
+      version: 1,
+      operation: "remove",
+      source: target,
+      before: [{ id: "fenced-clone", path: target, backend: "local" }],
+      after: [],
+    }, null, 2)}\n`, { mode: 0o600 });
+
+    try {
+      const fenced = await fetch(`${origin}/api/hub/clone-jobs`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie, origin },
+        body: JSON.stringify({ url: "interactive:fenced-clone", dest: destination }),
+      });
+      expect(fenced.status).toBe(409);
+      await assertContract("POST", "/api/hub/clone-jobs", fenced);
+      expect(await fenced.json()).toEqual({
+        error: "a pending folder mutation requires recovery before further registered changes",
+      });
+      // No job took the reservation, and nothing was written where recovery
+      // still expects the journaled folder to be absent.
+      expect(reservations.isReserved(target)).toBe(false);
+      expect(await stat(target).then(() => true).catch(() => false)).toBe(false);
+      expect(registry.byPath(target)).toBeUndefined();
+
+      // Fail closed: a journal too corrupt to interpret is still a journal.
+      await writeFile(journalPath, "{ not json", { mode: 0o600 });
+      const corrupt = await fetch(`${origin}/api/hub/clone-jobs`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie, origin },
+        body: JSON.stringify({ url: "interactive:fenced-clone", dest: destination }),
+      });
+      expect(corrupt.status).toBe(409);
+      expect(reservations.isReserved(target)).toBe(false);
+    } finally {
+      // Every later test in this file mutates registered state, which the
+      // journal fences: a failure here must not leave one behind.
+      await rm(journalPath, { force: true });
+    }
+
+    // Recovery clearing the record reopens clone creation.
+    const cloned = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ url: "interactive:fenced-clone", dest: destination }),
+    });
+    expect(cloned.status).toBe(202);
+    const jobId = ((await cloned.json()) as { jobId: string }).jobId;
+    const cancelled = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/cancel`, {
+      method: "POST",
+      headers: { cookie, origin },
+    });
+    expect(cancelled.status).toBe(200);
+  }, 60_000);
+
   test("start:false registers without starting a session (recents import)", async () => {
     const imported = path.join(tempRoot, "workspaces", "imported-only");
     execFileSync("mkdir", ["-p", imported]);
