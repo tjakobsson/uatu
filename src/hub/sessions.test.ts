@@ -567,3 +567,164 @@ describe("SessionManager serialized lifecycle", () => {
     expect(sessions.isRunning("stop-refused")).toBe(true);
   });
 });
+
+describe("SessionManager composite lifecycle barrier", () => {
+  test("reports every running or in-flight affected workspace without stopping or mutating", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-composite-conflict-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    await registry.register("/srv/workspaces/alpha");
+    await registry.register("/srv/workspaces/beta");
+
+    let releaseBeta!: (session: RunningSession) => void;
+    const stopped: string[] = [];
+    const backend: SessionBackend = {
+      start: workspace => workspace.id === "beta"
+        ? new Promise<RunningSession>(resolve => { releaseBeta = resolve; })
+        : Promise.resolve(fakeSession(workspace.id, () => stopped.push(workspace.id))),
+    };
+    const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
+    await sessions.start("alpha");
+    const betaStart = sessions.start("beta");
+    let mutated = false;
+    const resultPromise = sessions.runWithSessionsStopped(
+      ["beta", "alpha", "beta"],
+      false,
+      async () => { mutated = true; },
+    );
+
+    await tick();
+    releaseBeta(fakeSession("beta", () => stopped.push("beta")));
+    await betaStart;
+
+    expect(await resultPromise).toEqual({ status: "needs-stop", workspaceIds: ["alpha", "beta"] });
+    expect(stopped).toEqual([]);
+    expect(mutated).toBe(false);
+    expect(sessions.runningIds().sort()).toEqual(["alpha", "beta"]);
+  });
+
+  test("authorized operation stops running and in-flight sessions before its callback", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-composite-stop-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    await registry.register("/srv/workspaces/alpha");
+    await registry.register("/srv/workspaces/beta");
+    const token: TokenCredentialRecord = {
+      id: "composite-token",
+      name: "Composite token",
+      type: "token",
+      enabled: true,
+      capabilities: ["github-cli"],
+      metadata: { host: "github.com" },
+      createdAt: "2026-08-23T00:00:00.000Z",
+    };
+    const resolver: CredentialContextResolver = {
+      revision: () => "composite",
+      runExclusive: operation => operation(),
+      resolve: async () => ({
+        ...structuredClone(EMPTY_RESOLVED_CREDENTIAL_CONTEXT),
+        authentication: [{ host: "github.com", credential: token, token: "secret" }],
+      }),
+    };
+    let releaseBeta!: (session: RunningSession) => void;
+    const events: string[] = [];
+    const backend: SessionBackend = {
+      start: workspace => workspace.id === "beta"
+        ? new Promise<RunningSession>(resolve => { releaseBeta = resolve; })
+        : Promise.resolve(fakeSession(workspace.id, () => events.push(`stop:${workspace.id}`))),
+    };
+    const sessions = new SessionManager(registry, { local: backend }, resolver);
+    await sessions.start("alpha");
+    const betaStart = sessions.start("beta");
+    const resultPromise = sessions.runWithSessionsStopped(["beta", "alpha"], true, async () => {
+      events.push("callback");
+      expect(sessions.runningIds()).toEqual([]);
+      expect(sessions.runningWorkspaceIdsUsingCredential(token.id)).toEqual([]);
+      return "updated";
+    });
+
+    await tick();
+    releaseBeta(fakeSession("beta", () => events.push("stop:beta")));
+    await betaStart;
+
+    expect(await resultPromise).toEqual({ status: "completed", value: "updated" });
+    expect(events).toEqual(["stop:alpha", "stop:beta", "callback"]);
+    expect(sessions.isStarting("beta")).toBe(false);
+  });
+
+  test("does not invoke the callback when any affected session fails to stop", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-composite-failure-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    await registry.register("/srv/workspaces/alpha");
+    await registry.register("/srv/workspaces/beta");
+    const stops: string[] = [];
+    const backend: SessionBackend = {
+      start: async workspace => ({
+        ...fakeSession(workspace.id),
+        stop: async () => {
+          stops.push(workspace.id);
+          if (workspace.id === "beta") throw new Error("beta refused stop");
+        },
+      }),
+    };
+    const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
+    await Promise.all([sessions.start("alpha"), sessions.start("beta")]);
+    let mutated = false;
+
+    let failure: unknown;
+    try {
+      await sessions.runWithSessionsStopped(["beta", "alpha"], true, async () => { mutated = true; });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(stops).toEqual(["alpha", "beta"]);
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).errors[0]).toEqual(new Error("beta refused stop"));
+    expect(mutated).toBe(false);
+    expect(sessions.isRunning("alpha")).toBe(false);
+    expect(sessions.isRunning("beta")).toBe(true);
+  });
+
+  test("queues a start until a registered path update has completed", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-composite-path-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    const workspace = await registry.register("/srv/workspaces/before");
+    const startedPaths: string[] = [];
+    const backend: SessionBackend = {
+      start: async entry => {
+        startedPaths.push(entry.path);
+        return fakeSession(entry.id);
+      },
+    };
+    const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
+    let updateEntered!: () => void;
+    const entered = new Promise<void>(resolve => { updateEntered = resolve; });
+    let finishUpdate!: () => void;
+    const updateGate = new Promise<void>(resolve => { finishUpdate = resolve; });
+    const update = sessions.runWithSessionsStopped([workspace.id], false, async () => {
+      await registry.replacePathPrefix("/srv/workspaces/before", "/srv/workspaces/after");
+      updateEntered();
+      await updateGate;
+    });
+    await entered;
+
+    const start = sessions.start(workspace.id);
+    const stop = sessions.stop(workspace.id);
+    await tick();
+    expect(startedPaths).toEqual([]);
+
+    finishUpdate();
+    expect(await update).toEqual({ status: "completed", value: undefined });
+    await start;
+    expect(await stop).toBe(true);
+    expect(startedPaths).toEqual(["/srv/workspaces/after"]);
+    expect(sessions.isRunning(workspace.id)).toBe(false);
+  });
+});

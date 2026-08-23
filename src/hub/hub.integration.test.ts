@@ -6,7 +6,7 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -20,6 +20,9 @@ import { hashPassword, HubSessionStore, HUB_COOKIE_NAME } from "./auth";
 import { CloneJobManager } from "./clone-jobs";
 import { CloneProcessAdapter, type CloneProcessFactory } from "./clone-process";
 import type { HubConfig } from "./config";
+import { CredentialMetadataStore } from "./credential-store";
+import { FolderManager } from "./folder-manager";
+import { PathReservationCoordinator } from "./path-reservations";
 import { PersonalWorkspaceStateStore } from "./personal-state";
 import { WorkspaceRegistry } from "./registry";
 import { startHubServer } from "./server";
@@ -68,6 +71,7 @@ let origin = "";
 let cookie = "";
 let bearerId = "";
 let cloneJobs: CloneJobManager;
+let reservations: PathReservationCoordinator;
 const managedCloneStarts: Array<CloneCredentialProcessContext | undefined> = [];
 const managedCloneAssignments: string[] = [];
 let managedAssignmentBarrier: Promise<void> | undefined;
@@ -95,7 +99,8 @@ beforeAll(async () => {
   registry = new WorkspaceRegistry(path.join(tempRoot, "registry.json"));
   await registry.load();
   personalState = new PersonalWorkspaceStateStore(path.join(tempRoot, "personal-state.json"));
-  await personalState.load();
+  const credentialMetadata = new CredentialMetadataStore(path.join(tempRoot, "credentials.json"));
+  await Promise.all([personalState.load(), credentialMetadata.load()]);
   sessionStorePath = path.join(tempRoot, "sessions.json");
   sessionStore = new HubSessionStore(sessionStorePath);
   await sessionStore.load();
@@ -146,6 +151,7 @@ beforeAll(async () => {
       };
     },
   };
+  reservations = new PathReservationCoordinator();
   cloneJobs = new CloneJobManager({
     processFactory,
     registry,
@@ -179,8 +185,27 @@ beforeAll(async () => {
       },
       runExclusive: operation => operation(),
     },
+    reservations,
   });
-  server = startHubServer({ config, registry, sessions, sessionStore, personalState, cloneJobs });
+  const folderManager = new FolderManager({
+    journalPath: path.join(tempRoot, "pending-folder-mutation.json"),
+    registry,
+    sessions,
+    personalState,
+    credentials: credentialMetadata,
+    reservations,
+  });
+  await folderManager.recover();
+  server = startHubServer({
+    config,
+    registry,
+    sessions,
+    sessionStore,
+    personalState,
+    cloneJobs,
+    folderManager,
+    reservations,
+  });
   origin = `http://127.0.0.1:${server.port}`;
 }, 30_000);
 
@@ -770,6 +795,234 @@ describe("hub end to end", () => {
     );
     expect(missing.status).toBe(404);
     await assertContract("GET", "/api/hub/browse", missing);
+  });
+
+  test("folder mutations use the existing authentication and same-origin gate", async () => {
+    const parent = path.join(tempRoot, "folder-auth");
+    await mkdir(parent);
+    const body = JSON.stringify({ parent, name: "blocked" });
+    const unauthenticated = await fetch(`${origin}/api/hub/folders/create`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin },
+      body,
+    });
+    expect(unauthenticated.status).toBe(401);
+    await assertContract("POST", "/api/hub/folders/create", unauthenticated);
+
+    const crossOrigin = await fetch(`${origin}/api/hub/folders/create`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin: "https://attacker.example" },
+      body,
+    });
+    expect(crossOrigin.status).toBe(403);
+    await assertContract("POST", "/api/hub/folders/create", crossOrigin);
+    expect(await Bun.file(path.join(parent, "blocked")).exists()).toBe(false);
+
+    const bearer = await fetch(`${origin}/api/hub/folders/create`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${bearerId}`,
+        origin: "https://attacker.example",
+      },
+      body: JSON.stringify({ parent: "relative", name: "invalid" }),
+    });
+    expect(bearer.status).toBe(400);
+    await assertContract("POST", "/api/hub/folders/create", bearer);
+    expect(await bearer.json()).toEqual({ error: "parent must be an absolute path" });
+  });
+
+  test("folder mutation routes enforce closed validation and typed missing errors", async () => {
+    const headers = { "content-type": "application/json", cookie, origin };
+    const malformed = await fetch(`${origin}/api/hub/folders/create`, {
+      method: "POST",
+      headers,
+      body: "{",
+    });
+    expect(malformed.status).toBe(400);
+    expect(await malformed.json()).toEqual({ error: "invalid JSON body" });
+
+    const invalidBodies = [
+      ["create", { parent: tempRoot, name: ".hidden" }],
+      ["create", { parent: tempRoot, name: "valid", extra: true }],
+      ["rename", { path: "relative", name: "valid" }],
+      ["remove", { path: tempRoot, stop: "yes" }],
+    ] as const;
+    for (const [operation, body] of invalidBodies) {
+      const response = await fetch(`${origin}/api/hub/folders/${operation}`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(400);
+      expect(Object.keys(await response.json())).toEqual(["error"]);
+    }
+
+    const missing = await fetch(`${origin}/api/hub/folders/remove`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ path: path.join(tempRoot, "folder-never-existed") }),
+    });
+    expect(missing.status).toBe(404);
+    await assertContract("POST", "/api/hub/folders/remove", missing);
+    expect(await missing.json()).toEqual({ error: "folder was not found" });
+  });
+
+  test("folder routes create, rename, and remove without overwriting or recursive deletion", async () => {
+    const parent = path.join(tempRoot, "folder-basic");
+    await mkdir(parent);
+    const headers = { "content-type": "application/json", cookie, origin };
+    const post = (operation: string, body: unknown) => fetch(`${origin}/api/hub/folders/${operation}`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+
+    const createdPath = path.join(parent, "created");
+    const created = await post("create", { parent, name: "created" });
+    expect(created.status).toBe(200);
+    await assertContract("POST", "/api/hub/folders/create", created);
+    expect(await created.json()).toEqual({ path: createdPath });
+
+    await mkdir(path.join(parent, "occupied"));
+    const collision = await post("rename", { path: createdPath, name: "occupied" });
+    expect(collision.status).toBe(409);
+    await assertContract("POST", "/api/hub/folders/rename", collision);
+    expect(await collision.json()).toEqual({ error: "destination already exists" });
+    expect((await stat(createdPath)).isDirectory()).toBe(true);
+
+    const renamedPath = path.join(parent, "renamed");
+    const renamed = await post("rename", { path: createdPath, name: "renamed" });
+    expect(renamed.status).toBe(200);
+    await assertContract("POST", "/api/hub/folders/rename", renamed);
+    expect(await renamed.json()).toEqual({ path: renamedPath, workspaceIds: [] });
+
+    await writeFile(path.join(renamedPath, "content.txt"), "kept");
+    const nonEmpty = await post("remove", { path: renamedPath });
+    expect(nonEmpty.status).toBe(409);
+    await assertContract("POST", "/api/hub/folders/remove", nonEmpty);
+    expect(await nonEmpty.json()).toEqual({ error: "folder is not empty" });
+    await rm(path.join(renamedPath, "content.txt"));
+    await writeFile(path.join(renamedPath, ".hidden"), "kept too");
+    const hidden = await post("remove", { path: renamedPath });
+    expect(hidden.status).toBe(409);
+    expect(await hidden.json()).toEqual({ error: "folder is not empty" });
+    expect(await Bun.file(path.join(renamedPath, ".hidden")).text()).toBe("kept too");
+    await rm(path.join(renamedPath, ".hidden"));
+
+    const removed = await post("remove", { path: renamedPath });
+    expect(removed.status).toBe(200);
+    await assertContract("POST", "/api/hub/folders/remove", removed);
+    expect(await removed.json()).toEqual({ path: renamedPath });
+    await expect(stat(renamedPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("registered descendant renames and registered removal return closed identity payloads", async () => {
+    const source = path.join(tempRoot, "folder-registered-source");
+    const firstPath = path.join(source, "api-descendant-first");
+    const secondPath = path.join(source, "nested", "api-descendant-second");
+    await Promise.all([mkdir(firstPath, { recursive: true }), mkdir(secondPath, { recursive: true })]);
+    const [first, second] = await Promise.all([registry.register(firstPath), registry.register(secondPath)]);
+    const headers = { "content-type": "application/json", cookie, origin };
+
+    const renamedPath = path.join(tempRoot, "folder-registered-renamed");
+    const renamed = await fetch(`${origin}/api/hub/folders/rename`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ path: source, name: path.basename(renamedPath) }),
+    });
+    expect(renamed.status).toBe(200);
+    expect(await renamed.json()).toEqual({ path: renamedPath, workspaceIds: [first.id, second.id] });
+    expect(registry.byId(first.id)?.path).toBe(path.join(renamedPath, "api-descendant-first"));
+    expect(registry.byId(second.id)?.path).toBe(path.join(renamedPath, "nested", "api-descendant-second"));
+
+    const removablePath = path.join(tempRoot, "api-registered-removal");
+    await mkdir(removablePath);
+    const removable = await registry.register(removablePath);
+    const removed = await fetch(`${origin}/api/hub/folders/remove`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ path: removablePath }),
+    });
+    expect(removed.status).toBe(200);
+    expect(await removed.json()).toEqual({ path: removablePath, workspaceId: removable.id });
+    expect(registry.byId(removable.id)).toBeUndefined();
+  });
+
+  test("registered folder mutation reports every running or starting descendant and can stop them", async () => {
+    const source = path.join(tempRoot, "folder-active-source");
+    const runningPath = path.join(source, "api-running-descendant");
+    const startingPath = path.join(source, "api-starting-descendant");
+    await Promise.all([mkdir(runningPath, { recursive: true }), mkdir(startingPath, { recursive: true })]);
+    execFileSync("git", ["init"], { cwd: runningPath, stdio: "ignore" });
+    execFileSync("git", ["init"], { cwd: startingPath, stdio: "ignore" });
+    const running = await registry.register(runningPath);
+    const starting = await registry.register(startingPath);
+    await sessions.start(running.id);
+    const startPromise = sessions.start(starting.id);
+    expect(sessions.isStarting(starting.id)).toBe(true);
+    const headers = { "content-type": "application/json", cookie, origin };
+
+    const conflict = await fetch(`${origin}/api/hub/folders/rename`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ path: source, name: "folder-active-renamed" }),
+    });
+    await startPromise;
+    expect(conflict.status).toBe(409);
+    await assertContract("POST", "/api/hub/folders/rename", conflict);
+    expect(await conflict.json()).toEqual({
+      error: "affected workspace sessions must be stopped",
+      needsStop: true,
+      workspaceIds: [running.id, starting.id].sort(),
+    });
+    expect((await stat(source)).isDirectory()).toBe(true);
+
+    const renamedPath = path.join(tempRoot, "folder-active-renamed");
+    const confirmed = await fetch(`${origin}/api/hub/folders/rename`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ path: source, name: path.basename(renamedPath), stop: true }),
+    });
+    expect(confirmed.status).toBe(200);
+    expect(await confirmed.json()).toEqual({ path: renamedPath, workspaceIds: [running.id, starting.id] });
+    expect(sessions.isRunning(running.id)).toBe(false);
+    expect(sessions.isRunning(starting.id)).toBe(false);
+  }, 60_000);
+
+  test("folder mutations and clone jobs share hierarchy reservations", async () => {
+    const destination = path.join(tempRoot, "folder-clone-race");
+    await mkdir(destination);
+    const cloned = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ url: "interactive:reserved-clone", dest: destination }),
+    });
+    expect(cloned.status).toBe(202);
+    const jobId = ((await cloned.json()) as { jobId: string }).jobId;
+    const canonicalDestination = await realpath(destination);
+    const headers = { "content-type": "application/json", cookie, origin };
+
+    const exact = await fetch(`${origin}/api/hub/folders/create`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ parent: canonicalDestination, name: "reserved-clone" }),
+    });
+    expect(exact.status).toBe(409);
+    expect(await exact.json()).toEqual({ error: "folder path is reserved by another operation" });
+    const ancestor = await fetch(`${origin}/api/hub/folders/remove`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ path: canonicalDestination }),
+    });
+    expect(ancestor.status).toBe(409);
+    expect(await ancestor.json()).toEqual({ error: "folder path is reserved by another operation" });
+
+    const cancelled = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/cancel`, {
+      method: "POST",
+      headers: { cookie, origin },
+    });
+    expect(cancelled.status).toBe(200);
   });
 
   test("start:false registers without starting a session (recents import)", async () => {

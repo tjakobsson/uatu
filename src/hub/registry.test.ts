@@ -113,6 +113,65 @@ describe("WorkspaceRegistry", () => {
     await registry.load();
     expect(registry.list()).toEqual([]);
   });
+
+  test("finds exact and nested registrations without matching prefixed siblings", async () => {
+    const registry = await tempRegistry();
+    await registry.register("/srv/group");
+    await registry.register("/srv/group/nested/repo");
+    await registry.register("/srv/group-two/repo");
+    await registry.register("/srv/other");
+
+    expect(registry.atOrBelow("/srv/group/./").map(entry => entry.path)).toEqual([
+      "/srv/group",
+      "/srv/group/nested/repo",
+    ]);
+  });
+
+  test("replaces exact and nested path prefixes while preserving identity", async () => {
+    const registry = await tempRegistry();
+    const exact = await registry.register("/srv/group");
+    const nested = await registry.register("/srv/group/nested/repo");
+    const sibling = await registry.register("/srv/group-two/repo");
+
+    const updated = await registry.replacePathPrefix("/srv/group", "/srv/team");
+
+    expect(updated).toEqual([
+      { ...exact, path: "/srv/team" },
+      { ...nested, path: "/srv/team/nested/repo" },
+    ]);
+    expect(registry.byId(exact.id)).toEqual({ ...exact, path: "/srv/team" });
+    expect(registry.byId(nested.id)).toEqual({ ...nested, path: "/srv/team/nested/repo" });
+    expect(registry.byId(sibling.id)).toEqual(sibling);
+  });
+
+  test("atomically restores exact journal entries, including a missing id", async () => {
+    const registry = await tempRegistry();
+    const first = await registry.register("/srv/old/first");
+    const second = await registry.register("/srv/old/second");
+    await registry.replacePathPrefix("/srv/old", "/srv/new");
+    await registry.remove(second.id);
+
+    await registry.restoreEntries([first, second]);
+    expect(registry.byId(first.id)).toEqual(first);
+    expect(registry.byId(second.id)).toEqual(second);
+  });
+
+  test("rejects exact recovery collisions without changing entries", async () => {
+    const registry = await tempRegistry();
+    const source = await registry.register("/srv/source");
+    const occupied = await registry.register("/srv/occupied");
+    await expect(registry.restoreEntries([{ ...source, path: occupied.path }])).rejects.toThrow("path collision");
+    expect(registry.list()).toEqual([source, occupied]);
+  });
+
+  test("rejects replacement collisions without changing memory", async () => {
+    const registry = await tempRegistry();
+    const source = await registry.register("/srv/source/repo");
+    const occupied = await registry.register("/srv/destination/repo");
+
+    await expect(registry.replacePathPrefix("/srv/source", "/srv/destination")).rejects.toThrow("path collision");
+    expect(registry.list()).toEqual([source, occupied]);
+  });
 });
 
 describe("registry persistence under concurrency", () => {
@@ -174,6 +233,51 @@ describe("registry rollback on persistence failure", () => {
     await expect(registry.remove("keeper")).rejects.toThrow();
     expect(registry.byId("keeper")).toBeDefined();
   });
+
+  test("a failed bulk replacement restores every old path", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-hub-registry-"));
+    tempDirectories.push(dir);
+    const stateDir = path.join(dir, "state");
+    await (await import("node:fs/promises")).mkdir(stateDir);
+    const registry = new WorkspaceRegistry(path.join(stateDir, "registry.json"));
+    await registry.load();
+    const parent = await registry.register("/srv/group");
+    const child = await registry.register("/srv/group/child");
+    await rm(stateDir, { recursive: true, force: true });
+
+    await expect(registry.replacePathPrefix("/srv/group", "/srv/team")).rejects.toThrow();
+    expect(registry.list()).toEqual([parent, child]);
+  });
+
+  test("a failed exact recovery restores the previous in-memory entries", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-hub-registry-"));
+    tempDirectories.push(dir);
+    const stateDir = path.join(dir, "state");
+    await (await import("node:fs/promises")).mkdir(stateDir);
+    const registry = new WorkspaceRegistry(path.join(stateDir, "registry.json"));
+    await registry.load();
+    const entry = await registry.register("/srv/old");
+    await rm(stateDir, { recursive: true, force: true });
+
+    await expect(registry.restoreEntries([{ ...entry, path: "/srv/new" }])).rejects.toThrow();
+    expect(registry.byId(entry.id)).toEqual(entry);
+  });
+
+  test("bulk replacement preserves ids and backends after reload", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-hub-registry-"));
+    tempDirectories.push(dir);
+    const filePath = path.join(dir, "registry.json");
+    const registry = new WorkspaceRegistry(filePath);
+    await registry.load();
+    const parent = await registry.register("/srv/group");
+    const child = await registry.register("/srv/group/child");
+    await registry.replacePathPrefix("/srv/group", "/srv/team");
+
+    const reloaded = new WorkspaceRegistry(filePath);
+    await reloaded.load();
+    expect(reloaded.byPath("/srv/team")).toEqual({ ...parent, path: "/srv/team" });
+    expect(reloaded.byPath("/srv/team/child")).toEqual({ ...child, path: "/srv/team/child" });
+  });
 });
 
 describe("registry mutation serialization", () => {
@@ -230,5 +334,25 @@ describe("registry mutation serialization", () => {
     await reloaded.load();
     // The rejected registration must NOT resurrect from any snapshot.
     expect(reloaded.list().map(e => e.id)).toEqual(["phoenix"]);
+  });
+
+  test("bulk replacement serializes with concurrent registrations", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-hub-registry-"));
+    tempDirectories.push(dir);
+    const filePath = path.join(dir, "registry.json");
+    const registry = new WorkspaceRegistry(filePath);
+    await registry.load();
+    const original = await registry.register("/srv/group/repo");
+
+    const [updated, concurrent] = await Promise.all([
+      registry.replacePathPrefix("/srv/group", "/srv/team"),
+      registry.register("/srv/unrelated/notes"),
+    ]);
+
+    expect(updated).toEqual([{ ...original, path: "/srv/team/repo" }]);
+    expect(concurrent.path).toBe("/srv/unrelated/notes");
+    const reloaded = new WorkspaceRegistry(filePath);
+    await reloaded.load();
+    expect(reloaded.list()).toEqual(registry.list());
   });
 });

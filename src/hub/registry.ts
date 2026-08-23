@@ -10,6 +10,8 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
+import { isPathAtOrBelow, normalizeAbsolutePath } from "./path-reservations";
+
 export type WorkspaceBackend = "local";
 
 export type WorkspaceEntry = {
@@ -100,6 +102,97 @@ export class WorkspaceRegistry {
 
   byPath(folderPath: string): WorkspaceEntry | undefined {
     return this.workspaces.find(entry => entry.path === folderPath);
+  }
+
+  atOrBelow(folderPath: string): WorkspaceEntry[] {
+    return this.workspaces.filter(entry => isPathAtOrBelow(entry.path, folderPath));
+  }
+
+  replacePathPrefix(source: string, destination: string): Promise<WorkspaceEntry[]> {
+    return this.enqueueMutation(async () => {
+      if (!path.isAbsolute(source) || !path.isAbsolute(destination)) {
+        throw new Error("workspace path prefixes must be absolute");
+      }
+      const normalizedSource = normalizeAbsolutePath(source);
+      const normalizedDestination = normalizeAbsolutePath(destination);
+      const affectedIds = new Set(this.atOrBelow(normalizedSource).map(entry => entry.id));
+      if (affectedIds.size === 0) return [];
+
+      const replacements = new Map<string, WorkspaceEntry>();
+      for (const entry of this.workspaces) {
+        if (!affectedIds.has(entry.id)) continue;
+        const relative = path.relative(normalizedSource, normalizeAbsolutePath(entry.path));
+        replacements.set(entry.id, {
+          ...entry,
+          path: relative === "" ? normalizedDestination : path.join(normalizedDestination, relative),
+        });
+      }
+
+      const occupied = new Set(
+        this.workspaces
+          .filter(entry => !affectedIds.has(entry.id))
+          .map(entry => normalizeAbsolutePath(entry.path)),
+      );
+      for (const replacement of replacements.values()) {
+        const candidate = normalizeAbsolutePath(replacement.path);
+        if (occupied.has(candidate)) {
+          throw new Error(`workspace path collision: ${replacement.path}`);
+        }
+        occupied.add(candidate);
+      }
+
+      const previous = this.workspaces;
+      this.workspaces = previous.map(entry => replacements.get(entry.id) ?? entry);
+      try {
+        await this.save();
+      } catch (error) {
+        this.workspaces = previous;
+        throw error;
+      }
+      return this.workspaces.filter(entry => affectedIds.has(entry.id));
+    });
+  }
+
+  // Reconciles complete entries recorded by the folder-mutation journal.
+  // Existing ids are replaced and missing ids are restored in one snapshot.
+  restoreEntries(entries: readonly WorkspaceEntry[]): Promise<WorkspaceEntry[]> {
+    return this.enqueueMutation(async () => {
+      if (entries.length === 0) return [];
+      if (entries.some(entry => !path.isAbsolute(entry.path))) {
+        throw new Error("invalid workspace recovery entry");
+      }
+      const restored = entries.map(entry => ({ ...entry, path: normalizeAbsolutePath(entry.path) }));
+      if (restored.some(entry => entry.backend !== "local")) {
+        throw new Error("invalid workspace recovery entry");
+      }
+      if (new Set(restored.map(entry => entry.id)).size !== restored.length) {
+        throw new Error("duplicate workspace recovery id");
+      }
+      if (new Set(restored.map(entry => entry.path)).size !== restored.length) {
+        throw new Error("duplicate workspace recovery path");
+      }
+
+      const restoredIds = new Set(restored.map(entry => entry.id));
+      const restoredPaths = new Set(restored.map(entry => entry.path));
+      for (const entry of this.workspaces) {
+        if (!restoredIds.has(entry.id) && restoredPaths.has(normalizeAbsolutePath(entry.path))) {
+          throw new Error(`workspace path collision: ${entry.path}`);
+        }
+      }
+
+      const byId = new Map(restored.map(entry => [entry.id, entry]));
+      const previous = this.workspaces;
+      this.workspaces = previous
+        .map(entry => byId.get(entry.id) ?? entry)
+        .concat(restored.filter(entry => !previous.some(existing => existing.id === entry.id)));
+      try {
+        await this.save();
+      } catch (error) {
+        this.workspaces = previous;
+        throw error;
+      }
+      return restored.map(entry => ({ ...entry }));
+    });
   }
 
   // Registers a folder, returning the existing entry when the folder is

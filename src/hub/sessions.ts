@@ -20,6 +20,10 @@ export function sessionBasePath(workspaceId: string): string {
   return `/s/${workspaceId}/`;
 }
 
+export type SessionsStoppedResult<T> =
+  | { status: "completed"; value: T }
+  | { status: "needs-stop"; workspaceIds: string[] };
+
 export class SessionManager {
   private readonly running = new Map<string, RunningSession>();
   // Published at CALL time — before the operation even reaches the front of
@@ -92,6 +96,43 @@ export class SessionManager {
       }
       return operation();
     });
+  }
+
+  // Installs one shared barrier on every affected queue before waiting for
+  // any predecessor. Later lifecycle calls therefore wait for the whole
+  // operation, without acquiring workspace queues one at a time.
+  async runWithSessionsStopped<T>(
+    workspaceIds: Iterable<string>,
+    stopAuthorized: boolean,
+    operation: () => Promise<T>,
+  ): Promise<SessionsStoppedResult<T>> {
+    const ids = [...new Set(workspaceIds)].sort();
+    const predecessors = ids.map(id => this.lifecycle.get(id) ?? Promise.resolve());
+    let releaseBarrier!: () => void;
+    const barrier = new Promise<void>(resolve => { releaseBarrier = resolve; });
+    for (const id of ids) {
+      this.lifecycle.set(id, barrier);
+    }
+
+    try {
+      await Promise.all(predecessors);
+      const needsStop = ids.filter(id => this.running.has(id));
+      if (needsStop.length > 0 && !stopAuthorized) {
+        return { status: "needs-stop", workspaceIds: needsStop };
+      }
+
+      if (stopAuthorized) {
+        const results = await Promise.allSettled(ids.map(id => this.stopWhileLifecycleQueueHeld(id)));
+        const failures = results.flatMap(result => result.status === "rejected" ? [result.reason] : []);
+        if (failures.length > 0) {
+          throw new AggregateError(failures, "one or more affected workspace sessions failed to stop");
+        }
+      }
+
+      return { status: "completed", value: await operation() };
+    } finally {
+      releaseBarrier();
+    }
   }
 
   // Starts (or joins the pending start of) the session for a registered

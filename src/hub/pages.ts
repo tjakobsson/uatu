@@ -162,6 +162,7 @@ const SHARED_STYLE = `
     white-space: nowrap;
   }
   .row-detail { color: var(--text-subtle); font-size: 0.72rem; }
+  .row-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.4rem; }
 
   /* Indicator dot — mirrors .indicator-dot/.connection-state. */
   .indicator-dot {
@@ -316,6 +317,10 @@ const SHARED_STYLE = `
   .clone-response { padding-top: 0; align-items: end; }
   .clone-response label { flex: 1; min-width: 0; color: var(--text-subtle); font-size: 0.72rem; font-weight: 600; }
   .clone-response input { display: block; margin-top: 0.2rem; }
+  .folder-create-form { border-bottom: 1px solid var(--border-soft); align-items: flex-start; }
+  .folder-create-form input { min-width: 10rem; }
+  .folder-create-form .local-error { flex: 1 0 100%; margin: 0; }
+  .folder-dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.5rem; }
   @media (max-width: 520px) {
     .form-row { flex-wrap: wrap; }
     .form-row input { flex-basis: 100%; }
@@ -328,6 +333,10 @@ const SHARED_STYLE = `
     .assignment-add { grid-template-columns: 1fr; }
     .workspace-assignment-form { grid-template-columns: 1fr; }
     .assignment-add > button { width: 100%; }
+    .folder-browser .row { flex-wrap: wrap; }
+    .folder-browser .row-main { flex-basis: calc(100% - 2rem); }
+    .folder-browser .row-actions { flex: 1 0 100%; justify-content: flex-end; }
+    .folder-create-form button { flex: 1 1 auto; }
   }
   .empty { padding: 0.75rem 1rem; color: var(--text-subtle); font-size: 0.8rem; }
   .error-text { color: var(--danger); font-size: 0.8rem; margin: 0.75rem 0; }
@@ -452,7 +461,13 @@ function authenticatedPage(pageName: AuthenticatedPage, authenticatedUser: strin
   const sharedUidAdvisory = `<p class="advisory" data-shared-uid-warning><span>${sharedUidWarning}</span><button type="button" data-dismiss-shared-uid>Dismiss</button></p>`;
   const addFolder = `<section class="pane">
   <div class="pane-header"><h2>Add folder</h2><span id="browse-path" class="pane-meta"></span></div>
-  <div id="browser"><p class="empty">Loading…</p></div>
+  <form id="new-folder-form" class="form-row folder-create-form">
+    <input id="new-folder-name" type="text" required aria-label="New folder name" placeholder="New folder name" />
+    <button type="submit">Create folder</button>
+    <p id="new-folder-error" class="local-error" role="alert" hidden></p>
+  </form>
+  <p id="browser-error" class="local-error" role="alert" hidden style="padding: 0 1rem;"></p>
+  <div id="browser" class="folder-browser"><p class="empty">Loading…</p></div>
   ${sharedUidAdvisory}
   <form class="form-stack" id="clone-form" style="border-top: 1px solid var(--border-soft);">
     <input type="text" id="clone-url" placeholder="Clone a repository into this folder — git URL" aria-label="Git clone URL" />
@@ -486,6 +501,17 @@ function authenticatedPage(pageName: AuthenticatedPage, authenticatedUser: strin
     <p id="clone-response-help" class="empty" style="padding-top: 0;">Available for any Git or SSH prompt. Responses are not shown in this log.</p>
     <p class="local-error" id="clone-action-error" role="alert" hidden></p>
   </div>
+  <dialog id="rename-folder-dialog" class="credential-dialog" aria-labelledby="rename-folder-title">
+    <form id="rename-folder-form" class="form-stack">
+      <h2 id="rename-folder-title">Rename folder</h2>
+      <label>Folder name<input id="rename-folder-name" type="text" required /></label>
+      <p id="rename-folder-error" class="local-error" role="alert" hidden></p>
+      <div class="folder-dialog-actions">
+        <button id="rename-folder-cancel" type="button">Cancel</button>
+        <button id="rename-folder-submit" class="primary" type="submit">Rename</button>
+      </div>
+    </form>
+  </dialog>
 </section>
 `;
   const credentials = `<section class="pane" id="credentials-pane">
@@ -673,11 +699,15 @@ function row({ title, href, titleClick, path, detail, live, chip, chipWarn, butt
   if (path) main.appendChild(el("div", "row-path", path));
   if (detail) main.appendChild(el("div", "row-detail", detail));
   div.appendChild(main);
-  for (const spec of buttons ?? (button ? [button] : [])) {
+  const specs = buttons ?? (button ? [button] : []);
+  const actions = el("div", "row-actions");
+  for (const spec of specs) {
     const action = el("button", spec.className || null, spec.label);
+    if (spec.ariaLabel) action.setAttribute("aria-label", spec.ariaLabel);
     action.onclick = () => spec.onClick(action);
-    div.appendChild(action);
+    actions.appendChild(action);
   }
+  if (specs.length) div.appendChild(actions);
   return div;
 }
 // Session starts (a real server spawn) take seconds; a silent button reads
@@ -1242,15 +1272,85 @@ async function addFolder(folder, errorTarget) {
 // add the current candidate with its button. Server defaults to the home
 // directory; the resolved path comes back with every listing.
 let browsePath = null;
-async function loadBrowser() {
+let browseParent = null;
+function childFolderPath(parent, name) {
+  const separator = parent.includes("\\\\") && !parent.includes("/") ? "\\\\" : "/";
+  return parent + (parent.endsWith("/") || parent.endsWith("\\\\") ? "" : separator) + name;
+}
+async function refreshWorkspaceState() {
+  const response = await fetch("/api/hub/state");
+  if (!response.ok) return;
+  const state = await response.json();
+  dashboardWorkspaces = state.workspaces || [];
+}
+async function requestFolderMutation(endpoint, request) {
+  try {
+    return await api(endpoint, request);
+  } catch (error) {
+    if (!error.payload?.needsStop) throw error;
+    const workspaceIds = error.payload.workspaceIds || [];
+    const names = workspaceIds.length ? workspaceIds.map(id => '"' + id + '"').join(", ") : "the affected workspaces";
+    if (!confirm("Stop " + names + " and continue? Their running sessions and shells will be terminated.")) {
+      return null;
+    }
+    return api(endpoint, { ...request, stop: true });
+  }
+}
+async function refreshAfterFolderMutation() {
+  await Promise.all([
+    loadBrowser({ fallbackToParent: true }),
+    refreshWorkspaceState().catch(() => {}),
+  ]);
+}
+let pendingRename = null;
+function openRenameFolder(folder, name, button) {
+  pendingRename = { folder, name, button };
+  const dialog = document.getElementById("rename-folder-dialog");
+  const input = document.getElementById("rename-folder-name");
+  input.value = name;
+  setLocalError(document.getElementById("rename-folder-error"), "");
+  dialog.showModal();
+  input.focus();
+  input.select();
+}
+async function removeFolder(folder, name, button) {
+  if (!confirm('Remove empty folder "' + name + '"? Only empty folders can be removed. This cannot be undone.')) return;
+  const errorTarget = actionErrorFor(button);
+  setLocalError(errorTarget, "");
+  await withBusy(button, "Removing…", async () => {
+    try {
+      const result = await requestFolderMutation("/api/hub/folders/remove", { path: folder });
+      if (result) await refreshAfterFolderMutation();
+    } catch (error) {
+      setLocalError(errorTarget, 'Could not remove "' + name + '": ' + error.message);
+    }
+  });
+}
+async function loadBrowser({ fallbackToParent = false } = {}) {
   let listing;
   try {
     const query = browsePath === null ? "" : "?path=" + encodeURIComponent(browsePath);
     const response = await fetch("/api/hub/browse" + query);
-    if (!response.ok) return;
+    if (!response.ok) {
+      if (fallbackToParent && response.status === 404 && browseParent) {
+        browsePath = browseParent;
+        if (await loadBrowser()) {
+          setLocalError(document.getElementById("browser-error"), "The folder being viewed is no longer available. Showing its parent; another client may have renamed or removed it.");
+          return true;
+        }
+      }
+      const payload = await response.json().catch(() => ({}));
+      setLocalError(document.getElementById("browser-error"), payload.error || "This folder could not be refreshed. Check that it still exists and is readable.");
+      return false;
+    }
     listing = await response.json();
-  } catch { return; }
+  } catch (error) {
+    setLocalError(document.getElementById("browser-error"), error.message || "This folder could not be refreshed. Check the Hub connection.");
+    return false;
+  }
   browsePath = listing.path;
+  browseParent = listing.parent;
+  setLocalError(document.getElementById("browser-error"), "");
   document.getElementById("browse-path").textContent = listing.path;
   const rows = [];
   if (listing.parent) {
@@ -1261,31 +1361,43 @@ async function loadBrowser() {
     }));
   }
   for (const dir of listing.dirs) {
+    const folder = childFolderPath(listing.path, dir.name);
     rows.push(row({
       title: dir.name,
-      titleClick: () => { browsePath = listing.path + (listing.path.endsWith("/") ? "" : "/") + dir.name; loadBrowser(); },
+      titleClick: () => { browsePath = folder; loadBrowser(); },
       chip: dir.registeredId ? "added" : (dir.git ? "git" : "no git"),
       chipWarn: !dir.registeredId && !dir.git,
-      button: dir.registeredId
-        ? { label: "Open", onClick: () => openSession(dir.registeredId) }
-        : {
+      buttons: [
+        dir.registeredId
+          ? { label: "Open", ariaLabel: "Open " + dir.name, onClick: () => openSession(dir.registeredId) }
+          : {
             label: "Add",
+            ariaLabel: "Add " + dir.name,
             onClick: async button => {
               const errorTarget = actionErrorFor(button);
               uiBusy += 1;
               const original = button.textContent;
               button.disabled = true;
               button.textContent = "Starting…";
-              if (!(await addFolder(listing.path + (listing.path.endsWith("/") ? "" : "/") + dir.name, errorTarget))) {
+              if (!(await addFolder(folder, errorTarget))) {
                 uiBusy -= 1;
                 button.disabled = false;
                 button.textContent = original;
               }
             },
           },
+        { label: "Rename", ariaLabel: "Rename " + dir.name, onClick: button => openRenameFolder(folder, dir.name, button) },
+        {
+          label: "Remove",
+          ariaLabel: "Remove " + dir.name,
+          className: "danger",
+          onClick: button => removeFolder(folder, dir.name, button),
+        },
+      ],
     }));
   }
   renderInto(document.getElementById("browser"), rows, "No subfolders here.");
+  return true;
 }
 async function refresh(force) {
   if (!force && uiBusy > 0) return;
@@ -1432,6 +1544,15 @@ async function loadDevices() {
 }
 function initClonePage() {
 initSharedUidAdvisory();
+const newFolderForm = document.getElementById("new-folder-form");
+const newFolderName = document.getElementById("new-folder-name");
+const newFolderError = document.getElementById("new-folder-error");
+const renameFolderDialog = document.getElementById("rename-folder-dialog");
+const renameFolderForm = document.getElementById("rename-folder-form");
+const renameFolderName = document.getElementById("rename-folder-name");
+const renameFolderError = document.getElementById("rename-folder-error");
+const renameFolderCancel = document.getElementById("rename-folder-cancel");
+const renameFolderSubmit = document.getElementById("rename-folder-submit");
 const cloneForm = document.getElementById("clone-form");
 const clonePanel = document.getElementById("clone-panel");
 const clonePhase = document.getElementById("clone-phase");
@@ -1454,6 +1575,61 @@ let cloneJobId = sessionStorage.getItem(cloneJobStorageKey);
 let cloneEvents = null;
 let cloneBusy = false;
 let clonePromptText = "";
+
+newFolderForm.onsubmit = async event => {
+  event.preventDefault();
+  const name = newFolderName.value.trim();
+  if (!name) return;
+  setLocalError(newFolderError, "");
+  const button = newFolderForm.querySelector('button[type="submit"]');
+  await withBusy(button, "Creating…", async () => {
+    try {
+      await api("/api/hub/folders/create", { parent: browsePath, name });
+      newFolderName.value = "";
+      await refreshAfterFolderMutation();
+    } catch (error) {
+      setLocalError(newFolderError, 'Could not create "' + name + '": ' + error.message);
+    }
+  });
+};
+renameFolderCancel.onclick = () => {
+  pendingRename = null;
+  setLocalError(renameFolderError, "");
+  renameFolderDialog.close();
+};
+renameFolderDialog.addEventListener("cancel", event => {
+  if (renameFolderSubmit.disabled) {
+    event.preventDefault();
+    return;
+  }
+  pendingRename = null;
+  setLocalError(renameFolderError, "");
+});
+renameFolderForm.onsubmit = async event => {
+  event.preventDefault();
+  if (!pendingRename) return;
+  const rename = pendingRename;
+  const name = renameFolderName.value.trim();
+  if (!name) return;
+  setLocalError(renameFolderError, "");
+  renameFolderSubmit.disabled = true;
+  renameFolderCancel.disabled = true;
+  renameFolderName.disabled = true;
+  await withBusy(rename.button, "Renaming…", async () => {
+    try {
+      const result = await requestFolderMutation("/api/hub/folders/rename", { path: rename.folder, name });
+      if (!result) return;
+      pendingRename = null;
+      renameFolderDialog.close();
+      await refreshAfterFolderMutation();
+    } catch (error) {
+      setLocalError(renameFolderError, 'Could not rename "' + rename.name + '": ' + error.message);
+    }
+  });
+  renameFolderSubmit.disabled = false;
+  renameFolderCancel.disabled = false;
+  renameFolderName.disabled = false;
+};
 
 async function loadCloneCredentials() {
   try {

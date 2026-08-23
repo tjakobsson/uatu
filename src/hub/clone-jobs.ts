@@ -1,5 +1,3 @@
-import path from "node:path";
-
 import type { CloneProcess, CloneProcessFactory } from "./clone-process";
 import {
   EMPTY_CLONE_CREDENTIAL_RESOLVER,
@@ -7,6 +5,11 @@ import {
   type ResolvedCloneCredential,
 } from "./credential-context";
 import type { WorkspaceEntry } from "./registry";
+import {
+  normalizeAbsolutePath,
+  PathReservationCoordinator,
+  type PathReservation,
+} from "./path-reservations";
 
 export type CloneJobPhase = "cloning" | "registering" | "starting";
 export type CloneJobResult =
@@ -52,6 +55,7 @@ export type CloneJobManagerOptions = {
   inactivityMs?: number;
   lifetimeMs?: number;
   retentionMs?: number;
+  reservations?: PathReservationCoordinator;
 };
 
 type Job = {
@@ -78,6 +82,7 @@ type Job = {
   assigned: boolean;
   done: Promise<void>;
   resolveDone(): void;
+  reservation: PathReservation;
 };
 
 const defaultTimer: CloneJobTimer = {
@@ -88,7 +93,7 @@ const SHUTDOWN_CLEANUP_ATTEMPTS = 2;
 
 export class CloneJobManager {
   private readonly jobs = new Map<string, Job>();
-  private readonly reservations = new Map<string, string>();
+  private readonly reservations: PathReservationCoordinator;
   private readonly processFactory: CloneProcessFactory;
   private readonly registry: Registry;
   private readonly sessions: Sessions;
@@ -114,6 +119,7 @@ export class CloneJobManager {
     this.inactivityMs = options.inactivityMs ?? 10 * 60_000;
     this.lifetimeMs = options.lifetimeMs ?? 60 * 60_000;
     this.retentionMs = options.retentionMs ?? 5 * 60_000;
+    this.reservations = options.reservations ?? new PathReservationCoordinator();
   }
 
   resolveCredential(url: string, credentialId?: string): Promise<ResolvedCloneCredential | undefined> {
@@ -127,11 +133,12 @@ export class CloneJobManager {
     options: { credential?: ResolvedCloneCredential; retainAssignment?: boolean } = {},
   ): { jobId: string } {
     if (this.closed) throw new Error("clone job manager is closed");
-    const normalizedTarget = path.normalize(path.resolve(target));
-    if (this.reservations.has(normalizedTarget)) throw new Error(`clone target is already reserved: ${normalizedTarget}`);
+    const normalizedTarget = normalizeAbsolutePath(target);
 
     let id: string;
     do id = this.makeId(); while (this.jobs.has(id));
+    const reservation = this.reservations.acquire([normalizedTarget]);
+    if (!reservation) throw new Error(`clone target is already reserved: ${normalizedTarget}`);
     let resolveDone!: () => void;
     const job: Job = {
       id,
@@ -152,9 +159,9 @@ export class CloneJobManager {
         resolveDone = resolve;
       }),
       resolveDone,
+      reservation,
     };
     this.jobs.set(id, job);
-    this.reservations.set(normalizedTarget, id);
     this.emit(job, "phase", { phase: "cloning" });
     job.lifetimeTimer = this.timer.set(() => void this.requestTimeout(job, "lifetime"), this.lifetimeMs);
     this.resetInactivity(job);
@@ -167,7 +174,7 @@ export class CloneJobManager {
   }
 
   isTargetReserved(target: string): boolean {
-    return this.reservations.has(path.normalize(path.resolve(target)));
+    return this.reservations.isReserved(target);
   }
 
   subscribe(owner: string, jobId: string, afterEventId: number, listener: (event: CloneJobEvent) => void): (() => void) | null {
@@ -224,7 +231,7 @@ export class CloneJobManager {
           }
         }
       }
-      if (!job.process) this.reservations.delete(job.target);
+      if (!job.process) job.reservation.release();
       return job.process
         ? new Error(`failed to terminate clone job '${job.id}': ${errorText(terminationError)}`)
         : undefined;
@@ -418,7 +425,7 @@ export class CloneJobManager {
     // Only a retained process can still be operating on the clone target.
     // Registry and session cleanup failures remain represented by their own
     // managers and must not permanently poison this in-memory reservation.
-    if (!job.process) this.reservations.delete(job.target);
+    if (!job.process) job.reservation.release();
     this.emit(job, "result", result);
     job.subscribers.clear();
     job.url = "";
