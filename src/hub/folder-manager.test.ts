@@ -20,7 +20,12 @@ afterEach(async () => {
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 
-async function fixture(options: { fs?: typeof fs; reservations?: PathReservationCoordinator; renameNoReplace?: (from: string, to: string) => number } = {}) {
+async function fixture(options: {
+  fs?: typeof fs;
+  reservations?: PathReservationCoordinator;
+  renameNoReplace?: (from: string, to: string) => number;
+  platform?: NodeJS.Platform;
+} = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "uatu-folders-")));
   tempDirectories.push(root);
   const state = path.join(root, "state");
@@ -53,6 +58,7 @@ async function fixture(options: { fs?: typeof fs; reservations?: PathReservation
     reservations,
     fs: options.fs,
     ...(options.renameNoReplace === undefined ? {} : { renameNoReplace: options.renameNoReplace }),
+    ...(options.platform === undefined ? {} : { platform: options.platform }),
   });
   return { root, state, folders, registry, personalState, credentials, sessions, reservations, journalPath, manager, stopped };
 }
@@ -76,7 +82,7 @@ function renameJournal(
   source: string,
   destination: string,
   entries: WorkspaceEntry[],
-  identities?: { source: { dev: string; ino: string }; claim: { dev: string; ino: string } },
+  identities?: { source: { dev: string; ino: string }; claim?: { dev: string; ino: string } },
 ): PendingFolderMutation {
   return {
     version: 1,
@@ -602,6 +608,61 @@ describe("FolderManager registered mutations", () => {
     expect(await exists(f.journalPath)).toBe(false);
   });
 
+  test("the Windows fallback plain-renames instead of claiming the destination", async () => {
+    // Windows rename refuses ANY existing destination, an empty directory
+    // included, so a claimed placeholder would be the very thing blocking
+    // every rename there. Both the unregistered and the registered path
+    // must reach fs.rename without a destination mkdir.
+    const mkdirs: string[] = [];
+    const injected = Object.assign({}, fs, {
+      mkdir: async (candidate: string, options?: Parameters<typeof fs.mkdir>[1]) => {
+        mkdirs.push(candidate);
+        return fs.mkdir(candidate, options);
+      },
+    }) as typeof fs;
+    const f = await fixture({ fs: injected, platform: "win32" });
+    const unregistered = path.join(f.folders, "unregistered");
+    const registered = path.join(f.folders, "registered");
+    await Promise.all([fs.mkdir(unregistered), fs.mkdir(registered)]);
+    await fs.writeFile(path.join(unregistered, "kept.txt"), "kept");
+    const entry = await f.registry.register(registered);
+
+    completed(await f.manager.rename({ path: unregistered, name: "moved" }));
+    completed(await f.manager.rename({ path: registered, name: "renamed" }));
+    expect(await fs.readFile(path.join(f.folders, "moved", "kept.txt"), "utf8")).toBe("kept");
+    expect(f.registry.byId(entry.id)?.path).toBe(path.join(f.folders, "renamed"));
+    expect(mkdirs).not.toContain(path.join(f.folders, "moved"));
+    expect(mkdirs).not.toContain(path.join(f.folders, "renamed"));
+    expect(await exists(f.journalPath)).toBe(false);
+  });
+
+  test("a Windows registered rename journals its source identity without a claim", async () => {
+    // No placeholder exists to record, so the journal must still reach
+    // disk before the rename, carrying the source identity alone — the
+    // same shape the native no-replace path writes and recovery reads.
+    let midFlight: { identities?: { source?: unknown; claim?: unknown } } | undefined;
+    let journalPath = "";
+    let source = "";
+    const injected = Object.assign({}, fs, {
+      rename: async (from: string, to: string) => {
+        if (from === source) {
+          midFlight = JSON.parse(await fs.readFile(journalPath, "utf8")) as typeof midFlight;
+        }
+        return fs.rename(from, to);
+      },
+    }) as typeof fs;
+    const f = await fixture({ fs: injected, platform: "win32" });
+    journalPath = f.journalPath;
+    source = path.join(f.folders, "source");
+    await fs.mkdir(source);
+    await f.registry.register(source);
+
+    completed(await f.manager.rename({ path: source, name: "renamed" }));
+    expect(midFlight?.identities?.source).toBeDefined();
+    expect(midFlight?.identities?.claim).toBeUndefined();
+    expect(await exists(f.journalPath)).toBe(false);
+  });
+
   test("a claim swapped from under the rename conflicts instead of replacing", async () => {
     // A same-user process replaces the destination while the journal is
     // being written: the recorded claim identity no longer matches, so the
@@ -781,6 +842,25 @@ describe("FolderManager journal recovery", () => {
     expect(await exists(destination)).toBe(true);
     expect(await exists(source)).toBe(true);
     expect(await exists(f.journalPath)).toBe(false);
+  });
+
+  test("completes a claim-less rename journal by the recorded source identity", async () => {
+    // The native no-replace and Windows paths record no claim. Recovery
+    // must still recognize the moved folder at the destination — and a
+    // foreign directory there must stay a loud failure.
+    const f = await fixture();
+    const source = path.join(f.folders, "source");
+    const destination = path.join(f.folders, "destination");
+    await fs.mkdir(destination);
+    const entry = await f.registry.register(source);
+    await writeJournal(f.journalPath, renameJournal(source, destination, [entry], { source: await identityOf(destination) }));
+    await f.manager.recover();
+    expect(f.registry.byId(entry.id)?.path).toBe(destination);
+    expect(await exists(f.journalPath)).toBe(false);
+
+    await writeJournal(f.journalPath, renameJournal(source, destination, [entry], { source: { dev: "0", ino: "1" } }));
+    await expect(f.manager.recover()).rejects.toThrow("unrecognized directory");
+    expect(await exists(f.journalPath)).toBe(true);
   });
 
   test("rejects a lone surviving directory that is not the journaled source", async () => {
