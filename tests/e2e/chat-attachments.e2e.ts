@@ -403,3 +403,26 @@ test.describe("composer edits during the upload drain", () => {
     await page.unroute("**/attachments");
   });
 });
+
+test.describe("touch composer rail with attachments", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("the attach control and a readable model name share the touch rail", async ({ page, request }) => {
+    await request.post("/__e2e/reset");
+    const token = await request.get("/__e2e/terminal-token").then(r => r.json()) as { token: string };
+    await page.goto(`/?t=${encodeURIComponent(token.token)}`);
+    await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
+    await page.locator("#touch-tab-chat").click();
+    await expect(page.locator("#chat-surface")).toBeVisible();
+    await page.getByRole("button", { name: "New conversation" }).click();
+    await expect(page.locator("#chat-conversation-select")).not.toHaveValue("");
+    await expect(page.locator("#chat-attach")).toBeVisible();
+    // The regression squeezed the configuration trigger into a 2.25rem
+    // column; a readable trigger occupies the rail's flexible track.
+    const width = await page.locator("#chat-configuration-trigger").evaluate(element => element.getBoundingClientRect().width);
+    expect(width).toBeGreaterThan(120);
+    // No horizontal overflow: send stays inside the viewport.
+    const send = await page.locator("#chat-send").evaluate(element => element.getBoundingClientRect().right);
+    expect(send).toBeLessThanOrEqual(390);
+  });
+});

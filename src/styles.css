@@ -6662,6 +6662,15 @@ html[data-ui-mode="touch"] .chat-composer-actions {
   min-height: 2rem;
 }
 
+/* This touch template outranks the desktop :has() variant (the ui-mode
+   attribute adds specificity), so with the attach control present it must
+   restate the five-column layout itself — otherwise the desktop column
+   assignments land in touch's four-column grid and squeeze the model name
+   into a 2.25rem track. */
+html[data-ui-mode="touch"] .chat-composer-actions:has(> .chat-attach-button) {
+  grid-template-columns: 2.25rem auto minmax(0, 1fr) 2.25rem 2.55rem;
+}
+
 html[data-ui-mode="touch"] #chat-send {
   display: inline-grid;
   place-items: center;
