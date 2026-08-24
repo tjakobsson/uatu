@@ -1,6 +1,7 @@
 import { OpenCodeChatAdapter, type ChatAdapterOptions, type ChatEventMetrics } from "./adapter";
 import { createAttachmentStore, type AttachmentStore, type StoredAttachment } from "./attachment-store";
 import { OpenCodeService, type OpenCodeServiceOptions } from "./opencode-service";
+import type { ConversationInventorySubscription } from "./inventory-broadcaster";
 import { createSdkV2Provider } from "./sdk-v2-provider";
 import type { OpenCodeProvider } from "./provider";
 import type { ReplaySubscription } from "./replay";
@@ -25,6 +26,7 @@ export interface WorkspaceChatService {
   modes(): Promise<ChatMode[]>;
   commands(): Promise<ChatCommand[]>;
   listConversations(): Promise<ConversationSummary[]>;
+  subscribeInventory(options?: { signal?: AbortSignal }): Promise<ConversationInventorySubscription>;
   createConversation(): Promise<ConversationSnapshot>;
   history(id: string, options?: { cursor?: string; limit?: number }): Promise<ConversationSnapshot>;
   subscribe(id: string, options?: { cursor?: string; signal?: AbortSignal }): Promise<{
@@ -134,7 +136,7 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
     const previous = this.adapter;
     this.adapterPromise = null;
     this.adapter = null;
-    await previous?.stopEventPump().catch(() => undefined);
+    await previous?.dispose().catch(() => undefined);
     // A full restart, not a bare runtime retry: an adapter-level failure
     // (compatibility probe, startup race) leaves the runtime "ready", and
     // re-probing the same process can never pick up a replaced binary.
@@ -148,7 +150,7 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
     const stray = this.adapter as OpenCodeChatAdapter | null;
     this.adapterPromise = null;
     this.adapter = null;
-    await stray?.stopEventPump().catch(() => undefined);
+    await stray?.dispose().catch(() => undefined);
     return this.status();
   }
 
@@ -156,6 +158,7 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
   async models() { return (await this.requireAdapter()).models(); }
   async modes() { return (await this.requireAdapter()).modes(); }
   async commands() { return (await this.requireAdapter()).commands(); }
+  async subscribeInventory(options: { signal?: AbortSignal } = {}) { return (await this.requireAdapter()).subscribeInventory(options.signal); }
   async createConversation() { return (await this.requireAdapter()).createConversation(); }
   async history(id: string, options?: { cursor?: string; limit?: number }) { return (await this.requireAdapter()).history(id, options); }
   async subscribe(id: string, options?: { cursor?: string; signal?: AbortSignal }) { return (await this.requireAdapter()).subscribe(id, options); }
@@ -178,7 +181,7 @@ export class LazyOpenCodeChatService implements WorkspaceChatService {
   async dispose(): Promise<void> {
     this.disposed = true;
     const runtimeDisposal = this.runtime.dispose();
-    await this.adapter?.stopEventPump().catch(() => undefined);
+    await this.adapter?.dispose().catch(() => undefined);
     await runtimeDisposal;
   }
 

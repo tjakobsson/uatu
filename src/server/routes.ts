@@ -464,6 +464,67 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         return run(() => deps.chatService.createConversation(), 201);
       },
     },
+    // Static route must precede the conversation identity route so "events"
+    // is never interpreted as a conversation id.
+    [p("/api/chat/conversations/events")]: {
+      GET: async (request: Request) => {
+        const rejected = authenticated(request);
+        if (rejected) return rejected;
+        const abort = new AbortController();
+        const onAbort = () => abort.abort();
+        if (request.signal.aborted) abort.abort();
+        else request.signal.addEventListener("abort", onAbort, { once: true });
+        try {
+          const events = await deps.chatService.subscribeInventory({ signal: abort.signal });
+          const encoder = new TextEncoder();
+          const iterator = events[Symbol.asyncIterator]();
+          let pending: Promise<IteratorResult<void>> | null = null;
+          let finished = false;
+          const finish = async () => {
+            if (finished) return;
+            finished = true;
+            await iterator.return?.().catch(() => undefined);
+            events.cancel();
+            request.signal.removeEventListener("abort", onAbort);
+          };
+          const stream = new ReadableStream<Uint8Array>({
+            async pull(controller) {
+              try {
+                pending ??= iterator.next();
+                const result = await nextChatEvent(pending, CHAT_KEEPALIVE_MS);
+                if (result === "keepalive") {
+                  controller.enqueue(encoder.encode(": keepalive\n\n"));
+                  return;
+                }
+                pending = null;
+                if (!result.done) {
+                  controller.enqueue(encoder.encode('event: inventory\ndata: {"type":"conversation.inventory"}\n\n'));
+                  return;
+                }
+              } catch {
+                // Cancellation closes the transport without an in-band error.
+              }
+              await finish();
+              try { controller.close(); } catch { /* consumer cancelled */ }
+            },
+            cancel() {
+              abort.abort();
+              return finish();
+            },
+          }, { highWaterMark: 0 });
+          return new Response(stream, {
+            headers: {
+              "cache-control": "no-store, no-transform",
+              "content-type": "text/event-stream; charset=utf-8",
+              "x-accel-buffering": "no",
+            },
+          });
+        } catch (error) {
+          request.signal.removeEventListener("abort", onAbort);
+          return normalizedChatError(error);
+        }
+      },
+    },
     [p("/api/chat/conversations/:conversationId")]: {
       GET: async (request: RouteRequest) => {
         const rejected = authenticated(request);
@@ -858,10 +919,10 @@ function normalizedChatError(error: unknown): Response {
   return chatError(500, "chat operation failed");
 }
 
-function nextChatEvent(
-  pending: Promise<IteratorResult<import("../chat/types").ChatEvent>>,
+function nextChatEvent<T>(
+  pending: Promise<IteratorResult<T>>,
   milliseconds: number,
-): Promise<IteratorResult<import("../chat/types").ChatEvent> | "keepalive"> {
+): Promise<IteratorResult<T> | "keepalive"> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => resolve("keepalive"), milliseconds);
     void pending.then(value => {

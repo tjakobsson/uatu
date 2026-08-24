@@ -165,11 +165,20 @@ async function handleE2EChat(request: Request): Promise<Response> {
     capabilities?: ChatCapability[];
     models?: ChatModel[];
     child?: boolean;
+    invalidate?: boolean;
     configuration?: ConversationConfiguration;
   };
   switch (body.action) {
     case "seed":
       return Response.json(chatService.seed(body.title ?? "Fixture conversation", body.items ?? [], body.older ?? [], body.child ?? false, body.configuration));
+    case "externalCreate":
+      return Response.json(chatService.externalCreate(body.title ?? "External conversation", { child: body.child, invalidate: body.invalidate }));
+    case "externalRename":
+      if (body.conversationId) return Response.json(chatService.externalRename(body.conversationId, body.title ?? "Externally renamed", body.invalidate !== false));
+      break;
+    case "externalDelete":
+      if (body.conversationId) return Response.json(chatService.externalDelete(body.conversationId, body.invalidate !== false));
+      break;
     case "item":
       if (body.conversationId && body.item) return Response.json(chatService.publishItem(body.conversationId, body.item));
       break;
@@ -194,7 +203,25 @@ async function handleE2EChat(request: Request): Promise<Response> {
       chatService.disconnect();
       return Response.json({ ok: true });
     case "stats":
-      return Response.json({ statusCalls: chatService.statusCalls, promptAttempts: chatService.promptAttempts, promptModes: chatService.promptModes, promptVariants: chatService.promptVariants, promptConfigurations: chatService.promptConfigurations });
+      return Response.json({ statusCalls: chatService.statusCalls, promptAttempts: chatService.promptAttempts, promptModes: chatService.promptModes, promptVariants: chatService.promptVariants, promptConfigurations: chatService.promptConfigurations, ...chatService.inventoryStats() });
+    case "inventoryInvalidate":
+      chatService.invalidateInventory();
+      return Response.json({ ok: true });
+    case "inventoryInterrupt":
+      chatService.interruptInventoryTransport();
+      return Response.json({ ok: true });
+    case "inventoryResume":
+      chatService.resumeInventoryTransport();
+      return Response.json({ ok: true });
+    case "providerPumpRestart":
+      chatService.restartProviderPump();
+      return Response.json({ ok: true });
+    case "delayNextInventoryList":
+      chatService.delayNextInventoryList();
+      return Response.json({ ok: true });
+    case "releaseInventoryList":
+      chatService.releaseInventoryList();
+      return Response.json({ ok: true });
     case "failPrompt":
       chatService.failPrompt();
       return Response.json({ ok: true });

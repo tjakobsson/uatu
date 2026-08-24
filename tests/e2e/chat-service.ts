@@ -5,6 +5,7 @@ import path from "node:path";
 import { ConversationReplay } from "../../src/chat/replay";
 import { deriveConversationTitle, QueuedMessageNotHeldError, UnknownAttachmentError } from "../../src/chat/adapter";
 import { createAttachmentStore } from "../../src/chat/attachment-store";
+import { ConversationInventoryBroadcaster, type ConversationInventorySubscription } from "../../src/chat/inventory-broadcaster";
 import type { WorkspaceChatService } from "../../src/chat/service";
 import { ConversationNotFoundError } from "../../src/chat/workspace";
 import type {
@@ -42,6 +43,14 @@ export class FakeE2EChatService implements WorkspaceChatService {
   // depends on that, so the fake has to keep the same shape.
   private readonly children = new Set<string>();
   private readonly subscriptions = new Set<{ cancel(): void }>();
+  private inventory = new ConversationInventoryBroadcaster();
+  private readonly inventorySubscriptions = new Set<ConversationInventorySubscription>();
+  private readonly pendingInventorySubscriptions = new Set<() => void>();
+  private inventoryTransportInterrupted = false;
+  private inventoryListGate: { pending: boolean; promise: Promise<void>; release(): void } | null = null;
+  private inventoryListCalls = 0;
+  private inventoryListCompleted = 0;
+  private inventoryInvalidations = 0;
   // Counted so the suite can assert Chat's lazy backend startup: in production
   // status() launches the OpenCode server, so a page load that never opens
   // Chat must never call it.
@@ -157,9 +166,34 @@ export class FakeE2EChatService implements WorkspaceChatService {
   }
 
   async listConversations(): Promise<ConversationSummary[]> {
-    return [...this.conversations.values()]
+    this.inventoryListCalls += 1;
+    const result = [...this.conversations.values()]
       .filter(conversation => !this.children.has(conversation.id))
       .sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
+    const gate = this.inventoryListGate;
+    if (gate && !gate.pending) {
+      gate.pending = true;
+      await gate.promise;
+      if (this.inventoryListGate === gate) this.inventoryListGate = null;
+    }
+    this.inventoryListCompleted += 1;
+    return result;
+  }
+
+  async subscribeInventory(options: { signal?: AbortSignal } = {}) {
+    if (!this.inventoryTransportInterrupted) return this.trackInventorySubscription(options.signal);
+    return new Promise<ConversationInventorySubscription>(resolve => {
+      let settled = false;
+      const resume = () => {
+        if (settled) return;
+        settled = true;
+        options.signal?.removeEventListener("abort", resume);
+        this.pendingInventorySubscriptions.delete(resume);
+        resolve(this.trackInventorySubscription(options.signal));
+      };
+      this.pendingInventorySubscriptions.add(resume);
+      options.signal?.addEventListener("abort", resume, { once: true });
+    });
   }
 
   async createConversation(): Promise<ConversationSnapshot> {
@@ -176,6 +210,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.configurations.set(id, this.nextCreatedConfiguration);
     this.nextCreatedConfiguration = {};
     this.replay.set(id, new ConversationReplay(this.generation, id, 64 * 1024));
+    this.invalidateInventory();
     return this.snapshot(id);
   }
 
@@ -338,6 +373,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     const result = { conversation };
     this.receipts.set(key, result);
     this.replay.get(id)!.publish({ type: "conversation.updated", conversation });
+    this.invalidateInventory();
     return result;
   }
 
@@ -378,10 +414,25 @@ export class FakeE2EChatService implements WorkspaceChatService {
     return result;
   }
 
-  async dispose(): Promise<void> {}
+  async dispose(): Promise<void> {
+    for (const subscription of [...this.inventorySubscriptions]) subscription.cancel();
+    this.inventory.dispose();
+    this.inventoryTransportInterrupted = false;
+    for (const resume of [...this.pendingInventorySubscriptions]) resume();
+  }
 
   reset(): void {
     this.disconnect();
+    for (const subscription of [...this.inventorySubscriptions]) subscription.cancel();
+    this.inventory.dispose();
+    this.inventory = new ConversationInventoryBroadcaster();
+    this.inventoryTransportInterrupted = false;
+    for (const resume of [...this.pendingInventorySubscriptions]) resume();
+    this.inventoryListGate?.release();
+    this.inventoryListGate = null;
+    this.inventoryListCalls = 0;
+    this.inventoryListCompleted = 0;
+    this.inventoryInvalidations = 0;
     this.statusCalls = 0;
     this.promptAttempts = [];
     this.promptModes = [];
@@ -422,7 +473,90 @@ export class FakeE2EChatService implements WorkspaceChatService {
     this.configurations.set(id, configuration);
     this.replay.set(id, new ConversationReplay(this.generation, id, 64 * 1024));
     if (older.length) this.olderItems.set(id, older);
+    this.invalidateInventory();
     return this.snapshot(id);
+  }
+
+  externalCreate(title: string, options: { child?: boolean; invalidate?: boolean } = {}): ConversationSnapshot {
+    const id = `conversation-${this.nextId++}`;
+    const conversation: ConversationSummary = {
+      id,
+      title,
+      createdAt: this.nextId,
+      updatedAt: this.nextId,
+      status: "idle",
+    };
+    this.conversations.set(id, conversation);
+    this.items.set(id, new Map());
+    this.configurations.set(id, {});
+    this.replay.set(id, new ConversationReplay(this.generation, id, 64 * 1024));
+    if (options.child) this.children.add(id);
+    if (!options.child && options.invalidate !== false) this.invalidateInventory();
+    return this.snapshot(id);
+  }
+
+  externalRename(id: string, title: string, invalidate = true): ConversationSummary {
+    const current = this.require(id);
+    const conversation = { ...current, title, updatedAt: this.nextId++ };
+    this.conversations.set(id, conversation);
+    if (invalidate) this.invalidateInventory();
+    return conversation;
+  }
+
+  externalDelete(id: string, invalidate = true): ConversationSummary {
+    const conversation = this.require(id);
+    this.conversations.delete(id);
+    this.items.delete(id);
+    this.configurations.delete(id);
+    this.olderItems.delete(id);
+    this.queues.delete(id);
+    this.dormant.delete(id);
+    this.children.delete(id);
+    this.replay.delete(id);
+    if (invalidate) this.invalidateInventory();
+    return conversation;
+  }
+
+  invalidateInventory(): void {
+    this.inventoryInvalidations += 1;
+    this.inventory.invalidate();
+  }
+
+  interruptInventoryTransport(): void {
+    this.inventoryTransportInterrupted = true;
+    for (const subscription of [...this.inventorySubscriptions]) subscription.cancel();
+  }
+
+  resumeInventoryTransport(): void {
+    this.inventoryTransportInterrupted = false;
+    for (const resume of [...this.pendingInventorySubscriptions]) resume();
+  }
+
+  restartProviderPump(): void {
+    this.invalidateInventory();
+  }
+
+  delayNextInventoryList(): void {
+    if (this.inventoryListGate) throw new Error("an inventory list delay is already armed");
+    let release!: () => void;
+    const promise = new Promise<void>(resolve => { release = resolve; });
+    this.inventoryListGate = { pending: false, promise, release };
+  }
+
+  releaseInventoryList(): void {
+    this.inventoryListGate?.release();
+  }
+
+  inventoryStats() {
+    return {
+      inventoryListCalls: this.inventoryListCalls,
+      inventoryListCompleted: this.inventoryListCompleted,
+      inventoryListPending: this.inventoryListGate?.pending ?? false,
+      inventoryInvalidations: this.inventoryInvalidations,
+      inventorySubscribers: this.inventory.subscriberCount(),
+      inventoryTransportInterrupted: this.inventoryTransportInterrupted,
+      pendingInventorySubscriptions: this.pendingInventorySubscriptions.size,
+    };
   }
 
   publishItem(id: string, item: ConversationItem): ChatEvent {
@@ -463,6 +597,31 @@ export class FakeE2EChatService implements WorkspaceChatService {
 
   restart(): void {
     this.rotateGeneration();
+  }
+
+  private trackInventorySubscription(signal?: AbortSignal): ConversationInventorySubscription {
+    const source = this.inventory.subscribe(signal);
+    let tracked: ConversationInventorySubscription;
+    const forget = () => { this.inventorySubscriptions.delete(tracked); };
+    tracked = {
+      next: async () => {
+        const result = await source.next();
+        if (result.done) forget();
+        return result;
+      },
+      cancel: () => {
+        source.cancel();
+        forget();
+      },
+      return: async () => {
+        const result = await source.return();
+        forget();
+        return result;
+      },
+      [Symbol.asyncIterator]: () => tracked,
+    };
+    this.inventorySubscriptions.add(tracked);
+    return tracked;
   }
 
   private require(id: string): ConversationSummary {

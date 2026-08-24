@@ -27,6 +27,8 @@ import { formatDiagnostics } from "./diagnostics";
 import { collectQuestionAnswers, showQuestionPanel, syncQuestionControl, syncQuestionForm } from "./question-form";
 import { configurationOptionLabel, createChatConfigurationPicker, type ChatConfigurationPickerController } from "./configuration-picker";
 import { copyChatText } from "./copy-actions";
+import { announceConversationInventory, renderConversationInventoryAwareness, renderSelectedConversationDeleted } from "./inventory-presentation";
+import { ConversationInventoryTracker, SerializedInventoryReconciler, dedupeConversationInventory, isConversationChooserActivationKey, patchConversationOptions, retainedPresentationConversationIds } from "./inventory-reconciler";
 
 const PRESENTATION_KEY = "uatu:chat-presentation";
 const SAVE_DEBOUNCE_MS = 400;
@@ -128,7 +130,15 @@ export function initChat(): void {
   const stagedConfigurations = new Map<string, ConversationConfiguration>();
   let configurationPicker: ChatConfigurationPickerController | null = null;
   let stream: ChatEventStream | null = null;
+  let inventoryStream: ChatEventStream | null = null;
   let selectionGeneration = 0;
+  let selectedConversationDeleted = false;
+  const inventoryTracker = new ConversationInventoryTracker();
+  const syncInventoryAwareness = (announceIncrease = false) => {
+    renderConversationInventoryAwareness(document, inventoryTracker.unseenCount);
+    announceConversationInventory(document, announceIncrease ? inventoryTracker.unseenCount : 0);
+  };
+  syncInventoryAwareness();
   // Viewing child X of parent Y. A subagent transcript is a drill-down into a
   // turn, not a conversation: this state never reaches the picker, the
   // inventory, or the stored per-conversation presentation, so returning to
@@ -312,8 +322,11 @@ export function initChat(): void {
     // The inventory is the whole truth about what may keep stored state: a
     // subagent's transcript is a drill-down, never a picker option and never
     // a conversation, so it has no draft here to protect.
-    const known = new Set(conversations.map(conversation => conversation.id));
-    if (projection) known.add(projection.conversationId);
+    const known = retainedPresentationConversationIds(
+      conversations,
+      projection?.conversationId ?? null,
+      selectedConversationDeleted ? presentation.selectedId ?? null : null,
+    );
     // Prune only once the inventory has actually loaded — an empty list at
     // boot must not wipe every stored draft.
     if (conversations.length > 0) {
@@ -1334,6 +1347,8 @@ export function initChat(): void {
   };
 
   const selectConversation = async (id: string) => {
+    selectedConversationDeleted = false;
+    renderSelectedConversationDeleted(document, false);
     // Choosing a conversation is leaving whatever turn was being drilled into:
     // the drill-down is a view over the parent, and the parent is changing.
     closeChildConversation();
@@ -1409,23 +1424,107 @@ export function initChat(): void {
     }
   };
 
-  const renderChooser = () => {
-    select.replaceChildren();
-    if (conversations.length === 0) {
-      select.append(new Option("No conversations", ""));
-      select.disabled = true;
+  const patchChooser = (selectedId: string | null, deleted = false) => {
+    renderSelectedConversationDeleted(document, deleted);
+    patchConversationOptions(select, conversations, displayConversationTitle);
+    const genericPlaceholder = select.querySelector<HTMLOptionElement>("option[data-chat-inventory-placeholder]");
+    if (deleted || selectedId) {
+      genericPlaceholder?.remove();
+    } else {
+      const placeholder = genericPlaceholder ?? document.createElement("option");
+      placeholder.setAttribute("data-chat-inventory-placeholder", "");
+      placeholder.value = "";
+      placeholder.disabled = true;
+      placeholder.textContent = conversations.length === 0 ? "No conversations" : "Select a conversation";
+      if (!genericPlaceholder) select.prepend(placeholder);
+    }
+    if (deleted) {
+      select.value = "";
+      select.disabled = false;
+    } else {
+      select.value = selectedId ?? "";
+      select.disabled = conversations.length === 0;
+    }
+  };
+
+  const installInitialChooser = () => {
+    const selected = conversations.some(item => item.id === presentation.selectedId)
+      ? presentation.selectedId!
+      : conversations[0]?.id ?? null;
+    patchChooser(selected);
+    if (!selected) {
       form.hidden = true;
       if (chatTitle) chatTitle.textContent = chatHeading();
       return;
     }
-    select.disabled = false;
-    for (const conversation of conversations) select.append(new Option(displayConversationTitle(conversation), conversation.id));
-    const selected = conversations.some(item => item.id === presentation.selectedId) ? presentation.selectedId! : conversations[0]!.id;
-    select.value = selected;
     void selectConversation(selected);
   };
 
-  select.addEventListener("change", () => { if (select.value) void selectConversation(select.value); });
+  const acknowledgeInventory = () => {
+    if (!inventoryTracker.acknowledge()) return;
+    syncInventoryAwareness();
+  };
+  document.querySelector<HTMLButtonElement>("#chat-conversation-unseen-count")
+    ?.addEventListener("click", acknowledgeInventory);
+  select.addEventListener("pointerdown", event => {
+    if (event.button === 0) acknowledgeInventory();
+  });
+  select.addEventListener("keydown", event => {
+    if (isConversationChooserActivationKey(event)) acknowledgeInventory();
+  });
+  select.addEventListener("change", () => {
+    if (!select.value) return;
+    if (inventoryTracker.isUnseen(select.value)) acknowledgeInventory();
+    void selectConversation(select.value);
+  });
+
+  const enterSelectedConversationDeleted = () => {
+    if (selectedConversationDeleted) return;
+    selectedConversationDeleted = true;
+    const selectedId = presentation.selectedId;
+    if (selectedId) {
+      presentation.drafts[selectedId] = input.value;
+      if (projection?.conversationId === selectedId) {
+        const currentAnchor = anchor.currentAnchor();
+        if (currentAnchor) presentation.anchors[selectedId] = currentAnchor;
+      }
+    }
+    // The projection remains in memory so its draft, attachments,
+    // configuration, and active turn survive until an explicit selection.
+    // Its stream and any snapshot callbacks can no longer mutate it.
+    selectionGeneration += 1;
+    stream?.close();
+    stream = null;
+    save();
+  };
+
+  const applyConversationInventory = (next: ConversationSummary[]) => {
+    const tracked = inventoryTracker.reconcile(next);
+    const selectedId = presentation.selectedId ?? null;
+    const selectedMissing = selectedId !== null && !next.some(conversation => conversation.id === selectedId);
+    if (selectedMissing) enterSelectedConversationDeleted();
+
+    // The successful response replaces inventory truth. It does not install a
+    // snapshot or touch the selected projection.
+    conversations = next;
+    const selectedConversation = selectedId ? next.find(conversation => conversation.id === selectedId) : undefined;
+    if (selectedConversation && projection?.conversationId === selectedId) {
+      projection = { ...projection, conversation: selectedConversation };
+      if (chatTitle) chatTitle.textContent = displayConversationTitle(selectedConversation);
+    }
+    if (selectedConversationDeleted) patchChooser(null, true);
+    else patchChooser(selectedId);
+    syncInventoryAwareness(tracked.increased);
+    syncControls();
+    save();
+  };
+
+  const inventoryReconciler = new SerializedInventoryReconciler(
+    () => api.conversations(),
+    applyConversationInventory,
+    error => announce(messageOf(error), true),
+  );
+
   const stageModel = (selection: ModelSelection | undefined) => {
     if (!projection) return;
     const staged = { ...stagedConfigurations.get(projection.conversationId) };
@@ -1486,10 +1585,15 @@ export function initChat(): void {
     try {
       const snapshot = await api.createConversation();
       if (projection) presentation.drafts[projection.conversationId] = input.value;
-      conversations = [snapshot.conversation, ...conversations.filter(item => item.id !== snapshot.conversation.id)];
+      // Record local identity before the provider's invalidation can reconcile
+      // it back, so this page never announces its own selected creation.
+      if (inventoryTracker.noteLocalCreation(snapshot.conversation.id)) syncInventoryAwareness();
+      void inventoryReconciler.supersede();
+      conversations = dedupeConversationInventory([snapshot.conversation, ...conversations]);
       presentation.selectedId = snapshot.conversation.id;
-      renderChooser();
-      select.value = snapshot.conversation.id;
+      selectedConversationDeleted = false;
+      patchChooser(snapshot.conversation.id);
+      void selectConversation(snapshot.conversation.id);
     } catch (error) { announce(messageOf(error), true); }
     finally { newButton.disabled = false; }
   });
@@ -1524,6 +1628,7 @@ export function initChat(): void {
     controls.forEach(control => { control.disabled = true; });
     try {
       const { conversation } = await api.renameConversation(conversationId, newRequestId(), title);
+      void inventoryReconciler.supersede();
       conversations = conversations.map(item => item.id === conversation.id ? conversation : item);
       const option = Array.from(select.options).find(candidate => candidate.value === conversation.id);
       if (option) option.text = displayConversationTitle(conversation);
@@ -2294,6 +2399,7 @@ export function initChat(): void {
   window.addEventListener("pagehide", () => {
     flushSave();
     stream?.close();
+    inventoryStream?.close();
     child?.stream?.close();
     observer?.disconnect();
     surfaceObserver.disconnect();
@@ -2305,11 +2411,23 @@ export function initChat(): void {
   // Bootstrap is deferred until Chat is actually the active surface: status()
   // lazily launches the OpenCode server, and merely opening Preview, Files, or
   // Terminal must not pay that cost. A restored Chat surface bootstraps
-  // immediately via the initial maybeBootstrap() call. Failures — a stale PWA
+  // immediately via the initial surface-state check. Failures — a stale PWA
   // cookie 401, a transient status error — leave the bootstrap re-runnable:
   // it retries on the next Chat activation and on credential refresh.
   let bootstrapped = false;
   let bootstrapping = false;
+
+  const startInventoryStream = () => {
+    if (inventoryStream) return;
+    try {
+      inventoryStream = api.inventoryStream({
+        invalidation: () => { void inventoryReconciler.request(); },
+        error: error => announce(error.message, true),
+      });
+    } catch (error) {
+      announce(messageOf(error), true);
+    }
+  };
 
   // The unavailable state is the whole point of this surface when OpenCode will
   // not start: it has to carry enough evidence to diagnose the failure from a
@@ -2397,19 +2515,29 @@ export function initChat(): void {
       // A capability the agent does not declare is not fetched at all. The
       // mode list stays fault-tolerant on top of that: a declared list that
       // fails to load hides the picker rather than blocking chat.
-      [models, conversations, commands, modes] = await Promise.all([
+      const [nextModels, nextConversations, nextCommands, nextModes] = await Promise.all([
         declares("models") ? api.models() : Promise.resolve([] as ChatModel[]),
         api.conversations(),
         declares("commands") ? api.commands().catch(() => []) : Promise.resolve([] as ChatCommand[]),
         declares("modes") ? api.modes().catch(() => [] as ChatMode[]) : Promise.resolve([] as ChatMode[]),
       ]);
+      models = nextModels;
+      conversations = dedupeConversationInventory(nextConversations);
+      commands = nextCommands;
+      modes = nextModes;
+      // Bootstrap is the silent page-local baseline. The stream starts only
+      // after this point, so its mandatory initial frame reconciles rather
+      // than turning every existing id into an unseen one.
+      inventoryTracker.reconcile(conversations);
+      syncInventoryAwareness();
       form.hidden = false;
       select.disabled = false;
       newButton.disabled = false;
       renderConfiguration();
       announce(conversations.length ? "" : "No conversations yet. Create one to start.");
-      renderChooser();
+      installInitialChooser();
       bootstrapped = true;
+      startInventoryStream();
     } catch (error) { announce(messageOf(error), true); }
     finally { bootstrapping = false; }
   };
@@ -2419,11 +2547,32 @@ export function initChat(): void {
       ? root.getAttribute("data-active-tab") === "chat"
       : root.getAttribute("data-chat-panel") === "open";
   };
-  const maybeBootstrap = () => { if (chatSurfaceActive()) void bootstrap(); };
-  const surfaceObserver = new MutationObserver(maybeBootstrap);
+  let chatWasActive = false;
+  const handleChatSurfaceState = () => {
+    const active = chatSurfaceActive();
+    const becameActive = active && !chatWasActive;
+    chatWasActive = active;
+    if (!active) return;
+    if (!bootstrapped) void bootstrap();
+    else if (becameActive) {
+      startInventoryStream();
+      void inventoryReconciler.request();
+    }
+  };
+  const surfaceObserver = new MutationObserver(handleChatSurfaceState);
   surfaceObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-chat-panel", "data-active-tab", "data-ui-mode"] });
-  onWorkspaceCredentialRefresh(maybeBootstrap);
-  maybeBootstrap();
+  onWorkspaceCredentialRefresh(() => {
+    if (bootstrapped) {
+      startInventoryStream();
+      void inventoryReconciler.request();
+    } else if (chatSurfaceActive()) {
+      void bootstrap();
+    }
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && bootstrapped) void inventoryReconciler.request();
+  });
+  handleChatSurfaceState();
 }
 
 function isTextEditingControl(value: Element | null): boolean {

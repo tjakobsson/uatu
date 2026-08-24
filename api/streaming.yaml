@@ -58,6 +58,21 @@ channels:
       keepalive: Comment frames may be sent while no chat event is available.
       cancellation: Client disconnect or stream cancellation removes the subscriber.
       errors: Authentication, unavailable chat, and unknown or foreign conversations return HTTP errors before stream start.
+  workspaceChatConversationInventory:
+    transport: sse
+    operationId: workspaceStreamChatConversationInventory
+    path: /s/{workspaceId}/api/chat/conversations/events
+    mediaType: text/event-stream
+    authentication: hubSession
+    events:
+      - { name: inventory, dataSchema: ConversationInventoryEvent, replayId: none }
+    lifecycle:
+      initialEvent: inventory
+      coalescing: Each subscriber holds at most one pending inventory signal; repeated invalidations may collapse into that signal.
+      reconnection: Every connection emits a fresh inventory event after subscription so clients can refetch the complete authoritative list and repair missed changes.
+      keepalive: Comment frames may be sent while no inventory event is available.
+      cancellation: Client disconnect or stream cancellation removes the subscriber.
+      errors: Authentication and unavailable chat return HTTP errors before stream start; no in-band error event exists.
   terminal:
     transport: websocket
     operationId: workspaceAttachTerminal
@@ -106,6 +121,7 @@ schemas:
     $ref: ./openapi.yaml#/components/schemas/WorkspaceState
   ChatEvent: { $ref: ./openapi.yaml#/components/schemas/ChatEvent }
   ChatResyncEvent: { $ref: ./openapi.yaml#/components/schemas/ChatResyncEvent }
+  ConversationInventoryEvent: { $ref: ./openapi.yaml#/components/schemas/ConversationInventoryEvent }
   CloneOutput:
     type: object
     required: [output]

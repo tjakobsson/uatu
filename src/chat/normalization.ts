@@ -10,6 +10,14 @@ export type NormalizedProviderUpdate =
   | { kind: "remove"; itemId: string }
   | { kind: "status"; status: ConversationStatus; message?: string };
 
+export type NormalizedSessionLifecycle = {
+  kind: "created" | "updated" | "deleted";
+  id: string;
+  directory: string;
+  title: string;
+  parentId?: string;
+};
+
 // Why an event produced no updates. Without this an unrecognized event and one
 // we deliberately ignore are the same empty value to the caller, so a counter
 // over them would either miss real drops or inflate on expected ones.
@@ -130,6 +138,9 @@ export type NormalizedProviderEvent = {
   configuration?: ConversationConfiguration;
   // A model switch without a variant explicitly clears the previous variant.
   replaceModel?: boolean;
+  // Inventory identity deliberately excludes provider timestamps. They change
+  // during ordinary session activity without changing picker membership.
+  sessionLifecycle?: NormalizedSessionLifecycle;
 };
 
 // Event types recognized as deliberately carrying nothing for the timeline.
@@ -235,7 +246,7 @@ export function normalizeProviderEvent(value: unknown, memory?: ProviderEventMem
   const eventType = optionalString(record(value).type) ?? "";
   try {
     const matched = normalizeKnownEvent(value, memory);
-    if (matched) return { ...matched, outcome: matched.updates.length > 0 ? "handled" : "ignored", eventType };
+    if (matched) return { ...matched, outcome: matched.updates.length > 0 || matched.sessionLifecycle ? "handled" : "ignored", eventType };
     return {
       conversationId: conversationIdOf(value),
       updates: [],
@@ -252,7 +263,8 @@ export function normalizeProviderEvent(value: unknown, memory?: ProviderEventMem
 function conversationIdOf(value: unknown): string | undefined {
   try {
     const data = record(record(value).data ?? record(value).properties);
-    return optionalString(data.sessionID) ?? optionalString(data.sessionId);
+    const info = record(data.info ?? data.session);
+    return optionalString(data.sessionID) ?? optionalString(data.sessionId) ?? optionalString(info.id);
   } catch {
     return undefined;
   }
@@ -266,6 +278,7 @@ type KnownEvent = {
   removedMessageId?: string;
   configuration?: ConversationConfiguration;
   replaceModel?: boolean;
+  sessionLifecycle?: NormalizedSessionLifecycle;
 };
 
 function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): KnownEvent | undefined {
@@ -276,6 +289,10 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
   const createdAt = timestamp(data.timestamp ?? data.timeCreated, Date.now());
 
   switch (event.type) {
+    case "session.created": {
+      const sessionLifecycle = normalizeSessionLifecycle("created", data);
+      return { conversationId: conversationId ?? sessionLifecycle.id, updates: [], sessionLifecycle };
+    }
     case "session.next.agent.switched":
       return { conversationId, updates: [], configuration: { mode: string(data.agent, "session agent") } };
     case "session.next.model.switched": {
@@ -293,13 +310,19 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
     }
     case "session.updated": {
       const info = record(data.info ?? data.session);
+      const sessionLifecycle = normalizeSessionLifecycle("updated", data);
       const configuration = configurationFromRecord(info);
       return {
-        conversationId: conversationId ?? optionalString(info.id),
+        conversationId: conversationId ?? sessionLifecycle.id,
         updates: [],
+        sessionLifecycle,
         ...(configuration ? { configuration } : {}),
         ...(configuration?.model ? { replaceModel: true } : {}),
       };
+    }
+    case "session.deleted": {
+      const sessionLifecycle = normalizeSessionLifecycle("deleted", data);
+      return { conversationId: conversationId ?? sessionLifecycle.id, updates: [], sessionLifecycle };
     }
     case "session.next.prompted":
     case "session.next.prompt.admitted": {
@@ -620,6 +643,19 @@ function normalizeKnownEvent(value: unknown, memory?: ProviderEventMemory): Know
       // No case matched. The wrapper decides whether that is expected.
       return undefined;
   }
+}
+
+function normalizeSessionLifecycle(kind: NormalizedSessionLifecycle["kind"], data: RecordValue): NormalizedSessionLifecycle {
+  const info = record(data.info ?? data.session);
+  const id = string(info.id ?? data.sessionID ?? data.sessionId, "session id");
+  const directory = string(info.directory ?? record(info.location).directory, "session directory");
+  if (typeof info.title !== "string") throw new Error("invalid OpenCode session title");
+  const parent = info.parentID ?? info.parentId;
+  if (parent !== undefined && parent !== null && typeof parent !== "string") {
+    throw new Error("invalid OpenCode session parent id");
+  }
+  const parentId = optionalString(parent);
+  return { kind, id, directory, title: info.title, ...(parentId ? { parentId } : {}) };
 }
 
 function configurationFromRecord(value: RecordValue): ConversationConfiguration | undefined {

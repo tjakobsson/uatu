@@ -333,6 +333,10 @@ export type ConversationSnapshot = {
   olderCursor?: string;
 };
 
+export type ConversationInventoryEvent = {
+  type: "conversation.inventory";
+};
+
 type ChatEventBase = {
   generation: string;
   sequence: number;

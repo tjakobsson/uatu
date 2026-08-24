@@ -29,6 +29,7 @@ Compatibility: breaking (Hub and workspace)
 - `ChatPromptRequest` gained optional `attachments`: up to 8 `{id, name, mimeType}` references to previously uploaded images, submitted with the text as one message. `text` may now be empty when `attachments` is non-empty — an image-only prompt is valid (and `QueuedMessage.text` may be empty for such a message). Bytes never ride the prompt request. A reference the workspace has not stored, attachments on a slash command, or an empty text with no attachments answer `400`.
 - `UserMessageItem` and `QueuedMessage` gained optional `attachments` (`MessageAttachment` references): held messages keep their attachments and deliver them under the configuration frozen at submission, and replayed user messages restate theirs. A replayed attachment whose reference could not be recovered carries no `id`; clients render it as a labeled placeholder.
 - `ChatModel` gained optional `imageInput`, reporting whether the model can see image attachments; absent means not reported, which clients treat as no.
+- Added `workspaceStreamChatConversationInventory` (`GET .../chat/conversations/events`): an authenticated SSE stream whose `inventory` event carries only `{type: "conversation.inventory"}`. The initial event and every later invalidation tell clients to refetch the authoritative conversation list; the stream has no replay cursor or mutation-specific payload. This operation is additive.
 
 ### Migration
 

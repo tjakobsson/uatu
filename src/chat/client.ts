@@ -6,6 +6,7 @@ import type {
   ChatEvent,
   ChatModel,
   ConversationConfiguration,
+  ConversationInventoryEvent,
   ConversationSnapshot,
   ConversationSummary,
   MessageAttachment,
@@ -19,6 +20,7 @@ import {
   parseChatCommand,
   parseChatEvent,
   parseChatModel,
+  parseConversationInventoryEvent,
   parseConversationSnapshot,
   parseConversationConfiguration,
   parseConversationSummary,
@@ -37,7 +39,28 @@ type StreamHandlers = {
   error: (error: ChatTransportError) => void;
 };
 
+type InventoryStreamHandlers = {
+  invalidation: (event: ConversationInventoryEvent) => void;
+  error: (error: ChatTransportError) => void;
+};
+
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+type ChatClientTimers = {
+  setTimeout(callback: () => void, delay: number): ReturnType<typeof setTimeout>;
+  clearTimeout(timer: ReturnType<typeof setTimeout>): void;
+};
+
+const RECONNECT_BASE_DELAY_MS = 1_000;
+const MAX_RECONNECT_DELAY_MS = 15_000;
+const defaultTimers: ChatClientTimers = {
+  setTimeout: (callback, delay) => setTimeout(callback, delay),
+  clearTimeout: timer => clearTimeout(timer),
+};
+
+function reconnectDelay(failures: number): number {
+  return Math.min(RECONNECT_BASE_DELAY_MS * 2 ** (failures - 1), MAX_RECONNECT_DELAY_MS);
+}
 
 export type ChatEventStream = { close(): void };
 
@@ -45,6 +68,7 @@ export class ChatApiClient {
   constructor(
     private readonly fetcher: FetchLike = (input, init) => fetch(input, init),
     private readonly eventSourceFactory: (url: string) => EventSource = url => new EventSource(url),
+    private readonly timers: ChatClientTimers = defaultTimers,
   ) {}
 
   status(): Promise<ChatAvailability> {
@@ -170,6 +194,54 @@ export class ChatApiClient {
     return this.mutate(appUrl(`/api/chat/conversations/${encodeURIComponent(conversationId)}/questions/${encodeURIComponent(interactionId)}`), { requestId, outcome }, value => value);
   }
 
+  inventoryStream(handlers: InventoryStreamHandlers): ChatEventStream {
+    let closed = false;
+    let source: EventSource | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let failures = 0;
+
+    const connect = () => {
+      if (closed) return;
+      const nextSource = this.eventSourceFactory(appUrl("/api/chat/conversations/events"));
+      source = nextSource;
+      nextSource.addEventListener("inventory", ((raw: MessageEvent<string>) => {
+        let event: ConversationInventoryEvent;
+        try {
+          event = parseConversationInventoryEvent(JSON.parse(raw.data));
+        } catch (error) {
+          handlers.error(new ChatTransportError(error instanceof Error ? error.message : "Invalid conversation inventory event"));
+          return;
+        }
+        failures = 0;
+        handlers.invalidation(event);
+      }) as EventListener);
+      nextSource.onerror = () => {
+        if (source !== nextSource) return;
+        nextSource.close();
+        source = null;
+        if (closed) return;
+        failures += 1;
+        if (failures > 1) handlers.error(new ChatTransportError("Chat inventory connection interrupted; reconnecting"));
+        if (closed) return;
+        reconnectTimer = this.timers.setTimeout(() => {
+          reconnectTimer = null;
+          connect();
+        }, reconnectDelay(failures));
+      };
+    };
+    const close = () => {
+      closed = true;
+      source?.close();
+      source = null;
+      if (reconnectTimer !== null) {
+        this.timers.clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+    };
+    connect();
+    return { close };
+  }
+
   stream(conversationId: string, cursor: string, handlers: StreamHandlers): ChatEventStream {
     let closed = false;
     let source: EventSource | null = null;
@@ -211,14 +283,14 @@ export class ChatApiClient {
         // The first drop retries silently; a banner only appears once the
         // outage persists past one reconnect attempt.
         if (failures > 1) handlers.error(new ChatTransportError("Chat connection interrupted; reconnecting"));
-        reconnectTimer = setTimeout(connect, Math.min(1_000 * 2 ** (failures - 1), 15_000));
+        reconnectTimer = this.timers.setTimeout(connect, reconnectDelay(failures));
       };
     };
     const close = () => {
       closed = true;
       source?.close();
       source = null;
-      if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+      if (reconnectTimer !== null) this.timers.clearTimeout(reconnectTimer);
     };
     connect();
     return { close };

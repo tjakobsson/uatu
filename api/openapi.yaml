@@ -918,6 +918,24 @@ paths:
         '500': { $ref: '#/components/responses/Error' }
         '502': { $ref: '#/components/responses/SessionUnreachable' }
         '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
+  /s/{workspaceId}/api/chat/conversations/events:
+    parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
+    get:
+      operationId: workspaceStreamChatConversationInventory
+      tags: [Chat]
+      summary: Follow conversation inventory invalidations
+      description: Each inventory event signals that clients should refetch the authoritative conversation list. The event does not identify a mutation or carry a conversation snapshot.
+      responses:
+        '200':
+          description: SSE stream described by streaming.yaml#channels.workspaceChatConversationInventory
+          headers:
+            Cache-Control: { schema: { type: string, const: 'no-store, no-transform' } }
+            X-Accel-Buffering: { schema: { type: string, const: 'no' } }
+          content: { text/event-stream: { schema: { type: string } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/SessionUnreachable' }
+        '503': { $ref: '#/components/responses/WorkspaceUnavailable' }
   /s/{workspaceId}/api/chat/conversations/{conversationId}:
     parameters: [{ $ref: '#/components/parameters/WorkspaceId' }, { $ref: '#/components/parameters/ConversationId' }]
     get:
@@ -1844,6 +1862,7 @@ components:
       properties: { id: { type: string, minLength: 1, maxLength: 512 }, title: { type: string }, createdAt: { type: number, minimum: 0 }, updatedAt: { type: number, minimum: 0 }, status: { $ref: '#/components/schemas/ConversationStatus' } }
       additionalProperties: false
     ConversationList: { type: object, required: [conversations], properties: { conversations: { type: array, items: { $ref: '#/components/schemas/ConversationSummary' } } }, additionalProperties: false }
+    ConversationInventoryEvent: { type: object, required: [type], properties: { type: { const: conversation.inventory } }, additionalProperties: false }
     TimelineBase: { type: object, required: [id, type, createdAt], properties: { id: { type: string }, type: { type: string }, createdAt: { type: number, minimum: 0 } } }
     ConversationItem:
       oneOf:

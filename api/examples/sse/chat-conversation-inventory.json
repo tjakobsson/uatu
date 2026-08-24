@@ -1,0 +1,6 @@
+{
+  "event": "inventory",
+  "data": {
+    "type": "conversation.inventory"
+  }
+}

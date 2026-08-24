@@ -88,6 +88,26 @@ describe("LazyOpenCodeChatService", () => {
     await service.dispose();
   });
 
+  test("passes provider-neutral inventory subscriptions and abort signals to the adapter", async () => {
+    const service = new LazyOpenCodeChatService({
+      workspacePath: "/workspace",
+      runtime: fixtureRuntime(),
+      createProvider: () => provider(),
+      createAdapter: options => new OpenCodeChatAdapter({ ...options, generation: "test" }),
+    });
+    const controller = new AbortController();
+
+    const inventory = await service.subscribeInventory({ signal: controller.signal });
+    expect(await inventory.next()).toEqual({ value: undefined, done: false });
+    const waiting = inventory.next();
+
+    controller.abort();
+
+    expect((await waiting).done).toBe(true);
+    expect((await inventory.next()).done).toBe(true);
+    await service.dispose();
+  });
+
   test("a failed adapter probe is retried on the next status call instead of caching unsupported", async () => {
     let probes = 0;
     const flaky = {
@@ -356,4 +376,30 @@ describe("LazyOpenCodeChatService", () => {
 
     await service.dispose();
   }, 10_000);
+
+  test("retry terminally disposes the retired adapter and closes its inventory subscribers", async () => {
+    const adapters: OpenCodeChatAdapter[] = [];
+    const service = new LazyOpenCodeChatService({
+      workspacePath: "/workspace",
+      runtime: fixtureRuntime(),
+      createProvider: () => provider(),
+      createAdapter: options => {
+        const adapter = new OpenCodeChatAdapter({ ...options, generation: "test" });
+        adapters.push(adapter);
+        return adapter;
+      },
+    });
+
+    await service.status();
+    const inventory = await service.subscribeInventory();
+    expect((await inventory.next()).done).toBe(false);
+    const waiting = inventory.next();
+
+    await service.retry();
+
+    expect((await waiting).done).toBe(true);
+    expect((await adapters[0]!.subscribeInventory().next()).done).toBe(true);
+    expect(adapters).toHaveLength(2);
+    await service.dispose();
+  });
 });

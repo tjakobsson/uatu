@@ -107,6 +107,26 @@ describe("conversation configuration and rename", () => {
   });
 });
 
+describe("conversation inventory events", () => {
+  test("the inventory SSE payload is exact, closed, and not replay identified", async () => {
+    const [openapi, streaming, fixture] = await Promise.all([
+      readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml"),
+      readYaml<{ channels: { workspaceChatConversationInventory: { events: unknown[]; lifecycle: { initialEvent: string } } } }>("api/streaming.yaml"),
+      readJson<{ event: string; data: unknown; id?: unknown }>("api/examples/sse/chat-conversation-inventory.json"),
+    ]);
+    const validate = createAjv().compile(schemaForAjv(openapi.components.schemas.ConversationInventoryEvent, openapi.components.schemas));
+
+    expect(fixture).toEqual({ event: "inventory", data: { type: "conversation.inventory" } });
+    expect(validate(fixture.data)).toBe(true);
+    expect(validate({ type: "conversation.inventory", conversationId: "conversation-1" })).toBe(false);
+    expect(validate({ type: "conversation.updated" })).toBe(false);
+    expect(streaming.channels.workspaceChatConversationInventory.events).toEqual([
+      { name: "inventory", dataSchema: "ConversationInventoryEvent", replayId: "none" },
+    ]);
+    expect(streaming.channels.workspaceChatConversationInventory.lifecycle.initialEvent).toBe("inventory");
+  });
+});
+
 describe("Hub credential contracts", () => {
   test("a populated Hub state includes workspace credential status and assignment names", async () => {
     const openapi = await readYaml<{ components: { schemas: Record<string, object> } }>("api/openapi.yaml");

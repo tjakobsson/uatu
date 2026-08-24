@@ -88,20 +88,138 @@ describe("chat API client", () => {
 
   test("the first reconnect is silent and later failures announce", () => {
     const sources: FakeEventSource[] = [];
+    const timers = new FakeTimers();
     const client = new ChatApiClient(fetch, url => {
       const source = new FakeEventSource(url);
       sources.push(source);
       return source as unknown as EventSource;
-    });
+    }, timers);
     const errors: string[] = [];
     const stream = client.stream("c1", "cursor-1", { event: () => {}, resync: () => {}, error: error => errors.push(error.message) });
 
-    sources[0]!.onerror?.(new Event("error"));
+    sources[0]!.fail();
     expect(errors).toEqual([]);
+    expect(timers.delays()).toEqual([1_000]);
+    timers.runNext();
 
-    sources[0]!.onerror?.(new Event("error"));
+    sources[1]!.fail();
     expect(errors).toEqual(["Chat connection interrupted; reconnecting"]);
     stream.close();
+  });
+
+  test("inventory stream uses the app base path and accepts initial and reconnect frames", () => {
+    Reflect.set(globalThis, "document", { querySelector: () => ({ getAttribute: () => "/s/work/" }) });
+    resetAppBasePathForTests();
+    const sources: FakeEventSource[] = [];
+    const timers = new FakeTimers();
+    const client = eventSourceClient(sources, timers);
+    const invalidations: unknown[] = [];
+    const stream = client.inventoryStream({
+      invalidation: event => invalidations.push(event),
+      error: () => {},
+    });
+
+    expect(sources[0]!.url).toBe("/s/work/api/chat/conversations/events");
+    sources[0]!.emit("inventory", { type: "conversation.inventory" });
+    sources[0]!.fail();
+    timers.runNext();
+    sources[1]!.emit("inventory", { type: "conversation.inventory" });
+
+    expect(sources[1]!.url).toBe("/s/work/api/chat/conversations/events");
+    expect(invalidations).toEqual([
+      { type: "conversation.inventory" },
+      { type: "conversation.inventory" },
+    ]);
+    stream.close();
+  });
+
+  test("inventory stream rejects malformed frames without invalidating", () => {
+    const sources: FakeEventSource[] = [];
+    const client = eventSourceClient(sources, new FakeTimers());
+    const errors: string[] = [];
+    let invalidations = 0;
+    const stream = client.inventoryStream({
+      invalidation: () => { invalidations += 1; },
+      error: error => errors.push(error.message),
+    });
+
+    sources[0]!.emit("inventory", { type: "conversation.created" });
+    sources[0]!.emit("inventory", { type: "conversation.inventory", id: "c1" });
+    sources[0]!.emitRaw("inventory", "not json");
+
+    expect(invalidations).toBe(0);
+    expect(errors).toHaveLength(3);
+    stream.close();
+  });
+
+  test("inventory stream retries with capped backoff and reports persistent failure", () => {
+    const sources: FakeEventSource[] = [];
+    const timers = new FakeTimers();
+    const client = eventSourceClient(sources, timers);
+    const errors: string[] = [];
+    const stream = client.inventoryStream({ invalidation: () => {}, error: error => errors.push(error.message) });
+
+    const expectedDelays = [1_000, 2_000, 4_000, 8_000, 15_000, 15_000];
+    for (const [index, delay] of expectedDelays.entries()) {
+      sources[index]!.fail();
+      expect(timers.delays()).toEqual([delay]);
+      expect(errors).toHaveLength(Math.max(0, index));
+      timers.runNext();
+    }
+
+    expect(sources).toHaveLength(expectedDelays.length + 1);
+    expect(errors.every(error => error === "Chat inventory connection interrupted; reconnecting")).toBe(true);
+    stream.close();
+  });
+
+  test("a valid inventory frame resets consecutive failures", () => {
+    const sources: FakeEventSource[] = [];
+    const timers = new FakeTimers();
+    const client = eventSourceClient(sources, timers);
+    const errors: string[] = [];
+    const stream = client.inventoryStream({ invalidation: () => {}, error: error => errors.push(error.message) });
+
+    sources[0]!.fail();
+    timers.runNext();
+    sources[1]!.emit("inventory", { type: "conversation.inventory" });
+    sources[1]!.fail();
+
+    expect(timers.delays()).toEqual([1_000]);
+    expect(errors).toEqual([]);
+    stream.close();
+  });
+
+  test("inventory stream cleanup closes active sources and cancels reconnect timers", () => {
+    const sources: FakeEventSource[] = [];
+    const timers = new FakeTimers();
+    const client = eventSourceClient(sources, timers);
+    const activeStream = client.inventoryStream({ invalidation: () => {}, error: () => {} });
+
+    activeStream.close();
+    expect(sources[0]!.closed).toBe(true);
+
+    const reconnectingStream = client.inventoryStream({ invalidation: () => {}, error: () => {} });
+    sources[1]!.fail();
+    expect(timers.delays()).toEqual([1_000]);
+    reconnectingStream.close();
+    expect(timers.delays()).toEqual([]);
+    timers.runNext();
+    expect(sources).toHaveLength(2);
+  });
+
+  test("inventory stream does not schedule another reconnect when persistent-error handling closes it", () => {
+    const sources: FakeEventSource[] = [];
+    const timers = new FakeTimers();
+    const client = eventSourceClient(sources, timers);
+    let stream!: ReturnType<ChatApiClient["inventoryStream"]>;
+    stream = client.inventoryStream({ invalidation: () => {}, error: () => stream.close() });
+
+    sources[0]!.fail();
+    timers.runNext();
+    sources[1]!.fail();
+
+    expect(timers.delays()).toEqual([]);
+    expect(sources[1]!.closed).toBe(true);
   });
 });
 
@@ -112,9 +230,47 @@ class FakeEventSource {
   constructor(readonly url: string) {}
   addEventListener(type: string, listener: EventListener) { this.listeners.set(type, listener as (event: MessageEvent<string>) => void); }
   close() { this.closed = true; }
-  emit(type: string, value: unknown, lastEventId: string) {
+  fail() { this.onerror?.(new Event("error")); }
+  emit(type: string, value: unknown, lastEventId = "") {
     this.listeners.get(type)?.({ data: JSON.stringify(value), lastEventId } as MessageEvent<string>);
   }
+  emitRaw(type: string, data: string) {
+    this.listeners.get(type)?.({ data, lastEventId: "" } as MessageEvent<string>);
+  }
+}
+
+class FakeTimers {
+  private nextId = 1;
+  private readonly tasks = new Map<ReturnType<typeof setTimeout>, { callback: () => void; delay: number }>();
+
+  setTimeout = (callback: () => void, delay: number): ReturnType<typeof setTimeout> => {
+    const id = this.nextId++ as unknown as ReturnType<typeof setTimeout>;
+    this.tasks.set(id, { callback, delay });
+    return id;
+  };
+
+  clearTimeout = (id: ReturnType<typeof setTimeout>): void => {
+    this.tasks.delete(id);
+  };
+
+  delays(): number[] {
+    return [...this.tasks.values()].map(task => task.delay);
+  }
+
+  runNext(): void {
+    const next = this.tasks.entries().next().value as [ReturnType<typeof setTimeout>, { callback: () => void }] | undefined;
+    if (!next) return;
+    this.tasks.delete(next[0]);
+    next[1].callback();
+  }
+}
+
+function eventSourceClient(sources: FakeEventSource[], timers: FakeTimers): ChatApiClient {
+  return new ChatApiClient(fetch, url => {
+    const source = new FakeEventSource(url);
+    sources.push(source);
+    return source as unknown as EventSource;
+  }, timers);
 }
 
 function snapshot() {

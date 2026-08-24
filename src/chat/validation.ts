@@ -9,6 +9,7 @@ import type {
   ChatModel,
   ChatStartupDiagnostics,
   ConversationConfiguration,
+  ConversationInventoryEvent,
   ConversationItem,
   ConversationSnapshot,
   ConversationStatus,
@@ -358,6 +359,13 @@ export function parseQueuedMessages(value: unknown): QueuedMessage[] {
     if (record.attachments !== undefined) parseMessageAttachments(record.attachments, "queued message attachment");
   }
   return value as QueuedMessage[];
+}
+
+export function parseConversationInventoryEvent(value: unknown): ConversationInventoryEvent {
+  const record = expectRecord(value, "conversation inventory event");
+  expectKeys(record, ["type"], "conversation inventory event");
+  if (record.type !== "conversation.inventory") throw new Error("invalid conversation inventory event type");
+  return value as ConversationInventoryEvent;
 }
 
 export function parseChatEvent(value: unknown): ChatEvent {

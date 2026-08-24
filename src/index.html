@@ -667,6 +667,7 @@
                reopening is an interaction *inside* the surface (which is what
                lets active-surface tracking claim it like any other click). -->
           <button id="chat-expand" class="chat-expand-strip" type="button" aria-label="Open chat panel" title="Open chat panel">
+            <span class="chat-inventory-attention" aria-hidden="true"></span>
             <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
               <path
                 fill="none"
@@ -691,6 +692,9 @@
             <div class="chat-conversation-controls">
               <label class="sr-only" for="chat-conversation-select">Conversation</label>
               <select id="chat-conversation-select" aria-label="Conversation"></select>
+              <button id="chat-conversation-unseen-count" class="chat-conversation-unseen-count" type="button" hidden>
+                <span class="chat-conversation-unseen-number" aria-hidden="true">0</span>
+              </button>
               <button id="chat-rename-conversation" class="icon-button chat-rename-button" type="button" aria-label="Rename conversation" title="Rename conversation" hidden>
                 <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
                   <path d="M3 11.5V13h1.5l7.8-7.8-1.5-1.5L3 11.5Zm8.9-8.9 1.5 1.5.7-.7a1.05 1.05 0 0 0-1.5-1.5l-.7.7Z" fill="currentColor"/>
@@ -718,6 +722,10 @@
             <button id="chat-rename-cancel" class="chat-secondary-button" type="button">Cancel</button>
           </form>
           <div id="chat-state" class="chat-state" role="status" aria-live="polite">Loading chat…</div>
+          <div id="chat-conversation-unavailable" class="chat-conversation-unavailable" role="status" aria-live="polite" aria-atomic="true" hidden>
+            <strong>Conversation unavailable</strong>
+            <span>This conversation was deleted elsewhere. Choose another conversation or start a new one.</span>
+          </div>
           <div id="chat-find-slot" class="find-slot"></div>
           <!-- The timeline and the subagent drill-down share one box: the
                child opens *over* the parent's transcript, while the header,
@@ -837,6 +845,7 @@
               </button>
             </div>
           </form>
+          <span id="chat-conversation-inventory-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span>
           <span id="chat-copy-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span>
           <!-- Full-size attachment viewer: any thumbnail opens here in place
                rather than navigating away (a new tab misbehaves in the
@@ -1072,6 +1081,7 @@
           <path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" d="M2 2.5h12v8H7l-3.5 3v-3H2z"/>
         </svg>
         <span class="touch-tab-label">Chat</span>
+        <span class="touch-tab-badge chat-inventory-attention" aria-hidden="true"></span>
       </button>
       <button
         id="touch-tab-terminal"

@@ -4650,6 +4650,7 @@ html[data-ui-mode="touch"] .chat-resizer {
    edge. Hidden whenever the panel is open (or in touch mode) by the display
    default here. */
 .chat-expand-strip {
+  position: relative;
   display: none;
   align-items: center;
   justify-content: center;
@@ -4666,6 +4667,21 @@ html[data-ui-mode="touch"] .chat-resizer {
   font-size: 0.72em;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+.chat-expand-strip .chat-inventory-attention {
+  display: none;
+  position: absolute;
+  top: 0.55rem;
+  right: 4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--attention);
+}
+
+.chat-expand-strip[data-chat-inventory-attention] .chat-inventory-attention {
+  display: block;
 }
 
 .chat-expand-strip:hover,
@@ -4818,6 +4834,36 @@ body.is-resizing-chat .chat-resizer {
   display: flex;
   align-items: center;
   gap: 0.5rem;
+}
+
+.chat-conversation-unseen-count {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  min-width: 1.65rem;
+  height: 1.65rem;
+  padding: 0 0.4rem;
+  border: 1px solid var(--notice-warn-border);
+  border-radius: 999px;
+  color: var(--attention);
+  background: var(--notice-warn-bg);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.chat-conversation-unseen-number {
+  display: block;
+}
+
+.chat-conversation-unseen-count:hover {
+  border-color: var(--attention);
+}
+
+.chat-conversation-unseen-count[hidden] {
+  display: none;
 }
 
 .chat-composer-actions {
@@ -5045,6 +5091,39 @@ body.is-resizing-chat .chat-resizer {
   padding: 0.65rem 1.5rem;
   color: var(--text-subtle);
   border-bottom: 1px solid var(--border-soft);
+}
+
+.chat-state[hidden] {
+  display: none;
+}
+
+.chat-conversation-unavailable {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 0.25rem 0.65rem;
+  padding: 0.65rem 1.5rem;
+  border-bottom: 1px solid var(--notice-warn-border);
+  background: var(--notice-warn-bg);
+  color: var(--text-subtle);
+  line-height: 1.35;
+}
+
+.chat-conversation-unavailable[hidden] {
+  display: none;
+}
+
+.chat-conversation-unavailable strong {
+  color: var(--text-strong);
+  font-weight: 650;
+}
+
+.chat-surface[data-selected-conversation-deleted] .chat-composer {
+  background: var(--surface-subtle);
+  opacity: 0.72;
+}
+
+.chat-surface[data-selected-conversation-deleted] .chat-composer textarea {
+  color: var(--text-subtle);
 }
 
 .chat-rename-form {
@@ -6348,6 +6427,11 @@ html[data-ui-mode="touch"] .touch-tab-bar {
   display: block;
 }
 
+html[data-ui-mode="touch"]:not([data-active-tab="chat"]) #touch-tab-chat[data-chat-inventory-attention] .chat-inventory-attention {
+  display: block;
+  background: var(--attention);
+}
+
 /* The UI-mode toggle: ONE control for both directions, in the sidebar
    header — which touch mode renders inside the Files tab — plus a rail
    variant for the collapsed desktop sidebar. Never in the tab bar (the bar
@@ -6621,6 +6705,13 @@ html[data-ui-mode="touch"] .chat-conversation-controls select {
 html[data-ui-mode="touch"] .chat-rename-form {
   flex-wrap: wrap;
   padding: 0.55rem 0.75rem;
+}
+
+html[data-ui-mode="touch"] .chat-conversation-unavailable {
+  grid-template-columns: 1fr;
+  gap: 0.12rem;
+  padding: 0.55rem 0.75rem;
+  font-size: 0.85rem;
 }
 
 html[data-ui-mode="touch"] .chat-rename-form label {
