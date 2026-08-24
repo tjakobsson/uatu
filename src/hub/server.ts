@@ -239,8 +239,30 @@ export function createHubFetchHandler(deps: HubDeps) {
   // record on disk where this sees it. Without it an unassignment could
   // return the set to its recorded pre-commit value and be reinstated
   // later by recovery.
+  //
+  // Both recovery journals fence assignments, so both are checked — the
+  // same layering the start route uses. A registered folder removal writes
+  // its journal, rmdirs the directory, and only then strips assignments and
+  // unregisters; if that tail fails, the journal stays pending while the
+  // registry entry can still be visible. An assignment written against that
+  // doomed workspace would answer 200 and then be deleted by
+  // FolderManager.recover() finishing the removal. The folder fence covers
+  // the onboarding journal too when it is wired as a sibling recovery path,
+  // but the onboarding check runs first so assemblies that wire onboarding
+  // without a folder manager — and the message callers already see — are
+  // unchanged.
+  //
+  // Serialization matches the onboarding argument exactly: registered
+  // folder mutations journal from inside runWithSessionsStopped, which
+  // holds the lifecycle queue of every affected workspace, so under the
+  // queue no removal of THIS workspace can be mid-journal while one that
+  // already passed the point of no return has left its record on disk.
+  // Both checks are pure lstats that take no lock, so they sit at any depth
+  // without disturbing the locking order (workspace queues outermost,
+  // credential lock innermost).
   const assertAssignmentsUnfenced = async (): Promise<void> => {
     if (await onboardingFencesAssignments()) throw new OnboardingAssignmentFenceError();
+    await deps.folderManager?.assertNoPendingMutation();
   };
   const stopProviderCliSessions = async (credentialId: string): Promise<void> => {
     const workspaceIds = sessions.runningWorkspaceIdsUsingCredential(credentialId);
@@ -1430,6 +1452,10 @@ export function createHubFetchHandler(deps: HubDeps) {
           return json(200, { assignments }, headers);
         } catch (error) {
           if (error instanceof OnboardingAssignmentFenceError) return json(409, { error: error.message }, headers);
+          // The folder-journal fence raised under the queue; answered with
+          // the manager's own code (409 for a pending journal) rather than
+          // the credential mapping, whose heuristics would call it a 500.
+          if (error instanceof FolderManagerError) return folderError(error);
           const mapped = credentialApiError(error);
           return json(mapped.status, { error: mapped.message }, headers);
         }
@@ -1533,6 +1559,8 @@ export function createHubFetchHandler(deps: HubDeps) {
           }
         } catch (error) {
           if (error instanceof OnboardingAssignmentFenceError) return json(409, { error: error.message }, headers);
+          // As above: the folder-journal fence keeps the manager's status.
+          if (error instanceof FolderManagerError) return folderError(error);
           const mapped = credentialApiError(error);
           return json(mapped.status, { error: mapped.message }, headers);
         }
