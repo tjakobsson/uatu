@@ -124,13 +124,15 @@ function absolutePath(value: unknown, field: string): string {
   return normalizeAbsolutePath(value);
 }
 
-// Control characters (Cc) AND Unicode format characters (Cf) are both
-// rejected: Cf covers the zero-width family, the bidi embedding and
-// override controls, and the BOM. None of them survive a nonempty check —
-// trim() leaves them in place — so a name made only of them would create a
-// directory that renders blank, and one containing a bidi control can make
-// the created folder display a name other than the path it occupies.
-const INVISIBLE_NAME_CHARACTER = /[\u0000-\u001f\u007f]|\p{Cf}/u;
+// The whole control category (Cc — the C0 range, DEL, and the C1 range
+// U+0080–U+009F) AND Unicode format characters (Cf — the zero-width family,
+// the bidi embedding and override controls, and the BOM) are rejected: the
+// same class validateWorkspaceDisplayName holds a display name to. None of
+// them survive a nonempty check — trim() leaves them in place — so a name
+// made only of them would create a directory that renders blank, and one
+// containing a bidi control can make the created folder display a name
+// other than the path it occupies.
+const INVISIBLE_NAME_CHARACTER = /[\p{Cc}\p{Cf}]/u;
 
 /**
  * The name rule itself, exported so the published `FolderName` pattern is

@@ -170,8 +170,10 @@ describe("FolderManager validation and unregistered operations", () => {
   test("rejects invisible formatting characters while accepting ordinary non-ASCII", async () => {
     const f = await fixture();
     // Every one of these survives trim() and would name a directory that
-    // renders blank (zero-width only, BOM only) or displays a name other
-    // than the path it occupies (an embedded bidi override or isolate).
+    // renders blank (zero-width only, BOM only, C1 controls only) or
+    // displays a name other than the path it occupies (an embedded bidi
+    // override or isolate, an embedded control). The whole Cc category is
+    // rejected, so the C1 range U+0080-U+009F is out too.
     const invisible = [
       "\u200b",
       "\u200b\u200c\u200d",
@@ -179,6 +181,9 @@ describe("FolderManager validation and unregistered operations", () => {
       "docs\u202egpj.txt",
       "docs\u2066hidden\u2069",
       "\u00ad",
+      "docs\u0085name",
+      "\u009f",
+      "\u0080\u009f",
     ];
     for (const name of invisible) {
       await expect(f.manager.create({ parent: f.folders, name })).rejects.toMatchObject({ code: "invalid-input" });

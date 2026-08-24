@@ -93,10 +93,28 @@ export type OnboardingResult = {
   startError: string | null;
 };
 
+// How far the two-store commit had provably got when the record was last
+// written. It is what separates "the assignment commit never ran" from "it
+// ran and something revoked it afterwards" — two states whose registry and
+// credential contents are identical whenever the revocation landed back on
+// the recorded pre-commit set.
+//
+// "registering" is written up front, so it costs no extra journal write:
+// while it stands, the assignment commit had not completed. "assigned" is
+// written only when both stores committed and the journal's clear failed —
+// the one case where a truthful record has to outlive a completed commit.
+// A successful commit clears the journal instead of advancing it.
+//
+// Optional: a journal written before this field existed parses to
+// undefined and recovers exactly as it did then (comparison only, never
+// the registration rollback), so an upgrade mid-onboarding is safe.
+type OnboardingPhase = "registering" | "assigned";
+
 type PendingOnboarding = {
   version: typeof JOURNAL_VERSION;
   operation: "configure-existing" | "create-new";
   createdFolder: boolean;
+  phase?: OnboardingPhase;
   entry: WorkspaceEntry;
   previousEntry: WorkspaceEntry | null;
   previousAssignments: CredentialAssignment[];
@@ -157,13 +175,15 @@ function absolutePath(value: unknown, field: string): string {
   return normalizeAbsolutePath(value);
 }
 
-// Control characters (Cc) AND Unicode format characters (Cf) are both
-// rejected: Cf covers the zero-width family, the bidi embedding and
-// override controls, and the BOM. None of them survive a nonempty check —
-// trim() leaves them in place — so a name made only of them would create a
-// directory that renders blank, and one containing a bidi control can make
-// the created folder display a name other than the path it occupies.
-const INVISIBLE_NAME_CHARACTER = /[\u0000-\u001f\u007f]|\p{Cf}/u;
+// The whole control category (Cc — the C0 range, DEL, and the C1 range
+// U+0080–U+009F) AND Unicode format characters (Cf — the zero-width family,
+// the bidi embedding and override controls, and the BOM) are rejected: the
+// same class validateWorkspaceDisplayName holds a display name to. None of
+// them survive a nonempty check — trim() leaves them in place — so a name
+// made only of them would create a directory that renders blank, and one
+// containing a bidi control can make the created folder display a name
+// other than the path it occupies.
+const INVISIBLE_NAME_CHARACTER = /[\p{Cc}\p{Cf}]/u;
 
 // Same visible-segment rules as the folder manager's create operation.
 function visibleFolderSegment(value: unknown, field: string): string {
@@ -359,7 +379,7 @@ function parseJournalAssignment(value: unknown): CredentialAssignment {
 function parseJournal(value: unknown): PendingOnboarding {
   const record = closedJournalObject(
     value,
-    ["version", "operation", "createdFolder", "entry", "previousEntry", "previousAssignments", "desiredAssignments"],
+    ["version", "operation", "createdFolder", "phase", "entry", "previousEntry", "previousAssignments", "desiredAssignments"],
     "pending onboarding journal",
   );
   if (record.version !== JOURNAL_VERSION) throw new Error("unsupported onboarding journal version");
@@ -367,6 +387,13 @@ function parseJournal(value: unknown): PendingOnboarding {
     throw new Error("unsupported onboarding journal operation");
   }
   if (typeof record.createdFolder !== "boolean") throw new Error("invalid onboarding journal createdFolder");
+  // Absent is the pre-phase journal format, and the recovery rules treat it
+  // exactly as they did before the field existed. A present value is held
+  // to the enum: an unrecognized phase would be read as "absent" and
+  // silently re-enable the ambiguity the field exists to remove.
+  if (record.phase !== undefined && record.phase !== "registering" && record.phase !== "assigned") {
+    throw new Error("unsupported onboarding journal phase");
+  }
   if (!Array.isArray(record.previousAssignments) || !Array.isArray(record.desiredAssignments)) {
     throw new Error("invalid onboarding journal assignments");
   }
@@ -374,6 +401,7 @@ function parseJournal(value: unknown): PendingOnboarding {
     version: JOURNAL_VERSION,
     operation: record.operation,
     createdFolder: record.createdFolder,
+    ...(record.phase === undefined ? {} : { phase: record.phase }),
     entry: parseJournalEntry(record.entry),
     previousEntry: record.previousEntry === null ? null : parseJournalEntry(record.previousEntry),
     previousAssignments: record.previousAssignments.map(parseJournalAssignment),
@@ -571,8 +599,11 @@ export class WorkspaceOnboardingCoordinator {
   // registry and assignment commits (or before rollback finished). Compare
   // the journaled desired entry with the registry: when the registration
   // matches, complete the desired assignment set; otherwise restore the
-  // recorded previous state. Created folders are never deleted here — an
-  // initialized repository cannot be proven free of user content.
+  // recorded previous state. A registration whose assignments the journal
+  // proves never committed, and can no longer commit, is rolled back too —
+  // it is as uncommitted as one the registry never took. Created folders
+  // are never deleted here — an initialized repository cannot be proven
+  // free of user content.
   recover(): Promise<void> {
     return this.enqueue(async () => {
       const pending = await this.journal.read();
@@ -587,9 +618,27 @@ export class WorkspaceOnboardingCoordinator {
       const current = this.options.registry.byId(pending.entry.id);
       const committed = current !== undefined
         && normalizeAbsolutePath(current.path) === pending.entry.path;
+      let rollBack = !committed;
       if (committed) {
-        await this.completeRecoveredAssignments(pending.entry.id, pending.desiredAssignments, pending.previousAssignments);
-      } else {
+        const outcome = await this.completeRecoveredAssignments(
+          pending.entry.id,
+          pending.desiredAssignments,
+          pending.previousAssignments,
+        );
+        // "unappliable" on its own proves nothing: a workspace sitting at
+        // its recorded pre-commit assignments with a desired set that no
+        // longer resolves is either an assignment commit that never ran or
+        // one that ran and was revoked back afterwards. Only "registering"
+        // rules the second out — and a journal from before the phase field
+        // existed, or one already advanced to "assigned", keeps the
+        // preserving behavior it had. The backend check completes the
+        // identity guard the committed test began: nothing is removed
+        // unless the occupant is the journaled entry itself.
+        rollBack = outcome === "unappliable"
+          && pending.phase === "registering"
+          && current.backend === pending.entry.backend;
+      }
+      if (rollBack) {
         if (pending.previousEntry) {
           await this.options.registry.restoreEntries([pending.previousEntry]);
         } else if (current) {
@@ -815,6 +864,11 @@ export class WorkspaceOnboardingCoordinator {
       version: JOURNAL_VERSION,
       operation: options.operation,
       createdFolder: options.createdFolder,
+      // Stands from this write until the assignment commit returns, so a
+      // registration recovery finds under it is one whose configuration
+      // never landed. It rides the write the commit already makes, which
+      // is why the phase costs no extra fsync on the success path.
+      phase: "registering",
       entry,
       previousEntry: null,
       previousAssignments,
@@ -906,6 +960,14 @@ export class WorkspaceOnboardingCoordinator {
         // state, but an uncleaned journal must still be surfaced. The
         // committed entry travels with the error so callers (the clone
         // job) can report the preserved workspace.
+        //
+        // A surviving journal has to stop claiming "registering" first:
+        // that phase authorizes recovery to roll the registration back,
+        // and this registration is complete. Best effort — if the upgrade
+        // cannot be written, recovery still preserves the workspace by the
+        // assignment-set comparison, which sees the desired set in place
+        // rather than the recorded pre-commit one.
+        await this.journal.write({ ...pending, phase: "assigned" }).catch(() => undefined);
         throw new OnboardingError("recovery-required", "workspace onboarding committed but its journal could not be cleared; restart the Hub to reconcile", { cause: error, committedEntry: { ...entry } });
       }
 
@@ -987,31 +1049,35 @@ export class WorkspaceOnboardingCoordinator {
 
   // Completing a committed onboarding replays the journaled desired set —
   // unless state moved on while the journal lingered (its clear failed and
-  // the hub kept serving until this restart). Two drift signals defer to
-  // the newer state: the workspace's current assignments no longer match
-  // the recorded pre-commit set (the desired set, or a later user choice,
-  // already landed — replaying would undo a revocation or replacement),
-  // or the desired set no longer resolves against the current store (a
-  // credential was deleted or disabled after commit). Only the recorded
-  // pre-commit state with a still-valid desired set is completed. No
-  // credential lock here: recovery runs at startup, before the hub serves,
-  // so no revocation can be reading an assignment snapshot alongside it.
+  // the hub kept serving until this restart). Two drift signals stop the
+  // replay. "preserved": the workspace's current assignments no longer
+  // match the recorded pre-commit set, so the desired set or a later user
+  // choice already landed and replaying would undo a revocation or a
+  // replacement. "unappliable": the workspace still sits at its pre-commit
+  // set but the desired one no longer resolves against the current store
+  // (a credential was deleted or disabled). Both leave the store
+  // untouched; they differ in what the caller may conclude, because only
+  // "unappliable" leaves a registration that may never have received any
+  // configuration at all — see recover(). No credential lock here:
+  // recovery runs at startup, before the hub serves, so no revocation can
+  // be reading an assignment snapshot alongside it.
   private async completeRecoveredAssignments(
     workspaceId: string,
     desired: CredentialAssignment[],
     previous: CredentialAssignment[],
-  ): Promise<void> {
+  ): Promise<"completed" | "preserved" | "unappliable"> {
     const current = this.options.credentials.snapshot().assignments
       .filter(assignment => assignment.workspaceId === workspaceId);
-    if (!sameAssignmentSet(current, previous)) return;
+    if (!sameAssignmentSet(current, previous)) return "preserved";
     if (desired.length > 0) {
       try {
         resolveOnboardingAssignments(workspaceId, selectionsFromAssignments(desired), this.options.credentials.snapshot());
       } catch {
-        return;
+        return "unappliable";
       }
     }
     await this.replaceWorkspaceAssignments(workspaceId, desired);
+    return "completed";
   }
 
   private async replaceWorkspaceAssignments(workspaceId: string, assignments: CredentialAssignment[]): Promise<void> {

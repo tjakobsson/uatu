@@ -203,15 +203,20 @@ describe("onboarding input validation", () => {
 
   test("rejects folder names that are invisible or visually misleading", async () => {
     const f = await fixture();
-    // trim() leaves zero-width and bidi characters in place, so a name made
-    // only of them passes the emptiness check and would create a directory
-    // that renders blank; a bidi override makes the created folder display a
-    // name other than the path segment it occupies.
+    // trim() leaves zero-width, bidi, and C1 control characters in place, so
+    // a name made only of them passes the emptiness check and would create a
+    // directory that renders blank; a bidi override makes the created folder
+    // display a name other than the path segment it occupies. The rejected
+    // class is the whole Cc plus Cf, matching the display-name validator, so
+    // the C1 range U+0080-U+009F is refused alongside C0 and DEL.
     const invisible = [
       "\u200b",
       "\ufeff\u200d",
       "docs\u202egnp.txt",
       "in\u200bvisible",
+      "docs\u0085name",
+      "\u009f",
+      "\u0080\u009f",
     ];
     for (const folderName of invisible) {
       await expect(f.coordinator.createWorkspace({ parent: f.folders, folderName, displayName: "X" }))
@@ -805,6 +810,76 @@ describe("commit-boundary failure injection", () => {
     ]);
   });
 
+  test("recovery rolls back a registration whose assignments never committed and no longer can", async () => {
+    // Same interleaving as the test above — the assignment commit failed
+    // and the registration rollback failed too, so the journal survives
+    // with the registration present and the pre-commit (empty) assignment
+    // set — but the selected credential is disabled before the restart.
+    // Disabling is not fenced by the pending journal the way assignment
+    // mutations are, so the desired set is unresolvable by the time
+    // recovery reads it. Recovery cannot complete the configuration, and
+    // it must not keep a registration that never received any: the
+    // journal's "registering" phase proves the assignments never
+    // committed, which separates this from a deliberate post-commit
+    // revocation, so the pre-onboarding state is restored instead.
+    const f = await fixture();
+    await addSshCredential(f.credentials, "auth-key");
+    const folder = await gitRepository(f.folders, "repo");
+    let failRemove = true;
+    const brokenRegistry = {
+      byId: (id: string) => f.registry.byId(id),
+      byPath: (p: string) => f.registry.byPath(p),
+      list: () => f.registry.list(),
+      registerWithStatus: (p: string, backend: "local", name?: string) => f.registry.registerWithStatus(p, backend, name),
+      remove: async (id: string) => {
+        if (failRemove) throw new Error("injected rollback failure");
+        return f.registry.remove(id);
+      },
+      replacePathPrefix: (source: string, destination: string) => f.registry.replacePathPrefix(source, destination),
+      restoreEntries: (entries: never) => f.registry.restoreEntries(entries),
+    };
+    let failTransaction = true;
+    const flakyCredentials = {
+      snapshot: () => f.credentials.snapshot(),
+      transaction: async (mutate: never) => {
+        if (failTransaction) throw new Error("injected assignment failure");
+        return f.credentials.transaction(mutate);
+      },
+      runExclusiveCredential: <T,>(id: string, operation: () => Promise<T>) =>
+        f.credentials.runExclusiveCredential(id, operation),
+    };
+    const coordinator = new WorkspaceOnboardingCoordinator({
+      journalPath: f.journalPath,
+      registry: brokenRegistry as never,
+      credentials: flakyCredentials as never,
+      sessions: f.sessions,
+      reservations: f.reservations,
+      git: f.git,
+    });
+    await expect(coordinator.configureExisting({
+      path: folder,
+      displayName: "Repo",
+      authentication: [{ credentialId: "auth-key", host: "github.com" }],
+    })).rejects.toMatchObject({ code: "recovery-required" });
+    expect(f.registry.byPath(folder)).toBeDefined();
+    expect(f.credentials.snapshot().assignments).toEqual([]);
+    expect(JSON.parse(await fs.readFile(f.journalPath, "utf8")).phase).toBe("registering");
+
+    await f.credentials.transaction(draft => {
+      const record = draft.credentials.find(credential => credential.id === "auth-key");
+      if (record) record.enabled = false;
+    });
+    failRemove = false;
+    failTransaction = false;
+    await coordinator.recover();
+    // Nothing half-onboarded survives: no registration without its
+    // requested configuration, no assignments, no journal.
+    expect(f.registry.byId("repo")).toBeUndefined();
+    expect(f.registry.byPath(folder)).toBeUndefined();
+    expect(f.credentials.snapshot().assignments).toEqual([]);
+    expect(await journalExists(f.journalPath)).toBe(false);
+  });
+
   test("recovery restores previous state when the registration never committed", async () => {
     const f = await fixture();
     await addSshCredential(f.credentials, "auth-key");
@@ -1047,12 +1122,67 @@ describe("commit-boundary failure injection", () => {
     expect(result.created).toBe(true);
   });
 
+  test("a commit whose journal survives records its completed phase and outlives a later revocation", async () => {
+    // The end-to-end form of the case above: the commit itself succeeds and
+    // only the journal's clear fails, so the record has to stop claiming
+    // the registration phase — that phase is what authorizes recovery to
+    // roll a registration back. The upgrade to "assigned" is written on
+    // this failure path alone, so a successful onboarding still writes the
+    // journal exactly once. An operator then revokes the committed
+    // assignment back to the pre-commit set and deletes the credential:
+    // registry and credential state now look exactly like an assignment
+    // commit that never ran, and only the recorded phase tells them apart.
+    const f = await fixture();
+    await addSshCredential(f.credentials, "auth-key");
+    const folder = await gitRepository(f.folders, "repo");
+    let failUnlink = true;
+    const failingFs = Object.assign({}, fs, {
+      unlink: async (target: string) => {
+        if (failUnlink && target === f.journalPath) {
+          throw Object.assign(new Error("injected clear failure"), { code: "EACCES" });
+        }
+        return fs.unlink(target);
+      },
+    });
+    const coordinator = new WorkspaceOnboardingCoordinator({
+      journalPath: f.journalPath,
+      registry: f.registry,
+      credentials: f.credentials,
+      sessions: f.sessions,
+      reservations: f.reservations,
+      git: f.git,
+      fs: failingFs as never,
+    });
+    await expect(coordinator.configureExisting({
+      path: folder,
+      displayName: "Repo",
+      authentication: [{ credentialId: "auth-key", host: "github.com" }],
+    })).rejects.toMatchObject({ code: "recovery-required" });
+    expect(f.credentials.snapshot().assignments).toEqual([
+      { workspaceId: "repo", credentialId: "auth-key", role: "authentication", host: "github.com" },
+    ]);
+    expect(JSON.parse(await fs.readFile(f.journalPath, "utf8")).phase).toBe("assigned");
+
+    await f.credentials.transaction(draft => {
+      draft.credentials = draft.credentials.filter(credential => credential.id !== "auth-key");
+      draft.assignments = draft.assignments.filter(assignment => assignment.credentialId !== "auth-key");
+    });
+    failUnlink = false;
+    await coordinator.recover();
+    expect(f.registry.byPath(folder)?.displayName).toBe("Repo");
+    expect(f.credentials.snapshot().assignments).toEqual([]);
+    expect(await journalExists(f.journalPath)).toBe(false);
+  });
+
   test("recovery does not resurrect assignments revoked after the commit", async () => {
     // The journal's clear failed after both stores committed and the hub
     // kept serving: a credential deletion then legitimately revoked the
     // committed assignment. On restart the desired set no longer resolves,
     // so recovery must keep the newer (empty) assignment state instead of
-    // replaying the journal — while still clearing it.
+    // replaying the journal — while still clearing it. The journal here
+    // carries no phase at all, the shape written before that field
+    // existed: a record from an older Hub keeps exactly this preserving
+    // behavior across the upgrade.
     const f = await fixture();
     await addSshCredential(f.credentials, "auth-key");
     const folder = await gitRepository(f.folders, "committed");

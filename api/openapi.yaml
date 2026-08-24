@@ -1436,15 +1436,16 @@ components:
     FolderName:
       type: string
       minLength: 1
-      pattern: '^(?!\.)(?![\s\S]*[\\/\x00-\x1f\x7f\p{Cf}])[\s\S]*\S[\s\S]*$'
+      pattern: '^(?!\.)(?![\s\S]*[\\/\p{Cc}\p{Cf}])[\s\S]*\S[\s\S]*$'
       description: >-
-        A visible, non-hidden single path segment. Dot-prefixed names, path separators, control characters,
-        Unicode format characters (Cf — the zero-width family, the bidi embedding and override controls, the
-        BOM, and the tag characters), and names made only of whitespace or format characters are rejected: none
-        of them survive a nonempty check, and a bidi control can make a folder display a name other than the
-        path it occupies. The pattern is a Unicode-mode expression, as JSON Schema requires, so its `\p{Cf}`
-        escape covers the format characters above the BMP as well; it accepts exactly the names the server
-        accepts.
+        A visible, non-hidden single path segment. Dot-prefixed names, path separators, control characters
+        (Cc — the C0 range, DEL, and the C1 range U+0080–U+009F), Unicode format characters (Cf — the
+        zero-width family, the bidi embedding and override controls, the BOM, and the tag characters), and
+        names made only of whitespace or format characters are rejected: none of them survive a nonempty
+        check, and a bidi control can make a folder display a name other than the path it occupies. The
+        pattern is a Unicode-mode expression, as JSON Schema requires, so its `\p{Cc}` and `\p{Cf}` escapes
+        cover the whole categories, format characters above the BMP included; it accepts exactly the names the
+        server accepts.
     CreateFolderRequest:
       type: object
       required: [parent, name]
