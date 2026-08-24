@@ -800,6 +800,39 @@ describe("FolderManager registered mutations", () => {
     expect(await exists(source)).toBe(false);
   });
 
+  test("deletes id-keyed state before the registry removal frees the id", async () => {
+    // The registry entry holds the basename slug: the instant it is gone
+    // the id is reusable by a registration already past the journal fence,
+    // and both credential assignments and personal state are selected by
+    // workspace id alone. So neither may still exist when the removal
+    // commits — the ordering IS the protection against a newcomer
+    // inheriting the removed workspace's credentials.
+    const f = await fixture();
+    const source = path.join(f.folders, "empty");
+    await fs.mkdir(source);
+    const entry = await f.registry.register(source);
+    await f.personalState.patch("alice", entry.id, { follow: true });
+    await f.credentials.transaction(state => state.credentials.push({
+      id: "key", name: "Key", type: "ssh", enabled: true,
+      capabilities: ["ssh-signing"], metadata: { publicKey: "ssh-ed25519 AAAA", fingerprint: "SHA256:test" },
+      createdAt: "2026-08-23T00:00:00.000Z",
+    }));
+    await f.credentials.assign({ workspaceId: entry.id, credentialId: "key", role: "signing" });
+
+    const atRegistryRemoval: Array<{ assignments: number; personal: boolean }> = [];
+    const realRemove = f.registry.remove.bind(f.registry);
+    f.registry.remove = async (id: string) => {
+      atRegistryRemoval.push({
+        assignments: f.credentials.snapshot().assignments.filter(assignment => assignment.workspaceId === id).length,
+        personal: f.personalState.get("alice", id).follow === true,
+      });
+      return realRemove(id);
+    };
+
+    expect(completed(await f.manager.remove({ path: source }))).toEqual({ path: source, workspaceId: entry.id });
+    expect(atRegistryRemoval).toEqual([{ assignments: 0, personal: false }]);
+  });
+
   test("surfaces a journal that survives its failed or committed removal", async () => {
     const journalUnlinkFails = { enabled: false };
     const failingFs = {
@@ -1081,6 +1114,56 @@ describe("FolderManager journal recovery", () => {
     expect(f.personalState.get("alice", newcomer.id)).toEqual({ version: 1 });
     expect(f.personalState.get("bob", newcomer.id).follow).toBe(true);
     expect(f.credentials.snapshot().assignments).toHaveLength(1);
+  });
+
+  test("a removal that fails finalizing never frees an id its assignments still answer to", async () => {
+    // The reused-id guard above cannot separate the removed workspace's
+    // assignments from the newcomer's, so the removal must never produce
+    // that state: a finalization failing after the rmdir leaves the
+    // registry entry — and with it the slug — in place, so the newcomer
+    // gets a fresh id and recovery finishes the removal under the old one.
+    const f = await fixture();
+    const removedFolder = path.join(f.folders, "a", "foo");
+    const newFolder = path.join(f.folders, "b", "foo");
+    await Promise.all([fs.mkdir(removedFolder, { recursive: true }), fs.mkdir(newFolder, { recursive: true })]);
+    const removed = await f.registry.register(removedFolder);
+    await f.personalState.patch("alice", removed.id, { follow: true });
+    await f.credentials.transaction(state => state.credentials.push({
+      id: "key", name: "Key", type: "ssh", enabled: true,
+      capabilities: ["ssh-signing"], metadata: { publicKey: "ssh-ed25519 AAAA", fingerprint: "SHA256:test" },
+      createdAt: "2026-08-23T00:00:00.000Z",
+    }));
+    await f.credentials.assign({ workspaceId: removed.id, credentialId: "key", role: "signing" });
+
+    // One-shot failure inside the finalization that follows the rmdir.
+    let failsOnce = true;
+    const realRemoveAssignments = f.credentials.removeWorkspaceAssignments.bind(f.credentials);
+    f.credentials.removeWorkspaceAssignments = async (workspaceId: string) => {
+      if (!failsOnce) return realRemoveAssignments(workspaceId);
+      failsOnce = false;
+      throw new Error("injected assignment removal failure");
+    };
+    await expect(f.manager.remove({ path: removedFolder })).rejects.toMatchObject({
+      code: "internal",
+      message: expect.stringContaining("requires recovery"),
+    });
+    expect(await exists(removedFolder)).toBe(false);
+    expect(await exists(f.journalPath)).toBe(true);
+
+    // A registration admitted before the journal existed lands here. The
+    // failed removal never committed its registry deletion, so the slug is
+    // still taken and the newcomer is minted a distinct id.
+    const newcomer = await f.registry.register(newFolder);
+    expect(newcomer.id).not.toBe(removed.id);
+
+    await f.manager.recover();
+    expect(f.registry.list()).toEqual([newcomer]);
+    expect(await exists(f.journalPath)).toBe(false);
+    // The removal completed under recovery, and nothing it left behind is
+    // filed under an id the newcomer owns.
+    expect(f.credentials.snapshot().assignments).toEqual([]);
+    expect(f.personalState.get("alice", removed.id)).toEqual({ version: 1 });
+    expect(f.personalState.get("alice", newcomer.id)).toEqual({ version: 1 });
   });
 
   test("removal recovery does not repoint a reused id onto a surviving source", async () => {

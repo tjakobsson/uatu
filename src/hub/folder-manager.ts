@@ -660,25 +660,38 @@ export class FolderManager {
         // dropped instead: its directory survives on disk, and registering
         // it again mints a fresh id.
         if (!reusedId) await this.options.registry.restoreEntries([pending.entry]);
-      } else if (registered && !reusedId) {
-        await this.options.personalState.forgetWorkspace(
-          pending.entry.id,
-          () => this.options.registry.remove(pending.entry.id),
-          async () => { await this.options.credentials.removeWorkspaceAssignments(pending.entry.id); },
-        );
-      } else if (!registered) {
-        await this.options.personalState.removeWorkspace(pending.entry.id);
+      } else if (!reusedId) {
+        // Finishing the removal follows the same ordering rule as
+        // removeRegistered: the assignments go before the registry entry
+        // that holds the id, so a crash inside recovery cannot free the
+        // slug while this workspace's credentials still answer to it. (An
+        // absent registration implies !reusedId — reuse is a live occupant
+        // that is not the journaled entry — so this branch covers both the
+        // still-registered forget and the registry-less cleanup.)
+        await this.options.credentials.removeWorkspaceAssignments(pending.entry.id);
+        if (registered) {
+          await this.options.personalState.forgetWorkspace(
+            pending.entry.id,
+            () => this.options.registry.remove(pending.entry.id),
+          );
+        } else {
+          await this.options.personalState.removeWorkspace(pending.entry.id);
+        }
       }
-      // A reused id leaves nothing to finish under it. The journaled
-      // workspace's own leftovers — personal state records, credential
-      // assignments — are filed under an id the new workspace now owns, so
-      // they are indistinguishable from (and inseparable of) the new
-      // owner's: deleting by id would destroy live data, and restoring the
-      // pending-forget records would overwrite it. Recovery therefore drops
-      // only the pending-forget journal (dead records of a workspace whose
-      // registration is already gone) and touches nothing else keyed by the
-      // id. Stale leftovers orphaned under the new owner are the lesser
-      // harm next to deleting a workspace this journal never described.
+      // A reused id leaves nothing to finish under it. Anything still filed
+      // under it belongs to the new workspace — deleting by id would
+      // destroy live data, and restoring the pending-forget records would
+      // overwrite it — so recovery drops only the pending-forget journal
+      // (dead records of a workspace whose registration is already gone)
+      // and touches nothing else keyed by the id.
+      // The journaled workspace's own credential assignments cannot be
+      // among those leftovers: this build deletes them before the registry
+      // removal that frees the slug, so an id is only reusable once its
+      // predecessor's assignments are gone. A journal written by a build
+      // that deleted them after the registry removal can still have left
+      // them behind, and they are then indistinguishable from the new
+      // owner's — leaving them is the lesser harm next to stripping the
+      // credentials of a workspace this journal never described.
       const journaledIdReused = (workspaceId: string) => reusedId && workspaceId === pending.entry.id;
       await this.options.personalState.recoverPendingForgets(
         workspaceId => !journaledIdReused(workspaceId) && this.options.registry.byId(workspaceId) !== undefined,
@@ -687,7 +700,6 @@ export class FolderManager {
           await this.options.credentials.removeWorkspaceAssignments(workspaceId);
         },
       );
-      if (!sourceExists && !reusedId) await this.options.credentials.removeWorkspaceAssignments(pending.entry.id);
       await this.journal.clear();
     });
   }
@@ -980,10 +992,25 @@ export class FolderManager {
       throw await this.failedMutationError(error, "registered folder removal failed");
     }
     try {
+      // Ordering is the whole defense against a reused id inheriting this
+      // workspace's credentials. The registry entry is what holds the
+      // basename slug: the instant it is removed, a registration already
+      // past the journal fence can re-mint that exact id, and credential
+      // resolution selects assignments by workspace id alone. So everything
+      // keyed by the id is deleted BEFORE the registry removal commits —
+      // the assignments here, and the personal-state records inside
+      // forgetWorkspace, which journals and deletes them before it calls
+      // the registry. Every crash point then leaves either the entry still
+      // present (the id was never freed, and recovery finishes the removal)
+      // or the entry gone with its id-keyed state already gone with it.
+      // Deleting first cannot strand a LIVE workspace without its
+      // assignments: the directory is already rmdir'd and the journal
+      // fences every later mutation, so a failure below leaves a doomed
+      // workspace that recovery finishes removing, never a usable one.
+      await this.options.credentials.removeWorkspaceAssignments(entry.id);
       await this.options.personalState.forgetWorkspace(
         entry.id,
         () => this.options.registry.remove(entry.id),
-        async () => { await this.options.credentials.removeWorkspaceAssignments(entry.id); },
       );
       await this.journal.clear();
       return { path: source, workspaceId: entry.id };
