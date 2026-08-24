@@ -133,6 +133,9 @@ is path-filtered (`.github/workflows/desktop-ci.yml`); it builds with plain
 
 - `bun run dev` — local watch on `testdata/watch-docs`
 - `bun test` — unit suite (~18s)
+- When developing Uatu inside a Hub-managed workspace, credential tests may
+  discover Uatu's projected Git/SSH wrappers. Use a clean tool environment for
+  those tests; do not change product behavior to accommodate nested projection.
 - `bun test:e2e` — Playwright suite (~5min, `workers: 1` serial)
 - `bun run build` — compile the single-file `dist/uatu` binary
 - `bun run check:licenses` — license audit
