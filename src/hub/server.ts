@@ -973,11 +973,41 @@ export function createHubFetchHandler(deps: HubDeps) {
       // assignment; rejecting retention here beats cloning fully and then
       // rolling the registration back over an assign the metadata parser
       // was always going to refuse.
+      let retainedHost: string | undefined;
       if (body.retainAssignment === true && credential) {
         try {
-          normalizeProviderHost(credential.host);
+          retainedHost = normalizeProviderHost(credential.host);
         } catch {
           throw new Error(`selected credential cannot retain an assignment for this clone host: ${credential.host}`);
+        }
+      }
+      // Legacy retention flag: retain the clone identity as the workspace
+      // authentication default for its host — still an explicit request,
+      // never an implicit consequence of selecting a clone credential. The
+      // merge compares normalized hosts: the identical selection dedupes,
+      // and a different credential for the same logical host is a request
+      // conflict surfaced now — either variant slipping through would fail
+      // only after the clone completed, leaving the checkout unregistered.
+      // Decided here, with the other request validation: it reads the
+      // request fields and the credential metadata just resolved, and
+      // nothing the reservation or the journal fence protects — no registry,
+      // no disk. So it is settled before the target is reserved and long
+      // before the mkdir below, and a conflicting request cannot leave the
+      // destination hierarchy it named behind on disk.
+      const retained = [...retainedAuthentication];
+      if (retainedHost !== undefined && credential && deps.onboarding) {
+        const sameHost = retained.find(selection => {
+          try {
+            return normalizeProviderHost(selection.host) === retainedHost;
+          } catch {
+            return selection.host === retainedHost;
+          }
+        });
+        if (sameHost && sameHost.credentialId !== credential.credentialId) {
+          return json(400, { error: `retainAssignment conflicts with a retainedAuthentication selection for host: ${retainedHost}` });
+        }
+        if (!sameHost) {
+          retained.push({ credentialId: credential.credentialId, host: retainedHost });
         }
       }
       const resolvedDest = path.resolve(dest);
@@ -1092,30 +1122,6 @@ export function createHubFetchHandler(deps: HubDeps) {
         }
         if (await fs.stat(target).then(() => true).catch(() => false)) {
           return json(409, { error: `target already exists: ${target}` });
-        }
-        // Legacy retention flag: retain the clone identity as the workspace
-        // authentication default for its host — still an explicit request,
-        // never an implicit consequence of selecting a clone credential. The
-        // merge compares normalized hosts: the identical selection dedupes,
-        // and a different credential for the same logical host is a request
-        // conflict surfaced now — either variant slipping through would fail
-        // only after the clone completed, leaving the checkout unregistered.
-        const retained = [...retainedAuthentication];
-        if (body.retainAssignment === true && credential && deps.onboarding) {
-          const host = normalizeProviderHost(credential.host);
-          const sameHost = retained.find(selection => {
-            try {
-              return normalizeProviderHost(selection.host) === host;
-            } catch {
-              return selection.host === host;
-            }
-          });
-          if (sameHost && sameHost.credentialId !== credential.credentialId) {
-            return json(400, { error: `retainAssignment conflicts with a retainedAuthentication selection for host: ${host}` });
-          }
-          if (!sameHost) {
-            retained.push({ credentialId: credential.credentialId, host });
-          }
         }
         job = cloneJobs.create(owner, url, target, {
           credential,

@@ -2573,6 +2573,39 @@ describe("hub end to end", () => {
     await sessions.stop("unselected");
   });
 
+  test("a conflicting retention selection is refused before the destination is created", async () => {
+    // The retention merge is a verdict over the request and the resolved
+    // credential alone — nothing on disk feeds it — so it belongs before the
+    // route's first filesystem change. Run after the recursive mkdir, the
+    // refusal would still leave the caller-named hierarchy behind, and a
+    // directory nobody asked for is not inert here: it changes what later
+    // folder creates, renames, and clones into the same parent see.
+    const parent = path.join(tempRoot, "retain-conflict-absent");
+    const dest = path.join(parent, "nested");
+    const target = path.join(dest, "conflicting-absent");
+    const startsBefore = managedCloneStarts.length;
+    const conflicting = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({
+        url: "managed:conflicting-absent.git",
+        dest,
+        credentialId: "unlocked-ssh",
+        retainAssignment: true,
+        retainedAuthentication: [{ credentialId: "some-other-credential", host: "GitHub.COM" }],
+      }),
+    });
+    expect(conflicting.status).toBe(400);
+    await assertContract("POST", "/api/hub/clone-jobs", conflicting);
+    expect(((await conflicting.json()) as { error: string }).error).toContain("conflicts");
+    expect(managedCloneStarts).toHaveLength(startsBefore);
+    // Neither the destination nor the parent the recursive mkdir would have
+    // created with it exists, and no reservation outlived the refusal.
+    expect(await stat(dest).then(() => true).catch(() => false)).toBe(false);
+    expect(await stat(parent).then(() => true).catch(() => false)).toBe(false);
+    expect(reservations.isReserved(target)).toBe(false);
+  });
+
   test("clone jobs accept private prompt input and enforce owner and CSRF gates", async () => {
     const dest = path.join(tempRoot, "interactive-checkouts");
     const unknownCreateField = await fetch(`${origin}/api/hub/clone-jobs`, {
