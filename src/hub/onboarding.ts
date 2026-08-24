@@ -106,7 +106,7 @@ type PendingOnboarding = {
 type FileSystem = Pick<typeof nodeFs, "lstat" | "realpath" | "mkdir" | "rmdir" | "readFile" | "open" | "unlink" | "chmod" | "rm" | "rename" | "readdir">;
 
 type OnboardingRegistry = Pick<WorkspaceRegistry, "byId" | "byPath" | "list" | "registerWithStatus" | "remove" | "replacePathPrefix" | "restoreEntries">;
-type OnboardingCredentials = Pick<CredentialMetadataStore, "snapshot" | "transaction">;
+type OnboardingCredentials = Pick<CredentialMetadataStore, "snapshot" | "transaction" | "runExclusiveCredential">;
 type OnboardingSessions = Pick<SessionManager, "runExclusive" | "startWhileLifecycleQueueHeld">;
 
 export type OnboardingGit = {
@@ -931,6 +931,20 @@ export class WorkspaceOnboardingCoordinator {
     };
   }
 
+  // Every selected credential's lock, deduped and acquired in sorted order,
+  // nested innermost. Same shape and same order as the assignment routes'
+  // withCredentialLocks, so onboarding introduces no new lock-order edge:
+  // the workspace lifecycle queue is always outermost (commitPlanned holds
+  // it around this), the credential locks always innermost, and sorting
+  // makes concurrent acquirers of overlapping sets agree on the order.
+  private withCredentialLocks<T>(credentialIds: readonly string[], operation: () => Promise<T>): Promise<T> {
+    const ids = [...new Set(credentialIds)].sort();
+    const acquire = (index: number): Promise<T> => index === ids.length
+      ? operation()
+      : this.options.credentials.runExclusiveCredential(ids[index]!, () => acquire(index + 1));
+    return acquire(0);
+  }
+
   // Commits the desired set, re-running the full selection rules against
   // the transaction draft. The set was resolved from a pre-commit snapshot,
   // and a concurrent credential mutation (delete, disable, capability or
@@ -940,17 +954,35 @@ export class WorkspaceOnboardingCoordinator {
   // rollback path undoes the registration. Rollback keeps using
   // replaceWorkspaceAssignments — a restored previous state must never be
   // re-judged against newer credential rules.
+  //
+  // Validation AND persistence run under every selected credential's lock,
+  // exactly as the assignment routes do. A workspace being onboarded is in
+  // NO revocation's initial affected set — no assignment for the credential
+  // yet, and not running — so the lifecycle queue this commit holds fences
+  // nothing on its own; the lock is what makes a revocation's re-read
+  // authoritative. Either the revocation holds it first, and this
+  // validation then sees the disabled or deleted credential and refuses
+  // (nothing commits, the registration rolls back), or this commit holds it
+  // first, and the assignment is in the snapshot before the lock is
+  // released — so the revocation's re-read names this workspace and retries
+  // with it included, blocking on the lifecycle queue this commit still
+  // holds and then stopping whatever the in-commit start spawned. That is
+  // why the start needs no credential lock of its own, and the regular
+  // start path takes none either: by the time a revocation can act, the
+  // assignment is visible and the child is either running and stoppable or
+  // still queued behind this operation.
   private async commitDesiredAssignments(workspaceId: string, desired: CredentialAssignment[]): Promise<void> {
     if (desired.length === 0) {
       await this.replaceWorkspaceAssignments(workspaceId, desired);
       return;
     }
     const selections = selectionsFromAssignments(desired);
-    await this.options.credentials.transaction(draft => {
-      resolveOnboardingAssignments(workspaceId, selections, draft);
-      draft.assignments = draft.assignments.filter(assignment => assignment.workspaceId !== workspaceId);
-      draft.assignments.push(...structuredClone(desired));
-    });
+    await this.withCredentialLocks(desired.map(assignment => assignment.credentialId), () =>
+      this.options.credentials.transaction(draft => {
+        resolveOnboardingAssignments(workspaceId, selections, draft);
+        draft.assignments = draft.assignments.filter(assignment => assignment.workspaceId !== workspaceId);
+        draft.assignments.push(...structuredClone(desired));
+      }));
   }
 
   // Completing a committed onboarding replays the journaled desired set —
@@ -961,7 +993,9 @@ export class WorkspaceOnboardingCoordinator {
   // already landed — replaying would undo a revocation or replacement),
   // or the desired set no longer resolves against the current store (a
   // credential was deleted or disabled after commit). Only the recorded
-  // pre-commit state with a still-valid desired set is completed.
+  // pre-commit state with a still-valid desired set is completed. No
+  // credential lock here: recovery runs at startup, before the hub serves,
+  // so no revocation can be reading an assignment snapshot alongside it.
   private async completeRecoveredAssignments(
     workspaceId: string,
     desired: CredentialAssignment[],

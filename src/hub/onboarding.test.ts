@@ -441,6 +441,8 @@ describe("create new workspace", () => {
     const failingCredentials = {
       snapshot: () => f.credentials.snapshot(),
       transaction: async () => { throw new Error("injected assignment failure"); },
+      runExclusiveCredential: <T,>(id: string, operation: () => Promise<T>) =>
+        f.credentials.runExclusiveCredential(id, operation),
     };
     await addSshCredential(f.credentials, "auth-key");
     const coordinator = new WorkspaceOnboardingCoordinator({
@@ -726,6 +728,8 @@ describe("commit-boundary failure injection", () => {
     const failingCredentials = {
       snapshot: () => f.credentials.snapshot(),
       transaction: async () => { throw new Error("injected assignment failure"); },
+      runExclusiveCredential: <T,>(id: string, operation: () => Promise<T>) =>
+        f.credentials.runExclusiveCredential(id, operation),
     };
     const coordinator = new WorkspaceOnboardingCoordinator({
       journalPath: f.journalPath,
@@ -768,6 +772,8 @@ describe("commit-boundary failure injection", () => {
         if (failTransaction) throw new Error("injected assignment failure");
         return f.credentials.transaction(mutate);
       },
+      runExclusiveCredential: <T,>(id: string, operation: () => Promise<T>) =>
+        f.credentials.runExclusiveCredential(id, operation),
     };
     const coordinator = new WorkspaceOnboardingCoordinator({
       journalPath: f.journalPath,
@@ -879,6 +885,104 @@ describe("commit-boundary failure injection", () => {
     expect(f.registry.byPath(folder)).toBeUndefined();
     expect(f.credentials.snapshot().assignments).toEqual([]);
     expect(await journalExists(f.journalPath)).toBe(false);
+  });
+
+  test("a revocation holding the credential lock is not passed by an onboarding commit", async () => {
+    // A workspace being onboarded is in no revocation's INITIAL affected
+    // set — it has no assignment for the credential yet and is not running
+    // — so the lifecycle queue the commit holds fences nothing on its own.
+    // Only the credential lock orders the two. Held around validation and
+    // persistence both, the commit that arrives second sees the disable and
+    // refuses; the disable can therefore trust the empty assignment set it
+    // read under the lock. Without the lock the commit slides through the
+    // revocation, persists the assignment, and starts a session projecting
+    // the credential the disable just reported revoked.
+    const f = await fixture();
+    await addSshCredential(f.credentials, "auth-key");
+    const folder = await gitRepository(f.folders, "raced");
+
+    let markLockHeld!: () => void;
+    const lockHeld = new Promise<void>(resolve => { markLockHeld = resolve; });
+    let assignmentsSeenUnderLock: string[] | undefined;
+    const revocation = f.credentials.runExclusiveCredential("auth-key", async () => {
+      markLockHeld();
+      // Let the commit run right up to its assignment write: the registry
+      // save immediately precedes it, so once the id is visible the only
+      // thing left before the assignment is the lock this holds.
+      const deadline = Date.now() + 2_000;
+      while (!f.registry.byId("raced") && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 1));
+      }
+      // A window an unlocked assignment write comfortably fits in.
+      await new Promise(resolve => setTimeout(resolve, 50));
+      // The authoritative re-read revokeExclusive makes under this lock.
+      assignmentsSeenUnderLock = f.credentials.snapshot().assignments
+        .filter(assignment => assignment.credentialId === "auth-key")
+        .map(assignment => assignment.workspaceId);
+      await f.credentials.transaction(draft => {
+        const record = draft.credentials.find(credential => credential.id === "auth-key");
+        if (record) record.enabled = false;
+      });
+    });
+    await lockHeld;
+
+    const outcome = await f.coordinator.configureExisting({
+      path: folder,
+      displayName: "Raced",
+      authentication: [{ credentialId: "auth-key", host: "github.com" }],
+      start: true,
+    }).then(result => result as unknown, error => error as unknown);
+    await revocation;
+
+    // The disable committed against a set it read correctly...
+    expect(assignmentsSeenUnderLock).toEqual([]);
+    expect(f.credentials.snapshot().credentials.find(credential => credential.id === "auth-key")?.enabled).toBe(false);
+    // ...and nothing outlived it: no assignment, no session, no half
+    // registration, and the onboarding reports the credential refusal.
+    expect(f.credentials.snapshot().assignments).toEqual([]);
+    expect(f.started).toEqual([]);
+    expect(f.registry.byPath(folder)).toBeUndefined();
+    expect(outcome).toMatchObject({ code: "credential" });
+    expect(await journalExists(f.journalPath)).toBe(false);
+  });
+
+  test("the assignment commit takes every selected credential's lock, deduped and sorted", async () => {
+    // The assignment routes' acquisition shape: sorted so overlapping
+    // acquirers agree on the order, deduped so one credential selected for
+    // two roles is not asked for its own lock twice (which would deadlock
+    // on a non-reentrant lock).
+    const f = await fixture();
+    await addSshCredential(f.credentials, "b-key");
+    await addSshCredential(f.credentials, "a-key");
+    const acquired: string[] = [];
+    const recordingCredentials = {
+      snapshot: () => f.credentials.snapshot(),
+      transaction: (mutate: never) => f.credentials.transaction(mutate),
+      runExclusiveCredential: <T,>(id: string, operation: () => Promise<T>) => {
+        acquired.push(id);
+        return f.credentials.runExclusiveCredential(id, operation);
+      },
+    };
+    const coordinator = new WorkspaceOnboardingCoordinator({
+      journalPath: f.journalPath,
+      registry: f.registry,
+      credentials: recordingCredentials as never,
+      sessions: f.sessions,
+      reservations: f.reservations,
+      git: f.git,
+    });
+    const folder = await gitRepository(f.folders, "locked");
+    await coordinator.configureExisting({
+      path: folder,
+      displayName: "Locked",
+      authentication: [
+        { credentialId: "b-key", host: "github.com" },
+        { credentialId: "a-key", host: "gitlab.com" },
+      ],
+      signing: "a-key",
+    });
+    expect(acquired).toEqual(["a-key", "b-key"]);
+    expect(f.credentials.snapshot().assignments).toHaveLength(3);
   });
 
   test("recovery recognizes a committed entry renamed before the crash", async () => {
@@ -1112,6 +1216,8 @@ describe("concurrency", () => {
         await gate;
         return f.credentials.transaction(mutate);
       },
+      runExclusiveCredential: <T,>(id: string, operation: () => Promise<T>) =>
+        f.credentials.runExclusiveCredential(id, operation),
     };
     const assignmentsSeenByStart: number[] = [];
     const sessions = {
