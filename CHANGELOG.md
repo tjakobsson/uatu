@@ -4,6 +4,29 @@ Notable user-facing changes to uatu are documented here. Versions follow
 [Semantic Versioning](https://semver.org/) and are generated from Conventional
 Commits by [Release Please](https://github.com/googleapis/release-please).
 
+## [0.6.0](https://github.com/tjakobsson/uatu/compare/v0.5.1...v0.6.0) (2026-08-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* **hub:** Hub workspace sessions and clone jobs no longer inherit ambient SSH agents, Git credential helpers, GnuPG homes, or provider tokens. Operators must configure and assign Hub credentials for unattended authentication and signing. The Hub API revision increases from 1 to 4.
+* **chat:** Strict workspace API consumers must regenerate against revision 6 or widen their schemas for conversation configuration, configuration events, conversation updates, and rename support.
+
+### Features
+
+* **api:** publish the API contract and documentation site ([373c938](https://github.com/tjakobsson/uatu/commit/373c9380d18d58f50a275df428ffd3bffc95ff2a))
+* **chat:** add integrated OpenCode workspace chat ([8410b08](https://github.com/tjakobsson/uatu/commit/8410b0804236802d7c83dc9f235c3f36a5d179b8))
+* **chat:** attach images to prompts from the composer ([#290](https://github.com/tjakobsson/uatu/issues/290)) ([5d8d96b](https://github.com/tjakobsson/uatu/commit/5d8d96b3a665a351c22815abdd266bee3e0b5444))
+* **hub:** configure named workspaces before first start ([#292](https://github.com/tjakobsson/uatu/issues/292)) ([ced78e9](https://github.com/tjakobsson/uatu/commit/ced78e9196109b6a1b57a98dcd4659b4dff5e3c7))
+* **hub:** manage folders from directory browser ([#291](https://github.com/tjakobsson/uatu/issues/291)) ([046066c](https://github.com/tjakobsson/uatu/commit/046066c31c480ad3e4f5765531c5a2d7ab9cc731))
+* **hub:** manage workspace credentials ([047641f](https://github.com/tjakobsson/uatu/commit/047641f9daefa8df56f19bd00df5c84102eb5721))
+
+
+### Bug Fixes
+
+* **hub:** keep slow workspace starts alive past the startup window ([#293](https://github.com/tjakobsson/uatu/issues/293)) ([e4bee82](https://github.com/tjakobsson/uatu/commit/e4bee82758625e5ccc2360f5b109a7a129680f86))
+* **watch:** keep active document previews current ([0ddd532](https://github.com/tjakobsson/uatu/commit/0ddd5328446cc87e9201010fd670f1311617dc82))
+
 ## [0.5.1](https://github.com/tjakobsson/uatu/compare/v0.5.0...v0.5.1) (2026-08-13)
 
 
