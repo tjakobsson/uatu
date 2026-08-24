@@ -299,7 +299,7 @@ paths:
       operationId: hubUpdateWorkspaceDisplayName
       tags: [Hub]
       summary: Rename a workspace display name
-      description: Changes only the mutable display name. Valid while the workspace is running or stopped; the session, folder, stable id, URL, personal state, and assignments are untouched.
+      description: Changes only the mutable display name. Valid while the workspace is running or stopped; the session, folder, stable id, URL, personal state, and assignments are untouched. Refused with 409 while a recovery journal awaits Hub recovery; the check runs inside the workspace lifecycle operation, so a folder mutation cannot journal between it and the update.
       requestBody:
         required: true
         content:
@@ -317,6 +317,13 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/NoStoreError' }
+        '409':
+          description: A pending recovery journal awaits Hub recovery. The journal records whole registry entries, display name included, and recovery restores them verbatim — so a rename admitted now would be silently reverted at the next restart.
+          headers: { Cache-Control: { schema: { type: string, const: no-store } } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: a pending recovery journal requires Hub recovery before further folder changes }
         '500':
           description: The validated name could not be persisted (a retryable registry save failure, not a request problem).
           content:

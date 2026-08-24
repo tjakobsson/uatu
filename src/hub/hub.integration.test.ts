@@ -1706,6 +1706,137 @@ describe("hub end to end", () => {
     await sessions.stop(workspaceId);
   }, 60_000);
 
+  test("renaming a workspace refuses while a folder mutation journal awaits recovery", async () => {
+    const folder = path.join(tempRoot, "workspaces", "rename-journal-fenced");
+    execFileSync("mkdir", ["-p", folder]);
+    execFileSync("git", ["init"], { cwd: folder, stdio: "ignore" });
+    const registration = await fetch(`${origin}/api/hub/workspaces`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ path: folder, start: false }),
+    });
+    expect(registration.status).toBe(200);
+    const workspaceId = ((await registration.json()) as { id: string }).id;
+    const journalledName = registry.byId(workspaceId)!.displayName;
+    const moved = path.join(tempRoot, "workspaces", "rename-journal-fenced-moved");
+    const journalPath = path.join(tempRoot, "pending-folder-mutation.json");
+
+    // A registered folder rename that moved the directory but could neither
+    // persist the registry nor roll back leaves exactly this record, and
+    // recovery restores its journaled entries verbatim — display name
+    // included. A label change admitted now would answer 200 and then be
+    // silently reverted to the journaled name at the next restart, with
+    // nothing left to tell the user their rename was lost.
+    await writeFile(journalPath, `${JSON.stringify({
+      version: 1,
+      operation: "rename",
+      source: folder,
+      destination: moved,
+      before: [{ id: workspaceId, path: folder, backend: "local", displayName: journalledName }],
+      after: [{ id: workspaceId, path: moved, backend: "local", displayName: journalledName }],
+    }, null, 2)}\n`, { mode: 0o600 });
+
+    try {
+      const fenced = await fetch(`${origin}/api/hub/workspaces/${workspaceId}/display-name`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie, origin },
+        body: JSON.stringify({ displayName: "Renamed Before Recovery" }),
+      });
+      expect(fenced.status).toBe(409);
+      await assertContract("POST", "/api/hub/workspaces/{workspaceId}/display-name", fenced);
+      expect(await fenced.json()).toEqual({
+        error: "a pending recovery journal requires Hub recovery before further folder changes",
+      });
+      expect(registry.byId(workspaceId)?.displayName).toBe(journalledName);
+
+      // Fail closed: a journal too corrupt to interpret is still a journal.
+      await writeFile(journalPath, "{ not json", { mode: 0o600 });
+      const corrupt = await fetch(`${origin}/api/hub/workspaces/${workspaceId}/display-name`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie, origin },
+        body: JSON.stringify({ displayName: "Renamed Before Recovery" }),
+      });
+      expect(corrupt.status).toBe(409);
+      expect(registry.byId(workspaceId)?.displayName).toBe(journalledName);
+    } finally {
+      // Every later test in this file mutates registered state, which the
+      // journal fences: a failure here must not leave one behind.
+      await rm(journalPath, { force: true });
+    }
+
+    // Recovery clearing the record reopens renaming.
+    const renamed = await fetch(`${origin}/api/hub/workspaces/${workspaceId}/display-name`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ displayName: "Renamed After Recovery" }),
+    });
+    expect(renamed.status).toBe(200);
+    expect(registry.byId(workspaceId)?.displayName).toBe("Renamed After Recovery");
+  }, 60_000);
+
+  test("renaming a workspace refuses a journal that lands while it waits for the workspace queue", async () => {
+    const folder = path.join(tempRoot, "workspaces", "rename-journal-race");
+    execFileSync("mkdir", ["-p", folder]);
+    execFileSync("git", ["init"], { cwd: folder, stdio: "ignore" });
+    const registration = await fetch(`${origin}/api/hub/workspaces`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ path: folder, start: false }),
+    });
+    expect(registration.status).toBe(200);
+    const workspaceId = ((await registration.json()) as { id: string }).id;
+    const journalledName = registry.byId(workspaceId)!.displayName;
+    const moved = path.join(tempRoot, "workspaces", "rename-journal-race-moved");
+    const journalPath = path.join(tempRoot, "pending-folder-mutation.json");
+
+    // Occupy this workspace's lifecycle queue the way a registered folder
+    // rename does through runWithSessionsStopped, and journal only after the
+    // display-name request is past the route's outer checks: the check it is
+    // fenced by must be the one it makes under the queue, not one it made
+    // before asking for it.
+    let releaseQueue!: () => void;
+    const held = new Promise<void>(resolve => {
+      releaseQueue = resolve;
+    });
+    const holding = sessions.runExclusive(workspaceId, () => held);
+    const renaming = fetch(`${origin}/api/hub/workspaces/${workspaceId}/display-name`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ displayName: "Renamed Mid Journal" }),
+    });
+    try {
+      // Ample time for an in-process request to reach the route and queue
+      // behind the hold. A slower machine only weakens the proof — a journal
+      // that lands before the route runs is refused either way — so this can
+      // never make the test red.
+      await Bun.sleep(250);
+      await writeFile(journalPath, `${JSON.stringify({
+        version: 1,
+        operation: "rename",
+        source: folder,
+        destination: moved,
+        before: [{ id: workspaceId, path: folder, backend: "local", displayName: journalledName }],
+        after: [{ id: workspaceId, path: moved, backend: "local", displayName: journalledName }],
+      }, null, 2)}\n`, { mode: 0o600 });
+      releaseQueue();
+      await holding;
+
+      const response = await renaming;
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        error: "a pending recovery journal requires Hub recovery before further folder changes",
+      });
+      // The label recovery will restore is still the one on disk, so the
+      // verbatim restore reverts nothing the user was told had changed.
+      expect(registry.byId(workspaceId)?.displayName).toBe(journalledName);
+    } finally {
+      releaseQueue();
+      await holding.catch(() => undefined);
+      await renaming.catch(() => undefined);
+      await rm(journalPath, { force: true });
+    }
+  }, 60_000);
+
   test("forget refuses while a folder mutation journal awaits recovery", async () => {
     const folder = path.join(tempRoot, "workspaces", "forget-journal-fenced");
     execFileSync("mkdir", ["-p", folder]);

@@ -774,7 +774,32 @@ export function createHubFetchHandler(deps: HubDeps) {
       return json(404, { error: `unknown workspace: ${workspaceId}` }, NO_STORE_HEADERS);
     }
     try {
-      const updated = await registry.updateDisplayName(workspaceId, displayName);
+      // The display name lives in the registry entry, so it is fenced by
+      // the recovery journals exactly as the other registered-state
+      // mutations are. A registered rename or removal that outlived its
+      // mutation journalled whole entries — display name included — and
+      // recovery restores them verbatim: renaming now would report success
+      // and then be silently reverted to the journalled label at the next
+      // restart, with nothing left to tell the user their rename was lost.
+      // Fails closed, so an uninspectable journal is treated as pending.
+      //
+      // The check runs INSIDE this workspace's lifecycle operation, not
+      // before it. Registered renames and removals journal from within
+      // their runWithSessionsStopped callback, which holds the lifecycle
+      // queue of every affected workspace — this one included, since the
+      // journalled entries are exactly the registrations at or below the
+      // mutated folder. Under the queue no mutation of this workspace can
+      // be mid-journal, while one that already finished (including a
+      // rename that failed its rollback) has left its record on disk where
+      // this check sees it. A check before the queue would instead admit
+      // the rename and let a folder mutation reserve the workspace,
+      // journal, and release the queue before the update lands. Holding
+      // the queue costs one registry save; nothing here starts or stops a
+      // session, so a running workspace is renamed without interruption.
+      const updated = await sessions.runExclusive(workspaceId, async () => {
+        await deps.folderManager?.assertNoPendingMutation();
+        return registry.updateDisplayName(workspaceId, displayName);
+      });
       if (!updated) return json(404, { error: `unknown workspace: ${workspaceId}` }, NO_STORE_HEADERS);
       return json(200, {
         workspace: {
@@ -785,7 +810,8 @@ export function createHubFetchHandler(deps: HubDeps) {
           running: sessions.isRunning(updated.id),
         },
       }, NO_STORE_HEADERS);
-    } catch {
+    } catch (error) {
+      if (error instanceof FolderManagerError) return folderError(error);
       return json(500, { error: "workspace display name could not be persisted" }, NO_STORE_HEADERS);
     }
   };
