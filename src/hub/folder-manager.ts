@@ -352,13 +352,23 @@ class FolderMutationJournal {
       // Nothing was unlinked, so there is no directory entry to persist.
       return;
     }
-    // Propagates, exactly like the unlink itself: a clear that is not
-    // durable can resurrect the journal across a reboot, and a resurrected
-    // journal fences every folder mutation, workspace registration, and
-    // session start until recovery resolves it. The callers already treat
-    // a failed clear as the recovery-required answer (failedMutationError,
-    // removeRegistered), and that is the honest answer here too.
-    await this.syncDirectory();
+    // Swallowed, unlike the write path's sync above. The unlink already
+    // removed the journal from the live namespace, so the clear IS done;
+    // only its durability is in doubt. Reporting failure here would make
+    // every caller's catch branch act on a journal that no longer exists —
+    // and the rename's branch reverses the committed filesystem rename,
+    // a mutation now fenced by nothing. A crash between that reverse
+    // rename and restoreEntries leaves startup with no pending mutation,
+    // the registry pointing at the destination, and the folder back at the
+    // source: the exact divergence this journal exists to prevent.
+    // The residue of an unpersisted unlink is far milder — a power loss
+    // can resurrect the journal, and it resurrects describing a mutation
+    // that COMPLETED, which is ordinary work for recover() (its
+    // both-exist and committed-state branches resolve it and clear it
+    // again). A fence until the next startup beats an unjournaled
+    // rollback. So after this point clear() throws only when the journal
+    // is still present, which is what its callers treat it as.
+    await this.syncDirectory().catch(() => undefined);
   }
 }
 

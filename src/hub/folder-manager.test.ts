@@ -105,7 +105,14 @@ async function identityOf(candidate: string): Promise<{ dev: string; ino: string
 // unlink that clears it, the removal's rmdir, and every open/sync/close of
 // the journal's containing directory. `paths` is filled in after the
 // fixture exists; the injected hooks read it at call time.
-function journalDurabilityFs(events: string[], paths: { directory: string; journal: string }): typeof fs {
+function journalDurabilityFs(
+  events: string[],
+  paths: { directory: string; journal: string },
+  // Injects a directory-fsync failure, consulted at each directory sync
+  // (the pending event trace is the argument) so a test can fail the sync
+  // that publishes the journal, the one that persists its unlink, or both.
+  directorySyncFails: (events: readonly string[]) => boolean = () => false,
+): typeof fs {
   const label = (target: string): string | undefined => {
     if (target === paths.directory) return "directory";
     return target.startsWith(`${paths.journal}.`) ? "temp" : undefined;
@@ -118,7 +125,11 @@ function journalDurabilityFs(events: string[], paths: { directory: string; journ
       events.push(`${name}:open`);
       return {
         writeFile: (...args: Parameters<typeof handle.writeFile>) => handle.writeFile(...args),
-        sync: async () => { events.push(`${name}:sync`); await handle.sync(); },
+        sync: async () => {
+          events.push(`${name}:sync`);
+          if (name === "directory" && directorySyncFails(events)) throw new Error("injected directory fsync failure");
+          await handle.sync();
+        },
         close: async () => { events.push(`${name}:close`); await handle.close(); },
       } as unknown as typeof handle;
     }) as typeof fs.open,
@@ -468,6 +479,77 @@ describe("FolderManager registered mutations", () => {
       "folder:rmdir",
       "journal:unlink",
     ]);
+    expect(await exists(f.journalPath)).toBe(false);
+  });
+
+  test("a rename survives a directory sync that fails after the journal unlink", async () => {
+    // Past the unlink the journal is gone from the live namespace, so the
+    // clear is done and only its durability is in doubt. Failing the
+    // rename here would reverse a committed filesystem rename with no
+    // journal left to fence it — a crash mid-rollback would strand the
+    // registry at the destination with the folder back at the source.
+    const events: string[] = [];
+    const paths = { directory: "", journal: "" };
+    const f = await fixture({
+      fs: journalDurabilityFs(events, paths, pending => pending.includes("journal:unlink")),
+    });
+    paths.directory = f.state;
+    paths.journal = f.journalPath;
+    const source = path.join(f.folders, "source");
+    const destination = path.join(f.folders, "destination");
+    await fs.mkdir(source);
+    const entry = await f.registry.register(source);
+
+    expect(completed(await f.manager.rename({ path: source, name: "destination" })))
+      .toEqual({ path: destination, workspaceIds: [entry.id] });
+    expect(events).toContain("journal:unlink");
+    expect(await exists(source)).toBe(false);
+    expect(await exists(destination)).toBe(true);
+    expect(f.registry.byId(entry.id)?.path).toBe(destination);
+    expect(await exists(f.journalPath)).toBe(false);
+  });
+
+  test("a removal survives a directory sync that fails after the journal unlink", async () => {
+    // Same boundary on the removal path: the rmdir and the id-keyed
+    // deletions are committed, so a thrown clear would report
+    // recovery-required for a mutation that is complete and unjournaled.
+    const events: string[] = [];
+    const paths = { directory: "", journal: "" };
+    const f = await fixture({
+      fs: journalDurabilityFs(events, paths, pending => pending.includes("journal:unlink")),
+    });
+    paths.directory = f.state;
+    paths.journal = f.journalPath;
+    const source = path.join(f.folders, "empty");
+    await fs.mkdir(source);
+    const entry = await f.registry.register(source);
+
+    expect(completed(await f.manager.remove({ path: source }))).toEqual({ path: source, workspaceId: entry.id });
+    expect(events).toContain("journal:unlink");
+    expect(await exists(source)).toBe(false);
+    expect(f.registry.byId(entry.id)).toBeUndefined();
+    expect(await exists(f.journalPath)).toBe(false);
+  });
+
+  test("a directory sync failing before the mutation boundary fails the write", async () => {
+    // The write path keeps its strictness: an unpersisted publication is
+    // no journal at all, and the caller must not cross the filesystem
+    // mutation boundary behind it. The clear that follows the failure
+    // hits the same injected fsync failure and swallows it, which must
+    // not mask the write's error either.
+    const events: string[] = [];
+    const paths = { directory: "", journal: "" };
+    const f = await fixture({ fs: journalDurabilityFs(events, paths, () => true) });
+    paths.directory = f.state;
+    paths.journal = f.journalPath;
+    const source = path.join(f.folders, "source");
+    await fs.mkdir(source);
+    const entry = await f.registry.register(source);
+
+    await expect(f.manager.rename({ path: source, name: "destination" })).rejects.toMatchObject({ code: "internal" });
+    expect(await exists(source)).toBe(true);
+    expect(await exists(path.join(f.folders, "destination"))).toBe(false);
+    expect(f.registry.byId(entry.id)?.path).toBe(source);
     expect(await exists(f.journalPath)).toBe(false);
   });
 
