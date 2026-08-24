@@ -199,6 +199,12 @@ paths:
       operationId: hubCreateWorkspace
       tags: [Hub]
       summary: Register and optionally start a workspace
+      description: |
+        A registration that commits but whose recovery journal cannot be
+        cleared answers 200 with `recoveryRequired` instead of an error: the
+        workspace is registered and stopped, a requested start was not
+        attempted, and every further workspace change is refused until the
+        Hub restarts and recovers.
       requestBody:
         required: true
         content:
@@ -1503,7 +1509,12 @@ components:
     WorkspaceAction:
       type: object
       required: [id]
-      properties: { id: { $ref: '#/components/schemas/WorkspaceId' }, running: { type: boolean }, wasRunning: { type: boolean }, forgotten: { type: boolean } }
+      properties:
+        id: { $ref: '#/components/schemas/WorkspaceId' }
+        running: { type: boolean }
+        wasRunning: { type: boolean }
+        forgotten: { type: boolean }
+        recoveryRequired: { type: string, description: "Registration only: the workspace committed but its recovery journal could not be cleared. The workspace is registered and stopped — any requested start was not attempted — and the Hub needs a restart before starts, assignment changes, folder mutations, and further registration resume." }
       additionalProperties: false
     WorkspaceDisplayName:
       type: string

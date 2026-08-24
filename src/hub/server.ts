@@ -583,6 +583,16 @@ export function createHubFetchHandler(deps: HubDeps) {
         });
       } catch (error) {
         if (error instanceof OnboardingError) {
+          if (error.committedEntry) {
+            // Same reasoning as onboardingErrorResponse, in the legacy
+            // shape: the registration fully committed and only the journal
+            // failed to clear, so a 500 would falsely say nothing happened
+            // while retries are fenced by the pending journal. The commit
+            // raises this before it reaches the start step, so no session
+            // was spawned and none is spawned now — a start requested here
+            // is left to the client to retry after recovery.
+            return json(200, { id: error.committedEntry.id, running: false, recoveryRequired: error.message });
+          }
           if (error.code === "needs-init") return json(409, { needsInit: true, error: `${folder} is not a git repository` });
           if (error.code === "not-found") return json(404, { error: `no such folder: ${folder}` });
           if (error.code === "conflict") return json(409, { error: error.message });
@@ -590,7 +600,7 @@ export function createHubFetchHandler(deps: HubDeps) {
           // The admission fence refuses before any commit — a pending
           // recovery journal is a caller-actionable conflict here, like the
           // session-start and assignment fences, not a Hub-internal failure.
-          if (error.code === "recovery-required" && !error.committedEntry) return json(409, { error: error.message });
+          if (error.code === "recovery-required") return json(409, { error: error.message });
           return json(500, { error: error.message });
         }
         return json(500, { error: error instanceof Error ? error.message : String(error) });

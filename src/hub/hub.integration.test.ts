@@ -6,11 +6,12 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
+import { promises as nodeFs } from "node:fs";
 import { chmod, mkdir, mkdtemp, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { LocalProcessBackend } from "./backend";
+import { LocalProcessBackend, type RunningSession, type SessionBackend } from "./backend";
 import {
   EMPTY_CREDENTIAL_CONTEXT_RESOLVER,
   type CloneCredentialProcessContext,
@@ -1640,6 +1641,113 @@ describe("hub end to end", () => {
     });
     expect(registered.status).toBe(200);
     expect(registry.byPath(fenced)?.id).toBe(((await registered.json()) as { id: string }).id);
+  }, 60_000);
+
+  // A journal clear that fails is reachable only through an injected
+  // filesystem, so this case drives its own hub instance; the route, the
+  // onboarding coordinator, and the registry underneath are the real ones.
+  // Only the clear's unlink fails, so the two-store commit completes and the
+  // journal survives on disk: the committed case.
+  async function registerWithUnclearableJournal(body: Record<string, unknown>) {
+    const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "uatu-hub-committed-")));
+    const folder = path.join(root, "committed-repo");
+    execFileSync("mkdir", ["-p", folder]);
+    execFileSync("git", ["init"], { cwd: folder, stdio: "ignore" });
+    const journalPath = path.join(root, "pending-onboarding.json");
+    const localRegistry = new WorkspaceRegistry(path.join(root, "registry.json"));
+    const localPersonalState = new PersonalWorkspaceStateStore(path.join(root, "personal-state.json"));
+    const localCredentials = new CredentialMetadataStore(path.join(root, "credentials.json"));
+    const localSessionStore = new HubSessionStore(path.join(root, "sessions.json"));
+    await Promise.all([localRegistry.load(), localPersonalState.load(), localCredentials.load(), localSessionStore.load()]);
+    // Records every start the hub attempts, so the test can prove the
+    // requested start never ran rather than only that it failed.
+    const spawned: string[] = [];
+    const backend: SessionBackend = {
+      async start(entry): Promise<RunningSession> {
+        spawned.push(entry.id);
+        return {
+          workspaceId: entry.id,
+          basePath: `/s/${entry.id}/`,
+          endpoint: { hostname: "127.0.0.1", port: 1 },
+          token: null,
+          exited: new Promise<number | null>(() => undefined),
+          stop: async () => undefined,
+        };
+      },
+    };
+    const localSessions = new SessionManager(localRegistry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
+    const onboarding = new WorkspaceOnboardingCoordinator({
+      journalPath,
+      registry: localRegistry,
+      credentials: localCredentials,
+      sessions: localSessions,
+      reservations: new PathReservationCoordinator(),
+      fs: Object.assign(Object.create(nodeFs), nodeFs, {
+        unlink: async (target: string) => {
+          if (target === journalPath) throw Object.assign(new Error("injected clear failure"), { code: "EACCES" });
+          return nodeFs.unlink(target);
+        },
+      }) as typeof nodeFs,
+    });
+    const localConfig: HubConfig = {
+      port: 0 as number,
+      host: "127.0.0.1",
+      tls: null,
+      users: [{ name: "tobias", passwordHash: await hashPassword("open sesame") }],
+      stateDir: path.join(root, "state"),
+    };
+    const localServer = startHubServer({
+      config: localConfig,
+      registry: localRegistry,
+      sessions: localSessions,
+      sessionStore: localSessionStore,
+      personalState: localPersonalState,
+      onboarding,
+    });
+    try {
+      const localOrigin = `http://127.0.0.1:${localServer.port}`;
+      const response = await fetch(`${localOrigin}/api/hub/workspaces`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          cookie: `${HUB_COOKIE_NAME}=${(await localSessionStore.issue("tobias", "test")).id}`,
+          origin: localOrigin,
+        },
+        body: JSON.stringify({ path: folder, ...body }),
+      });
+      await assertContract("POST", "/api/hub/workspaces", response);
+      return {
+        status: response.status,
+        payload: (await response.json()) as { id?: string; running?: boolean; recoveryRequired?: string; error?: string },
+        folder,
+        spawned,
+        registeredPath: (id: string) => localRegistry.byId(id)?.path,
+        journalPending: await onboarding.hasPendingRecovery(),
+      };
+    } finally {
+      localServer.stop(true);
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+
+  test("a registration whose journal cannot clear reports the committed workspace, not a failure", async () => {
+    // Both stores committed; only the journal clear failed. An error here
+    // would tell a legacy client nothing was registered — false, and it
+    // leaves the client with no id while the pending journal fences every
+    // retry until the Hub restarts. Identical answer whether the caller
+    // asked for the historical start-by-default or opted out: the commit
+    // raises before its start step, so no session was ever spawned.
+    for (const requested of [{}, { start: false }]) {
+      const outcome = await registerWithUnclearableJournal(requested);
+      expect(outcome.status).toBe(200);
+      expect(outcome.payload.id).toBe("committed-repo");
+      expect(outcome.payload.running).toBe(false);
+      expect(outcome.payload.recoveryRequired).toContain("journal could not be cleared");
+      expect(outcome.payload.error).toBeUndefined();
+      expect(outcome.registeredPath("committed-repo")).toBe(outcome.folder);
+      expect(outcome.spawned).toEqual([]);
+      expect(outcome.journalPending).toBe(true);
+    }
   }, 60_000);
 
   test("starting a session refuses while a folder mutation journal awaits recovery", async () => {
