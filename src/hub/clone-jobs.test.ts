@@ -371,6 +371,30 @@ describe("CloneJobManager ownership and replay", () => {
     expect(await f.manager.cancel("alice", first.jobId)).toBe("terminal");
   });
 
+  test("adopts a caller's reservation and releases it with the job", async () => {
+    const reservations = new PathReservationCoordinator();
+    const f = fixture({ reservations });
+    // A caller that checks the target before creating the job must hold the
+    // reservation across both, so the job adopts that reservation instead of
+    // acquiring one of its own — an acquisition that would fail against the
+    // caller's own hold, leaving the checks and the clone in separate ones.
+    const held = reservations.acquire(["/tmp/handoff/repo"])!;
+    const { jobId } = f.manager.create("alice", "remote", "/tmp/handoff/../handoff/repo", { reservation: held });
+    expect(reservations.isReserved("/tmp/handoff/repo")).toBe(true);
+    await tick();
+    await f.manager.cancel("alice", jobId);
+    expect(reservations.isReserved("/tmp/handoff/repo")).toBe(false);
+  });
+
+  test("refuses a caller reservation that does not cover the target", () => {
+    const reservations = new PathReservationCoordinator();
+    const f = fixture({ reservations });
+    const elsewhere = reservations.acquire(["/tmp/elsewhere"])!;
+    expect(() => f.manager.create("alice", "remote", "/tmp/target", { reservation: elsewhere }))
+      .toThrow("clone reservation does not cover the target");
+    expect(reservations.isReserved("/tmp/target")).toBe(false);
+  });
+
   test("shares hierarchy-aware reservations across clone managers", async () => {
     const reservations = new PathReservationCoordinator();
     const first = fixture({ reservations });

@@ -179,6 +179,7 @@ export class CloneJobManager {
       retainedAuthentication?: Array<{ credentialId: string; host: string }>;
       signing?: string | null;
       start?: boolean;
+      reservation?: PathReservation;
     } = {},
   ): { jobId: string } {
     if (this.closed) throw new Error("clone job manager is closed");
@@ -186,7 +187,15 @@ export class CloneJobManager {
 
     let id: string;
     do id = this.makeId(); while (this.jobs.has(id));
-    const reservation = this.reservations.acquire([normalizedTarget]);
+    // A caller that inspected the target first must have held the
+    // reservation while inspecting — otherwise a folder mutation can commit
+    // between its verdict and this acquisition — so it hands its own
+    // reservation over and the job owns it from here. A reservation that
+    // does not cover this target would leave the clone unprotected.
+    if (options.reservation && !options.reservation.paths.includes(normalizedTarget)) {
+      throw new Error(`clone reservation does not cover the target: ${normalizedTarget}`);
+    }
+    const reservation = options.reservation ?? this.reservations.acquire([normalizedTarget]);
     if (!reservation) throw new Error(`clone target is already reserved: ${normalizedTarget}`);
     let resolveDone!: () => void;
     const job: Job = {

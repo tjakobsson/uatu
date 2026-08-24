@@ -16,7 +16,29 @@ describe("validCloneFolderName", () => {
   test("accepts one folder name and rejects paths and dot segments", () => {
     expect(validCloneFolderName("my-checkout")).toBe(true);
     expect(validCloneFolderName("repo copy")).toBe(true);
+    // Visible non-ASCII names are ordinary folder names.
+    expect(validCloneFolderName("docs-ö")).toBe(true);
+    expect(validCloneFolderName("文書")).toBe(true);
     for (const value of ["", ".", "..", "nested/repo", "nested\\repo", "/tmp/repo", "bad\0name"]) {
+      expect(validCloneFolderName(value)).toBe(false);
+    }
+  });
+
+  test("rejects control and invisible Unicode format characters", () => {
+    // The route trims before calling this, and trim() leaves every one of
+    // these in place: a zero-width-only name would clone into a directory
+    // that renders blank, and an embedded bidi control would make the
+    // checkout display a name other than the path it occupies.
+    for (const value of [
+      "\u200b",
+      "\u200b\u200c\u200d",
+      "\ufeff",
+      "repo\u202egpj.txt",
+      "repo\u2066hidden\u2069",
+      "\u00ad",
+      "bad\u0007name",
+      "bad\u007fname",
+    ]) {
       expect(validCloneFolderName(value)).toBe(false);
     }
   });

@@ -85,6 +85,54 @@ describe("LocalProcessBackend", () => {
 });
 
 describe("LocalProcessBackend stdout parsing", () => {
+  test("startup progress output keeps a slow child alive past the inactivity window", async () => {
+    // Heartbeats every 40ms for ~360ms, URL only after — far beyond the
+    // 150ms inactivity timeout, which a fixed deadline would trip.
+    const backend = new LocalProcessBackend({
+      uatuArgv: ["ignored"],
+      terminationGraceMs: 10,
+      startupInactivityMs: 150,
+      spawn: () => Bun.spawn(["sh", "-c", [
+        "for i in 1 2 3 4 5 6 7 8 9; do printf 'uatu: starting (indexing, %ss)\\n' \"$i\"; sleep 0.04; done",
+        "printf 'http://127.0.0.1:43213/s/slow-start/\\n'",
+        "sleep 30",
+      ].join("; ")], { stdin: "pipe", stdout: "pipe", stderr: "pipe" }),
+    });
+    const session = await backend.start(
+      { id: "slow-start", path: "/tmp", backend: "local", displayName: "slow-start" },
+      "/s/slow-start/",
+      EMPTY_RESOLVED_CREDENTIAL_CONTEXT,
+    );
+    expect(session.endpoint.port).toBe(43213);
+    await session.stop();
+  });
+
+  test("a silent child is still bounded by the inactivity timeout", async () => {
+    const backend = new LocalProcessBackend({
+      uatuArgv: ["ignored"],
+      terminationGraceMs: 10,
+      startupInactivityMs: 100,
+      spawn: () => Bun.spawn(["sh", "-c", "sleep 30"], { stdin: "pipe", stdout: "pipe", stderr: "pipe" }),
+    });
+    await expect(
+      backend.start({ id: "hung", path: "/tmp", backend: "local", displayName: "hung" }, "/s/hung/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT),
+    ).rejects.toThrow(/no session URL or startup output/);
+  });
+
+  test("heartbeats without a URL do not outlast the timeout forever once they stop", async () => {
+    // Output that then goes silent re-arms the timer only while it flows;
+    // silence after the last heartbeat still trips the bound.
+    const backend = new LocalProcessBackend({
+      uatuArgv: ["ignored"],
+      terminationGraceMs: 10,
+      startupInactivityMs: 120,
+      spawn: () => Bun.spawn(["sh", "-c", "printf 'uatu: starting\\n'; sleep 30"], { stdin: "pipe", stdout: "pipe", stderr: "pipe" }),
+    });
+    await expect(
+      backend.start({ id: "stalled", path: "/tmp", backend: "local", displayName: "stalled" }, "/s/stalled/", EMPTY_RESOLVED_CREDENTIAL_CONTEXT),
+    ).rejects.toThrow(/no session URL or startup output/);
+  });
+
   test("does not report a successful stop when signaling throws and exit is unconfirmed", async () => {
     let actual: ReturnType<typeof Bun.spawn> | undefined;
     const backend = new LocalProcessBackend({

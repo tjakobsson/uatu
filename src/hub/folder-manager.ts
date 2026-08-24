@@ -124,17 +124,32 @@ function absolutePath(value: unknown, field: string): string {
   return normalizeAbsolutePath(value);
 }
 
-function folderName(value: unknown): string {
-  if (
-    typeof value !== "string"
-    || value.trim() === ""
+// Control characters (Cc) AND Unicode format characters (Cf) are both
+// rejected: Cf covers the zero-width family, the bidi embedding and
+// override controls, and the BOM. None of them survive a nonempty check —
+// trim() leaves them in place — so a name made only of them would create a
+// directory that renders blank, and one containing a bidi control can make
+// the created folder display a name other than the path it occupies.
+const INVISIBLE_NAME_CHARACTER = /[\u0000-\u001f\u007f]|\p{Cf}/u;
+
+/**
+ * The name rule itself, exported so the published `FolderName` pattern is
+ * checked against this predicate rather than against a copy of it.
+ */
+export function isVisibleFolderName(value: string): boolean {
+  return !(
+    value.trim() === ""
     || value === "."
     || value === ".."
     || value.startsWith(".")
     || value.includes("/")
     || value.includes("\\")
-    || /[\u0000-\u001f\u007f]/.test(value)
-  ) {
+    || INVISIBLE_NAME_CHARACTER.test(value)
+  );
+}
+
+function folderName(value: unknown): string {
+  if (typeof value !== "string" || !isVisibleFolderName(value)) {
     throw new FolderManagerError("invalid-input", "name must be one visible non-hidden path segment");
   }
   return value;
@@ -271,7 +286,35 @@ function parseJournal(value: unknown): PendingFolderMutation {
 class FolderMutationJournal {
   private counter = 0;
 
-  constructor(private readonly filePath: string, private readonly fs: FileSystem) {}
+  constructor(
+    private readonly filePath: string,
+    private readonly fs: FileSystem,
+    // POSIX only; see syncDirectory.
+    private readonly syncsDirectory: boolean,
+  ) {}
+
+  // Persists the journal's own DIRECTORY ENTRY. handle.sync() below makes
+  // the temporary file's contents durable, and nothing more: the rename
+  // that publishes the journal, and the unlink that clears it, are
+  // directory metadata that a host crash can still lose. Without this
+  // fsync a power loss right after a write can drop the journal while the
+  // folder rename or rmdir it fences survives the reboot — the registry
+  // left pointing at the old path with no recovery record, which is the
+  // exact crash window the journal exists to close.
+  //
+  // Directory fsync is a POSIX primitive. Windows has no equivalent —
+  // opening a directory through fs.open fails outright there — but NTFS
+  // journals its own metadata, and this file already degrades to what the
+  // platform offers (the plain-rename fallback), so it degrades here too.
+  private async syncDirectory(): Promise<void> {
+    if (!this.syncsDirectory) return;
+    const handle = await this.fs.open(path.dirname(this.filePath), "r");
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  }
 
   async read(): Promise<PendingFolderMutation | undefined> {
     try {
@@ -301,6 +344,11 @@ class FolderMutationJournal {
       await this.fs.rename(temp, this.filePath);
       created = false;
       await this.fs.chmod(this.filePath, 0o600);
+      // Fails the write: an unpersisted publication is no journal at all,
+      // and the caller must not cross the filesystem mutation boundary
+      // behind it. The error propagates raw, like every other failure
+      // here, and callers map it through safeFsError.
+      await this.syncDirectory();
     } catch (error) {
       if (created) await this.fs.rm(temp, { force: true }).catch(() => undefined);
       throw error;
@@ -312,7 +360,26 @@ class FolderMutationJournal {
       await this.fs.unlink(this.filePath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      // Nothing was unlinked, so there is no directory entry to persist.
+      return;
     }
+    // Swallowed, unlike the write path's sync above. The unlink already
+    // removed the journal from the live namespace, so the clear IS done;
+    // only its durability is in doubt. Reporting failure here would make
+    // every caller's catch branch act on a journal that no longer exists —
+    // and the rename's branch reverses the committed filesystem rename,
+    // a mutation now fenced by nothing. A crash between that reverse
+    // rename and restoreEntries leaves startup with no pending mutation,
+    // the registry pointing at the destination, and the folder back at the
+    // source: the exact divergence this journal exists to prevent.
+    // The residue of an unpersisted unlink is far milder — a power loss
+    // can resurrect the journal, and it resurrects describing a mutation
+    // that COMPLETED, which is ordinary work for recover() (its
+    // both-exist and committed-state branches resolve it and clear it
+    // again). A fence until the next startup beats an unjournaled
+    // rollback. So after this point clear() throws only when the journal
+    // is still present, which is what its callers treat it as.
+    await this.syncDirectory().catch(() => undefined);
   }
 }
 
@@ -423,7 +490,11 @@ export class FolderManager {
 
   constructor(private readonly options: FolderManagerOptions) {
     this.fs = options.fs ?? nodeFs;
-    this.journal = new FolderMutationJournal(options.journalPath, this.fs);
+    // The one platform question this class asks: POSIX or Windows. It
+    // decides both the rename fallback below and whether the journal can
+    // fsync its containing directory.
+    const posix = (options.platform ?? process.platform) !== "win32";
+    this.journal = new FolderMutationJournal(options.journalPath, this.fs, posix);
     // The kernel-level no-replace rename applies only to the real
     // filesystem; an injected fs (failure-injection tests) exercises the
     // claimed-placeholder fallback its hooks can observe.
@@ -442,7 +513,7 @@ export class FolderManager {
     // just created block every rename, registered or not. There is no
     // Windows CI, so that path stays as simple as the platform allows:
     // probe the destination, then rename.
-    this.claimsDestination = (options.platform ?? process.platform) !== "win32";
+    this.claimsDestination = posix;
   }
 
   create(input: unknown): Promise<CreateFolderResult> {
@@ -618,6 +689,21 @@ export class FolderManager {
       }
 
       const sourceExists = await this.isDirectDirectory(pending.source);
+      // Every step below is keyed by the journaled id alone, and that id can
+      // have been re-minted for a DIFFERENT folder: a registration admitted
+      // before this removal wrote its journal is past the fence (mutations
+      // check the record only at admission) and reserves its own
+      // non-overlapping path, so once the removal frees the basename slug
+      // the registry hands it straight to that newcomer. The registry's
+      // current occupant therefore counts as the journaled workspace only
+      // when it IS the complete journaled entry — same id, same path, same
+      // backend. Anything else is a live workspace this journal knows
+      // nothing about.
+      const registered = this.options.registry.byId(pending.entry.id);
+      const reusedId = registered !== undefined && (
+        normalizeAbsolutePath(registered.path) !== pending.entry.path
+        || registered.backend !== pending.entry.backend
+      );
       if (sourceExists) {
         // A surviving source must plausibly BE the journaled directory.
         // The identity check catches path swaps, but inode numbers are
@@ -635,21 +721,52 @@ export class FolderManager {
         if ((await this.fs.readdir(pending.source)).length > 0) {
           throw new Error("pending folder removal recovery found an unrecognized directory; manual reconciliation required");
         }
-        await this.options.registry.restoreEntries([pending.entry]);
-      } else if (this.options.registry.byId(pending.entry.id)) {
-        await this.options.personalState.forgetWorkspace(
-          pending.entry.id,
-          () => this.options.registry.remove(pending.entry.id),
-          async () => { await this.options.credentials.removeWorkspaceAssignments(pending.entry.id); },
-        );
-      } else {
-        await this.options.personalState.removeWorkspace(pending.entry.id);
+        // restoreEntries reconciles by id, so restoring onto a reused id
+        // would repoint the new owner's registration at the journaled path
+        // and strand its folder unregistered. The journaled registration is
+        // dropped instead: its directory survives on disk, and registering
+        // it again mints a fresh id.
+        if (!reusedId) await this.options.registry.restoreEntries([pending.entry]);
+      } else if (!reusedId) {
+        // Finishing the removal follows the same ordering rule as
+        // removeRegistered: the assignments go before the registry entry
+        // that holds the id, so a crash inside recovery cannot free the
+        // slug while this workspace's credentials still answer to it. (An
+        // absent registration implies !reusedId — reuse is a live occupant
+        // that is not the journaled entry — so this branch covers both the
+        // still-registered forget and the registry-less cleanup.)
+        await this.options.credentials.removeWorkspaceAssignments(pending.entry.id);
+        if (registered) {
+          await this.options.personalState.forgetWorkspace(
+            pending.entry.id,
+            () => this.options.registry.remove(pending.entry.id),
+          );
+        } else {
+          await this.options.personalState.removeWorkspace(pending.entry.id);
+        }
       }
+      // A reused id leaves nothing to finish under it. Anything still filed
+      // under it belongs to the new workspace — deleting by id would
+      // destroy live data, and restoring the pending-forget records would
+      // overwrite it — so recovery drops only the pending-forget journal
+      // (dead records of a workspace whose registration is already gone)
+      // and touches nothing else keyed by the id.
+      // The journaled workspace's own credential assignments cannot be
+      // among those leftovers: this build deletes them before the registry
+      // removal that frees the slug, so an id is only reusable once its
+      // predecessor's assignments are gone. A journal written by a build
+      // that deleted them after the registry removal can still have left
+      // them behind, and they are then indistinguishable from the new
+      // owner's — leaving them is the lesser harm next to stripping the
+      // credentials of a workspace this journal never described.
+      const journaledIdReused = (workspaceId: string) => reusedId && workspaceId === pending.entry.id;
       await this.options.personalState.recoverPendingForgets(
-        workspaceId => this.options.registry.byId(workspaceId) !== undefined,
-        async workspaceId => { await this.options.credentials.removeWorkspaceAssignments(workspaceId); },
+        workspaceId => !journaledIdReused(workspaceId) && this.options.registry.byId(workspaceId) !== undefined,
+        async workspaceId => {
+          if (journaledIdReused(workspaceId)) return;
+          await this.options.credentials.removeWorkspaceAssignments(workspaceId);
+        },
       );
-      if (!sourceExists) await this.options.credentials.removeWorkspaceAssignments(pending.entry.id);
       await this.journal.clear();
     });
   }
@@ -825,6 +942,31 @@ export class FolderManager {
     throw new FolderManagerError("conflict", "destination already exists");
   }
 
+  // Clears the journal a FAILED mutation left behind and returns the error
+  // to throw. A journal that survives its own mutation fences every later
+  // folder change, workspace registration, and session start until
+  // recover() resolves it — and recovery of a source the operation never
+  // managed to touch (a still-populated directory) refuses as
+  // unrecognized, which leaves the Hub unstartable. So a clear failure must
+  // not disappear behind the original error, which is routinely an
+  // ordinary retryable 409 ("folder is not empty") that would tell the
+  // caller to empty the directory and try again — a retry the surviving
+  // journal refuses. Both facts travel in one internal error, the original
+  // first inside the cause, mirroring the rename rollback below.
+  private async failedMutationError(error: unknown, fallback: string): Promise<FolderManagerError> {
+    const original = safeFsError(error, fallback);
+    try {
+      await this.journal.clear();
+    } catch (clearError) {
+      return new FolderManagerError(
+        "internal",
+        `${original.message}, and its pending folder mutation journal could not be cleared; restart the Hub to recover before further folder changes`,
+        { cause: new AggregateError([original, clearError]) },
+      );
+    }
+    return original;
+  }
+
   private async isDirectDirectory(candidate: string): Promise<boolean> {
     try {
       const stats = await this.fs.lstat(candidate);
@@ -887,8 +1029,7 @@ export class FolderManager {
       }
     } catch (error) {
       if (claim) await this.removeOwnedClaim(destination, claim);
-      await this.journal.clear().catch(() => undefined);
-      throw safeFsError(error, "registered folder rename failed");
+      throw await this.failedMutationError(error, "registered folder rename failed");
     }
 
     let registryUpdated = false;
@@ -925,19 +1066,42 @@ export class FolderManager {
       await this.journal.write(pending);
       await this.fs.rmdir(source);
     } catch (error) {
-      await this.journal.clear().catch(() => undefined);
-      throw safeFsError(error, "registered folder removal failed");
+      throw await this.failedMutationError(error, "registered folder removal failed");
     }
     try {
+      // Ordering is the whole defense against a reused id inheriting this
+      // workspace's credentials. The registry entry is what holds the
+      // basename slug: the instant it is removed, a registration already
+      // past the journal fence can re-mint that exact id, and credential
+      // resolution selects assignments by workspace id alone. So everything
+      // keyed by the id is deleted BEFORE the registry removal commits —
+      // the assignments here, and the personal-state records inside
+      // forgetWorkspace, which journals and deletes them before it calls
+      // the registry. Every crash point then leaves either the entry still
+      // present (the id was never freed, and recovery finishes the removal)
+      // or the entry gone with its id-keyed state already gone with it.
+      // Deleting first cannot strand a LIVE workspace without its
+      // assignments: the directory is already rmdir'd and the journal
+      // fences every later mutation, so a failure below leaves a doomed
+      // workspace that recovery finishes removing, never a usable one.
+      await this.options.credentials.removeWorkspaceAssignments(entry.id);
       await this.options.personalState.forgetWorkspace(
         entry.id,
         () => this.options.registry.remove(entry.id),
-        async () => { await this.options.credentials.removeWorkspaceAssignments(entry.id); },
       );
       await this.journal.clear();
       return { path: source, workspaceId: entry.id };
     } catch (error) {
-      throw safeFsError(error, "registered folder removal requires recovery");
+      // Past the point of no return: the directory is gone and the journal
+      // is its only remaining record. Whichever step failed — the forget or
+      // the clear — that record survives and fences everything, so the
+      // answer is always the recovery-required internal error and never an
+      // errno-shaped 403/409 that reads as a retryable filesystem problem.
+      throw new FolderManagerError(
+        "internal",
+        "registered folder removal requires recovery; restart the Hub to resolve the pending folder mutation journal",
+        { cause: error },
+      );
     }
   }
 }

@@ -57,6 +57,11 @@ export class SessionManager {
     private readonly registry: WorkspaceRegistry,
     private readonly backends: Record<WorkspaceEntry["backend"], SessionBackend>,
     private readonly credentials: CredentialContextResolver,
+    // Precondition for spawning a child, evaluated INSIDE the queued start
+    // operation (see start()). Injected rather than imported because the
+    // folder manager that owns the recovery journal takes this manager as a
+    // dependency and is therefore assembled after it.
+    private readonly assertStartAllowed?: () => Promise<void>,
   ) {}
 
   get(workspaceId: string): RunningSession | undefined {
@@ -175,7 +180,7 @@ export class SessionManager {
     // The queued operation bypasses the shutdown gate on purpose: this call
     // is published in `starting` from here on, so stopAll() either saw it
     // and queued a stop behind it, or has not latched yet.
-    const operation = this.enqueue(workspaceId, () => this.spawnWhileLifecycleQueueHeld(workspaceId));
+    const operation = this.enqueue(workspaceId, () => this.spawnWhileLifecycleQueueHeld(workspaceId, true));
 
     let published: Promise<RunningSession>;
     published = operation.finally(() => {
@@ -202,12 +207,20 @@ export class SessionManager {
   // and stopAll() latches before it snapshots, so no start can fall between
   // the two. Onboarding treats the refusal as any other failed in-commit
   // start: the workspace stays committed and stopped, with startError set.
+  //
+  // Unfenced on purpose (see the fence note in spawnWhileLifecycleQueueHeld):
+  // the caller was admitted through its own fence over BOTH recovery
+  // journals and has held this workspace's lifecycle queue ever since, so
+  // no folder mutation can have journaled in between.
   async startWhileLifecycleQueueHeld(workspaceId: string): Promise<RunningSession> {
     if (this.shuttingDown) throw new Error(shuttingDownMessage(workspaceId));
-    return this.spawnWhileLifecycleQueueHeld(workspaceId);
+    return this.spawnWhileLifecycleQueueHeld(workspaceId, false);
   }
 
-  private async spawnWhileLifecycleQueueHeld(workspaceId: string): Promise<RunningSession> {
+  // `fencePendingMutation` marks the entry point that reaches here from
+  // outside any exclusive section — start() — and so has to prove no
+  // recovery journal is pending itself.
+  private async spawnWhileLifecycleQueueHeld(workspaceId: string, fencePendingMutation: boolean): Promise<RunningSession> {
     // Registered for the whole call — including the backend spawn — so a
     // shutdown arriving mid-commit enqueues a stop behind the section that
     // holds this queue, and waits for it there.
@@ -217,6 +230,26 @@ export class SessionManager {
       if (existing) {
         return existing;
       }
+
+      // The folder-mutation journal fence runs HERE, under this workspace's
+      // lifecycle queue, and not at the route that asked for the start.
+      // Registered folder renames and removals write, clear, and roll back
+      // their journal inside the runWithSessionsStopped callback, which
+      // holds the lifecycle queue of EVERY workspace the mutation touches
+      // for the whole journalled window. So while this operation owns the
+      // queue no mutation of this workspace can be mid-journal, and a
+      // journal that a failed rollback or finalization left behind is
+      // already on disk for the check to observe. A check made before the
+      // call — at the route — proves nothing: a mutation may journal
+      // between it and the moment the queue grants this operation, and the
+      // child would then be spawned with this workspace's credentials and
+      // personal identity in whatever content now sits at the registered
+      // path. Checked before the spawn block below, so a refusal spawns
+      // nothing and mutates no registered state (the caller's failure
+      // cleanup unregisters, which is itself fenced while recovery is
+      // pending). Skipped for a caller that already owns this queue from an
+      // earlier fence of its own — see startWhileLifecycleQueueHeld.
+      if (fencePendingMutation) await this.assertStartAllowed?.();
 
       let workspace: WorkspaceEntry;
       let session: RunningSession;

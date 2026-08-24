@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { ChatQueueFullError, ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, OpenCodeChatAdapter, parseSlashCommand, QueuedMessageNotHeldError } from "./adapter";
+import { ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, deriveConversationTitle, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, OpenCodeChatAdapter, parseSlashCommand, QueuedMessageNotHeldError, UnknownAttachmentError } from "./adapter";
 import { normalizeProviderEvent } from "./normalization";
 import type { ChatAgent } from "./types";
 import type {
@@ -57,7 +57,7 @@ class FakeProvider implements OpenCodeProvider {
   sessions: ProviderSession[] = [];
   pages = new Map<string, ProviderPage<ProviderMessage>>();
   eventQueue = new EventQueue();
-  prompts: Array<{ sessionId: string; id: string; text: string; delivery: "queue"; mode?: string; variant?: string }> = [];
+  prompts: Array<{ sessionId: string; id: string; text: string; delivery: "queue"; mode?: string; variant?: string; attachments?: import("./provider").ProviderAttachment[] }> = [];
   commandCalls: Array<{ sessionId: string; id: string; name: string; arguments: string; model?: ModelSelection }> = [];
   permissionReplies: Array<{ sessionId: string; requestId: string; reply: ProviderPermissionReply }> = [];
   questionReplies: Array<{ sessionId: string; requestId: string; answers?: string[][]; rejected?: true }> = [];
@@ -91,7 +91,7 @@ class FakeProvider implements OpenCodeProvider {
     signal.addEventListener("abort", () => this.eventQueue.close(), { once: true });
     return this.eventQueue;
   }
-  async prompt(sessionId: string, input: { id: string; text: string; delivery: "queue"; mode?: string; variant?: string }) {
+  async prompt(sessionId: string, input: { id: string; text: string; delivery: "queue"; mode?: string; variant?: string; attachments?: import("./provider").ProviderAttachment[] }) {
     this.prompts.push({ sessionId, ...input });
     return { messageId: input.id };
   }
@@ -2570,5 +2570,192 @@ describe("a subagent's pending request is reconciled into its parent", () => {
     ];
     const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
     expect((await adapter.history("parent")).items).toEqual([]);
+  });
+});
+
+describe("prompt attachments", () => {
+  const STORED = new Map([
+    ["11111111-2222-4333-8444-555555555555", { id: "11111111-2222-4333-8444-555555555555", mimeType: "image/png", absolutePath: "/state/attachments/ws/11111111-2222-4333-8444-555555555555.png" }],
+    ["22222222-2222-4333-8444-555555555555", { id: "22222222-2222-4333-8444-555555555555", mimeType: "image/webp", absolutePath: "/state/attachments/ws/22222222-2222-4333-8444-555555555555.webp" }],
+  ]);
+  const resolveAttachment = async (id: string) => STORED.get(id) ?? null;
+  const ref = (id: string, name = "shot.png") => ({ id, name, mimeType: "image/png" });
+
+  test("locates stored bytes at dispatch and hands the provider neutral refs with the sniffed type", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
+    // The client claims image/png; the store sniffed webp. The store wins on
+    // both the provider hand-off and the projected reference.
+    const accepted = await adapter.prompt("session", "r1", "look at this", undefined, undefined, undefined, [ref("22222222-2222-4333-8444-555555555555", "actually.webp")]);
+    expect(accepted.held).toBe(false);
+    expect(provider.prompts[0]!.attachments).toEqual([{
+      id: "22222222-2222-4333-8444-555555555555",
+      name: "actually.webp",
+      mimeType: "image/webp",
+      absolutePath: "/state/attachments/ws/22222222-2222-4333-8444-555555555555.webp",
+    }]);
+    expect(adapter.projectionForTests("session").items()).toContainEqual(expect.objectContaining({
+      type: "user_message",
+      text: "look at this",
+      attachments: [{ id: "22222222-2222-4333-8444-555555555555", name: "actually.webp", mimeType: "image/webp" }],
+    }));
+  });
+
+  test("refuses unknown references at admission, before anything reaches the provider", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
+    await expect(adapter.prompt("session", "r1", "go", undefined, undefined, undefined, [ref("99999999-0000-4000-8000-000000000000")]))
+      .rejects.toBeInstanceOf(UnknownAttachmentError);
+    expect(provider.prompts).toHaveLength(0);
+    // A harness without a store refuses every reference the same way.
+    const bare = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    await expect(bare.prompt("session", "r2", "go", undefined, undefined, undefined, [ref("11111111-2222-4333-8444-555555555555")]))
+      .rejects.toBeInstanceOf(UnknownAttachmentError);
+  });
+
+  test("refuses attachments on a slash command at admission", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
+    await expect(adapter.prompt("session", "r1", "/review focus", undefined, undefined, undefined, [ref("11111111-2222-4333-8444-555555555555")]))
+      .rejects.toBeInstanceOf(CommandAttachmentsError);
+    expect(provider.prompts).toHaveLength(0);
+    expect(provider.commandCalls).toHaveLength(0);
+  });
+
+  test("admits slash-leading prose with attachments when no listed command matches", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
+    // "/unknown" is not in the command list, so dispatch would send it as an
+    // ordinary prompt — admission must classify the same way and keep the
+    // images rather than refusing on shape alone.
+    const accepted = await adapter.prompt("session", "r1", "/unknown focus", undefined, undefined, undefined, [ref("11111111-2222-4333-8444-555555555555")]);
+    expect(accepted.messageId).toBeTruthy();
+    expect(provider.commandCalls).toHaveLength(0);
+    expect(provider.prompts).toHaveLength(1);
+    expect(provider.prompts[0]!.text).toBe("/unknown focus");
+    expect(provider.prompts[0]!.attachments).toHaveLength(1);
+  });
+
+  test("a slow command listing does not let a later prompt overtake the slash-prose one", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    let releaseListing: () => void = () => {};
+    const listing = new Promise<void>(resolve => { releaseListing = resolve; });
+    provider.listCommands = async () => {
+      await listing;
+      return provider.commands;
+    };
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
+    // Classification happens inside the per-conversation admission lane, so an
+    // ordinary prompt submitted afterwards cannot be admitted — and dispatched,
+    // committing its configuration — while the attachment-bearing one is still
+    // waiting on the listing.
+    const first = adapter.prompt("session", "r1", "/unknown focus", undefined, undefined, undefined, [ref("11111111-2222-4333-8444-555555555555")]);
+    const second = adapter.prompt("session", "r2", "second");
+    await Bun.sleep(5);
+    expect(provider.prompts).toHaveLength(0);
+    releaseListing();
+    expect((await first).held).toBe(false);
+    expect((await second).held).toBe(true);
+    expect(provider.prompts).toHaveLength(1);
+    expect(provider.prompts[0]!.text).toBe("/unknown focus");
+  });
+
+  test("a retry of an accepted slash-prose prompt replays the receipt after the command list changes", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
+    const accepted = await adapter.prompt("session", "r1", "/unknown focus", undefined, undefined, undefined, [ref("11111111-2222-4333-8444-555555555555")]);
+    // The list gains the name after acceptance. A lost-response retry must
+    // replay the receipt, never reclassify: refusing now would restore a
+    // draft the provider already received.
+    provider.commands = [...provider.commands, { name: "unknown", description: "New", argumentHint: "", kind: "command" as const }];
+    const retried = await adapter.prompt("session", "r1", "/unknown focus", undefined, undefined, undefined, [ref("11111111-2222-4333-8444-555555555555")]);
+    expect(retried.messageId).toBe(accepted.messageId);
+    expect(provider.prompts).toHaveLength(1);
+    expect(provider.commandCalls).toHaveLength(0);
+  });
+
+  test("held messages keep their references, expose them on the wire, and deliver them", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    let nextId = 0;
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", id: () => `message-${++nextId}`, resolveAttachment });
+    const pump = adapter.startEventPump();
+
+    await adapter.prompt("session", "r1", "first");
+    const held = await adapter.prompt("session", "r2", "with image", undefined, undefined, undefined, [ref("11111111-2222-4333-8444-555555555555")]);
+    expect(held.held).toBe(true);
+    expect(provider.prompts).toHaveLength(1);
+    expect((await adapter.history("session")).queued).toEqual([expect.objectContaining({
+      id: held.messageId,
+      text: "with image",
+      attachments: [{ id: "11111111-2222-4333-8444-555555555555", name: "shot.png", mimeType: "image/png" }],
+    })]);
+
+    provider.eventQueue.push({ id: "idle", type: "session.idle", data: { sessionID: "session" } });
+    for (let attempt = 0; attempt < 200 && provider.prompts.length < 2; attempt += 1) await Bun.sleep(1);
+    await adapter.stopEventPump();
+    await pump;
+    expect(provider.prompts).toHaveLength(2);
+    expect(provider.prompts[1]!.attachments).toEqual([expect.objectContaining({
+      id: "11111111-2222-4333-8444-555555555555",
+      absolutePath: "/state/attachments/ws/11111111-2222-4333-8444-555555555555.png",
+    })]);
+    expect((await adapter.history("session")).queued ?? []).toEqual([]);
+  });
+
+  test("removing a held message discards its references", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
+    await adapter.prompt("session", "r1", "first");
+    const held = await adapter.prompt("session", "r2", "queued", undefined, undefined, undefined, [ref("11111111-2222-4333-8444-555555555555")]);
+    await expect(adapter.removeQueued("session", held.messageId, "rm-1")).resolves.toEqual({ removed: true });
+    expect((await adapter.history("session")).queued ?? []).toEqual([]);
+    expect(provider.prompts).toHaveLength(1);
+  });
+});
+
+describe("sparse user-message updates preserve attachments", () => {
+  test("an attachment-less upsert for the same message keeps the thumbnails", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g" });
+    const projection = adapter.projectionForTests("session");
+    const attachments = [{ id: "11111111-2222-4333-8444-555555555555", name: "shot.png", mimeType: "image/png" }];
+    projection.upsert({ id: "message:m1", type: "user_message", createdAt: 1, text: "look", requestId: "r1", attachments });
+
+    // A classic event alias knows nothing of attachments: text-only restate.
+    projection.upsert({ id: "message:m1", type: "user_message", createdAt: 1, text: "look" });
+    expect(projection.items()[0]).toEqual(expect.objectContaining({ text: "look", requestId: "r1", attachments }));
+
+    // An empty-parts message.updated frame: empty text AND no attachments.
+    projection.upsert({ id: "message:m1", type: "user_message", createdAt: 1, text: "" });
+    expect(projection.items()[0]).toEqual(expect.objectContaining({ text: "look", attachments }));
+
+    // An update that does carry attachments is authoritative, not sparse.
+    const replaced = [{ id: "22222222-2222-4333-8444-555555555555", name: "other.png", mimeType: "image/webp" }];
+    projection.upsert({ id: "message:m1", type: "user_message", createdAt: 1, text: "look", attachments: replaced });
+    expect(projection.items()[0]).toEqual(expect.objectContaining({ attachments: replaced }));
+  });
+});
+
+describe("image-only prompts reach the provider", () => {
+  test("empty text with attachments dispatches; without them it is refused", async () => {
+    const provider = new FakeProvider();
+    provider.sessions = [fixtureSession("session")];
+    const resolveAttachment = async (id: string) => id === "11111111-2222-4333-8444-555555555555"
+      ? { id, mimeType: "image/png", absolutePath: "/state/a.png" }
+      : null;
+    const adapter = new OpenCodeChatAdapter({ provider, workspacePath: process.cwd(), generation: "g", resolveAttachment });
+    const accepted = await adapter.prompt("session", "r1", "", undefined, undefined, undefined, [{ id: "11111111-2222-4333-8444-555555555555", name: "shot.png", mimeType: "image/png" }]);
+    expect(accepted.held).toBe(false);
+    expect(provider.prompts[0]).toEqual(expect.objectContaining({ text: "", attachments: [expect.objectContaining({ id: "11111111-2222-4333-8444-555555555555" })] }));
+    await expect(adapter.prompt("session2", "r2", "")).rejects.toThrow("prompt must not be empty");
   });
 });

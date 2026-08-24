@@ -104,6 +104,23 @@ describe("black-box HTTP contract validation", () => {
     })).rejects.toThrow("longer than 4 characters");
   });
 
+  test("matches documented patterns over code points, not UTF-16 units", async () => {
+    // JSON Schema patterns are ECMA-262 expressions in Unicode mode, so a
+    // `\p{...}` escape has to enforce the property above the BMP as well —
+    // compiled without `u` it would degrade to a literal and pass everything.
+    const contract = {
+      paths: { "/name": { get: { operationId: "getName", responses: { "200": { content: { "application/json": { schema: {
+        type: "string", pattern: "^[^\\p{Cf}]+$",
+      } } } } } } } },
+    };
+    await assertOpenApiResponse(contract, { method: "GET", path: "/name", response: Response.json("visible") });
+    for (const name of ["zero\u{200b}width", "tag\u{e0001}", "music\u{1d173}"]) {
+      await expect(assertOpenApiResponse(contract, {
+        method: "GET", path: "/name", response: Response.json(name),
+      })).rejects.toThrow("does not match pattern");
+    }
+  });
+
   test("enforces documented numeric and string constraints", async () => {
     const constrained = {
       paths: { "/value": { get: { operationId: "getValue", responses: { "200": { content: { "application/json": { schema: {

@@ -743,3 +743,73 @@ function session(id: string) {
     time: { created: 1, updated: 1 },
   };
 }
+
+describe("prompt attachments", () => {
+  const attachment = {
+    id: "11111111-2222-4333-8444-555555555555",
+    name: "shot.png",
+    mimeType: "image/png",
+    absolutePath: "/state/attachments/ws/11111111-2222-4333-8444-555555555555.png",
+  };
+
+  test("declares the attachments capability", () => {
+    const provider = new SdkV2Provider({} as unknown as OpencodeClient, "/workspace");
+    expect(provider.describe().capabilities).toContain("attachments");
+  });
+
+  test("maps per-model image support from input.image or the legacy attachment flag", async () => {
+    const client = {
+      provider: {
+        list: async () => ({ data: {
+          connected: ["a"],
+          default: {},
+          all: [{ id: "a", name: "A", models: {
+            vision: { id: "vision", name: "Vision", capabilities: { input: { image: true } } },
+            legacy: { id: "legacy", name: "Legacy", capabilities: { attachment: true, input: { image: false } } },
+            blind: { id: "blind", name: "Blind", capabilities: { attachment: false, input: { image: false } } },
+            silent: { id: "silent", name: "Silent" },
+          } }],
+        } }),
+      },
+    } as unknown as OpencodeClient;
+    const models = await new SdkV2Provider(client, "/workspace").listModels();
+    const byId = new Map(models.map(model => [model.selection.modelId, model.imageInput]));
+    expect(byId.get("vision")).toBe(true);
+    expect(byId.get("legacy")).toBe(true);
+    // Absence of both signals reads as "cannot", never as "unknown".
+    expect(byId.get("blind")).toBeUndefined();
+    expect(byId.get("silent")).toBeUndefined();
+  });
+
+  test("v2 prompts carry attachments as file: uris and omit the key when there are none", async () => {
+    const promptInputs: Array<Record<string, unknown>> = [];
+    const client = {
+      v2: { session: { prompt: async (input: Record<string, unknown>) => { promptInputs.push(input); return { data: { data: { id: "msg_native" } } }; } } },
+    } as unknown as OpencodeClient;
+    const provider = new SdkV2Provider(client, "/workspace");
+    await provider.prompt("ses_native", { id: "r1", text: "look", delivery: "queue", attachments: [attachment] });
+    await provider.prompt("ses_native", { id: "r2", text: "plain", delivery: "queue" });
+    expect(promptInputs[0]!.prompt).toEqual({
+      text: "look",
+      files: [{ uri: "file:///state/attachments/ws/11111111-2222-4333-8444-555555555555.png", name: "shot.png" }],
+    });
+    expect(promptInputs[1]!.prompt).toEqual({ text: "plain" });
+  });
+
+  test("compatibility prompts carry classic file parts with mime, filename, and file: url", async () => {
+    let promptInput: Record<string, unknown> | undefined;
+    const client = {
+      session: {
+        create: async () => ({ data: { ...session("ses_classic"), directory: "/workspace" } }),
+        promptAsync: async (input: Record<string, unknown>) => { promptInput = input; return { data: undefined }; },
+      },
+    } as unknown as OpencodeClient;
+    const provider = new SdkV2Provider(client, "/workspace");
+    await provider.createSession("client-uuid");
+    await provider.prompt("ses_classic", { id: "r1", text: "look", delivery: "queue", attachments: [attachment] });
+    expect(promptInput!.parts).toEqual([
+      { type: "text", text: "look" },
+      { type: "file", mime: "image/png", filename: "shot.png", url: "file:///state/attachments/ws/11111111-2222-4333-8444-555555555555.png" },
+    ]);
+  });
+});

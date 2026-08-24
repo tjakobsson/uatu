@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { createAjv, openApiOperations, readJson, readYaml, schemaForAjv, validateApi } from "../scripts/validate-api";
+import { isVisibleFolderName } from "../src/hub/folder-manager";
 
 type Inventory = { operations: Array<{ operationId: string; method: string; path: string; childPath?: string; transport?: string; runtime: string }> };
 type Streaming = { channels: Record<string, unknown>; schemas: Record<string, object> };
@@ -216,6 +217,56 @@ describe("Hub folder mutation contracts", () => {
     expect(stopConflict({ error: "affected workspace sessions must be stopped", needsStop: true, workspaceIds: ["old"] })).toBe(true);
     expect(stopConflict({ error: "affected workspace sessions must be stopped", needsStop: false, workspaceIds: ["old"] })).toBe(false);
     expect(stopConflict({ error: "affected workspace sessions must be stopped", needsStop: true, workspaceIds: [], extra: true })).toBe(false);
+  });
+
+  test("FolderName accepts exactly the names the server accepts", async () => {
+    const openapi = await readYaml<{ components: { schemas: Record<string, { pattern: string }> } }>("api/openapi.yaml");
+    const folderName = createAjv().compile(schemaForAjv(openapi.components.schemas.FolderName, openapi.components.schemas));
+    // The compilation JSON Schema requires, and the one Ajv and the contract
+    // harness both use: ECMA-262 in Unicode mode, matching whole code points.
+    const pattern = new RegExp(openapi.components.schemas.FolderName.pattern, "u");
+
+    for (const name of ["new-project", "docs 2", "日本語", "café"]) {
+      expect(folderName(name)).toBe(true);
+      expect(pattern.test(name)).toBe(true);
+    }
+    // Every one of these is rejected by the server's folder-name validator:
+    // an OpenAPI-valid request must not be able to carry them. The last four
+    // are format characters above the BMP, which only a Unicode-mode
+    // validator sees as the single code points they are.
+    for (const name of [
+      "\u{200b}", // zero-width space alone: nonempty, renders blank
+      "zero\u{200b}width",
+      "project\u{202e}txt", // right-to-left override: displays as a different name
+      "\u{ad}soft", // soft hyphen
+      "\u{feff}bom", // byte order mark
+      "word\u{2060}joiner",
+      "ayah\u{6dd}", // Arabic end of ayah
+      "\u{180e}mongolian", // Mongolian vowel separator
+      "annotation\u{fff9}", // interlinear annotation anchor
+      "tag\u{e0020}s", // tag space
+      "music\u{1d173}", // musical symbol begin beam
+      "\u{110bd}x", // Kaithi number sign
+      "\u{e0001}x", // language tag
+    ]) {
+      expect(folderName(name)).toBe(false);
+      expect(pattern.test(name)).toBe(false);
+    }
+
+    // Differential sweep over every code point, in the shapes that exercise
+    // each clause of the rule: the published pattern and the Hub's own
+    // predicate must agree everywhere, or a contract-valid name answers 400.
+    const mismatches: string[] = [];
+    for (let codePoint = 0; codePoint <= 0x10ffff; codePoint += 1) {
+      if (codePoint >= 0xd800 && codePoint <= 0xdfff) continue; // unpaired surrogates are not characters
+      const character = String.fromCodePoint(codePoint);
+      for (const name of [character, `a${character}b`, `${character}a`, `.${character}`]) {
+        if (pattern.test(name) !== isVisibleFolderName(name)) {
+          mismatches.push(`U+${codePoint.toString(16).toUpperCase()} in ${JSON.stringify(name)}`);
+        }
+      }
+    }
+    expect(mismatches).toEqual([]);
   });
 });
 

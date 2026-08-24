@@ -27,6 +27,7 @@ import {
   printStartupBanner,
   SERVE_DEPRECATION_WARNING,
   shouldWarnServeDeprecation,
+  startSupervisedStartupHeartbeat,
 } from "./cli/output";
 import { createNavigationFetchHandler, INTERNAL_SHELL_PATH, openBrowser, spaShellResponse } from "./server/navigation";
 import { findNonGitWatchEntries, resolveWatchRoots, type WatchEntry } from "./server/roots";
@@ -161,6 +162,10 @@ async function runWatch(options: WatchOptions) {
   }
 
   const clearIndexingStatus = printIndexingStatus(rootEntries, process.stdout);
+  // Hub-supervised children (marked by --exit-on-stdin-close) get periodic
+  // progress lines instead of the TTY status, so the hub's startup watchdog
+  // can tell slow from hung.
+  const stopStartupHeartbeat = startSupervisedStartupHeartbeat(rootEntries, options, process.stdout);
   let watchSession: ReturnType<typeof createWatchSession> | null = null;
   let server: ReturnType<typeof Bun.serve> | null = null;
   let terminalServer: ReturnType<typeof createTerminalServer> | null = null;
@@ -284,6 +289,7 @@ async function runWatch(options: WatchOptions) {
     });
   } catch (error) {
     clearIndexingStatus();
+    stopStartupHeartbeat();
     if (chatService) await chatService.dispose().catch(() => undefined);
     if (watchSession) {
       void Promise.resolve()
@@ -306,6 +312,7 @@ async function runWatch(options: WatchOptions) {
   }
 
   clearIndexingStatus();
+  stopStartupHeartbeat();
   // TypeScript narrowing: both are set if the try block above completed.
   if (!server || !watchSession) {
     throw new Error("failed to start watch session");

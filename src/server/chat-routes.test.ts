@@ -2,8 +2,9 @@ import { describe, expect, test } from "bun:test";
 import path from "node:path";
 
 import { ConversationReplay, encodeReplayCursor } from "../chat/replay";
+import { AttachmentStoreError, sniffImageMime, type StoredAttachment } from "../chat/attachment-store";
 import type { WorkspaceChatService } from "../chat/service";
-import type { ChatAvailability, ConversationSnapshot, ConversationSummary, ModelSelection, PermissionOutcome, QuestionOutcome } from "../chat/types";
+import type { ChatAvailability, ConversationSnapshot, ConversationSummary, MessageAttachment, ModelSelection, PermissionOutcome, QuestionOutcome } from "../chat/types";
 import { ConversationNotFoundError } from "../chat/workspace";
 import { ConversationRenameUnsupportedError, QueuedMessageNotHeldError } from "../chat/adapter";
 import { buildRoutes } from "./routes";
@@ -35,16 +36,30 @@ class FakeChatService implements WorkspaceChatService {
     const handoff = this.replay.handoff(() => this.snapshot(), options.cursor, options.signal);
     return { snapshot: handoff.snapshot, events: handoff.subscription };
   }
-  async prompt(id: string, requestId: string, _text: string, model?: ModelSelection, agent?: string) {
+  async prompt(id: string, requestId: string, _text: string, model?: ModelSelection, agent?: string, _variant?: string, attachments?: MessageAttachment[]) {
     this.require(id);
     this.selectedModel = model;
     this.selectedAgent = agent;
+    this.promptAttachments = attachments;
     if (!this.promptResult) {
       this.prompts += 1;
       this.promptResult = { messageId: requestId, held: false };
     }
     return { ...this.promptResult, configuration: { ...(model ? { model } : {}), ...(agent ? { mode: agent } : {}) } };
   }
+  // Real sniffing with a tiny cap, so the route's error mapping is exercised
+  // without megabyte test bodies.
+  async saveAttachment(bytes: Uint8Array) {
+    const mimeType = sniffImageMime(bytes);
+    if (mimeType === null) throw new AttachmentStoreError("unsupported-type", "attachments must be PNG, JPEG, GIF, or WebP images");
+    if (bytes.byteLength > 4096) throw new AttachmentStoreError("too-large", "attachments are limited to 4096 bytes");
+    const id = `00000000-0000-4000-8000-00000000000${++this.uploads}`;
+    return { id, mimeType, sizeBytes: bytes.byteLength };
+  }
+  async resolveAttachment(id: string): Promise<StoredAttachment | null> { return this.storedAttachments.get(id) ?? null; }
+  uploads = 0;
+  promptAttachments: MessageAttachment[] | undefined;
+  readonly storedAttachments = new Map<string, StoredAttachment>();
   async removeQueued(id: string, messageId: string, _requestId: string) {
     this.require(id);
     if (messageId === "delivered") throw new QueuedMessageNotHeldError();
@@ -297,5 +312,163 @@ describe("workspace chat routes", () => {
     expect(frame).toContain("id: ");
     expect(JSON.parse(frame.match(/data: (.+)\n/)![1]!)).toEqual(expect.objectContaining({ type: "conversation.status", sequence: 1 }));
     await reader.cancel();
+  });
+});
+
+describe("chat attachment routes", () => {
+  const PNG = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+    "base64",
+  );
+  const ORIGIN = { origin: "http://127.0.0.1:4711" };
+  type Handler = { POST(request: Request & { params?: Record<string, string> }): Promise<Response> };
+  type GetHandler = { GET(request: Request & { params?: Record<string, string> }): Promise<Response> };
+
+  function uploadRequest(body: FormData | string, headers: Record<string, string> = {}) {
+    return request("/api/chat/conversations/local/attachments", {
+      method: "POST",
+      headers: { ...ORIGIN, ...headers },
+      body,
+    }, { conversationId: "local" });
+  }
+
+  test("stores a supported multipart upload and reports the sniffed type", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/:conversationId/attachments"] as Handler;
+    const form = new FormData();
+    form.append("file", new File([PNG], "shot.png", { type: "image/png" }));
+    const response = await handler.POST(uploadRequest(form));
+    expect(response.status).toBe(201);
+    expect(await response.json()).toEqual({ id: "00000000-0000-4000-8000-000000000001", mimeType: "image/png", sizeBytes: PNG.byteLength });
+  });
+
+  test("refuses non-image bytes with a client-visible reason and stores nothing", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/:conversationId/attachments"] as Handler;
+    const form = new FormData();
+    form.append("file", new File([Buffer.from("%PDF-1.4")], "doc.pdf", { type: "application/pdf" }));
+    const response = await handler.POST(uploadRequest(form));
+    expect(response.status).toBe(415);
+    expect((await response.json() as { error: string }).error).toContain("PNG, JPEG, GIF, or WebP");
+    expect(service.uploads).toBe(0);
+  });
+
+  test("refuses an oversized upload as too large", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/:conversationId/attachments"] as Handler;
+    const form = new FormData();
+    form.append("file", new File([Buffer.concat([PNG, Buffer.alloc(8192)])], "big.png", { type: "image/png" }));
+    const response = await handler.POST(uploadRequest(form));
+    expect(response.status).toBe(413);
+  });
+
+  test("refuses uploads that are not multipart, cross-origin, or unauthenticated", async () => {
+    const handler = routes(new FakeChatService())["/api/chat/conversations/:conversationId/attachments"] as Handler;
+    const json = await handler.POST(uploadRequest("{}", { "content-type": "application/json" }));
+    expect(json.status).toBe(415);
+    const form = new FormData();
+    form.append("file", new File([PNG], "shot.png", { type: "image/png" }));
+    const foreign = await handler.POST(request("/api/chat/conversations/local/attachments", {
+      method: "POST", headers: { origin: "https://evil.example" }, body: form,
+    }, { conversationId: "local" }));
+    expect(foreign.status).toBe(403);
+    const anonymous = await handler.POST(Object.assign(
+      new Request("http://127.0.0.1:4711/api/chat/conversations/local/attachments", { method: "POST", headers: ORIGIN, body: form }),
+      { params: { conversationId: "local" } },
+    ));
+    expect(anonymous.status).toBe(401);
+  });
+
+  test("serves stored bytes with the sniffed content type under authentication", async () => {
+    const service = new FakeChatService();
+    const id = "11111111-2222-4333-8444-555555555555";
+    const filePath = `${import.meta.dir}/../assets/icon-192.png`;
+    service.storedAttachments.set(id, { id, mimeType: "image/png", sizeBytes: 1, absolutePath: filePath });
+    const handler = routes(service)["/api/chat/attachments/:attachmentId"] as GetHandler;
+    const response = await handler.GET(request(`/api/chat/attachments/${id}`, {}, { attachmentId: id }));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("image/png");
+    expect(response.headers.get("cache-control")).toContain("private");
+    const anonymous = await handler.GET(Object.assign(
+      new Request(`http://127.0.0.1:4711/api/chat/attachments/${id}`),
+      { params: { attachmentId: id } },
+    ));
+    expect(anonymous.status).toBe(401);
+  });
+
+  test("answers 404 for unknown and hostile attachment identifiers", async () => {
+    const handler = routes(new FakeChatService())["/api/chat/attachments/:attachmentId"] as GetHandler;
+    for (const hostile of ["99999999-0000-4000-8000-000000000000", "..%2F..%2Fetc%2Fpasswd", "not-issued"]) {
+      const response = await handler.GET(request(`/api/chat/attachments/${hostile}`, {}, { attachmentId: hostile }));
+      expect(response.status).toBe(404);
+    }
+  });
+
+  test("accepts prompt attachment references and hands them to the service", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/:conversationId/prompts"] as Handler;
+    const attachments = [{ id: "11111111-2222-4333-8444-555555555555", name: "shot.png", mimeType: "image/png" }];
+    const response = await handler.POST(request("/api/chat/conversations/local/prompts", {
+      method: "POST",
+      headers: { ...ORIGIN, "content-type": "application/json" },
+      body: JSON.stringify({ requestId: "r-1", text: "look at this", attachments }),
+    }, { conversationId: "local" }));
+    expect(response.status).toBe(202);
+    expect(service.promptAttachments).toEqual(attachments);
+  });
+
+  test("refuses malformed prompt attachment references", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/:conversationId/prompts"] as Handler;
+    const send = (attachments: unknown) => handler.POST(request("/api/chat/conversations/local/prompts", {
+      method: "POST",
+      headers: { ...ORIGIN, "content-type": "application/json" },
+      body: JSON.stringify({ requestId: "r-1", text: "hello", attachments }),
+    }, { conversationId: "local" }));
+    expect((await send("nope")).status).toBe(400);
+    expect((await send([{ id: "a", name: "n.png", mimeType: "image/tiff" }])).status).toBe(400);
+    expect((await send([{ id: "a", name: "n.png", mimeType: "image/png", url: "data:x" }])).status).toBe(400);
+    expect((await send([{ id: "a", name: "", mimeType: "image/png" }])).status).toBe(400);
+    expect((await send(Array.from({ length: 9 }, (_, index) => ({ id: `id-${index}`, name: "n.png", mimeType: "image/png" })))).status).toBe(400);
+    expect(service.prompts).toBe(0);
+  });
+});
+
+describe("image-only prompts", () => {
+  const ORIGIN = { origin: "http://127.0.0.1:4711" };
+  type Handler = { POST(request: Request & { params?: Record<string, string> }): Promise<Response> };
+  const send = (handler: Handler, body: Record<string, unknown>) => handler.POST(request("/api/chat/conversations/local/prompts", {
+    method: "POST",
+    headers: { ...ORIGIN, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  }, { conversationId: "local" }));
+
+  test("empty text with attachments is accepted; without them it is still refused", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/:conversationId/prompts"] as Handler;
+    const attachments = [{ id: "11111111-2222-4333-8444-555555555555", name: "shot.png", mimeType: "image/png" }];
+    expect((await send(handler, { requestId: "r-1", text: "", attachments })).status).toBe(202);
+    expect(service.promptAttachments).toEqual(attachments);
+    expect((await send(handler, { requestId: "r-2", text: "   " })).status).toBe(400);
+    expect((await send(handler, { requestId: "r-3", text: "", attachments: [] })).status).toBe(400);
+    expect(service.prompts).toBe(1);
+  });
+});
+
+describe("upload body streaming limit", () => {
+  test("a chunked oversized body is refused without a content-length header", async () => {
+    const service = new FakeChatService();
+    const handler = routes(service)["/api/chat/conversations/:conversationId/attachments"] as { POST(request: Request & { params?: Record<string, string> }): Promise<Response> };
+    // 11 MiB body, no declared length: the streaming gate must refuse it
+    // before parsing, regardless of what the client claims.
+    const oversized = new Uint8Array(11 * 1024 * 1024);
+    const request_ = Object.assign(new Request(`http://127.0.0.1:4711/api/chat/conversations/local/attachments?t=${TOKEN}`, {
+      method: "POST",
+      headers: { origin: "http://127.0.0.1:4711", "content-type": "multipart/form-data; boundary=x" },
+      body: oversized,
+    }), { params: { conversationId: "local" } });
+    const response = await handler.POST(request_);
+    expect(response.status).toBe(413);
+    expect(service.uploads).toBe(0);
   });
 });

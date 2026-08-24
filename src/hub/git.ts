@@ -154,6 +154,19 @@ export function cloneTargetName(url: string): string | null {
   return name;
 }
 
+// A checkout folder name must be one visible path segment, held to the same
+// bar as the folder manager's name validator (folderName there): control
+// characters (Cc) and Unicode format characters (Cf — the zero-width family,
+// the bidi embedding and override controls, the BOM) are rejected. The
+// caller trims before this check, and trimming leaves those in place, so a
+// name made only of them would otherwise pass as nonempty and clone into a
+// directory that renders blank, while an embedded bidi control could make
+// the checkout display a name other than the path it occupies.
 export function validCloneFolderName(value: string): boolean {
-  return value !== "" && value !== "." && value !== ".." && !value.includes("/") && !value.includes("\\") && !value.includes("\0");
+  return value !== ""
+    && value !== "."
+    && value !== ".."
+    && !value.includes("/")
+    && !value.includes("\\")
+    && !/[\u0000-\u001f\u007f]|\p{Cf}/u.test(value);
 }

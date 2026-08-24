@@ -11,10 +11,11 @@
 
 import type { Serve } from "bun";
 
-import { ChatQueueFullError, ConversationRenameUnsupportedError, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, QueuedMessageNotHeldError } from "../chat/adapter";
+import { ChatQueueFullError, CommandAttachmentsError, ConversationRenameUnsupportedError, InteractionConflictError, InvalidConversationTitleError, InvalidModeSelectionError, InvalidModelSelectionError, InvalidVariantSelectionError, QueuedMessageNotHeldError, UnknownAttachmentError } from "../chat/adapter";
+import { AttachmentStoreError } from "../chat/attachment-store";
 import { encodeReplayCursor } from "../chat/replay";
 import { ChatUnavailableError, type WorkspaceChatService } from "../chat/service";
-import type { ModelSelection, PermissionOutcome, QuestionOutcome } from "../chat/types";
+import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MIME_TYPES, CHAT_ATTACHMENTS_PER_MESSAGE, type MessageAttachment, type ModelSelection, type PermissionOutcome, type QuestionOutcome } from "../chat/types";
 import { ConversationNotFoundError } from "../chat/workspace";
 import { getDocumentDiff } from "../document/diff";
 import { collectFileFacts } from "../document/file-facts";
@@ -396,6 +397,10 @@ const CHAT_PROMPT_BYTES = 64 * 1024;
 const CHAT_TITLE_BYTES = 200;
 const CHAT_BODY_BYTES = 128 * 1024;
 const CHAT_KEEPALIVE_MS = 15_000;
+const CHAT_ATTACHMENT_NAME_BYTES = 200;
+// Multipart framing around the one file field: boundaries, headers, the
+// filename. Generous because it only pre-screens the declared length.
+const CHAT_ATTACHMENT_FORM_OVERHEAD_BYTES = 16 * 1024;
 
 type RouteRequest = Request & { params?: Record<string, string> };
 
@@ -562,10 +567,10 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
       },
     },
     [p("/api/chat/conversations/:conversationId/prompts")]: {
-      POST: async (request: RouteRequest) => chatMutation(request, ["requestId", "text", "model", "mode", "variant"], async (id, body) => {
+      POST: async (request: RouteRequest) => chatMutation(request, ["requestId", "text", "model", "mode", "variant", "attachments"], async (id, body) => {
         const requestId = bodyIdentity(body, "requestId");
         if (requestId instanceof Response) return requestId;
-        if (typeof body.text !== "string" || !body.text.trim()) return chatError(400, "text must not be empty");
+        if (typeof body.text !== "string") return chatError(400, "text must be a string");
         if (Buffer.byteLength(body.text) > CHAT_PROMPT_BYTES) return chatError(413, "text is too large");
         const model = parseModelSelection(body.model);
         if (model instanceof Response) return model;
@@ -580,8 +585,94 @@ function buildChatRoutes(deps: BuildRoutesDeps, p: (path: string) => string) {
         // the same request flips from accepted to rejected. Requiring the
         // pair makes the contract independent of server lifetime.
         if (variant !== undefined && model === undefined) return chatError(400, "variant requires a model selection");
-        return run(() => deps.chatService.prompt(id, requestId, body.text as string, model, mode, variant), 202);
+        const attachments = parsePromptAttachments(body.attachments);
+        if (attachments instanceof Response) return attachments;
+        // Words or images: a message needs content, and an image-only prompt
+        // is content (OpenCode admits empty text with files — verified live).
+        if (!body.text.trim() && !attachments?.length) return chatError(400, "text must not be empty");
+        return run(() => deps.chatService.prompt(id, requestId, body.text as string, model, mode, variant, attachments), 202);
       }),
+    },
+    // Multipart rather than JSON: image bytes ride the request as a file
+    // field, so nothing base64-inflates and the JSON prompt payload stays
+    // reference-only (spec: attachment bytes stay out of the conversation
+    // transport). One image per request keeps refusals attributable.
+    [p("/api/chat/conversations/:conversationId/attachments")]: {
+      POST: async (request: RouteRequest) => {
+        const rejected = mutationGate(request);
+        if (rejected) return rejected;
+        const id = routeIdentity(request, "conversationId");
+        if (id instanceof Response) return id;
+        if (!(request.headers.get("content-type") ?? "").toLowerCase().startsWith("multipart/form-data")) {
+          return chatError(415, "content-type must be multipart/form-data");
+        }
+        // Declared-length gate refuses an honestly oversized body before any
+        // read; the streaming gate below is the enforcement that does not
+        // trust the client — a chunked upload without Content-Length must
+        // not buffer past the cap either. The store re-checks the decoded
+        // bytes authoritatively.
+        const bodyLimit = CHAT_ATTACHMENT_MAX_BYTES + CHAT_ATTACHMENT_FORM_OVERHEAD_BYTES;
+        const declared = Number(request.headers.get("content-length"));
+        if (Number.isFinite(declared) && declared > bodyLimit) {
+          return chatError(413, "attachment is too large");
+        }
+        const reader = request.body?.getReader();
+        if (!reader) return chatError(400, "missing request body");
+        const chunks: Uint8Array[] = [];
+        let received = 0;
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            received += value.byteLength;
+            if (received > bodyLimit) {
+              await reader.cancel().catch(() => undefined);
+              return chatError(413, "attachment is too large");
+            }
+            chunks.push(value);
+          }
+        } catch {
+          return chatError(400, "malformed request body");
+        }
+        const body = new Uint8Array(received);
+        let offset = 0;
+        for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
+        let form: FormData;
+        try {
+          form = await new Response(body, { headers: { "content-type": request.headers.get("content-type") ?? "" } }).formData();
+        } catch {
+          return chatError(400, "malformed multipart form data");
+        }
+        const file = form.get("file");
+        if (!(file instanceof Blob)) return chatError(400, 'multipart field "file" must be a file');
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        return run(() => deps.chatService.saveAttachment(bytes), 201);
+      },
+    },
+    // Not conversation-scoped: the id is a workspace-issued uuid and the
+    // authorization boundary is the workspace, same as every chat route.
+    [p("/api/chat/attachments/:attachmentId")]: {
+      GET: async (request: RouteRequest) => {
+        const rejected = authenticated(request);
+        if (rejected) return rejected;
+        const id = routeIdentity(request, "attachmentId");
+        if (id instanceof Response) return id;
+        try {
+          const stored = await deps.chatService.resolveAttachment(id);
+          if (stored === null) return chatError(404, "attachment not found");
+          return new Response(Bun.file(stored.absolutePath), {
+            headers: {
+              "content-type": stored.mimeType,
+              // Stored bytes never change under an id, so clients may cache
+              // hard — but privately, behind the auth that fetched them.
+              "cache-control": "private, max-age=31536000, immutable",
+              "x-content-type-options": "nosniff",
+            },
+          });
+        } catch (error) {
+          return normalizedChatError(error);
+        }
+      },
     },
     [p("/api/chat/conversations/:conversationId/cancel")]: {
       POST: async (request: RouteRequest) => chatMutation(request, ["requestId"], async (id, body) => {
@@ -711,6 +802,35 @@ function parseModelSelection(value: unknown): ModelSelection | undefined | Respo
 // One rule for both named selections, but each rejection names its own field —
 // a client sent "invalid mode selection" for a malformed variant would debug
 // the wrong key.
+// Strict per-entry validation: references only (never bytes), a bounded
+// display name, and one of the four supported image types. Unknown keys on
+// an entry are rejected like unknown top-level keys.
+function parsePromptAttachments(value: unknown): MessageAttachment[] | undefined | Response {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) return chatError(400, "attachments must be an array");
+  if (value.length > CHAT_ATTACHMENTS_PER_MESSAGE) {
+    return chatError(400, `attachments are limited to ${CHAT_ATTACHMENTS_PER_MESSAGE} per message`);
+  }
+  const attachments: MessageAttachment[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return chatError(400, "invalid attachment");
+    const record = entry as Record<string, unknown>;
+    const keys = Object.keys(record);
+    if (keys.length > 3 || keys.some(key => key !== "id" && key !== "name" && key !== "mimeType")) {
+      return chatError(400, "invalid attachment");
+    }
+    if (typeof record.id !== "string" || !validIdentity(record.id)) return chatError(400, "invalid attachment id");
+    if (typeof record.name !== "string" || record.name.trim() === "" || Buffer.byteLength(record.name) > CHAT_ATTACHMENT_NAME_BYTES) {
+      return chatError(400, "invalid attachment name");
+    }
+    if (typeof record.mimeType !== "string" || !(CHAT_ATTACHMENT_MIME_TYPES as readonly string[]).includes(record.mimeType)) {
+      return chatError(400, "invalid attachment type");
+    }
+    attachments.push({ id: record.id, name: record.name, mimeType: record.mimeType });
+  }
+  return attachments.length > 0 ? attachments : undefined;
+}
+
 function parseNameSelection(value: unknown, noun: "mode" | "variant"): string | undefined | Response {
   if (value === undefined) return undefined;
   return typeof value === "string" && validIdentity(value)
@@ -729,6 +849,11 @@ function normalizedChatError(error: unknown): Response {
   if (error instanceof InvalidModeSelectionError) return chatError(400, error.message);
   if (error instanceof InvalidVariantSelectionError) return chatError(400, error.message);
   if (error instanceof ChatUnavailableError) return chatError(503, "chat is unavailable");
+  if (error instanceof AttachmentStoreError) {
+    return chatError(error.reason === "too-large" ? 413 : 415, error.message);
+  }
+  if (error instanceof UnknownAttachmentError) return chatError(400, error.message);
+  if (error instanceof CommandAttachmentsError) return chatError(400, error.message);
   if (error instanceof Error && /invalid history cursor/.test(error.message)) return chatError(400, "invalid cursor");
   return chatError(500, "chat operation failed");
 }

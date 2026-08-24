@@ -100,6 +100,54 @@ async function identityOf(candidate: string): Promise<{ dev: string; ino: string
   return { dev: String(stats.dev), ino: String(stats.ino) };
 }
 
+// Records the journal's durability-relevant filesystem calls in order: the
+// temporary file's handle, the rename that publishes the journal, the
+// unlink that clears it, the removal's rmdir, and every open/sync/close of
+// the journal's containing directory. `paths` is filled in after the
+// fixture exists; the injected hooks read it at call time.
+function journalDurabilityFs(
+  events: string[],
+  paths: { directory: string; journal: string },
+  // Injects a directory-fsync failure, consulted at each directory sync
+  // (the pending event trace is the argument) so a test can fail the sync
+  // that publishes the journal, the one that persists its unlink, or both.
+  directorySyncFails: (events: readonly string[]) => boolean = () => false,
+): typeof fs {
+  const label = (target: string): string | undefined => {
+    if (target === paths.directory) return "directory";
+    return target.startsWith(`${paths.journal}.`) ? "temp" : undefined;
+  };
+  return Object.assign({}, fs, {
+    open: (async (target: string, flags?: unknown, mode?: unknown) => {
+      const handle = await fs.open(target, flags as never, mode as never);
+      const name = label(target);
+      if (name === undefined) return handle;
+      events.push(`${name}:open`);
+      return {
+        writeFile: (...args: Parameters<typeof handle.writeFile>) => handle.writeFile(...args),
+        sync: async () => {
+          events.push(`${name}:sync`);
+          if (name === "directory" && directorySyncFails(events)) throw new Error("injected directory fsync failure");
+          await handle.sync();
+        },
+        close: async () => { events.push(`${name}:close`); await handle.close(); },
+      } as unknown as typeof handle;
+    }) as typeof fs.open,
+    rename: async (from: string, to: string) => {
+      if (to === paths.journal) events.push("journal:rename");
+      return fs.rename(from, to);
+    },
+    unlink: async (target: string) => {
+      if (target === paths.journal) events.push("journal:unlink");
+      return fs.unlink(target);
+    },
+    rmdir: async (target: string) => {
+      events.push("folder:rmdir");
+      return fs.rmdir(target);
+    },
+  }) as typeof fs;
+}
+
 describe("FolderManager validation and unregistered operations", () => {
   test("accepts only closed absolute-path requests and visible single-segment names", async () => {
     const f = await fixture();
@@ -116,6 +164,31 @@ describe("FolderManager validation and unregistered operations", () => {
     ];
     for (const operation of invalid) {
       await expect(operation()).rejects.toMatchObject({ code: "invalid-input" });
+    }
+  });
+
+  test("rejects invisible formatting characters while accepting ordinary non-ASCII", async () => {
+    const f = await fixture();
+    // Every one of these survives trim() and would name a directory that
+    // renders blank (zero-width only, BOM only) or displays a name other
+    // than the path it occupies (an embedded bidi override or isolate).
+    const invisible = [
+      "\u200b",
+      "\u200b\u200c\u200d",
+      "\ufeff",
+      "docs\u202egpj.txt",
+      "docs\u2066hidden\u2069",
+      "\u00ad",
+    ];
+    for (const name of invisible) {
+      await expect(f.manager.create({ parent: f.folders, name })).rejects.toMatchObject({ code: "invalid-input" });
+      await expect(f.manager.rename({ path: f.folders, name })).rejects.toMatchObject({ code: "invalid-input" });
+      expect(await exists(path.join(f.folders, name))).toBe(false);
+    }
+    // Visible non-ASCII is not formatting and stays acceptable.
+    for (const name of ["docs-ö", "文書", "Ünïcode dir"]) {
+      expect(await f.manager.create({ parent: f.folders, name })).toEqual({ path: path.join(f.folders, name) });
+      expect(await exists(path.join(f.folders, name))).toBe(true);
     }
   });
 
@@ -368,6 +441,129 @@ describe("FolderManager registered mutations", () => {
     expect((JSON.parse(await fs.readFile(f.journalPath, "utf8")) as { version: number }).version).toBe(1);
     releaseRename();
     completed(await operation);
+  });
+
+  test("persists the journal's own directory entry around the filesystem mutation", async () => {
+    // Syncing the temporary file makes only its CONTENTS durable. The
+    // rename that publishes the journal and the unlink that clears it are
+    // directory metadata, so without an fsync of the containing directory
+    // a host crash can lose the journal while the rmdir it fences survives
+    // the reboot — a registry entry pointing at a folder that is gone,
+    // with no recovery record. Both boundaries are asserted by order: the
+    // directory sync must land before the rmdir, and again after the clear.
+    const events: string[] = [];
+    const paths = { directory: "", journal: "" };
+    const f = await fixture({ fs: journalDurabilityFs(events, paths) });
+    paths.directory = f.state;
+    paths.journal = f.journalPath;
+    const source = path.join(f.folders, "empty");
+    await fs.mkdir(source);
+    const entry = await f.registry.register(source);
+
+    expect(completed(await f.manager.remove({ path: source }))).toEqual({ path: source, workspaceId: entry.id });
+    expect(events).toEqual([
+      "temp:open", "temp:sync", "temp:close",
+      "journal:rename",
+      "directory:open", "directory:sync", "directory:close",
+      "folder:rmdir",
+      "journal:unlink",
+      "directory:open", "directory:sync", "directory:close",
+    ]);
+    expect(await exists(f.journalPath)).toBe(false);
+  });
+
+  test("the Windows journal skips a directory fsync the platform cannot perform", async () => {
+    // Directory fsync is POSIX: on Windows fs.open of a directory fails
+    // outright, so the journal must not attempt it. NTFS journals its own
+    // metadata, and this file already degrades to what the platform offers.
+    const events: string[] = [];
+    const paths = { directory: "", journal: "" };
+    const f = await fixture({ fs: journalDurabilityFs(events, paths), platform: "win32" });
+    paths.directory = f.state;
+    paths.journal = f.journalPath;
+    const source = path.join(f.folders, "empty");
+    await fs.mkdir(source);
+    const entry = await f.registry.register(source);
+
+    expect(completed(await f.manager.remove({ path: source }))).toEqual({ path: source, workspaceId: entry.id });
+    expect(events).toEqual([
+      "temp:open", "temp:sync", "temp:close",
+      "journal:rename",
+      "folder:rmdir",
+      "journal:unlink",
+    ]);
+    expect(await exists(f.journalPath)).toBe(false);
+  });
+
+  test("a rename survives a directory sync that fails after the journal unlink", async () => {
+    // Past the unlink the journal is gone from the live namespace, so the
+    // clear is done and only its durability is in doubt. Failing the
+    // rename here would reverse a committed filesystem rename with no
+    // journal left to fence it — a crash mid-rollback would strand the
+    // registry at the destination with the folder back at the source.
+    const events: string[] = [];
+    const paths = { directory: "", journal: "" };
+    const f = await fixture({
+      fs: journalDurabilityFs(events, paths, pending => pending.includes("journal:unlink")),
+    });
+    paths.directory = f.state;
+    paths.journal = f.journalPath;
+    const source = path.join(f.folders, "source");
+    const destination = path.join(f.folders, "destination");
+    await fs.mkdir(source);
+    const entry = await f.registry.register(source);
+
+    expect(completed(await f.manager.rename({ path: source, name: "destination" })))
+      .toEqual({ path: destination, workspaceIds: [entry.id] });
+    expect(events).toContain("journal:unlink");
+    expect(await exists(source)).toBe(false);
+    expect(await exists(destination)).toBe(true);
+    expect(f.registry.byId(entry.id)?.path).toBe(destination);
+    expect(await exists(f.journalPath)).toBe(false);
+  });
+
+  test("a removal survives a directory sync that fails after the journal unlink", async () => {
+    // Same boundary on the removal path: the rmdir and the id-keyed
+    // deletions are committed, so a thrown clear would report
+    // recovery-required for a mutation that is complete and unjournaled.
+    const events: string[] = [];
+    const paths = { directory: "", journal: "" };
+    const f = await fixture({
+      fs: journalDurabilityFs(events, paths, pending => pending.includes("journal:unlink")),
+    });
+    paths.directory = f.state;
+    paths.journal = f.journalPath;
+    const source = path.join(f.folders, "empty");
+    await fs.mkdir(source);
+    const entry = await f.registry.register(source);
+
+    expect(completed(await f.manager.remove({ path: source }))).toEqual({ path: source, workspaceId: entry.id });
+    expect(events).toContain("journal:unlink");
+    expect(await exists(source)).toBe(false);
+    expect(f.registry.byId(entry.id)).toBeUndefined();
+    expect(await exists(f.journalPath)).toBe(false);
+  });
+
+  test("a directory sync failing before the mutation boundary fails the write", async () => {
+    // The write path keeps its strictness: an unpersisted publication is
+    // no journal at all, and the caller must not cross the filesystem
+    // mutation boundary behind it. The clear that follows the failure
+    // hits the same injected fsync failure and swallows it, which must
+    // not mask the write's error either.
+    const events: string[] = [];
+    const paths = { directory: "", journal: "" };
+    const f = await fixture({ fs: journalDurabilityFs(events, paths, () => true) });
+    paths.directory = f.state;
+    paths.journal = f.journalPath;
+    const source = path.join(f.folders, "source");
+    await fs.mkdir(source);
+    const entry = await f.registry.register(source);
+
+    await expect(f.manager.rename({ path: source, name: "destination" })).rejects.toMatchObject({ code: "internal" });
+    expect(await exists(source)).toBe(true);
+    expect(await exists(path.join(f.folders, "destination"))).toBe(false);
+    expect(f.registry.byId(entry.id)?.path).toBe(source);
+    expect(await exists(f.journalPath)).toBe(false);
   });
 
   test("preserves an unresolved mutation journal by refusing all later mutations", async () => {
@@ -816,6 +1012,83 @@ describe("FolderManager registered mutations", () => {
     expect(f.credentials.snapshot().assignments).toEqual([]);
     expect(await exists(source)).toBe(false);
   });
+
+  test("deletes id-keyed state before the registry removal frees the id", async () => {
+    // The registry entry holds the basename slug: the instant it is gone
+    // the id is reusable by a registration already past the journal fence,
+    // and both credential assignments and personal state are selected by
+    // workspace id alone. So neither may still exist when the removal
+    // commits — the ordering IS the protection against a newcomer
+    // inheriting the removed workspace's credentials.
+    const f = await fixture();
+    const source = path.join(f.folders, "empty");
+    await fs.mkdir(source);
+    const entry = await f.registry.register(source);
+    await f.personalState.patch("alice", entry.id, { follow: true });
+    await f.credentials.transaction(state => state.credentials.push({
+      id: "key", name: "Key", type: "ssh", enabled: true,
+      capabilities: ["ssh-signing"], metadata: { publicKey: "ssh-ed25519 AAAA", fingerprint: "SHA256:test" },
+      createdAt: "2026-08-23T00:00:00.000Z",
+    }));
+    await f.credentials.assign({ workspaceId: entry.id, credentialId: "key", role: "signing" });
+
+    const atRegistryRemoval: Array<{ assignments: number; personal: boolean }> = [];
+    const realRemove = f.registry.remove.bind(f.registry);
+    f.registry.remove = async (id: string) => {
+      atRegistryRemoval.push({
+        assignments: f.credentials.snapshot().assignments.filter(assignment => assignment.workspaceId === id).length,
+        personal: f.personalState.get("alice", id).follow === true,
+      });
+      return realRemove(id);
+    };
+
+    expect(completed(await f.manager.remove({ path: source }))).toEqual({ path: source, workspaceId: entry.id });
+    expect(atRegistryRemoval).toEqual([{ assignments: 0, personal: false }]);
+  });
+
+  test("surfaces a journal that survives its failed or committed removal", async () => {
+    const journalUnlinkFails = { enabled: false };
+    const failingFs = {
+      ...fs,
+      unlink: async (target: string) => {
+        if (journalUnlinkFails.enabled && target.endsWith("pending-folder-mutation.json")) {
+          const error = new Error("EACCES: permission denied") as NodeJS.ErrnoException;
+          error.code = "EACCES";
+          throw error;
+        }
+        return fs.unlink(target);
+      },
+    } as typeof fs;
+    const f = await fixture({ fs: failingFs });
+
+    // A non-empty source fails its rmdir; the journal clear failing too
+    // must not hide behind the retryable not-empty conflict — the journal
+    // survives on disk and fences everything until recovery.
+    const populated = path.join(f.folders, "populated");
+    await fs.mkdir(populated);
+    await fs.writeFile(path.join(populated, "keep.txt"), "content");
+    await f.registry.register(populated);
+    journalUnlinkFails.enabled = true;
+    await expect(f.manager.remove({ path: populated })).rejects.toMatchObject({
+      code: "internal",
+      message: expect.stringContaining("could not be cleared"),
+    });
+    expect(await exists(f.journalPath)).toBe(true);
+    await fs.rm(f.journalPath, { force: true });
+
+    // Past the rmdir the journal is the removal's only record: a clear
+    // failure is the recovery-required internal error, never an
+    // errno-shaped permission refusal that reads as retryable.
+    const empty = path.join(f.folders, "empty");
+    await fs.mkdir(empty);
+    await f.registry.register(empty);
+    await expect(f.manager.remove({ path: empty })).rejects.toMatchObject({
+      code: "internal",
+      message: expect.stringContaining("requires recovery"),
+    });
+    expect(await exists(empty)).toBe(false);
+    expect(await exists(f.journalPath)).toBe(true);
+  });
 });
 
 describe("FolderManager journal recovery", () => {
@@ -1018,6 +1291,131 @@ describe("FolderManager journal recovery", () => {
 
     await f.manager.recover();
     expect(f.registry.byId(entry.id)).toEqual({ ...legacyEntry, displayName: "legacy-repo" });
+    expect(await exists(f.journalPath)).toBe(false);
+  });
+
+  test("removal recovery leaves a workspace that reused the freed id untouched", async () => {
+    // A registration admitted before the removal journaled its record is
+    // past the fence and reserves an unrelated path, so once the removal
+    // frees the basename slug the registry re-mints it for that newcomer.
+    // A journal surviving the failed finalization then names an id that
+    // belongs to a different, live workspace: recovery must not forget it.
+    const f = await fixture();
+    const removedFolder = path.join(f.folders, "a", "foo");
+    const newFolder = path.join(f.folders, "b", "foo");
+    await Promise.all([fs.mkdir(removedFolder, { recursive: true }), fs.mkdir(newFolder, { recursive: true })]);
+    const removed = await f.registry.register(removedFolder);
+    await f.personalState.patch("alice", removed.id, { follow: true });
+    // The removal rmdir'd its folder and committed the registry deletion,
+    // then failed finalizing — the pending forget and the journal survive.
+    await fs.rmdir(removedFolder);
+    await expect(f.personalState.forgetWorkspace(
+      removed.id,
+      () => f.registry.remove(removed.id),
+      async () => { throw new Error("finalize failed"); },
+    )).rejects.toThrow("finalize failed");
+    const newcomer = await f.registry.register(newFolder);
+    expect(newcomer.id).toBe(removed.id);
+    await f.personalState.patch("bob", newcomer.id, { follow: true });
+    await f.credentials.transaction(state => state.credentials.push({
+      id: "key", name: "Key", type: "ssh", enabled: true,
+      capabilities: ["ssh-signing"], metadata: { publicKey: "ssh-ed25519 AAAA", fingerprint: "SHA256:test" },
+      createdAt: "2026-08-23T00:00:00.000Z",
+    }));
+    await f.credentials.assign({ workspaceId: newcomer.id, credentialId: "key", role: "signing" });
+    await writeJournal(f.journalPath, { version: 1, operation: "remove", source: removedFolder, entry: removed });
+
+    await f.manager.recover();
+    expect(f.registry.byId(newcomer.id)).toEqual(newcomer);
+    expect(f.personalState.get("bob", newcomer.id).follow).toBe(true);
+    expect(f.credentials.snapshot().assignments).toHaveLength(1);
+    expect(await exists(f.journalPath)).toBe(false);
+    // The removed workspace's own records are dead — dropped, never
+    // resurrected onto the id its successor now owns, here or in the
+    // startup sweep that follows recovery.
+    expect(f.personalState.get("alice", newcomer.id)).toEqual({ version: 1 });
+    await f.personalState.recoverPendingForgets(
+      workspaceId => f.registry.byId(workspaceId) !== undefined,
+      async workspaceId => { await f.credentials.removeWorkspaceAssignments(workspaceId); },
+    );
+    expect(f.personalState.get("alice", newcomer.id)).toEqual({ version: 1 });
+    expect(f.personalState.get("bob", newcomer.id).follow).toBe(true);
+    expect(f.credentials.snapshot().assignments).toHaveLength(1);
+  });
+
+  test("a removal that fails finalizing never frees an id its assignments still answer to", async () => {
+    // The reused-id guard above cannot separate the removed workspace's
+    // assignments from the newcomer's, so the removal must never produce
+    // that state: a finalization failing after the rmdir leaves the
+    // registry entry — and with it the slug — in place, so the newcomer
+    // gets a fresh id and recovery finishes the removal under the old one.
+    const f = await fixture();
+    const removedFolder = path.join(f.folders, "a", "foo");
+    const newFolder = path.join(f.folders, "b", "foo");
+    await Promise.all([fs.mkdir(removedFolder, { recursive: true }), fs.mkdir(newFolder, { recursive: true })]);
+    const removed = await f.registry.register(removedFolder);
+    await f.personalState.patch("alice", removed.id, { follow: true });
+    await f.credentials.transaction(state => state.credentials.push({
+      id: "key", name: "Key", type: "ssh", enabled: true,
+      capabilities: ["ssh-signing"], metadata: { publicKey: "ssh-ed25519 AAAA", fingerprint: "SHA256:test" },
+      createdAt: "2026-08-23T00:00:00.000Z",
+    }));
+    await f.credentials.assign({ workspaceId: removed.id, credentialId: "key", role: "signing" });
+
+    // One-shot failure inside the finalization that follows the rmdir.
+    let failsOnce = true;
+    const realRemoveAssignments = f.credentials.removeWorkspaceAssignments.bind(f.credentials);
+    f.credentials.removeWorkspaceAssignments = async (workspaceId: string) => {
+      if (!failsOnce) return realRemoveAssignments(workspaceId);
+      failsOnce = false;
+      throw new Error("injected assignment removal failure");
+    };
+    await expect(f.manager.remove({ path: removedFolder })).rejects.toMatchObject({
+      code: "internal",
+      message: expect.stringContaining("requires recovery"),
+    });
+    expect(await exists(removedFolder)).toBe(false);
+    expect(await exists(f.journalPath)).toBe(true);
+
+    // A registration admitted before the journal existed lands here. The
+    // failed removal never committed its registry deletion, so the slug is
+    // still taken and the newcomer is minted a distinct id.
+    const newcomer = await f.registry.register(newFolder);
+    expect(newcomer.id).not.toBe(removed.id);
+
+    await f.manager.recover();
+    expect(f.registry.list()).toEqual([newcomer]);
+    expect(await exists(f.journalPath)).toBe(false);
+    // The removal completed under recovery, and nothing it left behind is
+    // filed under an id the newcomer owns.
+    expect(f.credentials.snapshot().assignments).toEqual([]);
+    expect(f.personalState.get("alice", removed.id)).toEqual({ version: 1 });
+    expect(f.personalState.get("alice", newcomer.id)).toEqual({ version: 1 });
+  });
+
+  test("removal recovery does not repoint a reused id onto a surviving source", async () => {
+    // Same id reuse, but the source survived the crash. Restoring by id
+    // would move the newcomer's registration onto the journaled path; the
+    // journaled registration is dropped instead, folder intact on disk.
+    const f = await fixture();
+    const removedFolder = path.join(f.folders, "a", "foo");
+    const newFolder = path.join(f.folders, "b", "foo");
+    await Promise.all([fs.mkdir(removedFolder, { recursive: true }), fs.mkdir(newFolder, { recursive: true })]);
+    const removed = await f.registry.register(removedFolder);
+    await f.registry.remove(removed.id);
+    const newcomer = await f.registry.register(newFolder);
+    expect(newcomer.id).toBe(removed.id);
+    await writeJournal(f.journalPath, {
+      version: 1,
+      operation: "remove",
+      source: removedFolder,
+      entry: removed,
+      identity: await identityOf(removedFolder),
+    });
+
+    await f.manager.recover();
+    expect(f.registry.list()).toEqual([newcomer]);
+    expect(await exists(removedFolder)).toBe(true);
     expect(await exists(f.journalPath)).toBe(false);
   });
 

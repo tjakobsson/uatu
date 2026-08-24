@@ -136,7 +136,7 @@ describe("chat domain validation", () => {
       () => parseConversationItem({ ...items[0], type: "provider_message" }),
       () => parseChatEvent({ generation: "g", sequence: -1, conversationId: "c", type: "item.remove", itemId: "i" }),
       () => parseChatEvent({ generation: "g", sequence: 1.5, conversationId: "c", type: "item.remove", itemId: "i" }),
-      () => parseChatEvent({ generation: "g", sequence: 1, conversationId: "c", type: "conversation.queue", queued: [{ id: "held-1", text: "", queuedAt: 1 }], change: { kind: "held", messageId: "held-1" } }),
+      () => parseChatEvent({ generation: "g", sequence: 1, conversationId: "c", type: "conversation.queue", queued: [{ id: "held-1", text: 5, queuedAt: 1 }], change: { kind: "held", messageId: "held-1" } }),
       () => parseChatEvent({ generation: "g", sequence: 1, conversationId: "c", type: "conversation.queue", queued: [], change: { kind: "steered", messageId: "held-1" } }),
     ];
     for (const parse of invalid) expect(parse).toThrow();

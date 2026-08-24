@@ -1,5 +1,10 @@
+import { mkdtempSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 import { ConversationReplay } from "../../src/chat/replay";
-import { deriveConversationTitle, QueuedMessageNotHeldError } from "../../src/chat/adapter";
+import { deriveConversationTitle, QueuedMessageNotHeldError, UnknownAttachmentError } from "../../src/chat/adapter";
+import { createAttachmentStore } from "../../src/chat/attachment-store";
 import type { WorkspaceChatService } from "../../src/chat/service";
 import { ConversationNotFoundError } from "../../src/chat/workspace";
 import type {
@@ -11,6 +16,7 @@ import type {
   ConversationItem,
   ConversationSnapshot,
   ConversationSummary,
+  MessageAttachment,
   ModelSelection,
   PermissionOutcome,
   QueuedMessage,
@@ -60,13 +66,19 @@ export class FakeE2EChatService implements WorkspaceChatService {
   // The capabilities this fake declares. A test can narrow them to drive the
   // surface an agent that offers less produces — the one path a workspace with
   // a single real agent can never reach on its own.
-  private static readonly DEFAULT_CAPABILITIES: ChatCapability[] = ["modes", "models", "commands", "questions", "permissions", "subagents", "variants", "context", "conversation-rename"];
+  private static readonly DEFAULT_CAPABILITIES: ChatCapability[] = ["modes", "models", "commands", "questions", "permissions", "subagents", "variants", "context", "conversation-rename", "attachments"];
   private capabilities: ChatCapability[] = [...FakeE2EChatService.DEFAULT_CAPABILITIES];
   private modelInventory: ChatModel[] = FakeE2EChatService.defaultModels();
+  // The real store against a throwaway root: e2e uploads exercise the real
+  // sniffing, caps, and id policy rather than a parallel fake.
+  private readonly attachmentStore = createAttachmentStore({
+    workspacePath: "uatu-e2e",
+    root: mkdtempSync(path.join(os.tmpdir(), "uatu-e2e-attachments-")),
+  });
 
   private static defaultModels(): ChatModel[] {
     return [
-      { selection: { providerId: "anthropic", modelId: "claude-sonnet" }, provider: "Anthropic", name: "Claude Sonnet", variants: ["high", "xhigh"], contextLimit: 200000 },
+      { selection: { providerId: "anthropic", modelId: "claude-sonnet" }, provider: "Anthropic", name: "Claude Sonnet", variants: ["high", "xhigh"], contextLimit: 200000, imageInput: true },
       { selection: { providerId: "openai", modelId: "gpt-5" }, provider: "OpenAI", name: "GPT-5", contextLimit: 100000 },
     ];
   }
@@ -192,7 +204,16 @@ export class FakeE2EChatService implements WorkspaceChatService {
     return { snapshot: await handoff.snapshot, events: handoff.subscription };
   }
 
-  async prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string): Promise<{
+  async saveAttachment(bytes: Uint8Array) {
+    const stored = await this.attachmentStore.save(bytes);
+    return { id: stored.id, mimeType: stored.mimeType, sizeBytes: stored.sizeBytes };
+  }
+
+  async resolveAttachment(id: string) {
+    return this.attachmentStore.resolve(id);
+  }
+
+  async prompt(id: string, requestId: string, text: string, model?: ModelSelection, mode?: string, variant?: string, attachments?: MessageAttachment[]): Promise<{
     messageId: string;
     held: boolean;
     conversation?: ConversationSummary;
@@ -227,6 +248,14 @@ export class FakeE2EChatService implements WorkspaceChatService {
       candidate.selection.providerId === model.providerId && candidate.selection.modelId === model.modelId)) {
       throw new Error("selected model is not available");
     }
+    // Same admission-time contract as the adapter: every reference must
+    // resolve to stored bytes, and the store's sniffed type wins.
+    const attachmentRefs: MessageAttachment[] = [];
+    for (const attachment of attachments ?? []) {
+      const stored = attachment.id ? await this.attachmentStore.resolve(attachment.id) : null;
+      if (!stored) throw new UnknownAttachmentError();
+      attachmentRefs.push({ id: stored.id, name: attachment.name, mimeType: stored.mimeType });
+    }
     this.configurations.set(id, configuration);
     this.nextCreatedConfiguration = structuredClone(configuration);
     if (JSON.stringify(previousConfiguration) !== JSON.stringify(configuration)) {
@@ -236,7 +265,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     // holds the message instead of delivering it, exactly like the adapter.
     const queue = this.queues.get(id) ?? [];
     if (conversation.status === "running" || conversation.status === "sending" || queue.length > 0) {
-      const held: QueuedMessage = { id: `held-${this.nextId++}`, text, queuedAt: Date.now(), requestId };
+      const held: QueuedMessage = { id: `held-${this.nextId++}`, text, queuedAt: Date.now(), requestId, ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}) };
       queue.push(held);
       this.queues.set(id, queue);
       this.dormant.delete(id);
@@ -253,7 +282,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
       renamed = { ...conversation, title: deriveConversationTitle(text), updatedAt: this.nextId };
       this.conversations.set(id, renamed);
     }
-    const messageId = this.dispatch(id, text, requestId);
+    const messageId = this.dispatch(id, text, requestId, attachmentRefs);
     const result = { messageId, held: false, configuration, ...(renamed ? { conversation: renamed } : {}) };
     this.receipts.set(key, result);
     return result;
@@ -275,9 +304,9 @@ export class FakeE2EChatService implements WorkspaceChatService {
     return result;
   }
 
-  private dispatch(id: string, text: string, requestId?: string): string {
+  private dispatch(id: string, text: string, requestId?: string, attachments?: MessageAttachment[]): string {
     const messageId = `message-${this.nextId++}`;
-    const item: ConversationItem = { id: `message:${messageId}`, type: "user_message", createdAt: Date.now(), text, ...(requestId ? { requestId } : {}) };
+    const item: ConversationItem = { id: `message:${messageId}`, type: "user_message", createdAt: Date.now(), text, ...(requestId ? { requestId } : {}), ...(attachments?.length ? { attachments } : {}) };
     this.items.get(id)!.set(item.id, item);
     this.replay.get(id)!.publish({ type: "item.upsert", item });
     this.setStatus(id, "running");
@@ -291,7 +320,7 @@ export class FakeE2EChatService implements WorkspaceChatService {
     if (!queue || !held) return;
     queue.shift();
     if (queue.length === 0) this.queues.delete(id);
-    this.dispatch(id, held.text, held.requestId);
+    this.dispatch(id, held.text, held.requestId, held.attachments);
     this.publishQueue(id, { kind: "delivered", messageId: held.id });
   }
 

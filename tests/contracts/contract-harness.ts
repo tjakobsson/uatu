@@ -98,7 +98,11 @@ function schemaError(root: unknown, schemaValue: unknown, value: unknown, at: st
   if (typeof value === "string") {
     if (typeof schema.minLength === "number" && value.length < schema.minLength) return `${at}: shorter than ${schema.minLength} characters`;
     if (typeof schema.maxLength === "number" && value.length > schema.maxLength) return `${at}: longer than ${schema.maxLength} characters`;
-    if (typeof schema.pattern === "string" && !new RegExp(schema.pattern).test(value)) return `${at}: does not match pattern ${schema.pattern}`;
+    // JSON Schema patterns are ECMA-262 regular expressions matched over code
+    // points, so they compile with `u` — the same mode Ajv uses. Without it a
+    // `\p{...}` escape degrades to a literal instead of failing, which would
+    // let a published pattern silently stop enforcing what it says.
+    if (typeof schema.pattern === "string" && !new RegExp(schema.pattern, "u").test(value)) return `${at}: does not match pattern ${schema.pattern}`;
     if (schema.format === "uuid" && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) return `${at}: expected UUID`;
     if (schema.format === "date-time" && Number.isNaN(Date.parse(value))) return `${at}: expected date-time`;
     if (schema.format === "uri" && !URL.canParse(value)) return `${at}: expected URI`;

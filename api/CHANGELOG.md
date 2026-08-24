@@ -2,9 +2,9 @@
 
 Entries are ordered newest first. Every entry has Hub and workspace revisions, a compatibility classification, and migration guidance. Use `None` when no migration is required.
 
-## Hub 5 / Workspace 7 - Unreleased
+## Hub 5 / Workspace 8 - Unreleased
 
-Compatibility: breaking (Hub)
+Compatibility: breaking (Hub and workspace)
 
 ### Changes
 
@@ -20,10 +20,19 @@ Compatibility: breaking (Hub)
 - `CreateCloneJobRequest` gained `displayName`, `retainedAuthentication`, `signing`, and explicit `start` defaulting to false. The clone credential is never retained as a workspace assignment implicitly; `retainAssignment` remains as the explicit legacy form of retention. A successful clone without requested start now finishes as a registered stopped workspace.
 - `CloneResult` (streaming) `succeeded` gained required `running`; `start-failed` gained optional `workspaceId` identifying a preserved stopped workspace whose configuration committed before the start failed.
 - The legacy `hubCreateWorkspace` operation is retained as a compatibility shorthand with its historical start-by-default behavior and basename-derived display name.
+- `hubStartWorkspace` now documents `409`: starting a workspace is refused while a folder mutation journal awaits recovery, because the registry may still point at a path recovery has to move or restore and the child would carry that workspace's credentials and personal identity into whatever now sits there. The check runs inside the workspace lifecycle operation, so a concurrent folder rename or removal cannot journal between the check and the start. This is additive — a start with no pending journal answers exactly as before.
+- `FolderName` now publishes the invisible-name rule the Hub already enforces: Unicode format characters (Cf — the zero-width family, the bidi embedding and override controls, the BOM, and the tag characters) are rejected alongside path separators and control characters, so a name that renders blank or displays a path it does not occupy is contract-invalid instead of an undocumented `400`. The pattern is a Unicode-mode expression, as JSON Schema requires, so its `\p{Cf}` escape reaches the format characters above the BMP as well and the published rule is exactly the one the Hub applies. `CreateCloneJobRequest.folderName` documents the same bar for a checkout name, including that a blank value derives it from the clone URL.
+- The chat composer can attach images to a prompt. Added `workspaceUploadChatAttachment` (`POST .../chat/conversations/{conversationId}/attachments`): one PNG, JPEG, GIF, or WebP image per multipart request (field `file`, 10 MiB cap), sniffed from the bytes and stored outside every watched root; the response's `ChatAttachmentStored.id` is what later requests reference. The mutation is origin-protected.
+- Added `workspaceGetChatAttachment` (`GET .../chat/attachments/{attachmentId}`), serving a stored image's bytes under the workspace's chat authorization. Only workspace-issued identifiers resolve; anything else answers `404` without filesystem interpretation.
+- `ChatPromptRequest` gained optional `attachments`: up to 8 `{id, name, mimeType}` references to previously uploaded images, submitted with the text as one message. `text` may now be empty when `attachments` is non-empty — an image-only prompt is valid (and `QueuedMessage.text` may be empty for such a message). Bytes never ride the prompt request. A reference the workspace has not stored, attachments on a slash command, or an empty text with no attachments answer `400`.
+- `UserMessageItem` and `QueuedMessage` gained optional `attachments` (`MessageAttachment` references): held messages keep their attachments and deliver them under the configuration frozen at submission, and replayed user messages restate theirs. A replayed attachment whose reference could not be recovered carries no `id`; clients render it as a labeled placeholder.
+- `ChatModel` gained optional `imageInput`, reporting whether the model can see image attachments; absent means not reported, which clients treat as no.
 
 ### Migration
 
 Strict Hub consumers must regenerate against Hub revision 5: accept required `displayName` on workspaces and browse entries, required `running` on successful clone results, and optional `workspaceDefaults` on Hub state. Clients that relied on clone jobs starting a session must send `start: true`; clone completion without it ends on a stopped registered workspace. New onboarding flows should prefer `hubConfigureWorkspace`/`hubCreateConfiguredWorkspace` over the legacy registration operation.
+
+Strict workspace chat consumers must regenerate against workspace revision 8: the closed response objects for user message items, queued messages, and models gained optional properties (`attachments`, `imageInput`), so validators built from revision 7 reject conversation snapshots, chat events, and model listings produced by revision 8. Request producers need no changes — every new request field is optional, and existing prompts remain valid.
 
 ## Hub 4 / Workspace 7 - Unreleased
 

@@ -451,7 +451,16 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     tools: contextTools,
     runExclusive: operation => sshRuntime.run(() => operation()),
   });
-  const sessions = new SessionManager(registry, { local: new LocalProcessBackend() }, credentialContexts);
+  const sessions = new SessionManager(
+    registry,
+    { local: new LocalProcessBackend() },
+    credentialContexts,
+    // The pending-mutation fence every start is checked against, evaluated
+    // inside the queued lifecycle operation. Reached through the closure
+    // because the folder manager below takes `sessions` as a dependency; the
+    // first start can only come from the server assembled after it.
+    () => folderManager.assertNoPendingMutation(),
+  );
   const cloneCredentials = createStoredCloneCredentialResolver({
     metadata: credentialMetadata,
     tokens: credentialTokens,

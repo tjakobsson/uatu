@@ -45,7 +45,30 @@ export type ChatCapability =
   // The agent reports token usage per message, so Chat can say how full the
   // context window is and what each subagent cost.
   | "context"
-  | "conversation-rename";
+  | "conversation-rename"
+  // The agent accepts image attachments on a prompt. Whether a particular
+  // model can see them is per-model (`ChatModel.imageInput`), not per-agent.
+  | "attachments";
+
+// Image attachment bounds, shared by the composer (intake refusal), the
+// upload route (authoritative enforcement), and the store. 10 MiB sits
+// safely under OpenCode's 20 MiB decoded per-item cap while leaving room
+// for its server-side resize budget.
+export const CHAT_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
+export const CHAT_ATTACHMENTS_PER_MESSAGE = 8;
+// The image formats OpenCode supports as model-visible attachments. SVG is
+// deliberately absent (OpenCode treats it as text), as is PDF (unsupported).
+export const CHAT_ATTACHMENT_MIME_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
+
+// An image riding a user message, referenced by store id — never by bytes
+// (spec: attachment bytes stay out of the conversation transport). `id` is
+// absent on a replayed attachment whose reference could not be recovered;
+// the client renders those as labeled placeholders.
+export type MessageAttachment = {
+  id?: string;
+  name: string;
+  mimeType: string;
+};
 
 // What Chat is talking to. One agent per workspace today, but the surface
 // takes its name and its controls from this record rather than from fixed
@@ -94,6 +117,10 @@ export type ChatModel = {
   variants?: string[];
   // The model's context-window size in tokens, when the agent reports it.
   contextLimit?: number;
+  // Whether this model can see image attachments, as the agent reports it.
+  // Drives the attach control's inactive state; absent means not reported,
+  // which the surface treats as no.
+  imageInput?: boolean;
 };
 
 export type ChatCommand = {
@@ -128,6 +155,8 @@ export type UserMessageItem = TimelineItemBase & {
   type: "user_message";
   text: string;
   requestId?: string;
+  // Images sent with this message, as references (see MessageAttachment).
+  attachments?: MessageAttachment[];
 };
 
 /**
@@ -287,6 +316,9 @@ export type QueuedMessage = {
   text: string;
   queuedAt: number;
   requestId?: string;
+  // Attachment references held with the message; delivered exactly as
+  // submitted, discarded with the message on removal.
+  attachments?: MessageAttachment[];
 };
 
 export type ConversationSnapshot = {

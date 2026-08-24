@@ -109,7 +109,7 @@ beforeAll(async () => {
   await sessionStore.load();
   sessions = new SessionManager(registry, {
     local: new LocalProcessBackend({ uatuArgv: ["bun", "run", CLI_PATH] }),
-  }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
+  }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER, () => folderManager.assertNoPendingMutation());
   const realCloneProcess = new CloneProcessAdapter();
   const processFactory: CloneProcessFactory = {
     start(options) {
@@ -1271,6 +1271,184 @@ describe("hub end to end", () => {
     expect(cancelled.status).toBe(200);
   });
 
+  test("clone creation inspects the target under the reservation the job keeps", async () => {
+    const destination = path.join(tempRoot, "clone-check-race");
+    await mkdir(destination);
+    const canonicalDestination = await realpath(destination);
+    const target = path.join(canonicalDestination, "checked-clone");
+    const originalAtOrBelow = registry.atOrBelow.bind(registry);
+    let mutationBlocked: boolean | undefined;
+    // A folder mutation racing this clone reserves the target before it
+    // touches disk. Standing in for one at the moment the route decides the
+    // target is free: unreserved checks would let it win the reservation and
+    // land — creating the directory, or renaming a registered workspace onto
+    // it — after the verdict but before the clone started.
+    registry.atOrBelow = (candidate: string) => {
+      if (candidate === target && mutationBlocked === undefined) {
+        const competing = reservations.acquire([target]);
+        mutationBlocked = competing === undefined;
+        competing?.release();
+      }
+      return originalAtOrBelow(candidate);
+    };
+    let jobId = "";
+    try {
+      const cloned = await fetch(`${origin}/api/hub/clone-jobs`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie, origin },
+        body: JSON.stringify({ url: "interactive:checked-clone", dest: destination }),
+      });
+      expect(cloned.status).toBe(202);
+      jobId = ((await cloned.json()) as { jobId: string }).jobId;
+      expect(mutationBlocked).toBe(true);
+      // The very reservation the checks ran under is the one the job holds.
+      expect(reservations.isReserved(target)).toBe(true);
+    } finally {
+      registry.atOrBelow = originalAtOrBelow;
+      if (jobId !== "") {
+        await fetch(`${origin}/api/hub/clone-jobs/${jobId}/cancel`, {
+          method: "POST",
+          headers: { cookie, origin },
+        });
+      }
+    }
+    expect(reservations.isReserved(target)).toBe(false);
+  });
+
+  test("clone creation refuses while a folder mutation journal awaits recovery", async () => {
+    const destination = path.join(tempRoot, "clone-journal-fenced");
+    await mkdir(destination);
+    const canonicalDestination = await realpath(destination);
+    const target = path.join(canonicalDestination, "fenced-clone");
+    const journalPath = path.join(tempRoot, "pending-folder-mutation.json");
+
+    // A registered removal that deleted and unregistered its source but could
+    // not finish metadata cleanup leaves exactly this record. Cloning into
+    // that now-absent source passes both the registry and the on-disk checks,
+    // and startup recovery then finds a freshly created directory where it
+    // expects the removed folder: identity validation fails and the Hub will
+    // not start.
+    await writeFile(journalPath, `${JSON.stringify({
+      version: 1,
+      operation: "remove",
+      source: target,
+      before: [{ id: "fenced-clone", path: target, backend: "local" }],
+      after: [],
+    }, null, 2)}\n`, { mode: 0o600 });
+
+    try {
+      const fenced = await fetch(`${origin}/api/hub/clone-jobs`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie, origin },
+        body: JSON.stringify({ url: "interactive:fenced-clone", dest: destination }),
+      });
+      expect(fenced.status).toBe(409);
+      await assertContract("POST", "/api/hub/clone-jobs", fenced);
+      expect(await fenced.json()).toEqual({
+        error: "a pending recovery journal requires Hub recovery before further folder changes",
+      });
+      // No job took the reservation, and nothing was written where recovery
+      // still expects the journaled folder to be absent.
+      expect(reservations.isReserved(target)).toBe(false);
+      expect(await stat(target).then(() => true).catch(() => false)).toBe(false);
+      expect(registry.byPath(target)).toBeUndefined();
+
+      // Fail closed: a journal too corrupt to interpret is still a journal.
+      await writeFile(journalPath, "{ not json", { mode: 0o600 });
+      const corrupt = await fetch(`${origin}/api/hub/clone-jobs`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie, origin },
+        body: JSON.stringify({ url: "interactive:fenced-clone", dest: destination }),
+      });
+      expect(corrupt.status).toBe(409);
+      expect(reservations.isReserved(target)).toBe(false);
+    } finally {
+      // Every later test in this file mutates registered state, which the
+      // journal fences: a failure here must not leave one behind.
+      await rm(journalPath, { force: true });
+    }
+
+    // Recovery clearing the record reopens clone creation.
+    const cloned = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ url: "interactive:fenced-clone", dest: destination }),
+    });
+    expect(cloned.status).toBe(202);
+    const jobId = ((await cloned.json()) as { jobId: string }).jobId;
+    const cancelled = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/cancel`, {
+      method: "POST",
+      headers: { cookie, origin },
+    });
+    expect(cancelled.status).toBe(200);
+  }, 60_000);
+
+  test("clone creation refuses a journaled destination without creating it", async () => {
+    // The journal's removal source is the clone destination itself, and it is
+    // absent — exactly what a removal that deleted its folder but could not
+    // finish leaves behind. The destination is what the route would create to
+    // resolve the target, so the fence has to refuse before that mkdir: a
+    // recreated source is an unrelated directory to startup recovery, which
+    // fails identity validation there and leaves the Hub unstartable.
+    const canonicalRoot = await realpath(tempRoot);
+    const destination = path.join(canonicalRoot, "clone-journal-absent-dest");
+    const target = path.join(destination, "absent-dest-clone");
+    const journalPath = path.join(tempRoot, "pending-folder-mutation.json");
+    await writeFile(journalPath, `${JSON.stringify({
+      version: 1,
+      operation: "remove",
+      source: destination,
+      before: [{ id: "absent-dest-clone", path: destination, backend: "local" }],
+      after: [],
+    }, null, 2)}\n`, { mode: 0o600 });
+
+    try {
+      const fenced = await fetch(`${origin}/api/hub/clone-jobs`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie, origin },
+        body: JSON.stringify({ url: "interactive:absent-dest-clone", dest: destination }),
+      });
+      expect(fenced.status).toBe(409);
+      await assertContract("POST", "/api/hub/clone-jobs", fenced);
+      expect(await fenced.json()).toEqual({
+        error: "a pending recovery journal requires Hub recovery before further folder changes",
+      });
+      // The journaled source stayed absent: no directory was created before
+      // the refusal, and no reservation outlived it.
+      expect(await stat(destination).then(() => true).catch(() => false)).toBe(false);
+      expect(reservations.isReserved(target)).toBe(false);
+    } finally {
+      await rm(journalPath, { force: true });
+      await rm(destination, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("clone reserves the canonical target through a symlinked, not-yet-created destination", async () => {
+    // The reservation and the fence now run before the destination exists, so
+    // the route predicts the canonical target rather than realpath'ing it. A
+    // symlinked ancestor with absent components under it is where a wrong
+    // prediction shows: an alias-spelled reservation folder mutations would
+    // not overlap, or a spurious "destination changed" refusal.
+    const canonicalRoot = await realpath(tempRoot);
+    const real = path.join(canonicalRoot, "clone-symlink-real");
+    await mkdir(real);
+    const link = path.join(canonicalRoot, "clone-symlink-link");
+    await symlink(real, link);
+    const cloned = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ url: "interactive:symlinked-clone", dest: path.join(link, "nested") }),
+    });
+    expect(cloned.status).toBe(202);
+    const jobId = ((await cloned.json()) as { jobId: string }).jobId;
+    expect(reservations.isReserved(path.join(real, "nested", "symlinked-clone"))).toBe(true);
+    const cancelled = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/cancel`, {
+      method: "POST",
+      headers: { cookie, origin },
+    });
+    expect(cancelled.status).toBe(200);
+  });
+
   test("start:false registers without starting a session (recents import)", async () => {
     const imported = path.join(tempRoot, "workspaces", "imported-only");
     execFileSync("mkdir", ["-p", imported]);
@@ -1464,6 +1642,311 @@ describe("hub end to end", () => {
     expect(registry.byPath(fenced)?.id).toBe(((await registered.json()) as { id: string }).id);
   }, 60_000);
 
+  test("starting a session refuses while a folder mutation journal awaits recovery", async () => {
+    const folder = path.join(tempRoot, "workspaces", "start-journal-fenced");
+    execFileSync("mkdir", ["-p", folder]);
+    execFileSync("git", ["init"], { cwd: folder, stdio: "ignore" });
+    const registration = await fetch(`${origin}/api/hub/workspaces`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ path: folder, start: false }),
+    });
+    expect(registration.status).toBe(200);
+    const workspaceId = ((await registration.json()) as { id: string }).id;
+    const moved = path.join(tempRoot, "workspaces", "start-journal-moved");
+    const journalPath = path.join(tempRoot, "pending-folder-mutation.json");
+
+    // A registered rename that moved the directory and then failed both its
+    // registry update and its rollback leaves exactly this record. The
+    // registry still names the source, which recovery may yet have to move
+    // or restore: a child spawned there now would carry this workspace's
+    // credentials and personal identity into whatever recreated the source.
+    await writeFile(journalPath, `${JSON.stringify({
+      version: 1,
+      operation: "rename",
+      source: folder,
+      destination: moved,
+      before: [{ id: workspaceId, path: folder, backend: "local" }],
+      after: [{ id: workspaceId, path: moved, backend: "local" }],
+    }, null, 2)}\n`, { mode: 0o600 });
+
+    try {
+      const fenced = await fetch(`${origin}/api/hub/sessions/${workspaceId}/start`, {
+        method: "POST",
+        headers: { cookie, origin },
+      });
+      expect(fenced.status).toBe(409);
+      await assertContract("POST", "/api/hub/sessions/{workspaceId}/start", fenced);
+      expect(await fenced.json()).toEqual({
+        error: "a pending recovery journal requires Hub recovery before further folder changes",
+      });
+      expect(sessions.isRunning(workspaceId)).toBe(false);
+
+      // Fail closed: a journal too corrupt to interpret is still a journal.
+      await writeFile(journalPath, "{ not json", { mode: 0o600 });
+      const corrupt = await fetch(`${origin}/api/hub/sessions/${workspaceId}/start`, {
+        method: "POST",
+        headers: { cookie, origin },
+      });
+      expect(corrupt.status).toBe(409);
+      expect(sessions.isRunning(workspaceId)).toBe(false);
+    } finally {
+      // Every later test in this file mutates registered state, which the
+      // journal fences: a failure here must not leave one behind.
+      await rm(journalPath, { force: true });
+    }
+
+    // Recovery clearing the record reopens starting.
+    const started = await fetch(`${origin}/api/hub/sessions/${workspaceId}/start`, {
+      method: "POST",
+      headers: { cookie, origin },
+    });
+    expect(started.status).toBe(200);
+    expect(sessions.isRunning(workspaceId)).toBe(true);
+    await sessions.stop(workspaceId);
+  }, 60_000);
+
+  test("forget refuses while a folder mutation journal awaits recovery", async () => {
+    const folder = path.join(tempRoot, "workspaces", "forget-journal-fenced");
+    execFileSync("mkdir", ["-p", folder]);
+    execFileSync("git", ["init"], { cwd: folder, stdio: "ignore" });
+    const registration = await fetch(`${origin}/api/hub/workspaces`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ path: folder, start: false }),
+    });
+    expect(registration.status).toBe(200);
+    const workspaceId = ((await registration.json()) as { id: string }).id;
+    const moved = path.join(tempRoot, "workspaces", "forget-journal-moved");
+    const journalPath = path.join(tempRoot, "pending-folder-mutation.json");
+
+    // A registered rename that moved the directory but could neither persist
+    // the registry nor roll back leaves exactly this record, and recovery
+    // restores its journaled entries verbatim. Forgetting first deletes this
+    // workspace's personal state and credential assignments; the restore
+    // would then resurrect the registration alone — a half-alive workspace
+    // the user explicitly removed.
+    await writeFile(journalPath, `${JSON.stringify({
+      version: 1,
+      operation: "rename",
+      source: folder,
+      destination: moved,
+      before: [{ id: workspaceId, path: folder, backend: "local" }],
+      after: [{ id: workspaceId, path: moved, backend: "local" }],
+    }, null, 2)}\n`, { mode: 0o600 });
+
+    try {
+      const fencedForget = await fetch(`${origin}/api/hub/workspaces/${workspaceId}/forget`, {
+        method: "POST",
+        headers: { cookie, origin },
+      });
+      expect(fencedForget.status).toBe(409);
+      await assertContract("POST", "/api/hub/workspaces/{workspaceId}/forget", fencedForget);
+      expect(await fencedForget.json()).toEqual({
+        error: "a pending recovery journal requires Hub recovery before further folder changes",
+      });
+      expect(registry.byId(workspaceId)?.path).toBe(folder);
+
+      // Fail closed: a journal too corrupt to interpret is still a journal.
+      await writeFile(journalPath, "{ not json", { mode: 0o600 });
+      const corrupt = await fetch(`${origin}/api/hub/workspaces/${workspaceId}/forget`, {
+        method: "POST",
+        headers: { cookie, origin },
+      });
+      expect(corrupt.status).toBe(409);
+      expect(registry.byId(workspaceId)?.path).toBe(folder);
+    } finally {
+      // Every later test in this file mutates registered state, which the
+      // journal fences: a failure here must not leave one behind.
+      await rm(journalPath, { force: true });
+    }
+
+    // Recovery clearing the record reopens forgetting.
+    const forgottenAfterRecovery = await fetch(`${origin}/api/hub/workspaces/${workspaceId}/forget`, {
+      method: "POST",
+      headers: { cookie, origin },
+    });
+    expect(forgottenAfterRecovery.status).toBe(200);
+    expect(registry.byId(workspaceId)).toBeUndefined();
+  }, 60_000);
+
+  test("forget refuses a journal that lands while it waits for the workspace queue", async () => {
+    const folder = path.join(tempRoot, "workspaces", "forget-journal-race");
+    execFileSync("mkdir", ["-p", folder]);
+    execFileSync("git", ["init"], { cwd: folder, stdio: "ignore" });
+    const registration = await fetch(`${origin}/api/hub/workspaces`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ path: folder, start: false }),
+    });
+    expect(registration.status).toBe(200);
+    const workspaceId = ((await registration.json()) as { id: string }).id;
+    const moved = path.join(tempRoot, "workspaces", "forget-journal-race-moved");
+    const journalPath = path.join(tempRoot, "pending-folder-mutation.json");
+
+    // Occupy this workspace's lifecycle queue the way a registered folder
+    // rename does through runWithSessionsStopped, and journal only after the
+    // forget request is past the route's outer checks: the check the forget
+    // is fenced by must be the one it makes under the queue, not one it made
+    // before asking for it.
+    let releaseQueue!: () => void;
+    const held = new Promise<void>(resolve => {
+      releaseQueue = resolve;
+    });
+    const holding = sessions.runExclusive(workspaceId, () => held);
+    const forgetting = fetch(`${origin}/api/hub/workspaces/${workspaceId}/forget`, {
+      method: "POST",
+      headers: { cookie, origin },
+    });
+    try {
+      // Ample time for an in-process request to reach the route and queue
+      // behind the hold. A slower machine only weakens the proof — a journal
+      // that lands before the route runs is refused either way — so this can
+      // never make the test red.
+      await Bun.sleep(250);
+      await writeFile(journalPath, `${JSON.stringify({
+        version: 1,
+        operation: "rename",
+        source: folder,
+        destination: moved,
+        before: [{ id: workspaceId, path: folder, backend: "local" }],
+        after: [{ id: workspaceId, path: moved, backend: "local" }],
+      }, null, 2)}\n`, { mode: 0o600 });
+      releaseQueue();
+      await holding;
+
+      const response = await forgetting;
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        error: "a pending recovery journal requires Hub recovery before further folder changes",
+      });
+      // Nothing of the workspace was deleted, so recovery restoring the
+      // journaled entry cannot resurrect a registration without its state.
+      expect(registry.byId(workspaceId)?.path).toBe(folder);
+    } finally {
+      releaseQueue();
+      await holding.catch(() => undefined);
+      await forgetting.catch(() => undefined);
+      await rm(journalPath, { force: true });
+    }
+  }, 60_000);
+
+  test("forget refuses an id re-minted for another folder while it waits for the workspace queue", async () => {
+    // Two folders with the SAME basename, so the second mints the first's
+    // slug once the first frees it. Both are registered through the route,
+    // the way a user's second folder would be.
+    const original = path.join(tempRoot, "reuse-original", "reused-slug");
+    const newcomer = path.join(tempRoot, "reuse-newcomer", "reused-slug");
+    for (const folder of [original, newcomer]) {
+      execFileSync("mkdir", ["-p", folder]);
+      execFileSync("git", ["init"], { cwd: folder, stdio: "ignore" });
+    }
+    const registration = await fetch(`${origin}/api/hub/workspaces`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ path: original, start: false }),
+    });
+    expect(registration.status).toBe(200);
+    const workspaceId = ((await registration.json()) as { id: string }).id;
+    expect(registry.byId(workspaceId)?.path).toBe(original);
+
+    // Occupy the workspace's lifecycle queue the way a registered folder
+    // rename or removal does, and let the forget queue behind it.
+    let releaseQueue!: () => void;
+    const held = new Promise<void>(resolve => {
+      releaseQueue = resolve;
+    });
+    const holding = sessions.runExclusive(workspaceId, () => held);
+    const forgetting = fetch(`${origin}/api/hub/workspaces/${workspaceId}/forget`, {
+      method: "POST",
+      headers: { cookie, origin },
+    });
+    try {
+      // Ample time for an in-process request to reach the route, resolve the
+      // workspace, and queue behind the hold.
+      await Bun.sleep(250);
+
+      // A registered removal of the original completes normally: the entry
+      // is gone and its journal cleared, so the forget's fence sees nothing.
+      expect(await registry.remove(workspaceId)).toBe(true);
+      // The newcomer claims the freed slug while the forget still waits.
+      // Registered against the registry directly rather than through the
+      // route: onboarding commits every registration inside the planned
+      // id's lifecycle section, so a route registration would queue behind
+      // this very hold. The paths that mint an id outside that section —
+      // startup recovery restoring journaled entries, a clone job
+      // registering without the onboarding coordinator — reach the registry
+      // exactly like this, and they are what this guard answers.
+      const reregistered = await registry.register(newcomer);
+      expect(reregistered.id).toBe(workspaceId);
+      await personalState.patch("tobias", workspaceId, { documentPath: "README.md" });
+
+      releaseQueue();
+      await holding;
+
+      const response = await forgetting;
+      // The newcomer is untouched: its registration, personal state and (with
+      // a credential API wired) its assignments belong to a workspace this
+      // request never described.
+      expect(registry.byId(workspaceId)?.path).toBe(newcomer);
+      expect(personalState.get("tobias", workspaceId).documentPath).toBe("README.md");
+      expect(response.status).toBe(409);
+      await assertContract("POST", "/api/hub/workspaces/{workspaceId}/forget", response);
+      expect(await response.json()).toEqual({
+        error: `workspace id now names a different registration: ${workspaceId}`,
+      });
+    } finally {
+      releaseQueue();
+      await holding.catch(() => undefined);
+      await forgetting.catch(() => undefined);
+      await personalState.removeWorkspace(workspaceId);
+      await registry.remove(workspaceId);
+    }
+  }, 60_000);
+
+  test("forget reports an unknown workspace when the registration goes while it waits", async () => {
+    const folder = path.join(tempRoot, "forget-vanished", "vanished-slug");
+    execFileSync("mkdir", ["-p", folder]);
+    execFileSync("git", ["init"], { cwd: folder, stdio: "ignore" });
+    const registration = await fetch(`${origin}/api/hub/workspaces`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ path: folder, start: false }),
+    });
+    expect(registration.status).toBe(200);
+    const workspaceId = ((await registration.json()) as { id: string }).id;
+
+    let releaseQueue!: () => void;
+    const held = new Promise<void>(resolve => {
+      releaseQueue = resolve;
+    });
+    const holding = sessions.runExclusive(workspaceId, () => held);
+    const forgetting = fetch(`${origin}/api/hub/workspaces/${workspaceId}/forget`, {
+      method: "POST",
+      headers: { cookie, origin },
+    });
+    try {
+      await Bun.sleep(250);
+      // A registered removal ahead of the forget unregistered it and cleaned
+      // its personal state and assignments on the way out, leaving nothing
+      // for this request to finish.
+      expect(await registry.remove(workspaceId)).toBe(true);
+      releaseQueue();
+      await holding;
+
+      const response = await forgetting;
+      expect(response.status).toBe(404);
+      await assertContract("POST", "/api/hub/workspaces/{workspaceId}/forget", response);
+      expect(await response.json()).toEqual({ error: `unknown workspace: ${workspaceId}` });
+      expect(registry.byId(workspaceId)).toBeUndefined();
+    } finally {
+      releaseQueue();
+      await holding.catch(() => undefined);
+      await forgetting.catch(() => undefined);
+      await registry.remove(workspaceId);
+    }
+  }, 60_000);
+
   test("forget unregisters a stopped workspace and refuses a running one", async () => {
     // plain-folder was registered (and stopped) by the init-offer test above.
     const runningRefusal = await fetch(`${origin}/api/hub/workspaces/myproject/forget`, {
@@ -1614,6 +2097,95 @@ describe("hub end to end", () => {
     expect(nested.status).toBe(400);
     expect(((await nested.json()) as { error: string }).error).toContain("single folder name");
   }, 60_000);
+
+  test("clone refuses a target whose subtree a registered workspace still claims", async () => {
+    // A workspace registered below the target keeps its registration when
+    // its directory vanishes. Cloning into the (absent) ancestor would fill
+    // that subtree with unrelated content while the old stable id, personal
+    // state, and credential assignments still point at it.
+    const source = path.join(tempRoot, "stale-claim-source");
+    execFileSync("mkdir", ["-p", source]);
+    execFileSync("git", ["init"], { cwd: source, stdio: "ignore" });
+    await writeFile(path.join(source, "README.md"), "# Stale Claim\n");
+
+    const dest = path.join(tempRoot, "stale-claim-checkouts");
+    const target = path.join(dest, "stale-parent");
+    const descendant = path.join(target, "sub");
+    await mkdir(descendant, { recursive: true });
+    const stale = await registry.register(descendant);
+    await rm(target, { recursive: true, force: true });
+
+    const refused = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ url: source, dest, folderName: "stale-parent" }),
+    });
+    expect(refused.status).toBe(409);
+    await assertContract("POST", "/api/hub/clone-jobs", refused);
+    expect(((await refused.json()) as { error: string }).error).toContain(
+      `workspace is already registered: ${descendant}`,
+    );
+    // No job started: nothing holds the target reservation and the target
+    // was never populated or registered.
+    expect(cloneJobs.isTargetReserved(target)).toBe(false);
+    expect(await stat(target).then(() => true).catch(() => false)).toBe(false);
+    expect(registry.byPath(target)).toBeUndefined();
+    expect(registry.byId(stale.id)?.path).toBe(descendant);
+
+    expect(await registry.remove(stale.id)).toBe(true);
+  }, 30_000);
+
+  test("clone refuses a target under a missing registered ancestor without recreating it", async () => {
+    // The destination the clone would create is itself a registered
+    // workspace whose directory vanished — a registration deliberately
+    // retained. The recursive mkdir that prepares the destination would
+    // resurrect that folder, and the claim check only ever looks at or below
+    // the target, so the clone would fill a hierarchy the old stable id, its
+    // personal state, and its credential assignments still point at.
+    const dest = path.join(tempRoot, "missing-ancestor-checkouts");
+    const stale = path.join(dest, "stale");
+    await mkdir(stale, { recursive: true });
+    const retained = await registry.register(stale);
+    await rm(stale, { recursive: true, force: true });
+    const target = path.join(stale, "ancestor-clone");
+
+    const refused = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ url: "interactive:ancestor-clone", dest: stale }),
+    });
+    expect(refused.status).toBe(409);
+    await assertContract("POST", "/api/hub/clone-jobs", refused);
+    expect(((await refused.json()) as { error: string }).error).toContain(
+      `workspace is registered at a missing ancestor: ${stale}`,
+    );
+    // The refusal is only worth anything while the ancestor is still absent:
+    // nothing was recreated, no job took the reservation, and the retained
+    // registration still records the same path.
+    expect(await stat(stale).then(() => true).catch(() => false)).toBe(false);
+    expect(cloneJobs.isTargetReserved(target)).toBe(false);
+    expect(registry.byId(retained.id)?.path).toBe(stale);
+    expect(registry.byPath(target)).toBeUndefined();
+
+    // An ancestor that still exists is untouched by the mkdir, so cloning
+    // inside a live registered workspace stays allowed as it always was.
+    await mkdir(stale, { recursive: true });
+    const nested = await fetch(`${origin}/api/hub/clone-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin },
+      body: JSON.stringify({ url: "interactive:ancestor-clone", dest: stale }),
+    });
+    expect(nested.status).toBe(202);
+    const jobId = ((await nested.json()) as { jobId: string }).jobId;
+    const cancelled = await fetch(`${origin}/api/hub/clone-jobs/${jobId}/cancel`, {
+      method: "POST",
+      headers: { cookie, origin },
+    });
+    expect(cancelled.status).toBe(200);
+
+    expect(await registry.remove(retained.id)).toBe(true);
+    await rm(dest, { recursive: true, force: true });
+  }, 30_000);
 
   test("forget cannot pass a clone registration before retained assignment commits", async () => {
     const dest = path.join(tempRoot, "forget-race-checkouts");
@@ -2113,6 +2685,7 @@ describe("hub end to end", () => {
       ["GET", "/s/myproject/api/chat/conversations/local", "/s/{workspaceId}/api/chat/conversations/{conversationId}"],
       ["PATCH", "/s/myproject/api/chat/conversations/local", "/s/{workspaceId}/api/chat/conversations/{conversationId}", { requestId: "stopped-rename", title: "Renamed" }],
       ["GET", "/s/myproject/api/chat/conversations/local/events", "/s/{workspaceId}/api/chat/conversations/{conversationId}/events"],
+      ["GET", "/s/myproject/api/chat/attachments/11111111-2222-4333-8444-555555555555", "/s/{workspaceId}/api/chat/attachments/{attachmentId}"],
       ["POST", "/s/myproject/api/chat/conversations/local/cancel", "/s/{workspaceId}/api/chat/conversations/{conversationId}/cancel", { requestId: "stopped" }],
       ["DELETE", "/s/myproject/api/chat/conversations/local/queue/held-1", "/s/{workspaceId}/api/chat/conversations/{conversationId}/queue/{messageId}", { requestId: "stopped-unqueue" }],
       ["POST", "/s/myproject/api/chat/conversations/local/permissions/request", "/s/{workspaceId}/api/chat/conversations/{conversationId}/permissions/{interactionId}", { requestId: "stopped", outcome: "rejected" }],
@@ -2127,6 +2700,18 @@ describe("hub end to end", () => {
       expect(response.status).toBe(503);
       await assertContract(method, contractPath, response);
     }
+
+    // The attachment upload is multipart, so it probes the same
+    // stopped-workspace contract outside the JSON loop.
+    const uploadForm = new FormData();
+    uploadForm.append("file", new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], "probe.png", { type: "image/png" }));
+    const stoppedUpload = await fetch(`${origin}/s/myproject/api/chat/conversations/local/attachments`, {
+      method: "POST",
+      headers: { cookie, origin },
+      body: uploadForm,
+    });
+    expect(stoppedUpload.status).toBe(503);
+    await assertContract("POST", "/s/{workspaceId}/api/chat/conversations/{conversationId}/attachments", stoppedUpload);
   });
 
   test("a live session for a user removed from the config is rejected", async () => {
