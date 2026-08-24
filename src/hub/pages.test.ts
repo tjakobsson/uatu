@@ -20,6 +20,18 @@ function clientScript(html: string): string {
   return start >= 0 && end > start ? html.slice(start + "<script>".length, end) : "";
 }
 
+function folderMutationFunction(html: string) {
+  const script = clientScript(html);
+  const start = script.indexOf("async function requestFolderMutation");
+  const end = script.indexOf("async function refreshAfterFolderMutation", start);
+  const source = script.slice(start, end);
+  return (api: (path: string, body: Record<string, unknown>) => Promise<unknown>, confirm: (message: string) => boolean) =>
+    new Function("api", "confirm", `${source}\nreturn requestFolderMutation;`)(api, confirm) as (
+      path: string,
+      body: Record<string, unknown>,
+    ) => Promise<unknown>;
+}
+
 describe("authenticated Hub pages", () => {
   test("share navigation and have syntactically valid page-scoped initialization", () => {
     for (const pageName of ["dashboard", "clone", "settings"] as const) {
@@ -114,6 +126,107 @@ describe("clone page", () => {
     // HTTPS hosts are normalized like the backend before token matching.
     expect(html).toContain('parsed.hostname.endsWith(".")');
     expect(html).not.toContain("at > 0");
+  });
+
+  test("renders accessible folder management controls and a prefilled rename dialog", () => {
+    const html = htmlFor.clone();
+    const document = documentFor("clone");
+    for (const id of [
+      "new-folder-form",
+      "new-folder-name",
+      "new-folder-error",
+      "browser-error",
+      "rename-folder-dialog",
+      "rename-folder-form",
+      "rename-folder-name",
+      "rename-folder-error",
+      "rename-folder-cancel",
+      "rename-folder-submit",
+    ]) {
+      expect(document.getElementById(id)).not.toBeNull();
+    }
+    expect(document.querySelector('#new-folder-name[aria-label="New folder name"]')).not.toBeNull();
+    expect(document.querySelector('#rename-folder-dialog[aria-labelledby="rename-folder-title"]')).not.toBeNull();
+    expect(document.querySelectorAll('[role="alert"]').length).toBeGreaterThanOrEqual(4);
+    expect(html).toContain('input.value = name;');
+    expect(html).toContain('input.select();');
+    expect(html).toContain('ariaLabel: "Rename " + dir.name');
+    expect(html).toContain('ariaLabel: "Remove " + dir.name');
+    expect(html).toContain('Only empty folders can be removed. This cannot be undone.');
+  });
+
+  test("posts closed folder payloads and refreshes browser and workspace state", () => {
+    const html = htmlFor.clone();
+    expect(html).toContain('api("/api/hub/folders/create", { parent: browsePath, name })');
+    expect(html).toContain('requestFolderMutation("/api/hub/folders/rename", { path: rename.folder, name })');
+    expect(html).toContain('requestFolderMutation("/api/hub/folders/remove", { path: folder })');
+    expect(html).toContain('loadBrowser({ fallbackToParent: true })');
+    expect(html).toContain('refreshWorkspaceState().catch(() => {})');
+    expect(html).toContain('response.status === 404 && browseParent');
+    expect(html).toContain("another client may have renamed or removed it");
+    // Folder names may legitimately carry whitespace (the rename field is
+    // even pre-filled with the current basename); only emptiness is judged
+    // trimmed and the submitted name keeps its whitespace.
+    expect(html).toContain("const name = renameFolderName.value;");
+    expect(html).toContain("const name = newFolderName.value;");
+    expect(html).toContain("if (!name.trim()) return;");
+    expect(html).not.toContain("renameFolderName.value.trim()");
+    expect(html).not.toContain("newFolderName.value.trim()");
+  });
+
+  test("retries needsStop with named workspace confirmation and stop authorization", async () => {
+    const calls: { path: string; body: Record<string, unknown> }[] = [];
+    const confirmations: string[] = [];
+    const conflict = Object.assign(new Error("workspaces are running"), {
+      payload: { needsStop: true, workspaceIds: ["alpha", "nested-beta"] },
+    });
+    const api = async (path: string, body: Record<string, unknown>) => {
+      calls.push({ path, body });
+      if (calls.length === 1) throw conflict;
+      return { path: "/work/team" };
+    };
+    const mutate = folderMutationFunction(htmlFor.clone())(api, message => {
+      confirmations.push(message);
+      return true;
+    });
+
+    await expect(mutate("/api/hub/folders/rename", { path: "/work/group", name: "team" })).resolves.toEqual({ path: "/work/team" });
+    expect(calls).toEqual([
+      { path: "/api/hub/folders/rename", body: { path: "/work/group", name: "team" } },
+      { path: "/api/hub/folders/rename", body: { path: "/work/group", name: "team", stop: true } },
+    ]);
+    expect(confirmations[0]).toContain('"alpha", "nested-beta"');
+    expect(confirmations[0]).toContain("running sessions and shells will be terminated");
+  });
+
+  test("cancelling a needsStop prompt sends no mutation retry", async () => {
+    const calls: Record<string, unknown>[] = [];
+    const api = async (_path: string, body: Record<string, unknown>) => {
+      calls.push(body);
+      throw Object.assign(new Error("workspace is running"), {
+        payload: { needsStop: true, workspaceIds: ["alpha"] },
+      });
+    };
+    const mutate = folderMutationFunction(htmlFor.clone())(api, () => false);
+
+    await expect(mutate("/api/hub/folders/remove", { path: "/work/alpha" })).resolves.toBeNull();
+    expect(calls).toEqual([{ path: "/work/alpha" }]);
+  });
+
+  test("keeps folder controls busy through retry and exposes local actionable errors", () => {
+    const html = htmlFor.clone();
+    expect(html).toContain('await withBusy(button, "Creating…"');
+    expect(html).toContain('await withBusy(rename.button, "Renaming…"');
+    expect(html).toContain('await withBusy(button, "Removing…"');
+    expect(html).toContain('Could not create "');
+    expect(html).toContain('Could not rename "');
+    expect(html).toContain('Could not remove "');
+    expect(html).toContain('if (!result) return;');
+    expect(html).toContain('renameFolderSubmit.disabled = true;');
+    expect(html).toContain('if (renameFolderSubmit.disabled)');
+    expect(html).toContain('event.preventDefault();');
+    expect(html).toContain('.folder-browser .row { flex-wrap: wrap; }');
+    expect(html).toContain('.folder-browser .row-actions { flex: 1 0 100%; justify-content: flex-end; }');
   });
 });
 

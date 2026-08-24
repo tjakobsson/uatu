@@ -14,10 +14,14 @@ import { CredentialToolManager, readyToolPath } from "./credential-tools";
 import { OpenPgpCredentialManager, type OpenPgpCredentialOperations } from "./openpgp-credentials";
 import { TokenCredentialManager } from "./token-credentials";
 import { createStoredCloneCredentialResolver, createStoredCredentialContextResolver } from "./credential-context";
+import { CloneJobManager } from "./clone-jobs";
+import { CloneProcessAdapter } from "./clone-process";
+import { FolderManager } from "./folder-manager";
 import { hashPassword, HubSessionStore } from "./auth";
 import { loadHubConfig } from "./config";
 import { WorkspaceRegistry } from "./registry";
 import { PersonalWorkspaceStateStore } from "./personal-state";
+import { PathReservationCoordinator } from "./path-reservations";
 import {
   ensureCredentialStateDirs,
   ensureCanonicalStateDir,
@@ -28,6 +32,7 @@ import {
   credentialsPath,
   credentialTokenStorePath,
   credentialToolsPath,
+  folderMutationJournalPath,
   personalWorkspaceStatePath,
   registryPath,
   resolveHubStateRoot,
@@ -283,11 +288,6 @@ export async function runHub(options: RunHubOptions): Promise<void> {
   const personalState = new PersonalWorkspaceStateStore(personalWorkspaceStatePath(stateRoot));
   const credentialMetadata = new CredentialMetadataStore(credentialsPath(stateRoot));
   await Promise.all([personalState.load(), credentialMetadata.load()]);
-  await personalState.recoverPendingForgets(
-    workspaceId => registry.byId(workspaceId) !== undefined,
-    async workspaceId => { await credentialMetadata.removeWorkspaceAssignments(workspaceId); },
-  );
-
   const credentialTokens = new CredentialTokenStore(credentialTokenStorePath(stateRoot));
   const credentialToolStore = new CredentialToolOverrideStore(credentialToolsPath(stateRoot));
   const credentialTools = new CredentialToolManager(
@@ -445,7 +445,16 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     tools: contextTools,
     runExclusive: operation => sshRuntime.run(() => operation()),
   });
-  const sessions = new SessionManager(registry, { local: new LocalProcessBackend() }, credentialContexts);
+  const sessions = new SessionManager(
+    registry,
+    { local: new LocalProcessBackend() },
+    credentialContexts,
+    // The pending-mutation fence every start is checked against, evaluated
+    // inside the queued lifecycle operation. Reached through the closure
+    // because the folder manager below takes `sessions` as a dependency; the
+    // first start can only come from the server assembled after it.
+    () => folderManager.assertNoPendingMutation(),
+  );
   const cloneCredentials = createStoredCloneCredentialResolver({
     metadata: credentialMetadata,
     tokens: credentialTokens,
@@ -457,6 +466,27 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     uatuArgv,
     runExclusive: operation => sshRuntime.run(() => operation()),
   });
+  const reservations = new PathReservationCoordinator();
+  const folderManager = new FolderManager({
+    journalPath: folderMutationJournalPath(stateRoot),
+    registry,
+    sessions,
+    personalState,
+    credentials: credentialMetadata,
+    reservations,
+  });
+  await folderManager.recover();
+  await personalState.recoverPendingForgets(
+    workspaceId => registry.byId(workspaceId) !== undefined,
+    async workspaceId => { await credentialMetadata.removeWorkspaceAssignments(workspaceId); },
+  );
+  const cloneJobs = new CloneJobManager({
+    processFactory: new CloneProcessAdapter({ gitCommand: () => activePaths.get("git") ?? path.join(stateRoot, ".unavailable-git") }),
+    registry,
+    sessions,
+    credentials: cloneCredentials,
+    reservations,
+  });
   const server = startHubServer({
     config,
     registry,
@@ -465,6 +495,9 @@ export async function runHub(options: RunHubOptions): Promise<void> {
     personalState,
     gitCommand: () => activePaths.get("git") ?? path.join(stateRoot, ".unavailable-git"),
     cloneCredentials,
+    cloneJobs,
+    folderManager,
+    reservations,
     credentialApi: {
       metadata: credentialMetadata,
       tools: credentialTools,

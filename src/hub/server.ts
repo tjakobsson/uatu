@@ -38,7 +38,9 @@ import {
   type CredentialApiServices,
 } from "./credential-api";
 import { cloneTargetName, gitInit, probeGitRepository, validCloneFolderName } from "./git";
+import { FolderManagerError, reconcileRegisteredAliasPaths, type FolderManager } from "./folder-manager";
 import { clonePage, dashboardPage, loginPage, settingsPage, stoppedSessionPage } from "./pages";
+import { isPathAtOrBelow, normalizeAbsolutePath, pathsOverlap, type PathReservationCoordinator } from "./path-reservations";
 import {
   bridgeWebSocketHandlers,
   childUrlFor,
@@ -65,6 +67,8 @@ export type HubDeps = {
   sessions: SessionManager;
   sessionStore: HubSessionStore;
   personalState: PersonalWorkspaceStateStore;
+  folderManager?: Pick<FolderManager, "create" | "rename" | "remove" | "assertNoPendingMutation">;
+  reservations?: PathReservationCoordinator;
   cloneJobs?: CloneJobManager;
   cloneCredentials?: CloneCredentialResolver;
   credentialApi?: CredentialApiServices;
@@ -100,6 +104,28 @@ function htmlResponse(body: string, status = 200): Response {
   });
 }
 
+// The canonical path a not-yet-created folder will have: realpath resolves
+// the nearest existing ancestor and the absent components are re-attached.
+// Read-only by construction — it is what lets a clone reserve and fence its
+// destination before creating it. Errors other than the absence being walked
+// past propagate: an unreadable ancestor must not silently downgrade to the
+// uncanonicalized spelling, which folder mutations would not overlap.
+async function canonicalizeAbsentPath(folderPath: string): Promise<string> {
+  const absent: string[] = [];
+  let current = normalizeAbsolutePath(folderPath);
+  for (;;) {
+    try {
+      return normalizeAbsolutePath(path.join(await fs.realpath(current), ...absent));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      const parent = path.dirname(current);
+      if ((code !== "ENOENT" && code !== "ENOTDIR") || parent === current) throw error;
+      absent.unshift(path.basename(current));
+      current = parent;
+    }
+  }
+}
+
 // The return-to target as the login form should carry it. "/" is the default
 // the form falls back to anyway, so rendering it would only put a redundant
 // value in the markup and the URL.
@@ -114,6 +140,7 @@ export function createHubFetchHandler(deps: HubDeps) {
     registry,
     sessions,
     credentials: deps.cloneCredentials,
+    reservations: deps.reservations,
   });
   const limiter = new LoginRateLimiter();
   const credentialLimiter = new CredentialOperationRateLimiter();
@@ -371,9 +398,10 @@ export function createHubFetchHandler(deps: HubDeps) {
     if (!path.isAbsolute(requested)) {
       return json(400, { error: "path must be absolute" });
     }
-    const resolved = path.resolve(requested);
+    let resolved = path.resolve(requested);
     let dirents;
     try {
+      resolved = await fs.realpath(resolved);
       dirents = await fs.readdir(resolved, { withFileTypes: true });
     } catch {
       return json(404, { error: `cannot read directory: ${resolved}` });
@@ -398,6 +426,25 @@ export function createHubFetchHandler(deps: HubDeps) {
     return json(200, { path: resolved, parent: parent === resolved ? null : parent, dirs });
   };
 
+  // Folder-state failures answer with the manager's own code, whatever
+  // route observed them; anything that is not a FolderManagerError never
+  // carries a caller-actionable message and stays a Hub-internal 500.
+  const folderError = (error: unknown): Response => {
+    if (!(error instanceof FolderManagerError)) {
+      return json(500, { error: "folder operation failed" }, NO_STORE_HEADERS);
+    }
+    const status = error.code === "invalid-input"
+      ? 400
+      : error.code === "permission-denied"
+        ? 403
+        : error.code === "not-found"
+          ? 404
+          : error.code === "conflict" || error.code === "not-empty"
+            ? 409
+            : 500;
+    return json(status, { error: error.message }, NO_STORE_HEADERS);
+  };
+
   // POST /api/hub/workspaces {path, init?} — registers any absolute folder
   // path. The git preflight mirrors the desktop launcher's rules: a
   // definitive not-a-repository answer yields a 409 {needsInit:true} the
@@ -418,9 +465,11 @@ export function createHubFetchHandler(deps: HubDeps) {
     if (requested === "" || !path.isAbsolute(requested)) {
       return json(400, { error: "an absolute folder path is required" });
     }
-    const folder = path.resolve(requested);
+    const requestedFolder = path.resolve(requested);
+    let folder = requestedFolder;
     let isDirectory = false;
     try {
+      folder = await fs.realpath(requestedFolder);
       isDirectory = (await fs.stat(folder)).isDirectory();
     } catch {
       isDirectory = false;
@@ -428,37 +477,85 @@ export function createHubFetchHandler(deps: HubDeps) {
     if (!isDirectory) {
       return json(404, { error: `no such folder: ${folder}` });
     }
-    if (cloneJobs.isTargetReserved(folder)) {
+    const reservation = cloneJobs.reserveTarget(folder);
+    if (!reservation) {
       return json(409, { error: `folder is currently being cloned: ${folder}` });
     }
-
-    const gitCommand = deps.gitCommand?.() ?? "git";
-    const probe = await probeGitRepository(folder, gitCommand);
-    if (probe.kind === "not-a-repository") {
-      if (body.init !== true) {
-        return json(409, { needsInit: true, error: `${folder} is not a git repository` });
-      }
-      const initialized = await gitInit(folder, gitCommand);
-      if (!initialized.ok) {
-        return json(500, { error: `git init failed: ${initialized.error}` });
-      }
-    }
-
-    const { entry, created } = await registry.registerWithStatus(folder);
-    if (body.start === false) {
-      return json(200, { id: entry.id, running: false });
-    }
     try {
-      await sessions.start(entry.id, created ? async () => {
-        if (!(await registry.remove(entry.id))) throw new Error(`workspace registration was not removed: ${entry.id}`);
-        await deps.credentialApi?.metadata.removeWorkspaceAssignments(entry.id);
-      } : undefined);
-    } catch (error) {
-      // A folder that fails to serve is not left registered — mirroring the
-      // launcher rule that a declined/failed folder leaves no trace.
-      return json(500, { error: error instanceof Error ? error.message : String(error) });
+      // Registration is a registered-state mutation and is fenced by the
+      // folder-mutation journal exactly as create/rename/remove are. A
+      // journal that outlived its mutation is the only record tying a
+      // moved-or-removed directory back to its old registration, and
+      // startup recovery restores that entry at its journaled path: minting
+      // a fresh id for the same directory here would make the restore
+      // collide, leaving the Hub unstartable without manual state repair.
+      // Checked under the reservation, so no mutation of this folder can be
+      // journaling concurrently, and failing closed — an uninspectable
+      // journal is treated as pending.
+      try {
+        await deps.folderManager?.assertNoPendingMutation();
+      } catch (error) {
+        return folderError(error);
+      }
+
+      // The canonicalization above ran before the lease, so a folder
+      // rename can have completed in between — the lease would then cover
+      // a stale path and the git probe treats a missing directory as
+      // indeterminate, persisting a dead registration. Re-checked under
+      // the lease, no further rename can move the folder.
+      try {
+        if ((await fs.realpath(folder)) !== folder) {
+          return json(409, { error: `folder moved during registration: ${folder}` });
+        }
+      } catch {
+        return json(404, { error: `no such folder: ${folder}` });
+      }
+      const gitCommand = deps.gitCommand?.() ?? "git";
+      const probe = await probeGitRepository(folder, gitCommand);
+      if (probe.kind === "not-a-repository") {
+        if (body.init !== true) {
+          return json(409, { needsInit: true, error: `${folder} is not a git repository` });
+        }
+        const initialized = await gitInit(folder, gitCommand);
+        if (!initialized.ok) {
+          return json(500, { error: `git init failed: ${initialized.error}` });
+        }
+      }
+
+      // Legacy registrations can persist alias spellings of this folder;
+      // reconciled first, the exact-path lookup inside registerWithStatus
+      // finds them instead of minting a duplicate id for the same repo.
+      try {
+        await reconcileRegisteredAliasPaths(registry);
+      } catch (error) {
+        const status = error instanceof FolderManagerError
+          ? error.code === "permission-denied" ? 403 : error.code === "conflict" ? 409 : 500
+          : 500;
+        return json(status, { error: error instanceof Error ? error.message : String(error) });
+      }
+      const { entry, created } = await registry.registerWithStatus(folder);
+      if (body.start === false) {
+        return json(200, { id: entry.id, running: false });
+      }
+      try {
+        await sessions.start(entry.id, created ? async () => {
+          if (!(await registry.remove(entry.id))) throw new Error(`workspace registration was not removed: ${entry.id}`);
+          await deps.credentialApi?.metadata.removeWorkspaceAssignments(entry.id);
+        } : undefined);
+      } catch (error) {
+        // A folder that fails to serve is not left registered — mirroring the
+        // launcher rule that a declined/failed folder leaves no trace. The
+        // journal fence inside the start is the exception: a mutation that
+        // journalled after the check above refuses before anything spawns
+        // and must not itself unregister while recovery is pending, so the
+        // registration stays and the start is retried after recovery.
+        if (error instanceof FolderManagerError) return folderError(error);
+        return json(500, { error: error instanceof Error ? error.message : String(error) });
+      }
+      return json(200, { id: entry.id });
+    } finally {
+      reservation.release();
     }
-    return json(200, { id: entry.id });
   };
 
   // A clone is a user-owned, addressable job: creation returns immediately;
@@ -506,18 +603,127 @@ export function createHubFetchHandler(deps: HubDeps) {
         }
       }
       const resolvedDest = path.resolve(dest);
-      await fs.mkdir(resolvedDest, { recursive: true });
-      const target = path.join(await fs.realpath(resolvedDest), requestedFolderName || cloneTargetName(url)!);
-      if (registry.byPath(target)) {
-        return json(409, { error: `workspace is already registered: ${target}` });
+      // Nothing on disk may change before a fence that runs under a
+      // reservation overlapping the path being changed — and the mkdir
+      // below is such a change: recreating a directory a pending removal
+      // journal expects to be absent makes startup recovery validate
+      // identity against an unrelated folder, leaving the Hub unstartable.
+      // So the target is predicted, reserved, and fenced before anything is
+      // created. Predicting it means canonicalizing without touching disk
+      // (realpath needs an existing path, hence the walk up to the nearest
+      // existing ancestor): folder mutations reserve canonical spellings, so
+      // only a canonical reservation is guaranteed to overlap theirs.
+      const target = await canonicalizeAbsentPath(
+        path.join(resolvedDest, requestedFolderName || cloneTargetName(url)!),
+      );
+      // Both checks below decide whether this clone may populate the target,
+      // and a folder mutation completing after them would void that verdict:
+      // a create can leave an empty directory here, a rename can move a
+      // registered workspace onto it, and the clone would then fill a folder
+      // it never inspected — reusing that workspace's stable id and
+      // metadata. Folder mutations reserve every path they touch (ancestors
+      // included, since reservations overlap), so the reservation is taken
+      // first and handed to the job: no mutation can slip between the
+      // verdict and the clone.
+      const reservation = cloneJobs.reserveTarget(target);
+      if (!reservation) {
+        return json(409, { error: `clone target is already reserved: ${target}` });
       }
-      if (await fs.stat(target).then(() => true).catch(() => false)) {
-        return json(409, { error: `target already exists: ${target}` });
+      let job: { jobId: string } | undefined;
+      try {
+        // A clone populates a directory and registers it, so it is fenced by
+        // the folder-mutation journal exactly as registration is. A journal
+        // that outlived its mutation is the only record tying a moved-or-
+        // removed directory back to its old registration, and startup
+        // recovery validates identity at the journaled paths: creating a
+        // directory where recovery expects a removed folder — or minting a
+        // fresh id for one it must restore an older entry onto — leaves the
+        // Hub unstartable without manual state repair. Checked before the
+        // reconciliation and claim checks below, since a pending journal
+        // means the registry those checks read is exactly what recovery may
+        // still rewrite; before the mkdir below, so a journaled destination
+        // is refused while it is still absent; and under the reservation, so
+        // no folder mutation of this target can be journaling concurrently.
+        // Fails closed: an uninspectable journal is treated as pending.
+        try {
+          await deps.folderManager?.assertNoPendingMutation();
+        } catch (error) {
+          return folderError(error);
+        }
+
+        // Legacy registrations can persist alias spellings of the target, of
+        // a folder beneath it, or of one of its ancestors; reconciled first,
+        // the claim checks below see them at the canonical paths this clone
+        // would populate or recreate. Reconciliation only rewrites how a
+        // registration spells its path — a registered directory that vanished
+        // stays registered, at the canonical spelling of its recorded path —
+        // so it never hides the stale claims those checks look for. It reads
+        // the registry and realpaths existing ancestors, touching nothing on
+        // disk, and so runs before the mkdir below.
+        let collided: string[];
+        try {
+          collided = await reconcileRegisteredAliasPaths(registry);
+        } catch (error) {
+          return folderError(error);
+        }
+        if (collided.some(canonical => pathsOverlap(canonical, target))) {
+          return json(409, { error: "folder has duplicate alias registrations that require manual cleanup" });
+        }
+        // A registered workspace whose directory is missing keeps its
+        // registration deliberately, and that claim covers the whole
+        // subtree: cloning into an absent /src/repo that still holds a
+        // registered /src/repo/sub would hand that stable workspace id —
+        // with its personal state and credential assignments — unrelated
+        // cloned content. Rejected at or below the target, as the folder
+        // create and rename paths already do.
+        const claimed = registry.atOrBelow(target);
+        if (claimed.length > 0) {
+          return json(409, { error: `workspace is already registered: ${claimed[0]!.path}` });
+        }
+        // The claim above sees only the target's subtree, but the recursive
+        // mkdir below reaches further up: it recreates every missing ancestor
+        // of the target too. An ancestor whose directory vanished keeps its
+        // registration just as deliberately, so resurrecting it and cloning
+        // underneath would point that stable id — with its personal state and
+        // credential assignments — at a hierarchy this clone just made.
+        // Refused while the ancestor is still absent, which is also the only
+        // way the refusal can leave it that way. Scoped to ancestors that are
+        // actually missing: an existing registered ancestor is untouched by
+        // the mkdir and keeps meaning what it always did, so cloning into a
+        // live workspace's folder stays allowed, exactly as creating a folder
+        // there does. Under the reservation, which overlaps every ancestor,
+        // so no folder mutation can create or move one between here and the
+        // mkdir.
+        for (const entry of registry.list()) {
+          const ancestor = normalizeAbsolutePath(entry.path);
+          if (!isPathAtOrBelow(target, ancestor)) continue;
+          if (await fs.stat(ancestor).then(() => true).catch(() => false)) continue;
+          return json(409, { error: `workspace is registered at a missing ancestor: ${ancestor}` });
+        }
+
+        // realpath needs the destination to exist, so the clone creates it —
+        // the first filesystem change, and only now that the fence and the
+        // claim checks have passed under the reservation. The prediction
+        // above holds unless the hierarchy changed under us: a symlink
+        // planted between the two would put the real target outside the
+        // reservation just taken. Refused rather than chased.
+        await fs.mkdir(resolvedDest, { recursive: true });
+        const created = path.join(await fs.realpath(resolvedDest), requestedFolderName || cloneTargetName(url)!);
+        if (normalizeAbsolutePath(created) !== target) {
+          return json(409, { error: `clone destination changed while it was being prepared: ${resolvedDest}` });
+        }
+        if (await fs.stat(target).then(() => true).catch(() => false)) {
+          return json(409, { error: `target already exists: ${target}` });
+        }
+        job = cloneJobs.create(owner, url, target, {
+          credential,
+          retainAssignment: body.retainAssignment === true,
+          reservation,
+        });
+        return json(202, job);
+      } finally {
+        if (!job) reservation.release();
       }
-      return json(202, cloneJobs.create(owner, url, target, {
-        credential,
-        retainAssignment: body.retainAssignment === true,
-      }));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const requestError = /credential|clone URL|SSH or HTTPS/.test(message);
@@ -561,6 +767,36 @@ export function createHubFetchHandler(deps: HubDeps) {
         connection: "keep-alive",
       },
     });
+  };
+
+  const mutateFolder = async (
+    request: Request,
+    operation: "create" | "rename" | "remove",
+  ): Promise<Response> => {
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return json(400, { error: "invalid JSON body" }, NO_STORE_HEADERS);
+    }
+    try {
+      if (operation === "create") {
+        return json(200, await deps.folderManager!.create(body), NO_STORE_HEADERS);
+      }
+      const result = operation === "rename"
+        ? await deps.folderManager!.rename(body)
+        : await deps.folderManager!.remove(body);
+      if (result.status === "needs-stop") {
+        return json(409, {
+          error: "affected workspace sessions must be stopped",
+          needsStop: true,
+          workspaceIds: result.workspaceIds,
+        }, NO_STORE_HEADERS);
+      }
+      return json(200, result.value, NO_STORE_HEADERS);
+    } catch (error) {
+      return folderError(error);
+    }
   };
 
   return async (request: Request, server: HubServer): Promise<Response | undefined> => {
@@ -912,6 +1148,11 @@ export function createHubFetchHandler(deps: HubDeps) {
       if (pathname === "/api/hub/workspaces") {
         return createWorkspace(request);
       }
+      if (deps.folderManager) {
+        if (pathname === "/api/hub/folders/create") return mutateFolder(request, "create");
+        if (pathname === "/api/hub/folders/rename") return mutateFolder(request, "rename");
+        if (pathname === "/api/hub/folders/remove") return mutateFolder(request, "remove");
+      }
       if (pathname === "/api/hub/clone-jobs") {
         return createCloneJob(request, session.user);
       }
@@ -945,9 +1186,17 @@ export function createHubFetchHandler(deps: HubDeps) {
         }
         if (action[2] === "start") {
           try {
+            // Starting is fenced by the folder-mutation journal from inside
+            // the workspace's lifecycle operation (see SessionManager.start):
+            // a journal that outlived its mutation means the registry may
+            // still point at a path recovery has to move or restore, and a
+            // child spawned there would carry this workspace's credentials
+            // and personal identity into unrelated content. The refusal
+            // arrives as a FolderManagerError and answers 409.
             await sessions.start(workspaceId);
             return json(200, { id: workspaceId, running: true });
           } catch (error) {
+            if (error instanceof FolderManagerError) return folderError(error);
             return json(500, { error: error instanceof Error ? error.message : String(error) });
           }
         }
@@ -968,16 +1217,79 @@ export function createHubFetchHandler(deps: HubDeps) {
         if (cloneJobs.isTargetReserved(workspace.path)) {
           return json(409, { error: `workspace is being finalized by a clone job: ${workspaceId}` });
         }
+        // Forgetting is a registered-state mutation and is fenced by the
+        // folder-mutation journal exactly as registration and cloning are.
+        // A journal that outlived its mutation records registry entries
+        // recovery will restore verbatim: forgetting one first deletes its
+        // personal state and credential assignments, and the restore then
+        // resurrects the registration alone — a half-alive workspace the
+        // user explicitly removed. Fails closed, so an uninspectable
+        // journal is treated as pending.
+        //
+        // The check runs INSIDE the lifecycle operation, not before it.
+        // Registered folder renames and removals journal from inside their
+        // runWithSessionsStopped callback, which holds this workspace's
+        // lifecycle queue for the whole journalled window; under the queue
+        // no mutation of this workspace can be mid-journal, while one that
+        // already finished — including a rename that failed its rollback —
+        // has left its record on disk where this check sees it. A check
+        // before runWhileStopped() would instead admit the forget and let a
+        // rename reserve the workspace, journal, and release the queue
+        // first, so the forget would delete the personal state and
+        // credential assignments of a registration recovery then restores.
         try {
-          await sessions.runWhileStopped(workspaceId, () =>
-            personalState.forgetWorkspace(
+          type ForgetOutcome = "forgotten" | "unknown" | "reused";
+          const outcome = await sessions.runWhileStopped(workspaceId, async (): Promise<ForgetOutcome> => {
+            await deps.folderManager?.assertNoPendingMutation();
+            // Every deletion below is keyed by the id alone, and that id can
+            // have been re-minted for a DIFFERENT folder while this callback
+            // waited for the queue: a registered removal ahead of it frees
+            // the basename slug (and clears the journal the fence just
+            // read), and an already-admitted start:false registration or
+            // clone at a non-overlapping path takes no lifecycle queue at
+            // all, so it can claim the freed slug before the queue grants
+            // this callback. The registry's current occupant is therefore
+            // the workspace this request resolved only when it IS the
+            // complete captured entry — same id, same path, same backend.
+            const current = registry.byId(workspaceId);
+            if (!current) {
+              // The registration this request resolved is already gone, and
+              // whatever took it — a registered folder removal, another
+              // forget — deleted the personal state and credential
+              // assignments with it; one that failed partway would still be
+              // holding the journal the fence above reads. So nothing is
+              // left to finish under this id, while deleting by id anyway
+              // would destroy the records of whichever workspace mints the
+              // freed slug next. Answered as the same unknown workspace the
+              // route reports at admission: identical condition, observed
+              // one queue grant later.
+              return "unknown";
+            }
+            if (
+              normalizeAbsolutePath(current.path) !== normalizeAbsolutePath(workspace.path)
+              || current.backend !== workspace.backend
+            ) {
+              // A live workspace this request never described. Refused
+              // without touching anything: forgetting it would delete a
+              // registration, personal state and credential assignments the
+              // user never asked about, and the workspace they did ask about
+              // is gone either way.
+              return "reused";
+            }
+            await personalState.forgetWorkspace(
               workspaceId,
               () => registry.remove(workspaceId),
               async () => { await deps.credentialApi?.metadata.removeWorkspaceAssignments(workspaceId); },
-            )
-          );
+            );
+            return "forgotten";
+          });
+          if (outcome === "unknown") return json(404, { error: `unknown workspace: ${workspaceId}` });
+          if (outcome === "reused") {
+            return json(409, { error: `workspace id now names a different registration: ${workspaceId}` });
+          }
           return json(200, { id: workspaceId, forgotten: true });
         } catch (error) {
+          if (error instanceof FolderManagerError) return folderError(error);
           const message = error instanceof Error ? error.message : String(error);
           if (message.includes("before forgetting")) return json(409, { error: message });
           return json(500, { error: "failed to forget workspace" });
@@ -998,6 +1310,7 @@ export function startHubServer(deps: HubDeps) {
     registry: deps.registry,
     sessions: deps.sessions,
     credentials: deps.cloneCredentials,
+    reservations: deps.reservations,
   });
   const handler = createHubFetchHandler({ ...deps, cloneJobs });
   const server = Bun.serve<BridgeData>({

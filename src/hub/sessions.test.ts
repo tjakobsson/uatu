@@ -66,6 +66,81 @@ describe("SessionManager.isStarting", () => {
   });
 });
 
+describe("SessionManager start precondition", () => {
+  test("checks the fence after the lifecycle queue grants, not when start is called", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-fence-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    await registry.register("/srv/workspaces/fenced");
+
+    let spawns = 0;
+    const backend: SessionBackend = {
+      start: async workspace => {
+        spawns += 1;
+        return fakeSession(workspace.id);
+      },
+    };
+    // Stands in for the folder-mutation journal: absent when the start is
+    // requested, present by the time the queue grants it.
+    let mutationPending = false;
+    const sessions = new SessionManager(
+      registry,
+      { local: backend },
+      EMPTY_CREDENTIAL_CONTEXT_RESOLVER,
+      async () => {
+        if (mutationPending) throw new Error("a pending folder mutation requires recovery");
+      },
+    );
+
+    // A registered folder rename holds the workspace's lifecycle queue for
+    // its whole journalled window; this stands in for that hold.
+    let releaseQueue!: () => void;
+    const held = new Promise<void>(resolve => {
+      releaseQueue = resolve;
+    });
+    const holding = sessions.runExclusive("fenced", () => held);
+
+    const startPromise = sessions.start("fenced");
+    expect(sessions.isStarting("fenced")).toBe(true);
+    // The mutation journals while the start waits its turn — a check made
+    // when start() was called (a route-level fence) had already passed.
+    mutationPending = true;
+    releaseQueue();
+    await holding;
+
+    await expect(startPromise).rejects.toThrow("a pending folder mutation requires recovery");
+    expect(spawns).toBe(0);
+    expect(sessions.isRunning("fenced")).toBe(false);
+    expect(sessions.isStarting("fenced")).toBe(false);
+  });
+
+  test("a refused start leaves the caller's registration cleanup alone", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-fence-cleanup-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    await registry.register("/srv/workspaces/fenced-cleanup");
+
+    const backend: SessionBackend = { start: async workspace => fakeSession(workspace.id) };
+    const sessions = new SessionManager(
+      registry,
+      { local: backend },
+      EMPTY_CREDENTIAL_CONTEXT_RESOLVER,
+      async () => { throw new Error("a pending folder mutation requires recovery"); },
+    );
+
+    // Unregistering is itself a registered-state mutation the same journal
+    // fences, so the refusal must not run the failure cleanup that performs
+    // one; the registration stays and the start is retried after recovery.
+    let cleanups = 0;
+    await expect(sessions.start("fenced-cleanup", async () => { cleanups += 1; }))
+      .rejects.toThrow("a pending folder mutation requires recovery");
+    expect(cleanups).toBe(0);
+    expect(registry.byId("fenced-cleanup")).toBeDefined();
+  });
+});
+
 describe("SessionManager credential contexts", () => {
   test("passes the resolved context explicitly and reports assignment changes as restart-required", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-session-credentials-"));
@@ -565,5 +640,196 @@ describe("SessionManager serialized lifecycle", () => {
     await expect(sessions.stop("stop-refused", async () => { cleaned = true; })).rejects.toThrow("backend refused stop");
     expect(cleaned).toBe(false);
     expect(sessions.isRunning("stop-refused")).toBe(true);
+  });
+});
+
+describe("SessionManager composite lifecycle barrier", () => {
+  test("reports every running or in-flight affected workspace without stopping or mutating", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-composite-conflict-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    await registry.register("/srv/workspaces/alpha");
+    await registry.register("/srv/workspaces/beta");
+
+    let releaseBeta!: (session: RunningSession) => void;
+    const stopped: string[] = [];
+    const backend: SessionBackend = {
+      start: workspace => workspace.id === "beta"
+        ? new Promise<RunningSession>(resolve => { releaseBeta = resolve; })
+        : Promise.resolve(fakeSession(workspace.id, () => stopped.push(workspace.id))),
+    };
+    const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
+    await sessions.start("alpha");
+    const betaStart = sessions.start("beta");
+    let mutated = false;
+    const resultPromise = sessions.runWithSessionsStopped(
+      ["beta", "alpha", "beta"],
+      false,
+      async () => { mutated = true; },
+    );
+
+    await tick();
+    releaseBeta(fakeSession("beta", () => stopped.push("beta")));
+    await betaStart;
+
+    expect(await resultPromise).toEqual({ status: "needs-stop", workspaceIds: ["alpha", "beta"] });
+    expect(stopped).toEqual([]);
+    expect(mutated).toBe(false);
+    expect(sessions.runningIds().sort()).toEqual(["alpha", "beta"]);
+  });
+
+  test("authorized operation stops running and in-flight sessions before its callback", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-composite-stop-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    await registry.register("/srv/workspaces/alpha");
+    await registry.register("/srv/workspaces/beta");
+    const token: TokenCredentialRecord = {
+      id: "composite-token",
+      name: "Composite token",
+      type: "token",
+      enabled: true,
+      capabilities: ["github-cli"],
+      metadata: { host: "github.com" },
+      createdAt: "2026-08-23T00:00:00.000Z",
+    };
+    const resolver: CredentialContextResolver = {
+      revision: () => "composite",
+      runExclusive: operation => operation(),
+      resolve: async () => ({
+        ...structuredClone(EMPTY_RESOLVED_CREDENTIAL_CONTEXT),
+        authentication: [{ host: "github.com", credential: token, token: "secret" }],
+      }),
+    };
+    let releaseBeta!: (session: RunningSession) => void;
+    const events: string[] = [];
+    const backend: SessionBackend = {
+      start: workspace => workspace.id === "beta"
+        ? new Promise<RunningSession>(resolve => { releaseBeta = resolve; })
+        : Promise.resolve(fakeSession(workspace.id, () => events.push(`stop:${workspace.id}`))),
+    };
+    const sessions = new SessionManager(registry, { local: backend }, resolver);
+    await sessions.start("alpha");
+    const betaStart = sessions.start("beta");
+    const resultPromise = sessions.runWithSessionsStopped(["beta", "alpha"], true, async () => {
+      events.push("callback");
+      expect(sessions.runningIds()).toEqual([]);
+      expect(sessions.runningWorkspaceIdsUsingCredential(token.id)).toEqual([]);
+      return "updated";
+    });
+
+    await tick();
+    releaseBeta(fakeSession("beta", () => events.push("stop:beta")));
+    await betaStart;
+
+    expect(await resultPromise).toEqual({ status: "completed", value: "updated" });
+    expect(events).toEqual(["stop:alpha", "stop:beta", "callback"]);
+    expect(sessions.isStarting("beta")).toBe(false);
+  });
+
+  test("does not invoke the callback when any affected session fails to stop", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-composite-failure-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    await registry.register("/srv/workspaces/alpha");
+    await registry.register("/srv/workspaces/beta");
+    const stops: string[] = [];
+    const backend: SessionBackend = {
+      start: async workspace => ({
+        ...fakeSession(workspace.id),
+        stop: async () => {
+          stops.push(workspace.id);
+          if (workspace.id === "beta") throw new Error("beta refused stop");
+        },
+      }),
+    };
+    const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
+    await Promise.all([sessions.start("alpha"), sessions.start("beta")]);
+    let mutated = false;
+
+    let failure: unknown;
+    try {
+      await sessions.runWithSessionsStopped(["beta", "alpha"], true, async () => { mutated = true; });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(stops).toEqual(["alpha", "beta"]);
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).errors[0]).toEqual(new Error("beta refused stop"));
+    expect(mutated).toBe(false);
+    expect(sessions.isRunning("alpha")).toBe(false);
+    expect(sessions.isRunning("beta")).toBe(true);
+  });
+
+  test("composite stop coordination cannot deadlock against nested acquisitions", async () => {
+    // Mirrors server.ts's revokeExclusive shape: a composite that holds
+    // alpha while acquiring beta. If the folder composite installed one
+    // simultaneous barrier across both queues, the two would wait on each
+    // other forever; sorted nested acquisition shares its total order.
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-composite-deadlock-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    await registry.register("/srv/workspaces/alpha");
+    await registry.register("/srv/workspaces/beta");
+    const backend: SessionBackend = { start: async workspace => fakeSession(workspace.id) };
+    const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
+
+    let releaseAlpha!: () => void;
+    const alphaHeld = new Promise<void>(resolve => { releaseAlpha = resolve; });
+    const inflight = sessions.runExclusive("alpha", () => alphaHeld);
+    // The nested composite queues on alpha behind the in-flight op...
+    const nested = sessions.runExclusive("alpha", () => sessions.runExclusive("beta", async () => "nested"));
+    await tick();
+    // ...and the folder composite arrives on [alpha, beta] after it.
+    const composite = sessions.runWithSessionsStopped(["alpha", "beta"], false, async () => "composite");
+    await tick();
+    releaseAlpha();
+
+    expect(await nested).toBe("nested");
+    expect(await composite).toEqual({ status: "completed", value: "composite" });
+    await inflight;
+  });
+
+  test("queues a start until a registered path update has completed", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "uatu-sessions-composite-path-"));
+    tempDirectories.push(dir);
+    const registry = new WorkspaceRegistry(path.join(dir, "registry.json"));
+    await registry.load();
+    const workspace = await registry.register("/srv/workspaces/before");
+    const startedPaths: string[] = [];
+    const backend: SessionBackend = {
+      start: async entry => {
+        startedPaths.push(entry.path);
+        return fakeSession(entry.id);
+      },
+    };
+    const sessions = new SessionManager(registry, { local: backend }, EMPTY_CREDENTIAL_CONTEXT_RESOLVER);
+    let updateEntered!: () => void;
+    const entered = new Promise<void>(resolve => { updateEntered = resolve; });
+    let finishUpdate!: () => void;
+    const updateGate = new Promise<void>(resolve => { finishUpdate = resolve; });
+    const update = sessions.runWithSessionsStopped([workspace.id], false, async () => {
+      await registry.replacePathPrefix("/srv/workspaces/before", "/srv/workspaces/after");
+      updateEntered();
+      await updateGate;
+    });
+    await entered;
+
+    const start = sessions.start(workspace.id);
+    const stop = sessions.stop(workspace.id);
+    await tick();
+    expect(startedPaths).toEqual([]);
+
+    finishUpdate();
+    expect(await update).toEqual({ status: "completed", value: undefined });
+    await start;
+    expect(await stop).toBe(true);
+    expect(startedPaths).toEqual(["/srv/workspaces/after"]);
+    expect(sessions.isRunning(workspace.id)).toBe(false);
   });
 });

@@ -99,6 +99,100 @@ paths:
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
+  /api/hub/folders/create:
+    post:
+      operationId: hubCreateFolder
+      tags: [Hub]
+      summary: Create an empty child folder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateFolderRequest' }
+            example: { parent: /src, name: new-project }
+      responses:
+        '200':
+          description: Folder created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreateFolderResult' }
+              example: { path: /src/new-project }
+        '400': { $ref: '#/components/responses/FolderMutationError' }
+        '401': { $ref: '#/components/responses/FolderMutationError' }
+        '403': { $ref: '#/components/responses/FolderMutationError' }
+        '404': { $ref: '#/components/responses/FolderMutationError' }
+        '409': { $ref: '#/components/responses/FolderMutationError' }
+        '500': { $ref: '#/components/responses/FolderMutationError' }
+  /api/hub/folders/rename:
+    post:
+      operationId: hubRenameFolder
+      tags: [Hub]
+      summary: Rename a folder to an unused sibling name
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RenameFolderRequest' }
+            example: { path: /src/old-project, name: new-project, stop: true }
+      responses:
+        '200':
+          description: Folder renamed and affected workspace paths updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RenameFolderResult' }
+              example: { path: /src/new-project, workspaceIds: [old-project] }
+        '400': { $ref: '#/components/responses/FolderMutationError' }
+        '401': { $ref: '#/components/responses/FolderMutationError' }
+        '403': { $ref: '#/components/responses/FolderMutationError' }
+        '404': { $ref: '#/components/responses/FolderMutationError' }
+        '409':
+          description: The destination or another operation conflicts, the folder is not empty, or affected sessions need explicit stop authorization.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - { $ref: '#/components/schemas/FolderMutationError' }
+                  - { $ref: '#/components/schemas/FolderStopConflict' }
+              examples:
+                destinationExists: { value: { error: destination already exists } }
+                needsStop: { value: { error: affected workspace sessions must be stopped, needsStop: true, workspaceIds: [old-project] } }
+        '500': { $ref: '#/components/responses/FolderMutationError' }
+  /api/hub/folders/remove:
+    post:
+      operationId: hubRemoveFolder
+      tags: [Hub]
+      summary: Remove an empty folder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RemoveFolderRequest' }
+            example: { path: /src/old-project, stop: true }
+      responses:
+        '200':
+          description: Empty folder removed, with its workspace registration when present
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RemoveFolderResult' }
+              examples:
+                unregistered: { value: { path: /src/empty-folder } }
+                registered: { value: { path: /src/old-project, workspaceId: old-project } }
+        '400': { $ref: '#/components/responses/FolderMutationError' }
+        '401': { $ref: '#/components/responses/FolderMutationError' }
+        '403': { $ref: '#/components/responses/FolderMutationError' }
+        '404': { $ref: '#/components/responses/FolderMutationError' }
+        '409':
+          description: The folder is not empty, another operation conflicts, or an affected session needs explicit stop authorization.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - { $ref: '#/components/schemas/FolderMutationError' }
+                  - { $ref: '#/components/schemas/FolderStopConflict' }
+              examples:
+                notEmpty: { value: { error: folder is not empty } }
+                needsStop: { value: { error: affected workspace sessions must be stopped, needsStop: true, workspaceIds: [old-project] } }
+        '500': { $ref: '#/components/responses/FolderMutationError' }
   /api/hub/workspaces:
     post:
       operationId: hubCreateWorkspace
@@ -117,7 +211,7 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '409':
-          description: Initialization confirmation required or target reserved
+          description: Initialization confirmation required, target reserved, or a pending folder mutation awaits recovery
           content:
             application/json:
               schema: { $ref: '#/components/schemas/WorkspaceConflict' }
@@ -128,11 +222,13 @@ paths:
       operationId: hubStartWorkspace
       tags: [Hub]
       summary: Start a registered workspace
+      description: Refused with 409 while a pending folder mutation awaits recovery; the check runs inside the workspace lifecycle operation, so a folder mutation cannot journal between it and the start.
       responses:
         '200': { $ref: '#/components/responses/WorkspaceAction' }
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
   /api/hub/sessions/{workspaceId}/stop:
     parameters: [{ $ref: '#/components/parameters/WorkspaceId' }]
@@ -1001,6 +1097,12 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
           example: { error: request rejected }
+    FolderMutationError:
+      description: Folder mutation rejected
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/FolderMutationError' }
+          example: { error: folder operation failed }
     PlainError:
       description: Plain-text terminal error
       content:
@@ -1162,6 +1264,72 @@ components:
         dirs:
           type: array
           items: { type: object, required: [name, git, registeredId], properties: { name: { type: string }, git: { type: boolean }, registeredId: { oneOf: [{ $ref: '#/components/schemas/WorkspaceId' }, { type: 'null' }] } }, additionalProperties: false }
+      additionalProperties: false
+    FolderName:
+      type: string
+      minLength: 1
+      pattern: '^(?!\.)(?![\s\S]*[\\/\x00-\x1f\x7f\p{Cf}])[\s\S]*\S[\s\S]*$'
+      description: >-
+        A visible, non-hidden single path segment. Dot-prefixed names, path separators, control characters,
+        Unicode format characters (Cf — the zero-width family, the bidi embedding and override controls, the
+        BOM, and the tag characters), and names made only of whitespace or format characters are rejected: none
+        of them survive a nonempty check, and a bidi control can make a folder display a name other than the
+        path it occupies. The pattern is a Unicode-mode expression, as JSON Schema requires, so its `\p{Cf}`
+        escape covers the format characters above the BMP as well; it accepts exactly the names the server
+        accepts.
+    CreateFolderRequest:
+      type: object
+      required: [parent, name]
+      properties:
+        parent: { type: string, minLength: 1, description: Absolute path of the existing direct parent directory. }
+        name: { $ref: '#/components/schemas/FolderName' }
+      additionalProperties: false
+    RenameFolderRequest:
+      type: object
+      required: [path, name]
+      properties:
+        path: { type: string, minLength: 1, description: Absolute path of the direct non-symbolic-link directory to rename. }
+        name: { $ref: '#/components/schemas/FolderName' }
+        stop: { type: boolean, default: false, description: Authorizes stopping all affected workspace sessions before mutation. }
+      additionalProperties: false
+    RemoveFolderRequest:
+      type: object
+      required: [path]
+      properties:
+        path: { type: string, minLength: 1, description: Absolute path of the empty direct non-symbolic-link directory to remove. }
+        stop: { type: boolean, default: false, description: Authorizes stopping the affected workspace session before mutation. }
+      additionalProperties: false
+    CreateFolderResult:
+      type: object
+      required: [path]
+      properties: { path: { type: string, minLength: 1, description: Absolute path of the created folder. } }
+      additionalProperties: false
+    RenameFolderResult:
+      type: object
+      required: [path, workspaceIds]
+      properties:
+        path: { type: string, minLength: 1, description: Absolute destination path. }
+        workspaceIds: { type: array, uniqueItems: true, items: { $ref: '#/components/schemas/WorkspaceId' }, description: Stable ids of every registration moved with the folder. }
+      additionalProperties: false
+    RemoveFolderResult:
+      type: object
+      required: [path]
+      properties:
+        path: { type: string, minLength: 1, description: Absolute path removed by the operation. }
+        workspaceId: { $ref: '#/components/schemas/WorkspaceId', description: Stable id of the registration removed with the folder, when one existed. }
+      additionalProperties: false
+    FolderMutationError:
+      type: object
+      required: [error]
+      properties: { error: { type: string, minLength: 1 } }
+      additionalProperties: false
+    FolderStopConflict:
+      type: object
+      required: [error, needsStop, workspaceIds]
+      properties:
+        error: { type: string, minLength: 1 }
+        needsStop: { type: boolean, const: true }
+        workspaceIds: { type: array, minItems: 1, uniqueItems: true, items: { $ref: '#/components/schemas/WorkspaceId' }, description: Complete list of running or starting affected workspaces. }
       additionalProperties: false
     CreateWorkspaceRequest:
       type: object
@@ -1355,7 +1523,7 @@ components:
     CreateCloneJobRequest:
       type: object
       required: [url, dest]
-      properties: { url: { type: string }, dest: { type: string }, folderName: { type: string }, credentialId: { $ref: '#/components/schemas/CredentialId' }, retainAssignment: { type: boolean, default: false } }
+      properties: { url: { type: string }, dest: { type: string }, folderName: { type: string, description: "Checkout folder name, trimmed before use. Absent, blank, or whitespace-only derives it from the clone URL. Any other value must be one visible path segment — `.`, `..`, path separators, control characters, and Unicode format characters (Cf) answer 400 — but, unlike FolderName, a dot-prefixed checkout is accepted." }, credentialId: { $ref: '#/components/schemas/CredentialId' }, retainAssignment: { type: boolean, default: false } }
       dependentSchemas:
         retainAssignment:
           if: { properties: { retainAssignment: { const: true } } }

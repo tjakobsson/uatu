@@ -20,6 +20,10 @@ export function sessionBasePath(workspaceId: string): string {
   return `/s/${workspaceId}/`;
 }
 
+export type SessionsStoppedResult<T> =
+  | { status: "completed"; value: T }
+  | { status: "needs-stop"; workspaceIds: string[] };
+
 export class SessionManager {
   private readonly running = new Map<string, RunningSession>();
   // Published at CALL time — before the operation even reaches the front of
@@ -36,6 +40,11 @@ export class SessionManager {
     private readonly registry: WorkspaceRegistry,
     private readonly backends: Record<WorkspaceEntry["backend"], SessionBackend>,
     private readonly credentials: CredentialContextResolver,
+    // Precondition for spawning a child, evaluated INSIDE the queued start
+    // operation (see start()). Injected rather than imported because the
+    // folder manager that owns the recovery journal takes this manager as a
+    // dependency and is therefore assembled after it.
+    private readonly assertStartAllowed?: () => Promise<void>,
   ) {}
 
   get(workspaceId: string): RunningSession | undefined {
@@ -94,6 +103,41 @@ export class SessionManager {
     });
   }
 
+  // Acquires every affected queue NESTED in ascending id order — the same
+  // total order server.ts's revokeExclusive uses for its multi-workspace
+  // acquisitions — so the two composite shapes cannot deadlock. A
+  // simultaneous barrier across all queues can: it would hold a later
+  // queue while waiting for an earlier queue's predecessor, while that
+  // predecessor (a nested composite already holding the earlier queue)
+  // waits to acquire the later one.
+  async runWithSessionsStopped<T>(
+    workspaceIds: Iterable<string>,
+    stopAuthorized: boolean,
+    operation: () => Promise<T>,
+  ): Promise<SessionsStoppedResult<T>> {
+    const ids = [...new Set(workspaceIds)].sort();
+    const acquire = async (index: number): Promise<SessionsStoppedResult<T>> => {
+      if (index < ids.length) {
+        return this.enqueue(ids[index]!, () => acquire(index + 1));
+      }
+      const needsStop = ids.filter(id => this.running.has(id));
+      if (needsStop.length > 0 && !stopAuthorized) {
+        return { status: "needs-stop", workspaceIds: needsStop };
+      }
+
+      if (stopAuthorized) {
+        const results = await Promise.allSettled(ids.map(id => this.stopWhileLifecycleQueueHeld(id)));
+        const failures = results.flatMap(result => result.status === "rejected" ? [result.reason] : []);
+        if (failures.length > 0) {
+          throw new AggregateError(failures, "one or more affected workspace sessions failed to stop");
+        }
+      }
+
+      return { status: "completed", value: await operation() };
+    };
+    return acquire(0);
+  }
+
   // Starts (or joins the pending start of) the session for a registered
   // workspace.
   start(workspaceId: string, onFailure?: () => Promise<void>): Promise<RunningSession> {
@@ -112,6 +156,25 @@ export class SessionManager {
       if (existing) {
         return existing;
       }
+
+      // The folder-mutation journal fence runs HERE, under this workspace's
+      // lifecycle queue, and not at the route that asked for the start.
+      // Registered folder renames and removals write, clear, and roll back
+      // their journal inside the runWithSessionsStopped callback, which
+      // holds the lifecycle queue of EVERY workspace the mutation touches
+      // for the whole journalled window. So while this operation owns the
+      // queue no mutation of this workspace can be mid-journal, and a
+      // journal that a failed rollback or finalization left behind is
+      // already on disk for the check to observe. A check made before the
+      // call — at the route — proves nothing: a mutation may journal
+      // between it and the moment the queue grants this operation, and the
+      // child would then be spawned with this workspace's credentials and
+      // personal identity in whatever content now sits at the registered
+      // path. Checked before the spawn block below, so a refusal spawns
+      // nothing and mutates no registered state (the caller's failure
+      // cleanup unregisters, which is itself fenced while recovery is
+      // pending).
+      await this.assertStartAllowed?.();
 
       let workspace: WorkspaceEntry;
       let session: RunningSession;

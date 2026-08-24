@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { CloneProcess, CloneProcessFactory, CloneProcessStart } from "./clone-process";
 import { CloneJobManager, type CloneJobEvent, type CloneJobTimer } from "./clone-jobs";
 import type { ResolvedCloneCredential } from "./credential-context";
+import { PathReservationCoordinator } from "./path-reservations";
 import type { WorkspaceEntry } from "./registry";
 
 class FakeTimer implements CloneJobTimer {
@@ -92,7 +93,14 @@ class FakeProcess implements CloneProcess {
   }
 }
 
-function fixture(overrides: { maxReplayBytes?: number; maxInputBytes?: number; inactivityMs?: number; lifetimeMs?: number; retentionMs?: number } = {}) {
+function fixture(overrides: {
+  maxReplayBytes?: number;
+  maxInputBytes?: number;
+  inactivityMs?: number;
+  lifetimeMs?: number;
+  retentionMs?: number;
+  reservations?: PathReservationCoordinator;
+} = {}) {
   const timer = new FakeTimer();
   const processes: FakeProcess[] = [];
   const starts: CloneProcessStart[] = [];
@@ -207,6 +215,7 @@ function fixture(overrides: { maxReplayBytes?: number; maxInputBytes?: number; i
     retentionMs: overrides.retentionMs ?? 50,
     maxReplayBytes: overrides.maxReplayBytes ?? 1_000,
     maxInputBytes: overrides.maxInputBytes ?? 20,
+    reservations: overrides.reservations,
   });
   return {
     manager, timer, processes, starts, registered, removed, started, stopped, assigned, unassigned, sessions, runtimeSections,
@@ -295,6 +304,46 @@ describe("CloneJobManager ownership and replay", () => {
     expect(() => f.manager.create("bob", "remote", "/tmp/repo")).not.toThrow();
     await f.manager.cancel("bob", "job-2");
     expect(await f.manager.cancel("alice", first.jobId)).toBe("terminal");
+  });
+
+  test("adopts a caller's reservation and releases it with the job", async () => {
+    const reservations = new PathReservationCoordinator();
+    const f = fixture({ reservations });
+    // A caller that checks the target before creating the job must hold the
+    // reservation across both, so the job adopts that reservation instead of
+    // acquiring one of its own — an acquisition that would fail against the
+    // caller's own hold, leaving the checks and the clone in separate ones.
+    const held = reservations.acquire(["/tmp/handoff/repo"])!;
+    const { jobId } = f.manager.create("alice", "remote", "/tmp/handoff/../handoff/repo", { reservation: held });
+    expect(reservations.isReserved("/tmp/handoff/repo")).toBe(true);
+    await tick();
+    await f.manager.cancel("alice", jobId);
+    expect(reservations.isReserved("/tmp/handoff/repo")).toBe(false);
+  });
+
+  test("refuses a caller reservation that does not cover the target", () => {
+    const reservations = new PathReservationCoordinator();
+    const f = fixture({ reservations });
+    const elsewhere = reservations.acquire(["/tmp/elsewhere"])!;
+    expect(() => f.manager.create("alice", "remote", "/tmp/target", { reservation: elsewhere }))
+      .toThrow("clone reservation does not cover the target");
+    expect(reservations.isReserved("/tmp/target")).toBe(false);
+  });
+
+  test("shares hierarchy-aware reservations across clone managers", async () => {
+    const reservations = new PathReservationCoordinator();
+    const first = fixture({ reservations });
+    const second = fixture({ reservations });
+    const { jobId } = first.manager.create("alice", "remote", "/tmp/shared/group/repo");
+
+    expect(() => second.manager.create("bob", "remote", "/tmp/shared/group")).toThrow("already reserved");
+    expect(() => second.manager.create("bob", "remote", "/tmp/shared/group/repo/nested")).toThrow("already reserved");
+    expect(() => second.manager.create("bob", "remote", "/tmp/shared/group/repo-two")).not.toThrow();
+
+    await tick();
+    await first.manager.cancel("alice", jobId);
+    expect(() => second.manager.create("bob", "remote", "/tmp/shared/group/repo/nested")).not.toThrow();
+    await second.manager.close();
   });
 });
 
@@ -562,6 +611,21 @@ describe("CloneJobManager state machine", () => {
     f.processes[0].failTerminateTimes(new Error("descendant still present"), 1);
     await f.manager.close();
     expect(f.processes[0].terminateCalls).toBe(callsAfterFailure + 2);
+  });
+
+  test("an unreaped process retains its shared hierarchy reservation", async () => {
+    const reservations = new PathReservationCoordinator();
+    const f = fixture({ reservations });
+    const { jobId } = f.manager.create("alice", "remote", "/tmp/shared-retained/repo");
+    await tick();
+    f.processes[0].failTerminate(new Error("process survived"));
+
+    expect(await f.manager.cancel("alice", jobId)).toBe("cleanup-failed");
+    expect(reservations.acquire(["/tmp/shared-retained"])).toBeUndefined();
+
+    f.processes[0].failTerminateTimes(new Error("still alive"), 1);
+    await f.manager.close();
+    expect(reservations.acquire(["/tmp/shared-retained"])).toBeDefined();
   });
 
   test("failed registration rollback after cancellation reports cleanup failure", async () => {
