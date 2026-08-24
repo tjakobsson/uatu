@@ -130,8 +130,8 @@ test.describe("touch conversation inventory presentation", () => {
     await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "touch");
   });
 
-  test("keeps hidden-tab attention until chooser interaction is eventually connected", async ({ page }) => {
-    await applyChatInventoryFixture(page, { unseenCount: 1, announce: true });
+  test("keeps hidden-tab attention until chooser interaction is eventually connected", async ({ page, request }) => {
+    await control(request, { action: "externalCreate", title: "Created while Chat is hidden" });
     await expect(page.locator("#touch-tab-chat")).toHaveAttribute("aria-label", "Chat, 1 new conversation");
     await expect(page.locator("#touch-tab-chat .chat-inventory-attention")).toBeVisible();
 

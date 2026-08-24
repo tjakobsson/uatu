@@ -1505,14 +1505,19 @@ export function initChat(): void {
     if (selectedMissing) enterSelectedConversationDeleted();
 
     // The successful response replaces inventory truth. It does not install a
-    // snapshot or touch the selected projection.
+    // snapshot or touch the selected projection unless an unavailable
+    // selection has returned and needs its stream restored.
     conversations = next;
     const selectedConversation = selectedId ? next.find(conversation => conversation.id === selectedId) : undefined;
     if (selectedConversation && projection?.conversationId === selectedId) {
       projection = { ...projection, conversation: selectedConversation };
       if (chatTitle) chatTitle.textContent = displayConversationTitle(selectedConversation);
     }
-    if (selectedConversationDeleted) patchChooser(null, true);
+    if (selectedConversationDeleted && selectedConversation && selectedId) {
+      selectedConversationDeleted = false;
+      patchChooser(selectedId);
+      void selectConversation(selectedId);
+    } else if (selectedConversationDeleted) patchChooser(null, true);
     else patchChooser(selectedId);
     syncInventoryAwareness(tracked.increased);
     syncControls();

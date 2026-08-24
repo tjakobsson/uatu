@@ -254,6 +254,52 @@ test.describe("live conversation inventory", () => {
     await expectUniqueConversationOptions(page);
   });
 
+  test("a selected conversation that returns to top-level inventory reloads and resumes streaming", async ({ page, request }) => {
+    await request.post("/__e2e/reset");
+    const selected = await control<ConversationSnapshot>(request, {
+      action: "seed",
+      title: "Temporarily nested conversation",
+      items: transcript(8),
+    });
+    const credential = await token(request);
+    await bootChat(page, credential);
+    await expect(page.locator("#chat-conversation-select")).toHaveValue(selected.conversation.id);
+
+    await stageAttachment(page);
+    await chooseChatModel(page, "GPT-5");
+    await page.locator("#chat-configuration-done").click();
+    await page.locator("#chat-input").fill("Keep this draft while the session is nested");
+
+    await control(request, { action: "externalSetChild", conversationId: selected.conversation.id, child: true });
+    await expect(page.locator("#chat-conversation-unavailable")).toBeVisible();
+    await expect(page.locator("#chat-conversation-select")).toHaveValue("");
+
+    await control(request, { action: "item", conversationId: selected.conversation.id, item: {
+      id: "message:while-nested",
+      type: "assistant_message",
+      createdAt: 20,
+      markdown: "Loaded from the restored snapshot",
+    } });
+    await control(request, { action: "externalSetChild", conversationId: selected.conversation.id, child: false });
+
+    await expect(page.locator("#chat-conversation-unavailable")).toBeHidden();
+    await expect(page.locator("#chat-conversation-select")).toHaveValue(selected.conversation.id);
+    await expect(page.locator("#chat-composer")).not.toHaveAttribute("inert", "");
+    await expect(page.locator("#chat-input")).toHaveValue("Keep this draft while the session is nested");
+    await expect(page.locator("#chat-attachments .chat-attachment")).toContainText("inventory.png");
+    await expect(page.locator("#chat-configuration-trigger")).toContainText("GPT-5");
+    await expect(page.locator("#chat-items")).toContainText("Loaded from the restored snapshot");
+
+    await control(request, { action: "item", conversationId: selected.conversation.id, item: {
+      id: "message:after-restore",
+      type: "assistant_message",
+      createdAt: 21,
+      markdown: "Delivered after the stream resumed",
+    } });
+    await expect(page.locator("#chat-items")).toContainText("Delivered after the stream resumed");
+    await expectUniqueConversationOptions(page);
+  });
+
   test("inventory transport and provider-pump recovery fetch authoritative state without duplicates", async ({ page, request }) => {
     await request.post("/__e2e/reset");
     await control(request, { action: "seed", title: "Recovery baseline", items: [] });

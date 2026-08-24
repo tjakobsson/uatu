@@ -28,6 +28,12 @@ Inventory synchronization SHALL recover after transport interruption, provider-e
 - **AND** Chat does not silently select another conversation
 - **AND** the user can explicitly choose or create a conversation
 
+#### Scenario: Selected conversation returns to top-level inventory
+- **WHEN** the selected conversation temporarily becomes a child session and later returns to the authoritative top-level inventory
+- **THEN** Chat removes the unavailable state without switching to another conversation
+- **AND** Chat reloads the conversation and resumes its event stream
+- **AND** the local draft, staged attachments, and staged configuration remain available
+
 #### Scenario: Subagent lifecycle does not change the inventory
 - **WHEN** OpenCode creates, updates, or deletes a child session for a subagent
 - **THEN** the child does not appear in the conversation chooser

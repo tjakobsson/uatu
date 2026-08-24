@@ -179,6 +179,11 @@ async function handleE2EChat(request: Request): Promise<Response> {
     case "externalDelete":
       if (body.conversationId) return Response.json(chatService.externalDelete(body.conversationId, body.invalidate !== false));
       break;
+    case "externalSetChild":
+      if (body.conversationId && typeof body.child === "boolean") {
+        return Response.json(chatService.externalSetChild(body.conversationId, body.child, body.invalidate !== false));
+      }
+      break;
     case "item":
       if (body.conversationId && body.item) return Response.json(chatService.publishItem(body.conversationId, body.item));
       break;

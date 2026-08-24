@@ -517,6 +517,14 @@ export class FakeE2EChatService implements WorkspaceChatService {
     return conversation;
   }
 
+  externalSetChild(id: string, child: boolean, invalidate = true): ConversationSummary {
+    const conversation = this.require(id);
+    if (child) this.children.add(id);
+    else this.children.delete(id);
+    if (invalidate) this.invalidateInventory();
+    return conversation;
+  }
+
   invalidateInventory(): void {
     this.inventoryInvalidations += 1;
     this.inventory.invalidate();

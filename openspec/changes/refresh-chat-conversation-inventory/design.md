@@ -105,7 +105,7 @@ Alternative considered: clear the indicator when Chat becomes visible. Rejected 
 
 If reconciliation no longer contains the selected id, the client closes that conversation's SSE stream, preserves its local draft state, and replaces the chooser selection with a non-conversation placeholder explaining that the conversation was deleted elsewhere. The timeline does not get replaced by another conversation. Prompt, rename, attachment, configuration, and cancellation controls become unavailable for the missing selection while `New conversation` and the chooser remain usable.
 
-An explicit chooser change or local creation leaves this state through the normal selection path. This is the sole removal case where preserving the selected id is impossible; making it explicit avoids an apparently spontaneous context switch.
+An explicit chooser change or local creation leaves this state through the normal selection path. If the same id later returns to top-level inventory, as can happen when session parentage changes, the client also uses the normal selection path to fetch a fresh snapshot and restart the conversation stream while preserving local presentation state. Other inventory updates still avoid reloading a selected conversation that remained present throughout. Making the unavailable state explicit avoids an apparently spontaneous context switch.
 
 ### 8. Keep the public contract and generated clients synchronized
 
