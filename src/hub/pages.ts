@@ -2162,6 +2162,23 @@ function clearCloneState() {
     uiBusy -= 1;
   }
 }
+// The submitted form survives the whole job. An accepted job can still end in
+// clone-failed or register-failed, and finishClone re-enables this same form
+// for the retry, so only a successful terminal result clears it — exactly as
+// a failure to create the job preserves it. A page reload mid-job renders a
+// fresh empty form and the job's events carry no form values, so a failure
+// after a reload starts blank.
+function resetCloneForm() {
+  document.getElementById("clone-url").value = "";
+  document.getElementById("clone-folder-name").value = "";
+  cloneDisplayName.value = "";
+  cloneNameTouched = false;
+  cloneCredential.value = "";
+  cloneRetainedAuth.value = "";
+  cloneSigning.value = "";
+  cloneStartAfter.checked = false;
+  updateCloneCredentialState();
+}
 function parseCloneEvent(event) {
   try { return JSON.parse(event.data); }
   catch { return {}; }
@@ -2194,6 +2211,7 @@ async function finishClone(result) {
   cloneResponseLabel.textContent = "Terminal response";
   if (error && status !== "succeeded") appendCloneOutput((cloneOutput.textContent ? "\\n" : "") + error + "\\n");
   if (status === "succeeded") {
+    resetCloneForm();
     const workspaceId = result.workspaceId || result.id;
     if (workspaceId && result.running !== false) {
       // Only an explicitly requested successful start navigates.
@@ -2303,15 +2321,6 @@ cloneForm.onsubmit = async event => {
     cloneJobId = result.jobId;
     if (!cloneJobId) throw new Error("clone job did not return an id");
     sessionStorage.setItem(cloneJobStorageKey, cloneJobId);
-    input.value = "";
-    folderNameInput.value = "";
-    cloneDisplayName.value = "";
-    cloneNameTouched = false;
-    cloneCredential.value = "";
-    cloneRetainedAuth.value = "";
-    cloneSigning.value = "";
-    cloneStartAfter.checked = false;
-    updateCloneCredentialState();
     button.textContent = "Clone";
     setCloneActive(true);
     connectCloneEvents();

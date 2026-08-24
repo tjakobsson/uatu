@@ -46,6 +46,67 @@ function retainedHostFunction(html: string) {
     })(credential) as string | null;
 }
 
+// Extracts the clone page's terminal-result handling (resetCloneForm +
+// finishClone) with the form controls and the page's side effects faked, so
+// what a given job result does to the submitted form can be exercised
+// directly. Returns the fake controls alongside the handler.
+function cloneFinishFunction(html: string) {
+  const script = clientScript(html);
+  const reset = script.slice(script.indexOf("function resetCloneForm"), script.indexOf("function parseCloneEvent"));
+  const finish = script.slice(script.indexOf("async function finishClone"), script.indexOf("function connectCloneEvents"));
+  expect(reset).toContain("cloneStartAfter.checked = false");
+  expect(finish).toContain("const status = result.status || result.result");
+  return () => {
+    const form = {
+      url: { value: "https://github.com/acme/docs.git" },
+      folderName: { value: "docs" },
+      displayName: { value: "Docs site" },
+      credential: { value: "cred-token" },
+      retainedAuth: { value: "cred-key" },
+      signing: { value: "cred-sign" },
+      startAfter: { checked: true },
+    };
+    const opened: string[] = [];
+    const handler = new Function(
+      "document",
+      "cloneDisplayName",
+      "cloneCredential",
+      "cloneRetainedAuth",
+      "cloneSigning",
+      "cloneStartAfter",
+      "updateCloneCredentialState",
+      "clearCloneState",
+      "setClonePhase",
+      "appendCloneOutput",
+      "cloneOutput",
+      "cloneResponse",
+      "cloneResponseLabel",
+      "loadBrowser",
+      "openSession",
+      "refreshWorkspaceState",
+      `let cloneNameTouched = true;\n${reset}\n${finish}\nreturn finishClone;`,
+    )(
+      { getElementById: (id: string) => (id === "clone-url" ? form.url : form.folderName) },
+      form.displayName,
+      form.credential,
+      form.retainedAuth,
+      form.signing,
+      form.startAfter,
+      () => {},
+      () => {},
+      () => {},
+      () => {},
+      { textContent: "" },
+      { value: "" },
+      { textContent: "" },
+      async () => {},
+      (id: string) => opened.push(id),
+      async () => {},
+    ) as (result: Record<string, unknown>) => Promise<void>;
+    return { form, opened, finishClone: handler };
+  };
+}
+
 describe("authenticated Hub pages", () => {
   test("share navigation and have syntactically valid page-scoped initialization", () => {
     for (const pageName of ["dashboard", "clone", "settings"] as const) {
@@ -190,6 +251,47 @@ describe("clone page", () => {
     // the existing default.
     expect(retainedHostFor("git@[2001:db8::1]:owner/repo.git", token)).toBe("github.example.com");
     expect(retainedHostFor("not a remote", sshKey)).toBe("github.com");
+  });
+
+  test("keeps the submitted clone form until the job succeeds", async () => {
+    const html = htmlFor.clone();
+    // Accepting the job must not clear the form: the same controls are what
+    // finishClone re-enables for the retry after a failed job.
+    const submit = html.slice(html.indexOf("cloneForm.onsubmit"), html.indexOf("cloneResponseForm.onsubmit"));
+    expect(submit).toContain("sessionStorage.setItem(cloneJobStorageKey, cloneJobId)");
+    for (const cleared of [
+      'input.value = ""',
+      'folderNameInput.value = ""',
+      'cloneDisplayName.value = ""',
+      'cloneRetainedAuth.value = ""',
+      'cloneSigning.value = ""',
+      "cloneStartAfter.checked = false",
+    ]) {
+      expect(submit).not.toContain(cleared);
+    }
+    const buildClone = cloneFinishFunction(html);
+    for (const status of ["clone-failed", "register-failed", "cleanup-failed", "start-failed", "cancelled", "timed-out"]) {
+      const { form, finishClone } = buildClone();
+      await finishClone({ status, error: "remote hung up" });
+      expect(form.url.value).toBe("https://github.com/acme/docs.git");
+      expect(form.displayName.value).toBe("Docs site");
+      expect(form.credential.value).toBe("cred-token");
+      expect(form.retainedAuth.value).toBe("cred-key");
+      expect(form.signing.value).toBe("cred-sign");
+      expect(form.startAfter.checked).toBe(true);
+    }
+    // Only a successful terminal result clears it, including the run that
+    // navigates straight into the started session.
+    for (const result of [
+      { status: "succeeded", workspaceId: "ws-1", running: false },
+      { status: "succeeded", workspaceId: "ws-1" },
+    ]) {
+      const { form, opened, finishClone } = buildClone();
+      await finishClone(result);
+      expect([form.url.value, form.folderName.value, form.displayName.value, form.credential.value, form.retainedAuth.value, form.signing.value]).toEqual(["", "", "", "", "", ""]);
+      expect(form.startAfter.checked).toBe(false);
+      expect(opened).toEqual(result.running === false ? [] : ["ws-1"]);
+    }
   });
 
   test("renders accessible folder management controls and a prefilled rename dialog", () => {
