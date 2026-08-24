@@ -675,7 +675,7 @@ describe("commit-boundary failure injection", () => {
     const folder = await gitRepository(f.folders, "repo");
     await fs.writeFile(folderJournal, "{}\n", { mode: 0o600 });
     await expect(coordinator.configureExisting({ path: folder, displayName: "Repo" }))
-      .rejects.toMatchObject({ code: "recovery-required" });
+      .rejects.toMatchObject({ code: "recovery-pending" });
     expect(f.registry.byPath(folder)).toBeUndefined();
 
     await fs.unlink(folderJournal);
@@ -1108,9 +1108,9 @@ describe("commit-boundary failure injection", () => {
     const folder = await gitRepository(f.folders, "repo");
 
     await expect(f.coordinator.configureExisting({ path: folder, displayName: "Repo" }))
-      .rejects.toMatchObject({ code: "recovery-required" });
+      .rejects.toMatchObject({ code: "recovery-pending" });
     await expect(f.coordinator.createWorkspace({ parent: f.folders, folderName: "fresh", displayName: "Fresh" }))
-      .rejects.toMatchObject({ code: "recovery-required" });
+      .rejects.toMatchObject({ code: "recovery-pending" });
     expect(JSON.parse(await fs.readFile(f.journalPath, "utf8"))).toMatchObject({ entry: { id: "stranded" } });
     expect(f.registry.byPath(folder)).toBeUndefined();
     // The refusal lands before any filesystem mutation.

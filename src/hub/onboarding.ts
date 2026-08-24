@@ -36,6 +36,7 @@ export type OnboardingErrorCode =
   | "credential"
   | "git-init"
   | "internal"
+  | "recovery-pending"
   | "recovery-required";
 
 export class OnboardingError extends Error {
@@ -837,7 +838,7 @@ export class WorkspaceOnboardingCoordinator {
         pending = false;
       }
       if (pending) {
-        throw new OnboardingError("recovery-required", "a pending recovery journal requires Hub recovery before new workspace changes");
+        throw new OnboardingError("recovery-pending", "a pending recovery journal requires Hub recovery before new workspace changes");
       }
     }
   }

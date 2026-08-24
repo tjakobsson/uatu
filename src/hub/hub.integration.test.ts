@@ -1552,6 +1552,42 @@ describe("hub end to end", () => {
     }
   });
 
+  test("workspace onboarding reports pending recovery journals as conflicts", async () => {
+    const parent = path.join(tempRoot, "workspaces");
+    const existing = path.join(parent, "recovery-fenced-existing");
+    execFileSync("mkdir", ["-p", existing]);
+    execFileSync("git", ["init"], { cwd: existing, stdio: "ignore" });
+
+    for (const journalName of ["pending-onboarding.json", "pending-folder-mutation.json"]) {
+      const journal = path.join(tempRoot, journalName);
+      await writeFile(journal, "{}\n", { mode: 0o600 });
+      try {
+        const configured = await fetch(`${origin}/api/hub/workspaces/configure`, {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie, origin },
+          body: JSON.stringify({ path: existing, displayName: "Recovery Fenced" }),
+        });
+        expect(configured.status).toBe(409);
+        await assertContract("POST", "/api/hub/workspaces/configure", configured);
+        expect(((await configured.json()) as { error: string }).error).toContain("pending recovery journal");
+        expect(registry.byPath(existing)).toBeUndefined();
+
+        const folderName = `recovery-fenced-${journalName}`;
+        const created = await fetch(`${origin}/api/hub/workspaces/create`, {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie, origin },
+          body: JSON.stringify({ parent, folderName, displayName: "Recovery Fenced" }),
+        });
+        expect(created.status).toBe(409);
+        await assertContract("POST", "/api/hub/workspaces/create", created);
+        expect(((await created.json()) as { error: string }).error).toContain("pending recovery journal");
+        expect(await Bun.file(path.join(parent, folderName)).exists()).toBe(false);
+      } finally {
+        await rm(journal, { force: true });
+      }
+    }
+  });
+
   test("session starts freeze while a folder mutation journal is pending", async () => {
     // A registered rename or removal whose filesystem and registry halves
     // diverged leaves the registry pointing at the journaled source path:

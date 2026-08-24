@@ -622,7 +622,7 @@ export function createHubFetchHandler(deps: HubDeps) {
           // The admission fence refuses before any commit — a pending
           // recovery journal is a caller-actionable conflict here, like the
           // session-start and assignment fences, not a Hub-internal failure.
-          if (error.code === "recovery-required") return json(409, { error: error.message });
+          if (error.code === "recovery-pending") return json(409, { error: error.message });
           return json(500, { error: error.message });
         }
         return json(500, { error: error instanceof Error ? error.message : String(error) });
@@ -747,7 +747,7 @@ export function createHubFetchHandler(deps: HubDeps) {
       if (error.code === "needs-init") return json(409, { needsInit: true, ...body }, NO_STORE_HEADERS);
       const status = error.code === "invalid-input" ? 400
         : error.code === "not-found" ? 404
-        : error.code === "conflict" || error.code === "credential" ? 409
+        : error.code === "conflict" || error.code === "credential" || error.code === "recovery-pending" ? 409
         : 500;
       return json(status, body, NO_STORE_HEADERS);
     }

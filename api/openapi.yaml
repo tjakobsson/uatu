@@ -250,7 +250,7 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/NoStoreError' }
         '409':
-          description: Already registered, path reserved, init confirmation required, or credential selection conflict.
+          description: Already registered, path reserved, init confirmation required, credential selection conflict, or a pending recovery journal.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/WorkspaceOnboardingError' }
@@ -289,7 +289,7 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/NoStoreError' }
         '409':
-          description: Destination exists, is reserved, or a credential selection conflicts.
+          description: Destination exists, is reserved, a credential selection conflicts, or a pending recovery journal awaits Hub recovery.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/WorkspaceOnboardingError' }
